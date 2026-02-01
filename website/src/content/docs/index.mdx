@@ -8,27 +8,27 @@ import FeatureCard from '../../components/FeatureCard.astro';
 
 <div class="hero-video">
   <video autoplay loop muted playsinline>
-    <source src="/galloping-horsie.mp4" type="video/mp4" />
+    <source src="/horsies/galloping-horsie.mp4" type="video/mp4" />
   </video>
 </div>
 
 **PostgreSQL-backed background task queue and workflow engine for Python.**
 
 <CardGrid>
-  <LinkCard title="Get Started" href="/quick-start/getting-started/" description="Install Horsies and run your first task" />
+  <LinkCard title="Get Started" href="/horsies/quick-start/getting-started/" description="Install Horsies and run your first task" />
   <LinkCard title="View on GitHub" href="https://github.com/suleymanozkeskin/horsies" description="Source code and contributions" />
 </CardGrid>
 
 ## Features
 
 <CardGrid stagger>
-  <FeatureCard title="PostgreSQL Only" icon="/icons/postgresql.svg" description="No Redis, no RabbitMQ — just PostgreSQL as the single dependency." />
-  <FeatureCard title="Type-safe Tasks" icon="/icons/shield-check.svg" description="Tasks return typed results TaskResult[T, TaskError], allowing you to treat errors as values." />
-  <FeatureCard title="Real-time Dispatch" icon="/icons/zap.svg" description="PostgreSQL LISTEN/NOTIFY for instant task delivery — no polling." />
-  <FeatureCard title="Workflow Engine" icon="/icons/network.svg" description="DAG based workflow definitions for orchestrating complex task pipelines." />
-  <FeatureCard title="Scheduled Tasks" icon="/icons/clock.svg" description="Type-safe, human-readable schedule patterns with cron support." />
-  <FeatureCard title="Multi-queue Support" icon="/icons/layers.svg" description="Priority-based queues with per-queue concurrency limits." />
-  <FeatureCard title="Syce Monitoring" icon="/icons/terminal.svg" description="TUI dashboard for monitoring workers, tasks, and workflows." />
+  <FeatureCard title="PostgreSQL Only" icon="/horsies/icons/postgresql.svg" description="No Redis, no RabbitMQ — just PostgreSQL as the single dependency." />
+  <FeatureCard title="Type-safe Tasks" icon="/horsies/icons/shield-check.svg" description="Tasks return typed results TaskResult[T, TaskError], allowing you to treat errors as values." />
+  <FeatureCard title="Real-time Dispatch" icon="/horsies/icons/zap.svg" description="PostgreSQL LISTEN/NOTIFY for instant task delivery — no polling." />
+  <FeatureCard title="Workflow Engine" icon="/horsies/icons/network.svg" description="DAG based workflow definitions for orchestrating complex task pipelines." />
+  <FeatureCard title="Scheduled Tasks" icon="/horsies/icons/clock.svg" description="Type-safe, human-readable schedule patterns with cron support." />
+  <FeatureCard title="Multi-queue Support" icon="/horsies/icons/layers.svg" description="Priority-based queues with per-queue concurrency limits." />
+  <FeatureCard title="Syce Monitoring" icon="/horsies/icons/terminal.svg" description="TUI dashboard for monitoring workers, tasks, and workflows." />
 </CardGrid>
 
 ## Quick Example
