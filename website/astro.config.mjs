@@ -5,6 +5,8 @@ import darkThemeS from './src/themes/dark-theme-s.json';
 
 // https://astro.build/config
 export default defineConfig({
+	site: 'https://suleymanozkeskin.github.io',
+	base: '/horsies',
 	integrations: [
 		starlight({
 			title: 'Horsies',
@@ -15,7 +17,7 @@ export default defineConfig({
 			head: [
 				{
 					tag: 'script',
-					attrs: { src: '/scripts/page-search.js', defer: true },
+					attrs: { src: '/horsies/scripts/page-search.js', defer: true },
 				},
 			],
 			components: {
