@@ -1,0 +1,54 @@
+---
+title: Horsies
+description: A PostgreSQL-backed background task queue and workflow engine for Python.
+---
+
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
+import FeatureCard from '../../components/FeatureCard.astro';
+
+<div class="hero-video">
+  <video autoplay loop muted playsinline>
+    <source src="/galloping-horsie.mp4" type="video/mp4" />
+  </video>
+</div>
+
+**PostgreSQL-backed background task queue and workflow engine for Python.**
+
+<CardGrid>
+  <LinkCard title="Get Started" href="/quick-start/getting-started/" description="Install Horsies and run your first task" />
+  <LinkCard title="View on GitHub" href="https://github.com/suleymanozkeskin/horsies" description="Source code and contributions" />
+</CardGrid>
+
+## Features
+
+<CardGrid stagger>
+  <FeatureCard title="PostgreSQL Only" icon="/icons/postgresql.svg" description="No Redis, no RabbitMQ — just PostgreSQL as the single dependency." />
+  <FeatureCard title="Type-safe Tasks" icon="/icons/shield-check.svg" description="Tasks return typed results TaskResult[T, TaskError], allowing you to treat errors as values." />
+  <FeatureCard title="Real-time Dispatch" icon="/icons/zap.svg" description="PostgreSQL LISTEN/NOTIFY for instant task delivery — no polling." />
+  <FeatureCard title="Workflow Engine" icon="/icons/network.svg" description="DAG based workflow definitions for orchestrating complex task pipelines." />
+  <FeatureCard title="Scheduled Tasks" icon="/icons/clock.svg" description="Type-safe, human-readable schedule patterns with cron support." />
+  <FeatureCard title="Multi-queue Support" icon="/icons/layers.svg" description="Priority-based queues with per-queue concurrency limits." />
+  <FeatureCard title="Syce Monitoring" icon="/icons/terminal.svg" description="TUI dashboard for monitoring workers, tasks, and workflows." />
+</CardGrid>
+
+## Quick Example
+
+```python
+from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
+
+app = Horsies(AppConfig(
+    broker=PostgresConfig(
+        database_url="postgresql+psycopg://user:pass@localhost:5432/mydb",
+    ),
+))
+
+@app.task("add_numbers")
+def add_numbers(a: int, b: int) -> TaskResult[int, TaskError]:
+    return TaskResult(ok=a + b)
+
+# Send and get result
+handle = add_numbers.send(5, 3)
+result = handle.get()
+if result.is_ok()
+  print(result.ok_value)  # 8
+```

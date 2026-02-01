@@ -1,0 +1,674 @@
+/* Custom fonts for Horsies documentation */
+
+/* Departure Mono - download from https://departuremono.com/ */
+@font-face {
+	font-family: 'Departure Mono';
+	src: url('/fonts/DepartureMono-Regular.woff2') format('woff2'),
+		url('/fonts/DepartureMono-Regular.woff') format('woff');
+	font-weight: normal;
+	font-style: normal;
+	font-display: swap;
+}
+
+/* ============================================
+   Galloping Horsie Theme - Retro Cyberpunk
+   ============================================ */
+
+:root {
+	/* Body text: New York (Apple) with serif fallbacks */
+	--sl-font: 'New York', 'Iowan Old Style', 'Palatino Linotype', 'URW Palladio L',
+		P052, serif;
+
+	/* Code: Andale Mono with monospace fallbacks */
+	--sl-font-mono: 'Andale Mono', 'Monaco', 'Consolas', 'Lucida Console', monospace;
+
+	/* Theme colors - Galloping Horsie palette */
+	--horsie-gold: #DAA520;
+	--horsie-gold-bright: #FFD700;
+	--horsie-gold-dark: #B8860B;
+	--horsie-amber: #C9A227;
+	--horsie-neon-green: #00FFAA;
+	--horsie-neon-green-dim: #00DD99;
+	--horsie-black: #050505;
+	--horsie-charcoal: #0D0D0D;
+
+
+	/* Starlight color overrides */
+	--sl-color-accent-low: #1a1200;
+	--sl-color-accent: #DAA520;
+	--sl-color-accent-high: #FFD700;
+
+	--sl-color-white: #F5F5F0;
+	--sl-color-gray-1: #E5E5DC;
+	--sl-color-gray-2: #C9C9BC;
+	--sl-color-gray-3: #8B8B7A;
+	--sl-color-gray-4: #5A5A4A;
+	--sl-color-gray-5: #2A2A20;
+	--sl-color-gray-6: #151510;
+	--sl-color-black: #050505;
+
+	--sl-color-bg-nav: #0a0a08;
+	--sl-color-bg-sidebar: #0a0a08;
+	--sl-color-hairline-light: #2a2a1a;
+	--sl-color-hairline: #1a1a10;
+}
+
+/* Dark mode specific overrides */
+[data-theme='dark'],
+:root[data-theme='dark'] {
+	--sl-color-bg: #050505;
+	--sl-color-bg-nav: #0a0a08;
+	--sl-color-bg-sidebar: #0a0a08;
+	--sl-color-text: #F5F5F0;
+	--sl-color-text-accent: var(--horsie-gold);
+}
+
+/* ============================================
+   Light Mode — Warm Parchment
+   ============================================ */
+
+[data-theme='light'],
+:root[data-theme='light'] {
+	/*
+	 * !important is needed because Starlight's own light-mode CSS
+	 * (from props.css) compiles to unlayered CSS that appears AFTER
+	 * this block in the build output, overriding same-specificity
+	 * declarations by source order.
+	 */
+
+	/* Horsie palette — keep the golden yellow, just darken slightly for cream bg */
+	--horsie-gold: #DAA520 !important;
+	--horsie-gold-bright: #C49000 !important;
+	--horsie-gold-dark: #B8860B !important;
+	--horsie-neon-green: #007A52 !important;
+	--horsie-neon-green-dim: #006644 !important;
+	--horsie-black: #F7F3EB !important;
+	--horsie-charcoal: #EDE8DD !important;
+
+	/* Starlight semantic colors */
+	--sl-color-accent-low: #FFF5D6 !important;
+	--sl-color-accent: #DAA520 !important;
+	--sl-color-accent-high: #C49000 !important;
+
+	--sl-color-white: #1A1A14 !important;
+	--sl-color-gray-1: #2A2A20 !important;
+	--sl-color-gray-2: #4A4A3A !important;
+	--sl-color-gray-3: #7A7A68 !important;
+	--sl-color-gray-4: #A8A894 !important;
+	--sl-color-gray-5: #D6D2C6 !important;
+	--sl-color-gray-6: #EDE8DD !important;
+	--sl-color-black: #F7F3EB !important;
+
+	--sl-color-bg: #F7F3EB !important;
+	--sl-color-bg-nav: #EDE8DD !important;
+	--sl-color-bg-sidebar: #EDE8DD !important;
+	--sl-color-text: #1A1A14 !important;
+	--sl-color-text-accent: #DAA520 !important;
+	--sl-color-hairline-light: #D6D2C6 !important;
+	--sl-color-hairline: #E0DBCE !important;
+
+	/* Override Starlight's derived variables that use var() */
+	--sl-color-bg-inline-code: #EDE8DD !important;
+	--sl-color-text-invert: #F7F3EB !important;
+	--sl-color-bg-accent: #DAA520 !important;
+	--sl-color-gray-7: #F2EDE3 !important;
+}
+
+/* Light mode — headings */
+[data-theme='light'] h1,
+[data-theme='light'] h2,
+[data-theme='light'] h3,
+[data-theme='light'] h4,
+[data-theme='light'] h5,
+[data-theme='light'] h6,
+[data-theme='light'] .sl-markdown-content h1,
+[data-theme='light'] .sl-markdown-content h2,
+[data-theme='light'] .sl-markdown-content h3,
+[data-theme='light'] .sl-markdown-content h4,
+[data-theme='light'] .sl-markdown-content h5,
+[data-theme='light'] .sl-markdown-content h6 {
+	color: var(--horsie-gold);
+}
+
+/* Light mode — site title */
+[data-theme='light'] .site-title {
+	color: var(--horsie-gold-bright) !important;
+}
+
+/* Light mode — content links */
+[data-theme='light'] .sl-markdown-content a:not([class]) {
+	color: var(--horsie-neon-green);
+}
+
+[data-theme='light'] .sl-markdown-content a:not([class]):hover {
+	color: var(--horsie-neon-green-dim);
+}
+
+/* Light mode — inline code */
+[data-theme='light'] .sl-markdown-content :not(pre) > code {
+	background: rgba(218, 165, 32, 0.08);
+	border: 1px solid rgba(218, 165, 32, 0.2);
+	color: #8B6914;
+}
+
+/* Light mode — code block borders */
+[data-theme='light'] .sl-markdown-content pre {
+	border-color: rgba(0, 122, 82, 0.3);
+}
+
+/* Light mode — tables */
+[data-theme='light'] .sl-markdown-content table {
+	border-color: rgba(0, 122, 82, 0.25);
+}
+
+[data-theme='light'] .sl-markdown-content th {
+	background: rgba(218, 165, 32, 0.08);
+	color: var(--horsie-gold);
+}
+
+[data-theme='light'] .sl-markdown-content td {
+	border-color: rgba(0, 122, 82, 0.15);
+}
+
+/* Light mode — blockquotes */
+[data-theme='light'] .sl-markdown-content blockquote {
+	border-left-color: var(--horsie-gold);
+	background: rgba(218, 165, 32, 0.04);
+}
+
+/* Light mode — cards */
+[data-theme='light'] .card {
+	border-color: rgba(0, 122, 82, 0.3);
+	background: linear-gradient(180deg, rgba(237, 232, 221, 0.9) 0%, rgba(247, 243, 235, 0.95) 100%);
+}
+
+/* Light mode — selection */
+[data-theme='light'] ::selection {
+	background: rgba(218, 165, 32, 0.25);
+	color: #1A1A14;
+}
+
+/* Light mode — scrollbar */
+[data-theme='light'] ::-webkit-scrollbar-track {
+	background: var(--horsie-black);
+}
+
+[data-theme='light'] ::-webkit-scrollbar-thumb {
+	background: #C4B99A;
+}
+
+[data-theme='light'] ::-webkit-scrollbar-thumb:hover {
+	background: var(--horsie-gold);
+}
+
+/* Light mode — sidebar active link */
+[data-theme='light'] .sidebar-content a[aria-current='page'] {
+	color: #F7F3EB !important;
+}
+
+/* Light mode — search trigger */
+[data-theme='light'] site-search button[data-open-modal] {
+	background-color: var(--horsie-charcoal);
+	border-color: #C4B99A;
+}
+
+/* Light mode — search dialog */
+[data-theme='light'] site-search dialog {
+	background-color: #EDE8DD;
+	border-color: #C4B99A;
+}
+
+[data-theme='light'] site-search dialog::backdrop {
+	background-color: rgba(26, 26, 20, 0.4);
+}
+
+/* Light mode — pagefind overrides */
+[data-theme='light'] #starlight__search {
+	--pagefind-ui-primary: var(--horsie-gold);
+	--pagefind-ui-text: #2A2A20;
+	--pagefind-ui-background: #F7F3EB;
+	--pagefind-ui-border: #C4B99A;
+	--pagefind-ui-tag: #C4B99A;
+}
+
+[data-theme='light'] .pagefind-ui__search-input {
+	color: var(--horsie-neon-green) !important;
+	caret-color: var(--horsie-neon-green);
+}
+
+[data-theme='light'] .pagefind-ui__search-clear {
+	color: var(--horsie-gold) !important;
+	background-color: #F7F3EB !important;
+}
+
+[data-theme='light'] .pagefind-ui__result-link {
+	color: var(--horsie-gold) !important;
+}
+
+[data-theme='light'] .pagefind-ui__result-link:hover {
+	color: var(--horsie-neon-green) !important;
+}
+
+[data-theme='light'] .pagefind-ui__result-excerpt mark {
+	background-color: rgba(218, 165, 32, 0.2);
+	color: #8B6914;
+}
+
+/* Light mode — page search bar */
+[data-theme='light'] #page-search-bar {
+	background: var(--horsie-charcoal);
+	border-bottom-color: var(--horsie-gold);
+}
+
+[data-theme='light'] #page-search-input {
+	color: var(--horsie-neon-green);
+}
+
+[data-theme='light'] mark.page-search-highlight {
+	background: rgba(218, 165, 32, 0.2);
+}
+
+[data-theme='light'] mark.page-search-active {
+	background: rgba(0, 122, 82, 0.2);
+	outline-color: var(--horsie-neon-green);
+}
+
+/* Light mode — link cards */
+[data-theme='light'] .sl-link-card {
+	border-color: rgba(0, 122, 82, 0.3);
+	background: var(--horsie-black);
+}
+
+[data-theme='light'] .sl-link-card:hover {
+	background: rgba(218, 165, 32, 0.06);
+	border-color: var(--horsie-gold);
+}
+
+
+/* Titles/headings: Departure Mono */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+.sl-markdown-content h1,
+.sl-markdown-content h2,
+.sl-markdown-content h3,
+.sl-markdown-content h4,
+.sl-markdown-content h5,
+.sl-markdown-content h6 {
+	font-family: 'Departure Mono', ui-monospace, monospace;
+	color: var(--horsie-gold);
+}
+
+/* Site title in header */
+.site-title {
+	font-family: 'Departure Mono', ui-monospace, monospace;
+	color: var(--horsie-gold-bright) !important;
+}
+
+/* Sidebar group labels - Departure Mono */
+.group-label,
+.top-level > li > details > summary {
+	font-family: 'Departure Mono', ui-monospace, monospace;
+}
+
+/* Sidebar items - body font */
+.sidebar-content a {
+	font-family: var(--sl-font);
+}
+
+/* ============================================
+   Links & Interactive Elements
+   ============================================ */
+
+/* Content links - neon green accent */
+.sl-markdown-content a:not([class]) {
+	color: var(--horsie-neon-green);
+	text-decoration: none;
+	transition: color 0.2s ease;
+}
+
+.sl-markdown-content a:not([class]):hover {
+	color: var(--horsie-neon-green-dim);
+}
+
+/* Sidebar links */
+.sidebar-content a {
+	transition: color 0.2s ease;
+}
+
+.sidebar-content a:hover {
+	color: var(--horsie-gold-bright);
+}
+
+/* Active sidebar link - dark text on gold background for contrast */
+.sidebar-content a[aria-current='page'] {
+	color: var(--horsie-black) !important;
+	font-weight: 600;
+}
+
+/* Code blocks */
+.sl-markdown-content pre {
+	border: 2px solid rgba(0, 255, 170, 0.35);
+}
+
+/* Inline code - cream/off-white */
+.sl-markdown-content :not(pre) > code {
+	background: rgba(255, 243, 207, 0.1);
+	border: 1px solid rgba(255, 243, 207, 0.25);
+	color: #FFF3CF;
+}
+
+/* Buttons and CTAs */
+.sl-markdown-content .action.primary {
+	background: linear-gradient(135deg, var(--horsie-gold-dark), var(--horsie-gold));
+	border: 1px solid var(--horsie-gold-bright);
+}
+
+.sl-markdown-content .action.primary:hover {
+	background: linear-gradient(135deg, var(--horsie-gold), var(--horsie-gold-bright));
+}
+
+/* Cards */
+.card {
+	border: 2px solid rgba(0, 255, 170, 0.4);
+	background: linear-gradient(180deg, rgba(13, 13, 13, 0.9) 0%, rgba(5, 5, 5, 0.95) 100%);
+	transition: border-color 0.3s ease;
+}
+
+.card:hover {
+	border-color: var(--horsie-gold);
+}
+
+/* Table styling */
+.sl-markdown-content table {
+	border: 1px solid rgba(0, 255, 170, 0.3);
+	width: fit-content;
+}
+
+.sl-markdown-content th,
+.sl-markdown-content td {
+	padding: 0.5rem 1rem;
+}
+
+.sl-markdown-content th {
+	background: rgba(218, 165, 32, 0.1);
+	color: var(--horsie-gold);
+}
+
+.sl-markdown-content td {
+	border-color: rgba(0, 255, 170, 0.2);
+}
+
+/* Blockquotes */
+.sl-markdown-content blockquote {
+	border-left: 3px solid var(--horsie-gold);
+	background: rgba(218, 165, 32, 0.05);
+}
+
+/* Selection highlight */
+::selection {
+	background: rgba(218, 165, 32, 0.4);
+	color: var(--sl-color-white);
+}
+
+/* Scrollbar styling (webkit) */
+::-webkit-scrollbar {
+	width: 8px;
+	height: 8px;
+}
+
+::-webkit-scrollbar-track {
+	background: var(--horsie-black);
+}
+
+::-webkit-scrollbar-thumb {
+	background: var(--horsie-gold-dark);
+	border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+	background: var(--horsie-gold);
+}
+
+/* Hero video - subtle, non-invasive */
+.hero-video {
+	display: flex;
+	justify-content: center;
+	margin: 1rem auto 2rem;
+	max-width: 280px;
+}
+
+.hero-video video {
+	width: 100%;
+	height: auto;
+	border-radius: 12px;
+	opacity: 0.85;
+	filter: grayscale(20%);
+	transition: opacity 0.3s ease, filter 0.3s ease;
+}
+
+.hero-video video:hover {
+	opacity: 1;
+	filter: grayscale(0%);
+}
+
+/* ============================================
+   In-page Search Bar (Vim-style "/")
+   ============================================ */
+
+#page-search-bar {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	z-index: 9999;
+	display: flex;
+	align-items: center;
+	gap: 0.6rem;
+	padding: 0.5rem 1rem;
+	background: var(--horsie-charcoal, #0D0D0D);
+	border-bottom: 2px solid var(--horsie-gold, #DAA520);
+	font-family: 'Departure Mono', ui-monospace, monospace;
+	transform: translateY(-100%);
+	transition: transform 0.15s ease-out;
+}
+
+#page-search-bar.visible {
+	transform: translateY(0);
+}
+
+.page-search-label {
+	color: var(--horsie-gold, #DAA520);
+	font-size: 1.1rem;
+	flex-shrink: 0;
+}
+
+#page-search-input {
+	flex: 1;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 3px;
+	padding: 0.25rem 0.5rem;
+	color: var(--horsie-neon-green, #00FFAA);
+	font-family: 'Departure Mono', ui-monospace, monospace;
+	font-size: 0.95rem;
+	outline: none;
+}
+
+#page-search-input:focus {
+	border-color: var(--horsie-gold, #DAA520);
+}
+
+#page-search-input::placeholder {
+	color: var(--sl-color-gray-3, #8B8B7A);
+}
+
+#page-search-counter {
+	color: var(--sl-color-gray-2, #C9C9BC);
+	font-size: 0.8rem;
+	min-width: 4rem;
+	text-align: right;
+	flex-shrink: 0;
+}
+
+.page-search-close {
+	background: transparent;
+	border: 1px solid var(--horsie-gold-dark, #B8860B);
+	border-radius: 3px;
+	color: var(--horsie-gold, #DAA520);
+	font-family: 'Departure Mono', ui-monospace, monospace;
+	font-size: 0.75rem;
+	padding: 0.15rem 0.4rem;
+	cursor: pointer;
+	flex-shrink: 0;
+	transition: background 0.15s ease;
+}
+
+.page-search-close:hover {
+	background: rgba(218, 165, 32, 0.15);
+}
+
+/* Highlight marks */
+mark.page-search-highlight {
+	background: rgba(218, 165, 32, 0.3);
+	color: inherit;
+	border-radius: 2px;
+	padding: 0 1px;
+}
+
+mark.page-search-active {
+	background: rgba(0, 255, 170, 0.35);
+	outline: 2px solid var(--horsie-neon-green, #00FFAA);
+	outline-offset: 1px;
+}
+
+/* ============================================
+   Pagefind Search Modal — Horsie Theme
+   ============================================ */
+
+/* Trigger button */
+site-search button[data-open-modal] {
+	border-color: var(--horsie-gold-dark);
+	background-color: var(--horsie-charcoal);
+	font-family: 'Departure Mono', ui-monospace, monospace;
+}
+
+site-search button[data-open-modal]:hover {
+	border-color: var(--horsie-gold);
+	color: var(--horsie-gold-bright);
+}
+
+/* Shortcut hints injected by page-search.js */
+.search-shortcuts {
+	display: none;
+	align-items: center;
+	margin-inline-start: auto;
+	color: var(--horsie-gold-dark);
+	font-family: 'Departure Mono', ui-monospace, monospace;
+	font-size: var(--sl-text-2xs, 0.75rem);
+	white-space: nowrap;
+}
+
+@media (min-width: 50rem) {
+	.search-shortcuts {
+		display: inline-flex;
+	}
+}
+
+.search-shortcuts-sep {
+	color: var(--sl-color-gray-4);
+	margin-inline: 0.5rem;
+}
+
+.search-shortcuts-slash {
+	color: var(--horsie-neon-green);
+}
+
+/* Dialog modal */
+site-search dialog {
+	background-color: var(--horsie-charcoal);
+	border: 1px solid var(--horsie-gold-dark);
+}
+
+site-search dialog::backdrop {
+	background-color: rgba(5, 5, 5, 0.75);
+	-webkit-backdrop-filter: blur(4px);
+	backdrop-filter: blur(4px);
+}
+
+/* Cancel button (mobile) */
+site-search button[data-close-modal] {
+	color: var(--horsie-gold);
+	font-family: 'Departure Mono', ui-monospace, monospace;
+}
+
+/* Pagefind UI CSS variable overrides */
+#starlight__search {
+	--pagefind-ui-primary: var(--horsie-gold);
+	--pagefind-ui-text: var(--sl-color-gray-1);
+	--pagefind-ui-background: var(--horsie-black);
+	--pagefind-ui-border: var(--horsie-gold-dark);
+	--pagefind-ui-tag: var(--horsie-gold-dark);
+}
+
+/* Pagefind search input */
+.pagefind-ui__search-input {
+	font-family: 'Departure Mono', ui-monospace, monospace !important;
+	color: var(--horsie-neon-green) !important;
+	caret-color: var(--horsie-neon-green);
+}
+
+.pagefind-ui__search-input::placeholder {
+	color: var(--sl-color-gray-2) !important;
+}
+
+.pagefind-ui__search-input:focus {
+	border-color: var(--horsie-gold) !important;
+	outline: none;
+	box-shadow: 0 0 0 1px var(--horsie-gold-dark);
+}
+
+/* Pagefind clear button */
+.pagefind-ui__search-clear {
+	color: var(--horsie-gold) !important;
+	background-color: var(--horsie-black) !important;
+	font-family: 'Departure Mono', ui-monospace, monospace !important;
+}
+
+.pagefind-ui__search-clear:focus {
+	outline-color: var(--horsie-gold);
+}
+
+/* Result items */
+.pagefind-ui__result-link {
+	color: var(--horsie-gold-bright) !important;
+	font-family: 'Departure Mono', ui-monospace, monospace;
+}
+
+.pagefind-ui__result-link:hover {
+	color: var(--horsie-neon-green) !important;
+}
+
+.pagefind-ui__result-excerpt {
+	color: var(--sl-color-gray-2) !important;
+}
+
+.pagefind-ui__result-excerpt mark {
+	background-color: rgba(218, 165, 32, 0.3);
+	color: var(--horsie-gold-bright);
+}
+
+/* Result list borders */
+.pagefind-ui__results > li {
+	border-color: var(--horsie-gold-dark) !important;
+}
+
+/* Message text (e.g. "No results") */
+.pagefind-ui__message {
+	color: var(--sl-color-gray-3) !important;
+	font-family: 'Departure Mono', ui-monospace, monospace;
+}
+

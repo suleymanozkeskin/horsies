@@ -1,0 +1,51 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache
+
+# Virtual environments
+.venv
+
+# dotfiles
+.vscode
+.env
+.env.test
+.claude
+.cursor
+.mypy_cache
+.ruff_cache
+
+pyrightconfig.json
+
+# logs
+/logs/
+*.log
+
+# ds store
+.DS_Store
+
+# AGENTS
+/AGENTS
+AGENTS.md
+GEMINI.md1
+roadmap/
+orchestrator/
+
+# test results
+tests/test_results
+
+# external resources
+/external-resources
+
+# ignored content
+ignored-content/
+
+
+/docs/
+
+examples/
+tests/

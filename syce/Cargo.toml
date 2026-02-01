@@ -1,0 +1,38 @@
+[package]
+name = "syce"
+version = "0.1.0-alpha.1"
+edition = "2021"
+description = "Monitoring TUI for horsies task library"
+authors = ["Suleyman Ozkeskin"]
+license = "MIT"
+repository = "https://github.com/suleymanozkeskin/horsies"
+keywords = ["tui", "monitoring", "task-queue", "workflow", "postgres"]
+categories = ["command-line-utilities", "database"]
+
+[dependencies]
+# TUI
+ratatui = { version = "0.29", features = ["serde"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "json"] }
+tokio = { version = "1", features = ["full"] }
+
+# Serialization & Time
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+
+# CLI & Config
+clap = { version = "4.5", features = ["derive", "env"] }
+dotenvy = "0.15"
+
+# Error handling
+thiserror = "2.0"
+
+# Utilities
+strum = { version = "0.27.2", features = ["derive"] }
+arboard = "3.4"  # Clipboard support
+
+# Theme
+catppuccin = { version = "2.6.0", features = ["ratatui"] }

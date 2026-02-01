@@ -1,0 +1,444 @@
+# app/core/brokers/listener.py
+"""
+PostgreSQL LISTEN/NOTIFY-based notification system for task management:
+
+Architecture:
+  TaskApp -> PostgresBroker -> PostgresListener
+
+Flow:
+  1. Task submission: INSERT into tasks table -> PostgreSQL trigger -> NOTIFY task_new/task_queue_*
+  2. Worker notification: Workers listen to task_new + queue-specific channels
+  3. Task processing: Worker picks up task, processes it, updates status
+  4. Completion notification: UPDATE tasks status -> PostgreSQL trigger -> NOTIFY task_done
+  5. Result retrieval: Clients listen to task_done channel, filter by task_id
+
+Key channels:
+  - task_new: Global notification for any new task (workers)
+  - task_queue_*: Queue-specific notifications (workers)
+  - task_done: Task completion notifications (result waiters)
+"""
+
+# app/core/brokers/listener.py
+from __future__ import annotations
+import asyncio
+import contextlib
+from collections import defaultdict
+from typing import DefaultDict, Optional, Set
+from asyncio import Task, Queue  # precise type for Pylance/mypy
+
+import psycopg
+from psycopg import AsyncConnection, OperationalError, Notify
+from psycopg import sql
+from horsies.core.logging import get_logger
+
+logger = get_logger('listener')
+
+
+class PostgresListener:
+    """
+    PostgreSQL LISTEN/NOTIFY wrapper with async queue distribution.
+
+    Features:
+      - Single dispatcher consuming conn.notifies() to avoid competing readers
+      - Multiple subscribers per channel via independent asyncio queues
+      - Safe SQL with identifier quoting and parameter binding
+      - Auto-reconnect with exponential backoff and re-LISTEN
+      - Proactive connection health monitoring
+
+    Architecture:
+      - dispatcher_conn: Exclusively consumes notifications from conn.notifies()
+      - command_conn: Handles LISTEN/UNLISTEN commands separately
+      - Per-channel queues: Each subscriber gets independent notification delivery
+
+    Usage:
+    ------
+    listener = PostgresListener(database_url)
+    await listener.start()
+
+    # Subscribe: returns a queue that receives notifications for this channel
+    queue = await listener.listen("task_done")
+
+    # Wait for notifications (blocks until one arrives)
+    notification = await queue.get()
+    if notification.payload == "task_123":  # Filter by payload if needed
+        # Process notification
+        pass
+
+    # Cleanup: remove local subscription (keeps server-side LISTEN active)
+    await listener.unsubscribe("task_done", queue)
+    await listener.close()
+
+    Notes:
+    ------
+    * Uses autocommit=True: NOTIFYs are sent immediately, not held in transactions
+    * Dispatcher distributes each notification to ALL subscriber queues for that channel
+    * put_nowait() prevents slow consumers from blocking others (drops on queue full)
+    * Channel names are PostgreSQL identifiers, automatically quoted for safety
+    """
+
+    def __init__(self, database_url: str) -> None:
+        self.database_url = database_url
+
+        # Two separate connections to avoid blocking issues:
+        # 1. Dispatcher connection: exclusively for conn.notifies() consumption
+        self._dispatcher_conn: Optional[AsyncConnection] = None
+        # 2. Command connection: for LISTEN/UNLISTEN SQL commands
+        self._command_conn: Optional[AsyncConnection] = None
+
+        # Set of channels we have LISTENed to on the server.
+        self._listen_channels: Set[str] = set()
+
+        # Per-channel subscribers: each subscriber is an asyncio.Queue[Notify].
+        # Multiple subscribers can wait on the same channel independently.
+        self._subs: DefaultDict[str, Set[Queue[Notify]]] = defaultdict(set)
+
+        # Background dispatcher task consuming conn.notifies() and distributing to subscriber queues.
+        self._dispatcher_task: Optional[Task[None]] = None
+
+        # Health check task for proactive disconnection detection
+        self._health_check_task: Optional[Task[None]] = None
+
+        # Event for file descriptor activity detection
+        self._fd_activity = asyncio.Event()
+        self._fd_registered = False
+
+        # A lock used to serialize LISTEN/UNLISTEN and subscription book-keeping.
+        self._lock = asyncio.Lock()
+
+    async def start(self) -> None:
+        """
+        Establish the notification connections (autocommit) and start the
+        dispatcher task. Safe to call multiple times.
+        """
+        await self._ensure_connections()
+        # Defer starting the dispatcher until at least one channel is LISTENed.
+        if self._health_check_task is None:
+            # Start proactive health monitoring
+            self._health_check_task = asyncio.create_task(
+                self._health_monitor(), name='pg-listener-health'
+            )
+
+    async def _start_listening(self, conn: AsyncConnection) -> None:
+        """
+        Start listening to all _listen_channels for the given connection.
+        """
+        for channel in self._listen_channels:
+            await conn.execute(sql.SQL('LISTEN {}').format(sql.Identifier(channel)))
+
+    async def _ensure_connections(self) -> None:
+        """
+        Ensure we have live AsyncConnections in autocommit mode.
+        On reconnection, re-issue LISTEN for any previously tracked channels.
+        """
+        # Ensure dispatcher connection (for conn.notifies() consumption)
+        if self._dispatcher_conn is None or self._dispatcher_conn.closed:
+            self._dispatcher_conn = await psycopg.AsyncConnection.connect(
+                self.database_url,
+                autocommit=True,
+            )
+            await self._start_listening(self._dispatcher_conn)
+            # Register file descriptor for activity monitoring
+            self._register_fd_monitoring()
+
+        # Ensure command connection (for LISTEN/UNLISTEN commands)
+        if self._command_conn is None or self._command_conn.closed:
+            self._command_conn = await psycopg.AsyncConnection.connect(
+                self.database_url,
+                autocommit=True,
+            )
+            await self._start_listening(self._command_conn)
+
+    async def _ensure_dispatcher_connection(self) -> AsyncConnection:
+        """Ensure dispatcher connection is available."""
+        if self._dispatcher_conn is None or self._dispatcher_conn.closed:
+            await self._ensure_connections()
+        assert self._dispatcher_conn is not None
+        return self._dispatcher_conn
+
+    async def _ensure_command_connection(self) -> AsyncConnection:
+        """Ensure command connection is available."""
+        if self._command_conn is None or self._command_conn.closed:
+            await self._ensure_connections()
+        assert self._command_conn is not None
+        return self._command_conn
+
+    def _register_fd_monitoring(self) -> None:
+        """
+        Register file descriptor monitoring for proactive disconnection detection.
+        """
+        if (
+            self._dispatcher_conn
+            and not self._dispatcher_conn.closed
+            and not self._fd_registered
+        ):
+            try:
+                loop = asyncio.get_running_loop()
+                loop.add_reader(self._dispatcher_conn.fileno(), self._fd_activity.set)
+                self._fd_registered = True
+            except (OSError, AttributeError):
+                # fileno() might not be available or connection might be closed
+                pass
+
+    def _unregister_fd_monitoring(self) -> None:
+        """
+        Unregister file descriptor monitoring.
+        """
+        if self._fd_registered and self._dispatcher_conn:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.remove_reader(self._dispatcher_conn.fileno())
+            except (OSError, AttributeError, ValueError):
+                # Connection might be closed or already removed
+                pass
+            finally:
+                self._fd_registered = False
+
+    async def _health_monitor(self) -> None:
+        """
+        Proactive health monitoring using psycopg3 recommended pattern:
+        - Monitor file descriptor activity with timeout
+        - Perform health checks during idle periods
+        - Detect disconnections faster than waiting for operations to fail
+        """
+        while True:
+            try:
+                # Wait up to 60 seconds for file descriptor activity
+                try:
+                    await asyncio.wait_for(self._fd_activity.wait(), timeout=60.0)
+                    self._fd_activity.clear()
+
+                    # Activity detected - verify connection health
+                    if self._command_conn and not self._command_conn.closed:
+                        try:
+                            await self._command_conn.execute('SELECT 1')
+                        except OperationalError:
+                            # Connection is dead, trigger reconnection
+                            self._unregister_fd_monitoring()
+                            self._command_conn = None
+                            self._dispatcher_conn = None
+                            continue
+
+                except asyncio.TimeoutError:
+                    # No activity for 60 seconds - perform health check
+                    if self._command_conn and not self._command_conn.closed:
+                        try:
+                            await self._command_conn.execute('SELECT 1')
+                        except OperationalError:
+                            # Connection is dead, trigger reconnection
+                            self._unregister_fd_monitoring()
+                            self._command_conn = None
+                            self._dispatcher_conn = None
+                            continue
+
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Unexpected error in health monitoring - brief pause
+                await asyncio.sleep(1.0)
+                continue
+
+    async def _dispatcher(self) -> None:
+        """
+        Core notification dispatcher:
+          - Efficiently waits on PostgreSQL socket (no polling)
+          - Distributes each notification to all subscriber queues for that channel
+          - Handles disconnections with exponential backoff and automatic re-LISTEN
+          - Uses put_nowait() to prevent slow consumers from blocking others
+
+        The dispatcher is the single consumer of conn.notifies() to avoid race conditions
+        when multiple coroutines try to read from the same notification stream.
+        """
+        backoff = 0.2  # start small; increase on failures up to a cap
+        while True:
+            try:
+                conn = await self._ensure_dispatcher_connection()
+                # This async iterator blocks efficiently on the socket.
+                async for notification in conn.notifies():
+                    # Activity means the connection is healthy; reset backoff.
+                    backoff = 0.2
+
+                    # Signal file descriptor activity
+                    self._fd_activity.set()
+
+                    # Distribute to all subscriber queues for this channel
+                    # Use list() snapshot to avoid mutation during iteration
+                    for q in list(self._subs.get(notification.channel, ())):
+                        try:
+                            q.put_nowait(notification)
+                        except asyncio.QueueFull:
+                            # Drop notification if queue is full (prevents blocking other subscribers)
+                            # Consider increasing queue size if this happens frequently
+                            pass
+
+            except OperationalError:
+                # Likely a disconnect. Back off a bit, then force reconnect and re-LISTEN.
+                self._unregister_fd_monitoring()
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 5.0)  # cap backoff
+                self._dispatcher_conn = None  # force reconnection
+                self._command_conn = None
+                continue
+            except asyncio.CancelledError:
+                # Graceful shutdown: stop dispatching and exit the task.
+                self._unregister_fd_monitoring()
+                raise
+            except Exception:
+                # Unexpected issue: brief pause to avoid a hot loop, then try again.
+                self._unregister_fd_monitoring()
+                await asyncio.sleep(0.5)
+                self._dispatcher_conn = None
+                self._command_conn = None
+                continue
+
+    async def listen(self, channel_name: str) -> Queue[Notify]:
+        """
+        Subscribe to a PostgreSQL notification channel.
+
+        Creates a new asyncio queue for this subscriber and issues LISTEN command
+        to PostgreSQL (only once per channel, regardless of subscriber count).
+
+        Parameters
+        ----------
+        channel_name : str
+            PostgreSQL channel name (automatically quoted for SQL safety)
+
+        Returns
+        -------
+        asyncio.Queue[Notify]
+            Queue that will receive Notify objects for this channel.
+            Each subscriber gets their own independent queue.
+
+        Example
+        -------
+        queue = await listener.listen("task_done")
+        notification = await queue.get()  # Blocks until notification arrives
+        task_id = notification.payload    # Extract payload data
+
+        Notes
+        -----
+        - Multiple subscribers to same channel each get independent queues
+        - Server-side LISTEN is issued only once per channel
+        - Dispatcher automatically starts after first subscription
+        """
+        await self._ensure_connections()
+
+        async with self._lock:
+            # LISTEN on the server if this is the first subscriber for the channel.
+            if channel_name not in self._listen_channels:
+                # Ensure connections exist
+                await self._ensure_connections()
+
+                # Stop dispatcher temporarily to safely modify dispatcher connection state
+                if self._dispatcher_task is not None:
+                    self._dispatcher_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await self._dispatcher_task
+                    self._dispatcher_task = None
+
+                # Issue LISTEN on the dispatcher connection (the one consuming notifies)
+                disp_conn = await self._ensure_dispatcher_connection()
+                await disp_conn.execute(
+                    sql.SQL('LISTEN {}').format(sql.Identifier(channel_name))
+                )
+                self._listen_channels.add(channel_name)
+
+                # Restart dispatcher after updating the LISTEN set
+                if self._dispatcher_task is None:
+                    self._dispatcher_task = asyncio.create_task(
+                        self._dispatcher(), name='pg-listener-dispatcher'
+                    )
+
+            # Create a fresh queue for this subscriber.
+            q: Queue[Notify] = asyncio.Queue()
+            self._subs[channel_name].add(q)
+            return q
+
+    async def unlisten(
+        self, channel_name: str, q: Optional[Queue[Notify]] = None
+    ) -> None:
+        """
+        Remove subscription and issue UNLISTEN if no subscribers remain.
+
+        This completely removes the server-side LISTEN when the last subscriber
+        unsubscribes. Use unsubscribe() instead if you want to keep the server-side
+        LISTEN active to avoid LISTEN/UNLISTEN races.
+
+        Parameters
+        ----------
+        channel_name : str
+            Channel name used in listen()
+        q : Optional[Queue[Notify]]
+            Specific queue to remove. If None, only checks for server-side cleanup.
+
+        Warning
+        -------
+        Can cause LISTEN races if other subscribers are still using the channel.
+        Consider using unsubscribe() instead for better performance.
+        """
+        async with self._lock:
+            if q is not None:
+                self._subs[channel_name].discard(q)
+            # If nobody is listening locally, drop the server-side LISTEN.
+            no_local_subs = not self._subs[channel_name]
+            if no_local_subs and channel_name in self._listen_channels:
+                # Only UNLISTEN via the command connection to avoid racing dispatcher notifies iterator
+                if self._command_conn and not self._command_conn.closed:
+                    await self._command_conn.execute(
+                        sql.SQL('UNLISTEN {}').format(sql.Identifier(channel_name))
+                    )
+
+                self._listen_channels.discard(channel_name)
+
+    async def unsubscribe(
+        self, channel_name: str, q: Optional[Queue[Notify]] = None
+    ) -> None:
+        """
+        Remove local queue subscription while keeping server-side LISTEN active.
+
+        This is the preferred way to clean up subscriptions as it avoids expensive
+        LISTEN/UNLISTEN operations when multiple subscribers use the same channel.
+        The server-side LISTEN remains active for other current/future subscribers.
+
+        Parameters
+        ----------
+        channel_name : str
+            Channel name used in listen()
+        q : Optional[Queue[Notify]]
+            Specific queue to remove from local subscriptions
+
+        Notes
+        -----
+        - More efficient than unlisten() for temporary subscriptions
+        - Prevents LISTEN/UNLISTEN races in high-traffic scenarios
+        - Server-side LISTEN remains active until listener.close()
+        """
+        async with self._lock:
+            if q is not None:
+                self._subs[channel_name].discard(q)
+
+    async def close(self) -> None:
+        """
+        Stop the dispatcher, health monitor and close the notification connection.
+        Safe to call more than once.
+        """
+        if self._health_check_task:
+            self._health_check_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._health_check_task
+            self._health_check_task = None
+
+        if self._dispatcher_task:
+            self._dispatcher_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._dispatcher_task
+            self._dispatcher_task = None
+
+        self._unregister_fd_monitoring()
+
+        if self._dispatcher_conn and not self._dispatcher_conn.closed:
+            await self._dispatcher_conn.close()
+            self._dispatcher_conn = None
+
+        if self._command_conn and not self._command_conn.closed:
+            await self._command_conn.close()
+            self._command_conn = None

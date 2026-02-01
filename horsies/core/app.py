@@ -1,0 +1,552 @@
+# app/core/app.py
+from typing import (
+    Optional,
+    Callable,
+    TypeVar,
+    overload,
+    TYPE_CHECKING,
+    ParamSpec,
+    Any,
+    Union,
+)
+from horsies.core.models.app import AppConfig
+from horsies.core.models.queues import QueueMode
+from horsies.core.models.tasks import TaskError, TaskOptions, RetryPolicy
+from horsies.core.task_decorator import create_task_wrapper, effective_priority
+from horsies.core.models.workflow import (
+    TaskNode,
+    SubWorkflowNode,
+    WorkflowSpec,
+    OnError,
+    SuccessPolicy,
+)
+from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.logging import get_logger
+from horsies.core.registry.tasks import TaskRegistry
+from horsies.core.errors import (
+    ConfigurationError,
+    HorsiesError,
+    MultipleValidationErrors,
+    TaskDefinitionError,
+    ErrorCode,
+    SourceLocation,
+    ValidationReport,
+    raise_collected,
+)
+import os
+import importlib
+import glob
+from fnmatch import fnmatch
+from horsies.core.utils.imports import import_by_path
+
+if TYPE_CHECKING:
+    from horsies.core.task_decorator import TaskFunction
+    from horsies.core.models.tasks import TaskResult
+
+P = ParamSpec('P')
+T = TypeVar('T')
+
+_E = TypeVar('_E', bound=HorsiesError)
+
+
+def _no_location(error: _E) -> _E:
+    """Strip the auto-detected source location from a programmatic error.
+
+    Used for errors created inside horsies internals where the auto-detected
+    frame (e.g., CLI entry point) is misleading. The error message itself
+    contains the relevant context (e.g., module path).
+    """
+    error.location = None
+    return error
+
+
+class Horsies:
+    """
+    Configuration-driven task management app.
+    Requires an AppConfig instance for proper validation and type safety.
+    """
+
+    def __init__(self, config: AppConfig):
+        self.config = config
+        self._broker: Optional['PostgresBroker'] = None
+        self.tasks: TaskRegistry[Callable[..., Any]] = TaskRegistry()
+        self.logger = get_logger('app')
+        self._discovered_task_modules: list[str] = []
+        # When True, task sends/schedules are suppressed (used during import/discovery)
+        self._suppress_sends: bool = False
+        # Role indicates context: 'producer', 'worker', or 'scheduler'
+        self._role: str = 'producer'
+
+        if os.getenv('HORSIES_CHILD_PROCESS') == '1':
+            self.logger.info(
+                f'horsies subprocess initialized with {config.queue_mode.name} mode (pid={os.getpid()})'
+            )
+        else:
+            self.logger.info(f'horsies initialized as {self._role} with {config.queue_mode.name} mode')
+
+    def set_role(self, role: str) -> None:
+        """Set the role and log it. Called by CLI after discovery."""
+        self._role = role
+        self.logger.info(f'horsies running as {role}')
+
+    def get_valid_queue_names(self) -> list[str]:
+        """Get list of valid queue names based on configuration"""
+        if self.config.queue_mode == QueueMode.DEFAULT:
+            return ['default']
+        else:  # CUSTOM mode
+            return [queue.name for queue in (self.config.custom_queues or [])]
+
+    def validate_queue_name(self, queue_name: Optional[str]) -> str:
+        """Validate queue name against app configuration"""
+        if self.config.queue_mode == QueueMode.DEFAULT:
+            if queue_name is not None:
+                raise ConfigurationError(
+                    message='cannot specify queue_name in DEFAULT mode',
+                    code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+                    notes=[
+                        f"queue_name='{queue_name}' was specified",
+                        'but app is configured with QueueMode.DEFAULT',
+                    ],
+                    help_text='either remove queue_name or switch to QueueMode.CUSTOM',
+                )
+            return 'default'
+        else:  # CUSTOM mode
+            if queue_name is None:
+                raise ConfigurationError(
+                    message='queue_name is required in CUSTOM mode',
+                    code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+                    notes=['app is configured with QueueMode.CUSTOM'],
+                    help_text='specify queue_name from configured queues',
+                )
+            valid_queues = self.get_valid_queue_names()
+            if queue_name not in valid_queues:
+                raise ConfigurationError(
+                    message=f"invalid queue_name '{queue_name}'",
+                    code=ErrorCode.TASK_INVALID_QUEUE,
+                    notes=[f'valid queues: {valid_queues}'],
+                    help_text='use one of the configured queue names',
+                )
+            return queue_name
+
+    @overload
+    def task(
+        self, task_name: str, func: Callable[P, 'TaskResult[T, TaskError]']
+    ) -> 'TaskFunction[P, T]': ...
+
+    @overload
+    def task(
+        self,
+        task_name: str,
+        *,
+        queue_name: Optional[str] = None,
+        good_until: Any = None,
+        auto_retry_for: Optional[list[str]] = None,
+        retry_policy: Optional['RetryPolicy'] = None,
+    ) -> Callable[
+        [Callable[P, 'TaskResult[T, TaskError]']],
+        'TaskFunction[P, T]',
+    ]: ...
+
+    def task(
+        self,
+        task_name: str,
+        func: Optional[Callable[P, 'TaskResult[T, TaskError]']] = None,
+        **task_options_kwargs: Any,
+    ) -> Union[
+        'TaskFunction[P, T]',
+        Callable[
+            [Callable[P, 'TaskResult[T, TaskError]']],
+            'TaskFunction[P, T]',
+        ],
+    ]:
+        """
+        Decorator to register a task with this app.
+        Task options are validated against TaskOptions model and app configuration.
+        """
+
+        def decorator(fn: Callable[P, 'TaskResult[T, TaskError]']):
+            fn_location = SourceLocation.from_function(fn)
+
+            # Validate and create TaskOptions - this enforces pydantic validation
+            try:
+                task_options = TaskOptions(task_name=task_name, **task_options_kwargs)
+            except Exception as e:
+                raise TaskDefinitionError(
+                    message=f'invalid task options',
+                    code=ErrorCode.TASK_INVALID_OPTIONS,
+                    location=fn_location,
+                    notes=[f"task '{fn.__name__}'", str(e)],
+                    help_text='check task decorator arguments',
+                )
+
+            # VALIDATION AT DEFINITION TIME
+            # Validate queue_name against app configuration
+            try:
+                self.validate_queue_name(task_options.queue_name)
+            except ConfigurationError:
+                raise  # Re-raise with original formatting
+
+            # Create wrapper that uses this app's configuration
+            task_function = create_task_wrapper(fn, self, task_name, task_options)
+
+            # Register task with this app, passing source for duplicate detection
+            # Normalize path with realpath to handle symlinks and relative paths
+            source_str = (
+                f"{os.path.realpath(fn_location.file)}:{fn_location.line}"
+                if fn_location
+                else None
+            )
+            self.tasks.register(task_function, name=task_name, source=source_str)
+
+            return task_function
+
+        if func is None:
+            # Called with arguments: @app.task(queue_name="custom")
+            return decorator
+        else:
+            # Called without arguments: @app.task
+            return decorator(func)
+
+    def check(self, *, live: bool = False) -> list[HorsiesError]:
+        """Orchestrate phased validation and return all errors found.
+
+        Phase 1: Config — already validated at construction (implicit pass).
+        Phase 2: Task module imports — import each module, collect errors.
+        Phase 3: Workflow validation — happens during imports (WorkflowSpec construction).
+        Phase 4 (if live): Broker connectivity — async SELECT 1.
+
+        Args:
+            live: If True, also check broker connectivity (Phase 4).
+
+        Returns:
+            List of all HorsiesError instances found across phases.
+            Empty list means all validations passed.
+        """
+        all_errors: list[HorsiesError] = []
+
+        # Phase 2: task module imports (also triggers Phase 3 workflow validation)
+        all_errors.extend(self._check_task_imports())
+        if all_errors:
+            return all_errors
+
+        # Phase 4 (optional): broker connectivity
+        if live:
+            all_errors.extend(self._check_broker_connectivity())
+
+        return all_errors
+
+    def _check_task_imports(self) -> list[HorsiesError]:
+        """Import task modules and collect any errors."""
+        errors: list[HorsiesError] = []
+        modules = self._discovered_task_modules
+        prev_suppress = self._suppress_sends
+        self.suppress_sends(True)
+        try:
+            for module_path in modules:
+                try:
+                    if module_path.endswith('.py') or os.path.sep in module_path:
+                        abs_path = os.path.realpath(module_path)
+                        if not os.path.exists(abs_path):
+                            errors.append(_no_location(ConfigurationError(
+                                message=f'task module not found: {module_path}',
+                                code=ErrorCode.CLI_INVALID_ARGS,
+                                notes=[f'resolved path: {abs_path}'],
+                                help_text=(
+                                    'remove it from app.discover_tasks([...]) or fix the path; \n'
+                                    'if using globs, run app.expand_module_globs([...]) first'
+                                ),
+                            )))
+                            continue
+                        import_by_path(abs_path)
+                    else:
+                        importlib.import_module(module_path)
+                except MultipleValidationErrors as exc:
+                    errors.extend(exc.report.errors)
+                except HorsiesError as exc:
+                    errors.append(exc)
+                except Exception as exc:
+                    errors.append(_no_location(ConfigurationError(
+                        message=f'failed to import module: {module_path}',
+                        code=ErrorCode.CLI_INVALID_ARGS,
+                        notes=[str(exc)],
+                        help_text=(
+                            'ensure the module is importable; '
+                            'for file paths include .py and a valid path, '
+                            'for dotted paths verify PYTHONPATH or run from the project root'
+                        ),
+                    )))
+        finally:
+            self.suppress_sends(prev_suppress)
+        return errors
+
+    def _check_broker_connectivity(self) -> list[HorsiesError]:
+        """Check broker connectivity via SELECT 1."""
+        import asyncio
+
+        errors: list[HorsiesError] = []
+        try:
+            broker = self.get_broker()
+
+            async def _test_connection() -> None:
+                from sqlalchemy import text
+
+                async with broker.session_factory() as session:
+                    await session.execute(text('SELECT 1'))
+
+            asyncio.run(_test_connection())
+        except HorsiesError as exc:
+            errors.append(exc)
+        except Exception as exc:
+            errors.append(_no_location(ConfigurationError(
+                message='broker connectivity check failed',
+                code=ErrorCode.BROKER_INVALID_URL,
+                notes=[str(exc)],
+                help_text='check database_url in PostgresConfig',
+            )))
+        return errors
+
+    def list_tasks(self) -> list[str]:
+        """List tasks registered with this app"""
+        return list(self.tasks.keys_list())
+
+    def get_broker(self) -> 'PostgresBroker':
+        """Get the configured PostgreSQL broker for this app"""
+        try:
+            if self._broker is None:
+                self._broker = PostgresBroker(self.config.broker)
+                self._broker.app = self  # Store app reference for subworkflow support
+            return self._broker
+        except Exception as e:
+            raise ValueError(f'Failed to get broker: {e}')
+
+    def discover_tasks(
+        self,
+        modules: list[str],
+    ) -> None:
+        """
+        Register task modules for later import.
+
+        This method only records module paths — no file I/O happens here.
+        Actual imports occur when import_task_modules() is called (typically by worker).
+
+        Args:
+            modules: List of dotted module paths (e.g., ['myapp.tasks', 'myapp.jobs.tasks'])
+                     or file paths (e.g., ['tasks.py', 'src/worker_tasks.py'])
+
+        Examples:
+            app.discover_tasks(['myapp.tasks'])  # dotted module path
+            app.discover_tasks(['tasks.py'])     # file path
+
+            # For glob patterns, use expand_module_globs() first:
+            paths = app.expand_module_globs(['src/**/*_tasks.py'])
+            app.discover_tasks(paths)
+        """
+        self._discovered_task_modules = list(modules)
+
+        is_child_process = os.getenv('HORSIES_CHILD_PROCESS') == '1'
+        child_logs_enabled = os.getenv('HORSIES_CHILD_DISCOVERY_LOGS') == '1'
+        should_log = not is_child_process or child_logs_enabled
+
+        if should_log and len(modules) > 0:
+            self.logger.info(f'Registered {len(modules)} task module(s) for discovery')
+
+    def expand_module_globs(
+        self,
+        patterns: list[str],
+        exclude: list[str] | None = None,
+    ) -> list[str]:
+        """
+        Expand glob patterns to file paths.
+
+        Use this explicitly when you need glob-based discovery.
+        This is separated from discover_tasks() to make the I/O cost explicit.
+
+        Args:
+            patterns: Glob patterns like ['src/**/*_tasks.py'] or file paths
+            exclude: Glob patterns to exclude (default: test files)
+
+        Returns:
+            List of absolute file paths
+
+        Examples:
+            paths = app.expand_module_globs(['src/**/*_tasks.py'])
+            app.discover_tasks(paths)
+        """
+        exclude_patterns = exclude or ['*_test.py', 'test_*.py', 'conftest.py']
+        results: list[str] = []
+
+        def _is_excluded(path: str) -> bool:
+            basename = os.path.basename(path)
+            for pattern in exclude_patterns:
+                if fnmatch(path, pattern) or fnmatch(basename, pattern):
+                    return True
+            return False
+
+        for pattern in patterns:
+            has_glob = any(ch in pattern for ch in ['*', '?', '[', ']'])
+            if has_glob:
+                for match in glob.glob(pattern, recursive=True):
+                    abs_path = os.path.realpath(match)
+                    if not os.path.exists(abs_path):
+                        continue
+                    if os.path.isdir(abs_path):
+                        continue
+                    if not abs_path.endswith('.py'):
+                        continue
+                    if _is_excluded(abs_path):
+                        continue
+                    if abs_path not in results:
+                        results.append(abs_path)
+            elif pattern.endswith('.py') or os.path.sep in pattern:
+                # Direct file path
+                abs_path = os.path.realpath(pattern)
+                if os.path.exists(abs_path) and abs_path.endswith('.py'):
+                    if not _is_excluded(abs_path) and abs_path not in results:
+                        results.append(abs_path)
+            else:
+                # Dotted module path - pass through as-is
+                if pattern not in results:
+                    results.append(pattern)
+
+        return results
+
+    def get_discovered_task_modules(self) -> list[str]:
+        """Get the list of discovered task modules"""
+        return self._discovered_task_modules.copy()
+
+    def import_task_modules(
+        self,
+        modules: Optional[list[str]] = None,
+    ) -> list[str]:
+        """Import task modules to eagerly register tasks.
+
+        If modules is None, imports the modules discovered by discover_tasks().
+        Returns the list of module identifiers that were imported.
+        """
+        modules_to_import = (
+            self._discovered_task_modules if modules is None else modules
+        )
+        imported: list[str] = []
+        for module in modules_to_import:
+            if module.endswith('.py') or os.path.sep in module:
+                abs_path = os.path.realpath(module)
+                if not os.path.exists(abs_path):
+                    self.logger.warning(f'Task module not found: {module}')
+                    continue
+                import_by_path(abs_path)
+                imported.append(abs_path)
+            else:
+                importlib.import_module(module)
+                imported.append(module)
+        return imported
+
+    # -------- side-effect control (import/discovery) --------
+    def suppress_sends(self, value: bool = True) -> None:
+        """Enable/disable suppression of task sends/schedules.
+
+        Library-internal use: the worker sets this True while importing user
+        modules for task discovery so any top-level `.send()` calls in those
+        modules do not enqueue tasks as an import side effect.
+        """
+        self._suppress_sends = value
+
+    def are_sends_suppressed(self) -> bool:
+        """Return True if sends/schedules should be no-ops.
+
+        Environment override: if TASKLIB_SUPPRESS_SENDS=1, suppression is also
+        considered active (useful for ad-hoc scripting).
+        """
+        env_flag = os.getenv('TASKLIB_SUPPRESS_SENDS', '').strip()
+        return self._suppress_sends or env_flag == '1'
+
+    # -------- workflow factory --------
+    def workflow(
+        self,
+        name: str,
+        tasks: list[TaskNode[Any] | SubWorkflowNode[Any]],
+        on_error: OnError = OnError.FAIL,
+        output: TaskNode[Any] | SubWorkflowNode[Any] | None = None,
+        success_policy: SuccessPolicy | None = None,
+    ) -> WorkflowSpec:
+        """
+        Create a validated WorkflowSpec with proper queue and priority resolution.
+
+        Validates queues against app config and resolves priorities using
+        effective_priority() to match non-workflow task behavior.
+
+        Args:
+            name: Human-readable workflow name
+            tasks: List of TaskNode/SubWorkflowNode instances
+            on_error: Error handling policy (FAIL or PAUSE)
+            output: Explicit output task (optional)
+            success_policy: Custom success policy for workflow completion (optional)
+
+        Returns:
+            WorkflowSpec ready to start
+
+        Raises:
+            ValueError: If any TaskNode.queue is not in app config
+        """
+        report = ValidationReport('workflow')
+        for node in tasks:
+            # SubWorkflowNode doesn't have queue/priority - handled at execution time
+            if isinstance(node, SubWorkflowNode):
+                continue
+
+            # TaskNode: resolve queue and priority
+            task = node
+
+            # Resolve queue: explicit override > task decorator > "default"
+            resolved_queue = (
+                task.queue or getattr(task.fn, 'task_queue_name', None) or 'default'
+            )
+
+            # Validate queue against app config
+            # In DEFAULT mode, queue must be "default" (or None which resolves to "default")
+            # In CUSTOM mode, queue must be in custom_queues list
+            queue_valid = True
+            if self.config.queue_mode == QueueMode.CUSTOM:
+                valid_queues = self.get_valid_queue_names()
+                if resolved_queue not in valid_queues:
+                    report.add(ConfigurationError(
+                        message='TaskNode queue not in app config',
+                        code=ErrorCode.TASK_INVALID_QUEUE,
+                        notes=[
+                            f"TaskNode '{task.name}' has queue '{resolved_queue}'",
+                            f'valid queues: {valid_queues}',
+                        ],
+                        help_text='use one of the configured queue names or add this queue to app config',
+                    ))
+                    queue_valid = False
+            elif resolved_queue != 'default':
+                report.add(ConfigurationError(
+                    message='TaskNode has non-default queue in DEFAULT mode',
+                    code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+                    notes=[
+                        f"TaskNode '{task.name}' has queue '{resolved_queue}'",
+                        "app is in DEFAULT mode (only 'default' queue allowed)",
+                    ],
+                    help_text='either remove queue override or switch to QueueMode.CUSTOM',
+                ))
+                queue_valid = False
+
+            if queue_valid:
+                # Store resolved queue for later use
+                task.queue = resolved_queue
+
+                # Resolve priority if not explicitly set
+                if task.priority is None:
+                    task.priority = effective_priority(self, resolved_queue)
+
+        raise_collected(report)
+
+        # Create spec with validated tasks and broker
+        spec = WorkflowSpec(
+            name=name,
+            tasks=tasks,
+            on_error=on_error,
+            output=output,
+            success_policy=success_policy,
+            broker=self.get_broker(),
+        )
+        return spec

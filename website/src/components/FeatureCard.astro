@@ -1,0 +1,68 @@
+---
+interface Props {
+	title: string;
+	icon: string;
+	description: string;
+}
+
+const { title, icon, description } = Astro.props;
+---
+
+<div class="feature-card">
+	<div class="feature-card-header">
+		<img src={icon} alt="" class="feature-card-icon" />
+		<h3 class="feature-card-title">{title}</h3>
+	</div>
+	<p class="feature-card-description">{description}</p>
+</div>
+
+<style>
+	.feature-card {
+		border: 2px solid rgba(0, 255, 170, 0.4);
+		background: linear-gradient(
+			180deg,
+			rgba(13, 13, 13, 0.9) 0%,
+			rgba(5, 5, 5, 0.95) 100%
+		);
+		border-radius: 0.5rem;
+		padding: 1.5rem;
+		transition: border-color 0.3s ease, background 0.3s ease;
+	}
+
+	:global([data-theme='light']) .feature-card {
+		border-color: rgba(0, 122, 82, 0.3);
+		background: linear-gradient(180deg, #EDE8DD 0%, #F7F3EB 100%);
+	}
+
+	.feature-card:hover {
+		border-color: var(--horsie-gold);
+	}
+
+	.feature-card-header {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		margin-bottom: 0.5rem;
+	}
+
+	.feature-card-icon {
+		width: 1.5rem;
+		height: 1.5rem;
+		flex-shrink: 0;
+	}
+
+	:global([data-theme='light']) .feature-card-icon {
+		filter: brightness(0.55) saturate(1.4);
+	}
+
+	.feature-card-title {
+		margin: 0;
+		font-size: 1.1rem;
+	}
+
+	.feature-card-description {
+		margin: 0;
+		font-size: 0.9rem;
+		color: var(--sl-color-gray-2);
+	}
+</style>
