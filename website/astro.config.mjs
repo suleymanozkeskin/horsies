@@ -50,9 +50,19 @@ export default defineConfig({
 					label: 'Concepts',
 					items: [
 						{ label: 'Architecture', slug: 'concepts/architecture' },
+					],
+				},
+				{
+					label: 'Tasks',
+					items: [
 						{ label: 'Task Lifecycle', slug: 'concepts/task-lifecycle' },
 						{ label: 'Result Handling', slug: 'concepts/result-handling' },
-						{ label: 'Queue Modes', slug: 'concepts/queue-modes' },
+						{ label: 'Defining Tasks', slug: 'tasks/defining-tasks' },
+						{ label: 'Sending Tasks', slug: 'tasks/sending-tasks' },
+						{ label: 'Error Handling', slug: 'tasks/error-handling' },
+						{ label: 'Errors Reference', slug: 'tasks/errors' },
+						{ label: 'Retrieving Results', slug: 'tasks/retrieving-results' },
+						{ label: 'Retry Policy', slug: 'tasks/retry-policy' },
 					],
 				},
 				{
@@ -64,19 +74,9 @@ export default defineConfig({
 					],
 				},
 				{
-					label: 'Tasks',
-					items: [
-						{ label: 'Defining Tasks', slug: 'tasks/defining-tasks' },
-						{ label: 'Sending Tasks', slug: 'tasks/sending-tasks' },
-						{ label: 'Error Handling', slug: 'tasks/error-handling' },
-						{ label: 'Errors Reference', slug: 'tasks/errors' },
-						{ label: 'Retrieving Results', slug: 'tasks/retrieving-results' },
-						{ label: 'Retry Policy', slug: 'tasks/retry-policy' },
-					],
-				},
-				{
 					label: 'Configuration',
 					items: [
+						{ label: 'Queue Modes', slug: 'concepts/queue-modes' },
 						{ label: 'App Config', slug: 'configuration/app-config' },
 						{ label: 'Broker Config', slug: 'configuration/broker-config' },
 						{ label: 'Recovery Config', slug: 'configuration/recovery-config' },

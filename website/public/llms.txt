@@ -110,14 +110,10 @@ Each entry: Title -- summary -> URL
 
 ### Concepts
 - Architecture -- system design and data flow -> /horsies/concepts/architecture/
-- Task Lifecycle -- states and transitions -> /horsies/concepts/task-lifecycle/
-- Result Handling -- TaskResult pattern, error types -> /horsies/concepts/result-handling/
-- Queue Modes -- DEFAULT vs CUSTOM, priorities -> /horsies/concepts/queue-modes/
-- Workflow Semantics -- DAG behavior, failure, dependencies -> /horsies/concepts/workflows/workflow-semantics/
-- Workflow API -- WorkflowSpec/WorkflowHandle reference -> /horsies/concepts/workflows/workflow-api/
-- Subworkflows -- composing workflows with SubWorkflowNode -> /horsies/concepts/workflows/subworkflows/
 
 ### Tasks
+- Task Lifecycle -- states and transitions -> /horsies/concepts/task-lifecycle/
+- Result Handling -- TaskResult pattern, error types -> /horsies/concepts/result-handling/
 - Defining Tasks -- @app.task decorator -> /horsies/tasks/defining-tasks/
 - Sending Tasks -- enqueue for background execution -> /horsies/tasks/sending-tasks/
 - Error Handling -- TaskResult error patterns -> /horsies/tasks/error-handling/
@@ -125,7 +121,13 @@ Each entry: Title -- summary -> URL
 - Retrieving Results -- TaskHandle.get() -> /horsies/tasks/retrieving-results/
 - Retry Policy -- fixed/exponential backoff -> /horsies/tasks/retry-policy/
 
+### Workflows
+- Workflow Semantics -- DAG behavior, failure, dependencies -> /horsies/concepts/workflows/workflow-semantics/
+- Workflow API -- WorkflowSpec/WorkflowHandle reference -> /horsies/concepts/workflows/workflow-api/
+- Subworkflows -- composing workflows with SubWorkflowNode -> /horsies/concepts/workflows/subworkflows/
+
 ### Configuration
+- Queue Modes -- DEFAULT vs CUSTOM, priorities -> /horsies/concepts/queue-modes/
 - AppConfig -- root application config -> /horsies/configuration/app-config/
 - Broker Config -- PostgresConfig connection -> /horsies/configuration/broker-config/
 - Recovery Config -- stale task detection -> /horsies/configuration/recovery-config/
