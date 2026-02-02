@@ -12,6 +12,7 @@ from typing import (
     TypeGuard,
     cast,
 )
+import datetime as dt
 import json
 import traceback as tb
 from pydantic import BaseModel
@@ -186,6 +187,16 @@ def to_jsonable(value: Any) -> Json:
     # Is value a JSON-native type?
     if _is_json_native(value):
         return value
+
+    # datetime.datetime is a subclass of datetime.date — check datetime first.
+    if isinstance(value, dt.datetime):
+        return {'__datetime__': True, 'value': value.isoformat()}
+
+    if isinstance(value, dt.date):
+        return {'__date__': True, 'value': value.isoformat()}
+
+    if isinstance(value, dt.time):
+        return {'__time__': True, 'value': value.isoformat()}
 
     # Is value a `TaskResult`?
     if _is_task_result(value):
@@ -446,6 +457,16 @@ def rehydrate_value(value: Json) -> Any:
             raise SerializationError(
                 f'Failed to rehydrate dataclass {cache_key}: {str(e)}'
             )
+
+    # Handle datetime rehydration (datetime before date — subclass ordering)
+    if isinstance(value, dict) and value.get('__datetime__'):
+        return dt.datetime.fromisoformat(cast(str, value['value']))
+
+    if isinstance(value, dict) and value.get('__date__'):
+        return dt.date.fromisoformat(cast(str, value['value']))
+
+    if isinstance(value, dict) and value.get('__time__'):
+        return dt.time.fromisoformat(cast(str, value['value']))
 
     # Handle nested TaskResult rehydration
     if isinstance(value, dict) and value.get('__task_result__'):
