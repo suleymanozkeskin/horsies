@@ -53,7 +53,13 @@ export default defineConfig({
 						{ label: 'Task Lifecycle', slug: 'concepts/task-lifecycle' },
 						{ label: 'Result Handling', slug: 'concepts/result-handling' },
 						{ label: 'Queue Modes', slug: 'concepts/queue-modes' },
+					],
+				},
+				{
+					label: 'Workflows',
+					items: [
 						{ label: 'Workflow Semantics', slug: 'concepts/workflows/workflow-semantics' },
+						{ label: 'Workflow API', slug: 'concepts/workflows/workflow-api' },
 						{ label: 'Subworkflows', slug: 'concepts/workflows/subworkflows' },
 					],
 				},

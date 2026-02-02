@@ -4,95 +4,189 @@
 > Source: https://github.com/suleymanozkeskin/horsies
 > All public symbols: from horsies import <name>
 
+## Quick Reference
+
+### TaskResult[T, TaskError]
+- TaskResult(ok=value) | TaskResult(err=TaskError(...))
+- .is_ok() -> bool, .is_err() -> bool
+- .ok_value -> T, .err_value -> TaskError
+- .unwrap() -> T (raises on err), .unwrap_err() -> TaskError (raises on ok)
+
+### TaskError
+- error_code: str | LibraryErrorCode | None
+- message: str | None
+- data: Any | None
+
+### @app.task Decorator
+- @app.task("name", queue_name="default", retry_policy=..., auto_retry_for=[...])
+- Decorated function must return TaskResult[T, TaskError]
+- .send(*args) -> TaskHandle (sync), .send_async(*args) -> TaskHandle (async)
+
+### TaskHandle
+- .task_id -> str
+- .get(timeout_ms=None) -> TaskResult[T, TaskError] (blocking)
+- .get_async(timeout_ms=None) -> TaskResult[T, TaskError] (blocking, async)
+
+### TaskNode[T]
+- T = ok type of the task's TaskResult
+- TaskNode(fn=..., args=..., waits_for=..., args_from=..., node_id=..., workflow_ctx_from=..., allow_failed_deps=..., join=...)
+- args_from: downstream receives TaskResult[T, TaskError], not unwrapped T
+- workflow_ctx_from: list of nodes whose results are available in WorkflowContext
+- allow_failed_deps: if True, task runs even when dependencies fail/skip (default False)
+- join: "all" (default) | "any" | "quorum" (with min_success)
+
+### WorkflowSpec
+- .name -> str
+- .tasks -> list[TaskNode | SubWorkflowNode]
+- .on_error -> OnError (FAIL or PAUSE)
+- .output -> TaskNode | SubWorkflowNode | None
+- .success_policy -> SuccessPolicy | None
+- .start(workflow_id=None) -> WorkflowHandle
+- .start_async(workflow_id=None) -> WorkflowHandle
+
+### WorkflowHandle
+- .workflow_id -> str
+- .status() / .status_async() -> WorkflowStatus
+- .get(timeout_ms=None) / .get_async(...) -> TaskResult[Any, TaskError] (blocking)
+- .results() / .results_async() -> dict[str, TaskResult] (keyed by node_id)
+- .result_for(node) / .result_for_async(node) -> TaskResult[T, TaskError] (non-blocking single query)
+- .tasks() / .tasks_async() -> list[WorkflowTaskInfo]
+- .cancel() / .cancel_async() -> None
+- .pause() / .pause_async() -> bool
+- .resume() / .resume_async() -> bool
+
+### WorkflowTaskInfo
+- .index -> int, .name -> str, .status -> WorkflowTaskStatus
+- .result -> TaskResult[Any, TaskError] | None
+- .started_at -> datetime | None, .completed_at -> datetime | None
+
+### WorkflowContext
+- Injected when task declares workflow_ctx: WorkflowContext | None = None
+- Requires workflow_ctx_from on the TaskNode
+- .result_for(node: TaskNode[T] | NodeKey[T]) -> TaskResult[T, TaskError]
+- Only nodes in workflow_ctx_from are accessible (KeyError otherwise)
+
+### NodeKey[T]
+- NodeKey("string_id") for dynamic/string-based lookup
+- node.key() to get NodeKey from a TaskNode
+- Used with workflow_ctx.result_for() and handle.result_for()
+
+### Serialization
+- Supported: primitives, dict, list, Pydantic BaseModel, dataclass, datetime, date, time
+- Pydantic models: model_dump(mode="json") -> model_validate() round-trip
+- datetime: ISO 8601 with timezone preservation
+- Pydantic/dataclass values rehydrate to instances; plain dicts remain dicts
+- Unsupported: custom classes, __main__-defined classes, lambdas, file handles
+
+### Failure Semantics
+- Default (join="all", allow_failed_deps=False): downstream SKIPPED when any dep fails/skips
+- allow_failed_deps=True: downstream runs, receives failed TaskResult
+- join="any"/"quorum": downstream can still run if success threshold met
+- SKIPPED cascades for join="all" with allow_failed_deps=False
+- on_error="fail" (default): store error, continue DAG, mark FAILED when all terminal
+- on_error="pause": immediately pause, block new enqueues, await resume
+
+### discover_tasks
+- app.discover_tasks(["myapp.tasks", "myapp.workflows"])
+- Imports exact entries listed (dotted modules via importlib, .py paths via path import)
+- Export decorated functions from __init__.py or list submodules explicitly
+
+### RetryPolicy
+- RetryPolicy.fixed(delays=[60, 120, 300])
+- RetryPolicy.exponential(base_seconds=1, max_retries=3)
+- auto_retry_for=["ERROR_CODE", ...] on @app.task to trigger auto-retry
+
 ## Docs Sitemap
 
-Each entry: Title — summary → URL
+Each entry: Title -- summary -> URL
 
 ### Quick Start
-- Getting Started — minimal working example, install, first task → /horsies/quick-start/getting-started/
-- Configuring Horsies — app instance and broker setup → /horsies/quick-start/01-configuring-horsies/
-- Producing Tasks — define and send tasks → /horsies/quick-start/02-producing-tasks/
-- Defining Workflows — DAG-based workflows → /horsies/quick-start/03-defining-workflows/
-- Scheduling — recurring schedules → /horsies/quick-start/04-scheduling/
-- Workflow Patterns — real-world patterns → /horsies/quick-start/05-workflow-patterns/
+- Getting Started -- minimal working example, install, first task -> /horsies/quick-start/getting-started/
+- Configuring Horsies -- app instance and broker setup -> /horsies/quick-start/01-configuring-horsies/
+- Producing Tasks -- define and send tasks -> /horsies/quick-start/02-producing-tasks/
+- Defining Workflows -- DAG-based workflows -> /horsies/quick-start/03-defining-workflows/
+- Scheduling -- recurring schedules -> /horsies/quick-start/04-scheduling/
+- Workflow Patterns -- real-world patterns -> /horsies/quick-start/05-workflow-patterns/
 
 ### Concepts
-- Architecture — system design and data flow → /horsies/concepts/architecture/
-- Task Lifecycle — states and transitions → /horsies/concepts/task-lifecycle/
-- Result Handling — TaskResult pattern, error types → /horsies/concepts/result-handling/
-- Queue Modes — DEFAULT vs CUSTOM, priorities → /horsies/concepts/queue-modes/
-- Workflow Semantics — DAG behavior, failure, dependencies → /horsies/concepts/workflows/workflow-semantics/
-- Subworkflows — composing workflows with SubWorkflowNode → /horsies/concepts/workflows/subworkflows/
+- Architecture -- system design and data flow -> /horsies/concepts/architecture/
+- Task Lifecycle -- states and transitions -> /horsies/concepts/task-lifecycle/
+- Result Handling -- TaskResult pattern, error types -> /horsies/concepts/result-handling/
+- Queue Modes -- DEFAULT vs CUSTOM, priorities -> /horsies/concepts/queue-modes/
+- Workflow Semantics -- DAG behavior, failure, dependencies -> /horsies/concepts/workflows/workflow-semantics/
+- Workflow API -- WorkflowSpec/WorkflowHandle reference -> /horsies/concepts/workflows/workflow-api/
+- Subworkflows -- composing workflows with SubWorkflowNode -> /horsies/concepts/workflows/subworkflows/
 
 ### Tasks
-- Defining Tasks — @app.task decorator → /horsies/tasks/defining-tasks/
-- Sending Tasks — enqueue for background execution → /horsies/tasks/sending-tasks/
-- Error Handling — TaskResult error patterns → /horsies/tasks/error-handling/
-- Errors Reference — all error codes and types → /horsies/tasks/errors/
-- Retrieving Results — TaskHandle.get() → /horsies/tasks/retrieving-results/
-- Retry Policy — fixed/exponential backoff → /horsies/tasks/retry-policy/
+- Defining Tasks -- @app.task decorator -> /horsies/tasks/defining-tasks/
+- Sending Tasks -- enqueue for background execution -> /horsies/tasks/sending-tasks/
+- Error Handling -- TaskResult error patterns -> /horsies/tasks/error-handling/
+- Errors Reference -- all error codes and types -> /horsies/tasks/errors/
+- Retrieving Results -- TaskHandle.get() -> /horsies/tasks/retrieving-results/
+- Retry Policy -- fixed/exponential backoff -> /horsies/tasks/retry-policy/
 
 ### Configuration
-- AppConfig — root application config → /horsies/configuration/app-config/
-- Broker Config — PostgresConfig connection → /horsies/configuration/broker-config/
-- Recovery Config — stale task detection → /horsies/configuration/recovery-config/
+- AppConfig -- root application config -> /horsies/configuration/app-config/
+- Broker Config -- PostgresConfig connection -> /horsies/configuration/broker-config/
+- Recovery Config -- stale task detection -> /horsies/configuration/recovery-config/
 
 ### Workers
-- Worker Architecture — process pool model → /horsies/workers/worker-architecture/
-- Concurrency — worker/queue/cluster limits → /horsies/workers/concurrency/
-- Heartbeats & Recovery — crash detection → /horsies/workers/heartbeats-recovery/
+- Worker Architecture -- process pool model -> /horsies/workers/worker-architecture/
+- Concurrency -- worker/queue/cluster limits -> /horsies/workers/concurrency/
+- Heartbeats & Recovery -- crash detection -> /horsies/workers/heartbeats-recovery/
 
 ### Monitoring
-- Syce Overview — TUI monitoring dashboard → /horsies/monitoring/syce-overview/
-- Broker Methods — async inspection APIs → /horsies/monitoring/broker-methods/
+- Syce Overview -- TUI monitoring dashboard -> /horsies/monitoring/syce-overview/
+- Broker Methods -- async inspection APIs -> /horsies/monitoring/broker-methods/
 
 ### Scheduling
-- Scheduler Overview — how scheduler enqueues → /horsies/scheduling/scheduler-overview/
-- Schedule Patterns — Interval, Daily, Weekly, etc. → /horsies/scheduling/schedule-patterns/
-- Schedule Config — ScheduleConfig model → /horsies/scheduling/schedule-config/
+- Scheduler Overview -- how scheduler enqueues -> /horsies/scheduling/scheduler-overview/
+- Schedule Patterns -- Interval, Daily, Weekly, etc. -> /horsies/scheduling/schedule-patterns/
+- Schedule Config -- ScheduleConfig model -> /horsies/scheduling/schedule-config/
 
 ### CLI
-- CLI Reference — horsies worker, scheduler, check → /horsies/cli/
+- CLI Reference -- horsies worker, scheduler, check -> /horsies/cli/
 
 ### Internals
-- Database Schema — PostgreSQL tables → /horsies/internals/database-schema/
-- Serialization — JSON codec for args/results → /horsies/internals/serialization/
+- Database Schema -- PostgreSQL tables -> /horsies/internals/database-schema/
+- Serialization -- JSON codec for args/results -> /horsies/internals/serialization/
 
 ## Keyword Index
 
-keyword(s) → page URL
+keyword(s) -> page URL
 
-install, pip, setup, first task → /horsies/quick-start/getting-started/
-AppConfig, PostgresConfig, database_url, broker → /horsies/configuration/app-config/
-PostgresConfig, pool_size, max_overflow, connection → /horsies/configuration/broker-config/
-RecoveryConfig, stale, requeue, crash recovery → /horsies/configuration/recovery-config/
-@app.task, decorator, task definition, define task → /horsies/tasks/defining-tasks/
-send, send_async, enqueue, dispatch, produce → /horsies/tasks/sending-tasks/
-TaskResult, is_ok, is_err, unwrap, ok_value, err_value → /horsies/tasks/error-handling/
-LibraryErrorCode, TaskError, error codes, UNHANDLED_EXCEPTION → /horsies/tasks/errors/
-TaskHandle, get, get_async, timeout, result → /horsies/tasks/retrieving-results/
-RetryPolicy, retry, backoff, exponential, fixed, auto_retry_for → /horsies/tasks/retry-policy/
-PENDING, CLAIMED, RUNNING, COMPLETED, FAILED, task status → /horsies/concepts/task-lifecycle/
-TaskResult, Result pattern, error as value → /horsies/concepts/result-handling/
-QueueMode, DEFAULT, CUSTOM, priority, CustomQueueConfig → /horsies/concepts/queue-modes/
-WorkflowSpec, DAG, TaskNode, waits_for, args_from → /horsies/concepts/workflows/workflow-semantics/
-SubWorkflowNode, WorkflowDefinition, build_with, child workflow → /horsies/concepts/workflows/subworkflows/
-WorkflowContext, workflow_ctx_from, result_for, NodeKey → /horsies/concepts/workflows/workflow-semantics/
-SuccessPolicy, SuccessCase, partial success → /horsies/concepts/workflows/workflow-semantics/
-join, any, quorum, min_success, OR-join → /horsies/concepts/workflows/workflow-semantics/
-skip_when, run_when, conditional execution → /horsies/concepts/workflows/workflow-semantics/
-on_error, pause, resume, PAUSED → /horsies/concepts/workflows/workflow-semantics/
-allow_failed_deps, UPSTREAM_SKIPPED, recovery → /horsies/concepts/workflows/workflow-semantics/
-fan-out, fan-in, parallel, diamond → /horsies/quick-start/05-workflow-patterns/
-worker, process pool, claim, execute → /horsies/workers/worker-architecture/
-concurrency, max_concurrency, cluster_wide_cap, prefetch → /horsies/workers/concurrency/
-heartbeat, crash, stale, worker recovery → /horsies/workers/heartbeats-recovery/
-syce, dashboard, TUI, monitor → /horsies/monitoring/syce-overview/
-get_queue_stats, get_worker_states, broker methods → /horsies/monitoring/broker-methods/
-ScheduleConfig, TaskSchedule, IntervalSchedule, DailySchedule → /horsies/scheduling/schedule-config/
-schedule pattern, Interval, Hourly, Daily, Weekly, Monthly → /horsies/scheduling/schedule-patterns/
-scheduler, check_interval, cron → /horsies/scheduling/scheduler-overview/
-horsies worker, horsies scheduler, horsies check, CLI → /horsies/cli/
-PostgreSQL, tables, schema, migration → /horsies/internals/database-schema/
-serialization, JSON, codec, pydantic, datetime → /horsies/internals/serialization/
-architecture, LISTEN/NOTIFY, components, data flow → /horsies/concepts/architecture/
+install, pip, setup, first task -> /horsies/quick-start/getting-started/
+AppConfig, PostgresConfig, database_url, broker -> /horsies/configuration/app-config/
+PostgresConfig, pool_size, max_overflow, connection -> /horsies/configuration/broker-config/
+RecoveryConfig, stale, requeue, crash recovery -> /horsies/configuration/recovery-config/
+@app.task, decorator, task definition, define task -> /horsies/tasks/defining-tasks/
+send, send_async, enqueue, dispatch, produce -> /horsies/tasks/sending-tasks/
+TaskResult, is_ok, is_err, unwrap, ok_value, err_value -> /horsies/tasks/error-handling/
+LibraryErrorCode, TaskError, error codes, UNHANDLED_EXCEPTION -> /horsies/tasks/errors/
+TaskHandle, get, get_async, timeout, result -> /horsies/tasks/retrieving-results/
+RetryPolicy, retry, backoff, exponential, fixed, auto_retry_for -> /horsies/tasks/retry-policy/
+PENDING, CLAIMED, RUNNING, COMPLETED, FAILED, task status -> /horsies/concepts/task-lifecycle/
+TaskResult, Result pattern, error as value -> /horsies/concepts/result-handling/
+QueueMode, DEFAULT, CUSTOM, priority, CustomQueueConfig -> /horsies/concepts/queue-modes/
+WorkflowSpec, DAG, TaskNode, waits_for, args_from -> /horsies/concepts/workflows/workflow-semantics/
+WorkflowHandle, WorkflowTaskInfo, WorkflowStatus -> /horsies/concepts/workflows/workflow-api/
+SubWorkflowNode, WorkflowDefinition, build_with, child workflow -> /horsies/concepts/workflows/subworkflows/
+WorkflowContext, workflow_ctx_from, result_for, NodeKey -> /horsies/concepts/workflows/workflow-semantics/
+SuccessPolicy, SuccessCase, partial success -> /horsies/concepts/workflows/workflow-semantics/
+join, any, quorum, min_success, OR-join -> /horsies/concepts/workflows/workflow-semantics/
+skip_when, run_when, conditional execution -> /horsies/concepts/workflows/workflow-semantics/
+on_error, pause, resume, PAUSED -> /horsies/concepts/workflows/workflow-semantics/
+allow_failed_deps, UPSTREAM_SKIPPED, recovery -> /horsies/concepts/workflows/workflow-semantics/
+fan-out, fan-in, parallel, diamond -> /horsies/quick-start/05-workflow-patterns/
+worker, process pool, claim, execute -> /horsies/workers/worker-architecture/
+concurrency, max_concurrency, cluster_wide_cap, prefetch -> /horsies/workers/concurrency/
+heartbeat, crash, stale, worker recovery -> /horsies/workers/heartbeats-recovery/
+syce, dashboard, TUI, monitor -> /horsies/monitoring/syce-overview/
+get_queue_stats, get_worker_states, broker methods -> /horsies/monitoring/broker-methods/
+ScheduleConfig, TaskSchedule, IntervalSchedule, DailySchedule -> /horsies/scheduling/schedule-config/
+schedule pattern, Interval, Hourly, Daily, Weekly, Monthly -> /horsies/scheduling/schedule-patterns/
+scheduler, check_interval, cron -> /horsies/scheduling/scheduler-overview/
+horsies worker, horsies scheduler, horsies check, CLI -> /horsies/cli/
+PostgreSQL, tables, schema, migration -> /horsies/internals/database-schema/
+serialization, JSON, codec, pydantic, datetime -> /horsies/internals/serialization/
+architecture, LISTEN/NOTIFY, components, data flow -> /horsies/concepts/architecture/

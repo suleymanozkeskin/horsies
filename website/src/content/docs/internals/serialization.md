@@ -61,6 +61,59 @@ Serialized form:
 
 Rehydration uses `model_validate()` on the resolved class — Pydantic handles type coercion (including ISO strings back to `datetime` for model fields).
 
+### Pydantic Models in Workflows
+
+Pydantic models flowing through `args_from` are serialized with `model_dump(mode="json")` and rehydrated with `model_validate()`. The downstream task receives the reconstructed model instance, not a dict.
+
+```python
+from datetime import datetime, timezone
+from pydantic import BaseModel
+from horsies import (
+    Horsies,
+    AppConfig,
+    PostgresConfig,
+    TaskResult,
+    TaskError,
+    TaskNode,
+)
+
+config = AppConfig(
+    broker=PostgresConfig(
+        database_url="postgresql+psycopg://user:password@localhost:5432/mydb",
+    ),
+)
+app = Horsies(config)
+
+class Order(BaseModel):
+    item: str
+    total: float
+    created_at: datetime
+
+@app.task("create_order")
+def create_order() -> TaskResult[Order, TaskError]:
+    return TaskResult(ok=Order(
+        item="widget",
+        total=9.99,
+        created_at=datetime.now(timezone.utc),
+    ))
+
+@app.task("process_order")
+def process_order(order_result: TaskResult[Order, TaskError]) -> TaskResult[str, TaskError]:
+    if order_result.is_err():
+        return TaskResult(err=order_result.unwrap_err())
+    order: Order = order_result.ok_value  # Rehydrated Order instance, not a dict
+    print(order.created_at)               # datetime object, not a string
+    return TaskResult(ok=f"Processed {order.item}")
+
+# Wiring
+node_create: TaskNode[Order] = TaskNode(fn=create_order)
+node_process: TaskNode[str] = TaskNode(
+    fn=process_order,
+    waits_for=[node_create],
+    args_from={"order_result": node_create},
+)
+```
+
 ### Dataclasses
 
 Dataclasses serialize with the same metadata approach. Each field is recursively converted via `to_jsonable`, preserving nested Pydantic and dataclass types.

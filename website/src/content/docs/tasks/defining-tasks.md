@@ -111,6 +111,8 @@ app.discover_tasks(["myapp.tasks", "myapp.jobs.worker_tasks"])
 app.discover_tasks(["tasks.py", "more_tasks.py"])
 ```
 
+`discover_tasks` imports the **exact entries listed**. Dotted module paths use `importlib.import_module()`, while `.py` entries are imported by file path — it does not recursively scan submodules. To discover tasks in `myapp.tasks.scraping`, either list it explicitly or export the decorated functions from `myapp.tasks.__init__.py`.
+
 ## Things to Avoid
 
 **Don't omit the return type annotation.**

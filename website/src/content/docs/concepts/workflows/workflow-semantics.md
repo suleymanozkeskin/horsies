@@ -1,7 +1,7 @@
 ---
 title: Workflow Semantics
 summary: DAG-based workflow behavior, failure handling, and dependency resolution.
-related: [subworkflows, result-handling, ../../tasks/retry-policy]
+related: [workflow-api, subworkflows, result-handling, ../../tasks/retry-policy]
 tags: [concepts, workflows, DAG, semantics]
 ---
 
@@ -125,6 +125,67 @@ This design allows recovery handlers (`allow_failed_deps=True`) to execute befor
 |--------|----------|
 | `fail` (default) | Store error, continue DAG resolution, mark FAILED when complete |
 | `pause` | Immediately pause workflow, block new enqueues, await resume |
+
+### Upstream Failure and args_from
+
+When an upstream task fails and the downstream task uses `join="all"` (the default):
+
+- **`allow_failed_deps=False` (default):** The downstream task is **SKIPPED**. It does not execute and does not receive the failed result.
+- **`allow_failed_deps=True`:** The downstream task **runs** and receives the upstream `TaskResult` with `is_err() == True`.
+
+`on_error="fail"` does **not** short-circuit the DAG. The workflow stores the error and continues resolving dependents — downstream tasks are SKIPPED (or run if `allow_failed_deps=True`) before the workflow is marked FAILED.
+
+With `join="any"`, a downstream task runs when **any** dependency succeeds, so a single upstream failure does not cause a skip unless **all** dependencies fail. With `join="quorum"`, the task runs when `min_success` dependencies succeed, so failures only matter if they make the threshold unreachable.
+
+```python
+from horsies import (
+    Horsies,
+    AppConfig,
+    PostgresConfig,
+    TaskNode,
+    TaskResult,
+    TaskError,
+)
+
+config = AppConfig(
+    broker=PostgresConfig(
+        database_url="postgresql+psycopg://user:password@localhost:5432/mydb",
+    ),
+)
+app = Horsies(config)
+
+@app.task("produce")
+def produce() -> TaskResult[int, TaskError]:
+    return TaskResult(ok=1)
+
+@app.task("process")
+def process(data: TaskResult[int, TaskError]) -> TaskResult[str, TaskError]:
+    if data.is_err():
+        return TaskResult(err=TaskError(
+            error_code="UPSTREAM_FAILED",
+            message="Upstream task failed",
+        ))
+    return TaskResult(ok=str(data.ok_value))
+
+node_a: TaskNode[int] = TaskNode(fn=produce)
+
+# Default (join="all", allow_failed_deps=False): downstream is SKIPPED when upstream fails
+node_b_skip: TaskNode[str] = TaskNode(
+    fn=process,
+    waits_for=[node_a],
+    args_from={"data": node_a},
+)
+
+# With allow_failed_deps: downstream runs and receives the failed TaskResult
+node_b_recover: TaskNode[str] = TaskNode(
+    fn=process,
+    waits_for=[node_a],
+    args_from={"data": node_a},
+    allow_failed_deps=True,
+)
+```
+
+The manual `is_err()` check is the intended pattern when `allow_failed_deps=True`. Without `allow_failed_deps`, the task never executes on upstream failure — no error handling code is needed.
 
 ### PAUSE Semantics (Cooperative Stop)
 
@@ -545,26 +606,6 @@ When no success case is satisfied:
 1. If a **required** task from any case FAILED, the workflow error contains that task's error.
 2. If no required task FAILED (all SKIPPED), the error is `WORKFLOW_SUCCESS_CASE_NOT_MET`.
 
-## Possible Future Extensions
-
-### Branch Isolation
-
-```python
-# Failures in this branch don't affect other branches
-TaskNode("risky").isolated_branch(True)
-```
-
-### Dynamic Task Generation
-
-```python
-# Generate tasks at runtime based on upstream results
-@workflow
-def map_reduce(items: list[str]):
-    map_tasks = [TaskNode(fn=map_item, args=(item,)) for item in items]
-    reduce_task = TaskNode(fn=reduce_results, waits_for=map_tasks)
-    yield map_tasks, reduce_task
-```
-
 ## Best Practices
 
 ### 1. Use allow_failed_deps for Recovery
@@ -655,6 +696,12 @@ Tasks can access upstream results via `WorkflowContext` using the type-safe `res
 
 **Important:** `workflow_ctx_from` is **per-task**. The context is built fresh for each task that opts in, and does **not** persist or propagate to downstream tasks.
 
+**Scope:** Inside a task function, only results from nodes listed in `workflow_ctx_from` are accessible via `workflow_ctx.result_for()`. Accessing a node not in the list raises `KeyError` with `"TaskNode id '{id}' not in workflow context"`.
+
+This is distinct from `WorkflowHandle.result_for()`, which queries the database for any node in the workflow and returns `RESULT_NOT_READY` if the task hasn't completed.
+
+**Condition evaluation:** For `run_when` / `skip_when` lambdas, if `workflow_ctx_from` is set, conditions can only access those nodes. If `workflow_ctx_from` is **not** set, conditions receive a context with **all dependency** results.
+
 ```python
 from horsies import WorkflowContext, TaskNode, TaskResult, TaskError
 
@@ -705,6 +752,40 @@ value: int = a_result.unwrap()  # Type checker knows this is int
 key_a = node_a.key()  # NodeKey[int]
 result = workflow_ctx.result_for(key_a)
 ```
+
+For dynamic workflows where node references are not available inside the task function, construct a `NodeKey` from the string ID:
+
+```python
+from horsies import (
+    Horsies,
+    AppConfig,
+    PostgresConfig,
+    WorkflowContext,
+    NodeKey,
+    TaskResult,
+    TaskError,
+)
+
+config = AppConfig(
+    broker=PostgresConfig(
+        database_url="postgresql+psycopg://user:password@localhost:5432/mydb",
+    ),
+)
+app = Horsies(config)
+
+@app.task("fan_in")
+def fan_in(workflow_ctx: WorkflowContext | None = None) -> TaskResult[str, TaskError]:
+    if workflow_ctx is None:
+        return TaskResult(err=TaskError(error_code="NO_CTX", message="Missing context"))
+
+    i: int = 0
+    result = workflow_ctx.result_for(NodeKey(f"save_{i}"))
+    if result.is_err():
+        return TaskResult(err=result.unwrap_err())
+    return TaskResult(ok="ok")
+```
+
+The string-based `NodeKey` pattern is common for fan-in tasks that gather results from dynamically created nodes.
 
 If a TaskNode lacks `node_id`, `result_for()` raises:
 ```
@@ -763,6 +844,47 @@ def my_task(workflow_meta: WorkflowMeta | None = None) -> TaskResult[str, TaskEr
 
 **Use `workflow_ctx_from`** when you need to access many upstream results or want workflow metadata.
 
+### args_from: What the Receiving Function Gets
+
+`args_from` delivers the upstream task's full `TaskResult[T, TaskError]` — not the unwrapped `T`.
+
+```python
+from horsies import (
+    Horsies,
+    AppConfig,
+    PostgresConfig,
+    TaskNode,
+    TaskResult,
+    TaskError,
+)
+
+config = AppConfig(
+    broker=PostgresConfig(
+        database_url="postgresql+psycopg://user:password@localhost:5432/mydb",
+    ),
+)
+app = Horsies(config)
+
+@app.task("produce_number")
+def produce_number() -> TaskResult[int, TaskError]:
+    return TaskResult(ok=42)
+
+# transform receives TaskResult[int, TaskError], not int:
+@app.task("transform")
+def transform(data: TaskResult[int, TaskError]) -> TaskResult[str, TaskError]:
+    if data.is_err():
+        return TaskResult(err=data.unwrap_err())
+    value: int = data.ok_value
+    return TaskResult(ok=str(value))
+
+node_a: TaskNode[int] = TaskNode(fn=produce_number)
+node_b: TaskNode[str] = TaskNode(
+    fn=transform,
+    waits_for=[node_a],
+    args_from={"data": node_a},
+)
+```
+
 ## Things to Avoid
 
 ### Fire-and-Forget with result_for()
@@ -800,3 +922,5 @@ if result.is_err() and result.err.error_code == LibraryErrorCode.RESULT_NOT_READ
 - Workflows can be long-running (minutes to hours)
 - `result_for()` does not block or poll - it's a single database query
 - Use `handle.get(timeout_ms=...)` to wait for completion before accessing individual task results
+
+For class and method signatures, see [Workflow API](workflow-api.md).

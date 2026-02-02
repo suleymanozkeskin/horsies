@@ -68,6 +68,20 @@ app.discover_tasks([
 ])
 ```
 
+`discover_tasks` records module paths for later import by the worker. Dotted module paths use `importlib.import_module()`, while `.py` entries are imported by file path — it does **not** recursively scan submodules.
+
+To discover tasks in `myapp.tasks.scraping`, either list it explicitly:
+
+```python
+app.discover_tasks([
+    "myapp.tasks",
+    "myapp.tasks.scraping",
+    "myapp.workflows",
+])
+```
+
+Or export the decorated functions from `myapp.tasks.__init__.py` so importing `myapp.tasks` triggers the decorator registration.
+
 ## Running the Worker
 
 ```bash
