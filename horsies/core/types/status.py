@@ -10,20 +10,20 @@ from enum import Enum
 class TaskStatus(Enum):
     """Task execution status"""
 
-    PENDING = 'pending'  # It awaits to be a candidate for execution.
+    PENDING = 'PENDING'  # It awaits to be a candidate for execution.
     # Default status when the task is sent.
 
     CLAIMED = (
-        'claimed'  # It has been claimed by a worker but not yet started executing.
+        'CLAIMED'  # It has been claimed by a worker but not yet started executing.
     )
 
-    RUNNING = 'running'  # It is being executed by a process.
+    RUNNING = 'RUNNING'  # It is being executed by a process.
 
-    COMPLETED = 'completed'  # It has been executed successfully.
+    COMPLETED = 'COMPLETED'  # It has been executed successfully.
 
-    FAILED = 'failed'  # It has failed to be executed.
-    CANCELLED = 'cancelled'  # It has been cancelled.
-    REQUEUED = 'requeued'  # It has been requeued after a failure.
+    FAILED = 'FAILED'  # It has failed to be executed.
+    CANCELLED = 'CANCELLED'  # It has been cancelled.
+    REQUEUED = 'REQUEUED'  # It has been requeued after a failure.
 
     @property
     def is_terminal(self) -> bool:

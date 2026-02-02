@@ -26,13 +26,13 @@ tags: [concepts, tasks, states]
 
 | Enum | Value | Terminal |
 |------|-------|----------|
-| `PENDING` | `"pending"` | No |
-| `CLAIMED` | `"claimed"` | No |
-| `RUNNING` | `"running"` | No |
-| `COMPLETED` | `"completed"` | Yes |
-| `FAILED` | `"failed"` | Yes |
-| `CANCELLED` | `"cancelled"` | Yes |
-| `REQUEUED` | `"requeued"` | No |
+| `PENDING` | `"PENDING"` | No |
+| `CLAIMED` | `"CLAIMED"` | No |
+| `RUNNING` | `"RUNNING"` | No |
+| `COMPLETED` | `"COMPLETED"` | Yes |
+| `FAILED` | `"FAILED"` | Yes |
+| `CANCELLED` | `"CANCELLED"` | Yes |
+| `REQUEUED` | `"REQUEUED"` | No |
 
 Use `is_terminal` or `TASK_TERMINAL_STATES` to check terminal status programmatically:
 
