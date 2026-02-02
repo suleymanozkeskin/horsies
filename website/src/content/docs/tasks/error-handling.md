@@ -54,6 +54,110 @@ def fetch_api_data(url: str) -> TaskResult[dict, TaskError]:
 
 See [retry-policy](../retry-policy) for configuration details.
 
+### Handling Upstream Failures in Chained Tasks
+
+Tasks wired with `args_from` receive the upstream `TaskResult`, not the unwrapped value. Use this workflow example as the canonical guard pattern:
+
+```python
+from dataclasses import dataclass
+
+from horsies import (
+    Horsies,
+    AppConfig,
+    PostgresConfig,
+    TaskResult,
+    TaskError,
+    TaskNode,
+    OnError,
+)
+
+config = AppConfig(
+    broker=PostgresConfig(
+        database_url="postgresql+psycopg://user:password@localhost:5432/mydb",
+    ),
+)
+app = Horsies(config)
+
+
+@dataclass
+class ProductRecord:
+    product_id: str
+    name: str
+    price_cents: int
+
+
+@app.task("fetch_product_page")
+def fetch_product_page(url: str) -> TaskResult[str, TaskError]:
+    if "missing" in url:
+        return TaskResult(err=TaskError(
+            error_code="FETCH_FAILED",
+            message=f"Could not fetch {url}",
+        ))
+    return TaskResult(ok="<html>...</html>")
+
+
+@app.task("parse_product_page")
+def parse_product_page(
+    page_result: TaskResult[str, TaskError],
+) -> TaskResult[ProductRecord, TaskError]:
+    if page_result.is_err():
+        return TaskResult(err=TaskError(
+            error_code="UPSTREAM_FAILED",
+            message="Cannot parse product page: fetch failed",
+        ))
+    return TaskResult(ok=ProductRecord(
+        product_id="product-123",
+        name="Widget Pro",
+        price_cents=1999,
+    ))
+
+
+@app.task("save_product_record")
+def save_product_record(
+    product_result: TaskResult[ProductRecord, TaskError],
+) -> TaskResult[None, TaskError]:
+    if product_result.is_err():
+        return TaskResult(err=TaskError(
+            error_code="UPSTREAM_FAILED",
+            message="Cannot save product: parse failed",
+        ))
+    product = product_result.ok_value
+    _ = product  # persist to storage
+    return TaskResult(ok=None)
+
+
+fetch: TaskNode[str] = TaskNode(
+    fn=fetch_product_page,
+    args=("https://example.com/missing",),
+    node_id="fetch_product_page",
+)
+parse: TaskNode[ProductRecord] = TaskNode(
+    fn=parse_product_page,
+    waits_for=[fetch],
+    args_from={"page_result": fetch},
+    allow_failed_deps=True,
+    node_id="parse_product_page",
+)
+save: TaskNode[None] = TaskNode(
+    fn=save_product_record,
+    waits_for=[parse],
+    args_from={"product_result": parse},
+    allow_failed_deps=True,
+    node_id="save_product_record",
+)
+
+spec = app.workflow(
+    name="product_ingest",
+    tasks=[fetch, parse, save],
+    output=save,
+    on_error=OnError.FAIL,
+)
+handle = spec.start()
+handle.get(timeout_ms=30000)
+```
+
+This pattern only runs when the downstream task actually executes. With `join="all"` and `allow_failed_deps=False` (default), any failed or skipped dependency causes the task to be SKIPPED, so this guard code never runs. With `join="any"` or `join="quorum"`, the task can still run if the success threshold is met. See [Workflow Semantics](../concepts/workflows/workflow-semantics) for default join rules and failure propagation.
+
 ### Handle Errors with Explicit Returns
 
 Prefer explicit returns over raising exceptions:

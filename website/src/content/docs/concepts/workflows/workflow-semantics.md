@@ -126,6 +126,49 @@ This design allows recovery handlers (`allow_failed_deps=True`) to execute befor
 | `fail` (default) | Store error, continue DAG resolution, mark FAILED when complete |
 | `pause` | Immediately pause workflow, block new enqueues, await resume |
 
+### Failure Propagation and Short-Circuiting
+
+Horsies does **not** stop the entire workflow on first failure. It resolves the DAG to terminal state and applies failure rules **per dependency**. Short-circuiting happens **along the failed path**, not globally.
+
+**Default behavior (`join="all"`, `allow_failed_deps=False`, `on_error="fail"`):**
+
+- When a dependency fails or is skipped, any downstream task that requires all dependencies is **SKIPPED**.
+- That skip propagates to its dependents.
+- Other branches that do not depend on the failed task still run.
+- The workflow is marked FAILED **after** all tasks are terminal.
+
+**Example:**
+
+```
+A → B → C
+A → D
+```
+
+- If **A fails**:
+  - **B** is SKIPPED
+  - **C** is SKIPPED
+  - **D** still runs (independent branch)
+  - Workflow ends as FAILED
+
+**To run recovery logic downstream:**
+
+Set `allow_failed_deps=True` on the downstream task. It will run and receive the failed `TaskResult`.
+
+**Join rules change the short-circuit behavior:**
+
+- `join="any"`: a task can run if **any** dependency succeeds, even if others fail.
+- `join="quorum"`: a task can run if the success threshold is met, even with some failures.
+
+**Pause behaves differently:**
+
+- `on_error="pause"` does not kill running tasks.
+- It blocks new enqueues and waits for `resume()` or `cancel()`.
+
+**Result access is separate:**
+
+- `WorkflowHandle.get()` returns the workflow-level status (it can be FAILED even if the output task succeeded).
+- `WorkflowHandle.result_for()` is non-blocking and may return `RESULT_NOT_READY` if the task has not completed.
+
 ### Upstream Failure and args_from
 
 When an upstream task fails and the downstream task uses `join="all"` (the default):
