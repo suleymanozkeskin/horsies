@@ -1,0 +1,98 @@
+# Horsies
+> PostgreSQL-backed background task queue and workflow engine for Python.
+> Docs: https://suleymanozkeskin.github.io/horsies
+> Source: https://github.com/suleymanozkeskin/horsies
+> All public symbols: from horsies import <name>
+
+## Docs Sitemap
+
+Each entry: Title — summary → URL
+
+### Quick Start
+- Getting Started — minimal working example, install, first task → /horsies/quick-start/getting-started/
+- Configuring Horsies — app instance and broker setup → /horsies/quick-start/01-configuring-horsies/
+- Producing Tasks — define and send tasks → /horsies/quick-start/02-producing-tasks/
+- Defining Workflows — DAG-based workflows → /horsies/quick-start/03-defining-workflows/
+- Scheduling — recurring schedules → /horsies/quick-start/04-scheduling/
+- Workflow Patterns — real-world patterns → /horsies/quick-start/05-workflow-patterns/
+
+### Concepts
+- Architecture — system design and data flow → /horsies/concepts/architecture/
+- Task Lifecycle — states and transitions → /horsies/concepts/task-lifecycle/
+- Result Handling — TaskResult pattern, error types → /horsies/concepts/result-handling/
+- Queue Modes — DEFAULT vs CUSTOM, priorities → /horsies/concepts/queue-modes/
+- Workflow Semantics — DAG behavior, failure, dependencies → /horsies/concepts/workflows/workflow-semantics/
+- Subworkflows — composing workflows with SubWorkflowNode → /horsies/concepts/workflows/subworkflows/
+
+### Tasks
+- Defining Tasks — @app.task decorator → /horsies/tasks/defining-tasks/
+- Sending Tasks — enqueue for background execution → /horsies/tasks/sending-tasks/
+- Error Handling — TaskResult error patterns → /horsies/tasks/error-handling/
+- Errors Reference — all error codes and types → /horsies/tasks/errors/
+- Retrieving Results — TaskHandle.get() → /horsies/tasks/retrieving-results/
+- Retry Policy — fixed/exponential backoff → /horsies/tasks/retry-policy/
+
+### Configuration
+- AppConfig — root application config → /horsies/configuration/app-config/
+- Broker Config — PostgresConfig connection → /horsies/configuration/broker-config/
+- Recovery Config — stale task detection → /horsies/configuration/recovery-config/
+
+### Workers
+- Worker Architecture — process pool model → /horsies/workers/worker-architecture/
+- Concurrency — worker/queue/cluster limits → /horsies/workers/concurrency/
+- Heartbeats & Recovery — crash detection → /horsies/workers/heartbeats-recovery/
+
+### Monitoring
+- Syce Overview — TUI monitoring dashboard → /horsies/monitoring/syce-overview/
+- Broker Methods — async inspection APIs → /horsies/monitoring/broker-methods/
+
+### Scheduling
+- Scheduler Overview — how scheduler enqueues → /horsies/scheduling/scheduler-overview/
+- Schedule Patterns — Interval, Daily, Weekly, etc. → /horsies/scheduling/schedule-patterns/
+- Schedule Config — ScheduleConfig model → /horsies/scheduling/schedule-config/
+
+### CLI
+- CLI Reference — horsies worker, scheduler, check → /horsies/cli/
+
+### Internals
+- Database Schema — PostgreSQL tables → /horsies/internals/database-schema/
+- Serialization — JSON codec for args/results → /horsies/internals/serialization/
+
+## Keyword Index
+
+keyword(s) → page URL
+
+install, pip, setup, first task → /horsies/quick-start/getting-started/
+AppConfig, PostgresConfig, database_url, broker → /horsies/configuration/app-config/
+PostgresConfig, pool_size, max_overflow, connection → /horsies/configuration/broker-config/
+RecoveryConfig, stale, requeue, crash recovery → /horsies/configuration/recovery-config/
+@app.task, decorator, task definition, define task → /horsies/tasks/defining-tasks/
+send, send_async, enqueue, dispatch, produce → /horsies/tasks/sending-tasks/
+TaskResult, is_ok, is_err, unwrap, ok_value, err_value → /horsies/tasks/error-handling/
+LibraryErrorCode, TaskError, error codes, UNHANDLED_EXCEPTION → /horsies/tasks/errors/
+TaskHandle, get, get_async, timeout, result → /horsies/tasks/retrieving-results/
+RetryPolicy, retry, backoff, exponential, fixed, auto_retry_for → /horsies/tasks/retry-policy/
+PENDING, CLAIMED, RUNNING, COMPLETED, FAILED, task status → /horsies/concepts/task-lifecycle/
+TaskResult, Result pattern, error as value → /horsies/concepts/result-handling/
+QueueMode, DEFAULT, CUSTOM, priority, CustomQueueConfig → /horsies/concepts/queue-modes/
+WorkflowSpec, DAG, TaskNode, waits_for, args_from → /horsies/concepts/workflows/workflow-semantics/
+SubWorkflowNode, WorkflowDefinition, build_with, child workflow → /horsies/concepts/workflows/subworkflows/
+WorkflowContext, workflow_ctx_from, result_for, NodeKey → /horsies/concepts/workflows/workflow-semantics/
+SuccessPolicy, SuccessCase, partial success → /horsies/concepts/workflows/workflow-semantics/
+join, any, quorum, min_success, OR-join → /horsies/concepts/workflows/workflow-semantics/
+skip_when, run_when, conditional execution → /horsies/concepts/workflows/workflow-semantics/
+on_error, pause, resume, PAUSED → /horsies/concepts/workflows/workflow-semantics/
+allow_failed_deps, UPSTREAM_SKIPPED, recovery → /horsies/concepts/workflows/workflow-semantics/
+fan-out, fan-in, parallel, diamond → /horsies/quick-start/05-workflow-patterns/
+worker, process pool, claim, execute → /horsies/workers/worker-architecture/
+concurrency, max_concurrency, cluster_wide_cap, prefetch → /horsies/workers/concurrency/
+heartbeat, crash, stale, worker recovery → /horsies/workers/heartbeats-recovery/
+syce, dashboard, TUI, monitor → /horsies/monitoring/syce-overview/
+get_queue_stats, get_worker_states, broker methods → /horsies/monitoring/broker-methods/
+ScheduleConfig, TaskSchedule, IntervalSchedule, DailySchedule → /horsies/scheduling/schedule-config/
+schedule pattern, Interval, Hourly, Daily, Weekly, Monthly → /horsies/scheduling/schedule-patterns/
+scheduler, check_interval, cron → /horsies/scheduling/scheduler-overview/
+horsies worker, horsies scheduler, horsies check, CLI → /horsies/cli/
+PostgreSQL, tables, schema, migration → /horsies/internals/database-schema/
+serialization, JSON, codec, pydantic, datetime → /horsies/internals/serialization/
+architecture, LISTEN/NOTIFY, components, data flow → /horsies/concepts/architecture/
