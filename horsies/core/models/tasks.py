@@ -1,6 +1,7 @@
 # app/core/models/tasks.py
 from __future__ import annotations
 import datetime
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -20,6 +21,7 @@ from enum import Enum
 if TYPE_CHECKING:
     from horsies.core.models.workflow import SubWorkflowSummary
 
+from horsies.core.types.status import TaskStatus
 T = TypeVar('T')  # success payload
 E = TypeVar('E')  # error payload (TaskError )
 
@@ -217,6 +219,30 @@ class TaskResult(Generic[T, E]):
                 return error
             case (True, _):
                 raise ValueError('Result is not error - check is_err() first')
+
+
+@dataclass
+class TaskInfo:
+    """Metadata for a broker-backed task."""
+
+    task_id: str
+    task_name: str
+    status: TaskStatus
+    queue_name: str
+    priority: int
+    retry_count: int
+    max_retries: int
+    next_retry_at: datetime.datetime | None
+    sent_at: datetime.datetime | None
+    claimed_at: datetime.datetime | None
+    started_at: datetime.datetime | None
+    completed_at: datetime.datetime | None
+    failed_at: datetime.datetime | None
+    worker_hostname: str | None
+    worker_pid: int | None
+    worker_process_name: str | None
+    result: TaskResult[Any, TaskError] | None = None
+    failed_reason: str | None = None
 
 
 class RetryPolicy(BaseModel):

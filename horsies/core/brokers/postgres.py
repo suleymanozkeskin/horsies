@@ -16,6 +16,7 @@ from horsies.core.codec.serde import (
     loads_json,
     task_result_from_json,
 )
+from horsies.core.models.tasks import TaskInfo
 from horsies.core.utils.loop_runner import LoopRunner
 from horsies.core.logging import get_logger
 
@@ -853,6 +854,134 @@ class PostgresBroker:
             TaskResult - success, task error, retrieval error, or broker error
         """
         return self._loop_runner.call(self.get_result_async, task_id, timeout_ms)
+
+    async def get_task_info_async(
+        self,
+        task_id: str,
+        *,
+        include_result: bool = False,
+        include_failed_reason: bool = False,
+    ) -> 'TaskInfo | None':
+        """Fetch metadata for a task by ID."""
+        await self._ensure_initialized()
+
+        async with self.session_factory() as session:
+            base_columns = [
+                'id',
+                'task_name',
+                'status',
+                'queue_name',
+                'priority',
+                'retry_count',
+                'max_retries',
+                'next_retry_at',
+                'sent_at',
+                'claimed_at',
+                'started_at',
+                'completed_at',
+                'failed_at',
+                'worker_hostname',
+                'worker_pid',
+                'worker_process_name',
+            ]
+            if include_result:
+                base_columns.append('result')
+            if include_failed_reason:
+                base_columns.append('failed_reason')
+
+            query = text(
+                f"""
+                SELECT {', '.join(base_columns)}
+                FROM horsies_tasks
+                WHERE id = :id
+            """
+            )
+            result = await session.execute(query, {'id': task_id})
+            row = result.fetchone()
+            if row is None:
+                return None
+
+            result_value = None
+            failed_reason = None
+
+            idx = 0
+            task_id_value = row[idx]
+            idx += 1
+            task_name = row[idx]
+            idx += 1
+            status = TaskStatus(row[idx])
+            idx += 1
+            queue_name = row[idx]
+            idx += 1
+            priority = row[idx]
+            idx += 1
+            retry_count = row[idx] or 0
+            idx += 1
+            max_retries = row[idx] or 0
+            idx += 1
+            next_retry_at = row[idx]
+            idx += 1
+            sent_at = row[idx]
+            idx += 1
+            claimed_at = row[idx]
+            idx += 1
+            started_at = row[idx]
+            idx += 1
+            completed_at = row[idx]
+            idx += 1
+            failed_at = row[idx]
+            idx += 1
+            worker_hostname = row[idx]
+            idx += 1
+            worker_pid = row[idx]
+            idx += 1
+            worker_process_name = row[idx]
+            idx += 1
+
+            if include_result:
+                raw_result = row[idx]
+                idx += 1
+                if raw_result:
+                    result_value = task_result_from_json(loads_json(raw_result))
+
+            if include_failed_reason:
+                failed_reason = row[idx]
+
+            return TaskInfo(
+                task_id=task_id_value,
+                task_name=task_name,
+                status=status,
+                queue_name=queue_name,
+                priority=priority,
+                retry_count=retry_count,
+                max_retries=max_retries,
+                next_retry_at=next_retry_at,
+                sent_at=sent_at,
+                claimed_at=claimed_at,
+                started_at=started_at,
+                completed_at=completed_at,
+                failed_at=failed_at,
+                worker_hostname=worker_hostname,
+                worker_pid=worker_pid,
+                worker_process_name=worker_process_name,
+                result=result_value,
+                failed_reason=failed_reason,
+            )
+
+    def get_task_info(
+        self,
+        task_id: str,
+        *,
+        include_result: bool = False,
+        include_failed_reason: bool = False,
+    ) -> 'TaskInfo | None':
+        """Synchronous wrapper for get_task_info_async()."""
+        return self._loop_runner.call(
+            self.get_task_info_async,
+            task_id,
+            include_result=include_result,
+            include_failed_reason=include_failed_reason,
+        )
 
     def close(self) -> None:
         """

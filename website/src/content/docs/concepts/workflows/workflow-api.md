@@ -41,9 +41,10 @@ Use this page for the exact method signatures and return types used by workflows
 
 | Attribute | Type | Description |
 |---|---|---|
+| `.node_id` | `str \| None` | Node identifier (may be None for legacy rows) |
 | `.index` | `int` | Task position in the DAG |
 | `.name` | `str` | Task name |
 | `.status` | `WorkflowTaskStatus` | Current task status |
-| `.result` | `TaskResult[Any, TaskError] \| None` | Task result if completed |
+| `.result` | `TaskResult[Any, TaskError] \| None` | Task result if stored (COMPLETED/FAILED; SKIPPED often None) |
 | `.started_at` | `datetime \| None` | When execution started |
 | `.completed_at` | `datetime \| None` | When execution completed |

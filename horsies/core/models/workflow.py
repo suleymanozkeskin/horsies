@@ -1374,6 +1374,7 @@ class WorkflowContext(BaseModel):
 class WorkflowTaskInfo:
     """Information about a task within a workflow."""
 
+    node_id: str | None
     index: int
     name: str
     status: WorkflowTaskStatus
@@ -1700,7 +1701,7 @@ class WorkflowHandle:
         async with self.broker.session_factory() as session:
             result = await session.execute(
                 text("""
-                    SELECT task_index, task_name, status, result, started_at, completed_at
+                    SELECT node_id, task_index, task_name, status, result, started_at, completed_at
                     FROM horsies_workflow_tasks
                     WHERE workflow_id = :wf_id
                     ORDER BY task_index
@@ -1710,14 +1711,15 @@ class WorkflowHandle:
 
             return [
                 WorkflowTaskInfo(
-                    index=row[0],
-                    name=row[1],
-                    status=WorkflowTaskStatus(row[2]),
-                    result=task_result_from_json(loads_json(row[3]))
-                    if row[3]
+                    node_id=row[0],
+                    index=row[1],
+                    name=row[2],
+                    status=WorkflowTaskStatus(row[3]),
+                    result=task_result_from_json(loads_json(row[4]))
+                    if row[4]
                     else None,
-                    started_at=row[4],
-                    completed_at=row[5],
+                    started_at=row[5],
+                    completed_at=row[6],
                 )
                 for row in result.fetchall()
             ]

@@ -14,6 +14,7 @@ from .core.models.tasks import (
     LibraryErrorCode,
     SubWorkflowError,
     RetryPolicy,
+    TaskInfo,
 )
 from .core.models.queues import QueueMode, CustomQueueConfig
 from .core.models.workflow import (
@@ -67,6 +68,7 @@ __all__ = [
     'LibraryErrorCode',
     'SubWorkflowError',
     'RetryPolicy',
+    'TaskInfo',
     'QueueMode',
     'CustomQueueConfig',
     'TaskStatus',

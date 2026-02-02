@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from horsies.core.app import Horsies
     from horsies.core.models.tasks import TaskOptions
     from horsies.core.models.tasks import TaskError, TaskResult
+    from horsies.core.models.tasks import TaskInfo
 
 from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
 from horsies.core.models.workflow import WorkflowContextMissingIdError
@@ -190,6 +191,46 @@ class TaskHandle(Generic[T]):
                     )
                 case result:
                     return result
+
+    def info(
+        self,
+        *,
+        include_result: bool = False,
+        include_failed_reason: bool = False,
+    ) -> 'TaskInfo | None':
+        """Fetch metadata for this task from the broker."""
+        if not self._broker_mode or not self._app:
+            raise RuntimeError(
+                'TaskHandle.info() requires a broker-backed task handle '
+                '(use .send() or .send_async())'
+            )
+
+        broker = self._app.get_broker()
+        return broker.get_task_info(
+            self.task_id,
+            include_result=include_result,
+            include_failed_reason=include_failed_reason,
+        )
+
+    async def info_async(
+        self,
+        *,
+        include_result: bool = False,
+        include_failed_reason: bool = False,
+    ) -> 'TaskInfo | None':
+        """Async version of info()."""
+        if not self._broker_mode or not self._app:
+            raise RuntimeError(
+                'TaskHandle.info_async() requires a broker-backed task handle '
+                '(use .send() or .send_async())'
+            )
+
+        broker = self._app.get_broker()
+        return await broker.get_task_info_async(
+            self.task_id,
+            include_result=include_result,
+            include_failed_reason=include_failed_reason,
+        )
 
     def set_immediate_result(
         self,

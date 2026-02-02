@@ -26,6 +26,8 @@
 - .task_id -> str
 - .get(timeout_ms=None) -> TaskResult[T, TaskError] (blocking)
 - .get_async(timeout_ms=None) -> TaskResult[T, TaskError] (blocking, async)
+- .info(include_result=False, include_failed_reason=False) -> TaskInfo | None
+- .info_async(include_result=False, include_failed_reason=False) -> TaskInfo | None
 
 ### TaskNode[T]
 - T = ok type of the task's TaskResult
@@ -56,9 +58,17 @@
 - .resume() / .resume_async() -> bool
 
 ### WorkflowTaskInfo
-- .index -> int, .name -> str, .status -> WorkflowTaskStatus
-- .result -> TaskResult[Any, TaskError] | None
+- .node_id -> str | None, .index -> int, .name -> str, .status -> WorkflowTaskStatus
+- .result -> TaskResult[Any, TaskError] | None (COMPLETED/FAILED; SKIPPED often None)
 - .started_at -> datetime | None, .completed_at -> datetime | None
+
+### TaskInfo
+- .task_id -> str, .task_name -> str, .status -> TaskStatus
+- .queue_name -> str, .priority -> int
+- .retry_count -> int, .max_retries -> int, .next_retry_at -> datetime | None
+- .sent_at/claimed_at/started_at/completed_at/failed_at -> datetime | None
+- .worker_hostname/worker_pid/worker_process_name -> Optional worker metadata
+- .result -> TaskResult[Any, TaskError] | None (opt-in), .failed_reason -> str | None (opt-in)
 
 ### WorkflowContext
 - Injected when task declares workflow_ctx: WorkflowContext | None = None
@@ -185,6 +195,7 @@ concurrency, max_concurrency, cluster_wide_cap, prefetch -> /horsies/workers/con
 heartbeat, crash, stale, worker recovery -> /horsies/workers/heartbeats-recovery/
 syce, dashboard, TUI, monitor -> /horsies/monitoring/syce-overview/
 get_queue_stats, get_worker_states, broker methods -> /horsies/monitoring/broker-methods/
+TaskInfo, retry_count, next_retry_at, task metadata -> /horsies/monitoring/broker-methods/
 ScheduleConfig, TaskSchedule, IntervalSchedule, DailySchedule -> /horsies/scheduling/schedule-config/
 schedule pattern, Interval, Hourly, Daily, Weekly, Monthly -> /horsies/scheduling/schedule-patterns/
 scheduler, check_interval, cron -> /horsies/scheduling/scheduler-overview/

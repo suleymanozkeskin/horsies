@@ -59,6 +59,31 @@ for task in expired:
     print(f"Task {task['id']} ({task['task_name']}) expired {task['expired_for']} ago")
 ```
 
+### `get_task_info(task_id: str, include_result: bool = False, include_failed_reason: bool = False) -> TaskInfo | None`
+
+Fetch metadata for a single task by ID. Returns `None` if the task does not exist.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `task_id` | `str` | — | Task ID to query |
+| `include_result` | `bool` | `False` | Include `TaskResult` for terminal tasks |
+| `include_failed_reason` | `bool` | `False` | Include worker-level `failed_reason` |
+
+**Returns:** `TaskInfo | None`
+Sync wrapper: `broker.get_task_info(...)`.
+
+```python
+info = await broker.get_task_info(
+    task_id,
+    include_result=True,
+    include_failed_reason=True,
+)
+if info:
+    print(f"{info.task_name} {info.retry_count}/{info.max_retries}")
+    if info.next_retry_at:
+        print(f"Next retry at: {info.next_retry_at}")
+```
+
 ### `mark_stale_tasks_as_failed(stale_threshold_ms: int = 300_000) -> int`
 
 Mark RUNNING tasks as FAILED when no heartbeat has been received within the threshold. Sets the result to a `TaskResult` with `WORKER_CRASHED` error code.
