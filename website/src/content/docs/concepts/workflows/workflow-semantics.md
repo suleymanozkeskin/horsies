@@ -252,7 +252,7 @@ Tasks with `allow_failed_deps=True` receive the `TaskResult` from dependencies:
 - **SKIPPED deps**: Receive a sentinel `TaskResult` with `error_code=UPSTREAM_SKIPPED`
 
 ```python
-from horsies.core.models.tasks import LibraryErrorCode
+from horsies import LibraryErrorCode
 
 @app.task()
 def recovery_handler(input_result: TaskResult[Data, TaskError]) -> TaskResult[...]:
@@ -446,7 +446,7 @@ def process_items(items: list[str]):
 Workflow tasks honor the same retry policies configured on the `@task` decorator. When a task with a `retry_policy` or `auto_retry_for` is used in a workflow, those settings are preserved and applied when the workflow engine enqueues the task.
 
 ```python
-from horsies.core.models.tasks import RetryPolicy
+from horsies import RetryPolicy
 
 @app.task(
     retry_policy=RetryPolicy.exponential(
@@ -476,7 +476,7 @@ By default, any task failure marks the workflow as **FAILED**. The `success_poli
 ### SuccessCase and SuccessPolicy
 
 ```python
-from horsies.core.models.workflow import SuccessPolicy, SuccessCase
+from horsies import SuccessPolicy, SuccessCase
 
 # Define success cases
 policy = SuccessPolicy(

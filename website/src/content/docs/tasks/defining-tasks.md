@@ -77,7 +77,7 @@ def might_crash() -> TaskResult[str, TaskError]:
 ### Configure Retries
 
 ```python
-from horsies.core.models.tasks import RetryPolicy
+from horsies import RetryPolicy
 
 @app.task(
     "some_api_call",

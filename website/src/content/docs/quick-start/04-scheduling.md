@@ -39,7 +39,7 @@ def cleanup_completed_orders() -> TaskResult[dict, TaskError]:
 ```python
 from datetime import time as datetime_time
 from horsies import AppConfig, PostgresConfig, QueueMode, CustomQueueConfig
-from horsies.core.models.schedule import (
+from horsies import (
     ScheduleConfig,
     TaskSchedule,
     IntervalSchedule,

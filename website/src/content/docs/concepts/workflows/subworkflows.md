@@ -26,9 +26,11 @@ Workflows provide:
 ### 2.1 Class-Based Definition (Recommended)
 
 ```python
-from horsies import Horsies, WorkflowDefinition, TaskNode, TaskResult, TaskError
+from horsies import Horsies, AppConfig, PostgresConfig, WorkflowDefinition, TaskNode, TaskResult, TaskError
 
-app = Horsies()
+app = Horsies(AppConfig(
+    broker=PostgresConfig(database_url="postgresql+psycopg://user:pass@localhost:5432/mydb"),
+))
 
 @app.task()
 def fetch_data(url: str) -> TaskResult[dict, TaskError]:
@@ -81,7 +83,7 @@ class DataPipeline(WorkflowDefinition[bool]):
 ```python
 # Build and start
 spec = DataPipeline.build(app)
-handle = await start_workflow_async(spec, broker)
+handle = await spec.start_async()
 
 # Wait for completion
 result = await handle.get()  # TaskResult[bool, TaskError]
@@ -105,7 +107,7 @@ spec = app.workflow(
     tasks=[node_a, node_b],
     output=node_b,
 )
-handle = await start_workflow_async(spec, broker)
+handle = await spec.start_async()
 ```
 
 **Warning**: Inline workflows are not portable for `run_when`/`skip_when` or subworkflows.
@@ -838,6 +840,8 @@ from pydantic import BaseModel
 
 from horsies import (
     Horsies,
+    AppConfig,
+    PostgresConfig,
     WorkflowDefinition,
     TaskNode,
     SubWorkflowNode,
@@ -849,7 +853,9 @@ from horsies import (
     SuccessCase,
 )
 
-app = Horsies()
+app = Horsies(AppConfig(
+    broker=PostgresConfig(database_url="postgresql+psycopg://user:pass@localhost:5432/mydb"),
+))
 
 
 # --- Data Types ---
@@ -991,9 +997,9 @@ class MultiSourcePipeline(WorkflowDefinition[AggregatedReport]):
 
 # --- Usage ---
 
-async def run_pipeline(broker):
+async def run_pipeline():
     spec = MultiSourcePipeline.build(app)
-    handle = await start_workflow_async(spec, broker)
+    handle = await spec.start_async()
 
     result = await handle.get()
 

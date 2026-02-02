@@ -8,8 +8,7 @@ tags: [configuration, AppConfig]
 ## Basic Usage
 
 ```python
-from horsies import Horsies, AppConfig, PostgresConfig
-from horsies.core.models.queues import QueueMode
+from horsies import Horsies, AppConfig, PostgresConfig, QueueMode
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
@@ -46,7 +45,7 @@ config = AppConfig(
 ### CUSTOM Mode
 
 ```python
-from horsies.core.models.queues import CustomQueueConfig
+from horsies import CustomQueueConfig
 
 config = AppConfig(
     queue_mode=QueueMode.CUSTOM,
@@ -104,7 +103,7 @@ See [Concurrency](../../workers/concurrency) for detailed explanation of hard vs
 Override crash recovery defaults:
 
 ```python
-from horsies.core.models.recovery import RecoveryConfig
+from horsies import RecoveryConfig
 
 config = AppConfig(
     broker=PostgresConfig(...),
@@ -124,7 +123,7 @@ See [Recovery Config](recovery-config.md) for all options.
 Enable scheduled tasks:
 
 ```python
-from horsies.core.models.schedule import ScheduleConfig, TaskSchedule, DailySchedule
+from horsies import ScheduleConfig, TaskSchedule, DailySchedule
 from datetime import time
 
 config = AppConfig(

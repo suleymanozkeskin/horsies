@@ -49,6 +49,6 @@ def add_numbers(a: int, b: int) -> TaskResult[int, TaskError]:
 # Send and get result
 handle = add_numbers.send(5, 3)
 result = handle.get()
-if result.is_ok()
-  print(result.ok_value)  # 8
+if result.is_ok():
+    print(result.ok_value)  # 8
 ```

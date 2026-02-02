@@ -92,7 +92,7 @@ Run many independent tasks in parallel. Queue `max_concurrency` controls paralle
 
 ```python
 from horsies import TaskResult, TaskError
-from horsies.core.models.workflow import TaskNode, AnyNode
+from horsies import TaskNode, AnyNode
 
 # List of warehouse sync tasks
 ALL_WAREHOUSE_TASKS = [

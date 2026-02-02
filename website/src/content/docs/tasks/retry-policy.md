@@ -8,7 +8,7 @@ tags: [tasks, retry, backoff]
 ## Basic Usage
 
 ```python
-from horsies.core.models.tasks import RetryPolicy
+from horsies import RetryPolicy
 
 @app.task("flaky_task", retry_policy=RetryPolicy.fixed([60, 300, 900]))
 def flaky_task() -> TaskResult[str, TaskError]:

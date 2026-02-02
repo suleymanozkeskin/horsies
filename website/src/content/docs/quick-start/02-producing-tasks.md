@@ -67,5 +67,5 @@ result = await handle.get_async(timeout_ms=5000)
 `schedule()` dispatches the task after a delay (in milliseconds):
 
 ```python
-handle = validate_order.schedule(delay=5000, order)  # dispatched after 5 seconds
+handle = validate_order.schedule(5000, order)  # dispatched after 5 seconds
 ```
