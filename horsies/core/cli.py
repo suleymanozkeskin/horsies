@@ -18,7 +18,12 @@ import sys
 
 from horsies.core.app import Horsies
 from horsies.core.banner import print_banner
-from horsies.core.errors import ConfigurationError, ErrorCode, HorsiesError, ValidationReport
+from horsies.core.errors import (
+    ConfigurationError,
+    ErrorCode,
+    HorsiesError,
+    ValidationReport,
+)
 from horsies.core.logging import get_logger
 from horsies.core.scheduler import Scheduler
 from horsies.core.worker.worker import Worker, WorkerConfig
@@ -156,7 +161,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
         if not isinstance(obj, Horsies):
             raise TypeError(
                 f"'{attr_name}' in module '{module_name}' is not a Horsies instance "
-                f"(got {type(obj).__name__})"
+                f'(got {type(obj).__name__})'
             )
         app = obj
         var_name = attr_name

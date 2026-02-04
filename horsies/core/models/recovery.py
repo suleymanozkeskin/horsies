@@ -2,7 +2,12 @@
 from __future__ import annotations
 from typing import Annotated, Self
 from pydantic import BaseModel, Field, model_validator
-from horsies.core.errors import ConfigurationError, ErrorCode, ValidationReport, raise_collected
+from horsies.core.errors import (
+    ConfigurationError,
+    ErrorCode,
+    ValidationReport,
+    raise_collected,
+)
 
 
 class RecoveryConfig(BaseModel):
@@ -73,29 +78,33 @@ class RecoveryConfig(BaseModel):
 
         # Validate runner heartbeat vs running stale threshold
         if self.running_stale_threshold_ms < min_running:
-            report.add(ConfigurationError(
-                message='running_stale_threshold_ms too low',
-                code=ErrorCode.CONFIG_INVALID_RECOVERY,
-                notes=[
-                    f'running_stale_threshold_ms={self.running_stale_threshold_ms}ms ({self.running_stale_threshold_ms/1000:.1f}s)',
-                    f'runner_heartbeat_interval_ms={self.runner_heartbeat_interval_ms}ms ({self.runner_heartbeat_interval_ms/1000:.1f}s)',
-                    'threshold must be at least 2x heartbeat interval',
-                ],
-                help_text=f'set running_stale_threshold_ms >= {min_running}ms ({min_running/1000:.1f}s)',
-            ))
+            report.add(
+                ConfigurationError(
+                    message='running_stale_threshold_ms too low',
+                    code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                    notes=[
+                        f'running_stale_threshold_ms={self.running_stale_threshold_ms}ms ({self.running_stale_threshold_ms/1000:.1f}s)',
+                        f'runner_heartbeat_interval_ms={self.runner_heartbeat_interval_ms}ms ({self.runner_heartbeat_interval_ms/1000:.1f}s)',
+                        'threshold must be at least 2x heartbeat interval',
+                    ],
+                    help_text=f'set running_stale_threshold_ms >= {min_running}ms ({min_running/1000:.1f}s)',
+                )
+            )
 
         # Validate claimer heartbeat vs claimed stale threshold
         if self.claimed_stale_threshold_ms < min_claimed:
-            report.add(ConfigurationError(
-                message='claimed_stale_threshold_ms too low',
-                code=ErrorCode.CONFIG_INVALID_RECOVERY,
-                notes=[
-                    f'claimed_stale_threshold_ms={self.claimed_stale_threshold_ms}ms ({self.claimed_stale_threshold_ms/1000:.1f}s)',
-                    f'claimer_heartbeat_interval_ms={self.claimer_heartbeat_interval_ms}ms ({self.claimer_heartbeat_interval_ms/1000:.1f}s)',
-                    'threshold must be at least 2x heartbeat interval',
-                ],
-                help_text=f'set claimed_stale_threshold_ms >= {min_claimed}ms ({min_claimed/1000:.1f}s)',
-            ))
+            report.add(
+                ConfigurationError(
+                    message='claimed_stale_threshold_ms too low',
+                    code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                    notes=[
+                        f'claimed_stale_threshold_ms={self.claimed_stale_threshold_ms}ms ({self.claimed_stale_threshold_ms/1000:.1f}s)',
+                        f'claimer_heartbeat_interval_ms={self.claimer_heartbeat_interval_ms}ms ({self.claimer_heartbeat_interval_ms/1000:.1f}s)',
+                        'threshold must be at least 2x heartbeat interval',
+                    ],
+                    help_text=f'set claimed_stale_threshold_ms >= {min_claimed}ms ({min_claimed/1000:.1f}s)',
+                )
+            )
 
         raise_collected(report)
         return self

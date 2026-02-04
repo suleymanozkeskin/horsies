@@ -82,7 +82,9 @@ class Horsies:
                 f'horsies subprocess initialized with {config.queue_mode.name} mode (pid={os.getpid()})'
             )
         else:
-            self.logger.info(f'horsies initialized as {self._role} with {config.queue_mode.name} mode')
+            self.logger.info(
+                f'horsies initialized as {self._role} with {config.queue_mode.name} mode'
+            )
 
     def set_role(self, role: str) -> None:
         """Set the role and log it. Called by CLI after discovery."""
@@ -192,7 +194,7 @@ class Horsies:
             # Register task with this app, passing source for duplicate detection
             # Normalize path with realpath to handle symlinks and relative paths
             source_str = (
-                f"{os.path.realpath(fn_location.file)}:{fn_location.line}"
+                f'{os.path.realpath(fn_location.file)}:{fn_location.line}'
                 if fn_location
                 else None
             )
@@ -247,15 +249,19 @@ class Horsies:
                     if module_path.endswith('.py') or os.path.sep in module_path:
                         abs_path = os.path.realpath(module_path)
                         if not os.path.exists(abs_path):
-                            errors.append(_no_location(ConfigurationError(
-                                message=f'task module not found: {module_path}',
-                                code=ErrorCode.CLI_INVALID_ARGS,
-                                notes=[f'resolved path: {abs_path}'],
-                                help_text=(
-                                    'remove it from app.discover_tasks([...]) or fix the path; \n'
-                                    'if using globs, run app.expand_module_globs([...]) first'
-                                ),
-                            )))
+                            errors.append(
+                                _no_location(
+                                    ConfigurationError(
+                                        message=f'task module not found: {module_path}',
+                                        code=ErrorCode.CLI_INVALID_ARGS,
+                                        notes=[f'resolved path: {abs_path}'],
+                                        help_text=(
+                                            'remove it from app.discover_tasks([...]) or fix the path; \n'
+                                            'if using globs, run app.expand_module_globs([...]) first'
+                                        ),
+                                    )
+                                )
+                            )
                             continue
                         import_by_path(abs_path)
                     else:
@@ -265,16 +271,20 @@ class Horsies:
                 except HorsiesError as exc:
                     errors.append(exc)
                 except Exception as exc:
-                    errors.append(_no_location(ConfigurationError(
-                        message=f'failed to import module: {module_path}',
-                        code=ErrorCode.CLI_INVALID_ARGS,
-                        notes=[str(exc)],
-                        help_text=(
-                            'ensure the module is importable; '
-                            'for file paths include .py and a valid path, '
-                            'for dotted paths verify PYTHONPATH or run from the project root'
-                        ),
-                    )))
+                    errors.append(
+                        _no_location(
+                            ConfigurationError(
+                                message=f'failed to import module: {module_path}',
+                                code=ErrorCode.CLI_INVALID_ARGS,
+                                notes=[str(exc)],
+                                help_text=(
+                                    'ensure the module is importable; '
+                                    'for file paths include .py and a valid path, '
+                                    'for dotted paths verify PYTHONPATH or run from the project root'
+                                ),
+                            )
+                        )
+                    )
         finally:
             self.suppress_sends(prev_suppress)
         return errors
@@ -297,12 +307,16 @@ class Horsies:
         except HorsiesError as exc:
             errors.append(exc)
         except Exception as exc:
-            errors.append(_no_location(ConfigurationError(
-                message='broker connectivity check failed',
-                code=ErrorCode.BROKER_INVALID_URL,
-                notes=[str(exc)],
-                help_text='check database_url in PostgresConfig',
-            )))
+            errors.append(
+                _no_location(
+                    ConfigurationError(
+                        message='broker connectivity check failed',
+                        code=ErrorCode.BROKER_INVALID_URL,
+                        notes=[str(exc)],
+                        help_text='check database_url in PostgresConfig',
+                    )
+                )
+            )
         return errors
 
     def list_tasks(self) -> list[str]:
@@ -508,26 +522,30 @@ class Horsies:
             if self.config.queue_mode == QueueMode.CUSTOM:
                 valid_queues = self.get_valid_queue_names()
                 if resolved_queue not in valid_queues:
-                    report.add(ConfigurationError(
-                        message='TaskNode queue not in app config',
-                        code=ErrorCode.TASK_INVALID_QUEUE,
-                        notes=[
-                            f"TaskNode '{task.name}' has queue '{resolved_queue}'",
-                            f'valid queues: {valid_queues}',
-                        ],
-                        help_text='use one of the configured queue names or add this queue to app config',
-                    ))
+                    report.add(
+                        ConfigurationError(
+                            message='TaskNode queue not in app config',
+                            code=ErrorCode.TASK_INVALID_QUEUE,
+                            notes=[
+                                f"TaskNode '{task.name}' has queue '{resolved_queue}'",
+                                f'valid queues: {valid_queues}',
+                            ],
+                            help_text='use one of the configured queue names or add this queue to app config',
+                        )
+                    )
                     queue_valid = False
             elif resolved_queue != 'default':
-                report.add(ConfigurationError(
-                    message='TaskNode has non-default queue in DEFAULT mode',
-                    code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
-                    notes=[
-                        f"TaskNode '{task.name}' has queue '{resolved_queue}'",
-                        "app is in DEFAULT mode (only 'default' queue allowed)",
-                    ],
-                    help_text='either remove queue override or switch to QueueMode.CUSTOM',
-                ))
+                report.add(
+                    ConfigurationError(
+                        message='TaskNode has non-default queue in DEFAULT mode',
+                        code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+                        notes=[
+                            f"TaskNode '{task.name}' has queue '{resolved_queue}'",
+                            "app is in DEFAULT mode (only 'default' queue allowed)",
+                        ],
+                        help_text='either remove queue override or switch to QueueMode.CUSTOM',
+                    )
+                )
                 queue_valid = False
 
             if queue_valid:

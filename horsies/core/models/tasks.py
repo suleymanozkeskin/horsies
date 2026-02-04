@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from horsies.core.models.workflow import SubWorkflowSummary
 
 from horsies.core.types.status import TaskStatus
+
 T = TypeVar('T')  # success payload
 E = TypeVar('E')  # error payload (TaskError )
 

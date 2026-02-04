@@ -5,7 +5,12 @@ from typing import Literal, Union, Optional, Any
 from pydantic import BaseModel, Field, model_validator
 from typing_extensions import Self
 from enum import Enum
-from horsies.core.errors import ConfigurationError, ErrorCode, ValidationReport, raise_collected
+from horsies.core.errors import (
+    ConfigurationError,
+    ErrorCode,
+    ValidationReport,
+    raise_collected,
+)
 
 
 class Weekday(str, Enum):
@@ -54,12 +59,14 @@ class IntervalSchedule(BaseModel):
         """Ensure at least one time unit is specified."""
         report = ValidationReport('schedule')
         if not any([self.seconds, self.minutes, self.hours, self.days]):
-            report.add(ConfigurationError(
-                message='IntervalSchedule requires at least one time unit',
-                code=ErrorCode.CONFIG_INVALID_SCHEDULE,
-                notes=['all time units (seconds, minutes, hours, days) are None'],
-                help_text='specify at least one: seconds, minutes, hours, or days',
-            ))
+            report.add(
+                ConfigurationError(
+                    message='IntervalSchedule requires at least one time unit',
+                    code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                    notes=['all time units (seconds, minutes, hours, days) are None'],
+                    help_text='specify at least one: seconds, minutes, hours, or days',
+                )
+            )
         raise_collected(report)
         return self
 
@@ -126,12 +133,14 @@ class WeeklySchedule(BaseModel):
         """Ensure no duplicate days."""
         report = ValidationReport('schedule')
         if len(self.days) != len(set(self.days)):
-            report.add(ConfigurationError(
-                message='WeeklySchedule has duplicate days',
-                code=ErrorCode.CONFIG_INVALID_SCHEDULE,
-                notes=[f'days: {[d.value for d in self.days]}'],
-                help_text='each day should appear only once in the list',
-            ))
+            report.add(
+                ConfigurationError(
+                    message='WeeklySchedule has duplicate days',
+                    code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                    notes=[f'days: {[d.value for d in self.days]}'],
+                    help_text='each day should appear only once in the list',
+                )
+            )
         raise_collected(report)
         return self
 
@@ -219,11 +228,13 @@ class ScheduleConfig(BaseModel):
         report = ValidationReport('schedule')
         names: list[str] = [s.name for s in self.schedules]
         if len(names) != len(set(names)):
-            report.add(ConfigurationError(
-                message='duplicate schedule names',
-                code=ErrorCode.CONFIG_INVALID_SCHEDULE,
-                notes=[f'schedule names: {names}'],
-                help_text='each schedule must have a unique name',
-            ))
+            report.add(
+                ConfigurationError(
+                    message='duplicate schedule names',
+                    code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                    notes=[f'schedule names: {names}'],
+                    help_text='each schedule must have a unique name',
+                )
+            )
         raise_collected(report)
         return self

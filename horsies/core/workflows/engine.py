@@ -1843,7 +1843,7 @@ async def _check_workflow_completion(
         )
         logger.info(
             f"Workflow '{workflow_name}' ({workflow_id[:8]}) COMPLETED: "
-            f"{completed}/{total} tasks succeeded, {failed} failed"
+            f'{completed}/{total} tasks succeeded, {failed} failed'
         )
     else:
         # Compute error based on success_policy semantics
@@ -1867,7 +1867,7 @@ async def _check_workflow_completion(
         )
         logger.info(
             f"Workflow '{workflow_name}' ({workflow_id[:8]}) FAILED: "
-            f"{completed}/{total} tasks succeeded, {failed} failed"
+            f'{completed}/{total} tasks succeeded, {failed} failed'
         )
 
     # Send NOTIFY for workflow completion

@@ -5,7 +5,12 @@ from horsies.core.models.queues import QueueMode, CustomQueueConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.schedule import ScheduleConfig
-from horsies.core.errors import ConfigurationError, ErrorCode, ValidationReport, raise_collected
+from horsies.core.errors import (
+    ConfigurationError,
+    ErrorCode,
+    ValidationReport,
+    raise_collected,
+)
 from urllib.parse import urlparse, urlunparse
 import logging
 import os
@@ -37,91 +42,109 @@ class AppConfig(BaseModel):
 
         if self.queue_mode == QueueMode.DEFAULT:
             if self.custom_queues is not None:
-                report.add(ConfigurationError(
-                    message='custom_queues must be None in DEFAULT mode',
-                    code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
-                    notes=['queue_mode=DEFAULT but custom_queues was provided'],
-                    help_text='either remove custom_queues or set queue_mode=CUSTOM',
-                ))
+                report.add(
+                    ConfigurationError(
+                        message='custom_queues must be None in DEFAULT mode',
+                        code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+                        notes=['queue_mode=DEFAULT but custom_queues was provided'],
+                        help_text='either remove custom_queues or set queue_mode=CUSTOM',
+                    )
+                )
         elif self.queue_mode == QueueMode.CUSTOM:
             if self.custom_queues is None or len(self.custom_queues) == 0:
-                report.add(ConfigurationError(
-                    message='custom_queues required in CUSTOM mode',
-                    code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
-                    notes=['queue_mode=CUSTOM but custom_queues is empty or None'],
-                    help_text='provide at least one CustomQueueConfig in custom_queues',
-                ))
+                report.add(
+                    ConfigurationError(
+                        message='custom_queues required in CUSTOM mode',
+                        code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+                        notes=['queue_mode=CUSTOM but custom_queues is empty or None'],
+                        help_text='provide at least one CustomQueueConfig in custom_queues',
+                    )
+                )
             else:
                 # Validate unique queue names (only if queues exist)
                 queue_names = [q.name for q in self.custom_queues]
                 if len(queue_names) != len(set(queue_names)):
-                    report.add(ConfigurationError(
-                        message='duplicate queue names in custom_queues',
-                        code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
-                        notes=[f'queue names: {queue_names}'],
-                        help_text='each queue name must be unique',
-                    ))
+                    report.add(
+                        ConfigurationError(
+                            message='duplicate queue names in custom_queues',
+                            code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+                            notes=[f'queue names: {queue_names}'],
+                            help_text='each queue name must be unique',
+                        )
+                    )
 
         # Validate cluster_wide_cap if provided
         if self.cluster_wide_cap is not None and self.cluster_wide_cap <= 0:
-            report.add(ConfigurationError(
-                message='cluster_wide_cap must be positive',
-                code=ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
-                notes=[f'got cluster_wide_cap={self.cluster_wide_cap}'],
-                help_text='use a positive integer or None for unlimited',
-            ))
+            report.add(
+                ConfigurationError(
+                    message='cluster_wide_cap must be positive',
+                    code=ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
+                    notes=[f'got cluster_wide_cap={self.cluster_wide_cap}'],
+                    help_text='use a positive integer or None for unlimited',
+                )
+            )
 
         # Validate prefetch_buffer
         if self.prefetch_buffer < 0:
-            report.add(ConfigurationError(
-                message='prefetch_buffer must be non-negative',
-                code=ErrorCode.CONFIG_INVALID_PREFETCH,
-                notes=[f'got prefetch_buffer={self.prefetch_buffer}'],
-                help_text='use 0 for hard cap mode or positive integer for soft cap',
-            ))
+            report.add(
+                ConfigurationError(
+                    message='prefetch_buffer must be non-negative',
+                    code=ErrorCode.CONFIG_INVALID_PREFETCH,
+                    notes=[f'got prefetch_buffer={self.prefetch_buffer}'],
+                    help_text='use 0 for hard cap mode or positive integer for soft cap',
+                )
+            )
 
         # Validate claim_lease_ms
         if self.prefetch_buffer > 0 and self.claim_lease_ms is None:
-            report.add(ConfigurationError(
-                message='claim_lease_ms required when prefetch_buffer > 0',
-                code=ErrorCode.CONFIG_INVALID_PREFETCH,
-                notes=[
-                    f'prefetch_buffer={self.prefetch_buffer} but claim_lease_ms is None',
-                ],
-                help_text='set claim_lease_ms (e.g., 30000 for 30 seconds)',
-            ))
+            report.add(
+                ConfigurationError(
+                    message='claim_lease_ms required when prefetch_buffer > 0',
+                    code=ErrorCode.CONFIG_INVALID_PREFETCH,
+                    notes=[
+                        f'prefetch_buffer={self.prefetch_buffer} but claim_lease_ms is None',
+                    ],
+                    help_text='set claim_lease_ms (e.g., 30000 for 30 seconds)',
+                )
+            )
         if self.claim_lease_ms is not None and self.claim_lease_ms <= 0:
-            report.add(ConfigurationError(
-                message='claim_lease_ms must be positive',
-                code=ErrorCode.CONFIG_INVALID_PREFETCH,
-                notes=[f'got claim_lease_ms={self.claim_lease_ms}'],
-                help_text='use a positive integer in milliseconds',
-            ))
+            report.add(
+                ConfigurationError(
+                    message='claim_lease_ms must be positive',
+                    code=ErrorCode.CONFIG_INVALID_PREFETCH,
+                    notes=[f'got claim_lease_ms={self.claim_lease_ms}'],
+                    help_text='use a positive integer in milliseconds',
+                )
+            )
 
         # Forbid claim_lease_ms in hard cap mode
         if self.prefetch_buffer == 0 and self.claim_lease_ms is not None:
-            report.add(ConfigurationError(
-                message='claim_lease_ms incompatible with hard cap mode',
-                code=ErrorCode.CONFIG_INVALID_PREFETCH,
-                notes=[
-                    'prefetch_buffer=0 (hard cap mode)',
-                    f'but claim_lease_ms={self.claim_lease_ms} was set',
-                ],
-                help_text='remove claim_lease_ms or set prefetch_buffer > 0',
-            ))
+            report.add(
+                ConfigurationError(
+                    message='claim_lease_ms incompatible with hard cap mode',
+                    code=ErrorCode.CONFIG_INVALID_PREFETCH,
+                    notes=[
+                        'prefetch_buffer=0 (hard cap mode)',
+                        f'but claim_lease_ms={self.claim_lease_ms} was set',
+                    ],
+                    help_text='remove claim_lease_ms or set prefetch_buffer > 0',
+                )
+            )
 
         # Validate prefetch_buffer vs cluster_wide_cap conflict
         if self.cluster_wide_cap is not None and self.prefetch_buffer > 0:
-            report.add(ConfigurationError(
-                message='cluster_wide_cap incompatible with prefetch mode',
-                code=ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
-                notes=[
-                    f'cluster_wide_cap={self.cluster_wide_cap}',
-                    f'prefetch_buffer={self.prefetch_buffer}',
-                    'cluster_wide_cap requires hard cap mode (prefetch_buffer=0)',
-                ],
-                help_text='set prefetch_buffer=0 when using cluster_wide_cap',
-            ))
+            report.add(
+                ConfigurationError(
+                    message='cluster_wide_cap incompatible with prefetch mode',
+                    code=ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
+                    notes=[
+                        f'cluster_wide_cap={self.cluster_wide_cap}',
+                        f'prefetch_buffer={self.prefetch_buffer}',
+                        'cluster_wide_cap requires hard cap mode (prefetch_buffer=0)',
+                    ],
+                    help_text='set prefetch_buffer=0 when using cluster_wide_cap',
+                )
+            )
 
         raise_collected(report)
         return self

@@ -31,8 +31,10 @@ class TaskStatus(Enum):
         return self in TASK_TERMINAL_STATES
 
 
-TASK_TERMINAL_STATES: frozenset[TaskStatus] = frozenset({
-    TaskStatus.COMPLETED,
-    TaskStatus.FAILED,
-    TaskStatus.CANCELLED,
-})
+TASK_TERMINAL_STATES: frozenset[TaskStatus] = frozenset(
+    {
+        TaskStatus.COMPLETED,
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+    }
+)

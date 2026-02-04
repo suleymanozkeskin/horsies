@@ -55,22 +55,22 @@ def get_version() -> str:
     try:
         import horsies
 
-        version = getattr(horsies, "__version__", None)
-        return str(version) if version else "0.1.0"
+        version = getattr(horsies, '__version__', None)
+        return str(version) if version else '0.1.0'
     except ImportError:
-        return "0.1.0"
+        return '0.1.0'
 
 
 def format_banner(version: str | None = None) -> str:
     """Format the banner string with version."""
     if version is None:
         version = get_version()
-    return BANNER.format(version=f"v{version}")
+    return BANNER.format(version=f'v{version}')
 
 
 def print_banner(
-    app: "Horsies",
-    role: str = "worker",
+    app: 'Horsies',
+    role: str = 'worker',
     show_tasks: bool = True,
     file: TextIO | None = None,
 ) -> None:
@@ -96,44 +96,44 @@ def print_banner(
     lines.append(banner)
 
     # Configuration section
-    lines.append("[config]")
-    lines.append(f"  .> app:         {app.__class__.__name__}")
-    lines.append(f"  .> role:        {role}")
-    lines.append(f"  .> queue_mode:  {app.config.queue_mode.name}")
+    lines.append('[config]')
+    lines.append(f'  .> app:         {app.__class__.__name__}')
+    lines.append(f'  .> role:        {role}')
+    lines.append(f'  .> queue_mode:  {app.config.queue_mode.name}')
 
     # Queue info
-    if app.config.queue_mode.name == "CUSTOM" and app.config.custom_queues:
-        queues_str = ", ".join(q.name for q in app.config.custom_queues)
-        lines.append(f"  .> queues:      {queues_str}")
+    if app.config.queue_mode.name == 'CUSTOM' and app.config.custom_queues:
+        queues_str = ', '.join(q.name for q in app.config.custom_queues)
+        lines.append(f'  .> queues:      {queues_str}')
     else:
-        lines.append(f"  .> queues:      default")
+        lines.append(f'  .> queues:      default')
 
     # Broker info
     broker_url = app.config.broker.database_url
     # Mask password in URL
-    if "@" in broker_url:
-        pre, post = broker_url.split("@", 1)
-        if ":" in pre:
-            scheme_user = pre.rsplit(":", 1)[0]
-            broker_url = f"{scheme_user}:****@{post}"
-    lines.append(f"  .> broker:      {broker_url}")
+    if '@' in broker_url:
+        pre, post = broker_url.split('@', 1)
+        if ':' in pre:
+            scheme_user = pre.rsplit(':', 1)[0]
+            broker_url = f'{scheme_user}:****@{post}'
+    lines.append(f'  .> broker:      {broker_url}')
 
     # Concurrency info (if available)
-    if hasattr(app.config, "cluster_wide_cap") and app.config.cluster_wide_cap:
-        lines.append(f"  .> cap:         {app.config.cluster_wide_cap} (cluster-wide)")
+    if hasattr(app.config, 'cluster_wide_cap') and app.config.cluster_wide_cap:
+        lines.append(f'  .> cap:         {app.config.cluster_wide_cap} (cluster-wide)')
 
-    lines.append("")
+    lines.append('')
 
     # Tasks section
     if show_tasks:
         task_names = app.list_tasks()
-        lines.append(f"[tasks] ({len(task_names)} registered)")
+        lines.append(f'[tasks] ({len(task_names)} registered)')
         for task_name in sorted(task_names):
-            lines.append(f"  . {task_name}")
-        lines.append("")
+            lines.append(f'  . {task_name}')
+        lines.append('')
 
     # Print everything
-    output = "\n".join(lines)
+    output = '\n'.join(lines)
     print(output, file=file)
 
 

@@ -20,7 +20,7 @@ from typing import Any
 
 from horsies.core.logging import get_logger
 
-logger = get_logger("imports")
+logger = get_logger('imports')
 
 
 def find_project_root(start_dir: str) -> str | None:
@@ -34,7 +34,7 @@ def find_project_root(start_dir: str) -> str | None:
     Returns start_dir if it contains a marker file, None otherwise.
     """
     start_dir = os.path.abspath(start_dir)
-    for marker in ("pyproject.toml", "setup.cfg", "setup.py"):
+    for marker in ('pyproject.toml', 'setup.cfg', 'setup.py'):
         if os.path.exists(os.path.join(start_dir, marker)):
             return start_dir
     return None
@@ -54,7 +54,7 @@ def setup_sys_path_from_cwd() -> str | None:
     cwd = os.getcwd()
     if find_project_root(cwd) and cwd not in sys.path:
         sys.path.insert(0, cwd)
-        logger.debug(f"Added cwd to sys.path: {cwd}")
+        logger.debug(f'Added cwd to sys.path: {cwd}')
         return cwd
     return None
 
@@ -90,7 +90,7 @@ def _compute_synthetic_module_name(path: str) -> str:
     """
     realpath = os.path.realpath(path)
     hash_prefix = hashlib.sha256(realpath.encode()).hexdigest()[:12]
-    return f"horsies._dynamic.{hash_prefix}"
+    return f'horsies._dynamic.{hash_prefix}'
 
 
 def import_file_path(
@@ -121,11 +121,11 @@ def import_file_path(
     file_path = os.path.realpath(file_path)
 
     if not os.path.exists(file_path):
-        raise FileNotFoundError(f"Module file not found: {file_path}")
+        raise FileNotFoundError(f'Module file not found: {file_path}')
 
     # Check if already loaded
     for name, mod in list(sys.modules.items()):
-        mod_file = getattr(mod, "__file__", None)
+        mod_file = getattr(mod, '__file__', None)
         if mod_file and os.path.realpath(mod_file) == file_path:
             return mod
 
@@ -142,7 +142,7 @@ def import_file_path(
     # Load the module
     spec = importlib.util.spec_from_file_location(module_name, file_path)
     if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load module from path: {file_path}")
+        raise ImportError(f'Could not load module from path: {file_path}')
 
     mod = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = mod
@@ -164,7 +164,7 @@ def import_by_path(path: str, module_name: str | None = None) -> Any:
     For file paths: delegates to import_file_path()
     For module paths: delegates to import_module_path()
     """
-    if path.endswith(".py") or os.path.sep in path:
+    if path.endswith('.py') or os.path.sep in path:
         return import_file_path(path, module_name)
     else:
         return import_module_path(path)
@@ -187,7 +187,7 @@ def compute_package_path_from_fs(file_path: str) -> tuple[str | None, str | None
 
     components = [module_name]
     while True:
-        init_path = os.path.join(current_dir, "__init__.py")
+        init_path = os.path.join(current_dir, '__init__.py')
         if not os.path.exists(init_path):
             break
         package_name = os.path.basename(current_dir)
@@ -198,6 +198,6 @@ def compute_package_path_from_fs(file_path: str) -> tuple[str | None, str | None
         return (None, None)
 
     components.reverse()
-    dotted_name = ".".join(components)
+    dotted_name = '.'.join(components)
     package_root = current_dir
     return (dotted_name, package_root)

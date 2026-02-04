@@ -223,7 +223,9 @@ class ScheduleStateManager:
         """
         async with self.session_factory() as session:
             result = await session.execute(
-                text('DELETE FROM horsies_schedule_state WHERE schedule_name = :schedule_name'),
+                text(
+                    'DELETE FROM horsies_schedule_state WHERE schedule_name = :schedule_name'
+                ),
                 {'schedule_name': schedule_name},
             )
             await session.commit()

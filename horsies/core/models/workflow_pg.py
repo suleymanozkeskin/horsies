@@ -236,7 +236,9 @@ class WorkflowTaskModel(Base):
 
     # Unique constraint: one task per index per workflow
     __table_args__ = (
-        UniqueConstraint('workflow_id', 'task_index', name='uq_horsies_workflow_task_index'),
+        UniqueConstraint(
+            'workflow_id', 'task_index', name='uq_horsies_workflow_task_index'
+        ),
     )
 
 

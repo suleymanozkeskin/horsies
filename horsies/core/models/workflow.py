@@ -20,7 +20,12 @@ from typing import (
 import inspect
 import time
 from horsies.core.utils.loop_runner import LoopRunner
-from horsies.core.errors import ErrorCode, SourceLocation, ValidationReport, raise_collected
+from horsies.core.errors import (
+    ErrorCode,
+    SourceLocation,
+    ValidationReport,
+    raise_collected,
+)
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
@@ -75,11 +80,13 @@ class WorkflowStatus(str, Enum):
         return self in WORKFLOW_TERMINAL_STATES
 
 
-WORKFLOW_TERMINAL_STATES: frozenset[WorkflowStatus] = frozenset({
-    WorkflowStatus.COMPLETED,
-    WorkflowStatus.FAILED,
-    WorkflowStatus.CANCELLED,
-})
+WORKFLOW_TERMINAL_STATES: frozenset[WorkflowStatus] = frozenset(
+    {
+        WorkflowStatus.COMPLETED,
+        WorkflowStatus.FAILED,
+        WorkflowStatus.CANCELLED,
+    }
+)
 
 
 class WorkflowTaskStatus(str, Enum):
@@ -119,11 +126,13 @@ class WorkflowTaskStatus(str, Enum):
         return self in WORKFLOW_TASK_TERMINAL_STATES
 
 
-WORKFLOW_TASK_TERMINAL_STATES: frozenset[WorkflowTaskStatus] = frozenset({
-    WorkflowTaskStatus.COMPLETED,
-    WorkflowTaskStatus.FAILED,
-    WorkflowTaskStatus.SKIPPED,
-})
+WORKFLOW_TASK_TERMINAL_STATES: frozenset[WorkflowTaskStatus] = frozenset(
+    {
+        WorkflowTaskStatus.COMPLETED,
+        WorkflowTaskStatus.FAILED,
+        WorkflowTaskStatus.SKIPPED,
+    }
+)
 
 
 class OnError(str, Enum):
@@ -542,11 +551,10 @@ class SubWorkflowNode(Generic[OkT_co]):
         return NodeKey(self.node_id)
 
 
-
 AnyNode = TaskNode[Any] | SubWorkflowNode[Any]
-'''
+"""
 Type alias for any node type
-'''
+"""
 
 # =============================================================================
 # NodeKey (typed, stable id)
@@ -752,66 +760,82 @@ class WorkflowSpec:
             node_id_from_workflow_name = task.node_id is None
             if node_id_from_workflow_name:
                 if task.index is None:
-                    errors.append(WorkflowValidationError(
-                        message='TaskNode index is not set before assigning node_id',
-                        code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
-                    ))
+                    errors.append(
+                        WorkflowValidationError(
+                            message='TaskNode index is not set before assigning node_id',
+                            code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
+                        )
+                    )
                     continue
                 task.node_id = f'{slugify(self.name)}:{task.index}'
 
             node_id = task.node_id
             if node_id is None or not node_id.strip():
-                errors.append(WorkflowValidationError(
-                    message='TaskNode node_id must be a non-empty string',
-                    code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
-                ))
+                errors.append(
+                    WorkflowValidationError(
+                        message='TaskNode node_id must be a non-empty string',
+                        code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
+                    )
+                )
                 continue
             if len(node_id) > 128:
                 if node_id_from_workflow_name:
-                    errors.append(WorkflowValidationError(
-                        message='workflow name too long',
-                        code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
-                        notes=[
-                            f"workflow name: '{self.name}'",
-                            f"derived node_id would be {len(node_id)} characters (max 128)",
-                        ],
-                        help_text='use a shorter workflow name',
-                    ))
+                    errors.append(
+                        WorkflowValidationError(
+                            message='workflow name too long',
+                            code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
+                            notes=[
+                                f"workflow name: '{self.name}'",
+                                f'derived node_id would be {len(node_id)} characters (max 128)',
+                            ],
+                            help_text='use a shorter workflow name',
+                        )
+                    )
                 else:
-                    errors.append(WorkflowValidationError(
-                        message='TaskNode node_id exceeds 128 characters',
-                        code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
-                        notes=[f"node_id '{node_id}' has {len(node_id)} characters"],
-                        help_text='use a shorter node_id (max 128 characters)',
-                    ))
+                    errors.append(
+                        WorkflowValidationError(
+                            message='TaskNode node_id exceeds 128 characters',
+                            code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
+                            notes=[
+                                f"node_id '{node_id}' has {len(node_id)} characters"
+                            ],
+                            help_text='use a shorter node_id (max 128 characters)',
+                        )
+                    )
                 continue
             if NODE_ID_PATTERN.match(node_id) is None:
                 if node_id_from_workflow_name:
                     # This should never happen since slugify() sanitizes the name
-                    errors.append(WorkflowValidationError(
-                        message='workflow name produced invalid characters (internal error)',
-                        code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
-                        notes=[
-                            f"workflow name: '{self.name}'",
-                            f"derived node_id: '{node_id}'",
-                            'slugify() failed to sanitize the name',
-                        ],
-                        help_text='please report this bug',
-                    ))
+                    errors.append(
+                        WorkflowValidationError(
+                            message='workflow name produced invalid characters (internal error)',
+                            code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
+                            notes=[
+                                f"workflow name: '{self.name}'",
+                                f"derived node_id: '{node_id}'",
+                                'slugify() failed to sanitize the name',
+                            ],
+                            help_text='please report this bug',
+                        )
+                    )
                 else:
-                    errors.append(WorkflowValidationError(
-                        message='TaskNode node_id contains invalid characters',
-                        code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
-                        notes=[f"node_id '{node_id}'"],
-                        help_text='node_id must match pattern: [A-Za-z0-9_\\-:.]+',
-                    ))
+                    errors.append(
+                        WorkflowValidationError(
+                            message='TaskNode node_id contains invalid characters',
+                            code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
+                            notes=[f"node_id '{node_id}'"],
+                            help_text='node_id must match pattern: [A-Za-z0-9_\\-:.]+',
+                        )
+                    )
                 continue
             if node_id in seen_ids:
-                errors.append(WorkflowValidationError(
-                    message=f"duplicate node_id '{node_id}'",
-                    code=ErrorCode.WORKFLOW_DUPLICATE_NODE_ID,
-                    help_text='each TaskNode must have a unique node_id within the workflow',
-                ))
+                errors.append(
+                    WorkflowValidationError(
+                        message=f"duplicate node_id '{node_id}'",
+                        code=ErrorCode.WORKFLOW_DUPLICATE_NODE_ID,
+                        help_text='each TaskNode must have a unique node_id within the workflow',
+                    )
+                )
             seen_ids.add(node_id)
         return errors
 
@@ -822,28 +846,32 @@ class WorkflowSpec:
         # 1. Check for roots (tasks with no dependencies)
         roots = [t for t in self.tasks if not t.waits_for]
         if not roots:
-            errors.append(WorkflowValidationError(
-                message='no root tasks found',
-                code=ErrorCode.WORKFLOW_NO_ROOT_TASKS,
-                notes=[
-                    'all tasks have dependencies, creating an impossible start condition',
-                ],
-                help_text='at least one task must have empty waits_for list',
-            ))
+            errors.append(
+                WorkflowValidationError(
+                    message='no root tasks found',
+                    code=ErrorCode.WORKFLOW_NO_ROOT_TASKS,
+                    notes=[
+                        'all tasks have dependencies, creating an impossible start condition',
+                    ],
+                    help_text='at least one task must have empty waits_for list',
+                )
+            )
 
         # 2. Validate dependency references exist in workflow
         task_ids = set(id(t) for t in self.tasks)
         for task in self.tasks:
             for dep in task.waits_for:
                 if id(dep) not in task_ids:
-                    errors.append(WorkflowValidationError(
-                        message='dependency references task not in workflow',
-                        code=ErrorCode.WORKFLOW_INVALID_DEPENDENCY,
-                        notes=[
-                            f"task '{task.name}' waits for a TaskNode not in this workflow",
-                        ],
-                        help_text='ensure all dependencies are included in the workflow tasks list',
-                    ))
+                    errors.append(
+                        WorkflowValidationError(
+                            message='dependency references task not in workflow',
+                            code=ErrorCode.WORKFLOW_INVALID_DEPENDENCY,
+                            notes=[
+                                f"task '{task.name}' waits for a TaskNode not in this workflow",
+                            ],
+                            help_text='ensure all dependencies are included in the workflow tasks list',
+                        )
+                    )
 
         # 3. Cycle detection (Kahn's algorithm) over valid dependencies only
         in_degree: dict[int, int] = {}
@@ -880,12 +908,14 @@ class WorkflowSpec:
                             queue.append(task_idx)
 
         if visited != len(self.tasks):
-            errors.append(WorkflowValidationError(
-                message='cycle detected in workflow DAG',
-                code=ErrorCode.WORKFLOW_CYCLE_DETECTED,
-                notes=['workflows must be acyclic directed graphs (DAG)'],
-                help_text='remove circular dependencies between tasks',
-            ))
+            errors.append(
+                WorkflowValidationError(
+                    message='cycle detected in workflow DAG',
+                    code=ErrorCode.WORKFLOW_CYCLE_DETECTED,
+                    notes=['workflows must be acyclic directed graphs (DAG)'],
+                    help_text='remove circular dependencies between tasks',
+                )
+            )
 
         return errors
 
@@ -896,15 +926,17 @@ class WorkflowSpec:
             deps_ids = set(id(d) for d in task.waits_for)
             for kwarg_name, source_node in task.args_from.items():
                 if id(source_node) not in deps_ids:
-                    errors.append(WorkflowValidationError(
-                        message='args_from references task not in waits_for',
-                        code=ErrorCode.WORKFLOW_INVALID_ARGS_FROM,
-                        notes=[
-                            f"task '{task.name}' args_from['{kwarg_name}'] references '{source_node.name}'",
-                            f"'{source_node.name}' must be in waits_for to inject its result",
-                        ],
-                        help_text=f"add '{source_node.name}' to waits_for list",
-                    ))
+                    errors.append(
+                        WorkflowValidationError(
+                            message='args_from references task not in waits_for',
+                            code=ErrorCode.WORKFLOW_INVALID_ARGS_FROM,
+                            notes=[
+                                f"task '{task.name}' args_from['{kwarg_name}'] references '{source_node.name}'",
+                                f"'{source_node.name}' must be in waits_for to inject its result",
+                            ],
+                            help_text=f"add '{source_node.name}' to waits_for list",
+                        )
+                    )
         return errors
 
     def _collect_workflow_ctx_from_errors(self) -> list[WorkflowValidationError]:
@@ -916,15 +948,17 @@ class WorkflowSpec:
             deps_ids = set(id(d) for d in node.waits_for)
             for ctx_node in node.workflow_ctx_from:
                 if id(ctx_node) not in deps_ids:
-                    errors.append(WorkflowValidationError(
-                        message='workflow_ctx_from references task not in waits_for',
-                        code=ErrorCode.WORKFLOW_INVALID_CTX_FROM,
-                        notes=[
-                            f"node '{node.name}' references '{ctx_node.name}'",
-                            f"'{ctx_node.name}' must be in waits_for to use in workflow_ctx_from",
-                        ],
-                        help_text=f"add '{ctx_node.name}' to waits_for list",
-                    ))
+                    errors.append(
+                        WorkflowValidationError(
+                            message='workflow_ctx_from references task not in waits_for',
+                            code=ErrorCode.WORKFLOW_INVALID_CTX_FROM,
+                            notes=[
+                                f"node '{node.name}' references '{ctx_node.name}'",
+                                f"'{ctx_node.name}' must be in waits_for to use in workflow_ctx_from",
+                            ],
+                            help_text=f"add '{ctx_node.name}' to waits_for list",
+                        )
+                    )
 
             # Only check function parameter for TaskNode (SubWorkflowNode has no fn)
             if isinstance(node, SubWorkflowNode):
@@ -936,21 +970,23 @@ class WorkflowSpec:
                 original_fn = getattr(task.fn, '_original_fn', task.fn)
                 fn_location = SourceLocation.from_function(original_fn)
 
-                errors.append(WorkflowValidationError(
-                    message='workflow_ctx_from declared but function missing workflow_ctx param',
-                    code=ErrorCode.WORKFLOW_CTX_PARAM_MISSING,
-                    location=fn_location,  # May be None for non-function callables
-                    notes=[
-                        f"workflow '{self.name}'\n"
-                        f"TaskNode '{task.name}' declares workflow_ctx_from=[...]\n"
-                        f"but function '{task.name}' has no workflow_ctx parameter",
-                    ],
-                    help_text=(
-                        'either:\n'
-                        '  1. add `workflow_ctx: WorkflowContext | None` param to the function above if needs context\n'
-                        '  2. remove `workflow_ctx_from` from the TaskNode definition if this was a mistake'
-                    ),
-                ))
+                errors.append(
+                    WorkflowValidationError(
+                        message='workflow_ctx_from declared but function missing workflow_ctx param',
+                        code=ErrorCode.WORKFLOW_CTX_PARAM_MISSING,
+                        location=fn_location,  # May be None for non-function callables
+                        notes=[
+                            f"workflow '{self.name}'\n"
+                            f"TaskNode '{task.name}' declares workflow_ctx_from=[...]\n"
+                            f"but function '{task.name}' has no workflow_ctx parameter",
+                        ],
+                        help_text=(
+                            'either:\n'
+                            '  1. add `workflow_ctx: WorkflowContext | None` param to the function above if needs context\n'
+                            '  2. remove `workflow_ctx_from` from the TaskNode definition if this was a mistake'
+                        ),
+                    )
+                )
         return errors
 
     def _collect_output_errors(self) -> list[WorkflowValidationError]:
@@ -960,9 +996,11 @@ class WorkflowSpec:
             return errors
         task_ids = set(id(t) for t in self.tasks)
         if id(self.output) not in task_ids:
-            errors.append(WorkflowValidationError(
-                f"Output task '{self.output.name}' is not in workflow",
-            ))
+            errors.append(
+                WorkflowValidationError(
+                    f"Output task '{self.output.name}' is not in workflow",
+                )
+            )
         return errors
 
     def _collect_success_policy_errors(self) -> list[WorkflowValidationError]:
@@ -973,9 +1011,11 @@ class WorkflowSpec:
 
         # Validate cases list is not empty
         if not self.success_policy.cases:
-            errors.append(WorkflowValidationError(
-                'SuccessPolicy must have at least one SuccessCase',
-            ))
+            errors.append(
+                WorkflowValidationError(
+                    'SuccessPolicy must have at least one SuccessCase',
+                )
+            )
             return errors
 
         task_ids = set(id(t) for t in self.tasks)
@@ -983,22 +1023,28 @@ class WorkflowSpec:
         # Validate each success case
         for i, case in enumerate(self.success_policy.cases):
             if not case.required:
-                errors.append(WorkflowValidationError(
-                    f'SuccessCase[{i}] has no required tasks',
-                ))
+                errors.append(
+                    WorkflowValidationError(
+                        f'SuccessCase[{i}] has no required tasks',
+                    )
+                )
             for task in case.required:
                 if id(task) not in task_ids:
-                    errors.append(WorkflowValidationError(
-                        f"SuccessCase[{i}] required task '{task.name}' is not in workflow",
-                    ))
+                    errors.append(
+                        WorkflowValidationError(
+                            f"SuccessCase[{i}] required task '{task.name}' is not in workflow",
+                        )
+                    )
 
         # Validate optional tasks
         if self.success_policy.optional:
             for task in self.success_policy.optional:
                 if id(task) not in task_ids:
-                    errors.append(WorkflowValidationError(
-                        f"SuccessPolicy optional task '{task.name}' is not in workflow",
-                    ))
+                    errors.append(
+                        WorkflowValidationError(
+                            f"SuccessPolicy optional task '{task.name}' is not in workflow",
+                        )
+                    )
 
         return errors
 
@@ -1008,26 +1054,34 @@ class WorkflowSpec:
         for task in self.tasks:
             if task.join == 'quorum':
                 if task.min_success is None:
-                    errors.append(WorkflowValidationError(
-                        f"Task '{task.name}' has join='quorum' but min_success is not set",
-                    ))
+                    errors.append(
+                        WorkflowValidationError(
+                            f"Task '{task.name}' has join='quorum' but min_success is not set",
+                        )
+                    )
                 elif task.min_success < 1:
-                    errors.append(WorkflowValidationError(
-                        f"Task '{task.name}' min_success must be >= 1, got {task.min_success}",
-                    ))
+                    errors.append(
+                        WorkflowValidationError(
+                            f"Task '{task.name}' min_success must be >= 1, got {task.min_success}",
+                        )
+                    )
                 else:
                     dep_count = len(task.waits_for)
                     if task.min_success > dep_count:
-                        errors.append(WorkflowValidationError(
-                            f"Task '{task.name}' min_success ({task.min_success}) exceeds "
-                            f'dependency count ({dep_count})',
-                        ))
+                        errors.append(
+                            WorkflowValidationError(
+                                f"Task '{task.name}' min_success ({task.min_success}) exceeds "
+                                f'dependency count ({dep_count})',
+                            )
+                        )
             elif task.join in ('all', 'any'):
                 if task.min_success is not None:
-                    errors.append(WorkflowValidationError(
-                        f"Task '{task.name}' has min_success set but join='{task.join}' "
-                        "(min_success is only used with join='quorum')",
-                    ))
+                    errors.append(
+                        WorkflowValidationError(
+                            f"Task '{task.name}' has min_success set but join='{task.join}' "
+                            "(min_success is only used with join='quorum')",
+                        )
+                    )
         return errors
 
     def _validate_conditions(self) -> None:
@@ -1057,15 +1111,17 @@ class WorkflowSpec:
             """DFS visit with cycle detection via recursion stack."""
             if workflow_name in stack:
                 # Found a back-edge - this is a cycle
-                errors.append(WorkflowValidationError(
-                    message='cycle detected in nested workflows',
-                    code=ErrorCode.WORKFLOW_CYCLE_DETECTED,
-                    notes=[
-                        f"workflow '{workflow_name}' creates a circular reference",
-                        'cycles in nested workflows are not allowed',
-                    ],
-                    help_text='remove the circular SubWorkflowNode reference',
-                ))
+                errors.append(
+                    WorkflowValidationError(
+                        message='cycle detected in nested workflows',
+                        code=ErrorCode.WORKFLOW_CYCLE_DETECTED,
+                        notes=[
+                            f"workflow '{workflow_name}' creates a circular reference",
+                            'cycles in nested workflows are not allowed',
+                        ],
+                        help_text='remove the circular SubWorkflowNode reference',
+                    )
+                )
                 return
 
             if workflow_name in visited:
@@ -1102,15 +1158,17 @@ class WorkflowSpec:
             if not isinstance(node, SubWorkflowNode):
                 continue
             if node.retry_mode != SubWorkflowRetryMode.RERUN_FAILED_ONLY:
-                errors.append(WorkflowValidationError(
-                    message='unsupported SubWorkflowRetryMode',
-                    code=ErrorCode.WORKFLOW_INVALID_SUBWORKFLOW_RETRY_MODE,
-                    notes=[
-                        f"node '{node.name}' uses retry_mode='{node.retry_mode.value}'",
-                        "only 'rerun_failed_only' is supported in this release",
-                    ],
-                    help_text='use SubWorkflowRetryMode.RERUN_FAILED_ONLY',
-                ))
+                errors.append(
+                    WorkflowValidationError(
+                        message='unsupported SubWorkflowRetryMode',
+                        code=ErrorCode.WORKFLOW_INVALID_SUBWORKFLOW_RETRY_MODE,
+                        notes=[
+                            f"node '{node.name}' uses retry_mode='{node.retry_mode.value}'",
+                            "only 'rerun_failed_only' is supported in this release",
+                        ],
+                        help_text='use SubWorkflowRetryMode.RERUN_FAILED_ONLY',
+                    )
+                )
         return errors
 
     def _register_for_conditions(self) -> None:

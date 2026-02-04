@@ -202,6 +202,7 @@ def _child_initializer(
 
     # Set log level for this child process before any logging
     from horsies.core.logging import set_default_level
+
     set_default_level(loglevel)
 
     # Mark child process to adjust logging behavior during module import
@@ -236,9 +237,7 @@ def _child_initializer(
         except Exception:
             pass
         combined_imports = _dedupe_paths(combined_imports)
-        _debug_imports_log(
-            f'[child {os.getpid()}] import_modules={combined_imports}'
-        )
+        _debug_imports_log(f'[child {os.getpid()}] import_modules={combined_imports}')
         for m in combined_imports:
             if m.endswith('.py') or os.path.sep in m:
                 m_abs = os.path.abspath(m)
@@ -328,7 +327,12 @@ def _heartbeat_worker(
 
 def _is_retryable_db_error(exc: BaseException) -> bool:
     match exc:
-        case OperationalError() | InterfaceError() | SerializationFailure() | DeadlockDetected():
+        case (
+            OperationalError()
+            | InterfaceError()
+            | SerializationFailure()
+            | DeadlockDetected()
+        ):
             return True
         case _:
             return False
@@ -846,7 +850,9 @@ class Worker:
 
         # Create the process pool AFTER successful preload so initializer runs in children only
         # Compute the plain psycopg database URL for child processes
-        child_database_url = self.cfg.dsn.replace('+asyncpg', '').replace('+psycopg', '')
+        child_database_url = self.cfg.dsn.replace('+asyncpg', '').replace(
+            '+psycopg', ''
+        )
         self._executor = ProcessPoolExecutor(
             max_workers=self.cfg.processes,
             initializer=_child_initializer,
@@ -1523,7 +1529,8 @@ class Worker:
                 # Notify workers globally and on the specific queue to wake claims
                 # Fetch queue name for this task
                 resq = await s.execute(
-                    text('SELECT queue_name FROM horsies_tasks WHERE id = :id'), {'id': task_id}
+                    text('SELECT queue_name FROM horsies_tasks WHERE id = :id'),
+                    {'id': task_id},
                 )
                 rowq = resq.fetchone()
                 qname = str(rowq[0]) if rowq and rowq[0] else 'default'
