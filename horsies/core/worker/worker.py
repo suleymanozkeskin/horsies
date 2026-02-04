@@ -1619,9 +1619,7 @@ class Worker:
                 rowq = resq.fetchone()
                 qname = str(rowq[0]) if rowq and rowq[0] else 'default'
                 payload = f'capacity:{task_id}'
-                await s.execute(
-                    NOTIFY_TASK_NEW_SQL, {'c1': 'task_new', 'p': payload}
-                )
+                await s.execute(NOTIFY_TASK_NEW_SQL, {'c1': 'task_new', 'p': payload})
                 await s.execute(
                     NOTIFY_TASK_QUEUE_SQL,
                     {'c2': f'task_queue_{qname}', 'p': payload},

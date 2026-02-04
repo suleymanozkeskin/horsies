@@ -53,7 +53,9 @@ def _as_str_list(value: object) -> list[str]:
 
 # -- SQL constants for start_workflow_async --
 
-CHECK_WORKFLOW_EXISTS_SQL = text("""SELECT id FROM horsies_workflows WHERE id = :wf_id""")
+CHECK_WORKFLOW_EXISTS_SQL = text(
+    """SELECT id FROM horsies_workflows WHERE id = :wf_id"""
+)
 
 INSERT_WORKFLOW_SQL = text("""
     INSERT INTO horsies_workflows (id, name, status, on_error, output_task_index,
@@ -1243,7 +1245,9 @@ UPDATE_WORKFLOW_TASK_RESULT_SQL = text("""
     WHERE workflow_id = :wf_id AND task_index = :idx
 """)
 
-GET_WORKFLOW_STATUS_SQL = text("""SELECT status FROM horsies_workflows WHERE id = :wf_id""")
+GET_WORKFLOW_STATUS_SQL = text(
+    """SELECT status FROM horsies_workflows WHERE id = :wf_id"""
+)
 
 
 async def on_workflow_task_complete(
@@ -1315,7 +1319,9 @@ GET_DEPENDENT_TASKS_SQL = text("""
       AND status = 'PENDING'
 """)
 
-GET_WORKFLOW_DEPTH_SQL = text("""SELECT depth, root_workflow_id FROM horsies_workflows WHERE id = :wf_id""")
+GET_WORKFLOW_DEPTH_SQL = text(
+    """SELECT depth, root_workflow_id FROM horsies_workflows WHERE id = :wf_id"""
+)
 
 
 async def _process_dependents(
@@ -2269,7 +2275,9 @@ async def _get_workflow_failure_error(
 
 # -- SQL constants for _get_workflow_final_result --
 
-GET_WORKFLOW_OUTPUT_INDEX_SQL = text("""SELECT output_task_index FROM horsies_workflows WHERE id = :wf_id""")
+GET_WORKFLOW_OUTPUT_INDEX_SQL = text(
+    """SELECT output_task_index FROM horsies_workflows WHERE id = :wf_id"""
+)
 
 GET_OUTPUT_TASK_RESULT_SQL = text("""
     SELECT result FROM horsies_workflow_tasks
@@ -2343,7 +2351,9 @@ async def _get_workflow_final_result(
 
 # -- SQL constants for _handle_workflow_task_failure --
 
-GET_WORKFLOW_ON_ERROR_SQL = text("""SELECT on_error FROM horsies_workflows WHERE id = :wf_id""")
+GET_WORKFLOW_ON_ERROR_SQL = text(
+    """SELECT on_error FROM horsies_workflows WHERE id = :wf_id"""
+)
 
 SET_WORKFLOW_ERROR_SQL = text("""
     UPDATE horsies_workflows

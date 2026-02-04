@@ -21,7 +21,9 @@ from horsies.core.worker.worker import import_by_path
 
 logger = get_logger('scheduler')
 
-SCHEDULE_ADVISORY_LOCK_SQL = text("""SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))""")
+SCHEDULE_ADVISORY_LOCK_SQL = text(
+    """SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))"""
+)
 
 
 class Scheduler:
