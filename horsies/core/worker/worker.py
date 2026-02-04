@@ -811,6 +811,166 @@ class WorkerConfig:
     loglevel: int = 20  # logging.INFO
 
 
+# ---------- Worker SQL constants ----------
+
+CLAIM_ADVISORY_LOCK_SQL = text("""
+    SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
+""")
+
+COUNT_GLOBAL_IN_FLIGHT_SQL = text("""
+    SELECT COUNT(*) FROM horsies_tasks WHERE status IN ('RUNNING', 'CLAIMED')
+""")
+
+COUNT_QUEUE_IN_FLIGHT_HARD_SQL = text("""
+    SELECT COUNT(*) FROM horsies_tasks WHERE status IN ('RUNNING', 'CLAIMED') AND queue_name = :q
+""")
+
+COUNT_QUEUE_IN_FLIGHT_SOFT_SQL = text("""
+    SELECT COUNT(*) FROM horsies_tasks WHERE status = 'RUNNING' AND queue_name = :q
+""")
+
+COUNT_CLAIMED_FOR_WORKER_SQL = text("""
+    SELECT COUNT(*)
+    FROM horsies_tasks
+    WHERE claimed_by_worker_id = CAST(:wid AS VARCHAR)
+      AND status = 'CLAIMED'
+""")
+
+COUNT_RUNNING_FOR_WORKER_SQL = text("""
+    SELECT COUNT(*)
+    FROM horsies_tasks
+    WHERE claimed_by_worker_id = CAST(:wid AS VARCHAR)
+      AND status = 'RUNNING'
+""")
+
+COUNT_IN_FLIGHT_FOR_WORKER_SQL = text("""
+    SELECT COUNT(*)
+    FROM horsies_tasks
+    WHERE claimed_by_worker_id = CAST(:wid AS VARCHAR)
+      AND status IN ('RUNNING', 'CLAIMED')
+""")
+
+COUNT_RUNNING_IN_QUEUE_SQL = text("""
+    SELECT COUNT(*)
+    FROM horsies_tasks
+    WHERE status = 'RUNNING'
+      AND queue_name = :q
+""")
+
+GET_PAUSED_WORKFLOW_TASK_IDS_SQL = text("""
+    SELECT t.id
+    FROM horsies_tasks t
+    JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
+    JOIN horsies_workflows w ON w.id = wt.workflow_id
+    WHERE t.id = ANY(:ids)
+      AND w.status = 'PAUSED'
+""")
+
+UNCLAIM_PAUSED_TASKS_SQL = text("""
+    UPDATE horsies_tasks
+    SET status = 'PENDING',
+        claimed = FALSE,
+        claimed_at = NULL,
+        claimed_by_worker_id = NULL,
+        updated_at = NOW()
+    WHERE id = ANY(:ids)
+""")
+
+RESET_PAUSED_WORKFLOW_TASKS_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET status = 'READY', task_id = NULL, started_at = NULL
+    WHERE task_id = ANY(:ids)
+""")
+
+MARK_TASK_FAILED_WORKER_SQL = text("""
+    UPDATE horsies_tasks
+    SET status='FAILED',
+        failed_at = :now,
+        failed_reason = :reason,
+        updated_at = :now
+    WHERE id = :id
+""")
+
+MARK_TASK_FAILED_SQL = text("""
+    UPDATE horsies_tasks
+    SET status='FAILED',
+        failed_at = :now,
+        result = :result_json,
+        updated_at = :now
+    WHERE id = :id
+""")
+
+MARK_TASK_COMPLETED_SQL = text("""
+    UPDATE horsies_tasks
+    SET status='COMPLETED',
+        completed_at = :now,
+        result = :result_json,
+        updated_at = :now
+    WHERE id = :id
+""")
+
+GET_TASK_QUEUE_NAME_SQL = text("""
+    SELECT queue_name FROM horsies_tasks WHERE id = :id
+""")
+
+NOTIFY_TASK_NEW_SQL = text("""
+    SELECT pg_notify(:c1, :p)
+""")
+
+NOTIFY_TASK_QUEUE_SQL = text("""
+    SELECT pg_notify(:c2, :p)
+""")
+
+CHECK_WORKFLOW_TASK_EXISTS_SQL = text("""
+    SELECT 1 FROM horsies_workflow_tasks WHERE task_id = :tid LIMIT 1
+""")
+
+GET_TASK_RETRY_INFO_SQL = text("""
+    SELECT retry_count, max_retries, task_options FROM horsies_tasks WHERE id = :id
+""")
+
+GET_TASK_RETRY_CONFIG_SQL = text("""
+    SELECT retry_count, task_options FROM horsies_tasks WHERE id = :id
+""")
+
+SCHEDULE_TASK_RETRY_SQL = text("""
+    UPDATE horsies_tasks
+    SET status = 'PENDING',
+        retry_count = :retry_count,
+        next_retry_at = :next_retry_at,
+        sent_at = :next_retry_at,
+        updated_at = now()
+    WHERE id = :id
+""")
+
+NOTIFY_DELAYED_SQL = text("""
+    SELECT pg_notify(:channel, :payload)
+""")
+
+INSERT_CLAIMER_HEARTBEAT_SQL = text("""
+    INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid)
+    SELECT id, CAST(:wid AS VARCHAR), 'claimer', NOW(), :host, :pid
+    FROM horsies_tasks
+    WHERE status = 'CLAIMED' AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
+""")
+
+INSERT_WORKER_STATE_SQL = text("""
+    INSERT INTO horsies_worker_states (
+        worker_id, snapshot_at, hostname, pid,
+        processes, max_claim_batch, max_claim_per_worker,
+        cluster_wide_cap, queues, queue_priorities, queue_max_concurrency,
+        recovery_config, tasks_running, tasks_claimed,
+        memory_usage_mb, memory_percent, cpu_percent,
+        worker_started_at
+    )
+    VALUES (
+        :wid, NOW(), :host, :pid, :procs, :mcb, :mcpw, :cwc,
+        :queues, :qp, :qmc, :recovery, :running, :claimed,
+        :mem_mb, :mem_pct, :cpu_pct, :started
+    )
+""")
+
+
 class Worker:
     """
     Async master that:
@@ -1087,7 +1247,7 @@ class Worker:
         async with self.sf() as s:
             # Take a cluster-wide transaction-scoped advisory lock to serialize claiming
             await s.execute(
-                text('SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))'),
+                CLAIM_ADVISORY_LOCK_SQL,
                 {'key': self._advisory_key_global()},
             )
 
@@ -1111,11 +1271,7 @@ class Worker:
             if self.cfg.cluster_wide_cap is not None:
                 # Hard cap mode: count RUNNING + CLAIMED globally
                 # (Note: prefetch_buffer must be 0 when cluster_wide_cap is set, enforced by config validation)
-                res = await s.execute(
-                    text(
-                        "SELECT COUNT(*) FROM horsies_tasks WHERE status IN ('RUNNING', 'CLAIMED')"
-                    )
-                )
+                res = await s.execute(COUNT_GLOBAL_IN_FLIGHT_SQL)
                 row = res.fetchone()
                 if row:
                     in_flight_global = int(row[0])
@@ -1150,16 +1306,12 @@ class Worker:
                     # Soft cap mode: count only RUNNING
                     if hard_cap_mode:
                         resq = await s.execute(
-                            text(
-                                "SELECT COUNT(*) FROM horsies_tasks WHERE status IN ('RUNNING', 'CLAIMED') AND queue_name = :q"
-                            ),
+                            COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
                             {'q': qname},
                         )
                     else:
                         resq = await s.execute(
-                            text(
-                                "SELECT COUNT(*) FROM horsies_tasks WHERE status = 'RUNNING' AND queue_name = :q"
-                            ),
+                            COUNT_QUEUE_IN_FLIGHT_SOFT_SQL,
                             {'q': qname},
                         )
                     row = resq.fetchone()
@@ -1228,14 +1380,7 @@ class Worker:
         # Find which tasks belong to PAUSED workflows
         async with self.sf() as s:
             res = await s.execute(
-                text("""
-                    SELECT t.id
-                    FROM horsies_tasks t
-                    JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
-                    JOIN horsies_workflows w ON w.id = wt.workflow_id
-                    WHERE t.id = ANY(:ids)
-                      AND w.status = 'PAUSED'
-                """),
+                GET_PAUSED_WORKFLOW_TASK_IDS_SQL,
                 {'ids': task_ids},
             )
             paused_task_ids = {row[0] for row in res.fetchall()}
@@ -1243,25 +1388,13 @@ class Worker:
             if paused_task_ids:
                 # Unclaim these tasks: set back to PENDING so they can be picked up on resume
                 await s.execute(
-                    text("""
-                        UPDATE horsies_tasks
-                        SET status = 'PENDING',
-                            claimed = FALSE,
-                            claimed_at = NULL,
-                            claimed_by_worker_id = NULL,
-                            updated_at = NOW()
-                        WHERE id = ANY(:ids)
-                    """),
+                    UNCLAIM_PAUSED_TASKS_SQL,
                     {'ids': list(paused_task_ids)},
                 )
                 # Also reset workflow_tasks back to READY for consistency
                 # (they were ENQUEUED, but the task is now unclaimed)
                 await s.execute(
-                    text("""
-                        UPDATE horsies_workflow_tasks
-                        SET status = 'READY', task_id = NULL, started_at = NULL
-                        WHERE task_id = ANY(:ids)
-                    """),
+                    RESET_PAUSED_WORKFLOW_TASKS_SQL,
                     {'ids': list(paused_task_ids)},
                 )
                 await s.commit()
@@ -1306,14 +1439,7 @@ class Worker:
         """Count only CLAIMED tasks for this worker (not yet RUNNING)."""
         async with self.sf() as s:
             res = await s.execute(
-                text(
-                    """
-                    SELECT COUNT(*)
-                    FROM horsies_tasks
-                    WHERE claimed_by_worker_id = CAST(:wid AS VARCHAR)
-                      AND status = 'CLAIMED'
-                    """
-                ),
+                COUNT_CLAIMED_FOR_WORKER_SQL,
                 {'wid': self.worker_instance_id},
             )
             row = res.fetchone()
@@ -1323,14 +1449,7 @@ class Worker:
         """Count only RUNNING tasks for this worker (excludes CLAIMED)."""
         async with self.sf() as s:
             res = await s.execute(
-                text(
-                    """
-                    SELECT COUNT(*)
-                    FROM horsies_tasks
-                    WHERE claimed_by_worker_id = CAST(:wid AS VARCHAR)
-                      AND status = 'RUNNING'
-                    """
-                ),
+                COUNT_RUNNING_FOR_WORKER_SQL,
                 {'wid': self.worker_instance_id},
             )
             row = res.fetchone()
@@ -1340,14 +1459,7 @@ class Worker:
         """Count RUNNING + CLAIMED tasks for this worker (hard cap mode)."""
         async with self.sf() as s:
             res = await s.execute(
-                text(
-                    """
-                    SELECT COUNT(*)
-                    FROM horsies_tasks
-                    WHERE claimed_by_worker_id = CAST(:wid AS VARCHAR)
-                      AND status IN ('RUNNING', 'CLAIMED')
-                    """
-                ),
+                COUNT_IN_FLIGHT_FOR_WORKER_SQL,
                 {'wid': self.worker_instance_id},
             )
             row = res.fetchone()
@@ -1357,14 +1469,7 @@ class Worker:
         """Count RUNNING tasks in a given queue across the cluster."""
         async with self.sf() as s:
             res = await s.execute(
-                text(
-                    """
-                    SELECT COUNT(*)
-                    FROM horsies_tasks
-                    WHERE status = 'RUNNING'
-                      AND queue_name = :q
-                    """
-                ),
+                COUNT_RUNNING_IN_QUEUE_SQL,
                 {'q': queue_name},
             )
             row = res.fetchone()
@@ -1459,14 +1564,7 @@ class Worker:
 
                 # worker-level failure (rare): mark FAILED with reason
                 await s.execute(
-                    text("""
-                        UPDATE horsies_tasks
-                        SET status='FAILED',
-                            failed_at = :now,
-                            failed_reason = :reason,
-                            updated_at = :now
-                        WHERE id = :id
-                    """),
+                    MARK_TASK_FAILED_WORKER_SQL,
                     {
                         'now': now,
                         'reason': failed_reason or 'Worker failure',
@@ -1498,26 +1596,12 @@ class Worker:
 
                 # Mark as failed if no retry
                 await s.execute(
-                    text("""
-                        UPDATE horsies_tasks
-                        SET status='FAILED',
-                            failed_at = :now,
-                            result = :result_json,     -- or result_json JSONB if you add that column
-                            updated_at = :now
-                        WHERE id = :id
-                    """),
+                    MARK_TASK_FAILED_SQL,
                     {'now': now, 'result_json': result_json_str, 'id': task_id},
                 )
             else:
                 await s.execute(
-                    text("""
-                        UPDATE horsies_tasks
-                        SET status='COMPLETED',
-                            completed_at = :now,
-                            result = :result_json,     -- or result_json JSONB
-                            updated_at = :now
-                        WHERE id = :id
-                    """),
+                    MARK_TASK_COMPLETED_SQL,
                     {'now': now, 'result_json': result_json_str, 'id': task_id},
                 )
 
@@ -1529,17 +1613,17 @@ class Worker:
                 # Notify workers globally and on the specific queue to wake claims
                 # Fetch queue name for this task
                 resq = await s.execute(
-                    text('SELECT queue_name FROM horsies_tasks WHERE id = :id'),
+                    GET_TASK_QUEUE_NAME_SQL,
                     {'id': task_id},
                 )
                 rowq = resq.fetchone()
                 qname = str(rowq[0]) if rowq and rowq[0] else 'default'
                 payload = f'capacity:{task_id}'
                 await s.execute(
-                    text('SELECT pg_notify(:c1, :p)'), {'c1': 'task_new', 'p': payload}
+                    NOTIFY_TASK_NEW_SQL, {'c1': 'task_new', 'p': payload}
                 )
                 await s.execute(
-                    text('SELECT pg_notify(:c2, :p)'),
+                    NOTIFY_TASK_QUEUE_SQL,
                     {'c2': f'task_queue_{qname}', 'p': payload},
                 )
             except Exception:
@@ -1565,7 +1649,7 @@ class Worker:
 
         # Quick check: is this task linked to a workflow?
         check = await session.execute(
-            text('SELECT 1 FROM horsies_workflow_tasks WHERE task_id = :tid LIMIT 1'),
+            CHECK_WORKFLOW_TASK_EXISTS_SQL,
             {'tid': task_id},
         )
 
@@ -1580,9 +1664,7 @@ class Worker:
         """Check if a task should be retried based on its configuration and current retry count."""
         async with self.sf() as s:
             result = await s.execute(
-                text(
-                    'SELECT retry_count, max_retries, task_options FROM horsies_tasks WHERE id = :id'
-                ),
+                GET_TASK_RETRY_INFO_SQL,
                 {'id': task_id},
             )
             row = result.fetchone()
@@ -1639,7 +1721,7 @@ class Worker:
         """Schedule a task for retry by updating its status and next retry time."""
         # Get current retry configuration
         result = await session.execute(
-            text('SELECT retry_count, task_options FROM horsies_tasks WHERE id = :id'),
+            GET_TASK_RETRY_CONFIG_SQL,
             {'id': task_id},
         )
         row = result.fetchone()
@@ -1667,15 +1749,7 @@ class Worker:
 
         # Update task for retry
         await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'PENDING',
-                    retry_count = :retry_count,
-                    next_retry_at = :next_retry_at,
-                    sent_at = :next_retry_at,
-                    updated_at = now()
-                WHERE id = :id
-            """),
+            SCHEDULE_TASK_RETRY_SQL,
             {'id': task_id, 'retry_count': retry_count, 'next_retry_at': next_retry_at},
         )
 
@@ -1733,7 +1807,7 @@ class Worker:
             # Send notification to trigger retry processing
             async with self.sf() as session:
                 await session.execute(
-                    text('SELECT pg_notify(:channel, :payload)'),
+                    NOTIFY_DELAYED_SQL,
                     {'channel': channel, 'payload': payload},
                 )
                 await session.commit()
@@ -1748,7 +1822,7 @@ class Worker:
         """Fetch the queue_name for a given task id."""
         async with self.sf() as session:
             res = await session.execute(
-                text('SELECT queue_name FROM horsies_tasks WHERE id = :id'),
+                GET_TASK_QUEUE_NAME_SQL,
                 {'id': task_id},
             )
             row = res.fetchone()
@@ -1768,14 +1842,7 @@ class Worker:
                 try:
                     async with self.sf() as s:
                         await s.execute(
-                            text(
-                                """
-                                INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid)
-                                SELECT id, CAST(:wid AS VARCHAR), 'claimer', NOW(), :host, :pid
-                                FROM horsies_tasks
-                                WHERE status = 'CLAIMED' AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
-                                """
-                            ),
+                            INSERT_CLAIMER_HEARTBEAT_SQL,
                             {
                                 'wid': self.worker_instance_id,
                                 'host': socket.gethostname(),
@@ -1817,21 +1884,7 @@ class Worker:
 
             async with self.sf() as s:
                 await s.execute(
-                    text("""
-                        INSERT INTO horsies_worker_states (
-                            worker_id, snapshot_at, hostname, pid,
-                            processes, max_claim_batch, max_claim_per_worker,
-                            cluster_wide_cap, queues, queue_priorities, queue_max_concurrency,
-                            recovery_config, tasks_running, tasks_claimed,
-                            memory_usage_mb, memory_percent, cpu_percent,
-                            worker_started_at
-                        )
-                        VALUES (
-                            :wid, NOW(), :host, :pid, :procs, :mcb, :mcpw, :cwc,
-                            :queues, :qp, :qmc, :recovery, :running, :claimed,
-                            :mem_mb, :mem_pct, :cpu_pct, :started
-                        )
-                    """),
+                    INSERT_WORKER_STATE_SQL,
                     {
                         'wid': self.worker_instance_id,
                         'host': socket.gethostname(),

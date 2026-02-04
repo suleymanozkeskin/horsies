@@ -29,6 +29,120 @@ logger = get_logger('workflow.recovery')
 _WF_TASK_TERMINAL_VALUES: list[str] = [s.value for s in WORKFLOW_TASK_TERMINAL_STATES]
 
 
+GET_PENDING_WITH_TERMINAL_DEPS_SQL = text("""
+    SELECT wt.workflow_id, wt.task_index, wt.dependencies, wt.allow_failed_deps
+    FROM horsies_workflow_tasks wt
+    JOIN horsies_workflows w ON w.id = wt.workflow_id
+    WHERE wt.status = 'PENDING'
+      AND w.status = 'RUNNING'
+      AND NOT EXISTS (
+          SELECT 1 FROM horsies_workflow_tasks dep
+          WHERE dep.workflow_id = wt.workflow_id
+            AND dep.task_index = ANY(wt.dependencies)
+            AND NOT (dep.status = ANY(:wf_task_terminal_states))
+      )
+""")
+
+COUNT_FAILED_DEPS_SQL = text("""
+    SELECT COUNT(*) FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id
+      AND task_index = ANY(:deps)
+      AND status IN ('FAILED', 'SKIPPED')
+""")
+
+SKIP_PENDING_TASK_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET status = 'SKIPPED'
+    WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'PENDING'
+""")
+
+MARK_PENDING_READY_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET status = 'READY'
+    WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'PENDING'
+""")
+
+GET_READY_NOT_ENQUEUED_SQL = text("""
+    SELECT wt.workflow_id, wt.task_index, wt.dependencies
+    FROM horsies_workflow_tasks wt
+    JOIN horsies_workflows w ON w.id = wt.workflow_id
+    WHERE wt.status = 'READY'
+      AND wt.task_id IS NULL
+      AND wt.is_subworkflow = FALSE
+      AND w.status = 'RUNNING'
+""")
+
+GET_READY_SUBWORKFLOWS_NOT_STARTED_SQL = text("""
+    SELECT wt.workflow_id, wt.task_index, wt.dependencies, w.depth, w.root_workflow_id
+    FROM horsies_workflow_tasks wt
+    JOIN horsies_workflows w ON w.id = wt.workflow_id
+    WHERE wt.status = 'READY'
+      AND wt.is_subworkflow = TRUE
+      AND wt.sub_workflow_id IS NULL
+      AND w.status = 'RUNNING'
+""")
+
+RESET_SUBWORKFLOW_TO_PENDING_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET status = 'PENDING'
+    WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'READY'
+""")
+
+GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL = text("""
+    SELECT child.id, child.parent_workflow_id, child.parent_task_index, child.status
+    FROM horsies_workflows child
+    JOIN horsies_workflows parent ON parent.id = child.parent_workflow_id
+    JOIN horsies_workflow_tasks wt ON wt.workflow_id = parent.id AND wt.task_index = child.parent_task_index
+    WHERE child.status IN ('COMPLETED', 'FAILED')
+      AND wt.status = 'RUNNING'
+      AND parent.status = 'RUNNING'
+""")
+
+GET_CRASHED_WORKER_TASKS_SQL = text("""
+    SELECT wt.workflow_id, wt.task_index, wt.task_id,
+           UPPER(t.status) as task_status, t.result as task_result
+    FROM horsies_workflow_tasks wt
+    JOIN horsies_tasks t ON t.id = wt.task_id
+    JOIN horsies_workflows w ON w.id = wt.workflow_id
+    WHERE NOT (wt.status = ANY(:wf_task_terminal_states))
+      AND wt.task_id IS NOT NULL
+      AND wt.is_subworkflow = FALSE
+      AND w.status = 'RUNNING'
+      AND UPPER(t.status) IN ('COMPLETED', 'FAILED', 'CANCELLED')
+""")
+
+GET_TERMINAL_WORKFLOW_CANDIDATES_SQL = text("""
+    SELECT w.id, w.error, w.success_policy,
+           COUNT(*) FILTER (WHERE wt.status = 'FAILED') as failed_count
+    FROM horsies_workflows w
+    LEFT JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
+    WHERE w.status = 'RUNNING'
+      AND NOT EXISTS (
+          SELECT 1 FROM horsies_workflow_tasks wt2
+          WHERE wt2.workflow_id = w.id
+            AND NOT (wt2.status = ANY(:wf_task_terminal_states))
+      )
+    GROUP BY w.id, w.error, w.success_policy
+""")
+
+MARK_WORKFLOW_COMPLETED_SQL = text("""
+    UPDATE horsies_workflows
+    SET status = 'COMPLETED', result = :result, completed_at = NOW(), updated_at = NOW()
+    WHERE id = :wf_id AND status = 'RUNNING'
+""")
+
+MARK_WORKFLOW_FAILED_SQL = text("""
+    UPDATE horsies_workflows
+    SET status = 'FAILED', result = :result, error = :error,
+        completed_at = NOW(), updated_at = NOW()
+    WHERE id = :wf_id AND status = 'RUNNING'
+""")
+
+NOTIFY_WORKFLOW_DONE_SQL = text("""
+    SELECT pg_notify('workflow_done', :wf_id)
+""")
+
+
 async def recover_stuck_workflows(
     session: 'AsyncSession',
     broker: 'PostgresBroker | None' = None,
@@ -56,19 +170,7 @@ async def recover_stuck_workflows(
     # This happens when multiple dependencies complete concurrently and the PENDING→READY
     # transition is missed due to timing
     pending_ready = await session.execute(
-        text("""
-            SELECT wt.workflow_id, wt.task_index, wt.dependencies, wt.allow_failed_deps
-            FROM horsies_workflow_tasks wt
-            JOIN horsies_workflows w ON w.id = wt.workflow_id
-            WHERE wt.status = 'PENDING'
-              AND w.status = 'RUNNING'
-              AND NOT EXISTS (
-                  SELECT 1 FROM horsies_workflow_tasks dep
-                  WHERE dep.workflow_id = wt.workflow_id
-                    AND dep.task_index = ANY(wt.dependencies)
-                    AND NOT (dep.status = ANY(:wf_task_terminal_states))
-              )
-        """),
+        GET_PENDING_WITH_TERMINAL_DEPS_SQL,
         {'wf_task_terminal_states': _WF_TASK_TERMINAL_VALUES},
     )
 
@@ -83,12 +185,7 @@ async def recover_stuck_workflows(
 
         # Check if any dependency failed/skipped
         failed_check = await session.execute(
-            text("""
-                SELECT COUNT(*) FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id
-                  AND task_index = ANY(:deps)
-                  AND status IN ('FAILED', 'SKIPPED')
-            """),
+            COUNT_FAILED_DEPS_SQL,
             {'wf_id': workflow_id, 'deps': dependencies},
         )
         failed_count = failed_check.scalar() or 0
@@ -96,11 +193,7 @@ async def recover_stuck_workflows(
         if failed_count > 0 and not allow_failed_deps:
             # Skip this task (propagate failure)
             await session.execute(
-                text("""
-                    UPDATE horsies_workflow_tasks
-                    SET status = 'SKIPPED'
-                    WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'PENDING'
-                """),
+                SKIP_PENDING_TASK_SQL,
                 {'wf_id': workflow_id, 'idx': task_index},
             )
             logger.info(
@@ -111,11 +204,7 @@ async def recover_stuck_workflows(
         else:
             # Mark READY and enqueue
             await session.execute(
-                text("""
-                    UPDATE horsies_workflow_tasks
-                    SET status = 'READY'
-                    WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'PENDING'
-                """),
+                MARK_PENDING_READY_SQL,
                 {'wf_id': workflow_id, 'idx': task_index},
             )
             dep_results: dict[
@@ -137,17 +226,7 @@ async def recover_stuck_workflows(
     # Case 1: READY tasks not enqueued (task_id is NULL but status is READY)
     # This happens if worker crashed after marking READY but before creating task
     # Excludes SubWorkflowNodes (handled separately)
-    ready_not_enqueued = await session.execute(
-        text("""
-            SELECT wt.workflow_id, wt.task_index, wt.dependencies
-            FROM horsies_workflow_tasks wt
-            JOIN horsies_workflows w ON w.id = wt.workflow_id
-            WHERE wt.status = 'READY'
-              AND wt.task_id IS NULL
-              AND wt.is_subworkflow = FALSE
-              AND w.status = 'RUNNING'
-        """)
-    )
+    ready_not_enqueued = await session.execute(GET_READY_NOT_ENQUEUED_SQL)
 
     for row in ready_not_enqueued.fetchall():
         workflow_id = row[0]
@@ -177,17 +256,7 @@ async def recover_stuck_workflows(
     # Case 1.5: READY SubWorkflowNodes not started (sub_workflow_id is NULL)
     # This happens if worker crashed after marking READY but before starting child workflow
     # NOTE: This requires broker to start the child workflow, so we just mark them for retry
-    ready_subworkflows = await session.execute(
-        text("""
-            SELECT wt.workflow_id, wt.task_index, wt.dependencies, w.depth, w.root_workflow_id
-            FROM horsies_workflow_tasks wt
-            JOIN horsies_workflows w ON w.id = wt.workflow_id
-            WHERE wt.status = 'READY'
-              AND wt.is_subworkflow = TRUE
-              AND wt.sub_workflow_id IS NULL
-              AND w.status = 'RUNNING'
-        """)
-    )
+    ready_subworkflows = await session.execute(GET_READY_SUBWORKFLOWS_NOT_STARTED_SQL)
 
     for row in ready_subworkflows.fetchall():
         workflow_id = row[0]
@@ -218,11 +287,7 @@ async def recover_stuck_workflows(
         else:
             # Reset to PENDING so a future evaluation can start it
             await session.execute(
-                text("""
-                    UPDATE horsies_workflow_tasks
-                    SET status = 'PENDING'
-                    WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'READY'
-                """),
+                RESET_SUBWORKFLOW_TO_PENDING_SQL,
                 {'wf_id': workflow_id, 'idx': task_index},
             )
             logger.info(
@@ -233,17 +298,7 @@ async def recover_stuck_workflows(
 
     # Case 1.6: Child workflows completed but parent node not updated
     # This happens if the _on_subworkflow_complete callback failed or was interrupted
-    completed_children = await session.execute(
-        text("""
-            SELECT child.id, child.parent_workflow_id, child.parent_task_index, child.status
-            FROM horsies_workflows child
-            JOIN horsies_workflows parent ON parent.id = child.parent_workflow_id
-            JOIN horsies_workflow_tasks wt ON wt.workflow_id = parent.id AND wt.task_index = child.parent_task_index
-            WHERE child.status IN ('COMPLETED', 'FAILED')
-              AND wt.status = 'RUNNING'
-              AND parent.status = 'RUNNING'
-        """)
-    )
+    completed_children = await session.execute(GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL)
 
     for row in completed_children.fetchall():
         child_id = row[0]
@@ -267,18 +322,7 @@ async def recover_stuck_workflows(
     # - on_workflow_task_complete() was never called (worker died)
     # - workflow_tasks row stays RUNNING/ENQUEUED indefinitely
     crashed_worker_tasks = await session.execute(
-        text("""
-            SELECT wt.workflow_id, wt.task_index, wt.task_id,
-                   UPPER(t.status) as task_status, t.result as task_result
-            FROM horsies_workflow_tasks wt
-            JOIN horsies_tasks t ON t.id = wt.task_id
-            JOIN horsies_workflows w ON w.id = wt.workflow_id
-            WHERE NOT (wt.status = ANY(:wf_task_terminal_states))
-              AND wt.task_id IS NOT NULL
-              AND wt.is_subworkflow = FALSE
-              AND w.status = 'RUNNING'
-              AND UPPER(t.status) IN ('COMPLETED', 'FAILED', 'CANCELLED')
-        """),
+        GET_CRASHED_WORKER_TASKS_SQL,
         {'wf_task_terminal_states': _WF_TASK_TERMINAL_VALUES},
     )
 
@@ -338,19 +382,7 @@ async def recover_stuck_workflows(
     # This handles both completed and failed workflows, respecting success_policy.
     # This happens if worker crashed after completing last task but before updating workflow
     terminal_candidates = await session.execute(
-        text("""
-            SELECT w.id, w.error, w.success_policy,
-                   COUNT(*) FILTER (WHERE wt.status = 'FAILED') as failed_count
-            FROM horsies_workflows w
-            LEFT JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
-            WHERE w.status = 'RUNNING'
-              AND NOT EXISTS (
-                  SELECT 1 FROM horsies_workflow_tasks wt2
-                  WHERE wt2.workflow_id = w.id
-                    AND NOT (wt2.status = ANY(:wf_task_terminal_states))
-              )
-            GROUP BY w.id, w.error, w.success_policy
-        """),
+        GET_TERMINAL_WORKFLOW_CANDIDATES_SQL,
         {'wf_task_terminal_states': _WF_TASK_TERMINAL_VALUES},
     )
 
@@ -377,11 +409,7 @@ async def recover_stuck_workflows(
 
         if workflow_succeeded:
             await session.execute(
-                text("""
-                    UPDATE horsies_workflows
-                    SET status = 'COMPLETED', result = :result, completed_at = NOW(), updated_at = NOW()
-                    WHERE id = :wf_id AND status = 'RUNNING'
-                """),
+                MARK_WORKFLOW_COMPLETED_SQL,
                 {'wf_id': workflow_id, 'result': final_result},
             )
             logger.info(f'Recovered stuck COMPLETED workflow: {workflow_id}')
@@ -394,24 +422,29 @@ async def recover_stuck_workflows(
                 )
 
             await session.execute(
-                text("""
-                    UPDATE horsies_workflows
-                    SET status = 'FAILED', result = :result, error = :error,
-                        completed_at = NOW(), updated_at = NOW()
-                    WHERE id = :wf_id AND status = 'RUNNING'
-                """),
+                MARK_WORKFLOW_FAILED_SQL,
                 {'wf_id': workflow_id, 'result': final_result, 'error': error_payload},
             )
             logger.info(f'Recovered stuck FAILED workflow: {workflow_id}')
 
         # Send NOTIFY for workflow completion
         await session.execute(
-            text("SELECT pg_notify('workflow_done', :wf_id)"),
+            NOTIFY_WORKFLOW_DONE_SQL,
             {'wf_id': workflow_id},
         )
         recovered += 1
 
     return recovered
+
+
+GET_FIRST_FAILED_TASK_RESULT_SQL = text("""
+    SELECT result
+    FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id
+      AND status = 'FAILED'
+    ORDER BY task_index ASC
+    LIMIT 1
+""")
 
 
 async def _get_first_failed_task_error(
@@ -427,14 +460,7 @@ async def _get_first_failed_task_error(
     from horsies.core.codec.serde import dumps_json
 
     result = await session.execute(
-        text("""
-            SELECT result
-            FROM horsies_workflow_tasks
-            WHERE workflow_id = :wf_id
-              AND status = 'FAILED'
-            ORDER BY task_index ASC
-            LIMIT 1
-        """),
+        GET_FIRST_FAILED_TASK_RESULT_SQL,
         {'wf_id': workflow_id},
     )
 
@@ -447,6 +473,15 @@ async def _get_first_failed_task_error(
         return dumps_json(task_result.err)
 
     return None
+
+
+GET_DEPENDENCY_RESULTS_SQL = text("""
+    SELECT task_index, status, result
+    FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id
+      AND task_index = ANY(:indices)
+      AND status = ANY(:wf_task_terminal_states)
+""")
 
 
 async def _get_dependency_results(
@@ -466,13 +501,7 @@ async def _get_dependency_results(
         return {}
 
     result = await session.execute(
-        text("""
-            SELECT task_index, status, result
-            FROM horsies_workflow_tasks
-            WHERE workflow_id = :wf_id
-              AND task_index = ANY(:indices)
-              AND status = ANY(:wf_task_terminal_states)
-        """),
+        GET_DEPENDENCY_RESULTS_SQL,
         {
             'wf_id': workflow_id,
             'indices': dependency_indices,

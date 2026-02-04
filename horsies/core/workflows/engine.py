@@ -51,6 +51,46 @@ def _as_str_list(value: object) -> list[str]:
     return str_items
 
 
+# -- SQL constants for start_workflow_async --
+
+CHECK_WORKFLOW_EXISTS_SQL = text("""SELECT id FROM horsies_workflows WHERE id = :wf_id""")
+
+INSERT_WORKFLOW_SQL = text("""
+    INSERT INTO horsies_workflows (id, name, status, on_error, output_task_index,
+                             success_policy, workflow_def_module, workflow_def_qualname,
+                             depth, root_workflow_id,
+                             created_at, started_at, updated_at)
+    VALUES (:id, :name, 'RUNNING', :on_error, :output_idx,
+            :success_policy, :wf_module, :wf_qualname,
+            0, :id,
+            NOW(), NOW(), NOW())
+""")
+
+INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL = text("""
+    INSERT INTO horsies_workflow_tasks
+    (id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+     queue_name, priority, dependencies, args_from, workflow_ctx_from,
+     allow_failed_deps, join_type, min_success, task_options, status,
+     is_subworkflow, sub_workflow_name, sub_workflow_retry_mode,
+     sub_workflow_module, sub_workflow_qualname, created_at)
+    VALUES (:id, :wf_id, :idx, :node_id, :name, :args, :kwargs, :queue, :priority,
+            :deps, :args_from, :ctx_from, :allow_failed, :join_type, :min_success,
+            :task_options, :status, TRUE, :sub_wf_name, :sub_wf_retry_mode,
+            :sub_wf_module, :sub_wf_qualname, NOW())
+""")
+
+INSERT_WORKFLOW_TASK_SQL = text("""
+    INSERT INTO horsies_workflow_tasks
+    (id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+     queue_name, priority, dependencies, args_from, workflow_ctx_from,
+     allow_failed_deps, join_type, min_success, task_options, status,
+     is_subworkflow, created_at)
+    VALUES (:id, :wf_id, :idx, :node_id, :name, :args, :kwargs, :queue, :priority,
+            :deps, :args_from, :ctx_from, :allow_failed, :join_type, :min_success,
+            :task_options, :status, FALSE, NOW())
+""")
+
+
 async def start_workflow_async(
     spec: 'WorkflowSpec',
     broker: 'PostgresBroker',
@@ -106,7 +146,7 @@ async def start_workflow_async(
         # Check if workflow already exists (idempotent start)
         if workflow_id:
             existing = await session.execute(
-                text('SELECT id FROM horsies_workflows WHERE id = :wf_id'),
+                CHECK_WORKFLOW_EXISTS_SQL,
                 {'wf_id': wf_id},
             )
             if existing.fetchone():
@@ -137,16 +177,7 @@ async def start_workflow_async(
                 ]
 
         await session.execute(
-            text("""
-                INSERT INTO horsies_workflows (id, name, status, on_error, output_task_index,
-                                       success_policy, workflow_def_module, workflow_def_qualname,
-                                       depth, root_workflow_id,
-                                       created_at, started_at, updated_at)
-                VALUES (:id, :name, 'RUNNING', :on_error, :output_idx,
-                        :success_policy, :wf_module, :wf_qualname,
-                        0, :id,
-                        NOW(), NOW(), NOW())
-            """),
+            INSERT_WORKFLOW_SQL,
             {
                 'id': wf_id,
                 'name': spec.name,
@@ -177,18 +208,7 @@ async def start_workflow_async(
             if isinstance(node, SubWorkflowNode):
                 # SubWorkflowNode: no fn, queue, priority, good_until
                 await session.execute(
-                    text("""
-                        INSERT INTO horsies_workflow_tasks
-                        (id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
-                         queue_name, priority, dependencies, args_from, workflow_ctx_from,
-                         allow_failed_deps, join_type, min_success, task_options, status,
-                         is_subworkflow, sub_workflow_name, sub_workflow_retry_mode,
-                         sub_workflow_module, sub_workflow_qualname, created_at)
-                        VALUES (:id, :wf_id, :idx, :node_id, :name, :args, :kwargs, :queue, :priority,
-                                :deps, :args_from, :ctx_from, :allow_failed, :join_type, :min_success,
-                                :task_options, :status, TRUE, :sub_wf_name, :sub_wf_retry_mode,
-                                :sub_wf_module, :sub_wf_qualname, NOW())
-                    """),
+                    INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL,
                     {
                         'id': wt_id,
                         'wf_id': wf_id,
@@ -235,16 +255,7 @@ async def start_workflow_async(
                     task_options_json = dumps_json(base_options)
 
                 await session.execute(
-                    text("""
-                        INSERT INTO horsies_workflow_tasks
-                        (id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
-                         queue_name, priority, dependencies, args_from, workflow_ctx_from,
-                         allow_failed_deps, join_type, min_success, task_options, status,
-                         is_subworkflow, created_at)
-                        VALUES (:id, :wf_id, :idx, :node_id, :name, :args, :kwargs, :queue, :priority,
-                                :deps, :args_from, :ctx_from, :allow_failed, :join_type, :min_success,
-                                :task_options, :status, FALSE, NOW())
-                    """),
+                    INSERT_WORKFLOW_TASK_SQL,
                     {
                         'id': wt_id,
                         'wf_id': wf_id,
@@ -317,6 +328,18 @@ def start_workflow(
         runner.stop()
 
 
+# -- SQL constants for pause_workflow --
+
+PAUSE_WORKFLOW_SQL = text("""
+    UPDATE horsies_workflows
+    SET status = 'PAUSED', updated_at = NOW()
+    WHERE id = :wf_id AND status = 'RUNNING'
+    RETURNING id
+""")
+
+NOTIFY_WORKFLOW_DONE_SQL = text("""SELECT pg_notify('workflow_done', :wf_id)""")
+
+
 async def pause_workflow(
     broker: 'PostgresBroker',
     workflow_id: str,
@@ -343,12 +366,7 @@ async def pause_workflow(
     """
     async with broker.session_factory() as session:
         result = await session.execute(
-            text("""
-                UPDATE horsies_workflows
-                SET status = 'PAUSED', updated_at = NOW()
-                WHERE id = :wf_id AND status = 'RUNNING'
-                RETURNING id
-            """),
+            PAUSE_WORKFLOW_SQL,
             {'wf_id': workflow_id},
         )
         row = result.fetchone()
@@ -360,12 +378,26 @@ async def pause_workflow(
 
         # Notify clients of pause (so get() returns immediately with WORKFLOW_PAUSED)
         await session.execute(
-            text("SELECT pg_notify('workflow_done', :wf_id)"),
+            NOTIFY_WORKFLOW_DONE_SQL,
             {'wf_id': workflow_id},
         )
 
         await session.commit()
         return True
+
+
+# -- SQL constants for _cascade_pause_to_children --
+
+GET_RUNNING_CHILD_WORKFLOWS_SQL = text("""
+    SELECT id FROM horsies_workflows
+    WHERE parent_workflow_id = :wf_id AND status = 'RUNNING'
+""")
+
+PAUSE_CHILD_WORKFLOW_SQL = text("""
+    UPDATE horsies_workflows
+    SET status = 'PAUSED', updated_at = NOW()
+    WHERE id = :wf_id AND status = 'RUNNING'
+""")
 
 
 async def _cascade_pause_to_children(
@@ -383,10 +415,7 @@ async def _cascade_pause_to_children(
 
         # Find running child workflows
         children = await session.execute(
-            text("""
-                SELECT id FROM horsies_workflows
-                WHERE parent_workflow_id = :wf_id AND status = 'RUNNING'
-            """),
+            GET_RUNNING_CHILD_WORKFLOWS_SQL,
             {'wf_id': current_id},
         )
 
@@ -395,17 +424,13 @@ async def _cascade_pause_to_children(
 
             # Pause child
             await session.execute(
-                text("""
-                    UPDATE horsies_workflows
-                    SET status = 'PAUSED', updated_at = NOW()
-                    WHERE id = :wf_id AND status = 'RUNNING'
-                """),
+                PAUSE_CHILD_WORKFLOW_SQL,
                 {'wf_id': child_id},
             )
 
             # Notify of child pause
             await session.execute(
-                text("SELECT pg_notify('workflow_done', :wf_id)"),
+                NOTIFY_WORKFLOW_DONE_SQL,
                 {'wf_id': child_id},
             )
 
@@ -438,6 +463,26 @@ def pause_workflow_sync(
         runner.stop()
 
 
+# -- SQL constants for resume_workflow --
+
+RESUME_WORKFLOW_SQL = text("""
+    UPDATE horsies_workflows
+    SET status = 'RUNNING', updated_at = NOW()
+    WHERE id = :wf_id AND status = 'PAUSED'
+    RETURNING id, depth, root_workflow_id
+""")
+
+GET_PENDING_WORKFLOW_TASKS_SQL = text("""
+    SELECT task_index FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id AND status = 'PENDING'
+""")
+
+GET_READY_WORKFLOW_TASKS_SQL = text("""
+    SELECT task_index, dependencies, is_subworkflow FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id AND status = 'READY'
+""")
+
+
 async def resume_workflow(
     broker: 'PostgresBroker',
     workflow_id: str,
@@ -460,12 +505,7 @@ async def resume_workflow(
     async with broker.session_factory() as session:
         # 1. Transition PAUSED → RUNNING (only if currently PAUSED)
         result = await session.execute(
-            text("""
-                UPDATE horsies_workflows
-                SET status = 'RUNNING', updated_at = NOW()
-                WHERE id = :wf_id AND status = 'PAUSED'
-                RETURNING id, depth, root_workflow_id
-            """),
+            RESUME_WORKFLOW_SQL,
             {'wf_id': workflow_id},
         )
         row = result.fetchone()
@@ -478,10 +518,7 @@ async def resume_workflow(
 
         # 2. Find all PENDING tasks and try to make them READY
         pending_result = await session.execute(
-            text("""
-                SELECT task_index FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND status = 'PENDING'
-            """),
+            GET_PENDING_WORKFLOW_TASKS_SQL,
             {'wf_id': workflow_id},
         )
         pending_indices = [r[0] for r in pending_result.fetchall()]
@@ -495,10 +532,7 @@ async def resume_workflow(
         # (These may be tasks that were READY at pause time, or tasks that
         # couldn't be enqueued during step 2 due to failed deps check)
         ready_result = await session.execute(
-            text("""
-                SELECT task_index, dependencies, is_subworkflow FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND status = 'READY'
-            """),
+            GET_READY_WORKFLOW_TASKS_SQL,
             {'wf_id': workflow_id},
         )
         ready_tasks = ready_result.fetchall()
@@ -534,6 +568,20 @@ async def resume_workflow(
         return True
 
 
+# -- SQL constants for _cascade_resume_to_children --
+
+GET_PAUSED_CHILD_WORKFLOWS_SQL = text("""
+    SELECT id, depth, root_workflow_id FROM horsies_workflows
+    WHERE parent_workflow_id = :wf_id AND status = 'PAUSED'
+""")
+
+RESUME_CHILD_WORKFLOW_SQL = text("""
+    UPDATE horsies_workflows
+    SET status = 'RUNNING', updated_at = NOW()
+    WHERE id = :wf_id AND status = 'PAUSED'
+""")
+
+
 async def _cascade_resume_to_children(
     session: AsyncSession,
     broker: 'PostgresBroker',
@@ -550,10 +598,7 @@ async def _cascade_resume_to_children(
 
         # Find paused child workflows
         children = await session.execute(
-            text("""
-                SELECT id, depth, root_workflow_id FROM horsies_workflows
-                WHERE parent_workflow_id = :wf_id AND status = 'PAUSED'
-            """),
+            GET_PAUSED_CHILD_WORKFLOWS_SQL,
             {'wf_id': current_id},
         )
 
@@ -564,20 +609,13 @@ async def _cascade_resume_to_children(
 
             # Resume child
             await session.execute(
-                text("""
-                    UPDATE horsies_workflows
-                    SET status = 'RUNNING', updated_at = NOW()
-                    WHERE id = :wf_id AND status = 'PAUSED'
-                """),
+                RESUME_CHILD_WORKFLOW_SQL,
                 {'wf_id': child_id},
             )
 
             # Re-evaluate and enqueue child's PENDING/READY tasks
             child_pending = await session.execute(
-                text("""
-                    SELECT task_index FROM horsies_workflow_tasks
-                    WHERE workflow_id = :wf_id AND status = 'PENDING'
-                """),
+                GET_PENDING_WORKFLOW_TASKS_SQL,
                 {'wf_id': child_id},
             )
             for pending_row in child_pending.fetchall():
@@ -586,10 +624,7 @@ async def _cascade_resume_to_children(
                 )
 
             child_ready = await session.execute(
-                text("""
-                    SELECT task_index, dependencies, is_subworkflow FROM horsies_workflow_tasks
-                    WHERE workflow_id = :wf_id AND status = 'READY'
-                """),
+                GET_READY_WORKFLOW_TASKS_SQL,
                 {'wf_id': child_id},
             )
             for ready_row in child_ready.fetchall():
@@ -643,6 +678,34 @@ def resume_workflow_sync(
         runner.stop()
 
 
+# -- SQL constants for _enqueue_workflow_task --
+
+ENQUEUE_WORKFLOW_TASK_SQL = text("""
+    UPDATE horsies_workflow_tasks wt
+    SET status = 'ENQUEUED', started_at = NOW()
+    FROM horsies_workflows w
+    WHERE wt.workflow_id = :wf_id
+      AND wt.task_index = :idx
+      AND wt.status = 'READY'
+      AND w.id = wt.workflow_id
+      AND w.status = 'RUNNING'
+    RETURNING wt.id, wt.task_name, wt.task_args, wt.task_kwargs, wt.queue_name, wt.priority,
+              wt.args_from, wt.workflow_ctx_from, wt.task_options
+""")
+
+INSERT_TASK_FOR_WORKFLOW_SQL = text("""
+    INSERT INTO horsies_tasks (id, task_name, queue_name, priority, args, kwargs, status,
+                       sent_at, created_at, updated_at, claimed, retry_count, max_retries,
+                       task_options, good_until)
+    VALUES (:id, :name, :queue, :priority, :args, :kwargs, 'PENDING',
+            NOW(), NOW(), NOW(), FALSE, 0, :max_retries, :task_options, :good_until)
+""")
+
+LINK_WORKFLOW_TASK_SQL = text("""
+    UPDATE horsies_workflow_tasks SET task_id = :tid WHERE workflow_id = :wf_id AND task_index = :idx
+""")
+
+
 async def _enqueue_workflow_task(
     session: AsyncSession,
     workflow_id: str,
@@ -664,18 +727,7 @@ async def _enqueue_workflow_task(
     # Atomic: READY → ENQUEUED only if still READY AND workflow is RUNNING
     # PAUSE guard: JOIN with workflows ensures we don't enqueue while paused
     result = await session.execute(
-        text("""
-            UPDATE horsies_workflow_tasks wt
-            SET status = 'ENQUEUED', started_at = NOW()
-            FROM horsies_workflows w
-            WHERE wt.workflow_id = :wf_id
-              AND wt.task_index = :idx
-              AND wt.status = 'READY'
-              AND w.id = wt.workflow_id
-              AND w.status = 'RUNNING'
-            RETURNING wt.id, wt.task_name, wt.task_args, wt.task_kwargs, wt.queue_name, wt.priority,
-                      wt.args_from, wt.workflow_ctx_from, wt.task_options
-        """),
+        ENQUEUE_WORKFLOW_TASK_SQL,
         {'wf_id': workflow_id, 'idx': task_index},
     )
 
@@ -742,13 +794,7 @@ async def _enqueue_workflow_task(
     # Create actual task in tasks table
     task_id = str(uuid.uuid4())
     await session.execute(
-        text("""
-            INSERT INTO horsies_tasks (id, task_name, queue_name, priority, args, kwargs, status,
-                               sent_at, created_at, updated_at, claimed, retry_count, max_retries,
-                               task_options, good_until)
-            VALUES (:id, :name, :queue, :priority, :args, :kwargs, 'PENDING',
-                    NOW(), NOW(), NOW(), FALSE, 0, :max_retries, :task_options, :good_until)
-        """),
+        INSERT_TASK_FOR_WORKFLOW_SQL,
         {
             'id': task_id,
             'name': row[1],  # task_name
@@ -764,13 +810,55 @@ async def _enqueue_workflow_task(
 
     # Link workflow_task to actual task
     await session.execute(
-        text("""
-            UPDATE horsies_workflow_tasks SET task_id = :tid WHERE workflow_id = :wf_id AND task_index = :idx
-        """),
+        LINK_WORKFLOW_TASK_SQL,
         {'tid': task_id, 'wf_id': workflow_id, 'idx': task_index},
     )
 
     return task_id
+
+
+# -- SQL constants for _enqueue_subworkflow_task --
+
+ENQUEUE_SUBWORKFLOW_TASK_SQL = text("""
+    UPDATE horsies_workflow_tasks wt
+    SET status = 'ENQUEUED', started_at = NOW()
+    FROM horsies_workflows w
+    WHERE wt.workflow_id = :wf_id
+      AND wt.task_index = :idx
+      AND wt.status = 'READY'
+      AND wt.is_subworkflow = TRUE
+      AND w.id = wt.workflow_id
+      AND w.status = 'RUNNING'
+    RETURNING wt.id, wt.sub_workflow_name, wt.task_args, wt.task_kwargs,
+              wt.args_from, wt.node_id, wt.sub_workflow_module,
+              wt.sub_workflow_qualname, wt.sub_workflow_retry_mode
+""")
+
+GET_WORKFLOW_NAME_SQL = text("""SELECT name FROM horsies_workflows WHERE id = :wf_id""")
+
+MARK_WORKFLOW_TASK_FAILED_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET status = 'FAILED', result = :result, completed_at = NOW()
+    WHERE workflow_id = :wf_id AND task_index = :idx
+""")
+
+INSERT_CHILD_WORKFLOW_SQL = text("""
+    INSERT INTO horsies_workflows
+    (id, name, status, on_error, output_task_index, success_policy,
+     workflow_def_module, workflow_def_qualname,
+     parent_workflow_id, parent_task_index, depth, root_workflow_id,
+     created_at, started_at, updated_at)
+    VALUES (:id, :name, 'RUNNING', :on_error, :output_idx, :success_policy,
+            :wf_module, :wf_qualname,
+            :parent_wf_id, :parent_idx, :depth, :root_wf_id,
+            NOW(), NOW(), NOW())
+""")
+
+LINK_SUB_WORKFLOW_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET sub_workflow_id = :child_id, status = 'RUNNING'
+    WHERE workflow_id = :wf_id AND task_index = :idx
+""")
 
 
 async def _enqueue_subworkflow_task(
@@ -799,20 +887,7 @@ async def _enqueue_subworkflow_task(
     """
     # 1. Atomically mark parent node as ENQUEUED (with workflow RUNNING guard)
     result = await session.execute(
-        text("""
-            UPDATE horsies_workflow_tasks wt
-            SET status = 'ENQUEUED', started_at = NOW()
-            FROM horsies_workflows w
-            WHERE wt.workflow_id = :wf_id
-              AND wt.task_index = :idx
-              AND wt.status = 'READY'
-              AND wt.is_subworkflow = TRUE
-              AND w.id = wt.workflow_id
-              AND w.status = 'RUNNING'
-            RETURNING wt.id, wt.sub_workflow_name, wt.task_args, wt.task_kwargs,
-                      wt.args_from, wt.node_id, wt.sub_workflow_module,
-                      wt.sub_workflow_qualname, wt.sub_workflow_retry_mode
-        """),
+        ENQUEUE_SUBWORKFLOW_TASK_SQL,
         {'wf_id': workflow_id, 'idx': task_index},
     )
 
@@ -840,7 +915,7 @@ async def _enqueue_subworkflow_task(
     # Fallback import path (sub_workflow_module/qualname stored in DB) handles
     # the common case where registry is empty.
     workflow_name_result = await session.execute(
-        text('SELECT name FROM horsies_workflows WHERE id = :wf_id'),
+        GET_WORKFLOW_NAME_SQL,
         {'wf_id': workflow_id},
     )
     workflow_name_row = workflow_name_result.fetchone()
@@ -875,11 +950,7 @@ async def _enqueue_subworkflow_task(
             data={'module': sub_workflow_module, 'qualname': sub_workflow_qualname},
         )
         await session.execute(
-            text("""
-                UPDATE horsies_workflow_tasks
-                SET status = 'FAILED', result = :result, completed_at = NOW()
-                WHERE workflow_id = :wf_id AND task_index = :idx
-            """),
+            MARK_WORKFLOW_TASK_FAILED_SQL,
             {
                 'wf_id': workflow_id,
                 'idx': task_index,
@@ -964,17 +1035,7 @@ async def _enqueue_subworkflow_task(
     child_output_index = child_spec.output.index if child_spec.output else None
 
     await session.execute(
-        text("""
-            INSERT INTO horsies_workflows
-            (id, name, status, on_error, output_task_index, success_policy,
-             workflow_def_module, workflow_def_qualname,
-             parent_workflow_id, parent_task_index, depth, root_workflow_id,
-             created_at, started_at, updated_at)
-            VALUES (:id, :name, 'RUNNING', :on_error, :output_idx, :success_policy,
-                    :wf_module, :wf_qualname,
-                    :parent_wf_id, :parent_idx, :depth, :root_wf_id,
-                    NOW(), NOW(), NOW())
-        """),
+        INSERT_CHILD_WORKFLOW_SQL,
         {
             'id': child_id,
             'name': child_spec.name,
@@ -1012,18 +1073,7 @@ async def _enqueue_subworkflow_task(
         if child_is_subworkflow:
             child_sub = child_node
             await session.execute(
-                text("""
-                    INSERT INTO horsies_workflow_tasks
-                    (id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
-                     queue_name, priority, dependencies, args_from, workflow_ctx_from,
-                     allow_failed_deps, join_type, min_success, task_options, status,
-                     is_subworkflow, sub_workflow_name, sub_workflow_retry_mode,
-                     sub_workflow_module, sub_workflow_qualname, created_at)
-                    VALUES (:id, :wf_id, :idx, :node_id, :name, :args, :kwargs, :queue, :priority,
-                            :deps, :args_from, :ctx_from, :allow_failed, :join_type, :min_success,
-                            :task_options, :status, TRUE, :sub_wf_name, :sub_wf_retry_mode,
-                            :sub_wf_module, :sub_wf_qualname, NOW())
-                """),
+                INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL,
                 {
                     'id': child_wt_id,
                     'wf_id': child_id,
@@ -1065,16 +1115,7 @@ async def _enqueue_subworkflow_task(
                 child_task_options_json = dumps_json(child_base_options)
 
             await session.execute(
-                text("""
-                    INSERT INTO horsies_workflow_tasks
-                    (id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
-                     queue_name, priority, dependencies, args_from, workflow_ctx_from,
-                     allow_failed_deps, join_type, min_success, task_options, status,
-                     is_subworkflow, created_at)
-                    VALUES (:id, :wf_id, :idx, :node_id, :name, :args, :kwargs, :queue, :priority,
-                            :deps, :args_from, :ctx_from, :allow_failed, :join_type, :min_success,
-                            :task_options, :status, FALSE, NOW())
-                """),
+                INSERT_WORKFLOW_TASK_SQL,
                 {
                     'id': child_wt_id,
                     'wf_id': child_id,
@@ -1104,11 +1145,7 @@ async def _enqueue_subworkflow_task(
 
     # 7. Update parent's workflow_task with child_workflow_id and mark RUNNING
     await session.execute(
-        text("""
-            UPDATE horsies_workflow_tasks
-            SET sub_workflow_id = :child_id, status = 'RUNNING'
-            WHERE workflow_id = :wf_id AND task_index = :idx
-        """),
+        LINK_SUB_WORKFLOW_SQL,
         {'child_id': child_id, 'wf_id': workflow_id, 'idx': task_index},
     )
 
@@ -1131,6 +1168,18 @@ async def _enqueue_subworkflow_task(
 
     logger.info(f'Started child workflow {child_id} for {workflow_name}:{task_index}')
     return child_id
+
+
+# -- SQL constants for _build_workflow_context_data --
+
+GET_SUBWORKFLOW_SUMMARIES_SQL = text("""
+    SELECT node_id, sub_workflow_summary
+    FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id
+      AND node_id = ANY(:node_ids)
+      AND is_subworkflow = TRUE
+      AND sub_workflow_summary IS NOT NULL
+""")
 
 
 async def _build_workflow_context_data(
@@ -1162,14 +1211,7 @@ async def _build_workflow_context_data(
     summaries_by_id: dict[str, str] = {}
     if ctx_from_ids:
         summary_result = await session.execute(
-            text("""
-                SELECT node_id, sub_workflow_summary
-                FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id
-                  AND node_id = ANY(:node_ids)
-                  AND is_subworkflow = TRUE
-                  AND sub_workflow_summary IS NOT NULL
-            """),
+            GET_SUBWORKFLOW_SUMMARIES_SQL,
             {'wf_id': workflow_id, 'node_ids': ctx_from_ids},
         )
         for row in summary_result.fetchall():
@@ -1187,6 +1229,23 @@ async def _build_workflow_context_data(
     }
 
 
+# -- SQL constants for on_workflow_task_complete --
+
+GET_WORKFLOW_TASK_BY_TASK_ID_SQL = text("""
+    SELECT workflow_id, task_index
+    FROM horsies_workflow_tasks
+    WHERE task_id = :tid
+""")
+
+UPDATE_WORKFLOW_TASK_RESULT_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET status = :status, result = :result, completed_at = NOW()
+    WHERE workflow_id = :wf_id AND task_index = :idx
+""")
+
+GET_WORKFLOW_STATUS_SQL = text("""SELECT status FROM horsies_workflows WHERE id = :wf_id""")
+
+
 async def on_workflow_task_complete(
     session: AsyncSession,
     task_id: str,
@@ -1199,11 +1258,7 @@ async def on_workflow_task_complete(
     """
     # 1. Find workflow_task by task_id
     wt_result = await session.execute(
-        text("""
-            SELECT workflow_id, task_index
-            FROM horsies_workflow_tasks
-            WHERE task_id = :tid
-        """),
+        GET_WORKFLOW_TASK_BY_TASK_ID_SQL,
         {'tid': task_id},
     )
 
@@ -1217,11 +1272,7 @@ async def on_workflow_task_complete(
     # 2. Update workflow_task status and store result
     new_status = 'COMPLETED' if result.is_ok() else 'FAILED'
     await session.execute(
-        text("""
-            UPDATE horsies_workflow_tasks
-            SET status = :status, result = :result, completed_at = NOW()
-            WHERE workflow_id = :wf_id AND task_index = :idx
-        """),
+        UPDATE_WORKFLOW_TASK_RESULT_SQL,
         {
             'status': new_status,
             'result': dumps_json(result),
@@ -1241,7 +1292,7 @@ async def on_workflow_task_complete(
 
     # 4. Check if workflow is PAUSED (may have been paused by another task)
     status_check = await session.execute(
-        text('SELECT status FROM horsies_workflows WHERE id = :wf_id'),
+        GET_WORKFLOW_STATUS_SQL,
         {'wf_id': workflow_id},
     )
     status_row = status_check.fetchone()
@@ -1253,6 +1304,18 @@ async def on_workflow_task_complete(
 
     # 6. Check if workflow is complete
     await _check_workflow_completion(session, workflow_id, broker)
+
+
+# -- SQL constants for _process_dependents --
+
+GET_DEPENDENT_TASKS_SQL = text("""
+    SELECT task_index FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id
+      AND :completed_idx = ANY(dependencies)
+      AND status = 'PENDING'
+""")
+
+GET_WORKFLOW_DEPTH_SQL = text("""SELECT depth, root_workflow_id FROM horsies_workflows WHERE id = :wf_id""")
 
 
 async def _process_dependents(
@@ -1272,18 +1335,13 @@ async def _process_dependents(
     """
     # Find tasks that have completed_task_index in their dependencies
     dependents = await session.execute(
-        text("""
-            SELECT task_index FROM horsies_workflow_tasks
-            WHERE workflow_id = :wf_id
-              AND :completed_idx = ANY(dependencies)
-              AND status = 'PENDING'
-        """),
+        GET_DEPENDENT_TASKS_SQL,
         {'wf_id': workflow_id, 'completed_idx': completed_task_index},
     )
 
     # Get workflow depth and root for subworkflow support
     wf_info = await session.execute(
-        text('SELECT depth, root_workflow_id FROM horsies_workflows WHERE id = :wf_id'),
+        GET_WORKFLOW_DEPTH_SQL,
         {'wf_id': workflow_id},
     )
     wf_row = wf_info.fetchone()
@@ -1294,6 +1352,53 @@ async def _process_dependents(
         await _try_make_ready_and_enqueue(
             session, broker, workflow_id, row[0], depth, root_wf_id
         )
+
+
+# -- SQL constants for _try_make_ready_and_enqueue --
+
+GET_TASK_CONFIG_SQL = text("""
+    SELECT wt.status, wt.dependencies, wt.allow_failed_deps,
+           wt.join_type, wt.min_success, wt.workflow_ctx_from,
+           wt.is_subworkflow,
+           w.status as wf_status
+    FROM horsies_workflow_tasks wt
+    JOIN horsies_workflows w ON w.id = wt.workflow_id
+    WHERE wt.workflow_id = :wf_id AND wt.task_index = :idx
+""")
+
+GET_DEP_STATUS_COUNTS_SQL = text("""
+    SELECT status, COUNT(*) as cnt
+    FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id AND task_index = ANY(:deps)
+    GROUP BY status
+""")
+
+SKIP_WORKFLOW_TASK_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET status = 'SKIPPED'
+    WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'PENDING'
+""")
+
+COUNT_CTX_TERMINAL_DEPS_SQL = text("""
+    SELECT COUNT(*) as cnt
+    FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id
+      AND node_id = ANY(:node_ids)
+      AND status = ANY(:wf_task_terminal_states)
+""")
+
+MARK_TASK_READY_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET status = 'READY'
+    WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'PENDING'
+    RETURNING task_index
+""")
+
+SKIP_READY_WORKFLOW_TASK_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET status = 'SKIPPED'
+    WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'READY'
+""")
 
 
 async def _try_make_ready_and_enqueue(
@@ -1327,15 +1432,7 @@ async def _try_make_ready_and_enqueue(
     """
     # 1. Fetch task configuration
     config_result = await session.execute(
-        text("""
-            SELECT wt.status, wt.dependencies, wt.allow_failed_deps,
-                   wt.join_type, wt.min_success, wt.workflow_ctx_from,
-                   wt.is_subworkflow,
-                   w.status as wf_status
-            FROM horsies_workflow_tasks wt
-            JOIN horsies_workflows w ON w.id = wt.workflow_id
-            WHERE wt.workflow_id = :wf_id AND wt.task_index = :idx
-        """),
+        GET_TASK_CONFIG_SQL,
         {'wf_id': workflow_id, 'idx': task_index},
     )
     config_row = config_result.fetchone()
@@ -1365,12 +1462,7 @@ async def _try_make_ready_and_enqueue(
 
     # 2. Get dependency status counts
     dep_status_result = await session.execute(
-        text("""
-            SELECT status, COUNT(*) as cnt
-            FROM horsies_workflow_tasks
-            WHERE workflow_id = :wf_id AND task_index = ANY(:deps)
-            GROUP BY status
-        """),
+        GET_DEP_STATUS_COUNTS_SQL,
         {'wf_id': workflow_id, 'deps': dependencies},
     )
     status_counts: dict[str, int] = {
@@ -1415,11 +1507,7 @@ async def _try_make_ready_and_enqueue(
     if should_skip:
         # Mark task as SKIPPED (impossible to meet join condition)
         await session.execute(
-            text("""
-                UPDATE horsies_workflow_tasks
-                SET status = 'SKIPPED'
-                WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'PENDING'
-            """),
+            SKIP_WORKFLOW_TASK_SQL,
             {'wf_id': workflow_id, 'idx': task_index},
         )
         # Propagate SKIPPED to dependents
@@ -1433,13 +1521,7 @@ async def _try_make_ready_and_enqueue(
     ctx_from_ids = _as_str_list(raw_ctx_from)
     if ctx_from_ids:
         ctx_terminal_result = await session.execute(
-            text("""
-                SELECT COUNT(*) as cnt
-                FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id
-                  AND node_id = ANY(:node_ids)
-                  AND status = ANY(:wf_task_terminal_states)
-            """),
+            COUNT_CTX_TERMINAL_DEPS_SQL,
             {
                 'wf_id': workflow_id,
                 'node_ids': ctx_from_ids,
@@ -1452,12 +1534,7 @@ async def _try_make_ready_and_enqueue(
 
     # 4. Mark task as READY
     ready_result = await session.execute(
-        text("""
-            UPDATE horsies_workflow_tasks
-            SET status = 'READY'
-            WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'PENDING'
-            RETURNING task_index
-        """),
+        MARK_TASK_READY_SQL,
         {'wf_id': workflow_id, 'idx': task_index},
     )
     if ready_result.fetchone() is None:
@@ -1469,11 +1546,7 @@ async def _try_make_ready_and_enqueue(
         failed_or_skipped = failed + skipped
         if failed_or_skipped > 0 and not allow_failed_deps:
             await session.execute(
-                text("""
-                    UPDATE horsies_workflow_tasks
-                    SET status = 'SKIPPED'
-                    WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'READY'
-                """),
+                SKIP_READY_WORKFLOW_TASK_SQL,
                 {'wf_id': workflow_id, 'idx': task_index},
             )
             await _process_dependents(session, workflow_id, task_index, broker)
@@ -1482,7 +1555,7 @@ async def _try_make_ready_and_enqueue(
     # 6. Evaluate conditions (run_when/skip_when) if set
     # Requires workflow name to look up TaskNode from registry
     workflow_name_result = await session.execute(
-        text('SELECT name FROM horsies_workflows WHERE id = :wf_id'),
+        GET_WORKFLOW_NAME_SQL,
         {'wf_id': workflow_id},
     )
     workflow_name_row = workflow_name_result.fetchone()
@@ -1494,11 +1567,7 @@ async def _try_make_ready_and_enqueue(
         )
         if should_skip_condition:
             await session.execute(
-                text("""
-                    UPDATE horsies_workflow_tasks
-                    SET status = 'SKIPPED'
-                    WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'READY'
-                """),
+                SKIP_READY_WORKFLOW_TASK_SQL,
                 {'wf_id': workflow_id, 'idx': task_index},
             )
             await _process_dependents(session, workflow_id, task_index, broker)
@@ -1516,6 +1585,15 @@ async def _try_make_ready_and_enqueue(
     else:
         # Regular TaskNode: enqueue as task
         await _enqueue_workflow_task(session, workflow_id, task_index, dep_results)
+
+
+# -- SQL constants for _evaluate_conditions --
+
+GET_WORKFLOW_DEF_PATH_SQL = text("""
+    SELECT workflow_def_module, workflow_def_qualname
+    FROM horsies_workflows
+    WHERE id = :wf_id
+""")
 
 
 async def _evaluate_conditions(
@@ -1543,11 +1621,7 @@ async def _evaluate_conditions(
     if node is None:
         # Try to load workflow definition by import path (Option B.1)
         def_result = await session.execute(
-            text("""
-                SELECT workflow_def_module, workflow_def_qualname
-                FROM horsies_workflows
-                WHERE id = :wf_id
-            """),
+            GET_WORKFLOW_DEF_PATH_SQL,
             {'wf_id': workflow_id},
         )
         def_row = def_result.fetchone()
@@ -1592,14 +1666,7 @@ async def _evaluate_conditions(
     summaries_by_id: dict[str, SubWorkflowSummary[Any]] = {}
     if ctx_from_ids:
         summary_result = await session.execute(
-            text("""
-                SELECT node_id, sub_workflow_summary
-                FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id
-                  AND node_id = ANY(:node_ids)
-                  AND is_subworkflow = TRUE
-                  AND sub_workflow_summary IS NOT NULL
-            """),
+            GET_SUBWORKFLOW_SUMMARIES_SQL,
             {'wf_id': workflow_id, 'node_ids': ctx_from_ids},
         )
         for row in summary_result.fetchall():
@@ -1648,6 +1715,17 @@ class DependencyResults:
         self.by_id: dict[str, 'TaskResult[Any, TaskError]'] = {}
 
 
+# -- SQL constants for _get_dependency_results --
+
+GET_DEPENDENCY_RESULTS_SQL = text("""
+    SELECT task_index, status, result
+    FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id
+      AND task_index = ANY(:indices)
+      AND status = ANY(:wf_task_terminal_states)
+""")
+
+
 async def _get_dependency_results(
     session: AsyncSession,
     workflow_id: str,
@@ -1665,13 +1743,7 @@ async def _get_dependency_results(
         return {}
 
     result = await session.execute(
-        text("""
-            SELECT task_index, status, result
-            FROM horsies_workflow_tasks
-            WHERE workflow_id = :wf_id
-              AND task_index = ANY(:indices)
-              AND status = ANY(:wf_task_terminal_states)
-        """),
+        GET_DEPENDENCY_RESULTS_SQL,
         {
             'wf_id': workflow_id,
             'indices': dependency_indices,
@@ -1700,6 +1772,17 @@ async def _get_dependency_results(
     return results
 
 
+# -- SQL constants for _get_dependency_results_with_names --
+
+GET_DEPENDENCY_RESULTS_WITH_NAMES_SQL = text("""
+    SELECT task_index, task_name, node_id, status, result
+    FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id
+      AND node_id = ANY(:node_ids)
+      AND status = ANY(:wf_task_terminal_states)
+""")
+
+
 async def _get_dependency_results_with_names(
     session: AsyncSession,
     workflow_id: str,
@@ -1720,13 +1803,7 @@ async def _get_dependency_results_with_names(
         return dep_results
 
     result = await session.execute(
-        text("""
-            SELECT task_index, task_name, node_id, status, result
-            FROM horsies_workflow_tasks
-            WHERE workflow_id = :wf_id
-              AND node_id = ANY(:node_ids)
-              AND status = ANY(:wf_task_terminal_states)
-        """),
+        GET_DEPENDENCY_RESULTS_WITH_NAMES_SQL,
         {
             'wf_id': workflow_id,
             'node_ids': dependency_node_ids,
@@ -1765,6 +1842,45 @@ async def _get_dependency_results_with_names(
     return dep_results
 
 
+# -- SQL constants for _check_workflow_completion --
+
+GET_WORKFLOW_COMPLETION_STATUS_SQL = text("""
+    SELECT
+        w.status,
+        w.completed_at,
+        w.error,
+        w.success_policy,
+        w.name,
+        COUNT(*) FILTER (WHERE NOT (wt.status = ANY(:wf_task_terminal_states))) as incomplete,
+        COUNT(*) FILTER (WHERE wt.status = 'FAILED') as failed,
+        COUNT(*) FILTER (WHERE wt.status = 'COMPLETED') as completed,
+        COUNT(*) as total
+    FROM horsies_workflows w
+    LEFT JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
+    WHERE w.id = :wf_id
+    GROUP BY w.id, w.status, w.completed_at, w.error, w.success_policy, w.name
+""")
+
+MARK_WORKFLOW_COMPLETED_SQL = text("""
+    UPDATE horsies_workflows
+    SET status = 'COMPLETED', result = :result, completed_at = NOW(), updated_at = NOW()
+    WHERE id = :wf_id AND completed_at IS NULL
+""")
+
+MARK_WORKFLOW_FAILED_SQL = text("""
+    UPDATE horsies_workflows
+    SET status = 'FAILED', result = :result,
+        error = COALESCE(:error, error),
+        completed_at = NOW(), updated_at = NOW()
+    WHERE id = :wf_id AND completed_at IS NULL
+""")
+
+GET_PARENT_WORKFLOW_INFO_SQL = text("""
+    SELECT parent_workflow_id, parent_task_index
+    FROM horsies_workflows WHERE id = :wf_id
+""")
+
+
 async def _check_workflow_completion(
     session: AsyncSession,
     workflow_id: str,
@@ -1778,22 +1894,7 @@ async def _check_workflow_completion(
     """
     # Get current workflow status, error, success_policy, and task counts
     result = await session.execute(
-        text("""
-            SELECT
-                w.status,
-                w.completed_at,
-                w.error,
-                w.success_policy,
-                w.name,
-                COUNT(*) FILTER (WHERE NOT (wt.status = ANY(:wf_task_terminal_states))) as incomplete,
-                COUNT(*) FILTER (WHERE wt.status = 'FAILED') as failed,
-                COUNT(*) FILTER (WHERE wt.status = 'COMPLETED') as completed,
-                COUNT(*) as total
-            FROM horsies_workflows w
-            LEFT JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
-            WHERE w.id = :wf_id
-            GROUP BY w.id, w.status, w.completed_at, w.error, w.success_policy, w.name
-        """),
+        GET_WORKFLOW_COMPLETION_STATUS_SQL,
         {
             'wf_id': workflow_id,
             'wf_task_terminal_states': _WF_TASK_TERMINAL_VALUES,
@@ -1834,11 +1935,7 @@ async def _check_workflow_completion(
 
     if workflow_succeeded:
         await session.execute(
-            text("""
-                UPDATE horsies_workflows
-                SET status = 'COMPLETED', result = :result, completed_at = NOW(), updated_at = NOW()
-                WHERE id = :wf_id AND completed_at IS NULL
-            """),
+            MARK_WORKFLOW_COMPLETED_SQL,
             {'wf_id': workflow_id, 'result': final_result},
         )
         logger.info(
@@ -1856,13 +1953,7 @@ async def _check_workflow_completion(
             )
 
         await session.execute(
-            text("""
-                UPDATE horsies_workflows
-                SET status = 'FAILED', result = :result,
-                    error = COALESCE(:error, error),
-                    completed_at = NOW(), updated_at = NOW()
-                WHERE id = :wf_id AND completed_at IS NULL
-            """),
+            MARK_WORKFLOW_FAILED_SQL,
             {'wf_id': workflow_id, 'result': final_result, 'error': error_json},
         )
         logger.info(
@@ -1872,22 +1963,38 @@ async def _check_workflow_completion(
 
     # Send NOTIFY for workflow completion
     await session.execute(
-        text("SELECT pg_notify('workflow_done', :wf_id)"),
+        NOTIFY_WORKFLOW_DONE_SQL,
         {'wf_id': workflow_id},
     )
 
     # If this is a child workflow, notify parent
     parent_result = await session.execute(
-        text("""
-            SELECT parent_workflow_id, parent_task_index
-            FROM horsies_workflows WHERE id = :wf_id
-        """),
+        GET_PARENT_WORKFLOW_INFO_SQL,
         {'wf_id': workflow_id},
     )
     parent_row = parent_result.fetchone()
     if parent_row and parent_row[0] is not None:
         # This is a child workflow - notify parent
         await _on_subworkflow_complete(session, workflow_id, broker)
+
+
+# -- SQL constants for _on_subworkflow_complete --
+
+GET_CHILD_WORKFLOW_INFO_SQL = text("""
+    SELECT w.status, w.result, w.error, w.parent_workflow_id, w.parent_task_index,
+           (SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = w.id) as total,
+           (SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = w.id AND status = 'COMPLETED') as completed,
+           (SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = w.id AND status = 'FAILED') as failed,
+           (SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = w.id AND status = 'SKIPPED') as skipped
+    FROM horsies_workflows w
+    WHERE w.id = :child_id
+""")
+
+UPDATE_PARENT_NODE_RESULT_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET status = :status, result = :result, sub_workflow_summary = :summary, completed_at = NOW()
+    WHERE workflow_id = :wf_id AND task_index = :idx
+""")
 
 
 async def _on_subworkflow_complete(
@@ -1903,15 +2010,7 @@ async def _on_subworkflow_complete(
 
     # 1. Get child workflow info and task counts
     child_result = await session.execute(
-        text("""
-            SELECT w.status, w.result, w.error, w.parent_workflow_id, w.parent_task_index,
-                   (SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = w.id) as total,
-                   (SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = w.id AND status = 'COMPLETED') as completed,
-                   (SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = w.id AND status = 'FAILED') as failed,
-                   (SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = w.id AND status = 'SKIPPED') as skipped
-            FROM horsies_workflows w
-            WHERE w.id = :child_id
-        """),
+        GET_CHILD_WORKFLOW_INFO_SQL,
         {'child_id': child_workflow_id},
     )
 
@@ -1984,11 +2083,7 @@ async def _on_subworkflow_complete(
 
     # 4. Update parent node
     await session.execute(
-        text("""
-            UPDATE horsies_workflow_tasks
-            SET status = :status, result = :result, sub_workflow_summary = :summary, completed_at = NOW()
-            WHERE workflow_id = :wf_id AND task_index = :idx
-        """),
+        UPDATE_PARENT_NODE_RESULT_SQL,
         {
             'status': parent_node_status,
             'result': parent_node_result,
@@ -2018,7 +2113,7 @@ async def _on_subworkflow_complete(
 
     # 6. Check if parent workflow is PAUSED
     parent_status_check = await session.execute(
-        text('SELECT status FROM horsies_workflows WHERE id = :wf_id'),
+        GET_WORKFLOW_STATUS_SQL,
         {'wf_id': parent_wf_id},
     )
     parent_status_row = parent_status_check.fetchone()
@@ -2030,6 +2125,15 @@ async def _on_subworkflow_complete(
 
     # 8. Check parent completion
     await _check_workflow_completion(session, parent_wf_id, broker)
+
+
+# -- SQL constants for _evaluate_workflow_success --
+
+GET_TASK_STATUSES_SQL = text("""
+    SELECT task_index, status
+    FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id
+""")
 
 
 async def _evaluate_workflow_success(
@@ -2058,11 +2162,7 @@ async def _evaluate_workflow_success(
 
     # Build status map by task_index
     result = await session.execute(
-        text("""
-            SELECT task_index, status
-            FROM horsies_workflow_tasks
-            WHERE workflow_id = :wf_id
-        """),
+        GET_TASK_STATUSES_SQL,
         {'wf_id': workflow_id},
     )
 
@@ -2090,6 +2190,23 @@ async def _evaluate_workflow_success(
     return False
 
 
+# -- SQL constants for _get_workflow_failure_error --
+
+GET_FIRST_FAILED_TASK_RESULT_SQL = text("""
+    SELECT result FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id AND status = 'FAILED'
+    ORDER BY task_index ASC LIMIT 1
+""")
+
+GET_FIRST_FAILED_REQUIRED_TASK_SQL = text("""
+    SELECT result FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id
+      AND status = 'FAILED'
+      AND task_index = ANY(:required)
+    ORDER BY task_index ASC LIMIT 1
+""")
+
+
 async def _get_workflow_failure_error(
     session: AsyncSession,
     workflow_id: str,
@@ -2106,11 +2223,7 @@ async def _get_workflow_failure_error(
     if success_policy_data is None:
         # Default: get first failed task's error
         result = await session.execute(
-            text("""
-                SELECT result FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND status = 'FAILED'
-                ORDER BY task_index ASC LIMIT 1
-            """),
+            GET_FIRST_FAILED_TASK_RESULT_SQL,
             {'wf_id': workflow_id},
         )
         row = result.fetchone()
@@ -2136,13 +2249,7 @@ async def _get_workflow_failure_error(
     if all_required:
         # Get first failed required task
         result = await session.execute(
-            text("""
-                SELECT result FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id
-                  AND status = 'FAILED'
-                  AND task_index = ANY(:required)
-                ORDER BY task_index ASC LIMIT 1
-            """),
+            GET_FIRST_FAILED_REQUIRED_TASK_SQL,
             {'wf_id': workflow_id, 'required': list(all_required)},
         )
         row = result.fetchone()
@@ -2160,6 +2267,27 @@ async def _get_workflow_failure_error(
     )
 
 
+# -- SQL constants for _get_workflow_final_result --
+
+GET_WORKFLOW_OUTPUT_INDEX_SQL = text("""SELECT output_task_index FROM horsies_workflows WHERE id = :wf_id""")
+
+GET_OUTPUT_TASK_RESULT_SQL = text("""
+    SELECT result FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id AND task_index = :idx
+""")
+
+GET_TERMINAL_TASK_RESULTS_SQL = text("""
+    SELECT wt.node_id, wt.task_index, wt.result
+    FROM horsies_workflow_tasks wt
+    WHERE wt.workflow_id = :wf_id
+      AND NOT EXISTS (
+          SELECT 1 FROM horsies_workflow_tasks other
+          WHERE other.workflow_id = wt.workflow_id
+            AND wt.task_index = ANY(other.dependencies)
+      )
+""")
+
+
 async def _get_workflow_final_result(
     session: AsyncSession,
     workflow_id: str,
@@ -2172,7 +2300,7 @@ async def _get_workflow_final_result(
     """
     # Check for explicit output task
     wf_result = await session.execute(
-        text('SELECT output_task_index FROM horsies_workflows WHERE id = :wf_id'),
+        GET_WORKFLOW_OUTPUT_INDEX_SQL,
         {'wf_id': workflow_id},
     )
     wf_row = wf_result.fetchone()
@@ -2180,10 +2308,7 @@ async def _get_workflow_final_result(
     if wf_row and wf_row[0] is not None:
         # Return explicit output task's result
         output_result = await session.execute(
-            text("""
-                SELECT result FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = :idx
-            """),
+            GET_OUTPUT_TASK_RESULT_SQL,
             {'wf_id': workflow_id, 'idx': wf_row[0]},
         )
         output_row = output_result.fetchone()
@@ -2191,16 +2316,7 @@ async def _get_workflow_final_result(
 
     # Find terminal tasks (not in any other task's dependencies)
     terminal_results = await session.execute(
-        text("""
-            SELECT wt.node_id, wt.task_index, wt.result
-            FROM horsies_workflow_tasks wt
-            WHERE wt.workflow_id = :wf_id
-              AND NOT EXISTS (
-                  SELECT 1 FROM horsies_workflow_tasks other
-                  WHERE other.workflow_id = wt.workflow_id
-                    AND wt.task_index = ANY(other.dependencies)
-              )
-        """),
+        GET_TERMINAL_TASK_RESULTS_SQL,
         {'wf_id': workflow_id},
     )
 
@@ -2225,6 +2341,23 @@ async def _get_workflow_final_result(
     return dumps_json(wrapped_result)
 
 
+# -- SQL constants for _handle_workflow_task_failure --
+
+GET_WORKFLOW_ON_ERROR_SQL = text("""SELECT on_error FROM horsies_workflows WHERE id = :wf_id""")
+
+SET_WORKFLOW_ERROR_SQL = text("""
+    UPDATE horsies_workflows
+    SET error = :error, updated_at = NOW()
+    WHERE id = :wf_id AND status = 'RUNNING'
+""")
+
+PAUSE_WORKFLOW_ON_ERROR_SQL = text("""
+    UPDATE horsies_workflows
+    SET status = 'PAUSED', error = :error, updated_at = NOW()
+    WHERE id = :wf_id AND status = 'RUNNING'
+""")
+
+
 async def _handle_workflow_task_failure(
     session: AsyncSession,
     workflow_id: str,
@@ -2241,7 +2374,7 @@ async def _handle_workflow_task_failure(
     """
     # Get workflow's on_error policy
     wf_result = await session.execute(
-        text('SELECT on_error FROM horsies_workflows WHERE id = :wf_id'),
+        GET_WORKFLOW_ON_ERROR_SQL,
         {'wf_id': workflow_id},
     )
 
@@ -2259,11 +2392,7 @@ async def _handle_workflow_task_failure(
         # This allows allow_failed_deps tasks to run and produce meaningful final result
         # Status will be set to FAILED in _check_workflow_completion when all tasks are terminal
         await session.execute(
-            text("""
-                UPDATE horsies_workflows
-                SET error = :error, updated_at = NOW()
-                WHERE id = :wf_id AND status = 'RUNNING'
-            """),
+            SET_WORKFLOW_ERROR_SQL,
             {'wf_id': workflow_id, 'error': error_payload},
         )
         return True  # Continue dependency propagation
@@ -2271,17 +2400,13 @@ async def _handle_workflow_task_failure(
     elif on_error == 'pause':
         # Pause workflow for manual intervention - STOP all processing
         await session.execute(
-            text("""
-                UPDATE horsies_workflows
-                SET status = 'PAUSED', error = :error, updated_at = NOW()
-                WHERE id = :wf_id AND status = 'RUNNING'
-            """),
+            PAUSE_WORKFLOW_ON_ERROR_SQL,
             {'wf_id': workflow_id, 'error': error_payload},
         )
 
         # Notify of pause (so clients can react via get())
         await session.execute(
-            text("SELECT pg_notify('workflow_done', :wf_id)"),
+            NOTIFY_WORKFLOW_DONE_SQL,
             {'wf_id': workflow_id},
         )
 

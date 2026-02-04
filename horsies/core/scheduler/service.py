@@ -21,6 +21,8 @@ from horsies.core.worker.worker import import_by_path
 
 logger = get_logger('scheduler')
 
+SCHEDULE_ADVISORY_LOCK_SQL = text("""SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))""")
+
 
 class Scheduler:
     """
@@ -257,7 +259,7 @@ class Scheduler:
         async with self.broker.session_factory() as session:
             # Acquire transaction-scoped advisory lock for this specific schedule
             await session.execute(
-                text('SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))'),
+                SCHEDULE_ADVISORY_LOCK_SQL,
                 {'key': lock_key},
             )
 

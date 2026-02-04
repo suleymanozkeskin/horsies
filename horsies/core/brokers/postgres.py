@@ -23,6 +23,286 @@ from horsies.core.logging import get_logger
 if TYPE_CHECKING:
     from horsies.core.models.tasks import TaskResult, TaskError
 
+# ---- Task notification trigger queries ----
+
+CREATE_TASK_NOTIFY_FUNCTION_SQL = text("""
+    CREATE OR REPLACE FUNCTION horsies_notify_task_changes()
+    RETURNS trigger AS $$
+    BEGIN
+        IF TG_OP = 'INSERT' AND NEW.status = 'PENDING' THEN
+            -- New task notifications: wake up workers
+            PERFORM pg_notify('task_new', NEW.id);  -- Global worker notification
+            PERFORM pg_notify('task_queue_' || NEW.queue_name, NEW.id);  -- Queue-specific notification
+        ELSIF TG_OP = 'UPDATE' AND OLD.status != NEW.status THEN
+            -- Task completion notifications: wake up result waiters
+            IF NEW.status IN ('COMPLETED', 'FAILED') THEN
+                PERFORM pg_notify('task_done', NEW.id);  -- Send task_id as payload
+            END IF;
+        END IF;
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+""")
+
+CREATE_TASK_NOTIFY_TRIGGER_SQL = text("""
+    DROP TRIGGER IF EXISTS horsies_task_notify_trigger ON horsies_tasks;
+    CREATE TRIGGER horsies_task_notify_trigger
+        AFTER INSERT OR UPDATE ON horsies_tasks
+        FOR EACH ROW
+        EXECUTE FUNCTION horsies_notify_task_changes();
+""")
+
+# ---- Workflow schema queries ----
+
+CREATE_WORKFLOW_TASKS_DEPS_INDEX_SQL = text("""
+    CREATE INDEX IF NOT EXISTS idx_horsies_workflow_tasks_deps
+    ON horsies_workflow_tasks USING GIN(dependencies);
+""")
+
+# Schema migration queries
+
+ADD_TASK_OPTIONS_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflow_tasks
+    ADD COLUMN IF NOT EXISTS task_options TEXT;
+""")
+
+ADD_SUCCESS_POLICY_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflows
+    ADD COLUMN IF NOT EXISTS success_policy JSONB;
+""")
+
+ADD_JOIN_TYPE_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflow_tasks
+    ADD COLUMN IF NOT EXISTS join_type VARCHAR(10) NOT NULL DEFAULT 'all';
+""")
+
+ADD_MIN_SUCCESS_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflow_tasks
+    ADD COLUMN IF NOT EXISTS min_success INTEGER;
+""")
+
+ADD_NODE_ID_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflow_tasks
+    ADD COLUMN IF NOT EXISTS node_id VARCHAR(128);
+""")
+
+ALTER_WORKFLOW_CTX_FROM_TYPE_SQL = text("""
+    ALTER TABLE horsies_workflow_tasks
+    ALTER COLUMN workflow_ctx_from
+    TYPE VARCHAR(128)[]
+    USING workflow_ctx_from::VARCHAR(128)[];
+""")
+
+ADD_PARENT_WORKFLOW_ID_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflows
+    ADD COLUMN IF NOT EXISTS parent_workflow_id VARCHAR(36);
+""")
+
+ADD_PARENT_TASK_INDEX_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflows
+    ADD COLUMN IF NOT EXISTS parent_task_index INTEGER;
+""")
+
+ADD_DEPTH_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflows
+    ADD COLUMN IF NOT EXISTS depth INTEGER NOT NULL DEFAULT 0;
+""")
+
+ADD_ROOT_WORKFLOW_ID_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflows
+    ADD COLUMN IF NOT EXISTS root_workflow_id VARCHAR(36);
+""")
+
+ADD_WORKFLOW_DEF_MODULE_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflows
+    ADD COLUMN IF NOT EXISTS workflow_def_module VARCHAR(512);
+""")
+
+ADD_WORKFLOW_DEF_QUALNAME_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflows
+    ADD COLUMN IF NOT EXISTS workflow_def_qualname VARCHAR(512);
+""")
+
+ADD_IS_SUBWORKFLOW_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflow_tasks
+    ADD COLUMN IF NOT EXISTS is_subworkflow BOOLEAN NOT NULL DEFAULT FALSE;
+""")
+
+ADD_SUB_WORKFLOW_ID_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflow_tasks
+    ADD COLUMN IF NOT EXISTS sub_workflow_id VARCHAR(36);
+""")
+
+ADD_SUB_WORKFLOW_NAME_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflow_tasks
+    ADD COLUMN IF NOT EXISTS sub_workflow_name VARCHAR(255);
+""")
+
+ADD_SUB_WORKFLOW_RETRY_MODE_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflow_tasks
+    ADD COLUMN IF NOT EXISTS sub_workflow_retry_mode VARCHAR(50);
+""")
+
+ADD_SUB_WORKFLOW_SUMMARY_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflow_tasks
+    ADD COLUMN IF NOT EXISTS sub_workflow_summary TEXT;
+""")
+
+ADD_SUB_WORKFLOW_MODULE_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflow_tasks
+    ADD COLUMN IF NOT EXISTS sub_workflow_module VARCHAR(512);
+""")
+
+ADD_SUB_WORKFLOW_QUALNAME_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflow_tasks
+    ADD COLUMN IF NOT EXISTS sub_workflow_qualname VARCHAR(512);
+""")
+
+CREATE_WORKFLOW_NOTIFY_FUNCTION_SQL = text("""
+    CREATE OR REPLACE FUNCTION horsies_notify_workflow_changes()
+    RETURNS trigger AS $$
+    BEGIN
+        IF TG_OP = 'UPDATE' AND OLD.status != NEW.status THEN
+            -- Workflow completion notifications
+            IF NEW.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'PAUSED') THEN
+                PERFORM pg_notify('workflow_done', NEW.id);
+            END IF;
+        END IF;
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+""")
+
+CREATE_WORKFLOW_NOTIFY_TRIGGER_SQL = text("""
+    DROP TRIGGER IF EXISTS horsies_workflow_notify_trigger ON horsies_workflows;
+    CREATE TRIGGER horsies_workflow_notify_trigger
+        AFTER UPDATE ON horsies_workflows
+        FOR EACH ROW
+        EXECUTE FUNCTION horsies_notify_workflow_changes();
+""")
+
+# ---- Schema initialization queries ----
+
+SCHEMA_ADVISORY_LOCK_SQL = text("""
+    SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
+""")
+
+# ---- Monitoring queries ----
+
+GET_STALE_TASKS_SQL = text("""
+    SELECT
+        t.id,
+        t.worker_hostname,
+        t.worker_pid,
+        t.worker_process_name,
+        hb.last_heartbeat,
+        t.started_at,
+        t.task_name
+    FROM horsies_tasks t
+    LEFT JOIN LATERAL (
+        SELECT sent_at AS last_heartbeat
+        FROM horsies_heartbeats h
+        WHERE h.task_id = t.id AND h.role = 'runner'
+        ORDER BY sent_at DESC
+        LIMIT 1
+    ) hb ON TRUE
+    WHERE t.status = 'RUNNING'
+      AND t.started_at IS NOT NULL
+      AND COALESCE(hb.last_heartbeat, t.started_at) < NOW() - CAST(:stale_threshold || ' minutes' AS INTERVAL)
+    ORDER BY hb.last_heartbeat NULLS FIRST
+""")
+
+GET_WORKER_STATS_SQL = text("""
+    SELECT
+        t.worker_hostname,
+        t.worker_pid,
+        t.worker_process_name,
+        COUNT(*) AS active_tasks,
+        MIN(t.started_at) AS oldest_task_start,
+        MAX(hb.last_heartbeat) AS latest_heartbeat
+    FROM horsies_tasks t
+    LEFT JOIN LATERAL (
+        SELECT sent_at AS last_heartbeat
+        FROM horsies_heartbeats h
+        WHERE h.task_id = t.id AND h.role = 'runner'
+        ORDER BY sent_at DESC
+        LIMIT 1
+    ) hb ON TRUE
+    WHERE t.status = 'RUNNING'
+      AND t.worker_hostname IS NOT NULL
+    GROUP BY t.worker_hostname, t.worker_pid, t.worker_process_name
+    ORDER BY active_tasks DESC
+""")
+
+GET_EXPIRED_TASKS_SQL = text("""
+    SELECT
+        id,
+        task_name,
+        queue_name,
+        priority,
+        sent_at,
+        good_until,
+        NOW() - good_until as expired_for
+    FROM horsies_tasks
+    WHERE status = 'PENDING'
+      AND good_until < NOW()
+    ORDER BY good_until ASC
+""")
+
+# ---- Cleanup queries ----
+
+SELECT_STALE_RUNNING_TASKS_SQL = text("""
+    SELECT t2.id, t2.worker_pid, t2.worker_hostname, t2.claimed_by_worker_id,
+           t2.started_at, hb.last_heartbeat
+    FROM horsies_tasks t2
+    LEFT JOIN LATERAL (
+        SELECT sent_at AS last_heartbeat
+        FROM horsies_heartbeats h
+        WHERE h.task_id = t2.id AND h.role = 'runner'
+        ORDER BY sent_at DESC
+        LIMIT 1
+    ) hb ON TRUE
+    WHERE t2.status = 'RUNNING'
+      AND t2.started_at IS NOT NULL
+      AND COALESCE(hb.last_heartbeat, t2.started_at) < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL)
+""")
+
+MARK_STALE_TASK_FAILED_SQL = text("""
+    UPDATE horsies_tasks
+    SET status = 'FAILED',
+        failed_at = NOW(),
+        failed_reason = :failed_reason,
+        result = :result,
+        updated_at = NOW()
+    WHERE id = :task_id
+""")
+
+REQUEUE_STALE_CLAIMED_SQL = text("""
+    UPDATE horsies_tasks AS t
+    SET status = 'PENDING',
+        claimed = FALSE,
+        claimed_at = NULL,
+        claimed_by_worker_id = NULL,
+        updated_at = NOW()
+    FROM (
+        SELECT t2.id, hb.last_heartbeat, t2.claimed_at
+        FROM horsies_tasks t2
+        LEFT JOIN LATERAL (
+            SELECT sent_at AS last_heartbeat
+            FROM horsies_heartbeats h
+            WHERE h.task_id = t2.id AND h.role = 'claimer'
+            ORDER BY sent_at DESC
+            LIMIT 1
+        ) hb ON TRUE
+        WHERE t2.status = 'CLAIMED'
+    ) s
+    WHERE t.id = s.id
+      AND (
+        (s.last_heartbeat IS NULL AND s.claimed_at IS NOT NULL AND s.claimed_at < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL))
+        OR (s.last_heartbeat IS NOT NULL AND s.last_heartbeat < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL))
+      )
+""")
+
 
 class PostgresBroker:
     """
@@ -93,37 +373,10 @@ class PostgresBroker:
         """
         async with self.async_engine.begin() as conn:
             # Create trigger function
-            await conn.execute(
-                text("""
-                CREATE OR REPLACE FUNCTION horsies_notify_task_changes()
-                RETURNS trigger AS $$
-                BEGIN
-                    IF TG_OP = 'INSERT' AND NEW.status = 'PENDING' THEN
-                        -- New task notifications: wake up workers
-                        PERFORM pg_notify('task_new', NEW.id);  -- Global worker notification
-                        PERFORM pg_notify('task_queue_' || NEW.queue_name, NEW.id);  -- Queue-specific notification
-                    ELSIF TG_OP = 'UPDATE' AND OLD.status != NEW.status THEN
-                        -- Task completion notifications: wake up result waiters
-                        IF NEW.status IN ('COMPLETED', 'FAILED') THEN
-                            PERFORM pg_notify('task_done', NEW.id);  -- Send task_id as payload
-                        END IF;
-                    END IF;
-                    RETURN NEW;
-                END;
-                $$ LANGUAGE plpgsql;
-            """)
-            )
+            await conn.execute(CREATE_TASK_NOTIFY_FUNCTION_SQL)
 
             # Create trigger
-            await conn.execute(
-                text("""
-                DROP TRIGGER IF EXISTS horsies_task_notify_trigger ON horsies_tasks;
-                CREATE TRIGGER horsies_task_notify_trigger
-                    AFTER INSERT OR UPDATE ON horsies_tasks
-                    FOR EACH ROW
-                    EXECUTE FUNCTION horsies_notify_task_changes();
-            """)
-            )
+            await conn.execute(CREATE_TASK_NOTIFY_TRIGGER_SQL)
 
     async def _create_workflow_schema(self) -> None:
         """
@@ -136,166 +389,41 @@ class PostgresBroker:
         """
         async with self.async_engine.begin() as conn:
             # GIN index for efficient dependency array lookups
-            await conn.execute(
-                text("""
-                CREATE INDEX IF NOT EXISTS idx_horsies_workflow_tasks_deps
-                ON horsies_workflow_tasks USING GIN(dependencies);
-            """)
-            )
+            await conn.execute(CREATE_WORKFLOW_TASKS_DEPS_INDEX_SQL)
 
             # Migration: add task_options column for existing installs
-            await conn.execute(
-                text("""
-                ALTER TABLE horsies_workflow_tasks
-                ADD COLUMN IF NOT EXISTS task_options TEXT;
-            """)
-            )
+            await conn.execute(ADD_TASK_OPTIONS_COLUMN_SQL)
 
             # Migration: add success_policy column for existing installs
-            await conn.execute(
-                text("""
-                ALTER TABLE horsies_workflows
-                ADD COLUMN IF NOT EXISTS success_policy JSONB;
-            """)
-            )
+            await conn.execute(ADD_SUCCESS_POLICY_COLUMN_SQL)
 
             # Migration: add join_type and min_success columns for existing installs
-            await conn.execute(
-                text("""
-                ALTER TABLE horsies_workflow_tasks
-                ADD COLUMN IF NOT EXISTS join_type VARCHAR(10) NOT NULL DEFAULT 'all';
-            """)
-            )
-            await conn.execute(
-                text("""
-                ALTER TABLE horsies_workflow_tasks
-                ADD COLUMN IF NOT EXISTS min_success INTEGER;
-            """)
-            )
-            await conn.execute(
-                text("""
-                ALTER TABLE horsies_workflow_tasks
-                ADD COLUMN IF NOT EXISTS node_id VARCHAR(128);
-            """)
-            )
-            await conn.execute(
-                text("""
-                ALTER TABLE horsies_workflow_tasks
-                ALTER COLUMN workflow_ctx_from
-                TYPE VARCHAR(128)[]
-                USING workflow_ctx_from::VARCHAR(128)[];
-            """)
-            )
+            await conn.execute(ADD_JOIN_TYPE_COLUMN_SQL)
+            await conn.execute(ADD_MIN_SUCCESS_COLUMN_SQL)
+            await conn.execute(ADD_NODE_ID_COLUMN_SQL)
+            await conn.execute(ALTER_WORKFLOW_CTX_FROM_TYPE_SQL)
 
             # Subworkflow support columns
-            await conn.execute(
-                text("""
-                ALTER TABLE horsies_workflows
-                ADD COLUMN IF NOT EXISTS parent_workflow_id VARCHAR(36);
-            """)
-            )
-            await conn.execute(
-                text("""
-                ALTER TABLE horsies_workflows
-                ADD COLUMN IF NOT EXISTS parent_task_index INTEGER;
-            """)
-            )
-            await conn.execute(
-                text("""
-                ALTER TABLE horsies_workflows
-                ADD COLUMN IF NOT EXISTS depth INTEGER NOT NULL DEFAULT 0;
-            """)
-            )
-            await conn.execute(
-                text("""
-                ALTER TABLE horsies_workflows
-                ADD COLUMN IF NOT EXISTS root_workflow_id VARCHAR(36);
-            """)
-            )
-            await conn.execute(
-                text("""
-                ALTER TABLE horsies_workflows
-                ADD COLUMN IF NOT EXISTS workflow_def_module VARCHAR(512);
-            """)
-            )
-            await conn.execute(
-                text("""
-                ALTER TABLE horsies_workflows
-                ADD COLUMN IF NOT EXISTS workflow_def_qualname VARCHAR(512);
-            """)
-            )
+            await conn.execute(ADD_PARENT_WORKFLOW_ID_COLUMN_SQL)
+            await conn.execute(ADD_PARENT_TASK_INDEX_COLUMN_SQL)
+            await conn.execute(ADD_DEPTH_COLUMN_SQL)
+            await conn.execute(ADD_ROOT_WORKFLOW_ID_COLUMN_SQL)
+            await conn.execute(ADD_WORKFLOW_DEF_MODULE_COLUMN_SQL)
+            await conn.execute(ADD_WORKFLOW_DEF_QUALNAME_COLUMN_SQL)
 
-            await conn.execute(
-                text("""
-                ALTER TABLE horsies_workflow_tasks
-                ADD COLUMN IF NOT EXISTS is_subworkflow BOOLEAN NOT NULL DEFAULT FALSE;
-            """)
-            )
-            await conn.execute(
-                text("""
-                ALTER TABLE horsies_workflow_tasks
-                ADD COLUMN IF NOT EXISTS sub_workflow_id VARCHAR(36);
-            """)
-            )
-            await conn.execute(
-                text("""
-                ALTER TABLE horsies_workflow_tasks
-                ADD COLUMN IF NOT EXISTS sub_workflow_name VARCHAR(255);
-            """)
-            )
-            await conn.execute(
-                text("""
-                ALTER TABLE horsies_workflow_tasks
-                ADD COLUMN IF NOT EXISTS sub_workflow_retry_mode VARCHAR(50);
-            """)
-            )
-            await conn.execute(
-                text("""
-                ALTER TABLE horsies_workflow_tasks
-                ADD COLUMN IF NOT EXISTS sub_workflow_summary TEXT;
-            """)
-            )
-            await conn.execute(
-                text("""
-                ALTER TABLE horsies_workflow_tasks
-                ADD COLUMN IF NOT EXISTS sub_workflow_module VARCHAR(512);
-            """)
-            )
-            await conn.execute(
-                text("""
-                ALTER TABLE horsies_workflow_tasks
-                ADD COLUMN IF NOT EXISTS sub_workflow_qualname VARCHAR(512);
-            """)
-            )
+            await conn.execute(ADD_IS_SUBWORKFLOW_COLUMN_SQL)
+            await conn.execute(ADD_SUB_WORKFLOW_ID_COLUMN_SQL)
+            await conn.execute(ADD_SUB_WORKFLOW_NAME_COLUMN_SQL)
+            await conn.execute(ADD_SUB_WORKFLOW_RETRY_MODE_COLUMN_SQL)
+            await conn.execute(ADD_SUB_WORKFLOW_SUMMARY_COLUMN_SQL)
+            await conn.execute(ADD_SUB_WORKFLOW_MODULE_COLUMN_SQL)
+            await conn.execute(ADD_SUB_WORKFLOW_QUALNAME_COLUMN_SQL)
 
             # Workflow notification trigger function
-            await conn.execute(
-                text("""
-                CREATE OR REPLACE FUNCTION horsies_notify_workflow_changes()
-                RETURNS trigger AS $$
-                BEGIN
-                    IF TG_OP = 'UPDATE' AND OLD.status != NEW.status THEN
-                        -- Workflow completion notifications
-                        IF NEW.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'PAUSED') THEN
-                            PERFORM pg_notify('workflow_done', NEW.id);
-                        END IF;
-                    END IF;
-                    RETURN NEW;
-                END;
-                $$ LANGUAGE plpgsql;
-            """)
-            )
+            await conn.execute(CREATE_WORKFLOW_NOTIFY_FUNCTION_SQL)
 
             # Create workflow trigger
-            await conn.execute(
-                text("""
-                DROP TRIGGER IF EXISTS horsies_workflow_notify_trigger ON horsies_workflows;
-                CREATE TRIGGER horsies_workflow_notify_trigger
-                    AFTER UPDATE ON horsies_workflows
-                    FOR EACH ROW
-                    EXECUTE FUNCTION horsies_notify_workflow_changes();
-            """)
-            )
+            await conn.execute(CREATE_WORKFLOW_NOTIFY_TRIGGER_SQL)
 
     async def _ensure_initialized(self) -> None:
         if self._initialized:
@@ -304,7 +432,7 @@ class PostgresBroker:
             # Take a short-lived, cluster-wide advisory lock to serialize
             # schema creation across workers and producers.
             await conn.execute(
-                text('SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))'),
+                SCHEMA_ADVISORY_LOCK_SQL,
                 {'key': self._schema_advisory_key()},
             )
             await conn.run_sync(Base.metadata.create_all)
@@ -573,28 +701,7 @@ class PostgresBroker:
         """
         async with self.session_factory() as session:
             result = await session.execute(
-                text("""
-                SELECT 
-                    t.id,
-                    t.worker_hostname, 
-                    t.worker_pid,
-                    t.worker_process_name,
-                    hb.last_heartbeat,
-                    t.started_at,
-                    t.task_name
-                FROM horsies_tasks t
-                LEFT JOIN LATERAL (
-                    SELECT sent_at AS last_heartbeat
-                    FROM horsies_heartbeats h
-                    WHERE h.task_id = t.id AND h.role = 'runner'
-                    ORDER BY sent_at DESC
-                    LIMIT 1
-                ) hb ON TRUE
-                WHERE t.status = 'RUNNING'
-                  AND t.started_at IS NOT NULL
-                  AND COALESCE(hb.last_heartbeat, t.started_at) < NOW() - CAST(:stale_threshold || ' minutes' AS INTERVAL)
-                ORDER BY hb.last_heartbeat NULLS FIRST
-            """),
+                GET_STALE_TASKS_SQL,
                 {'stale_threshold': stale_threshold_minutes},
             )
             columns = result.keys()
@@ -611,29 +718,7 @@ class PostgresBroker:
             List of worker stats: worker_hostname, worker_pid, active_tasks, oldest_task_start
         """
         async with self.session_factory() as session:
-            result = await session.execute(
-                text("""
-                SELECT 
-                    t.worker_hostname,
-                    t.worker_pid,
-                    t.worker_process_name,
-                    COUNT(*) AS active_tasks,
-                    MIN(t.started_at) AS oldest_task_start,
-                    MAX(hb.last_heartbeat) AS latest_heartbeat
-                FROM horsies_tasks t
-                LEFT JOIN LATERAL (
-                    SELECT sent_at AS last_heartbeat
-                    FROM horsies_heartbeats h
-                    WHERE h.task_id = t.id AND h.role = 'runner'
-                    ORDER BY sent_at DESC
-                    LIMIT 1
-                ) hb ON TRUE
-                WHERE t.status = 'RUNNING'
-                  AND t.worker_hostname IS NOT NULL
-                GROUP BY t.worker_hostname, t.worker_pid, t.worker_process_name
-                ORDER BY active_tasks DESC
-            """)
-            )
+            result = await session.execute(GET_WORKER_STATS_SQL)
 
             columns = result.keys()
             return [dict(zip(columns, row)) for row in result.fetchall()]
@@ -649,22 +734,7 @@ class PostgresBroker:
             List of expired task info: id, task_name, queue_name, good_until, expired_for
         """
         async with self.session_factory() as session:
-            result = await session.execute(
-                text("""
-                SELECT 
-                    id,
-                    task_name,
-                    queue_name,
-                    priority,
-                    sent_at,
-                    good_until,
-                    NOW() - good_until as expired_for
-                FROM horsies_tasks
-                WHERE status = 'PENDING'
-                  AND good_until < NOW()
-                ORDER BY good_until ASC
-            """)
-            )
+            result = await session.execute(GET_EXPIRED_TASKS_SQL)
 
             columns = result.keys()
             return [dict(zip(columns, row)) for row in result.fetchall()]
@@ -694,21 +764,7 @@ class PostgresBroker:
         async with self.session_factory() as session:
             # First, find stale tasks and get their metadata
             stale_tasks_result = await session.execute(
-                text("""
-                SELECT t2.id, t2.worker_pid, t2.worker_hostname, t2.claimed_by_worker_id,
-                       t2.started_at, hb.last_heartbeat
-                FROM horsies_tasks t2
-                LEFT JOIN LATERAL (
-                    SELECT sent_at AS last_heartbeat
-                    FROM horsies_heartbeats h
-                    WHERE h.task_id = t2.id AND h.role = 'runner'
-                    ORDER BY sent_at DESC
-                    LIMIT 1
-                ) hb ON TRUE
-                WHERE t2.status = 'RUNNING'
-                  AND t2.started_at IS NOT NULL
-                  AND COALESCE(hb.last_heartbeat, t2.started_at) < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL)
-            """),
+                SELECT_STALE_RUNNING_TASKS_SQL,
                 {'stale_threshold': stale_threshold_seconds},
             )
 
@@ -747,15 +803,7 @@ class PostgresBroker:
 
                 # Update task with proper result
                 await session.execute(
-                    text("""
-                    UPDATE horsies_tasks
-                    SET status = 'FAILED',
-                        failed_at = NOW(),
-                        failed_reason = :failed_reason,
-                        result = :result,
-                        updated_at = NOW()
-                    WHERE id = :task_id
-                """),
+                    MARK_STALE_TASK_FAILED_SQL,
                     {
                         'task_id': task_id,
                         'failed_reason': f'Worker process crashed (no runner heartbeat for {stale_threshold_ms}ms = {stale_threshold_ms/1000:.1f}s)',
@@ -781,31 +829,7 @@ class PostgresBroker:
 
         async with self.session_factory() as session:
             result = await session.execute(
-                text("""
-                UPDATE horsies_tasks AS t
-                SET status = 'PENDING',
-                    claimed = FALSE,
-                    claimed_at = NULL,
-                    claimed_by_worker_id = NULL,
-                    updated_at = NOW()
-                FROM (
-                    SELECT t2.id, hb.last_heartbeat, t2.claimed_at
-                    FROM horsies_tasks t2
-                    LEFT JOIN LATERAL (
-                        SELECT sent_at AS last_heartbeat
-                        FROM horsies_heartbeats h
-                        WHERE h.task_id = t2.id AND h.role = 'claimer'
-                        ORDER BY sent_at DESC
-                        LIMIT 1
-                    ) hb ON TRUE
-                    WHERE t2.status = 'CLAIMED'
-                ) s
-                WHERE t.id = s.id
-                  AND (
-                    (s.last_heartbeat IS NULL AND s.claimed_at IS NOT NULL AND s.claimed_at < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL))
-                    OR (s.last_heartbeat IS NOT NULL AND s.last_heartbeat < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL))
-                  )
-            """),
+                REQUEUE_STALE_CLAIMED_SQL,
                 {'stale_threshold': stale_threshold_seconds},
             )
             await session.commit()

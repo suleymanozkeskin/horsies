@@ -9,6 +9,39 @@ from horsies.core.logging import get_logger
 
 logger = get_logger('scheduler.state')
 
+UPDATE_SCHEDULE_AFTER_RUN_SQL = text("""
+    UPDATE horsies_schedule_state
+    SET last_run_at = :executed_at,
+        next_run_at = :next_run_at,
+        last_task_id = :task_id,
+        run_count = run_count + 1,
+        updated_at = :now
+    WHERE schedule_name = :schedule_name
+""")
+
+UPDATE_SCHEDULE_NEXT_RUN_WITH_HASH_SQL = text("""
+    UPDATE horsies_schedule_state
+    SET next_run_at = :next_run_at,
+        config_hash = :config_hash,
+        updated_at = :now
+    WHERE schedule_name = :schedule_name
+""")
+
+UPDATE_SCHEDULE_NEXT_RUN_SQL = text("""
+    UPDATE horsies_schedule_state
+    SET next_run_at = :next_run_at,
+        updated_at = :now
+    WHERE schedule_name = :schedule_name
+""")
+
+DELETE_SCHEDULE_STATE_SQL = text("""
+    DELETE FROM horsies_schedule_state WHERE schedule_name = :schedule_name
+""")
+
+GET_ALL_SCHEDULE_STATES_SQL = text("""
+    SELECT * FROM horsies_schedule_state ORDER BY schedule_name
+""")
+
 
 class ScheduleStateManager:
     """
@@ -127,15 +160,7 @@ class ScheduleStateManager:
         async with self.session_factory() as session:
             # Use raw SQL for atomic update with increment
             result = await session.execute(
-                text("""
-                    UPDATE horsies_schedule_state
-                    SET last_run_at = :executed_at,
-                        next_run_at = :next_run_at,
-                        last_task_id = :task_id,
-                        run_count = run_count + 1,
-                        updated_at = :now
-                    WHERE schedule_name = :schedule_name
-                """),
+                UPDATE_SCHEDULE_AFTER_RUN_SQL,
                 {
                     'schedule_name': schedule_name,
                     'executed_at': executed_at,
@@ -174,13 +199,7 @@ class ScheduleStateManager:
         async with self.session_factory() as session:
             # Build UPDATE query dynamically based on whether config_hash is provided
             if config_hash is not None:
-                query = """
-                    UPDATE horsies_schedule_state
-                    SET next_run_at = :next_run_at,
-                        config_hash = :config_hash,
-                        updated_at = :now
-                    WHERE schedule_name = :schedule_name
-                """
+                query = UPDATE_SCHEDULE_NEXT_RUN_WITH_HASH_SQL
                 params = {
                     'schedule_name': schedule_name,
                     'next_run_at': next_run_at,
@@ -188,19 +207,14 @@ class ScheduleStateManager:
                     'now': datetime.now(timezone.utc),
                 }
             else:
-                query = """
-                    UPDATE horsies_schedule_state
-                    SET next_run_at = :next_run_at,
-                        updated_at = :now
-                    WHERE schedule_name = :schedule_name
-                """
+                query = UPDATE_SCHEDULE_NEXT_RUN_SQL
                 params = {
                     'schedule_name': schedule_name,
                     'next_run_at': next_run_at,
                     'now': datetime.now(timezone.utc),
                 }
 
-            result = await session.execute(text(query), params)
+            result = await session.execute(query, params)
             await session.commit()
 
             rows_updated = getattr(result, 'rowcount', 0)
@@ -223,9 +237,7 @@ class ScheduleStateManager:
         """
         async with self.session_factory() as session:
             result = await session.execute(
-                text(
-                    'DELETE FROM horsies_schedule_state WHERE schedule_name = :schedule_name'
-                ),
+                DELETE_SCHEDULE_STATE_SQL,
                 {'schedule_name': schedule_name},
             )
             await session.commit()
@@ -246,9 +258,7 @@ class ScheduleStateManager:
             List of all ScheduleStateModel records
         """
         async with self.session_factory() as session:
-            result = await session.execute(
-                text('SELECT * FROM horsies_schedule_state ORDER BY schedule_name')
-            )
+            result = await session.execute(GET_ALL_SCHEDULE_STATES_SQL)
             rows = result.fetchall()
             columns = result.keys()
 

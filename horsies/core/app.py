@@ -293,15 +293,17 @@ class Horsies:
         """Check broker connectivity via SELECT 1."""
         import asyncio
 
+        from sqlalchemy import text
+
+        HEALTH_CHECK_SQL = text("""SELECT 1""")
+
         errors: list[HorsiesError] = []
         try:
             broker = self.get_broker()
 
             async def _test_connection() -> None:
-                from sqlalchemy import text
-
                 async with broker.session_factory() as session:
-                    await session.execute(text('SELECT 1'))
+                    await session.execute(HEALTH_CHECK_SQL)
 
             asyncio.run(_test_connection())
         except HorsiesError as exc:

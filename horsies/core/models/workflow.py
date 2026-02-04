@@ -27,6 +27,7 @@ from horsies.core.errors import (
     raise_collected,
 )
 from pydantic import BaseModel
+from sqlalchemy import text
 
 if TYPE_CHECKING:
     from horsies.core.task_decorator import TaskFunction
@@ -1424,6 +1425,57 @@ class WorkflowContext(BaseModel):
 
 
 # =============================================================================
+# SQL constants for WorkflowHandle
+# =============================================================================
+
+GET_WORKFLOW_STATUS_SQL = text("""
+    SELECT status FROM horsies_workflows WHERE id = :wf_id
+""")
+
+GET_WORKFLOW_RESULT_SQL = text("""
+    SELECT result FROM horsies_workflows WHERE id = :wf_id
+""")
+
+GET_WORKFLOW_ERROR_SQL = text("""
+    SELECT error, status FROM horsies_workflows WHERE id = :wf_id
+""")
+
+GET_WORKFLOW_TASK_RESULTS_SQL = text("""
+    SELECT node_id, result
+    FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id
+      AND result IS NOT NULL
+""")
+
+GET_WORKFLOW_TASK_RESULT_BY_NODE_SQL = text("""
+    SELECT result
+    FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id
+      AND node_id = :node_id
+      AND result IS NOT NULL
+""")
+
+GET_WORKFLOW_TASKS_SQL = text("""
+    SELECT node_id, task_index, task_name, status, result, started_at, completed_at
+    FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id
+    ORDER BY task_index
+""")
+
+CANCEL_WORKFLOW_SQL = text("""
+    UPDATE horsies_workflows
+    SET status = 'CANCELLED', updated_at = NOW()
+    WHERE id = :wf_id AND status IN ('PENDING', 'RUNNING', 'PAUSED')
+""")
+
+SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET status = 'SKIPPED'
+    WHERE workflow_id = :wf_id AND status IN ('PENDING', 'READY')
+""")
+
+
+# =============================================================================
 # WorkflowHandle
 # =============================================================================
 
@@ -1467,11 +1519,9 @@ class WorkflowHandle:
 
     async def status_async(self) -> WorkflowStatus:
         """Async version of status()."""
-        from sqlalchemy import text
-
         async with self.broker.session_factory() as session:
             result = await session.execute(
-                text('SELECT status FROM horsies_workflows WHERE id = :wf_id'),
+                GET_WORKFLOW_STATUS_SQL,
                 {'wf_id': self.workflow_id},
             )
             row = result.fetchone()
@@ -1538,14 +1588,12 @@ class WorkflowHandle:
 
     async def _get_result(self) -> TaskResult[Any, TaskError]:
         """Fetch completed workflow result."""
-        from sqlalchemy import text
-
         from horsies.core.models.tasks import TaskResult
         from horsies.core.codec.serde import loads_json, task_result_from_json
 
         async with self.broker.session_factory() as session:
             result = await session.execute(
-                text('SELECT result FROM horsies_workflows WHERE id = :wf_id'),
+                GET_WORKFLOW_RESULT_SQL,
                 {'wf_id': self.workflow_id},
             )
             row = result.fetchone()
@@ -1555,14 +1603,12 @@ class WorkflowHandle:
 
     async def _get_error(self) -> TaskResult[Any, TaskError]:
         """Fetch failed workflow error."""
-        from sqlalchemy import text
-
         from horsies.core.models.tasks import TaskResult, TaskError
         from horsies.core.codec.serde import loads_json
 
         async with self.broker.session_factory() as session:
             result = await session.execute(
-                text('SELECT error, status FROM horsies_workflows WHERE id = :wf_id'),
+                GET_WORKFLOW_ERROR_SQL,
                 {'wf_id': self.workflow_id},
             )
             row = result.fetchone()
@@ -1629,18 +1675,11 @@ class WorkflowHandle:
         Keys are `node_id` values. If a TaskNode did not specify a node_id,
         WorkflowSpec auto-assigns one as "{workflow_name}:{task_index}".
         """
-        from sqlalchemy import text
-
         from horsies.core.codec.serde import loads_json, task_result_from_json
 
         async with self.broker.session_factory() as session:
             result = await session.execute(
-                text("""
-                    SELECT node_id, result
-                    FROM horsies_workflow_tasks
-                    WHERE workflow_id = :wf_id
-                      AND result IS NOT NULL
-                """),
+                GET_WORKFLOW_TASK_RESULTS_SQL,
                 {'wf_id': self.workflow_id},
             )
 
@@ -1687,8 +1726,6 @@ class WorkflowHandle:
         self, node: TaskNode[OkT] | NodeKey[OkT]
     ) -> 'TaskResult[OkT, TaskError]':
         """Async version of result_for(). See result_for() for full documentation."""
-        from sqlalchemy import text
-
         from horsies.core.codec.serde import loads_json, task_result_from_json
 
         node_id: str | None
@@ -1705,13 +1742,7 @@ class WorkflowHandle:
 
         async with self.broker.session_factory() as session:
             result = await session.execute(
-                text("""
-                    SELECT result
-                    FROM horsies_workflow_tasks
-                    WHERE workflow_id = :wf_id
-                      AND node_id = :node_id
-                      AND result IS NOT NULL
-                """),
+                GET_WORKFLOW_TASK_RESULT_BY_NODE_SQL,
                 {'wf_id': self.workflow_id, 'node_id': node_id},
             )
             row = result.fetchone()
@@ -1752,18 +1783,11 @@ class WorkflowHandle:
 
     async def tasks_async(self) -> list[WorkflowTaskInfo]:
         """Async version of tasks()."""
-        from sqlalchemy import text
-
         from horsies.core.codec.serde import loads_json, task_result_from_json
 
         async with self.broker.session_factory() as session:
             result = await session.execute(
-                text("""
-                    SELECT node_id, task_index, task_name, status, result, started_at, completed_at
-                    FROM horsies_workflow_tasks
-                    WHERE workflow_id = :wf_id
-                    ORDER BY task_index
-                """),
+                GET_WORKFLOW_TASKS_SQL,
                 {'wf_id': self.workflow_id},
             )
 
@@ -1794,26 +1818,16 @@ class WorkflowHandle:
 
     async def cancel_async(self) -> None:
         """Async version of cancel()."""
-        from sqlalchemy import text
-
         async with self.broker.session_factory() as session:
             # Cancel workflow
             await session.execute(
-                text("""
-                    UPDATE horsies_workflows
-                    SET status = 'CANCELLED', updated_at = NOW()
-                    WHERE id = :wf_id AND status IN ('PENDING', 'RUNNING', 'PAUSED')
-                """),
+                CANCEL_WORKFLOW_SQL,
                 {'wf_id': self.workflow_id},
             )
 
             # Skip pending/ready tasks
             await session.execute(
-                text("""
-                    UPDATE horsies_workflow_tasks
-                    SET status = 'SKIPPED'
-                    WHERE workflow_id = :wf_id AND status IN ('PENDING', 'READY')
-                """),
+                SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL,
                 {'wf_id': self.workflow_id},
             )
 
