@@ -262,31 +262,44 @@ def _task_accepts_workflow_ctx(fn: Callable[..., Any]) -> bool:
     return 'workflow_ctx' in sig.parameters
 
 
-def _get_valid_param_names(fn: Callable[..., Any]) -> set[str] | None:
-    """
-    Return valid parameter names for a task function.
-
-    Returns None if validation should be skipped:
-    - Function has **kwargs (any key is valid)
-    - Signature cannot be inspected (built-ins, C extensions)
-
-    Handles decorated functions via _original_fn attribute.
-    """
+def _get_signature(fn: Callable[..., Any]) -> inspect.Signature | None:
+    """Return an inspectable signature for a callable, or None if unavailable."""
     inspect_target: Callable[..., Any] = fn
     original = getattr(fn, '_original_fn', None)
     if callable(original):
         inspect_target = original
 
     try:
-        sig = inspect.signature(inspect_target)
+        return inspect.signature(inspect_target)
     except (TypeError, ValueError):
         return None
 
-    for param in sig.parameters.values():
-        if param.kind == inspect.Parameter.VAR_KEYWORD:
-            return None
 
-    return set(sig.parameters.keys())
+def _signature_accepts_kwargs(sig: inspect.Signature) -> bool:
+    """Return True if the signature allows **kwargs."""
+    return any(
+        param.kind == inspect.Parameter.VAR_KEYWORD
+        for param in sig.parameters.values()
+    )
+
+
+def _valid_kwarg_names(
+    sig: inspect.Signature, *, exclude: set[str] | None = None
+) -> set[str]:
+    """
+    Return names that are valid to pass by keyword.
+
+    Excludes positional-only params and *args/**kwargs.
+    """
+    names = {
+        param.name
+        for param in sig.parameters.values()
+        if param.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+    if exclude:
+        names -= exclude
+    return names
 
 
 NODE_ID_PATTERN = re.compile(r'^[A-Za-z0-9_\-:.]+$')
@@ -756,6 +769,8 @@ class WorkflowSpec:
             report.add(error)
         for error in self._collect_invalid_kwargs_errors():
             report.add(error)
+        for error in self._collect_missing_required_param_errors():
+            report.add(error)
         for error in self._collect_output_errors():
             report.add(error)
         for error in self._collect_success_policy_errors():
@@ -1064,40 +1079,128 @@ class WorkflowSpec:
         return errors
 
     def _collect_invalid_kwargs_errors(self) -> list[WorkflowValidationError]:
-        """Validate kwargs keys match function parameter names."""
+        """Validate kwargs/args_from keys match function parameter names."""
         errors: list[WorkflowValidationError] = []
         for node in self.tasks:
-            if not node.kwargs:
+            if not node.kwargs and not node.args_from:
                 continue
 
             # Get the function to inspect (TaskNode vs SubWorkflowNode)
             if isinstance(node, TaskNode):
                 fn = node.fn
+                exclude_names: set[str] = set()
             else:
-                # SubWorkflowNode - skip kwargs validation for now
-                # (kwargs go to build_with, not a task function)
+                # SubWorkflowNode - validate against build_with signature
+                fn = node.workflow_def.build_with
+                exclude_names = {'app', 'cls'}
+
+            sig = _get_signature(fn)
+            if sig is None:
+                continue  # Can't validate (uninspectable)
+
+            if _signature_accepts_kwargs(sig):
+                continue  # Accepts **kwargs, any key is valid
+
+            valid_names = _valid_kwarg_names(sig, exclude=exclude_names)
+
+            invalid_kwargs = set(node.kwargs.keys()) - valid_names
+            invalid_args_from = set(node.args_from.keys()) - valid_names
+            if not invalid_kwargs and not invalid_args_from:
                 continue
 
-            valid_names = _get_valid_param_names(fn)
-            if valid_names is None:
-                continue  # Can't validate (has **kwargs or uninspectable)
-
-            invalid_keys = set(node.kwargs.keys()) - valid_names
-            if not invalid_keys:
-                continue
-
-            sorted_invalid = sorted(invalid_keys)
-            sorted_valid = sorted(valid_names)
+            notes: list[str] = []
+            if invalid_kwargs:
+                notes.append(
+                    f"node '{node.name}' has unknown kwargs: {sorted(invalid_kwargs)}"
+                )
+            if invalid_args_from:
+                notes.append(
+                    f"node '{node.name}' has unknown args_from keys: {sorted(invalid_args_from)}"
+                )
+            notes.append(f"valid parameters: {sorted(valid_names)}")
 
             errors.append(
                 WorkflowValidationError(
-                    message='invalid kwargs key(s) for task function',
+                    message='invalid kwarg key(s) for callable signature',
                     code=ErrorCode.WORKFLOW_INVALID_KWARG_KEY,
+                    notes=notes,
+                    help_text='check for typos in kwarg or args_from keys',
+                )
+            )
+        return errors
+
+    def _collect_missing_required_param_errors(self) -> list[WorkflowValidationError]:
+        """Validate required parameters are provided via args/kwargs/args_from."""
+        errors: list[WorkflowValidationError] = []
+        for node in self.tasks:
+            # Get the function to inspect (TaskNode vs SubWorkflowNode)
+            if isinstance(node, TaskNode):
+                fn = node.fn
+                args_provided = list(node.args)
+                injected_kwargs: set[str] = set()
+            else:
+                fn = node.workflow_def.build_with
+                # build_with(app, *args, **kwargs) always provides the first positional
+                args_provided = [object(), *node.args]
+                injected_kwargs = set()
+
+            sig = _get_signature(fn)
+            if sig is None:
+                continue  # Can't validate
+
+            provided_kwargs = set(node.kwargs.keys()) | set(node.args_from.keys())
+
+            # Auto-injected workflow context for TaskNode when workflow_ctx_from is set
+            if isinstance(node, TaskNode):
+                if node.workflow_ctx_from is not None and 'workflow_ctx' in sig.parameters:
+                    injected_kwargs.add('workflow_ctx')
+                # WorkflowMeta is auto-injected if declared
+                if 'workflow_meta' in sig.parameters:
+                    injected_kwargs.add('workflow_meta')
+
+            provided_kwargs |= injected_kwargs
+
+            missing: list[str] = []
+            consumed_positional = 0
+
+            for param in sig.parameters.values():
+                if param.kind in (
+                    inspect.Parameter.VAR_POSITIONAL,
+                    inspect.Parameter.VAR_KEYWORD,
+                ):
+                    continue  # *args/**kwargs do not require values
+                if param.default is not inspect.Parameter.empty:
+                    continue  # optional
+
+                if param.kind == inspect.Parameter.POSITIONAL_ONLY:
+                    if consumed_positional < len(args_provided):
+                        consumed_positional += 1
+                        continue
+                    missing.append(param.name)
+                elif param.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD:
+                    if consumed_positional < len(args_provided):
+                        consumed_positional += 1
+                        continue
+                    if param.name in provided_kwargs:
+                        continue
+                    missing.append(param.name)
+                elif param.kind == inspect.Parameter.KEYWORD_ONLY:
+                    if param.name in provided_kwargs:
+                        continue
+                    missing.append(param.name)
+
+            if not missing:
+                continue
+
+            target = 'task function' if isinstance(node, TaskNode) else 'build_with'
+            errors.append(
+                WorkflowValidationError(
+                    message=f'missing required parameters for {target}',
+                    code=ErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS,
                     notes=[
-                        f"node '{node.name}' has unknown kwarg(s): {sorted_invalid}",
-                        f"valid parameters: {sorted_valid}",
+                        f"node '{node.name}' missing required parameter(s): {sorted(missing)}",
                     ],
-                    help_text='check for typos in kwarg names',
+                    help_text='provide required params via args=..., kwargs=..., or args_from',
                 )
             )
         return errors
