@@ -68,7 +68,7 @@ TaskNode(fn=validate_order, node_id="validate_order")
 TaskNode(fn=validate_order)  # becomes "order_processing:0"
 ```
 
-**Tip:** For tasks with static arguments, consider the [Typed Node Builder](/concepts/workflows/typed-node-builder) API for type-checked construction with IDE autocomplete:
+**Tip:** For tasks with static arguments, consider the [Typed Node Builder](../concepts/workflows/typed-node-builder) API for type-checked construction with IDE autocomplete:
 
 ```python
 node = validate_order.node(node_id="validate")(

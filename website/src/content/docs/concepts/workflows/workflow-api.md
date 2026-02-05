@@ -75,4 +75,4 @@ The `.node()` method on task functions returns a `NodeFactory` for type-safe `Ta
 | `min_success` | `int` | `None` | Required for `join='quorum'` |
 | `good_until` | `datetime` | `None` | Task expiry deadline |
 
-See [Typed Node Builder](/concepts/workflows/typed-node-builder) for usage examples.
+See [Typed Node Builder](typed-node-builder) for usage examples.

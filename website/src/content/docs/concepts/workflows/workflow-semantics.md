@@ -890,7 +890,7 @@ def my_task(workflow_meta: WorkflowMeta | None = None) -> TaskResult[str, TaskEr
 **Important:** When using `args_from` or `workflow_ctx_from`, positional `args` are not allowed.
 Put static values in `kwargs` instead.
 
-**Tip:** For root tasks with static arguments, the [Typed Node Builder](/concepts/workflows/typed-node-builder) provides type-checked construction with IDE autocomplete.
+**Tip:** For root tasks with static arguments, the [Typed Node Builder](typed-node-builder) provides type-checked construction with IDE autocomplete.
 
 ### args_from: What the Receiving Function Gets
 
