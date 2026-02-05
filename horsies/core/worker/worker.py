@@ -9,6 +9,7 @@ import socket
 import threading
 import time
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from importlib import import_module
@@ -37,6 +38,8 @@ from horsies.core.logging import get_logger
 from horsies.core.worker.current import get_current_app, set_current_app
 import sys
 from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.models.resilience import WorkerResilienceConfig
+from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.utils.imports import import_file_path
 
 logger = get_logger('worker')
@@ -336,6 +339,32 @@ def _is_retryable_db_error(exc: BaseException) -> bool:
             return True
         case _:
             return False
+
+
+@dataclass
+class _RetryBackoff:
+    initial_ms: int
+    max_ms: int
+    max_attempts: int
+    attempts: int = 0
+
+    def reset(self) -> None:
+        self.attempts = 0
+
+    def can_retry(self) -> bool:
+        match self.max_attempts:
+            case 0:
+                return True
+            case _:
+                return self.attempts < self.max_attempts
+
+    def next_delay_seconds(self) -> float:
+        self.attempts += 1
+        exponent = max(0, self.attempts - 1)
+        base_ms = min(self.max_ms, int(self.initial_ms * (2**exponent)))
+        jitter_range = base_ms * 0.25
+        delay_ms = base_ms + random.uniform(-jitter_range, jitter_range)
+        return max(0.1, delay_ms / 1000.0)
 
 
 def _get_workflow_status_for_task(cursor: Cursor[Any], task_id: str) -> str | None:
@@ -807,6 +836,9 @@ class WorkerConfig:
     recovery_config: Optional['RecoveryConfig'] = (
         None  # RecoveryConfig, avoid circular import
     )
+    resilience_config: Optional['WorkerResilienceConfig'] = (
+        None  # WorkerResilienceConfig, allow override
+    )
     # Log level for worker processes (default: INFO)
     loglevel: int = 20  # logging.INFO
 
@@ -874,6 +906,19 @@ UNCLAIM_PAUSED_TASKS_SQL = text("""
         claimed_by_worker_id = NULL,
         updated_at = NOW()
     WHERE id = ANY(:ids)
+""")
+
+UNCLAIM_CLAIMED_TASK_SQL = text("""
+    UPDATE horsies_tasks
+    SET status = 'PENDING',
+        claimed = FALSE,
+        claimed_at = NULL,
+        claimed_by_worker_id = NULL,
+        claim_expires_at = NULL,
+        updated_at = NOW()
+    WHERE id = :id
+      AND status = 'CLAIMED'
+      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
 """)
 
 RESET_PAUSED_WORKFLOW_TASKS_SQL = text("""
@@ -992,6 +1037,7 @@ class Worker:
         self.worker_instance_id = str(uuid.uuid4())
         self._started_at = datetime.now(timezone.utc)
         self._app: Horsies | None = None
+        self._resilience = self.cfg.resilience_config or WorkerResilienceConfig()
         # Delay creation of the process pool until after preloading modules so that
         # any import/validation errors surface in the main process at startup.
         self._executor: Optional[ProcessPoolExecutor] = None
@@ -1001,19 +1047,11 @@ class Worker:
         """Request worker to stop gracefully."""
         self._stop.set()
 
-    # ----- lifecycle -----
-
-    async def start(self) -> None:
-        logger.debug('Starting worker')
-        # Preload the app and task modules in the main process to fail fast
-        self._preload_modules_main()
-
-        # Create the process pool AFTER successful preload so initializer runs in children only
-        # Compute the plain psycopg database URL for child processes
+    def _create_executor(self) -> ProcessPoolExecutor:
         child_database_url = self.cfg.dsn.replace('+asyncpg', '').replace(
             '+psycopg', ''
         )
-        self._executor = ProcessPoolExecutor(
+        return ProcessPoolExecutor(
             max_workers=self.cfg.processes,
             initializer=_child_initializer,
             initargs=(
@@ -1024,6 +1062,100 @@ class Worker:
                 child_database_url,
             ),
         )
+
+    async def _restart_executor(self, reason: str) -> None:
+        if self._stop.is_set():
+            return
+        if self._executor is None:
+            self._executor = self._create_executor()
+            logger.warning(f'Executor created after restart request: {reason}')
+            return
+
+        loop = asyncio.get_running_loop()
+        executor = self._executor
+        self._executor = None
+        logger.error(f'Restarting worker executor: {reason}')
+        try:
+            await loop.run_in_executor(
+                None, lambda: executor.shutdown(wait=True, cancel_futures=True)
+            )
+        except Exception as e:
+            logger.error(f'Error shutting down broken executor: {e}')
+        self._executor = self._create_executor()
+
+    def _make_retry_backoff(self) -> _RetryBackoff:
+        return _RetryBackoff(
+            initial_ms=self._resilience.db_retry_initial_ms,
+            max_ms=self._resilience.db_retry_max_ms,
+            max_attempts=self._resilience.db_retry_max_attempts,
+        )
+
+    async def _sleep_with_stop(self, delay_seconds: float) -> None:
+        try:
+            await asyncio.wait_for(self._stop.wait(), timeout=delay_seconds)
+        except asyncio.TimeoutError:
+            return
+
+    async def _cleanup_after_failed_start(self) -> None:
+        try:
+            await self.listener.close()
+        except Exception as e:
+            logger.error(f'Error closing listener after failed start: {e}')
+
+        if self._executor:
+            loop = asyncio.get_running_loop()
+            executor = self._executor
+            self._executor = None
+            try:
+                await loop.run_in_executor(
+                    None, lambda: executor.shutdown(wait=True, cancel_futures=True)
+                )
+            except Exception as e:
+                logger.error(f'Error shutting down executor after failed start: {e}')
+
+    async def _handle_retryable_start_error(
+        self,
+        exc: BaseException,
+        backoff: _RetryBackoff,
+    ) -> None:
+        if not backoff.can_retry():
+            logger.error(
+                f'Worker start failed after {backoff.attempts} attempts: {exc}'
+            )
+            raise
+
+        await self._cleanup_after_failed_start()
+        delay = backoff.next_delay_seconds()
+        logger.error(
+            f'Worker start failed: {exc}. Retrying in {delay:.1f}s '
+            f'(attempt {backoff.attempts}/{backoff.max_attempts or "inf"})'
+        )
+        await self._sleep_with_stop(delay)
+
+    async def _start_with_resilience(self) -> None:
+        backoff = self._make_retry_backoff()
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self.start(), timeout=30.0)
+                return
+            except asyncio.TimeoutError as exc:
+                await self._handle_retryable_start_error(exc, backoff)
+                continue
+            except Exception as exc:
+                if is_retryable_connection_error(exc):
+                    await self._handle_retryable_start_error(exc, backoff)
+                    continue
+                raise
+
+    # ----- lifecycle -----
+
+    async def start(self) -> None:
+        logger.debug('Starting worker')
+        # Preload the app and task modules in the main process to fail fast
+        self._preload_modules_main()
+
+        # Create the process pool AFTER successful preload so initializer runs in children only
+        self._executor = self._create_executor()
         await self.listener.start()
         # Surface concurrency configuration clearly for operators
         max_claimed_effective = (
@@ -1142,27 +1274,44 @@ class Worker:
 
     async def run_forever(self) -> None:
         """Main orchestrator loop."""
+        await self._start_with_resilience()
+        if self._stop.is_set():
+            return
+        logger.info('Worker started')
         try:
-            # Add timeout to startup to prevent hanging
-            await asyncio.wait_for(self.start(), timeout=30.0)
-            logger.info('Worker started')
-        except asyncio.TimeoutError:
-            logger.error('Worker startup timed out after 30 seconds')
-            raise RuntimeError(
-                'Worker startup timeout - likely database connection issue'
-            )
-        try:
+            backoff = self._make_retry_backoff()
             while not self._stop.is_set():
-                # Single budgeted claim pass, then wait for new NOTIFY
-                await self._claim_and_dispatch_all()
+                try:
+                    # Single budgeted claim pass, then wait for new NOTIFY
+                    await self._claim_and_dispatch_all()
 
-                # Wait for a NOTIFY from any queue (coalesce bursts).
-                await self._wait_for_any_notify()
-                await self._claim_and_dispatch_all()
+                    # Wait for a NOTIFY from any queue (coalesce bursts).
+                    await self._wait_for_any_notify(
+                        poll_interval_ms=self._resilience.notify_poll_interval_ms
+                    )
+                    await self._claim_and_dispatch_all()
+                    backoff.reset()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if is_retryable_connection_error(exc):
+                        if not backoff.can_retry():
+                            logger.error(
+                                f'Worker loop failed after {backoff.attempts} attempts: {exc}'
+                            )
+                            raise
+                        delay = backoff.next_delay_seconds()
+                        logger.error(
+                            f'Worker loop error: {exc}. Retrying in {delay:.1f}s '
+                            f'(attempt {backoff.attempts}/{backoff.max_attempts or "inf"})'
+                        )
+                        await self._sleep_with_stop(delay)
+                        continue
+                    raise
         finally:
             await self.stop()
 
-    async def _wait_for_any_notify(self) -> None:
+    async def _wait_for_any_notify(self, poll_interval_ms: int) -> None:
         """Wait on any subscribed queue channel; coalesce a burst."""
         import contextlib
 
@@ -1172,12 +1321,25 @@ class Worker:
         # Add only the stop event as an additional wait condition (no periodic polling)
         stop_task = asyncio.create_task(self._stop.wait())
         all_tasks = queue_tasks + [stop_task]
-
-        _, pending = await asyncio.wait(all_tasks, return_when=asyncio.FIRST_COMPLETED)
+        timeout_seconds = max(0.0, poll_interval_ms / 1000.0)
+        done, pending = await asyncio.wait(
+            all_tasks,
+            return_when=asyncio.FIRST_COMPLETED,
+            timeout=timeout_seconds,
+        )
 
         # Check if stop was signaled
         if self._stop.is_set():
             # Cancel all pending tasks and await them to avoid warnings
+            for p in pending:
+                p.cancel()
+            for p in pending:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await p
+            return
+
+        # Timeout: fall back to polling
+        if not done:
             for p in pending:
                 p.cancel()
             for p in pending:
@@ -1499,6 +1661,28 @@ class Worker:
             cols = res.keys()
             return [dict(zip(cols, row)) for row in res.fetchall()]
 
+    async def _requeue_claimed_task(self, task_id: str, reason: str) -> bool:
+        async with self.sf() as s:
+            res = await s.execute(
+                UNCLAIM_CLAIMED_TASK_SQL,
+                {'id': task_id, 'wid': self.worker_instance_id},
+            )
+            await s.commit()
+            rowcount = getattr(res, 'rowcount', 0) or 0
+            requeued = rowcount > 0
+
+        if requeued:
+            logger.warning(f'Requeued CLAIMED task {task_id}: {reason}')
+        else:
+            logger.warning(
+                f'Failed to requeue task {task_id} (not CLAIMED or owner mismatch): {reason}'
+            )
+        return requeued
+
+    async def _handle_broken_pool(self, task_id: str, exc: BaseException) -> None:
+        await self._requeue_claimed_task(task_id, f'Broken process pool: {exc}')
+        await self._restart_executor(f'Broken process pool: {exc}')
+
     async def _dispatch_one(
         self,
         task_id: str,
@@ -1507,7 +1691,13 @@ class Worker:
         kwargs_json: Optional[str],
     ) -> None:
         """Submit to process pool; attach completion handler."""
-        assert self._executor is not None
+        if self._executor is None:
+            await self._restart_executor('Executor missing before dispatch')
+            if self._executor is None:
+                await self._requeue_claimed_task(
+                    task_id, 'Executor unavailable after restart attempt'
+                )
+                return
         loop = asyncio.get_running_loop()
 
         # Get heartbeat interval from recovery config (milliseconds)
@@ -1519,17 +1709,26 @@ class Worker:
 
         # Pass task_id and database_url to task process for self-heartbeat
         database_url = self.cfg.dsn.replace('+asyncpg', '').replace('+psycopg', '')
-        fut = loop.run_in_executor(
-            self._executor,
-            _run_task_entry,
-            task_name,
-            args_json,
-            kwargs_json,
-            task_id,
-            database_url,
-            self.worker_instance_id,
-            runner_heartbeat_interval_ms,
-        )
+        try:
+            fut = loop.run_in_executor(
+                self._executor,
+                _run_task_entry,
+                task_name,
+                args_json,
+                kwargs_json,
+                task_id,
+                database_url,
+                self.worker_instance_id,
+                runner_heartbeat_interval_ms,
+            )
+        except BrokenProcessPool as exc:
+            await self._handle_broken_pool(task_id, exc)
+            return
+        except Exception as exc:
+            await self._requeue_claimed_task(
+                task_id, f'Failed to dispatch task to executor: {exc}'
+            )
+            return
 
         # When done, record the outcome
         asyncio.create_task(self._finalize_after(fut, task_id))
@@ -1539,7 +1738,18 @@ class Worker:
     async def _finalize_after(
         self, fut: 'asyncio.Future[tuple[bool, str, Optional[str]]]', task_id: str
     ) -> None:
-        ok, result_json_str, failed_reason = await fut
+        try:
+            ok, result_json_str, failed_reason = await fut
+        except asyncio.CancelledError:
+            raise
+        except BrokenProcessPool as exc:
+            await self._handle_broken_pool(task_id, exc)
+            return
+        except Exception as exc:
+            await self._requeue_claimed_task(
+                task_id, f'Worker future failed before result: {exc}'
+            )
+            return
         now = datetime.now(timezone.utc)
 
         # Note: Heartbeat thread in task process automatically dies when process completes

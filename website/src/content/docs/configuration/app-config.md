@@ -28,6 +28,7 @@ app = Horsies(config)
 | `prefetch_buffer` | `int` | `0` | 0 = hard cap mode, >0 = soft cap with prefetch |
 | `claim_lease_ms` | `int` | `None` | Claim lease duration (required if prefetch_buffer > 0; must be None when prefetch_buffer = 0) |
 | `recovery` | `RecoveryConfig` | defaults | Crash recovery settings |
+| `resilience` | `WorkerResilienceConfig` | defaults | Worker retry/backoff and notify polling |
 | `schedule` | `ScheduleConfig` | `None` | Scheduled task configuration |
 
 ## Queue Mode Configuration
@@ -117,6 +118,24 @@ config = AppConfig(
 ```
 
 See [Recovery Config](recovery-config.md) for all options.
+
+## Resilience Configuration
+
+Configure worker retry/backoff and NOTIFY fallback polling:
+
+```python
+from horsies import WorkerResilienceConfig
+
+config = AppConfig(
+    broker=PostgresConfig(...),
+    resilience=WorkerResilienceConfig(
+        db_retry_initial_ms=500,
+        db_retry_max_ms=30_000,
+        db_retry_max_attempts=0,  # 0 = infinite
+        notify_poll_interval_ms=5_000,
+    ),
+)
+```
 
 ## Schedule Configuration
 

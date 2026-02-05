@@ -163,6 +163,41 @@ async def stop(self):
     self._executor.shutdown(wait=True)
 ```
 
+## Resilience
+
+Workers recover from transient infrastructure failures without operator intervention. Configure via `WorkerResilienceConfig` in `AppConfig`.
+
+### What It Handles
+
+- **Database outages**: Worker retries on connection loss during startup, claiming, and result writes. No crash, no manual restart.
+- **Silent NOTIFY channels**: If the PostgreSQL NOTIFY mechanism stops delivering (broken listener connection, dropped trigger), the worker falls back to periodic polling so tasks are still picked up.
+- **Broken process pool**: If child processes crash, the process pool is recreated. Tasks still in CLAIMED status are requeued back to PENDING. Tasks already in RUNNING status are eventually marked FAILED by the [recovery reaper](../heartbeats-recovery) and only retried if the task has `max_retries > 0`.
+
+### Configuration
+
+```python
+from horsies import WorkerResilienceConfig
+
+config = AppConfig(
+    broker=broker,
+    resilience=WorkerResilienceConfig(
+        db_retry_initial_ms=500,      # initial backoff on DB errors
+        db_retry_max_ms=30_000,       # backoff cap
+        db_retry_max_attempts=0,      # 0 = retry forever
+        notify_poll_interval_ms=5_000, # poll fallback when NOTIFY is silent
+    ),
+)
+```
+
+| Field | Type | Default | Description |
+| ----- | ---- | ------- | ----------- |
+| `db_retry_initial_ms` | `int` | `500` | Initial backoff delay (100–60,000ms) |
+| `db_retry_max_ms` | `int` | `30000` | Maximum backoff delay (500–300,000ms) |
+| `db_retry_max_attempts` | `int` | `0` | Max retry attempts; `0` = infinite (0–10,000) |
+| `notify_poll_interval_ms` | `int` | `5000` | Poll interval when NOTIFY is silent (1,000–300,000ms) |
+
+Backoff uses exponential growth (`initial_ms * 2^attempt`) with ±25% jitter, capped at `db_retry_max_ms`. Backoff resets after each successful loop iteration.
+
 ## Module Discovery
 
 Workers need to know where tasks are defined:

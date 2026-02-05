@@ -13,8 +13,10 @@ import asyncio
 import importlib
 import logging
 import os
+import random
 import signal
 import sys
+from typing import Any
 
 from horsies.core.app import Horsies
 from horsies.core.banner import print_banner
@@ -25,12 +27,56 @@ from horsies.core.errors import (
     ValidationReport,
 )
 from horsies.core.logging import get_logger
+from horsies.core.models.resilience import WorkerResilienceConfig
+from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.scheduler import Scheduler
 from horsies.core.worker.worker import Worker, WorkerConfig
 from horsies.core.utils.imports import (
     import_file_path,
     setup_sys_path_from_cwd,
 )
+
+
+async def _ensure_schema_with_retry(
+    broker: Any,
+    resilience: WorkerResilienceConfig,
+    logger: logging.Logger,
+) -> None:
+    attempts = 0
+    while True:
+        try:
+            await broker.ensure_schema_initialized()
+            return
+        except Exception as exc:
+            if not is_retryable_connection_error(exc):
+                raise
+
+            attempts += 1
+            match resilience.db_retry_max_attempts:
+                case 0:
+                    should_retry = True
+                case _:
+                    should_retry = attempts <= resilience.db_retry_max_attempts
+
+            if not should_retry:
+                logger.error(
+                    f'Database initialization failed after {attempts} attempts: {exc}'
+                )
+                raise
+
+            exponent = max(0, attempts - 1)
+            base_ms = min(
+                resilience.db_retry_max_ms,
+                int(resilience.db_retry_initial_ms * (2**exponent)),
+            )
+            jitter_range = base_ms * 0.25
+            delay_ms = base_ms + random.uniform(-jitter_range, jitter_range)
+            delay_s = max(0.1, delay_ms / 1000.0)
+            logger.error(
+                f'Database initialization failed: {exc}. Retrying in {delay_s:.1f}s '
+                f'(attempt {attempts}/{resilience.db_retry_max_attempts or "inf"})'
+            )
+            await asyncio.sleep(delay_s)
 
 
 def _resolve_module_argument(args: argparse.Namespace) -> str:
@@ -304,6 +350,7 @@ def worker_command(args: argparse.Namespace) -> None:
         max_claim_batch=args.max_claim_batch,
         max_claim_per_worker=args.max_claim_per_worker,
         recovery_config=app.config.recovery,
+        resilience_config=app.config.resilience,
         loglevel=log_level_int,
     )
 
@@ -318,7 +365,11 @@ def worker_command(args: argparse.Namespace) -> None:
         async def run_worker() -> None:
             try:
                 logger.info('Ensuring Postgres schema and triggers are initialized...')
-                await broker.ensure_schema_initialized()
+                await _ensure_schema_with_retry(
+                    broker,
+                    app.config.resilience,
+                    logger,
+                )
             except Exception as e:
                 logger.error(f'Failed to initialize database schema: {e}')
                 raise

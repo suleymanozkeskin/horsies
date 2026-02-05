@@ -55,6 +55,7 @@ from .core.models.schedule import (
     ScheduleConfig,
 )
 from .core.models.recovery import RecoveryConfig
+from .core.models.resilience import WorkerResilienceConfig
 from .core.types.status import TaskStatus, TASK_TERMINAL_STATES
 from .core.errors import ErrorCode, ValidationReport, MultipleValidationErrors
 
@@ -114,4 +115,5 @@ __all__ = [
     'ScheduleConfig',
     # Recovery
     'RecoveryConfig',
+    'WorkerResilienceConfig',
 ]

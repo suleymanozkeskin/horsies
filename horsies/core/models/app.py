@@ -4,6 +4,7 @@ from pydantic import BaseModel, model_validator, Field
 from horsies.core.models.queues import QueueMode, CustomQueueConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.schedule import ScheduleConfig
 from horsies.core.errors import (
     ConfigurationError,
@@ -28,6 +29,9 @@ class AppConfig(BaseModel):
     # Prefetched claims expire after this duration and can be reclaimed by other workers.
     claim_lease_ms: Optional[int] = None
     recovery: RecoveryConfig = Field(default_factory=RecoveryConfig)
+    resilience: WorkerResilienceConfig = Field(
+        default_factory=WorkerResilienceConfig
+    )
     schedule: Optional[ScheduleConfig] = Field(
         default=None, description='Scheduler configuration'
     )
@@ -209,6 +213,19 @@ class AppConfig(BaseModel):
         lines.append(f'    check_interval: {self.recovery.check_interval_ms}ms')
         lines.append(
             f'    heartbeat_intervals: runner={self.recovery.runner_heartbeat_interval_ms}ms, claimer={self.recovery.claimer_heartbeat_interval_ms}ms'
+        )
+
+        # Resilience config
+        lines.append('  resilience:')
+        lines.append(
+            f'    db_retry_initial_ms: {self.resilience.db_retry_initial_ms}ms'
+        )
+        lines.append(f'    db_retry_max_ms: {self.resilience.db_retry_max_ms}ms')
+        lines.append(
+            f'    db_retry_max_attempts: {self.resilience.db_retry_max_attempts}'
+        )
+        lines.append(
+            f'    notify_poll_interval_ms: {self.resilience.notify_poll_interval_ms}ms'
         )
 
         # Schedule config
