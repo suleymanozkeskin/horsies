@@ -48,3 +48,31 @@ Use this page for the exact method signatures and return types used by workflows
 | `.result` | `TaskResult[Any, TaskError] \| None` | Task result if stored (COMPLETED/FAILED; SKIPPED often None) |
 | `.started_at` | `datetime \| None` | When execution started |
 | `.completed_at` | `datetime \| None` | When execution completed |
+
+### TaskFunction.node()
+
+The `.node()` method on task functions returns a `NodeFactory` for type-safe `TaskNode` creation.
+
+| Method | Signature | Description |
+|---|---|---|
+| `.node(...)` | `(**workflow_opts) -> NodeFactory[P, T]` | Create a factory with workflow options |
+| `NodeFactory(...)` | `(*args, **kwargs) -> TaskNode[T]` | Call factory with typed task arguments |
+
+**Workflow options** (all keyword-only, all optional):
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `waits_for` | `Sequence[TaskNode \| SubWorkflowNode]` | `None` | Dependencies |
+| `args_from` | `dict[str, TaskNode \| SubWorkflowNode]` | `None` | Result injection mapping |
+| `workflow_ctx_from` | `Sequence[TaskNode \| SubWorkflowNode]` | `None` | Context sources |
+| `node_id` | `str` | `None` | Stable identifier |
+| `queue` | `str` | `None` | Queue override |
+| `priority` | `int` | `None` | Priority override |
+| `allow_failed_deps` | `bool` | `False` | Run despite failed deps |
+| `run_when` | `Callable[[WorkflowContext], bool]` | `None` | Conditional execution |
+| `skip_when` | `Callable[[WorkflowContext], bool]` | `None` | Conditional skip |
+| `join` | `Literal['all', 'any', 'quorum']` | `'all'` | Dependency join semantics |
+| `min_success` | `int` | `None` | Required for `join='quorum'` |
+| `good_until` | `datetime` | `None` | Task expiry deadline |
+
+See [Typed Node Builder](/concepts/workflows/typed-node-builder) for usage examples.

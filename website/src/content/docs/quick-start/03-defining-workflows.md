@@ -68,6 +68,14 @@ TaskNode(fn=validate_order, node_id="validate_order")
 TaskNode(fn=validate_order)  # becomes "order_processing:0"
 ```
 
+**Tip:** For tasks with static arguments, consider the [Typed Node Builder](/concepts/workflows/typed-node-builder) API for type-checked construction with IDE autocomplete:
+
+```python
+node = validate_order.node(node_id="validate")(
+    order_id="order-123",  # Typos and wrong types caught by pyright
+)
+```
+
 ## Declarative Workflow
 
 Define nodes at module level with explicit `node_id`, then assign to class attributes:

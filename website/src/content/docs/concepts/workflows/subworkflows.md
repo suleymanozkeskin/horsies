@@ -78,6 +78,12 @@ class DataPipeline(WorkflowDefinition[bool]):
 - Nodes are class attributes (order doesn't matter, DAG is built from `waits_for`)
 - `Meta.output` defines which node's result becomes the workflow result
 
+**Tip:** For tasks with static arguments, the [Typed Node Builder](/concepts/workflows/typed-node-builder) provides type-checked construction:
+
+```python
+fetch = fetch_data.node()(url="https://api.example.com")  # Type-checked
+```
+
 ### 2.2 Starting a Workflow
 
 ```python

@@ -6,7 +6,9 @@ from typing import (
     get_origin,
     get_type_hints,
     get_args,
+    Literal,
     ParamSpec,
+    Sequence,
     TypeVar,
     Generic,
     Protocol,
@@ -24,6 +26,11 @@ if TYPE_CHECKING:
     from horsies.core.models.tasks import TaskOptions
     from horsies.core.models.tasks import TaskError, TaskResult
     from horsies.core.models.tasks import TaskInfo
+    from horsies.core.models.workflow import (
+        TaskNode,
+        SubWorkflowNode,
+        WorkflowContext,
+    )
 
 from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
 from horsies.core.models.workflow import WorkflowContextMissingIdError
@@ -241,6 +248,87 @@ class TaskHandle(Generic[T]):
         self._result_fetched = True
 
 
+class NodeFactory(Generic[P, T]):
+    """
+    Factory for creating TaskNode instances with typed arguments.
+
+    Returned by TaskFunction.node(). Call with the task's arguments
+    to create a TaskNode with full static type checking.
+
+    Example:
+        node = my_task.node(waits_for=[dep])(value='test')
+        # Type checker validates 'value' against my_task's signature
+    """
+
+    _fn: 'TaskFunction[P, T]'
+    _waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None
+    _workflow_ctx_from: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None
+    _args_from: dict[str, 'TaskNode[Any] | SubWorkflowNode[Any]'] | None
+    _queue: str | None
+    _priority: int | None
+    _allow_failed_deps: bool
+    _run_when: Callable[['WorkflowContext'], bool] | None
+    _skip_when: Callable[['WorkflowContext'], bool] | None
+    _join: Literal['all', 'any', 'quorum']
+    _min_success: int | None
+    _good_until: datetime | None
+    _node_id: str | None
+
+    def __init__(
+        self,
+        fn: 'TaskFunction[P, T]',
+        *,
+        waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None,
+        workflow_ctx_from: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None,
+        args_from: dict[str, 'TaskNode[Any] | SubWorkflowNode[Any]'] | None,
+        queue: str | None,
+        priority: int | None,
+        allow_failed_deps: bool,
+        run_when: Callable[['WorkflowContext'], bool] | None,
+        skip_when: Callable[['WorkflowContext'], bool] | None,
+        join: Literal['all', 'any', 'quorum'],
+        min_success: int | None,
+        good_until: datetime | None,
+        node_id: str | None,
+    ) -> None:
+        self._fn = fn
+        self._waits_for = waits_for
+        self._workflow_ctx_from = workflow_ctx_from
+        self._args_from = args_from
+        self._queue = queue
+        self._priority = priority
+        self._allow_failed_deps = allow_failed_deps
+        self._run_when = run_when
+        self._skip_when = skip_when
+        self._join = join
+        self._min_success = min_success
+        self._good_until = good_until
+        self._node_id = node_id
+
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> 'TaskNode[T]':
+        from horsies.core.models.workflow import TaskNode
+
+        return TaskNode(
+            fn=self._fn,
+            args=args,
+            kwargs=dict(kwargs),
+            waits_for=list(self._waits_for) if self._waits_for else [],
+            workflow_ctx_from=list(self._workflow_ctx_from)
+            if self._workflow_ctx_from
+            else None,
+            args_from=dict(self._args_from) if self._args_from else {},
+            queue=self._queue,
+            priority=self._priority,
+            allow_failed_deps=self._allow_failed_deps,
+            run_when=self._run_when,
+            skip_when=self._skip_when,
+            join=self._join,
+            min_success=self._min_success,
+            good_until=self._good_until,
+            node_id=self._node_id,
+        )
+
+
 class TaskFunction(Protocol[P, T]):
     """
     A TaskFunction is a function that gets a @task decorator applied to it.
@@ -280,6 +368,24 @@ class TaskFunction(Protocol[P, T]):
         *args: P.args,
         **kwargs: P.kwargs,
     ) -> 'TaskHandle[T]': ...
+
+    @abstractmethod
+    def node(
+        self,
+        *,
+        waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None = None,
+        workflow_ctx_from: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None = None,
+        args_from: dict[str, 'TaskNode[Any] | SubWorkflowNode[Any]'] | None = None,
+        queue: str | None = None,
+        priority: int | None = None,
+        allow_failed_deps: bool = False,
+        run_when: Callable[['WorkflowContext'], bool] | None = None,
+        skip_when: Callable[['WorkflowContext'], bool] | None = None,
+        join: Literal['all', 'any', 'quorum'] = 'all',
+        min_success: int | None = None,
+        good_until: datetime | None = None,
+        node_id: str | None = None,
+    ) -> 'NodeFactory[P, T]': ...
 
 
 def create_task_wrapper(
@@ -646,6 +752,38 @@ def create_task_wrapper(
             **kwargs: P.kwargs,
         ) -> TaskHandle[T]:
             return schedule(delay, *args, **kwargs)
+
+        def node(
+            self,
+            *,
+            waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None = None,
+            workflow_ctx_from: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None = None,
+            args_from: dict[str, 'TaskNode[Any] | SubWorkflowNode[Any]'] | None = None,
+            queue: str | None = None,
+            priority: int | None = None,
+            allow_failed_deps: bool = False,
+            run_when: Callable[['WorkflowContext'], bool] | None = None,
+            skip_when: Callable[['WorkflowContext'], bool] | None = None,
+            join: Literal['all', 'any', 'quorum'] = 'all',
+            min_success: int | None = None,
+            good_until: datetime | None = None,
+            node_id: str | None = None,
+        ) -> NodeFactory[P, T]:
+            return NodeFactory(
+                fn=self,  # type: ignore[arg-type]
+                waits_for=waits_for,
+                workflow_ctx_from=workflow_ctx_from,
+                args_from=args_from,
+                queue=queue,
+                priority=priority,
+                allow_failed_deps=allow_failed_deps,
+                run_when=run_when,
+                skip_when=skip_when,
+                join=join,
+                min_success=min_success,
+                good_until=good_until,
+                node_id=node_id,
+            )
 
         # Copy metadata
         def __getattr__(self, name: str) -> Any:
