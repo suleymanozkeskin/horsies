@@ -262,6 +262,33 @@ def _task_accepts_workflow_ctx(fn: Callable[..., Any]) -> bool:
     return 'workflow_ctx' in sig.parameters
 
 
+def _get_valid_param_names(fn: Callable[..., Any]) -> set[str] | None:
+    """
+    Return valid parameter names for a task function.
+
+    Returns None if validation should be skipped:
+    - Function has **kwargs (any key is valid)
+    - Signature cannot be inspected (built-ins, C extensions)
+
+    Handles decorated functions via _original_fn attribute.
+    """
+    inspect_target: Callable[..., Any] = fn
+    original = getattr(fn, '_original_fn', None)
+    if callable(original):
+        inspect_target = original
+
+    try:
+        sig = inspect.signature(inspect_target)
+    except (TypeError, ValueError):
+        return None
+
+    for param in sig.parameters.values():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return None
+
+    return set(sig.parameters.keys())
+
+
 NODE_ID_PATTERN = re.compile(r'^[A-Za-z0-9_\-:.]+$')
 
 
@@ -308,6 +335,10 @@ class TaskNode(Generic[OkT_co]):
 
     fn: TaskFunction[Any, OkT_co]
     args: tuple[Any, ...] = ()
+    """
+    - Positional arguments passed to the task function
+    - Not allowed when args_from or workflow_ctx_from are set; use kwargs instead
+    """
     kwargs: dict[str, Any] = field(default_factory=lambda: {})
     waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] = field(
         default_factory=lambda: [],
@@ -451,6 +482,7 @@ class SubWorkflowNode(Generic[OkT_co]):
     args: tuple[Any, ...] = ()
     """
     - Positional arguments passed to workflow_def.build_with(app, *args, **kwargs)
+    - Not allowed when args_from or workflow_ctx_from are set; use kwargs instead
     """
 
     kwargs: dict[str, Any] = field(default_factory=lambda: {})
@@ -720,6 +752,10 @@ class WorkflowSpec:
             report.add(error)
         for error in self._collect_workflow_ctx_from_errors():
             report.add(error)
+        for error in self._collect_args_with_injection_errors():
+            report.add(error)
+        for error in self._collect_invalid_kwargs_errors():
+            report.add(error)
         for error in self._collect_output_errors():
             report.add(error)
         for error in self._collect_success_policy_errors():
@@ -988,6 +1024,82 @@ class WorkflowSpec:
                         ),
                     )
                 )
+        return errors
+
+    def _collect_args_with_injection_errors(self) -> list[WorkflowValidationError]:
+        """Reject positional args when args_from/workflow_ctx_from are set."""
+        errors: list[WorkflowValidationError] = []
+        for node in self.tasks:
+            if not node.args:
+                continue
+            has_args_from = bool(node.args_from)
+            has_ctx_from = node.workflow_ctx_from is not None
+            if not has_args_from and not has_ctx_from:
+                continue
+
+            injected_sources: list[str] = []
+            if has_args_from:
+                injected_sources.append('args_from')
+            if has_ctx_from:
+                injected_sources.append('workflow_ctx_from')
+
+            injected_str = ' and '.join(injected_sources)
+
+            errors.append(
+                WorkflowValidationError(
+                    message=(
+                        'positional args not allowed when using args_from or workflow_ctx_from'
+                    ),
+                    code=ErrorCode.WORKFLOW_ARGS_WITH_INJECTION,
+                    notes=[
+                        f"node '{node.name}' sets args=(...) and also {injected_str}",
+                        'positional args are only supported when args_from/workflow_ctx_from are not used',
+                    ],
+                    help_text=(
+                        'move static inputs into kwargs=... and reserve args_from/workflow_ctx_from '
+                        'for injected values'
+                    ),
+                )
+            )
+        return errors
+
+    def _collect_invalid_kwargs_errors(self) -> list[WorkflowValidationError]:
+        """Validate kwargs keys match function parameter names."""
+        errors: list[WorkflowValidationError] = []
+        for node in self.tasks:
+            if not node.kwargs:
+                continue
+
+            # Get the function to inspect (TaskNode vs SubWorkflowNode)
+            if isinstance(node, TaskNode):
+                fn = node.fn
+            else:
+                # SubWorkflowNode - skip kwargs validation for now
+                # (kwargs go to build_with, not a task function)
+                continue
+
+            valid_names = _get_valid_param_names(fn)
+            if valid_names is None:
+                continue  # Can't validate (has **kwargs or uninspectable)
+
+            invalid_keys = set(node.kwargs.keys()) - valid_names
+            if not invalid_keys:
+                continue
+
+            sorted_invalid = sorted(invalid_keys)
+            sorted_valid = sorted(valid_names)
+
+            errors.append(
+                WorkflowValidationError(
+                    message='invalid kwargs key(s) for task function',
+                    code=ErrorCode.WORKFLOW_INVALID_KWARG_KEY,
+                    notes=[
+                        f"node '{node.name}' has unknown kwarg(s): {sorted_invalid}",
+                        f"valid parameters: {sorted_valid}",
+                    ],
+                    help_text='check for typos in kwarg names',
+                )
+            )
         return errors
 
     def _collect_output_errors(self) -> list[WorkflowValidationError]:

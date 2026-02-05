@@ -156,6 +156,8 @@ Startup errors are **raised as exceptions** during app initialization, workflow 
 | E013 | `WORKFLOW_INVALID_JOIN` | Invalid join configuration |
 | E014 | `WORKFLOW_UNRESOLVED_QUEUE` | Queue name not resolved |
 | E015 | `WORKFLOW_UNRESOLVED_PRIORITY` | Priority not resolved |
+| E016 | `WORKFLOW_ARGS_WITH_INJECTION` | Positional args used with args_from or workflow_ctx_from |
+| E019 | `WORKFLOW_INVALID_KWARG_KEY` | Unknown kwargs key for task function |
 | E017 | `WORKFLOW_INVALID_SUBWORKFLOW_RETRY_MODE` | Invalid subworkflow retry mode |
 | E018 | `WORKFLOW_SUBWORKFLOW_APP_MISSING` | Subworkflow app reference missing |
 

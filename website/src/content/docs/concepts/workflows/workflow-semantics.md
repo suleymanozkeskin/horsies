@@ -887,6 +887,9 @@ def my_task(workflow_meta: WorkflowMeta | None = None) -> TaskResult[str, TaskEr
 
 **Use `workflow_ctx_from`** when you need to access many upstream results or want workflow metadata.
 
+**Important:** When using `args_from` or `workflow_ctx_from`, positional `args` are not allowed.
+Put static values in `kwargs` instead.
+
 ### args_from: What the Receiving Function Gets
 
 `args_from` delivers the upstream task's full `TaskResult[T, TaskError]` — not the unwrapped `T`.

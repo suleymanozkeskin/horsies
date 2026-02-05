@@ -279,6 +279,8 @@ def start_order_processing(order: Order) -> None:
 
 `args_from` injects upstream `TaskResult` values as keyword arguments into the receiving task function. Use `is_err()` to check for errors before accessing `.ok_value`:
 
+**Note:** When using `args_from` or `workflow_ctx_from`, positional `args` are not allowed. Put static inputs in `kwargs` instead.
+
 ```python
 @app.task("check_inventory", queue_name="standard")
 def check_inventory(
