@@ -265,6 +265,7 @@ SELECT_STALE_RUNNING_TASKS_SQL = text("""
     WHERE t2.status = 'RUNNING'
       AND t2.started_at IS NOT NULL
       AND COALESCE(hb.last_heartbeat, t2.started_at) < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL)
+    FOR UPDATE OF t2 SKIP LOCKED
 """)
 
 MARK_STALE_TASK_FAILED_SQL = text("""
@@ -275,6 +276,7 @@ MARK_STALE_TASK_FAILED_SQL = text("""
         result = :result,
         updated_at = NOW()
     WHERE id = :task_id
+      AND status = 'RUNNING'
 """)
 
 REQUEUE_STALE_CLAIMED_SQL = text("""
@@ -295,6 +297,7 @@ REQUEUE_STALE_CLAIMED_SQL = text("""
             LIMIT 1
         ) hb ON TRUE
         WHERE t2.status = 'CLAIMED'
+        FOR UPDATE OF t2 SKIP LOCKED
     ) s
     WHERE t.id = s.id
       AND (
