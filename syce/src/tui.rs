@@ -21,10 +21,20 @@ use crossterm::{
 };
 use ratatui::backend::CrosstermBackend as Backend;
 use tokio::{
-    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    sync::mpsc::{self, Receiver, Sender},
     task::JoinHandle,
     time::interval,
 };
+
+use crate::action::ListenerState;
+
+/// Batch of NOTIFY events coalesced during debounce window.
+#[derive(Clone, Debug, Default)]
+pub struct NotifyBatch {
+    pub task_status: bool,
+    pub workflow_status: bool,
+    pub worker_state: bool,
+}
 
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -40,13 +50,17 @@ pub enum Event {
     Key(KeyEvent),
     Mouse(MouseEvent),
     Resize(u16, u16),
+    /// Database NOTIFY events (debounced batch)
+    DbNotify(NotifyBatch),
+    /// Listener connection state changed
+    ListenerStateChanged(ListenerState),
 }
 
 pub struct Tui {
     pub terminal: ratatui::Terminal<Backend<Stdout>>,
     pub task: JoinHandle<()>,
-    pub event_rx: UnboundedReceiver<Event>,
-    pub event_tx: UnboundedSender<Event>,
+    pub event_rx: Receiver<Event>,
+    pub event_tx: Sender<Event>,
     pub frame_rate: f64,
     pub tick_rate: f64,
     pub mouse: bool,
@@ -56,7 +70,7 @@ pub struct Tui {
 
 impl Tui {
     pub fn new() -> Result<Self> {
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::channel(1024);
         Ok(Self {
             terminal: ratatui::Terminal::new(Backend::new(stdout()))?,
             task: tokio::spawn(async {}),
@@ -118,12 +132,12 @@ impl Tui {
         });
 
         self.task = task;
-        let _ = self.event_tx.send(Event::Init);
+        let _ = self.event_tx.try_send(Event::Init);
     }
 
     async fn tick_loop(
         stop_flag: Arc<AtomicBool>,
-        event_tx: UnboundedSender<Event>,
+        event_tx: Sender<Event>,
         tick_rate: f64,
     ) {
         let mut tick_interval = interval(Duration::from_secs_f64(1.0 / tick_rate));
@@ -132,16 +146,13 @@ impl Tui {
                 break;
             }
             tick_interval.tick().await;
-            if event_tx.send(Event::Tick).is_err() {
-                stop_flag.store(true, Ordering::Relaxed);
-                break;
-            }
+            let _ = event_tx.try_send(Event::Tick);
         }
     }
 
     async fn render_loop(
         stop_flag: Arc<AtomicBool>,
-        event_tx: UnboundedSender<Event>,
+        event_tx: Sender<Event>,
         frame_rate: f64,
     ) {
         let mut render_interval = interval(Duration::from_secs_f64(1.0 / frame_rate));
@@ -150,63 +161,42 @@ impl Tui {
                 break;
             }
             render_interval.tick().await;
-            if event_tx.send(Event::Render).is_err() {
-                stop_flag.store(true, Ordering::Relaxed);
-                break;
-            }
+            let _ = event_tx.try_send(Event::Render);
         }
     }
 
-    fn event_reader(stop_flag: Arc<AtomicBool>, event_tx: UnboundedSender<Event>) {
+    fn event_reader(stop_flag: Arc<AtomicBool>, event_tx: Sender<Event>) {
         while !stop_flag.load(Ordering::Relaxed) {
             match event::poll(Duration::from_millis(50)) {
                 Ok(true) => match event::read() {
                     Ok(CrosstermEvent::Key(key)) if key.kind == KeyEventKind::Press => {
-                        if event_tx.send(Event::Key(key)).is_err() {
-                            stop_flag.store(true, Ordering::Relaxed);
-                            break;
-                        }
+                        let _ = event_tx.try_send(Event::Key(key));
                     }
                     Ok(CrosstermEvent::Mouse(mouse)) => {
-                        if event_tx.send(Event::Mouse(mouse)).is_err() {
-                            stop_flag.store(true, Ordering::Relaxed);
-                            break;
-                        }
+                        let _ = event_tx.try_send(Event::Mouse(mouse));
                     }
                     Ok(CrosstermEvent::Resize(x, y)) => {
-                        if event_tx.send(Event::Resize(x, y)).is_err() {
-                            stop_flag.store(true, Ordering::Relaxed);
-                            break;
-                        }
+                        let _ = event_tx.try_send(Event::Resize(x, y));
                     }
                     Ok(CrosstermEvent::FocusLost) => {
-                        if event_tx.send(Event::FocusLost).is_err() {
-                            stop_flag.store(true, Ordering::Relaxed);
-                            break;
-                        }
+                        let _ = event_tx.try_send(Event::FocusLost);
                     }
                     Ok(CrosstermEvent::FocusGained) => {
-                        if event_tx.send(Event::FocusGained).is_err() {
-                            stop_flag.store(true, Ordering::Relaxed);
-                            break;
-                        }
+                        let _ = event_tx.try_send(Event::FocusGained);
                     }
                     Ok(CrosstermEvent::Paste(content)) => {
-                        if event_tx.send(Event::Paste(content)).is_err() {
-                            stop_flag.store(true, Ordering::Relaxed);
-                            break;
-                        }
+                        let _ = event_tx.try_send(Event::Paste(content));
                     }
                     Ok(_) => {}
                     Err(_) => {
-                        let _ = event_tx.send(Event::Error);
+                        let _ = event_tx.try_send(Event::Error);
                         stop_flag.store(true, Ordering::Relaxed);
                         break;
                     }
                 },
                 Ok(false) => continue,
                 Err(_) => {
-                    let _ = event_tx.send(Event::Error);
+                    let _ = event_tx.try_send(Event::Error);
                     stop_flag.store(true, Ordering::Relaxed);
                     break;
                 }

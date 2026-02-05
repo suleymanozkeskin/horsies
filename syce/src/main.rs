@@ -10,6 +10,7 @@ mod cli;
 mod components;
 mod db;
 mod errors;
+mod listener;
 mod models;
 mod state;
 mod theme;

@@ -3,6 +3,18 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use strum::Display;
 
+use crate::tui::NotifyBatch;
+
+/// State of the PostgreSQL NOTIFY listener connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ListenerState {
+    #[default]
+    Disconnected,
+    Connecting,
+    Connected,
+    Reconnecting,
+}
+
 use crate::models::{
     ActiveWorkerRow, AggregatedBreakdownRow, ClusterCapacitySummary, ClusterUtilizationPoint,
     DeadWorkerRow, OverloadedWorkerAlert, SnapshotAgeBucket, StaleClaimsAlert, TaskDetail,
@@ -103,6 +115,10 @@ pub enum Action {
     // Toast notification
     ShowToast(String),
     DismissToast,
+
+    // NOTIFY/LISTEN actions
+    NotifyRefresh(NotifyBatch),
+    ListenerStateChanged(ListenerState),
 }
 
 /// Represents a search match result

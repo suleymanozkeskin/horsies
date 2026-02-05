@@ -7,8 +7,10 @@ use sqlx::PgPool;
 use tokio::sync::mpsc;
 
 use crate::{
-    action::{Action, DataSource, DataUpdate, SearchMatch, Tab, TaskStatus, WorkflowStatus},
+    action::{Action, DataSource, DataUpdate, ListenerState, SearchMatch, Tab, TaskStatus, WorkflowStatus},
+    listener::NotifyListenerHandle,
     state::{SearchHighlight, Toast, ToastIcon},
+    tui::NotifyBatch,
     components::{
         dashboard::Dashboard, error_modal::ErrorModal, help::HelpOverlay, maintenance::Maintenance,
         search::SearchModal, status_bar::StatusBar, task_detail::TaskDetailPanel, tasks::Tasks,
@@ -103,6 +105,7 @@ pub struct App {
     state: AppState,
     pool: Option<PgPool>,
     tick_counter: u64,
+    listener_handle: Option<NotifyListenerHandle>,
 }
 
 impl App {
@@ -138,6 +141,7 @@ impl App {
             state: AppState::new(),
             pool,
             tick_counter: 0,
+            listener_handle: None,
         })
     }
 
@@ -151,6 +155,68 @@ impl App {
         FetchContext {
             pool: self.pool.clone(),
             action_tx: self.action_tx.clone(),
+        }
+    }
+
+    fn start_listener(&mut self, event_tx: mpsc::Sender<Event>) {
+        if self.listener_handle.is_none() {
+            self.listener_handle = NotifyListenerHandle::spawn(self.pool.clone(), event_tx);
+        }
+    }
+
+    fn stop_listener(&mut self) {
+        if let Some(handle) = self.listener_handle.take() {
+            handle.stop();
+        }
+        self.state.listener_state = ListenerState::Disconnected;
+    }
+
+    /// Handle NOTIFY-triggered refresh based on which channels fired.
+    fn handle_notify_refresh(&self, batch: NotifyBatch) {
+        if self.pool.is_none() {
+            return;
+        }
+
+        match self.state.current_tab {
+            Tab::Dashboard => {
+                if batch.task_status || batch.workflow_status || batch.worker_state {
+                    let ctx = self.clone_for_fetch();
+                    tokio::spawn(async move {
+                        ctx.fetch_dashboard_data(false).await;
+                    });
+                }
+            }
+            Tab::Workers => {
+                if batch.worker_state {
+                    let ctx = self.clone_for_fetch();
+                    let worker_id = self.state.selected_worker_id.clone();
+                    let time_interval = self.state.selected_time_window.interval().to_string();
+                    tokio::spawn(async move {
+                        ctx.fetch_workers_data(worker_id, &time_interval).await;
+                    });
+                }
+            }
+            Tab::Tasks => {
+                if batch.task_status {
+                    let ctx = self.clone_for_fetch();
+                    let filter = self.state.task_status_filter.to_sql_values();
+                    tokio::spawn(async move {
+                        ctx.fetch_tasks_data(filter).await;
+                    });
+                }
+            }
+            Tab::Workflows => {
+                if batch.workflow_status || batch.task_status {
+                    let ctx = self.clone_for_fetch();
+                    let filter = self.state.workflow_status_filter.to_sql_values();
+                    tokio::spawn(async move {
+                        ctx.fetch_workflows_data(filter).await;
+                    });
+                }
+            }
+            Tab::Maintenance => {
+                // Maintenance tab doesn't need real-time updates
+            }
         }
     }
 
@@ -906,6 +972,9 @@ impl App {
             .frame_rate(self.frame_rate);
         tui.enter()?;
 
+        // Spawn NOTIFY listener for real-time updates
+        self.start_listener(tui.event_tx.clone());
+
         // Trigger initial dashboard data fetch
         if self.pool.is_some() {
             let fetch_ctx = self.clone_for_fetch();
@@ -919,6 +988,7 @@ impl App {
             self.handle_events(&mut tui).await?;
             self.handle_actions(&mut tui)?;
             if self.should_suspend {
+                self.stop_listener();
                 tui.suspend()?;
                 Self::send_action(&action_tx, Action::Resume)?;
                 Self::send_action(&action_tx, Action::ClearScreen)?;
@@ -929,6 +999,7 @@ impl App {
                 break;
             }
         }
+        self.stop_listener();
         tui.exit()?;
         Ok(())
     }
@@ -944,6 +1015,8 @@ impl App {
             Event::Render => Self::send_action(&action_tx, Action::Render)?,
             Event::Resize(x, y) => Self::send_action(&action_tx, Action::Resize(x, y))?,
             Event::Key(key) => self.handle_key_event(key)?,
+            Event::DbNotify(batch) => Self::send_action(&action_tx, Action::NotifyRefresh(batch))?,
+            Event::ListenerStateChanged(state) => Self::send_action(&action_tx, Action::ListenerStateChanged(state))?,
             _ => {}
         }
         Ok(())
@@ -1213,22 +1286,31 @@ impl App {
                         }
                     }
 
-                    // Auto-refresh dashboard every 2 seconds (8 ticks at 4 ticks/sec)
-                    // Only refresh if we're on the Dashboard tab and have a database connection
+                    // Polling intervals: slower when listener connected (real-time updates),
+                    // faster when disconnected (fallback polling).
+                    // At 4 ticks/sec: 8 ticks = 2s, 32 ticks = 8s, 60 ticks = 15s, 240 ticks = 60s
+                    let listener_connected = self.state.listener_state == ListenerState::Connected;
+                    let dashboard_interval = if listener_connected { 60 } else { 8 };
+                    let workers_interval = if listener_connected { 60 } else { 12 };
+                    let tasks_interval = if listener_connected { 60 } else { 20 };
+                    let workflows_interval = if listener_connected { 60 } else { 20 };
+                    let maintenance_interval: u64 = 120; // Maintenance always slow
+
+                    // Auto-refresh dashboard
                     if self.state.current_tab == Tab::Dashboard
                         && self.pool.is_some()
-                        && self.tick_counter % 8 == 0
+                        && self.tick_counter % dashboard_interval == 0
                     {
                         let app_clone = self.clone_for_fetch();
                         tokio::spawn(async move {
-                            app_clone.fetch_dashboard_data(false).await; // Silent auto-refresh
+                            app_clone.fetch_dashboard_data(false).await;
                         });
                     }
 
-                    // Auto-refresh workers every 3 seconds (12 ticks at 4 ticks/sec)
+                    // Auto-refresh workers
                     if self.state.current_tab == Tab::Workers
                         && self.pool.is_some()
-                        && self.tick_counter % 12 == 0
+                        && self.tick_counter % workers_interval == 0
                     {
                         let app_clone = self.clone_for_fetch();
                         let selected_worker = self.state.selected_worker_id.clone();
@@ -1238,10 +1320,10 @@ impl App {
                         });
                     }
 
-                    // Auto-refresh tasks every 5 seconds (20 ticks at 4 ticks/sec)
+                    // Auto-refresh tasks
                     if self.state.current_tab == Tab::Tasks
                         && self.pool.is_some()
-                        && self.tick_counter % 20 == 0
+                        && self.tick_counter % tasks_interval == 0
                     {
                         let app_clone = self.clone_for_fetch();
                         let filter = self.state.task_status_filter.to_sql_values();
@@ -1250,11 +1332,10 @@ impl App {
                         });
                     }
 
-                    // Auto-refresh maintenance every 30 seconds (120 ticks at 4 ticks/sec)
-                    // Maintenance data doesn't change often, so refresh less frequently
+                    // Auto-refresh maintenance (always slow, data doesn't change often)
                     if self.state.current_tab == Tab::Maintenance
                         && self.pool.is_some()
-                        && self.tick_counter % 120 == 0
+                        && self.tick_counter % maintenance_interval == 0
                     {
                         let app_clone = self.clone_for_fetch();
                         tokio::spawn(async move {
@@ -1262,10 +1343,10 @@ impl App {
                         });
                     }
 
-                    // Auto-refresh workflows every 5 seconds (20 ticks at 4 ticks/sec)
+                    // Auto-refresh workflows
                     if self.state.current_tab == Tab::Workflows
                         && self.pool.is_some()
-                        && self.tick_counter % 20 == 0
+                        && self.tick_counter % workflows_interval == 0
                     {
                         let app_clone = self.clone_for_fetch();
                         let filter = self.state.workflow_status_filter.to_sql_values();
@@ -1274,9 +1355,18 @@ impl App {
                         });
                     }
                 }
-                Action::Quit => self.should_quit = true,
-                Action::Suspend => self.should_suspend = true,
-                Action::Resume => self.should_suspend = false,
+                Action::Quit => {
+                    self.stop_listener();
+                    self.should_quit = true;
+                }
+                Action::Suspend => {
+                    self.stop_listener();
+                    self.should_suspend = true;
+                }
+                Action::Resume => {
+                    self.should_suspend = false;
+                    self.start_listener(tui.event_tx.clone());
+                }
                 Action::ClearScreen => tui.terminal.clear()?,
                 Action::Resize(w, h) => self.handle_resize(tui, w, h)?,
                 Action::Render => self.render(tui)?,
@@ -1827,6 +1917,30 @@ impl App {
                 }
                 Action::DismissToast => {
                     self.state.toast = None;
+                }
+
+                // NOTIFY/LISTEN actions
+                Action::NotifyRefresh(batch) => {
+                    self.handle_notify_refresh(batch);
+                }
+                Action::ListenerStateChanged(state) => {
+                    let was_connected = self.state.listener_state == ListenerState::Connected;
+                    self.state.listener_state = state;
+
+                    // Show toast on connection state changes
+                    match state {
+                        ListenerState::Connected if !was_connected => {
+                            self.state.toast = Some(Toast::info("Real-time updates active"));
+                        }
+                        ListenerState::Reconnecting => {
+                            self.state.toast = Some(Toast {
+                                message: "Reconnecting to database...".into(),
+                                icon: ToastIcon::Warning,
+                                ticks_remaining: 12,
+                            });
+                        }
+                        _ => {}
+                    }
                 }
 
                 _ => {}

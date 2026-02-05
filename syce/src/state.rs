@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::action::{DataSource, SearchMatch, Tab, TaskStatusFilter, TimeWindow, WorkflowStatusFilter};
+use crate::action::{DataSource, ListenerState, SearchMatch, Tab, TaskStatusFilter, TimeWindow, WorkflowStatusFilter};
 use crate::models::{
     ActiveWorkerRow, AggregatedBreakdownRow, ClusterCapacitySummary, ClusterUtilizationPoint,
     DeadWorkerRow, OverloadedWorkerAlert, SnapshotAgeBucket, StaleClaimsAlert, TaskDetail,
@@ -259,6 +259,9 @@ pub struct AppState {
     // Loading & error state per dataset
     pub loading: HashMap<DataSource, bool>,
     pub errors: HashMap<DataSource, String>,
+
+    // NOTIFY listener state
+    pub listener_state: ListenerState,
 }
 
 impl AppState {
@@ -303,6 +306,7 @@ impl AppState {
             workflow_status_filter: WorkflowStatusFilter::default(),
             loading: HashMap::new(),
             errors: HashMap::new(),
+            listener_state: ListenerState::default(),
         }
     }
 
