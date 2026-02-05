@@ -19,7 +19,6 @@ from horsies.core.codec.serde import dumps_json, loads_json, task_result_from_js
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
     WorkflowHandle,
-    TaskNode,
     SubWorkflowNode,
     SubWorkflowSummary,
     WorkflowStatus,
