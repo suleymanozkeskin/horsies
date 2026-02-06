@@ -14,9 +14,14 @@ use crate::tui::{Event, NotifyBatch};
 
 /// Channels to listen for horsies state changes.
 const CHANNELS: &[&str] = &[
+    // Broad triggers (fire on ANY status change)
     "horsies_task_status",
     "horsies_workflow_status",
     "horsies_worker_state",
+    // Existing backend channels (backward compat with worker-oriented triggers)
+    "task_new",
+    "task_done",
+    "workflow_done",
 ];
 
 /// Debounce window in milliseconds.
@@ -134,8 +139,8 @@ async fn connect_and_listen(
             result = listener.recv() => {
                 let notif = result?;
                 match notif.channel() {
-                    "horsies_task_status" => batch.task_status = true,
-                    "horsies_workflow_status" => batch.workflow_status = true,
+                    "horsies_task_status" | "task_new" | "task_done" => batch.task_status = true,
+                    "horsies_workflow_status" | "workflow_done" => batch.workflow_status = true,
                     "horsies_worker_state" => batch.worker_state = true,
                     _ => {}
                 }

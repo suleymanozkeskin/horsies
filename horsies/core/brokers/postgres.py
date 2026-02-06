@@ -158,6 +158,68 @@ ADD_SUB_WORKFLOW_QUALNAME_COLUMN_SQL = text("""
     ADD COLUMN IF NOT EXISTS sub_workflow_qualname VARCHAR(512);
 """)
 
+# ---- TUI/syce notification triggers ----
+# These fire on ANY status change so the TUI gets real-time updates.
+# They are separate from the worker-oriented triggers above.
+
+CREATE_TASK_STATUS_NOTIFY_FUNCTION_SQL = text("""
+    CREATE OR REPLACE FUNCTION horsies_notify_task_status_change()
+    RETURNS trigger AS $$
+    BEGIN
+        IF TG_OP = 'INSERT' OR (TG_OP = 'UPDATE' AND OLD.status != NEW.status) THEN
+            PERFORM pg_notify('horsies_task_status', NEW.id);
+        END IF;
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+""")
+
+CREATE_TASK_STATUS_NOTIFY_TRIGGER_SQL = text("""
+    DROP TRIGGER IF EXISTS horsies_task_status_notify_trigger ON horsies_tasks;
+    CREATE TRIGGER horsies_task_status_notify_trigger
+        AFTER INSERT OR UPDATE ON horsies_tasks
+        FOR EACH ROW
+        EXECUTE FUNCTION horsies_notify_task_status_change();
+""")
+
+CREATE_WORKFLOW_STATUS_NOTIFY_FUNCTION_SQL = text("""
+    CREATE OR REPLACE FUNCTION horsies_notify_workflow_status_change()
+    RETURNS trigger AS $$
+    BEGIN
+        IF TG_OP = 'INSERT' OR (TG_OP = 'UPDATE' AND OLD.status != NEW.status) THEN
+            PERFORM pg_notify('horsies_workflow_status', NEW.id);
+        END IF;
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+""")
+
+CREATE_WORKFLOW_STATUS_NOTIFY_TRIGGER_SQL = text("""
+    DROP TRIGGER IF EXISTS horsies_workflow_status_notify_trigger ON horsies_workflows;
+    CREATE TRIGGER horsies_workflow_status_notify_trigger
+        AFTER INSERT OR UPDATE ON horsies_workflows
+        FOR EACH ROW
+        EXECUTE FUNCTION horsies_notify_workflow_status_change();
+""")
+
+CREATE_WORKER_STATE_NOTIFY_FUNCTION_SQL = text("""
+    CREATE OR REPLACE FUNCTION horsies_notify_worker_state_change()
+    RETURNS trigger AS $$
+    BEGIN
+        PERFORM pg_notify('horsies_worker_state', NEW.worker_id);
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+""")
+
+CREATE_WORKER_STATE_NOTIFY_TRIGGER_SQL = text("""
+    DROP TRIGGER IF EXISTS horsies_worker_state_notify_trigger ON horsies_worker_states;
+    CREATE TRIGGER horsies_worker_state_notify_trigger
+        AFTER INSERT OR UPDATE ON horsies_worker_states
+        FOR EACH ROW
+        EXECUTE FUNCTION horsies_notify_worker_state_change();
+""")
+
 CREATE_WORKFLOW_NOTIFY_FUNCTION_SQL = text("""
     CREATE OR REPLACE FUNCTION horsies_notify_workflow_changes()
     RETURNS trigger AS $$
@@ -381,6 +443,12 @@ class PostgresBroker:
             # Create trigger
             await conn.execute(CREATE_TASK_NOTIFY_TRIGGER_SQL)
 
+            # TUI notification triggers (broader: fires on ANY status change)
+            await conn.execute(CREATE_TASK_STATUS_NOTIFY_FUNCTION_SQL)
+            await conn.execute(CREATE_TASK_STATUS_NOTIFY_TRIGGER_SQL)
+            await conn.execute(CREATE_WORKER_STATE_NOTIFY_FUNCTION_SQL)
+            await conn.execute(CREATE_WORKER_STATE_NOTIFY_TRIGGER_SQL)
+
     async def _create_workflow_schema(self) -> None:
         """
         Set up workflow-specific schema elements.
@@ -427,6 +495,10 @@ class PostgresBroker:
 
             # Create workflow trigger
             await conn.execute(CREATE_WORKFLOW_NOTIFY_TRIGGER_SQL)
+
+            # TUI notification trigger (broader: fires on ANY workflow status change)
+            await conn.execute(CREATE_WORKFLOW_STATUS_NOTIFY_FUNCTION_SQL)
+            await conn.execute(CREATE_WORKFLOW_STATUS_NOTIFY_TRIGGER_SQL)
 
     async def _ensure_initialized(self) -> None:
         if self._initialized:
