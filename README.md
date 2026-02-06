@@ -1,9 +1,19 @@
+<p align="center">
+  <img src="https://suleymanozkeskin.github.io/horsies/galloping-horsie.jpg" alt="Horsies Logo" width="200" style="border-radius: 20px" />
+</p>
+
 # Horsies
 
-A PostgreSQL-backed distributed task queue and workflow engine for Python.
+**PostgreSQL-backed background task queue and workflow engine for Python.**
 
-Documentation: [horsies docs](https://suleymanozkeskin.github.io/horsies/)
+[**Full Documentation**](https://suleymanozkeskin.github.io/horsies/) | [**PyPI**](https://pypi.org/project/horsies/) | [**GitHub**](https://github.com/suleymanozkeskin/horsies)
 
-## Syce
+---
 
-Monitoring TUI for horsies. Documentation: [syce overview](https://suleymanozkeskin.github.io/horsies/monitoring/syce-overview/)
+## Monitoring
+
+Horsies includes **Syce**, a terminal-based UI for monitoring your cluster in real-time.
+
+![Syce Dashboard](https://suleymanozkeskin.github.io/horsies/images/syce/dashboard.png)
+
+[**Syce Setup & Usage**](https://suleymanozkeskin.github.io/horsies/monitoring/syce-overview/)
