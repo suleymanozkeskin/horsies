@@ -384,6 +384,49 @@ impl AppState {
             .map(|worker| worker.worker_id.clone());
     }
 
+    /// Move worker selection up by page_size rows
+    pub fn select_worker_page_up(&mut self, page_size: usize) {
+        if self.worker_list.is_empty() {
+            return;
+        }
+        self.selected_worker_index = match self.selected_worker_index {
+            Some(idx) => Some(idx.saturating_sub(page_size)),
+            None => Some(0),
+        };
+        self.update_selected_worker_id();
+    }
+
+    /// Move worker selection down by page_size rows
+    pub fn select_worker_page_down(&mut self, page_size: usize) {
+        if self.worker_list.is_empty() {
+            return;
+        }
+        let max_idx = self.worker_list.len().saturating_sub(1);
+        self.selected_worker_index = match self.selected_worker_index {
+            Some(idx) => Some((idx + page_size).min(max_idx)),
+            None => Some(0),
+        };
+        self.update_selected_worker_id();
+    }
+
+    /// Jump worker selection to first row
+    pub fn select_worker_home(&mut self) {
+        if self.worker_list.is_empty() {
+            return;
+        }
+        self.selected_worker_index = Some(0);
+        self.update_selected_worker_id();
+    }
+
+    /// Jump worker selection to last row
+    pub fn select_worker_end(&mut self) {
+        if self.worker_list.is_empty() {
+            return;
+        }
+        self.selected_worker_index = Some(self.worker_list.len().saturating_sub(1));
+        self.update_selected_worker_id();
+    }
+
     /// Set selected worker by ID
     pub fn set_selected_worker(&mut self, worker_id: Option<String>) {
         self.selected_worker_id = worker_id.clone();
@@ -462,6 +505,95 @@ impl AppState {
         self.task_aggregation
             .iter()
             .position(|row| row.worker_id != "TOTAL")
+    }
+
+    /// Find the last non-TOTAL index (no allocation)
+    fn last_non_total_index(&self) -> Option<usize> {
+        self.task_aggregation
+            .iter()
+            .rposition(|row| row.worker_id != "TOTAL")
+    }
+
+    /// Jump selection to first non-TOTAL row
+    pub fn select_task_home(&mut self) {
+        self.selected_task_index = self.first_non_total_index();
+    }
+
+    /// Jump selection to last non-TOTAL row
+    pub fn select_task_end(&mut self) {
+        self.selected_task_index = self.last_non_total_index();
+    }
+
+    /// Move selection up by page_size rows (skipping TOTAL), clamping to first non-TOTAL
+    pub fn select_task_page_up(&mut self, page_size: usize) {
+        let current = match self.selected_task_index {
+            Some(idx) => idx,
+            None => {
+                self.selected_task_index = self.first_non_total_index();
+                return;
+            }
+        };
+
+        // Walk backwards counting non-TOTAL rows
+        let mut remaining = page_size;
+        let mut target = current;
+        for i in (0..current).rev() {
+            if self.task_aggregation.get(i).is_some_and(|r| r.worker_id != "TOTAL") {
+                target = i;
+                remaining -= 1;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        self.selected_task_index = Some(target);
+    }
+
+    /// Move selection down by page_size rows (skipping TOTAL), clamping to last non-TOTAL
+    pub fn select_task_page_down(&mut self, page_size: usize) {
+        let current = match self.selected_task_index {
+            Some(idx) => idx,
+            None => {
+                self.selected_task_index = self.first_non_total_index();
+                return;
+            }
+        };
+
+        // Walk forwards counting non-TOTAL rows
+        let mut remaining = page_size;
+        let mut target = current;
+        for i in (current + 1)..self.task_aggregation.len() {
+            if self.task_aggregation.get(i).is_some_and(|r| r.worker_id != "TOTAL") {
+                target = i;
+                remaining -= 1;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        self.selected_task_index = Some(target);
+    }
+
+    /// Move up within expanded task IDs by page_size
+    pub fn select_task_id_page_up(&mut self, page_size: usize) {
+        if self.expanded_worker_index.is_none() {
+            return;
+        }
+        if let Some(idx) = self.selected_task_id_index {
+            self.selected_task_id_index = Some(idx.saturating_sub(page_size));
+        }
+    }
+
+    /// Move down within expanded task IDs by page_size
+    pub fn select_task_id_page_down(&mut self, page_size: usize) {
+        if self.expanded_worker_index.is_none() {
+            return;
+        }
+        let count = self.expanded_task_count();
+        let max_idx = count.saturating_sub(1);
+        if let Some(idx) = self.selected_task_id_index {
+            self.selected_task_id_index = Some((idx + page_size).min(max_idx));
+        }
     }
 
     /// Check if a worker row is currently expanded
@@ -622,6 +754,45 @@ impl AppState {
             Some(idx) => Some(idx),
             None => Some(0),
         };
+    }
+
+    /// Move workflow selection up by page_size rows
+    pub fn select_workflow_page_up(&mut self, page_size: usize) {
+        if self.workflow_list.is_empty() {
+            return;
+        }
+        self.selected_workflow_index = match self.selected_workflow_index {
+            Some(idx) => Some(idx.saturating_sub(page_size)),
+            None => Some(0),
+        };
+    }
+
+    /// Move workflow selection down by page_size rows
+    pub fn select_workflow_page_down(&mut self, page_size: usize) {
+        if self.workflow_list.is_empty() {
+            return;
+        }
+        let max_idx = self.workflow_list.len().saturating_sub(1);
+        self.selected_workflow_index = match self.selected_workflow_index {
+            Some(idx) => Some((idx + page_size).min(max_idx)),
+            None => Some(0),
+        };
+    }
+
+    /// Jump workflow selection to first row
+    pub fn select_workflow_home(&mut self) {
+        if self.workflow_list.is_empty() {
+            return;
+        }
+        self.selected_workflow_index = Some(0);
+    }
+
+    /// Jump workflow selection to last row
+    pub fn select_workflow_end(&mut self) {
+        if self.workflow_list.is_empty() {
+            return;
+        }
+        self.selected_workflow_index = Some(self.workflow_list.len().saturating_sub(1));
     }
 
     /// Get the currently selected workflow

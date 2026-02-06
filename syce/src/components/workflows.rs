@@ -191,7 +191,7 @@ impl<'a> Workflows<'a> {
 
     /// Render help hints at the bottom
     fn render_help_hints(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let hints = " ↑↓ Select workflow | Enter: View details | p/r/o/f/u/x: Toggle filter";
+        let hints = " ↑↓ Navigate | PgUp/PgDn Page | Home/End Jump | Enter: View details | p/r/o/f/u/x: Filter";
 
         let block = Block::default()
             .borders(Borders::TOP)

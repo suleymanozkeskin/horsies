@@ -1,7 +1,7 @@
 use std::cell::Cell;
 
 use crate::errors::{Result, SyceError};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use ratatui::prelude::Rect;
 use sqlx::PgPool;
 use tokio::sync::mpsc;
@@ -24,6 +24,9 @@ use crate::{
 use ratatui::layout::{Alignment, Constraint, Direction, Layout};
 use ratatui::style::Style;
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+
+/// Number of rows to skip per PageUp/PageDown action.
+const PAGE_SIZE: usize = 10;
 
 /// Helper to create a centered popup rect
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -1015,6 +1018,54 @@ impl App {
             Event::Render => Self::send_action(&action_tx, Action::Render)?,
             Event::Resize(x, y) => Self::send_action(&action_tx, Action::Resize(x, y))?,
             Event::Key(key) => self.handle_key_event(key)?,
+            Event::Mouse(mouse) => {
+                let action = match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        if self.state.show_task_detail {
+                            Some(Action::ScrollTaskDetailUp)
+                        } else if self.state.show_workflow_detail {
+                            Some(Action::ScrollWorkflowDetailUp)
+                        } else {
+                            match self.state.current_tab {
+                                Tab::Tasks => {
+                                    if self.state.expanded_worker_index.is_some() {
+                                        Some(Action::NavigateTaskIdUp)
+                                    } else {
+                                        Some(Action::NavigateTaskUp)
+                                    }
+                                }
+                                Tab::Workers => Some(Action::NavigateWorkerUp),
+                                Tab::Workflows => Some(Action::NavigateWorkflowUp),
+                                _ => None,
+                            }
+                        }
+                    }
+                    MouseEventKind::ScrollDown => {
+                        if self.state.show_task_detail {
+                            Some(Action::ScrollTaskDetailDown)
+                        } else if self.state.show_workflow_detail {
+                            Some(Action::ScrollWorkflowDetailDown)
+                        } else {
+                            match self.state.current_tab {
+                                Tab::Tasks => {
+                                    if self.state.expanded_worker_index.is_some() {
+                                        Some(Action::NavigateTaskIdDown)
+                                    } else {
+                                        Some(Action::NavigateTaskDown)
+                                    }
+                                }
+                                Tab::Workers => Some(Action::NavigateWorkerDown),
+                                Tab::Workflows => Some(Action::NavigateWorkflowDown),
+                                _ => None,
+                            }
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(action) = action {
+                    Self::send_action(&action_tx, action)?;
+                }
+            }
             Event::DbNotify(batch) => Self::send_action(&action_tx, Action::NotifyRefresh(batch))?,
             Event::ListenerStateChanged(state) => Self::send_action(&action_tx, Action::ListenerStateChanged(state))?,
             _ => {}
@@ -1153,14 +1204,14 @@ impl App {
             }
 
             // Task navigation (Tasks tab) - handle expanded state
-            (KeyCode::Up, _) if self.state.current_tab == Tab::Tasks && !self.state.show_task_detail => {
+            (KeyCode::Up | KeyCode::Char('k'), _) if self.state.current_tab == Tab::Tasks && !self.state.show_task_detail => {
                 if self.state.expanded_worker_index.is_some() {
                     Some(Action::NavigateTaskIdUp)
                 } else {
                     Some(Action::NavigateTaskUp)
                 }
             }
-            (KeyCode::Down, _) if self.state.current_tab == Tab::Tasks && !self.state.show_task_detail => {
+            (KeyCode::Down | KeyCode::Char('j'), _) if self.state.current_tab == Tab::Tasks && !self.state.show_task_detail => {
                 if self.state.expanded_worker_index.is_some() {
                     Some(Action::NavigateTaskIdDown)
                 } else {
@@ -1254,6 +1305,20 @@ impl App {
             // Enter in Workflows tab - open workflow detail
             (KeyCode::Enter, _) if self.state.current_tab == Tab::Workflows && !self.state.show_workflow_detail => {
                 self.state.get_selected_workflow_id().map(Action::OpenWorkflowDetail)
+            }
+
+            // Page/Home/End navigation (all navigable tabs, not in modals)
+            (KeyCode::PageUp, _) if !self.state.show_task_detail && !self.state.show_workflow_detail => {
+                Some(Action::NavigatePageUp)
+            }
+            (KeyCode::PageDown, _) if !self.state.show_task_detail && !self.state.show_workflow_detail => {
+                Some(Action::NavigatePageDown)
+            }
+            (KeyCode::Home, _) if !self.state.show_task_detail && !self.state.show_workflow_detail => {
+                Some(Action::NavigateHome)
+            }
+            (KeyCode::End, _) if !self.state.show_task_detail && !self.state.show_workflow_detail => {
+                Some(Action::NavigateEnd)
             }
 
             _ => None,
@@ -1672,6 +1737,96 @@ impl App {
                 }
                 Action::NavigateTaskIdDown => {
                     self.state.select_task_id_down();
+                }
+
+                // Page/Home/End navigation (dispatched per active tab)
+                Action::NavigatePageUp => {
+                    match self.state.current_tab {
+                        Tab::Tasks => {
+                            if self.state.expanded_worker_index.is_some() {
+                                self.state.select_task_id_page_up(PAGE_SIZE);
+                            } else {
+                                self.state.select_task_page_up(PAGE_SIZE);
+                            }
+                        }
+                        Tab::Workers => {
+                            self.state.select_worker_page_up(PAGE_SIZE);
+                            if self.pool.is_some() {
+                                if let Some(worker_id) = self.state.selected_worker_id.clone() {
+                                    let fetch_ctx = self.clone_for_fetch();
+                                    let time_interval = self.state.selected_time_window.interval().to_string();
+                                    tokio::spawn(async move {
+                                        fetch_ctx.fetch_workers_data(Some(worker_id), &time_interval).await;
+                                    });
+                                }
+                            }
+                        }
+                        Tab::Workflows => self.state.select_workflow_page_up(PAGE_SIZE),
+                        _ => {}
+                    }
+                }
+                Action::NavigatePageDown => {
+                    match self.state.current_tab {
+                        Tab::Tasks => {
+                            if self.state.expanded_worker_index.is_some() {
+                                self.state.select_task_id_page_down(PAGE_SIZE);
+                            } else {
+                                self.state.select_task_page_down(PAGE_SIZE);
+                            }
+                        }
+                        Tab::Workers => {
+                            self.state.select_worker_page_down(PAGE_SIZE);
+                            if self.pool.is_some() {
+                                if let Some(worker_id) = self.state.selected_worker_id.clone() {
+                                    let fetch_ctx = self.clone_for_fetch();
+                                    let time_interval = self.state.selected_time_window.interval().to_string();
+                                    tokio::spawn(async move {
+                                        fetch_ctx.fetch_workers_data(Some(worker_id), &time_interval).await;
+                                    });
+                                }
+                            }
+                        }
+                        Tab::Workflows => self.state.select_workflow_page_down(PAGE_SIZE),
+                        _ => {}
+                    }
+                }
+                Action::NavigateHome => {
+                    match self.state.current_tab {
+                        Tab::Tasks => self.state.select_task_home(),
+                        Tab::Workers => {
+                            self.state.select_worker_home();
+                            if self.pool.is_some() {
+                                if let Some(worker_id) = self.state.selected_worker_id.clone() {
+                                    let fetch_ctx = self.clone_for_fetch();
+                                    let time_interval = self.state.selected_time_window.interval().to_string();
+                                    tokio::spawn(async move {
+                                        fetch_ctx.fetch_workers_data(Some(worker_id), &time_interval).await;
+                                    });
+                                }
+                            }
+                        }
+                        Tab::Workflows => self.state.select_workflow_home(),
+                        _ => {}
+                    }
+                }
+                Action::NavigateEnd => {
+                    match self.state.current_tab {
+                        Tab::Tasks => self.state.select_task_end(),
+                        Tab::Workers => {
+                            self.state.select_worker_end();
+                            if self.pool.is_some() {
+                                if let Some(worker_id) = self.state.selected_worker_id.clone() {
+                                    let fetch_ctx = self.clone_for_fetch();
+                                    let time_interval = self.state.selected_time_window.interval().to_string();
+                                    tokio::spawn(async move {
+                                        fetch_ctx.fetch_workers_data(Some(worker_id), &time_interval).await;
+                                    });
+                                }
+                            }
+                        }
+                        Tab::Workflows => self.state.select_workflow_end(),
+                        _ => {}
+                    }
                 }
 
                 Action::SelectWorker(worker_id) => {

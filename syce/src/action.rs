@@ -62,6 +62,12 @@ pub enum Action {
     NavigateTaskIdUp,
     NavigateTaskIdDown,
 
+    // Page/Home/End navigation (tab-agnostic, dispatched contextually)
+    NavigatePageUp,
+    NavigatePageDown,
+    NavigateHome,
+    NavigateEnd,
+
     // Time window selection (for Workers tab charts)
     SwitchTimeWindow(TimeWindow),
     CycleTimeWindowForward,

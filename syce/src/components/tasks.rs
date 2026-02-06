@@ -268,9 +268,9 @@ impl<'a> Tasks<'a> {
     /// Render help hints at the bottom
     fn render_help_hints(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let hints = if self.state.expanded_worker_index.is_some() {
-            " ↑↓ Select task | Enter: View details | Esc: Collapse"
+            " ↑↓/jk Navigate | PgUp/PgDn Page | Enter: View details | Esc: Collapse"
         } else {
-            " ↑↓ Select worker | Enter: Expand | p/c/r/o/f: Toggle filter"
+            " ↑↓/jk Navigate | PgUp/PgDn Page | Home/End Jump | Enter: Expand | p/c/r/o/f: Filter"
         };
 
         let block = Block::default()
