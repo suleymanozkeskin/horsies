@@ -84,6 +84,7 @@ def _initialize_worker_pool(database_url: str) -> None:
         min_size=1,
         max_size=5,
         max_lifetime=300.0,
+        check=ConnectionPool.check_connection,
         open=True,
     )
     atexit.register(_cleanup_worker_pool)
