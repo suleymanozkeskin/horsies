@@ -19,6 +19,13 @@ export default defineConfig({
 					tag: 'script',
 					attrs: { src: '/horsies/scripts/page-search.js', defer: true },
 				},
+				{
+					tag: 'meta',
+					attrs: {
+						name: 'description',
+						content: 'PostgreSQL-backed background task queue and workflow engine for Python. No Redis, no RabbitMQ — just PostgreSQL.',
+					},
+				},
 			],
 			components: {
 				ThemeSelect: './src/components/ThemeSelect.astro',

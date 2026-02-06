@@ -7,7 +7,7 @@ tags: [errors, TaskError, LibraryErrorCode, ErrorCode, reference]
 
 # Errors Reference
 
-Horsies has two error systems: **runtime errors** returned in `TaskResult`, and **startup errors** raised during app initialization.
+Horsies has two error systems: **runtime errors** returned in `TaskResult`, and **blocking startup errors** raised during app initialization.
 
 ## Runtime Errors (TaskResult)
 
@@ -126,7 +126,17 @@ def call_api(url: str) -> TaskResult[dict, TaskError]:
 
 ## Startup Errors (HorsiesError)
 
-Startup errors are **raised as exceptions** during app initialization, workflow validation, or task registration. These use `ErrorCode` (not `LibraryErrorCode`).
+Startup errors are **blocking exceptions** raised during app initialization, workflow validation, or task registration. If a startup error occurs, the worker or scheduler will fail to start and will not accept tasks.
+
+These errors use `ErrorCode` (not `LibraryErrorCode`) and indicate structural or configuration issues that must be resolved before the application can run.
+
+### Validating with `horsies check`
+
+Use the `horsies check` command to validate your configuration, task registry, and workflow definitions without starting any services. This is recommended for CI/CD pipelines to catch blocking errors before deployment.
+
+```bash
+horsies check myapp.instance:app
+```
 
 ### ErrorCode Categories
 

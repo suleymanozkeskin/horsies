@@ -41,6 +41,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/suleymanozkeskin/horsies"
+Documentation = "https://suleymanozkeskin.github.io/horsies/"
 Repository = "https://github.com/suleymanozkeskin/horsies"
 Issues = "https://github.com/suleymanozkeskin/horsies/issues"
 
