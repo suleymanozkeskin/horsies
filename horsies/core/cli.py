@@ -448,6 +448,15 @@ def scheduler_command(args: argparse.Namespace) -> None:
         logger.warning('Scheduler is disabled in config')
         sys.exit(1)
 
+    # Strict startup validation before scheduler starts.
+    startup_errors = app.check(live=False)
+    if startup_errors:
+        report = ValidationReport('scheduler-startup')
+        for error in startup_errors:
+            report.add(error)
+        print(report.format_rust_style(), file=sys.stderr)
+        sys.exit(1)
+
     # Import task modules for validation
     discovered_modules = app.get_discovered_task_modules()
     if discovered_modules:
