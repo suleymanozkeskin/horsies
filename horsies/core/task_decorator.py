@@ -17,6 +17,8 @@ from typing import (
     Any,
 )
 from abc import abstractmethod
+from collections.abc import Mapping
+from types import MappingProxyType
 from datetime import datetime, timedelta, timezone
 from pydantic import TypeAdapter, ValidationError
 from horsies.core.codec.serde import serialize_task_options
@@ -749,7 +751,10 @@ def create_task_wrapper(
                 serialize_task_options(task_options) if task_options else None
             )
             # Expose mapper config for app.check() safety validation.
-            self.exception_mapper: ExceptionMapper | None = exception_mapper
+            # Frozen to prevent post-definition mutation.
+            self.exception_mapper: Mapping[type[BaseException], str] | None = (
+                MappingProxyType(exception_mapper) if exception_mapper is not None else None
+            )
             self.default_unhandled_error_code: str | None = default_unhandled_error_code
 
         def __call__(
