@@ -623,6 +623,11 @@ class Horsies:
             paths = app.expand_module_globs(['src/**/*_tasks.py'])
             app.discover_tasks(paths)
         """
+        if self._discovered_task_modules:
+            self.logger.warning(
+                f'discover_tasks() called again — replacing {len(self._discovered_task_modules)} '
+                f'previously registered module(s) with {len(modules)} new module(s)'
+            )
         self._discovered_task_modules = list(modules)
 
         is_child_process = os.getenv('HORSIES_CHILD_PROCESS') == '1'
