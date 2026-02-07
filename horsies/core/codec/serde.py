@@ -201,7 +201,7 @@ def to_jsonable(value: Any) -> Json:
     # Is value a `TaskResult`?
     if _is_task_result(value):
         # Represent discriminated union explicitly
-        ok_json = to_jsonable(value.ok) if value.ok is not None else None
+        ok_json = to_jsonable(value.ok) if value.is_ok() else None
         err_json: Optional[Dict[str, Json]] = None
         if value.err is not None:
             if isinstance(value.err, TaskError):
