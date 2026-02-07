@@ -38,7 +38,7 @@ from horsies.core.exception_mapper import (
     ExceptionMapper,
     resolve_exception_error_code,
 )
-from horsies.core.errors import TaskDefinitionError, ErrorCode, SourceLocation
+from horsies.core.errors import TaskDefinitionError, ConfigurationError, ErrorCode, SourceLocation
 
 P = ParamSpec('P')
 T = TypeVar('T')
@@ -51,7 +51,18 @@ def effective_priority(
 ) -> int:
     if app.config.queue_mode.name == 'DEFAULT':
         return 100  # default priority, least important
-    config = next(q for q in (app.config.custom_queues or []) if q.name == queue_name)
+    config = next(
+        (q for q in (app.config.custom_queues or []) if q.name == queue_name),
+        None,
+    )
+    if config is None:
+        valid = [q.name for q in (app.config.custom_queues or [])]
+        raise ConfigurationError(
+            message=f"queue '{queue_name}' not found in custom_queues",
+            code=ErrorCode.TASK_INVALID_QUEUE,
+            notes=[f'valid queues: {valid}'],
+            help_text='use one of the configured queue names',
+        )
     return config.priority
 
 
