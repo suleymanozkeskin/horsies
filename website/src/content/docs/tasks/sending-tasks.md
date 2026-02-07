@@ -91,7 +91,7 @@ result = my_task("arg1", "arg2")
 
 Direct calls bypass the queue entirely. Library features do not apply:
 
-- No retries (`retry_policy`, `auto_retry_for`)
+- No retries (`retry_policy`)
 - No persistence (task not recorded in database)
 - No worker distribution
 - No scheduling

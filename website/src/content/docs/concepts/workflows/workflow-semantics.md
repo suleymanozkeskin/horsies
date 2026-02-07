@@ -85,8 +85,8 @@ WORKFLOW_TASK_TERMINAL_STATES  # frozenset({COMPLETED, FAILED, SKIPPED})
 
 Workflow tasks use the same retry mechanism as standalone tasks:
 
-- A task retries only when it has a `retry_policy` **and** the failure matches `auto_retry_for`.
-- If `auto_retry_for` is not set, the task will **not** auto-retry even if `retry_policy` exists.
+- A task retries only when it has a `retry_policy` **and** the failure matches `auto_retry_for` (configured on `RetryPolicy`).
+- `auto_retry_for` is a required field on `RetryPolicy`, so retry triggers are always co-located with retry timing.
 - While retrying, the workflow task remains `RUNNING` until the final attempt completes.
 
 ### Worker crash / restart
@@ -547,7 +547,7 @@ def process_items(items: list[str]):
 
 ## Retry Policies in Workflows
 
-Workflow tasks honor the same retry policies configured on the `@task` decorator. When a task with a `retry_policy` or `auto_retry_for` is used in a workflow, those settings are preserved and applied when the workflow engine enqueues the task.
+Workflow tasks honor the same retry policies configured on the `@task` decorator. When a task with a `retry_policy` is used in a workflow, those settings (including `auto_retry_for`) are preserved and applied when the workflow engine enqueues the task.
 
 ```python
 from horsies import RetryPolicy
@@ -556,8 +556,8 @@ from horsies import RetryPolicy
     retry_policy=RetryPolicy.exponential(
         base_seconds=1,
         max_retries=3,
+        auto_retry_for=["TASK_EXCEPTION", "NETWORK_ERROR"],
     ),
-    auto_retry_for=["TASK_EXCEPTION", "NETWORK_ERROR"],
 )
 def fetch_data(url: str) -> TaskResult[dict, TaskError]:
     ...
@@ -569,7 +569,7 @@ node = TaskNode(fn=fetch_data, args=("https://api.example.com",))
 **Behavior:**
 
 - `max_retries` from the retry policy is applied to the underlying task
-- `auto_retry_for` error codes trigger automatic retries on matching failures
+- `auto_retry_for` error codes (on `RetryPolicy`) trigger automatic retries on matching failures
 - Retries happen at the task level (worker handles retry scheduling)
 - A task that fails after exhausting retries propagates failure to the workflow
 

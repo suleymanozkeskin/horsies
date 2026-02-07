@@ -14,7 +14,7 @@ from typing import (
     Union,
     overload,
 )
-from pydantic import BaseModel, model_validator, Field
+from pydantic import BaseModel, ConfigDict, model_validator, Field
 from pydantic.types import PositiveInt
 from enum import Enum
 
@@ -255,11 +255,15 @@ class RetryPolicy(BaseModel):
     1. Fixed: Uses intervals list exactly as specified
     2. Exponential: Uses intervals[0] as base, exponentially increases
 
-    - max_retries: maximum number of retry attempts (initial send not counted)
-    - intervals: delay intervals in seconds between retry attempts
-    - backoff_strategy: 'fixed' uses intervals as-is, 'exponential' uses intervals[0] as base
-    - jitter: whether to add ±25% randomization to delays
+    Fields:
+        max_retries: maximum number of retry attempts (initial send not counted)
+        intervals: delay intervals in seconds between retry attempts
+        backoff_strategy: 'fixed' uses intervals as-is, 'exponential' uses intervals[0] as base
+        jitter: whether to add ±25% randomization to delays
+        auto_retry_for: error codes that trigger automatic retries
     """
+
+    model_config = ConfigDict(extra='forbid')
 
     max_retries: Annotated[
         int, Field(ge=1, le=20, description='Number of retry attempts (1-20)')
@@ -275,6 +279,10 @@ class RetryPolicy(BaseModel):
     ] = [60, 300, 900]  # seconds: 1min, 5min, 15min
     backoff_strategy: Literal['fixed', 'exponential'] = 'fixed'
     jitter: bool = True
+    auto_retry_for: Annotated[
+        list[Union[str, LibraryErrorCode]],
+        Field(min_length=1),
+    ]
 
     @model_validator(mode='after')
     def validate_strategy_consistency(self) -> Self:
@@ -299,15 +307,32 @@ class RetryPolicy(BaseModel):
 
         return self
 
+    @model_validator(mode='after')
+    def validate_error_code_fields(self) -> Self:
+        """Validate that auto_retry_for entries are valid error code strings."""
+        for entry in self.auto_retry_for:
+            code = entry.value if isinstance(entry, LibraryErrorCode) else entry
+            err = validate_error_code_string(code, field_name='auto_retry_for')
+            if err is not None:
+                raise ValueError(err)
+        return self
+
     # Convenience constructors to prevent misconfiguration at call sites
     @classmethod
-    def fixed(cls, intervals: list[int], *, jitter: bool = True) -> 'RetryPolicy':
+    def fixed(
+        cls,
+        intervals: list[int],
+        *,
+        auto_retry_for: list[Union[str, LibraryErrorCode]],
+        jitter: bool = True,
+    ) -> 'RetryPolicy':
         """Create a fixed backoff policy where intervals length defines max_retries."""
         return cls(
             max_retries=len(intervals),
             intervals=intervals,
             backoff_strategy='fixed',
             jitter=jitter,
+            auto_retry_for=auto_retry_for,
         )
 
     @classmethod
@@ -316,6 +341,7 @@ class RetryPolicy(BaseModel):
         base_seconds: int,
         *,
         max_retries: int,
+        auto_retry_for: list[Union[str, LibraryErrorCode]],
         jitter: bool = True,
     ) -> 'RetryPolicy':
         """Create an exponential backoff policy using a single base interval.
@@ -327,6 +353,7 @@ class RetryPolicy(BaseModel):
             intervals=[base_seconds],
             backoff_strategy='exponential',
             jitter=jitter,
+            auto_retry_for=auto_retry_for,
         )
 
 
@@ -338,27 +365,15 @@ class TaskOptions(BaseModel):
         task_name: Unique task identifier (mandatory - decoupled from function names)
         queue_name: Target queue name (validated against app config at definition time)
         good_until: Task expiry deadline (task skipped if not claimed by this time)
-        auto_retry_for: Error codes that trigger automatic retries
-        retry_policy: Retry timing and backoff configuration
+        retry_policy: Retry timing and backoff configuration (includes auto_retry_for)
     """
+
+    model_config = ConfigDict(extra='forbid')
 
     task_name: str
     queue_name: Optional[str] = None
     good_until: Optional[datetime.datetime] = None
-    auto_retry_for: Optional[list[Union[str, LibraryErrorCode]]] = None
     retry_policy: Optional[RetryPolicy] = None
-
-    @model_validator(mode='after')
-    def validate_error_code_fields(self) -> Self:
-        if self.auto_retry_for is None:
-            return self
-
-        for entry in self.auto_retry_for:
-            code = entry.value if isinstance(entry, LibraryErrorCode) else entry
-            err = validate_error_code_string(code, field_name='auto_retry_for')
-            if err is not None:
-                raise ValueError(err)
-        return self
 
 
 # Rebuild SubWorkflowError to resolve forward reference to SubWorkflowSummary

@@ -86,8 +86,8 @@ from horsies import RetryPolicy
     retry_policy=RetryPolicy.exponential(
         base_seconds=30,
         max_retries=5,
+        auto_retry_for=["TIMEOUT", "CONNECTION_ERROR"],
     ),
-    auto_retry_for=["TIMEOUT", "CONNECTION_ERROR"],
 )
 def some_api_call() -> TaskResult[dict, TaskError]:
     try:
@@ -107,8 +107,8 @@ Or with the exception mapper (no try/except needed):
     retry_policy=RetryPolicy.exponential(
         base_seconds=30,
         max_retries=5,
+        auto_retry_for=["TIMEOUT", "CONNECTION_ERROR"],
     ),
-    auto_retry_for=["TIMEOUT", "CONNECTION_ERROR"],
     exception_mapper={
         TimeoutError: "TIMEOUT",
         ConnectionError: "CONNECTION_ERROR",
@@ -177,8 +177,7 @@ def task_two() -> TaskResult[str, TaskError]:
 | --------- | ---- | -------- | ----------- |
 | `task_name` | `str` | Yes | Unique task identifier |
 | `queue_name` | `str` | No | Target queue (CUSTOM mode only) |
-| `retry_policy` | `RetryPolicy` | No | Retry timing and backoff |
-| `auto_retry_for` | `list[str]` | No | Error codes that trigger retry |
+| `retry_policy` | `RetryPolicy` | No | Retry timing, backoff, and auto-retry triggers |
 | `good_until` | `datetime` | No | Task expiry deadline (set at definition time) |
 | `exception_mapper` | `dict[type[BaseException], str]` | No | Maps exception classes to error codes |
 | `default_unhandled_error_code` | `str` | No | Error code for unmapped exceptions (overrides global) |

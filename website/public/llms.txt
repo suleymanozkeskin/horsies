@@ -18,7 +18,8 @@
 - data: Any | None
 
 ### @app.task Decorator
-- @app.task("name", queue_name="default", retry_policy=..., auto_retry_for=[...])
+- @app.task("name", retry_policy=...) in DEFAULT mode
+- @app.task("name", queue_name="my_queue", retry_policy=...) in CUSTOM mode
 - Decorated function must return TaskResult[T, TaskError]
 - .send(*args) -> TaskHandle (sync), .send_async(*args) -> TaskHandle (async)
 
@@ -102,9 +103,9 @@
 - Export decorated functions from __init__.py or list submodules explicitly
 
 ### RetryPolicy
-- RetryPolicy.fixed(delays=[60, 120, 300])
-- RetryPolicy.exponential(base_seconds=1, max_retries=3)
-- auto_retry_for=["ERROR_CODE", ...] on @app.task to trigger auto-retry
+- RetryPolicy.fixed([60, 120, 300], auto_retry_for=["ERROR_CODE", ...])
+- RetryPolicy.exponential(base_seconds=1, max_retries=3, auto_retry_for=["ERROR_CODE", ...])
+- auto_retry_for is required on RetryPolicy — ensures retry triggers always have retry timing
 
 ## Docs Sitemap
 

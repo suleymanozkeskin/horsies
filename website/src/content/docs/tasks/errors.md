@@ -117,8 +117,7 @@ User-defined codes are auto-retried when listed in `auto_retry_for`:
 ```python
 @app.task(
     "call_api",
-    retry_policy=RetryPolicy.fixed([30, 60, 120]),
-    auto_retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"],
+    retry_policy=RetryPolicy.fixed([30, 60, 120], auto_retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"]),
 )
 def call_api(url: str) -> TaskResult[dict, TaskError]:
     ...

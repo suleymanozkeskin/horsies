@@ -1887,16 +1887,19 @@ class Worker:
         if retry_count >= max_retries or max_retries == 0:
             return False
 
-        # Parse task options to check auto_retry_for
+        # Parse task options to check auto_retry_for (nested in retry_policy)
         try:
             task_options_data = loads_json(row.task_options) if row.task_options else {}
             if not isinstance(task_options_data, dict):
                 return False
-            auto_retry_for = task_options_data.get('auto_retry_for', [])
+            retry_policy_raw = task_options_data.get('retry_policy', {})
+            if not isinstance(retry_policy_raw, dict):
+                return False
+            auto_retry_for = retry_policy_raw.get('auto_retry_for')
         except Exception:
             return False
 
-        if not auto_retry_for or not isinstance(auto_retry_for, list):
+        if not isinstance(auto_retry_for, list) or not auto_retry_for:
             return False
 
         # Match error code against auto_retry_for (enum value or string)

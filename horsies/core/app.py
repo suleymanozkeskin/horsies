@@ -148,7 +148,6 @@ class Horsies:
         *,
         queue_name: Optional[str] = None,
         good_until: Any = None,
-        auto_retry_for: Optional[list[str]] = None,
         retry_policy: Optional['RetryPolicy'] = None,
         exception_mapper: Optional['ExceptionMapper'] = None,
         default_unhandled_error_code: Optional[str] = None,
@@ -176,6 +175,21 @@ class Horsies:
 
         def decorator(fn: Callable[P, 'TaskResult[T, TaskError]']):
             fn_location = SourceLocation.from_function(fn)
+
+            if 'auto_retry_for' in task_options_kwargs:
+                raise TaskDefinitionError(
+                    message='invalid task options',
+                    code=ErrorCode.TASK_INVALID_OPTIONS,
+                    location=fn_location,
+                    notes=[
+                        f"task '{fn.__name__}'",
+                        "top-level 'auto_retry_for' is deprecated",
+                    ],
+                    help_text=(
+                        "move retry triggers into RetryPolicy, e.g. "
+                        "RetryPolicy.fixed([...], auto_retry_for=[...])"
+                    ),
+                )
 
             # Pop mapper-related kwargs (not part of TaskOptions, not serialized)
             exception_mapper: ExceptionMapper | None = task_options_kwargs.pop(
@@ -418,11 +432,74 @@ class Horsies:
                 )
                 continue
             if not isinstance(options, dict):
+                errors.append(
+                    _no_location(
+                        ConfigurationError(
+                            message='task_options_json must be an object',
+                            code=ErrorCode.TASK_INVALID_OPTIONS,
+                            notes=[f"task '{task_name}'", f'task_options_json={options!r}'],
+                            help_text='task options metadata must be a JSON object',
+                        )
+                    )
+                )
                 continue
-            auto_retry_for = options.get('auto_retry_for')
+            retry_policy_raw = options.get('retry_policy')
+            if retry_policy_raw is None:
+                continue
+            if not isinstance(retry_policy_raw, dict):
+                errors.append(
+                    _no_location(
+                        ConfigurationError(
+                            message='retry_policy must be an object',
+                            code=ErrorCode.TASK_INVALID_OPTIONS,
+                            notes=[f"task '{task_name}'", f'retry_policy={retry_policy_raw!r}'],
+                            help_text='retry policy metadata must be a JSON object',
+                        )
+                    )
+                )
+                continue
+            auto_retry_for = retry_policy_raw.get('auto_retry_for')
+            if auto_retry_for is None:
+                errors.append(
+                    _no_location(
+                        ConfigurationError(
+                            message='retry_policy.auto_retry_for is required',
+                            code=ErrorCode.TASK_INVALID_OPTIONS,
+                            notes=[f"task '{task_name}'"],
+                            help_text='configure retry triggers in RetryPolicy(auto_retry_for=[...])',
+                        )
+                    )
+                )
+                continue
             if not isinstance(auto_retry_for, list):
+                errors.append(
+                    _no_location(
+                        ConfigurationError(
+                            message='auto_retry_for must be a list',
+                            code=ErrorCode.TASK_INVALID_OPTIONS,
+                            notes=[
+                                f"task '{task_name}'",
+                                f'auto_retry_for={auto_retry_for!r}',
+                            ],
+                            help_text='use a list of UPPER_SNAKE_CASE error codes',
+                        )
+                    )
+                )
+                continue
+            if len(auto_retry_for) == 0:
+                errors.append(
+                    _no_location(
+                        ConfigurationError(
+                            message='auto_retry_for must not be empty',
+                            code=ErrorCode.TASK_INVALID_OPTIONS,
+                            notes=[f"task '{task_name}'"],
+                            help_text='provide at least one UPPER_SNAKE_CASE error code',
+                        )
+                    )
+                )
                 continue
 
+            has_entry_errors = False
             for idx, entry in enumerate(auto_retry_for):
                 if not isinstance(entry, str):
                     errors.append(
@@ -438,6 +515,7 @@ class Horsies:
                             )
                         )
                     )
+                    has_entry_errors = True
                     continue
                 code_error = validate_error_code_string(
                     entry,
@@ -452,6 +530,23 @@ class Horsies:
                             code=ErrorCode.TASK_INVALID_OPTIONS,
                             notes=[f"task '{task_name}'"],
                             help_text='replace exception names with explicit error codes',
+                        )
+                    )
+                )
+                has_entry_errors = True
+            if has_entry_errors:
+                continue
+
+            try:
+                RetryPolicy.model_validate(retry_policy_raw)
+            except Exception as exc:
+                errors.append(
+                    _no_location(
+                        ConfigurationError(
+                            message='invalid retry_policy metadata',
+                            code=ErrorCode.TASK_INVALID_OPTIONS,
+                            notes=[f"task '{task_name}'", str(exc)],
+                            help_text='ensure retry_policy matches RetryPolicy schema',
                         )
                     )
                 )

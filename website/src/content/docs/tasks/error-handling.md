@@ -43,8 +43,11 @@ from horsies import RetryPolicy, TaskResult, TaskError
 
 @app.task(
     "fetch_api_data",
-    retry_policy=RetryPolicy.exponential(base_seconds=30, max_retries=3),
-    auto_retry_for=["TASK_EXCEPTION", "RATE_LIMITED"],
+    retry_policy=RetryPolicy.exponential(
+        base_seconds=30,
+        max_retries=3,
+        auto_retry_for=["TASK_EXCEPTION", "RATE_LIMITED"],
+    ),
 )
 def fetch_api_data(url: str) -> TaskResult[dict, TaskError]:
     # If this returns a RATE_LIMITED error or raises an unhandled exception,
@@ -57,8 +60,11 @@ To avoid try/except boilerplate for mapping exceptions to error codes, use `exce
 ```python
 @app.task(
     "fetch_api_data",
-    retry_policy=RetryPolicy.exponential(base_seconds=30, max_retries=3),
-    auto_retry_for=["RATE_LIMITED", "TIMEOUT"],
+    retry_policy=RetryPolicy.exponential(
+        base_seconds=30,
+        max_retries=3,
+        auto_retry_for=["RATE_LIMITED", "TIMEOUT"],
+    ),
     exception_mapper={
         RateLimitError: "RATE_LIMITED",
         TimeoutError: "TIMEOUT",
@@ -243,11 +249,10 @@ if result.is_err():
 if error.error_code == "RATE_LIMITED":
     manually_schedule_retry(task_id)
 
-# Correct - configure auto_retry_for on the task
+# Correct - configure auto_retry_for on the retry policy
 @app.task(
     "my_task",
-    retry_policy=RetryPolicy.fixed([60, 120, 300]),
-    auto_retry_for=["RATE_LIMITED"],
+    retry_policy=RetryPolicy.fixed([60, 120, 300], auto_retry_for=["RATE_LIMITED"]),
 )
 def my_task() -> TaskResult[str, TaskError]:
     ...

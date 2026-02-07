@@ -574,19 +574,9 @@ def task_result_from_json(j: Json) -> TaskResult[Any, TaskError]:
 
 
 def serialize_task_options(task_options: TaskOptions) -> str:
-    # Normalize auto_retry_for entries to plain strings for JSON (support enums)
-    auto_retry: Optional[list[str]] = None
-    if task_options.auto_retry_for is not None:
-        auto_retry = []
-        for item in task_options.auto_retry_for:
-            if isinstance(item, LibraryErrorCode):
-                auto_retry.append(item.value)
-            else:
-                auto_retry.append(str(item))
     return dumps_json(
         {
-            'auto_retry_for': auto_retry,
-            'retry_policy': task_options.retry_policy.model_dump()
+            'retry_policy': task_options.retry_policy.model_dump(mode='json')
             if task_options.retry_policy
             else None,
             'good_until': task_options.good_until.isoformat()

@@ -10,7 +10,10 @@ tags: [tasks, retry, backoff]
 ```python
 from horsies import RetryPolicy
 
-@app.task("flaky_task", retry_policy=RetryPolicy.fixed([60, 300, 900]))
+@app.task(
+    "flaky_task",
+    retry_policy=RetryPolicy.fixed([60, 300, 900], auto_retry_for=["TRANSIENT_ERROR"]),
+)
 def flaky_task() -> TaskResult[str, TaskError]:
     # Will retry up to 3 times with delays: 1min, 5min, 15min
     ...
@@ -20,6 +23,7 @@ def flaky_task() -> TaskResult[str, TaskError]:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `auto_retry_for` | `list[str]` | (required) | Error codes that trigger automatic retries |
 | `max_retries` | `int` | 3 | Number of retry attempts (1-20) |
 | `intervals` | `list[int]` | [60, 300, 900] | Delay intervals in seconds |
 | `backoff_strategy` | `str` | "fixed" | "fixed" or "exponential" |
@@ -33,13 +37,14 @@ Uses exact intervals from the list. The list length must match `max_retries`.
 
 ```python
 # Retry 3 times: wait 1min, then 5min, then 15min
-RetryPolicy.fixed([60, 300, 900])
+RetryPolicy.fixed([60, 300, 900], auto_retry_for=["TRANSIENT_ERROR"])
 
 # Equivalent to:
 RetryPolicy(
     max_retries=3,
     intervals=[60, 300, 900],
     backoff_strategy='fixed',
+    auto_retry_for=["TRANSIENT_ERROR"],
 )
 ```
 
@@ -49,13 +54,14 @@ Uses a base interval multiplied by 2^(attempt-1).
 
 ```python
 # Base 30s: retry at 30s, 60s, 120s, 240s, 480s
-RetryPolicy.exponential(base_seconds=30, max_retries=5)
+RetryPolicy.exponential(base_seconds=30, max_retries=5, auto_retry_for=["TRANSIENT_ERROR"])
 
 # Equivalent to:
 RetryPolicy(
     max_retries=5,
     intervals=[30],  # Single base interval
     backoff_strategy='exponential',
+    auto_retry_for=["TRANSIENT_ERROR"],
 )
 ```
 
@@ -68,18 +74,17 @@ When `jitter=True` (default), delays are randomized by +/-25%:
 
 ```python
 # Disable jitter for predictable delays
-RetryPolicy.fixed([60, 300, 900], jitter=False)
+RetryPolicy.fixed([60, 300, 900], auto_retry_for=["TRANSIENT_ERROR"], jitter=False)
 ```
 
 ## Auto-Retry Triggers
 
-Retries only happen when specific conditions are met. Configure via `auto_retry_for`:
+Retries only happen when specific conditions are met. Configure via `auto_retry_for` on `RetryPolicy`:
 
 ```python
 @app.task(
     "api_call",
-    retry_policy=RetryPolicy.fixed([30, 60, 120]),
-    auto_retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"],
+    retry_policy=RetryPolicy.fixed([30, 60, 120], auto_retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"]),
 )
 def api_call() -> TaskResult[dict, TaskError]:
     ...
@@ -100,8 +105,7 @@ Map unhandled exceptions to error codes without try/except boilerplate. When a t
 ```python
 @app.task(
     "call_api",
-    retry_policy=RetryPolicy.fixed([30, 60, 120]),
-    auto_retry_for=["TIMEOUT", "CONNECTION_ERROR"],
+    retry_policy=RetryPolicy.fixed([30, 60, 120], auto_retry_for=["TIMEOUT", "CONNECTION_ERROR"]),
     exception_mapper={
         TimeoutError: "TIMEOUT",
         ConnectionError: "CONNECTION_ERROR",
@@ -180,6 +184,7 @@ RetryPolicy(
     max_retries=3,
     intervals=[60, 300],  # Only 2 intervals for 3 retries
     backoff_strategy='fixed',
+    auto_retry_for=["TRANSIENT_ERROR"],
 )
 
 # This also raises ValueError:
@@ -187,6 +192,7 @@ RetryPolicy(
     max_retries=3,
     intervals=[60, 300, 900],  # Multiple intervals
     backoff_strategy='exponential',  # Exponential needs exactly 1 interval
+    auto_retry_for=["TRANSIENT_ERROR"],
 )
 ```
 
@@ -197,8 +203,11 @@ RetryPolicy(
 ```python
 @app.task(
     "call_external_api",
-    retry_policy=RetryPolicy.exponential(base_seconds=60, max_retries=5),
-    auto_retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"],
+    retry_policy=RetryPolicy.exponential(
+        base_seconds=60,
+        max_retries=5,
+        auto_retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"],
+    ),
 )
 def call_external_api() -> TaskResult[dict, TaskError]:
     try:
@@ -215,8 +224,7 @@ def call_external_api() -> TaskResult[dict, TaskError]:
 ```python
 @app.task(
     "update_inventory",
-    retry_policy=RetryPolicy.fixed([1, 2, 5]),  # Quick retries
-    auto_retry_for=["DEADLOCK"],
+    retry_policy=RetryPolicy.fixed([1, 2, 5], auto_retry_for=["DEADLOCK"]),  # Quick retries
 )
 def update_inventory(item_id: int, delta: int) -> TaskResult[None, TaskError]:
     try:
