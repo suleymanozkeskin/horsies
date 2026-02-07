@@ -1799,7 +1799,7 @@ class Worker:
                         return
                     case _:
                         pass
-                should_retry = await self._should_retry_task(task_id, task_error)
+                should_retry = await self._should_retry_task(task_id, task_error, s)
                 if should_retry:
                     await self._schedule_retry(task_id, s)
                     await s.commit()
@@ -1869,14 +1869,15 @@ class Worker:
         # Handle workflow task completion
         await on_workflow_task_complete(session, task_id, result, broker)
 
-    async def _should_retry_task(self, task_id: str, error: TaskError) -> bool:
+    async def _should_retry_task(
+        self, task_id: str, error: TaskError, session: AsyncSession,
+    ) -> bool:
         """Check if a task should be retried based on its configuration and current retry count."""
-        async with self.sf() as s:
-            result = await s.execute(
-                GET_TASK_RETRY_INFO_SQL,
-                {'id': task_id},
-            )
-            row = result.fetchone()
+        result = await session.execute(
+            GET_TASK_RETRY_INFO_SQL,
+            {'id': task_id},
+        )
+        row = result.fetchone()
 
         if not row:
             return False
@@ -1974,12 +1975,14 @@ class Worker:
 
         # Calculate base delay based on strategy
         if backoff_strategy == 'fixed':
-            # Fixed strategy: use intervals directly (validation ensures length matches max_retries)
-            base_delay = intervals[retry_attempt - 1]  # Safe due to validation
+            # Fixed strategy: use intervals directly, clamped to last interval
+            # if retry_attempt exceeds length (possible after DB deserialization, old data)
+            clamped_index = min(retry_attempt - 1, len(intervals) - 1)
+            base_delay = intervals[clamped_index]
 
         elif backoff_strategy == 'exponential':
             # Exponential strategy: use intervals[0] as base and apply exponential multiplier
-            base_interval = intervals[0]  # Safe due to validation (exactly 1 interval)
+            base_interval = intervals[0] if intervals else 60
             base_delay = base_interval * (2 ** (retry_attempt - 1))
 
         else:
