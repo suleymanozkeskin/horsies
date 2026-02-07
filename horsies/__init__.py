@@ -58,6 +58,7 @@ from .core.models.recovery import RecoveryConfig
 from .core.models.resilience import WorkerResilienceConfig
 from .core.types.status import TaskStatus, TASK_TERMINAL_STATES
 from .core.errors import ErrorCode, ValidationReport, MultipleValidationErrors
+from .core.exception_mapper import ExceptionMapper
 
 __all__ = [
     # Core
@@ -116,4 +117,6 @@ __all__ = [
     # Recovery
     'RecoveryConfig',
     'WorkerResilienceConfig',
+    # Exception mapper
+    'ExceptionMapper',
 ]

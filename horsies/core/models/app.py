@@ -1,11 +1,16 @@
 # app/core/models/app.py
 from typing import List, Optional, Any
-from pydantic import BaseModel, model_validator, Field
+from pydantic import BaseModel, model_validator, Field, ConfigDict
 from horsies.core.models.queues import QueueMode, CustomQueueConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.schedule import ScheduleConfig
+from horsies.core.exception_mapper import (
+    ExceptionMapper,
+    validate_exception_mapper,
+    validate_error_code_string,
+)
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
@@ -18,6 +23,8 @@ import os
 
 
 class AppConfig(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     queue_mode: QueueMode = QueueMode.DEFAULT
     custom_queues: Optional[List[CustomQueueConfig]] = None
     broker: PostgresConfig
@@ -35,6 +42,10 @@ class AppConfig(BaseModel):
     schedule: Optional[ScheduleConfig] = Field(
         default=None, description='Scheduler configuration'
     )
+    exception_mapper: ExceptionMapper = Field(
+        default_factory=lambda: ExceptionMapper(),
+    )
+    default_unhandled_error_code: str = 'UNHANDLED_EXCEPTION'
 
     @model_validator(mode='after')
     def validate_queue_configuration(self):
@@ -150,6 +161,34 @@ class AppConfig(BaseModel):
                 )
             )
 
+        # Validate exception_mapper entries
+        mapper_errors = validate_exception_mapper(
+            self.exception_mapper,
+        )
+        for msg in mapper_errors:
+            report.add(
+                ConfigurationError(
+                    message=msg,
+                    code=ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
+                    notes=['check exception_mapper keys and values'],
+                    help_text='keys must be BaseException subclasses, values must be UPPER_SNAKE_CASE error codes',
+                )
+            )
+
+        default_code_error = validate_error_code_string(
+            self.default_unhandled_error_code,
+            field_name='default_unhandled_error_code',
+        )
+        if default_code_error is not None:
+            report.add(
+                ConfigurationError(
+                    message=default_code_error,
+                    code=ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
+                    notes=['invalid default_unhandled_error_code in AppConfig'],
+                    help_text='use UPPER_SNAKE_CASE error codes',
+                )
+            )
+
         raise_collected(report)
         return self
 
@@ -227,6 +266,12 @@ class AppConfig(BaseModel):
         lines.append(
             f'    notify_poll_interval_ms: {self.resilience.notify_poll_interval_ms}ms'
         )
+
+        # Exception mapper
+        if self.exception_mapper:
+            lines.append(f'  exception_mapper: {len(self.exception_mapper)} mapping(s)')
+        if self.default_unhandled_error_code != 'UNHANDLED_EXCEPTION':
+            lines.append(f'  default_unhandled_error_code: {self.default_unhandled_error_code}')
 
         # Schedule config
         if self.schedule is not None:

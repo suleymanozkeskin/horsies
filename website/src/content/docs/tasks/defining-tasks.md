@@ -76,19 +76,47 @@ def might_crash() -> TaskResult[str, TaskError]:
 
 ### Configure Retries
 
+With explicit try/except:
+
 ```python
 from horsies import RetryPolicy
 
 @app.task(
     "some_api_call",
     retry_policy=RetryPolicy.exponential(
-        base_seconds=30, 
+        base_seconds=30,
         max_retries=5,
     ),
-    auto_retry_for=["TimeoutError", "ConnectionError"],
+    auto_retry_for=["TIMEOUT", "CONNECTION_ERROR"],
 )
 def some_api_call() -> TaskResult[dict, TaskError]:
-    ...
+    try:
+        result = call_external_api()
+        return TaskResult(ok=result)
+    except TimeoutError:
+        return TaskResult(err=TaskError(error_code="TIMEOUT", message="Request timed out"))
+    except ConnectionError:
+        return TaskResult(err=TaskError(error_code="CONNECTION_ERROR", message="Connection failed"))
+```
+
+Or with the exception mapper (no try/except needed):
+
+```python
+@app.task(
+    "some_api_call",
+    retry_policy=RetryPolicy.exponential(
+        base_seconds=30,
+        max_retries=5,
+    ),
+    auto_retry_for=["TIMEOUT", "CONNECTION_ERROR"],
+    exception_mapper={
+        TimeoutError: "TIMEOUT",
+        ConnectionError: "CONNECTION_ERROR",
+    },
+)
+def some_api_call() -> TaskResult[dict, TaskError]:
+    result = call_external_api()
+    return TaskResult(ok=result)
 ```
 
 For backoff strategies, jitter, and auto-retry triggers, see [Retry Policy](../retry-policy).
@@ -150,7 +178,9 @@ def task_two() -> TaskResult[str, TaskError]:
 | `task_name` | `str` | Yes | Unique task identifier |
 | `queue_name` | `str` | No | Target queue (CUSTOM mode only) |
 | `retry_policy` | `RetryPolicy` | No | Retry timing and backoff |
-| `auto_retry_for` | `list[str]` | No | Error codes/exceptions that trigger retry |
+| `auto_retry_for` | `list[str]` | No | Error codes that trigger retry |
 | `good_until` | `datetime` | No | Task expiry deadline (set at definition time) |
+| `exception_mapper` | `dict[type[BaseException], str]` | No | Maps exception classes to error codes |
+| `default_unhandled_error_code` | `str` | No | Error code for unmapped exceptions (overrides global) |
 
 **Returns:** Decorated function that can be called directly or via `.send()` / `.send_async()`.

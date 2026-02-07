@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from horsies.core.models.workflow import SubWorkflowSummary
 
 from horsies.core.types.status import TaskStatus
+from horsies.core.exception_mapper import validate_error_code_string
 
 T = TypeVar('T')  # success payload
 E = TypeVar('E')  # error payload (TaskError )
@@ -337,7 +338,7 @@ class TaskOptions(BaseModel):
         task_name: Unique task identifier (mandatory - decoupled from function names)
         queue_name: Target queue name (validated against app config at definition time)
         good_until: Task expiry deadline (task skipped if not claimed by this time)
-        auto_retry_for: Error codes or exception types that trigger automatic retries
+        auto_retry_for: Error codes that trigger automatic retries
         retry_policy: Retry timing and backoff configuration
     """
 
@@ -346,6 +347,18 @@ class TaskOptions(BaseModel):
     good_until: Optional[datetime.datetime] = None
     auto_retry_for: Optional[list[Union[str, LibraryErrorCode]]] = None
     retry_policy: Optional[RetryPolicy] = None
+
+    @model_validator(mode='after')
+    def validate_error_code_fields(self) -> Self:
+        if self.auto_retry_for is None:
+            return self
+
+        for entry in self.auto_retry_for:
+            code = entry.value if isinstance(entry, LibraryErrorCode) else entry
+            err = validate_error_code_string(code, field_name='auto_retry_for')
+            if err is not None:
+                raise ValueError(err)
+        return self
 
 
 # Rebuild SubWorkflowError to resolve forward reference to SubWorkflowSummary

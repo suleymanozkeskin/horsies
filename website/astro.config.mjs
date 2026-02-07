@@ -125,6 +125,12 @@ export default defineConfig({
 						{ label: 'Serialization', slug: 'internals/serialization' },
 					],
 				},
+				{
+					label: 'Q&A',
+					items: [
+						{ label: 'Questions & Answers', slug: 'questions-and-answers' },
+					],
+				},
 			],
 		}),
 	],

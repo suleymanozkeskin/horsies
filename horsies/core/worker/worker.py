@@ -1899,7 +1899,7 @@ class Worker:
         if not auto_retry_for or not isinstance(auto_retry_for, list):
             return False
 
-        # Check if error matches auto_retry_for criteria (enum or string)
+        # Match error code against auto_retry_for (enum value or string)
         code = (
             error.error_code.value
             if isinstance(error.error_code, LibraryErrorCode)
@@ -1907,22 +1907,6 @@ class Worker:
         )
         if code and code in auto_retry_for:
             return True
-
-        if error.exception:
-            # Handle both Exception objects and serialized exception dicts
-            exception_type: str | None = None
-            if isinstance(error.exception, Exception):
-                exception_type = type(error.exception).__name__
-            elif isinstance(error.exception, dict):
-                # Support both serialization formats:
-                # - "type" from _exception_to_json
-                # - "exception_type" from task_decorator data field
-                exception_type = error.exception.get('type') or error.exception.get(
-                    'exception_type'
-                )
-
-            if exception_type and exception_type in auto_retry_for:
-                return True
 
         return False
 

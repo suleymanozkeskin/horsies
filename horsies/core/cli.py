@@ -284,6 +284,15 @@ def worker_command(args: argparse.Namespace) -> None:
         logger.error(f'Failed to discover app: {e}')
         sys.exit(1)
 
+    # Strict startup validation before worker accepts tasks.
+    startup_errors = app.check(live=False)
+    if startup_errors:
+        report = ValidationReport('worker-startup')
+        for error in startup_errors:
+            report.add(error)
+        print(report.format_rust_style(), file=sys.stderr)
+        sys.exit(1)
+
     # Get broker config from app
     try:
         broker = app.get_broker()

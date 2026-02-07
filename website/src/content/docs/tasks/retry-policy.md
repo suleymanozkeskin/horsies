@@ -79,7 +79,7 @@ Retries only happen when specific conditions are met. Configure via `auto_retry_
 @app.task(
     "api_call",
     retry_policy=RetryPolicy.fixed([30, 60, 120]),
-    auto_retry_for=["ConnectionError", "TimeoutError", "RATE_LIMITED"],
+    auto_retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"],
 )
 def api_call() -> TaskResult[dict, TaskError]:
     ...
@@ -87,13 +87,64 @@ def api_call() -> TaskResult[dict, TaskError]:
 
 `auto_retry_for` accepts:
 
-- Exception type names: `"ConnectionError"`, `"TimeoutError"`
 - Error codes from `TaskError`: `"RATE_LIMITED"`, `"SERVICE_UNAVAILABLE"`
-- Library error codes: `"UNHANDLED_EXCEPTION"`
+- Library error codes: `"UNHANDLED_EXCEPTION"`, `"WORKER_CRASHED"`
+- Codes must use `UPPER_SNAKE_CASE` (exception class names like `"TimeoutError"` are rejected)
+
+## Exception Mapper
+
+Map unhandled exceptions to error codes without try/except boilerplate. When a task raises an exception, the mapper matches the exact exception class (`type(exc)`).
+
+### Per-Task Mapper
+
+```python
+@app.task(
+    "call_api",
+    retry_policy=RetryPolicy.fixed([30, 60, 120]),
+    auto_retry_for=["TIMEOUT", "CONNECTION_ERROR"],
+    exception_mapper={
+        TimeoutError: "TIMEOUT",
+        ConnectionError: "CONNECTION_ERROR",
+    },
+)
+def call_api() -> TaskResult[dict, TaskError]:
+    # No try/except needed — TimeoutError becomes "TIMEOUT" automatically
+    response = requests.get("https://api.example.com", timeout=10)
+    return TaskResult(ok=response.json())
+```
+
+### Global Mapper
+
+Set a global mapper on `AppConfig` to apply to all tasks:
+
+```python
+config = AppConfig(
+    broker=PostgresConfig(database_url="postgresql+psycopg://..."),
+    exception_mapper={
+        TimeoutError: "TIMEOUT",
+        ConnectionError: "CONNECTION_ERROR",
+        PermissionError: "PERMISSION_DENIED",
+    },
+    default_unhandled_error_code="UNHANDLED_EXCEPTION",
+)
+```
+
+### Resolution Order
+
+When an unhandled exception is caught:
+
+1. Per-task `exception_mapper` (exact class lookup)
+2. Global `AppConfig.exception_mapper` (exact class lookup)
+3. Per-task `default_unhandled_error_code`
+4. Global `AppConfig.default_unhandled_error_code` (defaults to `"UNHANDLED_EXCEPTION"`)
+
+Per-task mapper entries take priority over global. If the task function returns `TaskResult(err=...)` explicitly, the mapper is never invoked.
+
+Only exact class matches count — subclasses are not matched. If you need to handle a subclass, map it explicitly.
 
 ## How Retries Work
 
-1. Task fails with matching error/exception
+1. Task fails with matching error code
 2. Worker checks `retry_count < max_retries`
 3. If retries remaining, task status set to PENDING
 4. `next_retry_at` calculated from retry policy
@@ -165,8 +216,12 @@ def call_external_api() -> TaskResult[dict, TaskError]:
 @app.task(
     "update_inventory",
     retry_policy=RetryPolicy.fixed([1, 2, 5]),  # Quick retries
-    auto_retry_for=["DeadlockDetected"],
+    auto_retry_for=["DEADLOCK"],
 )
 def update_inventory(item_id: int, delta: int) -> TaskResult[None, TaskError]:
-    ...
+    try:
+        db.update_stock(item_id, delta)
+        return TaskResult(ok=None)
+    except DeadlockDetected:
+        return TaskResult(err=TaskError(error_code="DEADLOCK", message="Deadlock detected"))
 ```

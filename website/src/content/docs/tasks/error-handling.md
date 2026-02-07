@@ -44,11 +44,28 @@ from horsies import RetryPolicy, TaskResult, TaskError
 @app.task(
     "fetch_api_data",
     retry_policy=RetryPolicy.exponential(base_seconds=30, max_retries=3),
-    auto_retry_for=["TASK_EXCEPTION", "RATE_LIMITED", "ConnectionError"],
+    auto_retry_for=["TASK_EXCEPTION", "RATE_LIMITED"],
 )
 def fetch_api_data(url: str) -> TaskResult[dict, TaskError]:
-    # If this raises ConnectionError or returns RATE_LIMITED error,
+    # If this returns a RATE_LIMITED error or raises an unhandled exception,
     # the worker automatically retries up to 3 times
+    ...
+```
+
+To avoid try/except boilerplate for mapping exceptions to error codes, use `exception_mapper`:
+
+```python
+@app.task(
+    "fetch_api_data",
+    retry_policy=RetryPolicy.exponential(base_seconds=30, max_retries=3),
+    auto_retry_for=["RATE_LIMITED", "TIMEOUT"],
+    exception_mapper={
+        RateLimitError: "RATE_LIMITED",
+        TimeoutError: "TIMEOUT",
+    },
+)
+def fetch_api_data(url: str) -> TaskResult[dict, TaskError]:
+    # Unhandled RateLimitError/TimeoutError automatically mapped and retried
     ...
 ```
 

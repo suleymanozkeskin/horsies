@@ -34,6 +34,10 @@ if TYPE_CHECKING:
 
 from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
 from horsies.core.models.workflow import WorkflowContextMissingIdError
+from horsies.core.exception_mapper import (
+    ExceptionMapper,
+    resolve_exception_error_code,
+)
 from horsies.core.errors import TaskDefinitionError, ErrorCode, SourceLocation
 
 P = ParamSpec('P')
@@ -393,6 +397,9 @@ def create_task_wrapper(
     app: 'Horsies',
     task_name: str,
     task_options: Optional['TaskOptions'] = None,
+    *,
+    exception_mapper: ExceptionMapper | None = None,
+    default_unhandled_error_code: str | None = None,
 ) -> 'TaskFunction[P, T]':
     """
     Create a task wrapper for a specific app instance.
@@ -516,10 +523,17 @@ def create_task_wrapper(
             return error_result
         except BaseException as e:
             # Catch SystemExit, GeneratorExit, Exception, etc.
+            error_code = resolve_exception_error_code(
+                exc=e,
+                task_mapper=exception_mapper,
+                global_mapper=app.config.exception_mapper,
+                task_default=default_unhandled_error_code,
+                global_default=app.config.default_unhandled_error_code,
+            )
             error_result: TaskResult[T, TaskError] = TaskResult(
                 err=TaskError(
                     exception=e,
-                    error_code=LibraryErrorCode.UNHANDLED_EXCEPTION,
+                    error_code=error_code,
                     message=f'Unhandled exception in task {fn.__name__}: {type(e).__name__}: {str(e)}',
                     data={'exception_type': type(e).__name__},
                 )
@@ -723,6 +737,9 @@ def create_task_wrapper(
             self.task_options_json: str | None = (
                 serialize_task_options(task_options) if task_options else None
             )
+            # Expose mapper config for app.check() safety validation.
+            self.exception_mapper: ExceptionMapper | None = exception_mapper
+            self.default_unhandled_error_code: str | None = default_unhandled_error_code
 
         def __call__(
             self,

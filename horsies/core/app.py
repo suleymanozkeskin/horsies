@@ -23,6 +23,11 @@ from horsies.core.models.workflow import (
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.logging import get_logger
 from horsies.core.registry.tasks import TaskRegistry
+from horsies.core.exception_mapper import (
+    ExceptionMapper,
+    validate_exception_mapper,
+    validate_error_code_string,
+)
 from horsies.core.errors import (
     ConfigurationError,
     HorsiesError,
@@ -38,6 +43,7 @@ import importlib
 import glob
 from fnmatch import fnmatch
 from horsies.core.utils.imports import import_by_path
+from horsies.core.codec.serde import loads_json
 
 if TYPE_CHECKING:
     from horsies.core.task_decorator import TaskFunction
@@ -144,6 +150,8 @@ class Horsies:
         good_until: Any = None,
         auto_retry_for: Optional[list[str]] = None,
         retry_policy: Optional['RetryPolicy'] = None,
+        exception_mapper: Optional['ExceptionMapper'] = None,
+        default_unhandled_error_code: Optional[str] = None,
     ) -> Callable[
         [Callable[P, 'TaskResult[T, TaskError]']],
         'TaskFunction[P, T]',
@@ -169,6 +177,43 @@ class Horsies:
         def decorator(fn: Callable[P, 'TaskResult[T, TaskError]']):
             fn_location = SourceLocation.from_function(fn)
 
+            # Pop mapper-related kwargs (not part of TaskOptions, not serialized)
+            exception_mapper: ExceptionMapper | None = task_options_kwargs.pop(
+                'exception_mapper', None,
+            )
+            default_unhandled_error_code: str | None = task_options_kwargs.pop(
+                'default_unhandled_error_code', None,
+            )
+
+            # Validate per-task mapper if provided
+            if exception_mapper is not None:
+                mapper_errors = validate_exception_mapper(
+                    exception_mapper,
+                )
+                if mapper_errors:
+                    raise TaskDefinitionError(
+                        message='invalid exception_mapper',
+                        code=ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
+                        location=fn_location,
+                        notes=[f"task '{fn.__name__}'", *mapper_errors],
+                        help_text='keys must be BaseException subclasses, values must be UPPER_SNAKE_CASE error codes',
+                    )
+
+            # Validate per-task default_unhandled_error_code if provided
+            if default_unhandled_error_code is not None:
+                code_error = validate_error_code_string(
+                    default_unhandled_error_code,
+                    field_name='default_unhandled_error_code',
+                )
+                if code_error is not None:
+                    raise TaskDefinitionError(
+                        message='invalid default_unhandled_error_code',
+                        code=ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
+                        location=fn_location,
+                        notes=[f"task '{fn.__name__}'", code_error],
+                        help_text='use UPPER_SNAKE_CASE error codes',
+                    )
+
             # Validate and create TaskOptions - this enforces pydantic validation
             try:
                 task_options = TaskOptions(task_name=task_name, **task_options_kwargs)
@@ -189,7 +234,14 @@ class Horsies:
                 raise  # Re-raise with original formatting
 
             # Create wrapper that uses this app's configuration
-            task_function = create_task_wrapper(fn, self, task_name, task_options)
+            task_function = create_task_wrapper(
+                fn,
+                self,
+                task_name,
+                task_options,
+                exception_mapper=exception_mapper,
+                default_unhandled_error_code=default_unhandled_error_code,
+            )
 
             # Register task with this app, passing source for duplicate detection
             # Normalize path with realpath to handle symlinks and relative paths
@@ -228,6 +280,11 @@ class Horsies:
 
         # Phase 2: task module imports (also triggers Phase 3 workflow validation)
         all_errors.extend(self._check_task_imports())
+        if all_errors:
+            return all_errors
+
+        # Phase 3.5: policy safety checks that require imported task metadata.
+        all_errors.extend(self._check_runtime_policy_safety())
         if all_errors:
             return all_errors
 
@@ -287,6 +344,118 @@ class Horsies:
                     )
         finally:
             self.suppress_sends(prev_suppress)
+        return errors
+
+    def _check_runtime_policy_safety(self) -> list[HorsiesError]:
+        """Validate runtime retry/mapping policies after task imports."""
+        errors: list[HorsiesError] = []
+
+        # Re-validate global settings so post-construction mutations fail startup.
+        mapper_errors = validate_exception_mapper(self.config.exception_mapper)
+        for msg in mapper_errors:
+            errors.append(
+                _no_location(
+                    ConfigurationError(
+                        message=msg,
+                        code=ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
+                        notes=['app config'],
+                        help_text='exception_mapper must be a mapping with exception-class keys and UPPER_SNAKE_CASE code values',
+                    )
+                )
+            )
+
+        global_default_error = validate_error_code_string(
+            self.config.default_unhandled_error_code,
+            field_name='default_unhandled_error_code',
+        )
+        if global_default_error is not None:
+            errors.append(
+                _no_location(
+                    ConfigurationError(
+                        message=global_default_error,
+                        code=ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
+                        notes=['app config'],
+                        help_text='use UPPER_SNAKE_CASE error codes',
+                    )
+                )
+            )
+
+        for task_name, task in self.tasks.items():
+            task_default = getattr(task, 'default_unhandled_error_code', None)
+            if task_default is not None:
+                code_error = validate_error_code_string(
+                    task_default,
+                    field_name='default_unhandled_error_code',
+                )
+                if code_error is not None:
+                    errors.append(
+                        _no_location(
+                            ConfigurationError(
+                                message=code_error,
+                                code=ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
+                                notes=[f"task '{task_name}'"],
+                                help_text='use UPPER_SNAKE_CASE error codes',
+                            )
+                        )
+                    )
+
+            task_options_json = getattr(task, 'task_options_json', None)
+            if not isinstance(task_options_json, str) or not task_options_json:
+                continue
+
+            try:
+                options = loads_json(task_options_json)
+            except Exception as exc:
+                errors.append(
+                    _no_location(
+                        ConfigurationError(
+                            message='invalid task_options_json',
+                            code=ErrorCode.TASK_INVALID_OPTIONS,
+                            notes=[f"task '{task_name}'", str(exc)],
+                            help_text='task options metadata must be valid JSON',
+                        )
+                    )
+                )
+                continue
+            if not isinstance(options, dict):
+                continue
+            auto_retry_for = options.get('auto_retry_for')
+            if not isinstance(auto_retry_for, list):
+                continue
+
+            for idx, entry in enumerate(auto_retry_for):
+                if not isinstance(entry, str):
+                    errors.append(
+                        _no_location(
+                            ConfigurationError(
+                                message='auto_retry_for entries must be strings',
+                                code=ErrorCode.TASK_INVALID_OPTIONS,
+                                notes=[
+                                    f"task '{task_name}'",
+                                    f'auto_retry_for[{idx}]={entry!r}',
+                                ],
+                                help_text='use explicit UPPER_SNAKE_CASE error codes',
+                            )
+                        )
+                    )
+                    continue
+                code_error = validate_error_code_string(
+                    entry,
+                    field_name='auto_retry_for',
+                )
+                if code_error is None:
+                    continue
+                errors.append(
+                    _no_location(
+                        ConfigurationError(
+                            message=code_error,
+                            code=ErrorCode.TASK_INVALID_OPTIONS,
+                            notes=[f"task '{task_name}'"],
+                            help_text='replace exception names with explicit error codes',
+                        )
+                    )
+                )
+
         return errors
 
     def _check_broker_connectivity(self) -> list[HorsiesError]:
