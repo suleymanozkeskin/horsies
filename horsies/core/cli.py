@@ -170,7 +170,12 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
                     ],
                     help_text=help_lines,
                 )
-            raise FileNotFoundError(f'Module file not found: {file_path}')
+            raise ConfigurationError(
+                message=f'module file not found: {file_path}',
+                code=ErrorCode.CLI_INVALID_ARGS,
+                notes=[f"resolved path: '{file_path}'"],
+                help_text='check that the file path is correct and the file exists',
+            )
 
         # import_file_path adds parent directory to sys.path
         module = import_file_path(file_path)
@@ -200,14 +205,19 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
     if attr_name:
         # Explicit attribute name
         if not hasattr(module, attr_name):
-            raise AttributeError(
-                f"Module '{module_name}' has no attribute '{attr_name}'"
+            raise ConfigurationError(
+                message=f"module '{module_name}' has no attribute '{attr_name}'",
+                code=ErrorCode.CLI_INVALID_ARGS,
+                notes=[f"available attributes: {[n for n in dir(module) if not n.startswith('_')]}"],
+                help_text='check the variable name after the colon in your module locator',
             )
         obj = getattr(module, attr_name)
         if not isinstance(obj, Horsies):
-            raise TypeError(
-                f"'{attr_name}' in module '{module_name}' is not a Horsies instance "
-                f'(got {type(obj).__name__})'
+            raise ConfigurationError(
+                message=f"'{attr_name}' in module '{module_name}' is not a Horsies instance",
+                code=ErrorCode.CLI_INVALID_ARGS,
+                notes=[f"got {type(obj).__name__} instead of Horsies"],
+                help_text='ensure the variable points to a Horsies() instance',
             )
         app = obj
         var_name = attr_name
@@ -221,16 +231,20 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
                     app_instances.append((obj, name))
 
         if not app_instances:
-            raise AttributeError(
-                f'No Horsies instance found in {module_name}. '
-                'Specify the variable name: module.path:variable'
+            raise ConfigurationError(
+                message=f'no Horsies instance found in {module_name}',
+                code=ErrorCode.CLI_INVALID_ARGS,
+                notes=[f"scanned module '{module_name}' for Horsies instances"],
+                help_text='specify the variable name: module.path:variable',
             )
 
         if len(app_instances) > 1:
             var_names = [name for _, name in app_instances]
-            raise AttributeError(
-                f'Multiple Horsies instances found in {module_name}: {var_names}. '
-                'Specify which one: module.path:variable'
+            raise ConfigurationError(
+                message=f'multiple Horsies instances found in {module_name}',
+                code=ErrorCode.CLI_INVALID_ARGS,
+                notes=[f'found: {var_names}'],
+                help_text='specify which one: module.path:variable',
             )
 
         app, var_name = app_instances[0]
