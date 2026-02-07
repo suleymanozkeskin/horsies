@@ -596,6 +596,8 @@ class Horsies:
                 self._broker = PostgresBroker(self.config.broker)
                 self._broker.app = self  # Store app reference for subworkflow support
             return self._broker
+        except HorsiesError:
+            raise
         except Exception as e:
             raise ValueError(f'Failed to get broker: {e}')
 

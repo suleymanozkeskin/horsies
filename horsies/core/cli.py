@@ -297,6 +297,9 @@ def worker_command(args: argparse.Namespace) -> None:
     try:
         broker = app.get_broker()
         postgres_config = broker.config
+    except HorsiesError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
         logger.error(f'Failed to get broker config: {e}')
         sys.exit(1)
