@@ -161,7 +161,6 @@ def _locate_app(app_locator: str) -> Horsies:
     """
     app_locator examples:
       - 'package.module:app'         -> import module, take variable attr
-      - 'package.module:create_app'  -> call factory
       - '/abs/path/to/file.py:app'   -> load from file path
     """
     logger.info(f'Locating app from {app_locator}')
@@ -178,18 +177,17 @@ def _locate_app(app_locator: str) -> Horsies:
     else:
         mod = import_module(mod_path)
     obj = getattr(mod, attr)
-    candidate = obj() if callable(obj) else obj
-    if not isinstance(candidate, Horsies):
+    if not isinstance(obj, Horsies):
         raise ConfigurationError(
             message='app locator did not resolve to Horsies instance',
             code=ErrorCode.WORKER_INVALID_LOCATOR,
             notes=[
                 f'locator: {app_locator!r}',
-                f'resolved to: {type(candidate).__name__}',
+                f'resolved to: {type(obj).__name__}',
             ],
-            help_text='ensure the locator points to a Horsies app instance or factory',
+            help_text='ensure the locator points to a Horsies app instance',
         )
-    return candidate
+    return obj
 
 
 def _child_initializer(
