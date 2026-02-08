@@ -1876,6 +1876,10 @@ class WorkflowHandle:
                 await self.broker.listener.unsubscribe('workflow_done', q)
         except asyncio.TimeoutError:
             pass  # Polling fallback
+        except RuntimeError:
+            # Cross-loop access: listener dispatcher is on a different event loop
+            # (e.g. sync handle.get() via LoopRunner). Fall back to sleep-based polling.
+            await asyncio.sleep(min(timeout_sec, 1.0))
 
     def results(self) -> dict[str, TaskResult[Any, TaskError]]:
         """
