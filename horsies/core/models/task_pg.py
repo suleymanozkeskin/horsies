@@ -10,6 +10,8 @@ from sqlalchemy import (
     Enum as SQLAlchemyEnum,
     Float,
     ARRAY,
+    false as sa_false,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import JSONB
@@ -61,7 +63,9 @@ class TaskModel(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     task_name: Mapped[str] = mapped_column(String(255), nullable=False)
     queue_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
-    priority: Mapped[int] = mapped_column(nullable=False, default=100)  # 1..100
+    priority: Mapped[int] = mapped_column(
+        nullable=False, default=100, server_default=text('100'),
+    )  # 1..100
 
     # Function arguments (stored as JSON)
     args: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -97,7 +101,9 @@ class TaskModel(Base):
     failed_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Task claiming and lifecycle
-    claimed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    claimed: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sa_false(), index=True,
+    )
     claimed_by_worker_id: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True
     )
@@ -111,8 +117,12 @@ class TaskModel(Base):
     )
 
     # Retry configuration and tracking
-    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    max_retries: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    retry_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text('0'), nullable=False,
+    )
+    max_retries: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text('0'), nullable=False,
+    )
     next_retry_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
@@ -127,11 +137,14 @@ class TaskModel(Base):
 
     # Metadata
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.now(timezone.utc)
+        DateTime(timezone=True),
+        default=datetime.now(timezone.utc),
+        server_default=text('NOW()'),
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=datetime.now(timezone.utc),
+        server_default=text('NOW()'),
         onupdate=datetime.now(timezone.utc),
     )
 
