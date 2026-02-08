@@ -168,8 +168,8 @@ class PostgresListener:
             if conn is not None and not conn.closed:
                 try:
                     await conn.close()
-                except (OperationalError, OSError):
-                    pass  # Connection already dead or socket broken
+                except (OperationalError, RuntimeError, OSError):
+                    pass  # Connection already dead, broken, or socket error
         self._dispatcher_conn = None
         self._command_conn = None
 
