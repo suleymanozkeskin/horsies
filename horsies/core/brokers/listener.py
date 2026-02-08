@@ -162,6 +162,17 @@ class PostgresListener:
         assert self._command_conn is not None
         return self._command_conn
 
+    async def _close_connections(self) -> None:
+        """Close raw connections and reset to None for reconnection."""
+        for conn in (self._dispatcher_conn, self._command_conn):
+            if conn is not None and not conn.closed:
+                try:
+                    await conn.close()
+                except (OperationalError, OSError):
+                    pass  # Connection already dead or socket broken
+        self._dispatcher_conn = None
+        self._command_conn = None
+
     def _register_fd_monitoring(self) -> None:
         """
         Register file descriptor monitoring for proactive disconnection detection.
@@ -187,8 +198,9 @@ class PostgresListener:
             try:
                 loop = asyncio.get_running_loop()
                 loop.remove_reader(self._dispatcher_conn.fileno())
-            except (OSError, AttributeError, ValueError):
-                # Connection might be closed or already removed
+            except (OSError, AttributeError, ValueError, OperationalError):
+                # Connection might be closed or already removed;
+                # OperationalError raised by fileno() when connection is dead.
                 pass
             finally:
                 self._fd_registered = False
@@ -273,10 +285,9 @@ class PostgresListener:
             except OperationalError:
                 # Likely a disconnect. Back off a bit, then force reconnect and re-LISTEN.
                 self._unregister_fd_monitoring()
+                await self._close_connections()
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 5.0)  # cap backoff
-                self._dispatcher_conn = None  # force reconnection
-                self._command_conn = None
                 continue
             except asyncio.CancelledError:
                 # Graceful shutdown: stop dispatching and exit the task.
@@ -285,9 +296,8 @@ class PostgresListener:
             except Exception:
                 # Unexpected issue: brief pause to avoid a hot loop, then try again.
                 self._unregister_fd_monitoring()
+                await self._close_connections()
                 await asyncio.sleep(0.5)
-                self._dispatcher_conn = None
-                self._command_conn = None
                 continue
 
     async def listen(self, channel_name: str) -> Queue[Notify]:
