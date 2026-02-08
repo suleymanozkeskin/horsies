@@ -54,12 +54,13 @@ include = ["horsies*"]
 
 [dependency-groups]
 dev = [
-    "mypy>=1.19.1", 
+    "mypy>=1.19.1",
     "pyright>=1.1.408",
-    "ty>=0.0.13",
+    "ty>=0.0.15",
     "python-dotenv>=1.2.1",
     "pytest>=8.3.4",
     "pytest-asyncio>=0.25.0",
+    "pytest-cov>=7.0.0",
 ]
 
 [tool.pytest.ini_options]
@@ -68,6 +69,7 @@ asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
     "e2e: end-to-end tests requiring database and worker process",
+    "integration: integration tests requiring a live database",
 ]
 
 [tool.pyright]
