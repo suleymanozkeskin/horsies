@@ -157,6 +157,9 @@ Each entry: Title -- summary -> URL
 - Schedule Patterns -- Interval, Daily, Weekly, etc. -> /horsies/scheduling/schedule-patterns/
 - Schedule Config -- ScheduleConfig model -> /horsies/scheduling/schedule-config/
 
+### Q&A
+- Questions & Answers -- design trade-offs, scaling, failure behavior -> /horsies/questions-and-answers/
+
 ### CLI
 - CLI Reference -- horsies worker, scheduler, check -> /horsies/cli/
 
@@ -204,3 +207,4 @@ horsies worker, horsies scheduler, horsies check, CLI -> /horsies/cli/
 PostgreSQL, tables, schema, migration -> /horsies/internals/database-schema/
 serialization, JSON, codec, pydantic, datetime -> /horsies/internals/serialization/
 architecture, LISTEN/NOTIFY, components, data flow -> /horsies/concepts/architecture/
+FAQ, questions, trade-offs, why PostgreSQL, production-ready, alpha -> /horsies/questions-and-answers/

@@ -54,6 +54,12 @@ export default defineConfig({
 					],
 				},
 				{
+					label: 'Q&A',
+					items: [
+						{ label: 'Questions & Answers', slug: 'questions-and-answers' },
+					],
+				},
+				{
 					label: 'Concepts',
 					items: [
 						{ label: 'Architecture', slug: 'concepts/architecture' },
@@ -125,13 +131,7 @@ export default defineConfig({
 						{ label: 'Serialization', slug: 'internals/serialization' },
 					],
 				},
-				{
-					label: 'Q&A',
-					items: [
-						{ label: 'Questions & Answers', slug: 'questions-and-answers' },
-					],
-				},
-			],
+				],
 		}),
 	],
 });
