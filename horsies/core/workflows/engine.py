@@ -655,6 +655,10 @@ async def _cascade_resume_to_children(
                 else:
                     await _enqueue_workflow_task(session, child_id, task_idx, dep_res)
 
+            # Check completion: resume may transition all pending tasks to
+            # SKIPPED/terminal without any subsequent callback to finalize.
+            await _check_workflow_completion(session, child_id, broker)
+
             # Add to queue to resume its children
             queue.append(child_id)
 
