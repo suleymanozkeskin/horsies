@@ -24,7 +24,7 @@ In contrast, a task function in horsies **must** return a `TaskResult` type with
 - a generic Ok value
 - a mandatory and structured TaskError with a uniform way to propagate errors
 
-Horsies' approach leads the developer to actually think on the error cases on both definition and call site. Same applies for coding agents. Horsies literally will not start if api is not correctly designed. Which will eventually lead to a better feedback loop for both agents and developers.
+Horsies' approach leads the developer to actually think on the error cases on both definition and call site. Same applies for coding agents. Horsies literally will not start if any of your task functions don't return a `TaskResult` type. Which will eventually lead to a better feedback loop for both agents and developers.
 
 See [error handling](../tasks/error-handling) for more.
 
@@ -71,9 +71,9 @@ Yes. Runs a separate process alongside workers with `horsies scheduler` command.
 
 ## I have various needs with data pipelines, does horsies support worker side orchestration and execution?
 
-Yes, horsies provide DAG workflows. Stack your tasks as nodes in the workflow, decide the policy by filling `TaskNode` details.
+Yes, horsies provide DAG workflows. Stack your tasks as nodes in the workflow, decide the policy by filling `TaskNode` details. You can even use workflows within workflows, a node itself can be a workflow.
 E.g. `join: [all, any, quorum]`, `waits_for` ( which nodes must be completed prior to this step in the pipeline )
-See [workflows](../concepts/workflows/workflow-api)
+See [workflows](../concepts/workflows/workflow-api) and [subworkflows](../concepts/workflows/subworkflows)
 
 ## Does it have monitoring?
 
