@@ -105,7 +105,3 @@ Note: I as the author, personally tested this library on a Celery dependent larg
 ## Is it optimised for linux?
 
 Not yet, but planned.
-
-## Where are the tests?
-
-Tests are work in progress, will be a part of releases in the future.
