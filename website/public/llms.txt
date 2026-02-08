@@ -6,37 +6,152 @@
 
 ## Quick Reference
 
+### Horsies (app instance)
+- app = Horsies(config=AppConfig(...))
+- @app.task("name", retry_policy=...) -> decorator (DEFAULT mode)
+- @app.task("name", queue_name="q", retry_policy=...) -> decorator (CUSTOM mode)
+- @app.task("name", exception_mapper={ValueError: "VALIDATION_ERROR"}) -> per-task exception mapping
+- @app.task("name", default_unhandled_error_code="MY_ERROR") -> override default error code
+- app.workflow(name, tasks, on_error, output, success_policy) -> WorkflowSpec
+- app.discover_tasks(["myapp.tasks", "myapp.workflows"]) -> register modules for import
+- app.expand_module_globs(["src/**/*_tasks.py"]) -> list[str] (resolve glob patterns)
+- app.import_task_modules() -> list[str] (import discovered modules)
+- app.list_tasks() -> list[str]
+- app.check(live=False) -> list[HorsiesError] (phased validation)
+- app.get_broker() -> PostgresBroker
+
+### AppConfig
+- queue_mode: QueueMode (DEFAULT or CUSTOM)
+- custom_queues: list[CustomQueueConfig] | None (required for CUSTOM)
+- broker: PostgresConfig
+- cluster_wide_cap: int | None (max RUNNING tasks across cluster)
+- prefetch_buffer: int (0 = hard cap, >0 = soft cap with lease)
+- claim_lease_ms: int | None (required when prefetch_buffer > 0)
+- recovery: RecoveryConfig
+- resilience: WorkerResilienceConfig
+- schedule: ScheduleConfig | None
+- exception_mapper: ExceptionMapper (global {ExceptionClass: "ERROR_CODE"})
+- default_unhandled_error_code: str (default "UNHANDLED_EXCEPTION")
+
+### PostgresConfig
+- database_url: str (must start with "postgresql+psycopg://")
+- pool_size: int (default 30)
+- max_overflow: int (default 30)
+- pool_timeout: int (default 30)
+- pool_recycle: int (default 1800)
+- pool_pre_ping: bool (default True)
+- echo: bool (default False)
+
+### QueueMode
+- QueueMode.DEFAULT — single "default" queue, no queue_name on tasks
+- QueueMode.CUSTOM — named queues with priorities and per-queue concurrency
+
+### CustomQueueConfig
+- name: str
+- priority: int (1=highest, 100=lowest, default 1)
+- max_concurrency: int (default 5)
+
 ### TaskResult[T, TaskError]
 - TaskResult(ok=value) | TaskResult(err=TaskError(...))
 - .is_ok() -> bool, .is_err() -> bool
-- .ok_value -> T, .err_value -> TaskError
-- .unwrap() -> T (raises on err), .unwrap_err() -> TaskError (raises on ok)
+- .ok -> T | None, .err -> E | None
+- .ok_value -> T (raises on err), .err_value -> E (raises on ok)
+- .unwrap() -> T (raises on err), .unwrap_err() -> E (raises on ok)
 
 ### TaskError
 - error_code: str | LibraryErrorCode | None
 - message: str | None
 - data: Any | None
+- exception: dict[str, Any] | BaseException | None
+
+### LibraryErrorCode (enum)
+- Execution: UNHANDLED_EXCEPTION, TASK_EXCEPTION, WORKER_CRASHED
+- Retrieval: WAIT_TIMEOUT, TASK_NOT_FOUND, TASK_CANCELLED, RESULT_NOT_AVAILABLE, RESULT_NOT_READY
+- Broker: BROKER_ERROR
+- Worker: WORKER_RESOLUTION_ERROR, WORKER_SERIALIZATION_ERROR
+- Validation: RETURN_TYPE_MISMATCH, PYDANTIC_HYDRATION_ERROR
+- Lifecycle: SEND_SUPPRESSED
+- Workflow: UPSTREAM_SKIPPED, WORKFLOW_CTX_MISSING_ID, WORKFLOW_SUCCESS_CASE_NOT_MET
+
+### SubWorkflowError (extends TaskError)
+- sub_workflow_id: str
+- sub_workflow_summary: SubWorkflowSummary[Any]
+- Pattern match to distinguish: case SubWorkflowError() vs case TaskError()
 
 ### @app.task Decorator
-- @app.task("name", retry_policy=...) in DEFAULT mode
-- @app.task("name", queue_name="my_queue", retry_policy=...) in CUSTOM mode
 - Decorated function must return TaskResult[T, TaskError]
-- .send(*args) -> TaskHandle (sync), .send_async(*args) -> TaskHandle (async)
+- Options: task_name, queue_name, good_until, retry_policy, exception_mapper, default_unhandled_error_code
+- Returns TaskFunction[P, T]
 
-### TaskHandle
+### TaskFunction[P, T] (decorated task)
+- .__call__(*args, **kwargs) -> TaskResult[T, TaskError] (sync direct call)
+- .send(*args, **kwargs) -> TaskHandle[T] (enqueue for background execution)
+- .send_async(*args, **kwargs) -> TaskHandle[T] (async enqueue)
+- .schedule(delay_seconds, *args, **kwargs) -> TaskHandle[T] (delayed enqueue)
+- .node(**workflow_opts) -> NodeFactory[P, T] (typed workflow node builder)
+- .task_name -> str
+
+### TaskHandle[T]
 - .task_id -> str
 - .get(timeout_ms=None) -> TaskResult[T, TaskError] (blocking)
-- .get_async(timeout_ms=None) -> TaskResult[T, TaskError] (blocking, async)
+- .get_async(timeout_ms=None) -> TaskResult[T, TaskError] (async blocking)
 - .info(include_result=False, include_failed_reason=False) -> TaskInfo | None
 - .info_async(include_result=False, include_failed_reason=False) -> TaskInfo | None
 
+### TaskInfo
+- .task_id -> str, .task_name -> str, .status -> TaskStatus
+- .queue_name -> str, .priority -> int
+- .retry_count -> int, .max_retries -> int, .next_retry_at -> datetime | None
+- .sent_at/claimed_at/started_at/completed_at/failed_at -> datetime | None
+- .worker_hostname/worker_pid/worker_process_name -> str | int | None
+- .result -> TaskResult[Any, TaskError] | None (opt-in via include_result)
+- .failed_reason -> str | None (opt-in via include_failed_reason)
+
+### TaskStatus (enum)
+- PENDING -> CLAIMED -> RUNNING -> COMPLETED | FAILED | CANCELLED | REQUEUED
+- .is_terminal -> bool
+- TASK_TERMINAL_STATES: frozenset = {COMPLETED, FAILED, CANCELLED}
+
+### NodeFactory[P, T] (typed node builder)
+- Returned by task_function.node(**workflow_opts)
+- Called with task arguments: node_factory(*args, **kwargs) -> TaskNode[T]
+- Two-step pattern: step 1 sets workflow options, step 2 sets task arguments
+- Example: my_task.node(waits_for=[dep], args_from={"x": dep})(extra_arg="val")
+- Workflow options: waits_for, workflow_ctx_from, args_from, queue, priority,
+  allow_failed_deps, run_when, skip_when, join, min_success, good_until, node_id
+
 ### TaskNode[T]
 - T = ok type of the task's TaskResult
-- TaskNode(fn=..., args=..., waits_for=..., args_from=..., node_id=..., workflow_ctx_from=..., allow_failed_deps=..., join=...)
-- args_from: downstream receives TaskResult[T, TaskError], not unwrapped T
-- workflow_ctx_from: list of nodes whose results are available in WorkflowContext
-- allow_failed_deps: if True, task runs even when dependencies fail/skip (default False)
-- join: "all" (default) | "any" | "quorum" (with min_success)
+- fn: TaskFunction, args: tuple, kwargs: dict
+- waits_for: list of TaskNode | SubWorkflowNode (wait for terminal)
+- args_from: dict[str, TaskNode | SubWorkflowNode] (inject TaskResult as kwarg)
+- workflow_ctx_from: list[TaskNode | SubWorkflowNode] | None (subset for WorkflowContext)
+- queue: str | None (override task decorator queue)
+- priority: int | None (override task decorator priority)
+- allow_failed_deps: bool (False=SKIP on dep failure, True=run with failed TaskResult)
+- run_when: Callable[[WorkflowContext], bool] | None (False -> SKIP; skip_when has priority)
+- skip_when: Callable[[WorkflowContext], bool] | None (True -> SKIP; evaluated first)
+- join: "all" (default) | "any" | "quorum"
+- min_success: int | None (required when join="quorum")
+- good_until: datetime | None (task expiry deadline)
+- node_id: str | None (auto-assigned as "{slugify(name)}:{index}" if None)
+- .name -> str, .key() -> NodeKey[T]
+
+### SubWorkflowNode[T]
+- T = child workflow's output type (from WorkflowDefinition[T])
+- workflow_def: type[WorkflowDefinition[T]]
+- args, kwargs: passed to workflow_def.build_with(app, *args, **kwargs)
+- waits_for, args_from, workflow_ctx_from: same semantics as TaskNode
+- join, min_success, allow_failed_deps: same as TaskNode
+- run_when, skip_when: same conditional execution as TaskNode
+- retry_mode: SubWorkflowRetryMode (default RERUN_FAILED_ONLY, only supported mode)
+- node_id: str | None (auto-assigned if None)
+- .name -> str, .key() -> NodeKey[T]
+
+### SubWorkflowRetryMode (enum)
+- RERUN_FAILED_ONLY — re-run only failed/cancelled child tasks (default, only supported)
+- RERUN_ALL — re-run entire child workflow (not yet implemented)
+- NO_RERUN — re-evaluate success policy without re-running (not yet implemented)
 
 ### WorkflowSpec
 - .name -> str
@@ -46,41 +161,247 @@
 - .success_policy -> SuccessPolicy | None
 - .start(workflow_id=None) -> WorkflowHandle
 - .start_async(workflow_id=None) -> WorkflowHandle
+- Validates DAG on construction (cycles, deps, args_from, node_ids, etc.)
 
 ### WorkflowHandle
 - .workflow_id -> str
 - .status() / .status_async() -> WorkflowStatus
 - .get(timeout_ms=None) / .get_async(...) -> TaskResult[Any, TaskError] (blocking)
 - .results() / .results_async() -> dict[str, TaskResult] (keyed by node_id)
-- .result_for(node) / .result_for_async(node) -> TaskResult[T, TaskError] (non-blocking single query)
+- .result_for(node) / .result_for_async(node) -> TaskResult[T, TaskError] (non-blocking query)
 - .tasks() / .tasks_async() -> list[WorkflowTaskInfo]
 - .cancel() / .cancel_async() -> None
 - .pause() / .pause_async() -> bool
 - .resume() / .resume_async() -> bool
+
+### WorkflowStatus (enum)
+- PENDING -> RUNNING -> COMPLETED | FAILED | PAUSED | CANCELLED
+- .is_terminal -> bool
+- WORKFLOW_TERMINAL_STATES: frozenset = {COMPLETED, FAILED, CANCELLED}
+
+### WorkflowTaskStatus (enum)
+- PENDING -> READY -> ENQUEUED -> RUNNING -> COMPLETED | FAILED | SKIPPED
+- .is_terminal -> bool
+- WORKFLOW_TASK_TERMINAL_STATES: frozenset = {COMPLETED, FAILED, SKIPPED}
 
 ### WorkflowTaskInfo
 - .node_id -> str | None, .index -> int, .name -> str, .status -> WorkflowTaskStatus
 - .result -> TaskResult[Any, TaskError] | None (COMPLETED/FAILED; SKIPPED often None)
 - .started_at -> datetime | None, .completed_at -> datetime | None
 
-### TaskInfo
-- .task_id -> str, .task_name -> str, .status -> TaskStatus
-- .queue_name -> str, .priority -> int
-- .retry_count -> int, .max_retries -> int, .next_retry_at -> datetime | None
-- .sent_at/claimed_at/started_at/completed_at/failed_at -> datetime | None
-- .worker_hostname/worker_pid/worker_process_name -> Optional worker metadata
-- .result -> TaskResult[Any, TaskError] | None (opt-in), .failed_reason -> str | None (opt-in)
+### OnError (enum)
+- FAIL — continue DAG, skip tasks without allow_failed_deps, mark workflow FAILED
+- PAUSE — pause workflow immediately, block new enqueues, await resume() or cancel()
 
 ### WorkflowContext
 - Injected when task declares workflow_ctx: WorkflowContext | None = None
 - Requires workflow_ctx_from on the TaskNode
+- .workflow_id -> str, .task_index -> int, .task_name -> str
 - .result_for(node: TaskNode[T] | NodeKey[T]) -> TaskResult[T, TaskError]
+- .has_result(node: TaskNode | SubWorkflowNode) -> bool
+- .summary_for(node: SubWorkflowNode[T]) -> SubWorkflowSummary[T]
+- .has_summary(node: SubWorkflowNode) -> bool
 - Only nodes in workflow_ctx_from are accessible (KeyError otherwise)
+
+### WorkflowMeta
+- Auto-injected when task declares workflow_meta: WorkflowMeta | None = None
+- .workflow_id -> str, .task_index -> int, .task_name -> str
+- Metadata only, no result access (lighter than WorkflowContext)
+
+### SubWorkflowSummary[T]
+- Accessible via WorkflowContext.summary_for(subworkflow_node)
+- .status -> WorkflowStatus (child's final status)
+- .success_case -> str | None (which SuccessCase was satisfied)
+- .output -> T | None (child's output value, typed via generic)
+- .total_tasks -> int, .completed_tasks -> int
+- .failed_tasks -> int, .skipped_tasks -> int
+- .error_summary -> str | None
 
 ### NodeKey[T]
 - NodeKey("string_id") for dynamic/string-based lookup
-- node.key() to get NodeKey from a TaskNode
+- node.key() to get NodeKey from a TaskNode or SubWorkflowNode
 - Used with workflow_ctx.result_for() and handle.result_for()
+
+### SuccessPolicy / SuccessCase
+- SuccessPolicy(cases=[SuccessCase(required=[...])], optional=[...])
+- Workflow COMPLETED if ANY SuccessCase is fully satisfied (all required COMPLETED)
+- optional: tasks that can fail without affecting success evaluation
+- Without success_policy: any task failure -> workflow FAILED
+
+### AnyNode
+- Type alias: TaskNode[Any] | SubWorkflowNode[Any]
+
+### WorkflowDefinition[T] (class-based workflow builder)
+- Subclass with name (ClassVar[str]) and TaskNode/SubWorkflowNode class attributes
+- class Meta: output, on_error, success_policy
+- .build(app) -> WorkflowSpec
+- .build_with(app, *args, **params) -> WorkflowSpec (with runtime parameters)
+- .get_workflow_nodes() -> list[tuple[str, TaskNode | SubWorkflowNode]]
+- Node IDs auto-assigned from attribute names
+
+### start_workflow / start_workflow_async
+- start_workflow(spec, broker, workflow_id=None) -> WorkflowHandle
+- start_workflow_async(spec, broker, workflow_id=None) -> WorkflowHandle
+- Standalone functions (alternative to spec.start())
+
+### ExceptionMapper
+- Type: dict[type[BaseException], str]
+- Maps exception classes to UPPER_SNAKE_CASE error codes
+- Exact class matching only (no MRO/inheritance lookup)
+- Resolution order: task_mapper -> global_mapper -> task_default -> global_default
+- Global: AppConfig(exception_mapper={ValueError: "VALIDATION_ERROR"})
+- Per-task: @app.task("name", exception_mapper={TimeoutError: "TIMEOUT"})
+
+### RetryPolicy
+- RetryPolicy.fixed([60, 120, 300], auto_retry_for=["ERROR_CODE", ...])
+- RetryPolicy.exponential(base_seconds=1, max_retries=3, auto_retry_for=["ERROR_CODE", ...])
+- auto_retry_for: required list of error codes that trigger retries
+- jitter: bool (default True, +-25% randomization)
+- Fixed: intervals length must equal max_retries
+- Exponential: exactly one base interval, delay = base * 2^(attempt-1)
+
+### RecoveryConfig
+- auto_requeue_stale_claimed: bool (default True)
+- claimed_stale_threshold_ms: int (default 120_000, range 1s-1hr)
+- auto_fail_stale_running: bool (default True)
+- running_stale_threshold_ms: int (default 300_000, range 1s-2hr)
+- check_interval_ms: int (default 30_000, range 1s-10min)
+- runner_heartbeat_interval_ms: int (default 30_000, range 1s-2min)
+- claimer_heartbeat_interval_ms: int (default 30_000, range 1s-2min)
+- Constraint: stale thresholds must be >= 2x heartbeat intervals
+
+### WorkerResilienceConfig
+- db_retry_initial_ms: int (default 500, range 100ms-60s)
+- db_retry_max_ms: int (default 30_000, range 500ms-5min)
+- db_retry_max_attempts: int (default 0 = infinite, range 0-10_000)
+- notify_poll_interval_ms: int (default 5_000, range 1s-5min)
+- Constraint: db_retry_max_ms >= db_retry_initial_ms
+
+### discover_tasks
+- app.discover_tasks(["myapp.tasks", "myapp.workflows"])
+- Imports exact entries listed (dotted modules via importlib, .py paths via path import)
+- Export decorated functions from __init__.py or list submodules explicitly
+
+### Scheduling Models
+
+#### Weekday (enum)
+- MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, SUNDAY
+
+#### IntervalSchedule
+- IntervalSchedule(seconds=30) | IntervalSchedule(hours=1, minutes=30)
+- At least one of: seconds, minutes, hours, days
+
+#### HourlySchedule
+- HourlySchedule(minute=30, second=0) -> every hour at XX:30:00
+
+#### DailySchedule
+- DailySchedule(time=time(3, 0, 0)) -> daily at 03:00:00
+
+#### WeeklySchedule
+- WeeklySchedule(days=[Weekday.MONDAY, Weekday.FRIDAY], time=time(9, 0))
+
+#### MonthlySchedule
+- MonthlySchedule(day=15, time=time(15, 0)) -> 15th at 15:00
+
+#### SchedulePattern
+- Type union: IntervalSchedule | HourlySchedule | DailySchedule | WeeklySchedule | MonthlySchedule
+
+#### TaskSchedule
+- name: str (unique schedule identifier)
+- task_name: str (registered task name)
+- pattern: SchedulePattern
+- args: tuple, kwargs: dict (task arguments)
+- queue_name: str | None
+- enabled: bool (default True)
+- timezone: str (default "UTC")
+- catch_up_missed: bool (default False)
+
+#### ScheduleConfig
+- enabled: bool (default True)
+- schedules: list[TaskSchedule]
+- check_interval_seconds: int (default 1, range 1-60)
+
+### horsies check (CLI validation)
+- Run `horsies check` before deploys — it lists all blocking errors in one pass
+- Use as a feedback loop from the library during development: define tasks/workflows, run check, fix errors, repeat
+- `horsies check <module> [--live]` — validate without starting services
+- Runs app.check(live=...) which performs phased validation:
+  - Phase 1: Config validation (implicit at AppConfig construction)
+  - Phase 2: Task module imports — imports each module, collects import/definition errors
+  - Phase 3: Workflow validation — triggered during imports (WorkflowSpec DAG construction)
+  - Phase 4: Runtime policy safety — retry_policy, exception_mapper, auto_retry_for validation
+  - Phase 5 (--live only): Broker connectivity — async SELECT 1 against PostgreSQL
+- Returns list[HorsiesError]; empty = all passed
+- Errors are collected (not fail-fast): all phases run and all errors surface together
+- Worker and scheduler also run check() at startup before accepting work
+- On success: prints "ok: all validations passed" with task count
+- On failure: prints Rust-style ValidationReport to stderr, exits with code 1
+
+### Error Types and Reporting
+
+#### ErrorCode (enum, startup/validation errors E001-E399)
+- Workflow validation (E001-E020):
+  - E001 WORKFLOW_NO_NAME, E002 WORKFLOW_NO_NODES
+  - E003 WORKFLOW_INVALID_NODE_ID, E004 WORKFLOW_DUPLICATE_NODE_ID
+  - E005 WORKFLOW_NO_ROOT_TASKS, E006 WORKFLOW_INVALID_DEPENDENCY
+  - E007 WORKFLOW_CYCLE_DETECTED, E008 WORKFLOW_INVALID_ARGS_FROM
+  - E009 WORKFLOW_INVALID_CTX_FROM, E010 WORKFLOW_CTX_PARAM_MISSING
+  - E011 WORKFLOW_INVALID_OUTPUT, E012 WORKFLOW_INVALID_SUCCESS_POLICY
+  - E013 WORKFLOW_INVALID_JOIN, E016 WORKFLOW_ARGS_WITH_INJECTION
+  - E017 WORKFLOW_INVALID_SUBWORKFLOW_RETRY_MODE, E018 WORKFLOW_SUBWORKFLOW_APP_MISSING
+  - E019 WORKFLOW_INVALID_KWARG_KEY, E020 WORKFLOW_MISSING_REQUIRED_PARAMS
+- Task definition (E100-E103):
+  - E100 TASK_NO_RETURN_TYPE, E101 TASK_INVALID_RETURN_TYPE
+  - E102 TASK_INVALID_OPTIONS, E103 TASK_INVALID_QUEUE
+- Config/broker (E200-E209):
+  - E200 CONFIG_INVALID_QUEUE_MODE, E201 CONFIG_INVALID_CLUSTER_CAP
+  - E202 CONFIG_INVALID_PREFETCH, E203 BROKER_INVALID_URL
+  - E204 CONFIG_INVALID_RECOVERY, E205 CONFIG_INVALID_SCHEDULE
+  - E206 CLI_INVALID_ARGS, E207 WORKER_INVALID_LOCATOR
+  - E208 CONFIG_INVALID_RESILIENCE, E209 CONFIG_INVALID_EXCEPTION_MAPPER
+- Registry (E300-E301):
+  - E300 TASK_NOT_REGISTERED, E301 TASK_DUPLICATE_NAME
+
+#### HorsiesError (base exception)
+- Rust-style formatted error display (like rustc compiler errors)
+- Fields: message, code (ErrorCode | None), location (SourceLocation | None), notes (list[str]), help_text (str | None)
+- .format_rust_style(use_colors=None) -> str (ANSI-colored for TTY)
+- Auto-detects source location from call stack (first frame outside horsies internals)
+- Subclasses: WorkflowValidationError, ConfigurationError, TaskDefinitionError, RegistryError
+- Environment variables:
+  - HORSIES_VERBOSE=1: show full Python traceback alongside Rust-style output
+  - HORSIES_PLAIN_ERRORS=1: fall back to default Python exception formatting
+  - HORSIES_FORCE_COLOR=1: force ANSI colors even when not TTY
+  - NO_COLOR: disable ANSI colors (https://no-color.org/)
+
+#### SourceLocation
+- .file -> str, .line -> int, .column -> int | None
+- .get_source_line() -> str | None (reads actual source for display)
+- .format_short() -> str ("file:line" or "file:line:col")
+- SourceLocation.from_function(fn) -> SourceLocation | None
+
+#### ValidationReport
+- Collects multiple HorsiesError instances within a validation phase
+- ValidationReport(phase_name: str)
+- .add(error: HorsiesError), .has_errors() -> bool, .errors -> list[HorsiesError]
+- .format_rust_style() -> str (formats all errors with "aborting due to N errors" summary)
+- Used by WorkflowSpec construction, AppConfig validation, and app.check()
+
+#### raise_collected(report: ValidationReport) -> None
+- 0 errors: no-op (returns normally)
+- 1 error: raises the original HorsiesError (preserves except clauses)
+- 2+ errors: raises MultipleValidationErrors wrapping the report
+
+#### MultipleValidationErrors (extends HorsiesError)
+- Wraps a ValidationReport with 2+ errors
+- .report -> ValidationReport
+- .format_rust_style() delegates to report
+
+#### WorkflowContextMissingIdError (RuntimeError)
+- Raised when TaskNode/NodeKey has no node_id for WorkflowContext.result_for()
+
+#### WorkflowHandleMissingIdError (RuntimeError)
+- Raised when TaskNode/NodeKey has no node_id for WorkflowHandle.result_for()
 
 ### Serialization
 - Supported: primitives, dict, list, Pydantic BaseModel, dataclass, datetime, date, time
@@ -97,15 +418,29 @@
 - on_error="fail" (default): store error, continue DAG, mark FAILED when all terminal
 - on_error="pause": immediately pause, block new enqueues, await resume
 
-### discover_tasks
-- app.discover_tasks(["myapp.tasks", "myapp.workflows"])
-- Imports exact entries listed (dotted modules via importlib, .py paths via path import)
-- Export decorated functions from __init__.py or list submodules explicitly
+### Conditional Execution (run_when / skip_when)
+- skip_when has priority over run_when (if both return True, task is SKIPPED)
+- Callables receive WorkflowContext built from workflow_ctx_from
+- Evaluated after dependencies are terminal, before enqueue
+- If condition skips: node status = SKIPPED, cascades to dependents
 
-### RetryPolicy
-- RetryPolicy.fixed([60, 120, 300], auto_retry_for=["ERROR_CODE", ...])
-- RetryPolicy.exponential(base_seconds=1, max_retries=3, auto_retry_for=["ERROR_CODE", ...])
-- auto_retry_for is required on RetryPolicy — ensures retry triggers always have retry timing
+### Utilities
+- slugify(value: str) -> str: convert string to valid node_id ([A-Za-z0-9_\-:.]+)
+
+### Terminal State Constants
+- TASK_TERMINAL_STATES: frozenset[TaskStatus] = {COMPLETED, FAILED, CANCELLED}
+- WORKFLOW_TERMINAL_STATES: frozenset[WorkflowStatus] = {COMPLETED, FAILED, CANCELLED}
+- WORKFLOW_TASK_TERMINAL_STATES: frozenset[WorkflowTaskStatus] = {COMPLETED, FAILED, SKIPPED}
+
+### CLI Commands
+- `horsies worker <module> [--processes N] [--loglevel LEVEL] [--max-claim-batch N] [--max-claim-per-worker N]`
+- `horsies scheduler <module> [--loglevel LEVEL]`
+- `horsies check <module> [--live] [--loglevel LEVEL]`
+- Module format: `myapp.config:app` (dotted:attr) or `app/config.py:app` (file:attr)
+- Auto-discovery: if module has exactly one Horsies instance, `:name` can be omitted
+- Exit codes: 0 = success, 1 = error
+- Signals: SIGTERM/SIGINT for graceful shutdown (workers wait for running tasks)
+- Both worker and scheduler run app.check() at startup; fail with ValidationReport if errors
 
 ## Docs Sitemap
 
@@ -135,6 +470,7 @@ Each entry: Title -- summary -> URL
 ### Workflows
 - Workflow Semantics -- DAG behavior, failure, dependencies -> /horsies/concepts/workflows/workflow-semantics/
 - Workflow API -- WorkflowSpec/WorkflowHandle reference -> /horsies/concepts/workflows/workflow-api/
+- Typed Node Builder -- .node() API for type-safe TaskNode construction -> /horsies/concepts/workflows/typed-node-builder/
 - Subworkflows -- composing workflows with SubWorkflowNode -> /horsies/concepts/workflows/subworkflows/
 
 ### Configuration
@@ -172,7 +508,7 @@ Each entry: Title -- summary -> URL
 keyword(s) -> page URL
 
 install, pip, setup, first task -> /horsies/quick-start/getting-started/
-AppConfig, PostgresConfig, database_url, broker -> /horsies/configuration/app-config/
+Horsies, AppConfig, PostgresConfig, database_url, broker -> /horsies/configuration/app-config/
 PostgresConfig, pool_size, max_overflow, connection -> /horsies/configuration/broker-config/
 RecoveryConfig, stale, requeue, crash recovery -> /horsies/configuration/recovery-config/
 @app.task, decorator, task definition, define task -> /horsies/tasks/defining-tasks/
@@ -194,6 +530,13 @@ skip_when, run_when, conditional execution -> /horsies/concepts/workflows/workfl
 on_error, pause, resume, PAUSED -> /horsies/concepts/workflows/workflow-semantics/
 allow_failed_deps, UPSTREAM_SKIPPED, recovery -> /horsies/concepts/workflows/workflow-semantics/
 fan-out, fan-in, parallel, diamond -> /horsies/quick-start/05-workflow-patterns/
+NodeFactory, .node(), typed node builder, type-safe -> /horsies/concepts/workflows/typed-node-builder/
+SubWorkflowSummary, summary_for, has_summary -> /horsies/concepts/workflows/subworkflows/
+WorkflowMeta, workflow_meta, metadata injection -> /horsies/concepts/workflows/workflow-semantics/
+WorkflowDefinition, class-based workflow, build, build_with -> /horsies/concepts/workflows/subworkflows/
+ExceptionMapper, exception_mapper, error code mapping -> /horsies/tasks/error-handling/
+good_until, task expiry, deadline -> /horsies/tasks/defining-tasks/
+schedule, delay, TaskFunction.schedule -> /horsies/tasks/sending-tasks/
 worker, process pool, claim, execute -> /horsies/workers/worker-architecture/
 concurrency, max_concurrency, cluster_wide_cap, prefetch -> /horsies/workers/concurrency/
 heartbeat, crash, stale, worker recovery -> /horsies/workers/heartbeats-recovery/
@@ -208,3 +551,10 @@ PostgreSQL, tables, schema, migration -> /horsies/internals/database-schema/
 serialization, JSON, codec, pydantic, datetime -> /horsies/internals/serialization/
 architecture, LISTEN/NOTIFY, components, data flow -> /horsies/concepts/architecture/
 FAQ, questions, trade-offs, why PostgreSQL, production-ready, alpha -> /horsies/questions-and-answers/
+ErrorCode, HorsiesError, WorkflowValidationError, validation -> /horsies/tasks/errors/
+ValidationReport, MultipleValidationErrors, raise_collected, error collection -> /horsies/tasks/errors/
+SourceLocation, Rust-style errors, format_rust_style, error display -> /horsies/tasks/errors/
+HORSIES_VERBOSE, HORSIES_PLAIN_ERRORS, HORSIES_FORCE_COLOR, NO_COLOR -> /horsies/tasks/errors/
+horsies check, app.check, phased validation, startup validation -> /horsies/cli/
+discover_tasks, import_task_modules, expand_module_globs -> /horsies/quick-start/01-configuring-horsies/
+slugify, node_id, NODE_ID_PATTERN -> /horsies/concepts/workflows/workflow-semantics/
