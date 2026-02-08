@@ -37,14 +37,6 @@ impl<'a> ErrorModal<'a> {
             .split(popup_layout[1])[1]
     }
 
-    /// Get all errors as a single string for clipboard
-    pub fn errors_to_string(&self) -> String {
-        self.errors
-            .iter()
-            .map(|(source, msg)| format!("{}: {}", source, msg))
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    }
 }
 
 impl<'a> Component for ErrorModal<'a> {

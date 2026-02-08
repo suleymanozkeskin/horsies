@@ -223,30 +223,6 @@ impl App {
         }
     }
 
-    /// Get the first task ID from the selected row's claimed/running tasks
-    fn get_first_selected_task_id(&self) -> Option<String> {
-        let idx = self.state.selected_task_index?;
-        let row = self.state.task_aggregation.get(idx)?;
-
-        // Skip TOTAL row
-        if row.worker_id == "TOTAL" {
-            return None;
-        }
-
-        // Try claimed tasks first, then running
-        if let Some(claimed_ids) = &row.claimed_task_ids {
-            if let Some(first) = claimed_ids.first() {
-                return Some(first.clone());
-            }
-        }
-        if let Some(running_ids) = &row.running_task_ids {
-            if let Some(first) = running_ids.first() {
-                return Some(first.clone());
-            }
-        }
-        None
-    }
-
     /// Perform search based on current context (tab or modal)
     fn perform_search(&mut self) {
         let query = self.state.search.query.to_lowercase();
@@ -890,33 +866,6 @@ impl FetchContext {
                 App::send_action(
                     action_tx,
                     Action::DataLoadError(format!("{}", e), DataSource::WorkflowList),
-                )
-                .ok();
-            }
-        }
-    }
-
-    /// Fetch workflow summary for dashboard
-    async fn fetch_workflow_summary(&self) {
-        let Some(pool) = &self.pool else {
-            return;
-        };
-
-        let action_tx = &self.action_tx;
-
-        App::send_action(action_tx, Action::StartLoading(DataSource::WorkflowSummary)).ok();
-        match queries::fetch_workflow_summary(pool).await {
-            Ok(summary) => {
-                App::send_action(
-                    action_tx,
-                    Action::DataLoaded(DataUpdate::WorkflowSummary(summary)),
-                )
-                .ok();
-            }
-            Err(e) => {
-                App::send_action(
-                    action_tx,
-                    Action::DataLoadError(format!("{}", e), DataSource::WorkflowSummary),
                 )
                 .ok();
             }
@@ -1829,18 +1778,7 @@ impl App {
                     }
                 }
 
-                Action::SelectWorker(worker_id) => {
-                    self.state.set_selected_worker(worker_id.clone());
 
-                    // Refetch worker details for the selected worker
-                    if self.pool.is_some() && worker_id.is_some() {
-                        let fetch_ctx = self.clone_for_fetch();
-                        let time_interval = self.state.selected_time_window.interval().to_string();
-                        tokio::spawn(async move {
-                            fetch_ctx.fetch_workers_data(worker_id, &time_interval).await;
-                        });
-                    }
-                }
 
                 // Manual refresh actions
                 Action::RefreshCurrentTab => {
@@ -2066,14 +2004,6 @@ impl App {
                     self.handle_search_confirm()?;
                 }
 
-                // Toast actions
-                Action::ShowToast(message) => {
-                    self.state.toast = Some(Toast::success(message));
-                }
-                Action::DismissToast => {
-                    self.state.toast = None;
-                }
-
                 // NOTIFY/LISTEN actions
                 Action::NotifyRefresh(batch) => {
                     self.handle_notify_refresh(batch);
@@ -2098,7 +2028,6 @@ impl App {
                     }
                 }
 
-                _ => {}
             }
         }
         Ok(())

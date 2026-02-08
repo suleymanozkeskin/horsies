@@ -1,6 +1,7 @@
 use std::io;
 
 #[derive(thiserror::Error, Debug)]
+#[allow(dead_code)]
 pub enum SyceError {
     #[error("IO error: {0}")]
     Io(#[from] io::Error),

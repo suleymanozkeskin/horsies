@@ -19,6 +19,7 @@ impl ThemeFlavor {
         }
     }
 
+    #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
             ThemeFlavor::Latte => "Latte",
@@ -70,10 +71,6 @@ impl Theme {
 
     pub fn next(self) -> Self {
         Self::new(self.flavor.next())
-    }
-
-    pub fn surface_style(&self) -> Style {
-        Style::default().bg(self.surface).fg(self.text)
     }
 
     pub fn muted_style(&self) -> Style {

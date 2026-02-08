@@ -2,32 +2,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-/// Task summary statistics from the database
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct TaskSummary {
-    pub pending: Option<i64>,
-    pub claimed: Option<i64>,
-    pub running: Option<i64>,
-    pub completed: Option<i64>,
-    pub failed: Option<i64>,
-}
-
-impl TaskSummary {
-    /// Get total number of tasks
-    pub fn total(&self) -> i64 {
-        self.pending.unwrap_or(0)
-            + self.claimed.unwrap_or(0)
-            + self.running.unwrap_or(0)
-            + self.completed.unwrap_or(0)
-            + self.failed.unwrap_or(0)
-    }
-
-    /// Get number of active tasks (pending + claimed + running)
-    pub fn active(&self) -> i64 {
-        self.pending.unwrap_or(0) + self.claimed.unwrap_or(0) + self.running.unwrap_or(0)
-    }
-}
-
 /// Full task details for the detail view
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct TaskDetail {

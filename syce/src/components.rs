@@ -11,7 +11,6 @@ use crate::{action::Action, theme::Theme, tui::Event};
 pub mod dashboard;
 pub mod error_modal;
 pub mod help;
-pub mod home;
 pub mod maintenance;
 pub mod search;
 pub mod status_bar;
@@ -25,6 +24,7 @@ pub mod workflows;
 ///
 /// Implementors of this trait can be registered with the main application loop and will be able to
 /// receive events, update state, and be rendered on the screen.
+#[allow(dead_code)]
 pub trait Component {
     /// Register an action handler that can send actions for processing if necessary.
     ///

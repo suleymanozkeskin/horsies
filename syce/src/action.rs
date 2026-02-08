@@ -38,8 +38,7 @@ pub enum Action {
     // Tab navigation
     SwitchTab(Tab),
 
-    // Worker selection (for Workers tab)
-    SelectWorker(Option<String>),
+    // Worker navigation (for Workers tab)
     NavigateWorkerUp,
     NavigateWorkerDown,
     NavigateTaskUp,
@@ -69,7 +68,6 @@ pub enum Action {
     NavigateEnd,
 
     // Time window selection (for Workers tab charts)
-    SwitchTimeWindow(TimeWindow),
     CycleTimeWindowForward,
     CycleTimeWindowBackward,
 
@@ -117,10 +115,6 @@ pub enum Action {
     SearchSelectUp,
     SearchSelectDown,
     SearchConfirm,
-
-    // Toast notification
-    ShowToast(String),
-    DismissToast,
 
     // NOTIFY/LISTEN actions
     NotifyRefresh(NotifyBatch),
@@ -185,16 +179,6 @@ impl TimeWindow {
         }
     }
 
-    pub fn all() -> Vec<Self> {
-        vec![
-            TimeWindow::FiveMinutes,
-            TimeWindow::ThirtyMinutes,
-            TimeWindow::OneHour,
-            TimeWindow::SixHours,
-            TimeWindow::TwentyFourHours,
-        ]
-    }
-
     pub fn next(&self) -> Self {
         match self {
             TimeWindow::FiveMinutes => TimeWindow::ThirtyMinutes,
@@ -247,16 +231,6 @@ impl TaskStatus {
         }
     }
 
-    pub fn short_label(&self) -> &'static str {
-        match self {
-            TaskStatus::Pending => "P",
-            TaskStatus::Claimed => "C",
-            TaskStatus::Running => "R",
-            TaskStatus::Completed => "OK",
-            TaskStatus::Failed => "F",
-        }
-    }
-
     pub fn db_value(&self) -> &'static str {
         match self {
             TaskStatus::Pending => "PENDING",
@@ -285,18 +259,6 @@ impl Default for TaskStatusFilter {
 }
 
 impl TaskStatusFilter {
-    pub fn all() -> Self {
-        Self {
-            selected: TaskStatus::all().into_iter().collect(),
-        }
-    }
-
-    pub fn none() -> Self {
-        Self {
-            selected: HashSet::new(),
-        }
-    }
-
     pub fn toggle(&mut self, status: TaskStatus) {
         if self.selected.contains(&status) {
             self.selected.remove(&status);
@@ -320,20 +282,6 @@ impl TaskStatusFilter {
     /// Get SQL-compatible list of status strings for query
     pub fn to_sql_values(&self) -> Vec<&'static str> {
         self.selected.iter().map(|s| s.db_value()).collect()
-    }
-
-    /// Display label showing selected statuses
-    pub fn display_label(&self) -> String {
-        if self.selected.len() == TaskStatus::all().len() {
-            return "All".to_string();
-        }
-        if self.selected.is_empty() {
-            return "None".to_string();
-        }
-
-        let mut labels: Vec<&str> = self.selected.iter().map(|s| s.short_label()).collect();
-        labels.sort();
-        labels.join("+")
     }
 }
 
@@ -371,17 +319,6 @@ impl WorkflowStatus {
         }
     }
 
-    pub fn short_label(&self) -> &'static str {
-        match self {
-            WorkflowStatus::Pending => "P",
-            WorkflowStatus::Running => "R",
-            WorkflowStatus::Completed => "OK",
-            WorkflowStatus::Failed => "F",
-            WorkflowStatus::Paused => "PA",
-            WorkflowStatus::Cancelled => "X",
-        }
-    }
-
     pub fn db_value(&self) -> &'static str {
         match self {
             WorkflowStatus::Pending => "PENDING",
@@ -412,18 +349,6 @@ impl Default for WorkflowStatusFilter {
 }
 
 impl WorkflowStatusFilter {
-    pub fn all() -> Self {
-        Self {
-            selected: WorkflowStatus::all().into_iter().collect(),
-        }
-    }
-
-    pub fn none() -> Self {
-        Self {
-            selected: HashSet::new(),
-        }
-    }
-
     pub fn toggle(&mut self, status: WorkflowStatus) {
         if self.selected.contains(&status) {
             self.selected.remove(&status);
@@ -448,20 +373,6 @@ impl WorkflowStatusFilter {
     pub fn to_sql_values(&self) -> Vec<&'static str> {
         self.selected.iter().map(|s| s.db_value()).collect()
     }
-
-    /// Display label showing selected statuses
-    pub fn display_label(&self) -> String {
-        if self.selected.len() == WorkflowStatus::all().len() {
-            return "All".to_string();
-        }
-        if self.selected.is_empty() {
-            return "None".to_string();
-        }
-
-        let mut labels: Vec<&str> = self.selected.iter().map(|s| s.short_label()).collect();
-        labels.sort();
-        labels.join("+")
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Display, Serialize, Deserialize)]
@@ -471,29 +382,6 @@ pub enum Tab {
     Tasks,
     Workflows,
     Maintenance,
-}
-
-impl Tab {
-    pub fn from_number(n: u8) -> Option<Self> {
-        match n {
-            1 => Some(Tab::Dashboard),
-            2 => Some(Tab::Workers),
-            3 => Some(Tab::Tasks),
-            4 => Some(Tab::Workflows),
-            5 => Some(Tab::Maintenance),
-            _ => None,
-        }
-    }
-
-    pub fn to_number(&self) -> u8 {
-        match self {
-            Tab::Dashboard => 1,
-            Tab::Workers => 2,
-            Tab::Tasks => 3,
-            Tab::Workflows => 4,
-            Tab::Maintenance => 5,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

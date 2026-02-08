@@ -1,6 +1,5 @@
 mod metrics;
 mod task;
-mod worker;
 mod workflow;
 
 // Export all metrics types
@@ -11,10 +10,7 @@ pub use metrics::{
 };
 
 // Export task types
-pub use task::{TaskDetail, TaskSummary};
-
-// Export worker types
-pub use worker::WorkerState;
+pub use task::TaskDetail;
 
 // Export workflow types
 pub use workflow::{WorkflowRow, WorkflowSummary, WorkflowTaskRow};

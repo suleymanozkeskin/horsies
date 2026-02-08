@@ -69,6 +69,7 @@ pub struct WorkerUptimeRow {
     pub worker_id: String,
     pub hostname: String,
     pub worker_started_at: DateTime<Utc>,
+    #[allow(dead_code)]
     pub last_seen: DateTime<Utc>,
     pub uptime: PgInterval,
 }
@@ -100,6 +101,7 @@ pub struct DeadWorkerRow {
     pub hostname: String,
     pub pid: i32,
     pub last_seen: DateTime<Utc>,
+    #[allow(dead_code)]
     pub offline_duration: PgInterval,
     pub tasks_at_death: i32,
 }

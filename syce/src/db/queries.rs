@@ -2,144 +2,10 @@ use crate::errors::Result;
 use crate::models::{
     ActiveWorkerRow, AggregatedBreakdownRow, ClusterCapacitySummary, ClusterUtilizationPoint,
     DeadWorkerRow, OverloadedWorkerAlert, SnapshotAgeBucket, StaleClaimsAlert, TaskDetail,
-    TaskStatusRow, TaskSummary, WorkerLoadPoint, WorkerQueuesRow, WorkerState, WorkerUptimeRow,
+    TaskStatusRow, WorkerLoadPoint, WorkerQueuesRow, WorkerUptimeRow,
     WorkflowRow, WorkflowSummary, WorkflowTaskRow,
 };
 use sqlx::PgPool;
-
-/// Get current state of all active workers (latest snapshot per worker)
-/// Uses: ../../sql/worker/active-workers.sql (Active workers query)
-pub async fn get_active_workers(pool: &PgPool) -> Result<Vec<WorkerState>> {
-    let _query = include_str!("../../sql/worker/active-workers.sql");
-
-    // Extract the "Active workers only" query from the file
-    // For now, inline it until we split the .sql file into separate query files
-    let workers = sqlx::query_as::<_, WorkerState>(
-        r#"
-        SELECT DISTINCT ON (worker_id)
-            worker_id,
-            snapshot_at,
-            hostname,
-            pid,
-            processes,
-            max_claim_batch,
-            max_claim_per_worker,
-            cluster_wide_cap,
-            queues,
-            queue_priorities,
-            queue_max_concurrency,
-            recovery_config,
-            tasks_running,
-            tasks_claimed,
-            memory_usage_mb,
-            memory_percent,
-            cpu_percent,
-            worker_started_at
-        FROM horsies_worker_states
-        WHERE snapshot_at > NOW() - INTERVAL '2 minutes'
-        ORDER BY worker_id, snapshot_at DESC
-        "#,
-    )
-    .fetch_all(pool)
-    .await?;
-
-    Ok(workers)
-}
-
-/// Get all workers (including stale ones)
-pub async fn get_all_workers(pool: &PgPool) -> Result<Vec<WorkerState>> {
-    let workers = sqlx::query_as::<_, WorkerState>(
-        r#"
-        SELECT DISTINCT ON (worker_id)
-            worker_id,
-            snapshot_at,
-            hostname,
-            pid,
-            processes,
-            max_claim_batch,
-            max_claim_per_worker,
-            cluster_wide_cap,
-            queues,
-            queue_priorities,
-            queue_max_concurrency,
-            recovery_config,
-            tasks_running,
-            tasks_claimed,
-            memory_usage_mb,
-            memory_percent,
-            cpu_percent,
-            worker_started_at
-        FROM horsies_worker_states
-        ORDER BY worker_id, snapshot_at DESC
-        "#,
-    )
-    .fetch_all(pool)
-    .await?;
-
-    Ok(workers)
-}
-
-/// Get cluster-wide task summary
-/// Uses: ../../sql/tasks/aggregated-breakdown.sql
-pub async fn get_task_summary(pool: &PgPool) -> Result<TaskSummary> {
-    // This query is similar to aggregated-breakdown.sql but simplified for summary
-    let summary = sqlx::query_as::<_, TaskSummary>(
-        r#"
-        SELECT
-            COUNT(*) FILTER (WHERE status = 'PENDING') as pending,
-            COUNT(*) FILTER (WHERE status = 'CLAIMED') as claimed,
-            COUNT(*) FILTER (WHERE status = 'RUNNING') as running,
-            COUNT(*) FILTER (WHERE status = 'COMPLETED') as completed,
-            COUNT(*) FILTER (WHERE status = 'FAILED') as failed
-        FROM horsies_tasks
-        "#,
-    )
-    .fetch_one(pool)
-    .await?;
-
-    Ok(summary)
-}
-
-/// Get worker state history for a specific worker (for charts)
-pub async fn get_worker_history(
-    pool: &PgPool,
-    worker_id: &str,
-    minutes: i32,
-) -> Result<Vec<WorkerState>> {
-    let history = sqlx::query_as::<_, WorkerState>(
-        r#"
-        SELECT
-            worker_id,
-            snapshot_at,
-            hostname,
-            pid,
-            processes,
-            max_claim_batch,
-            max_claim_per_worker,
-            cluster_wide_cap,
-            queues,
-            queue_priorities,
-            queue_max_concurrency,
-            recovery_config,
-            tasks_running,
-            tasks_claimed,
-            memory_usage_mb,
-            memory_percent,
-            cpu_percent,
-            worker_started_at
-        FROM horsies_worker_states
-        WHERE worker_id = $1
-          AND snapshot_at > NOW() - ($2 || ' minutes')::INTERVAL
-        ORDER BY snapshot_at ASC
-        "#,
-    )
-    .bind(worker_id)
-    .bind(minutes)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(history)
-}
 
 /// Cluster capacity summary
 /// Source: ../../sql/worker/cluster-capacity-summary.sql
@@ -218,16 +84,6 @@ pub async fn fetch_worker_uptime(pool: &PgPool) -> Result<Vec<WorkerUptimeRow>> 
 pub async fn fetch_worker_queues(pool: &PgPool) -> Result<Vec<WorkerQueuesRow>> {
     let _query = include_str!("../../sql/worker/worker-queues.sql");
     let rows = sqlx::query_as::<_, WorkerQueuesRow>(_query)
-        .fetch_all(pool)
-        .await?;
-    Ok(rows)
-}
-
-/// Worker load for last 5 minutes
-/// Source: ../../sql/worker/worker-load-5min.sql
-pub async fn fetch_worker_load_5m(pool: &PgPool) -> Result<Vec<WorkerLoadPoint>> {
-    let _query = include_str!("../../sql/worker/worker-load-5min.sql");
-    let rows = sqlx::query_as::<_, WorkerLoadPoint>(_query)
         .fetch_all(pool)
         .await?;
     Ok(rows)
@@ -314,11 +170,6 @@ pub async fn fetch_task_by_id(pool: &PgPool, task_id: &str) -> Result<Option<Tas
     Ok(task)
 }
 
-/// Refresh cadence hints (seconds)
-pub const REFRESH_FAST_SECS: u64 = 2;
-pub const REFRESH_NORMAL_SECS: u64 = 5;
-pub const REFRESH_SLOW_SECS: u64 = 15;
-
 // =========== Workflow Queries ===========
 
 /// Fetch workflow summary statistics for dashboard
@@ -400,7 +251,3 @@ pub async fn fetch_workflow_tasks(pool: &PgPool, workflow_id: &str) -> Result<Ve
         .await?;
     Ok(rows)
 }
-
-// TODO: Create individual .sql files for each query in horsies/sql/observartion/queries/
-// Then use sqlx::query_file!() like:
-// sqlx::query_file_as!(WorkerState, "horsies/sql/observartion/queries/active_workers.sql")

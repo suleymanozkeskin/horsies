@@ -38,6 +38,7 @@ pub struct Toast {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum ToastIcon {
     Success,
     Info,
@@ -241,7 +242,6 @@ pub struct AppState {
     pub expanded_worker_index: Option<usize>,    // Which worker row is expanded
     pub selected_task_id_index: Option<usize>,   // Which task ID is selected within expanded row
     pub task_status_filter: TaskStatusFilter,    // Multi-select status filter
-    pub tasks_scroll_offset: u16,                // Scroll offset for tasks table
 
     // Maintenance tab data
     pub snapshot_age_dist: Vec<SnapshotAgeBucket>,
@@ -294,7 +294,6 @@ impl AppState {
             expanded_worker_index: None,
             selected_task_id_index: None,
             task_status_filter: TaskStatusFilter::default(),
-            tasks_scroll_offset: 0,
             snapshot_age_dist: vec![],
             workflow_summary: None,
             workflow_list: vec![],
@@ -310,16 +309,6 @@ impl AppState {
         }
     }
 
-    /// Check if a dataset is currently loading
-    pub fn is_loading(&self, source: &DataSource) -> bool {
-        self.loading.get(source).copied().unwrap_or(false)
-    }
-
-    /// Get error message for a dataset, if any
-    pub fn get_error(&self, source: &DataSource) -> Option<&String> {
-        self.errors.get(source)
-    }
-
     /// Mark a dataset as loading
     pub fn set_loading(&mut self, source: DataSource, loading: bool) {
         if loading {
@@ -333,16 +322,6 @@ impl AppState {
     pub fn set_error(&mut self, source: DataSource, error: String) {
         self.errors.insert(source, error);
         self.set_loading(source, false);
-    }
-
-    /// Clear error for a dataset
-    pub fn clear_error(&mut self, source: &DataSource) {
-        self.errors.remove(source);
-    }
-
-    /// Get the currently selected worker ID
-    pub fn selected_worker(&self) -> Option<&String> {
-        self.selected_worker_id.as_ref()
     }
 
     /// Navigate worker selection up
@@ -425,19 +404,6 @@ impl AppState {
         }
         self.selected_worker_index = Some(self.worker_list.len().saturating_sub(1));
         self.update_selected_worker_id();
-    }
-
-    /// Set selected worker by ID
-    pub fn set_selected_worker(&mut self, worker_id: Option<String>) {
-        self.selected_worker_id = worker_id.clone();
-        if let Some(id) = worker_id {
-            self.selected_worker_index = self
-                .worker_list
-                .iter()
-                .position(|w| w.worker_id == id);
-        } else {
-            self.selected_worker_index = None;
-        }
     }
 
     /// Update task aggregation data and keep selection in sync

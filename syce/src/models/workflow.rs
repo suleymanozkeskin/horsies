@@ -25,10 +25,6 @@ impl WorkflowSummary {
             + self.cancelled.unwrap_or(0)
     }
 
-    /// Get number of active workflows (pending + running + paused)
-    pub fn active(&self) -> i64 {
-        self.pending.unwrap_or(0) + self.running.unwrap_or(0) + self.paused.unwrap_or(0)
-    }
 }
 
 /// Workflow row for list view with task progress
@@ -174,65 +170,4 @@ pub struct WorkflowTaskRow {
     pub completed_at: Option<DateTime<Utc>>,
     pub result: Option<String>,
     pub error: Option<String>,
-}
-
-impl WorkflowTaskRow {
-    /// Get short status label
-    pub fn status_label(&self) -> &str {
-        match self.status.as_str() {
-            "PENDING" => "PND",
-            "READY" => "RDY",
-            "ENQUEUED" => "ENQ",
-            "RUNNING" => "RUN",
-            "COMPLETED" => "OK",
-            "FAILED" => "ERR",
-            "SKIPPED" => "SKP",
-            _ => &self.status,
-        }
-    }
-
-    /// Get dependencies as string
-    pub fn deps_str(&self) -> String {
-        match &self.dependencies {
-            Some(deps) if !deps.is_empty() => {
-                deps.iter()
-                    .map(|d| d.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            }
-            _ => "-".to_string(),
-        }
-    }
-
-    /// Get workflow context sources as string (node_ids)
-    pub fn ctx_from_str(&self) -> String {
-        match &self.workflow_ctx_from {
-            Some(ids) if !ids.is_empty() => ids.join(","),
-            _ => "-".to_string(),
-        }
-    }
-
-    /// Get join type display string
-    pub fn join_str(&self) -> String {
-        match self.join_type.as_str() {
-            "all" => "ALL".to_string(),
-            "any" => "ANY".to_string(),
-            "quorum" => {
-                if let Some(min) = self.min_success {
-                    format!("Q({})", min)
-                } else {
-                    "Q(?)".to_string()
-                }
-            }
-            _ => self.join_type.clone(),
-        }
-    }
-}
-
-/// Workflow status aggregation row
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct WorkflowStatusAggRow {
-    pub status: String,
-    pub count: Option<i64>,
-    pub avg_duration_secs: Option<f64>,
 }
