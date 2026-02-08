@@ -492,6 +492,15 @@ def create_task_wrapper(
         try:
             result = fn(*args, **kwargs)
 
+            if result is None:
+                return TaskResult(
+                    err=TaskError(
+                        error_code=LibraryErrorCode.TASK_EXCEPTION,
+                        message=f'Task {fn.__name__} returned None instead of TaskResult',
+                        data={'task_name': task_name},
+                    )
+                )
+
             # Runtime type validation: validate result against declared types
             try:
                 if result.is_ok():
