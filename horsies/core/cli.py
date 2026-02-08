@@ -414,7 +414,10 @@ def worker_command(args: argparse.Namespace) -> None:
                 except NotImplementedError:
                     pass
 
-            await worker.run_forever()
+            try:
+                await worker.run_forever()
+            finally:
+                await broker.close_async()
 
         try:
             asyncio.run(run_worker())
