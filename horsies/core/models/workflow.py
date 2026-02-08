@@ -12,6 +12,7 @@ from typing import (
     Any,
     TypeVar,
     Generic,
+    TypeGuard,
     cast,
     Callable,
     Literal,
@@ -213,31 +214,39 @@ class SubWorkflowSummary(Generic[OkT_co]):
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> 'SubWorkflowSummary[Any]':
         """Build a SubWorkflowSummary from a JSON-like dict safely."""
-        status_val = data.get('status')
+        def _is_str_key_dict(value: object) -> TypeGuard[dict[str, Any]]:
+            if not isinstance(value, dict):
+                return False
+            items: list[tuple[Any, Any]] = list(value.items())
+            return all(isinstance(item[0], str) for item in items)
+
+        # Normalize possible serde dataclass envelope:
+        # {"__dataclass__": true, "module": ..., "qualname": ..., "data": {...}}
+        payload: dict[str, Any] = data
+        raw_inner = data.get('data')
+        if data.get('__dataclass__') and _is_str_key_dict(raw_inner):
+            payload = raw_inner
+
+        def _as_int(value: Any, default: int = 0) -> int:
+            return int(value) if isinstance(value, (int, float)) else default
+
+        status_val = payload.get('status')
         try:
             status = WorkflowStatus(str(status_val))
         except Exception:
             status = WorkflowStatus.FAILED
 
-        success_case_val = data.get('success_case')
-        total_val = data.get('total_tasks', 0)
-        completed_val = data.get('completed_tasks', 0)
-        failed_val = data.get('failed_tasks', 0)
-        skipped_val = data.get('skipped_tasks', 0)
-        error_val = data.get('error_summary')
+        success_case_val = payload.get('success_case')
+        error_val = payload.get('error_summary')
 
         return cls(
             status=status,
             success_case=str(success_case_val) if success_case_val else None,
-            output=data.get('output'),
-            total_tasks=int(total_val) if isinstance(total_val, (int, float)) else 0,
-            completed_tasks=int(completed_val)
-            if isinstance(completed_val, (int, float))
-            else 0,
-            failed_tasks=int(failed_val) if isinstance(failed_val, (int, float)) else 0,
-            skipped_tasks=int(skipped_val)
-            if isinstance(skipped_val, (int, float))
-            else 0,
+            output=payload.get('output'),
+            total_tasks=_as_int(payload.get('total_tasks')),
+            completed_tasks=_as_int(payload.get('completed_tasks')),
+            failed_tasks=_as_int(payload.get('failed_tasks')),
+            skipped_tasks=_as_int(payload.get('skipped_tasks')),
             error_summary=str(error_val) if error_val else None,
         )
 

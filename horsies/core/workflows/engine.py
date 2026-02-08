@@ -565,6 +565,11 @@ async def resume_workflow(
         # 4. Cascade resume to paused child workflows
         await _cascade_resume_to_children(session, broker, workflow_id)
 
+        # 5. Re-check completion after resume processing.
+        # Resume may transition pending tasks directly to SKIPPED/terminal without
+        # any subsequent task completion callback to trigger finalization.
+        await _check_workflow_completion(session, workflow_id, broker)
+
         await session.commit()
         return True
 
@@ -1948,14 +1953,11 @@ async def _check_workflow_completion(
             f'{completed}/{total} tasks succeeded, {failed} failed'
         )
     else:
-        # Compute error based on success_policy semantics
-        # With success_policy: always recompute to reflect required task failures
-        # Without success_policy: use existing error if already set
-        error_json: str | None = None
-        if success_policy_data is not None or not has_error:
-            error_json = await _get_workflow_failure_error(
-                session, workflow_id, success_policy_data
-            )
+        # Recompute failure error from terminal task results for deterministic
+        # final error selection (e.g., first failed task by task_index).
+        error_json: str | None = await _get_workflow_failure_error(
+            session, workflow_id, success_policy_data
+        )
 
         await session.execute(
             MARK_WORKFLOW_FAILED_SQL,
