@@ -158,6 +158,16 @@ ADD_SUB_WORKFLOW_QUALNAME_COLUMN_SQL = text("""
     ADD COLUMN IF NOT EXISTS sub_workflow_qualname VARCHAR(512);
 """)
 
+SET_TASK_COLUMN_DEFAULTS_SQL = text("""
+    ALTER TABLE horsies_tasks
+    ALTER COLUMN claimed SET DEFAULT FALSE,
+    ALTER COLUMN retry_count SET DEFAULT 0,
+    ALTER COLUMN max_retries SET DEFAULT 0,
+    ALTER COLUMN priority SET DEFAULT 100,
+    ALTER COLUMN created_at SET DEFAULT NOW(),
+    ALTER COLUMN updated_at SET DEFAULT NOW();
+""")
+
 # ---- TUI/syce notification triggers ----
 # These fire on ANY status change so the TUI gets real-time updates.
 # They are separate from the worker-oriented triggers above.
@@ -511,6 +521,10 @@ class PostgresBroker:
                 {'key': self._schema_advisory_key()},
             )
             await conn.run_sync(Base.metadata.create_all)
+
+            # Migration: ensure NOT NULL columns have server-side DEFAULTs
+            # for existing tables created before server_default was added.
+            await conn.execute(SET_TASK_COLUMN_DEFAULTS_SQL)
 
         await self._create_triggers()
         await self._create_workflow_schema()
