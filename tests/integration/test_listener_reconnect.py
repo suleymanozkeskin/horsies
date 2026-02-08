@@ -1,0 +1,85 @@
+"""Integration test for PostgresListener dispatcher reconnect after connection kill."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+
+import psycopg
+import pytest
+from psycopg import Notify
+
+from horsies.core.brokers.listener import PostgresListener
+
+# Raw psycopg URL (no +psycopg scheme) — matches what PostgresBroker passes to PostgresListener
+DB_URL = f'postgresql://postgres:{os.environ["DB_PASSWORD"]}@localhost:5432/horsies'
+
+CHANNEL = "test_reconnect"
+RECV_TIMEOUT = 5.0
+
+
+async def _drain_queue(queue: asyncio.Queue[Notify]) -> list[Notify]:
+    """Drain all currently buffered notifications from a queue without blocking."""
+    items: list[Notify] = []
+    while True:
+        try:
+            items.append(queue.get_nowait())
+        except asyncio.QueueEmpty:
+            break
+    return items
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio(loop_scope="function")
+class TestDispatcherReconnect:
+    """Verify the dispatcher reconnects and re-LISTENs after its backend is killed."""
+
+    async def test_dispatcher_reconnects_after_connection_kill(self) -> None:
+        """
+        Kill the dispatcher's PG backend via pg_terminate_backend() and confirm
+        that the listener recovers: re-establishes the connection, re-issues
+        LISTEN, and delivers notifications sent after the kill.
+        """
+        listener = PostgresListener(DB_URL)
+        helper_conn: psycopg.AsyncConnection[tuple[object, ...]] | None = None
+
+        try:
+            # -- Arrange --
+            await listener.start()
+            queue = await listener.listen(CHANNEL)
+
+            helper_conn = await psycopg.AsyncConnection.connect(
+                DB_URL,
+                autocommit=True,
+            )
+
+            # -- Pre-kill verify --
+            await helper_conn.execute(f"NOTIFY {CHANNEL}, 'before'")
+            notification = await asyncio.wait_for(queue.get(), timeout=RECV_TIMEOUT)
+            assert notification.payload == "before"
+
+            # -- Kill dispatcher connection --
+            assert listener._dispatcher_conn is not None
+            backend_pid: int = listener._dispatcher_conn.info.backend_pid
+            await helper_conn.execute(
+                "SELECT pg_terminate_backend(%s)",
+                (backend_pid,),
+            )
+
+            # -- Wait for reconnect --
+            # Dispatcher backoff starts at 0.2s; allow generous time for
+            # reconnect + re-LISTEN + connection setup.
+            await asyncio.sleep(2.0)
+
+            # Drain any stale/error artefacts that arrived during the kill window.
+            await _drain_queue(queue)
+
+            # -- Post-reconnect verify --
+            await helper_conn.execute(f"NOTIFY {CHANNEL}, 'after'")
+            notification = await asyncio.wait_for(queue.get(), timeout=RECV_TIMEOUT)
+            assert notification.payload == "after"
+
+        finally:
+            await listener.close()
+            if helper_conn is not None and not helper_conn.closed:
+                await helper_conn.close()
