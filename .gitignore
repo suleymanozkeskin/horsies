@@ -48,3 +48,5 @@ ignored-content/
 /docs/
 
 examples/
+
+.coverage
