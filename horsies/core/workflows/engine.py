@@ -1281,6 +1281,15 @@ async def on_workflow_task_complete(
     workflow_id = row[0]
     task_index = row[1]
 
+    # Serialize completion handling per workflow so concurrent task completions
+    # don't race dependency promotion (PENDING -> READY/SKIPPED).
+    lock_result = await session.execute(
+        LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
+        {'wf_id': workflow_id},
+    )
+    if lock_result.fetchone() is None:
+        return
+
     # 2. Update workflow_task status and store result
     new_status = 'COMPLETED' if result.is_ok() else 'FAILED'
     await session.execute(
@@ -1858,6 +1867,13 @@ async def _get_dependency_results_with_names(
 
 # -- SQL constants for _check_workflow_completion --
 
+LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL = text("""
+    SELECT id
+    FROM horsies_workflows
+    WHERE id = :wf_id
+    FOR UPDATE
+""")
+
 GET_WORKFLOW_COMPLETION_STATUS_SQL = text("""
     SELECT
         w.status,
@@ -1906,6 +1922,15 @@ async def _check_workflow_completion(
 
     If success_policy is set, evaluates success cases instead of "any failure → FAILED".
     """
+    # Serialize completion checks per workflow to avoid races when multiple
+    # tasks finish concurrently in separate transactions.
+    lock_result = await session.execute(
+        LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
+        {'wf_id': workflow_id},
+    )
+    if lock_result.fetchone() is None:
+        return
+
     # Get current workflow status, error, success_policy, and task counts
     result = await session.execute(
         GET_WORKFLOW_COMPLETION_STATUS_SQL,
