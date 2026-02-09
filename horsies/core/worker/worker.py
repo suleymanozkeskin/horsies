@@ -933,6 +933,8 @@ MARK_TASK_FAILED_WORKER_SQL = text("""
         failed_reason = :reason,
         updated_at = :now
     WHERE id = :id
+      AND status = 'RUNNING'
+    RETURNING id
 """)
 
 MARK_TASK_FAILED_SQL = text("""
@@ -942,6 +944,8 @@ MARK_TASK_FAILED_SQL = text("""
         result = :result_json,
         updated_at = :now
     WHERE id = :id
+      AND status = 'RUNNING'
+    RETURNING id
 """)
 
 MARK_TASK_COMPLETED_SQL = text("""
@@ -951,6 +955,8 @@ MARK_TASK_COMPLETED_SQL = text("""
         result = :result_json,
         updated_at = :now
     WHERE id = :id
+      AND status = 'RUNNING'
+    RETURNING id
 """)
 
 GET_TASK_QUEUE_NAME_SQL = text("""
@@ -985,6 +991,8 @@ SCHEDULE_TASK_RETRY_SQL = text("""
         sent_at = :next_retry_at,
         updated_at = now()
     WHERE id = :id
+      AND status = 'RUNNING'
+    RETURNING id
 """)
 
 NOTIFY_DELAYED_SQL = text("""
@@ -1772,7 +1780,7 @@ class Worker:
                         pass
 
                 # worker-level failure (rare): mark FAILED with reason
-                await s.execute(
+                res = await s.execute(
                     MARK_TASK_FAILED_WORKER_SQL,
                     {
                         'now': now,
@@ -1780,6 +1788,12 @@ class Worker:
                         'id': task_id,
                     },
                 )
+                if res.fetchone() is None:
+                    logger.warning(
+                        f'Task {task_id} finalize aborted: status is no longer RUNNING '
+                        f'(reaper likely reclaimed). Skipping to prevent double-execution.'
+                    )
+                    return
                 # Trigger automatically sends NOTIFY on UPDATE
                 await s.commit()
                 return
@@ -1799,20 +1813,37 @@ class Worker:
                         pass
                 should_retry = await self._should_retry_task(task_id, task_error, s)
                 if should_retry:
-                    await self._schedule_retry(task_id, s)
+                    retry_ok = await self._schedule_retry(task_id, s)
+                    if not retry_ok:
+                        logger.warning(
+                            f'Task {task_id} retry aborted during finalize: '
+                            f'task no longer RUNNING (reaper reclaimed).'
+                        )
                     await s.commit()
                     return
 
                 # Mark as failed if no retry
-                await s.execute(
+                fail_res = await s.execute(
                     MARK_TASK_FAILED_SQL,
                     {'now': now, 'result_json': result_json_str, 'id': task_id},
                 )
+                if fail_res.fetchone() is None:
+                    logger.warning(
+                        f'Task {task_id} finalize-fail aborted: status is no longer RUNNING '
+                        f'(reaper likely reclaimed). Skipping to prevent double-execution.'
+                    )
+                    return
             else:
-                await s.execute(
+                comp_res = await s.execute(
                     MARK_TASK_COMPLETED_SQL,
                     {'now': now, 'result_json': result_json_str, 'id': task_id},
                 )
+                if comp_res.fetchone() is None:
+                    logger.warning(
+                        f'Task {task_id} finalize-complete aborted: status is no longer RUNNING '
+                        f'(reaper likely reclaimed). Skipping to prevent double-execution.'
+                    )
+                    return
 
             # Handle workflow task completion (if this task is part of a workflow)
             await self._handle_workflow_task_if_needed(s, task_id, tr)
@@ -1912,8 +1943,12 @@ class Worker:
 
         return False
 
-    async def _schedule_retry(self, task_id: str, session: AsyncSession) -> None:
-        """Schedule a task for retry by updating its status and next retry time."""
+    async def _schedule_retry(self, task_id: str, session: AsyncSession) -> bool:
+        """Schedule a task for retry by updating its status and next retry time.
+
+        Returns True if the retry was scheduled, False if the task was already
+        reclaimed by the reaper (status no longer RUNNING).
+        """
         # Get current retry configuration
         result = await session.execute(
             GET_TASK_RETRY_CONFIG_SQL,
@@ -1922,7 +1957,7 @@ class Worker:
         row = result.fetchone()
 
         if not row:
-            return
+            return False
 
         retry_count = (row.retry_count or 0) + 1
 
@@ -1942,11 +1977,17 @@ class Worker:
         delay_seconds = self._calculate_retry_delay(retry_count, retry_policy_data)
         next_retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
 
-        # Update task for retry
-        await session.execute(
+        # Update task for retry — guarded by AND status = 'RUNNING'
+        res = await session.execute(
             SCHEDULE_TASK_RETRY_SQL,
             {'id': task_id, 'retry_count': retry_count, 'next_retry_at': next_retry_at},
         )
+        if res.fetchone() is None:
+            logger.warning(
+                f'Task {task_id} retry aborted: status is no longer RUNNING '
+                f'(reaper likely reclaimed). Skipping to prevent double-execution.'
+            )
+            return False
 
         # Schedule a delayed notification using asyncio for the task's actual queue
         queue_name = await self._get_task_queue_name(task_id)
@@ -1959,6 +2000,7 @@ class Worker:
         logger.info(
             f'Scheduled task {task_id} for retry #{retry_count} at {next_retry_at}'
         )
+        return True
 
     def _calculate_retry_delay(
         self, retry_attempt: int, retry_policy_data: dict[str, Any]
