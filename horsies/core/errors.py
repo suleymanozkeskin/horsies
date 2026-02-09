@@ -11,6 +11,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
+# Absolute path to the horsies package directory.
+# Used by _find_user_frame to distinguish library frames from user code.
+# This avoids false positives when the project checkout path itself contains
+# "horsies" (e.g. /home/runner/work/horsies/horsies/ on GitHub Actions).
+_HORSIES_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 class ErrorCode(str, Enum):
     """Error codes for startup/validation errors.
@@ -487,7 +493,7 @@ def _find_user_frame() -> Any | None:
             continue
 
         # Skip horsies internals and standard library
-        if '/horsies/' not in filename and '/site-packages/' not in filename:
+        if not filename.startswith(_HORSIES_PKG_DIR) and '/site-packages/' not in filename:
             return frame
 
         frame = frame.f_back

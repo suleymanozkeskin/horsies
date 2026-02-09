@@ -12,7 +12,7 @@ from horsies.core.models.queues import QueueMode
 
 DB_URL = os.environ.get(
     'HORSES_E2E_DB_URL',
-    f'postgresql+psycopg://postgres:{os.environ["DB_PASSWORD"]}@localhost:5432/horsies',
+    f'postgresql+psycopg://postgres:{os.environ.get("DB_PASSWORD", "")}@localhost:5432/horsies',
 )
 
 config = AppConfig(
