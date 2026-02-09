@@ -971,4 +971,4 @@ if result.is_err() and result.err.error_code == LibraryErrorCode.RESULT_NOT_READ
 - `result_for()` does not block or poll - it's a single database query
 - Use `handle.get(timeout_ms=...)` to wait for completion before accessing individual task results
 
-For class and method signatures, see [Workflow API](workflow-api.md).
+For class and method signatures, see [Workflow API](../workflow-api/).
