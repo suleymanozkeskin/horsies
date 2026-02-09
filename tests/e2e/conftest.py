@@ -17,6 +17,7 @@ from tests.e2e.tasks import instance as default_instance
 from tests.e2e.tasks import instance_custom
 from tests.e2e.tasks import instance_cluster_cap
 from tests.e2e.tasks import instance_recovery
+from tests.e2e.tasks import instance_softcap
 
 
 DB_URL = os.environ.get(
@@ -69,6 +70,18 @@ async def cluster_cap_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def recovery_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker instance with fast recovery thresholds for crash-detection tests."""
     brk = instance_recovery.broker
+    await brk.ensure_schema_initialized()
+    yield brk
+    try:
+        await brk.close_async()
+    except RuntimeError:
+        pass
+
+
+@pytest_asyncio.fixture(scope='session', loop_scope='session')
+async def softcap_broker() -> AsyncGenerator[PostgresBroker, None]:
+    """Broker instance with soft cap (prefetch_buffer > 0) for lease contention tests."""
+    brk = instance_softcap.broker
     await brk.ensure_schema_initialized()
     yield brk
     try:

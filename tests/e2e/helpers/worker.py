@@ -13,6 +13,41 @@ from typing import Callable, Generator, Sequence
 ReadyCheck = Callable[[], bool]
 
 
+def _kill_stale_workers() -> None:
+    """Kill any leftover horsies worker processes from previous tests.
+
+    Workers started with start_new_session=True survive parent death and share
+    queues, so a stale worker from a different app instance would pick up tasks
+    it cannot resolve (WORKER_RESOLUTION_ERROR).
+    Called automatically by run_worker / run_workers before starting new ones.
+
+    Strategy: graceful SIGTERM first (lets workers close DB connections),
+    then SIGKILL after 3s if needed.
+    """
+    result = subprocess.run(
+        ['pgrep', '-f', 'horsies worker'],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return  # no stale workers
+
+    # Graceful SIGTERM first
+    subprocess.run(['pkill', '-TERM', '-f', 'horsies worker'], capture_output=True)
+    for _ in range(3):
+        time.sleep(1)
+        check = subprocess.run(
+            ['pgrep', '-f', 'horsies worker'],
+            capture_output=True,
+        )
+        if check.returncode != 0:
+            return  # all gone
+
+    # Force SIGKILL if SIGTERM didn't work
+    subprocess.run(['pkill', '-9', '-f', 'horsies worker'], capture_output=True)
+    time.sleep(1)
+
+
 def _wait_for_ready(
     proc: subprocess.Popen[str],
     timeout: float,
@@ -95,6 +130,8 @@ def run_worker(
     ready_check: ReadyCheck | None = None,
 ) -> Generator[subprocess.Popen[str], None, None]:
     """Start a worker process, yield, then terminate it."""
+    _kill_stale_workers()
+
     cmd = [
         'uv',
         'run',
@@ -140,6 +177,8 @@ def run_workers(
     ready_check: ReadyCheck | None = None,
 ) -> Generator[Sequence[subprocess.Popen[str]], None, None]:
     """Start multiple worker processes, yield, then terminate all."""
+    _kill_stale_workers()
+
     workers: list[subprocess.Popen[str]] = []
 
     # Set PYTHONPATH to repo root so absolute imports work

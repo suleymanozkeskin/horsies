@@ -8,7 +8,7 @@ import os
 import signal
 import tempfile
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, Any
 
 import pytest
 
@@ -30,12 +30,14 @@ from tests.e2e.tasks import retry as retry_tasks
 from tests.e2e.tasks import queues_custom
 from tests.e2e.tasks import instance_cluster_cap
 from tests.e2e.tasks import instance_recovery
+from tests.e2e.tasks import instance_softcap
 
 
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
 CUSTOM_INSTANCE = 'tests.e2e.tasks.instance_custom:app'
 CLUSTER_CAP_INSTANCE = 'tests.e2e.tasks.instance_cluster_cap:app'
 RECOVERY_INSTANCE = 'tests.e2e.tasks.instance_recovery:app'
+SOFTCAP_INSTANCE = 'tests.e2e.tasks.instance_softcap:app'
 
 
 class _HealthcheckTask(Protocol):
@@ -54,6 +56,65 @@ def _make_ready_check(task_func: _HealthcheckTask):
         return result.is_ok()
 
     return _check
+
+
+async def _wait_for_claimed_owner(
+    session_factory,
+    task_id: str,
+    timeout_s: float = 15.0,
+    poll_interval: float = 0.1,
+) -> str:
+    """Wait until task is CLAIMED and return claimed_by_worker_id."""
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while asyncio.get_running_loop().time() < deadline:
+        async with session_factory() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT status, claimed_by_worker_id
+                    FROM horsies_tasks
+                    WHERE id = :id
+                    """
+                ),
+                {'id': task_id},
+            )
+            row = result.fetchone()
+            if row is not None and row[0] == 'CLAIMED' and row[1]:
+                return str(row[1])
+        await asyncio.sleep(poll_interval)
+    raise TimeoutError(f'Task {task_id} was not CLAIMED within {timeout_s}s')
+
+
+async def _prepare_execution_ledger_tables(broker: PostgresBroker) -> None:
+    """Create and clear DB-ledger tables used by the double-execution race test."""
+    async with broker.session_factory() as session:
+        await session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS e2e_execution_attempts (
+                    id BIGSERIAL PRIMARY KEY,
+                    token TEXT NOT NULL,
+                    worker_identity TEXT NOT NULL,
+                    worker_pid INTEGER NOT NULL,
+                    entered_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+        )
+        await session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS e2e_execution_winner (
+                    token TEXT PRIMARY KEY,
+                    worker_identity TEXT NOT NULL,
+                    worker_pid INTEGER NOT NULL,
+                    won_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+        )
+        await session.execute(text("TRUNCATE e2e_execution_attempts, e2e_execution_winner"))
+        await session.commit()
 
 
 # =============================================================================
@@ -289,6 +350,111 @@ def test_multi_worker_no_double_execution() -> None:
 
 
 # =============================================================================
+# L2.16 DB Ledger Race — Exact Single Execution Proof
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_softcap_db_ledger_race_single_execution(
+    softcap_broker: PostgresBroker,
+) -> None:
+    """L2.16: Force reclaim race and prove only one task body enters via DB ledger."""
+    await _prepare_execution_ledger_tables(softcap_broker)
+
+    blocker_duration_ms = 4_000
+    token = 'softcap_db_ledger_race_token'
+
+    with run_worker(
+        SOFTCAP_INSTANCE,
+        processes=1,
+        timeout=20.0,
+        ready_check=_make_ready_check(instance_softcap.healthcheck),
+    ):
+        blocker_task_id = softcap_broker.enqueue(
+            task_name='e2e_softcap_blocker',
+            args=(blocker_duration_ms,),
+            kwargs={},
+            queue_name='default',
+        )
+        await wait_for_status(
+            softcap_broker.session_factory,
+            blocker_task_id,
+            'RUNNING',
+            timeout_s=10.0,
+        )
+
+        ledger_task_id = softcap_broker.enqueue(
+            task_name='e2e_softcap_db_ledger',
+            args=(token,),
+            kwargs={},
+            queue_name='default',
+        )
+
+        first_owner = await _wait_for_claimed_owner(
+            softcap_broker.session_factory,
+            ledger_task_id,
+            timeout_s=10.0,
+        )
+
+        # claim_lease_ms=500 in SOFTCAP_INSTANCE, so 1.2s guarantees expiry before worker B starts
+        await asyncio.sleep(1.2)
+
+        with run_worker(
+            SOFTCAP_INSTANCE,
+            processes=1,
+            timeout=20.0,
+            ready_check=_make_ready_check(instance_softcap.healthcheck),
+        ):
+            await wait_for_all_terminal(
+                softcap_broker.session_factory,
+                [blocker_task_id, ledger_task_id],
+                timeout_s=40.0,
+            )
+
+    async with softcap_broker.session_factory() as session:
+        ledger_task = await session.get(TaskModel, ledger_task_id)
+        assert ledger_task is not None
+        assert ledger_task.status == TaskStatus.COMPLETED, (
+            f'Expected COMPLETED, got {ledger_task.status}'
+        )
+        assert ledger_task.claimed_by_worker_id != first_owner, (
+            f'Expected reclaim to a second worker, still owned by {first_owner}'
+        )
+
+        result = await session.execute(
+            text("SELECT COUNT(*) FROM e2e_execution_attempts WHERE token = :token"),
+            {'token': token},
+        )
+        attempts = int(result.scalar() or 0)
+        assert attempts == 1, f'Expected exactly 1 body-entry attempt, got {attempts}'
+
+        result = await session.execute(
+            text("SELECT COUNT(*) FROM e2e_execution_winner WHERE token = :token"),
+            {'token': token},
+        )
+        winners = int(result.scalar() or 0)
+        assert winners == 1, f'Expected exactly 1 winner row, got {winners}'
+
+        result = await session.execute(
+            text(
+                """
+                SELECT a.worker_identity, w.worker_identity
+                FROM e2e_execution_attempts a
+                JOIN e2e_execution_winner w ON w.token = a.token
+                WHERE a.token = :token
+                """
+            ),
+            {'token': token},
+        )
+        row = result.fetchone()
+        assert row is not None
+        assert row[0] == row[1], (
+            f'Attempt identity {row[0]} does not match winner identity {row[1]}'
+        )
+
+
+# =============================================================================
 # L2.6 Stale RUNNING → FAILED on Worker Crash
 # =============================================================================
 
@@ -510,7 +676,7 @@ async def test_retry_works_across_multiple_workers(broker: PostgresBroker) -> No
         handles = [retry_tasks.retry_exhausted_task.send() for _ in range(num_tasks)]
         task_ids = [h.task_id for h in handles]
 
-        # Wait for all to reach terminal state (3 retries × 1s + execution time)
+        # Wait for all to reach terminal state (3 retries x 1s + execution time)
         await wait_for_all_terminal(
             broker.session_factory, task_ids, timeout_s=30.0
         )
@@ -848,3 +1014,152 @@ async def test_concurrent_enqueue_during_processing(
                 assert task.status == TaskStatus.COMPLETED, (
                     f'Task {task_id} has status {task.status}, expected COMPLETED'
                 )
+
+
+# =============================================================================
+# L2.14 Soft Cap Lease — No Double Execution
+# =============================================================================
+
+
+@pytest.mark.e2e
+def test_softcap_lease_no_double_execution(
+    softcap_broker: PostgresBroker,
+) -> None:
+    """L2.14: Under soft cap with aggressive lease expiry, no task body executes twice.
+
+    Strategy: 2 workers x 1 process each. prefetch_buffer=2 lets each worker
+    claim up to 3 tasks (1 running + 2 prefetched). claim_lease_ms=500 means
+    prefetched claims expire while waiting in the process pool queue (each task
+    takes 800ms). The other worker's claim loop reclaims the expired claims.
+    When the first worker's pool finally picks up the expired claim,
+    _confirm_ownership_and_set_running detects CLAIM_LOST and aborts — no
+    double execution.
+    """
+    num_workers = 2
+    num_tasks = 6
+
+    with tempfile.TemporaryDirectory() as log_dir:
+        os.environ['E2E_IDEMPOTENT_LOG_DIR'] = log_dir
+        try:
+            with run_workers(
+                SOFTCAP_INSTANCE,
+                count=num_workers,
+                processes=1,
+                timeout=20.0,
+                ready_check=_make_ready_check(instance_softcap.healthcheck),
+            ):
+                tokens = [f'softcap_task_{i}' for i in range(num_tasks)]
+                handles = [
+                    instance_softcap.slow_idempotent_task.send(token, 800)
+                    for token in tokens
+                ]
+                results = [h.get(timeout_ms=60_000) for h in handles]
+
+                # All tasks should succeed (no DOUBLE_EXECUTION errors)
+                for i, r in enumerate(results):
+                    assert r.is_ok(), (
+                        f'Task {i} (token=softcap_task_{i}) failed: {r.err}'
+                    )
+
+                # Verify each token file exists exactly once
+                for token in tokens:
+                    token_file = Path(log_dir) / token
+                    assert token_file.exists(), f'Token file {token} not created'
+
+                # Verify no extra files (catches double-execution with different artifacts)
+                all_files = list(Path(log_dir).iterdir())
+                assert len(all_files) == num_tasks, (
+                    f'Expected exactly {num_tasks} token files, found {len(all_files)}: '
+                    f'{[f.name for f in all_files]}'
+                )
+        finally:
+            os.environ.pop('E2E_IDEMPOTENT_LOG_DIR', None)
+
+
+# =============================================================================
+# L2.15 Soft Cap — Expired Claim Requeued and Completed
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_softcap_expired_claim_requeued(
+    softcap_broker: PostgresBroker,
+) -> None:
+    """L2.15: A manually expired claim is reclaimed and executed exactly once.
+
+    Proves that CLAIM_LOST from the dead worker does not cascade into task
+    failure — the reclaiming worker completes the task successfully.
+    """
+    dead_worker_id = 'dead_softcap_worker_00000000'
+
+    with tempfile.TemporaryDirectory() as log_dir:
+        os.environ['E2E_IDEMPOTENT_LOG_DIR'] = log_dir
+        try:
+            token = 'softcap_expired_claim'
+
+            # Enqueue 1 softcap idempotent task (short duration — speed not needed here)
+            task_id = softcap_broker.enqueue(
+                task_name='e2e_softcap_slow_idempotent',
+                args=(token, 100),
+                kwargs={},
+                queue_name='default',
+            )
+
+            # Manually set to CLAIMED with an already-expired lease and a dead worker
+            async with softcap_broker.session_factory() as session:
+                await session.execute(
+                    text("""
+                        UPDATE horsies_tasks
+                        SET status = 'CLAIMED',
+                            claimed = TRUE,
+                            claimed_at = NOW() - INTERVAL '10 seconds',
+                            claimed_by_worker_id = :dead_worker_id,
+                            claim_expires_at = NOW() - INTERVAL '5 seconds'
+                        WHERE id = :task_id
+                    """),
+                    {'task_id': task_id, 'dead_worker_id': dead_worker_id},
+                )
+                await session.commit()
+
+            # Start 1 worker — its claim loop will pick up the expired claim
+            with run_worker(
+                SOFTCAP_INSTANCE,
+                processes=1,
+                timeout=20.0,
+                ready_check=_make_ready_check(instance_softcap.healthcheck),
+            ):
+                await wait_for_all_terminal(
+                    softcap_broker.session_factory,
+                    [task_id],
+                    timeout_s=15.0,
+                )
+
+            # Verify task completed successfully and was reclaimed
+            async with softcap_broker.session_factory() as session:
+                task = await session.get(TaskModel, task_id)
+                assert task is not None
+                assert task.status == TaskStatus.COMPLETED, (
+                    f'Expected COMPLETED, got {task.status}'
+                )
+                assert task.claimed_by_worker_id != dead_worker_id, (
+                    f'Task was not reclaimed: still assigned to {dead_worker_id}'
+                )
+
+                # Verify result has no error code (clean completion)
+                assert task.result is not None, 'COMPLETED task should have a result'
+                result_data: dict[str, Any] = json.loads(task.result)
+                assert 'err' not in result_data or result_data['err'] is None, (
+                    f'Expected clean result, got error: {result_data.get("err")}'
+                )
+
+            # Verify atomic token file exists exactly once (single execution)
+            token_file = Path(log_dir) / token
+            assert token_file.exists(), f'Token file {token} not created'
+            all_files = list(Path(log_dir).iterdir())
+            assert len(all_files) == 1, (
+                f'Expected exactly 1 token file, found {len(all_files)}: '
+                f'{[f.name for f in all_files]}'
+            )
+        finally:
+            os.environ.pop('E2E_IDEMPOTENT_LOG_DIR', None)
