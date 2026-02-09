@@ -12,8 +12,13 @@ from typing import Callable, Generator, Sequence
 
 ReadyCheck = Callable[[], bool]
 
+# Number of active run_worker/run_workers contexts created by this module.
+# Prevents stale-worker cleanup from killing intentionally running workers in
+# nested contexts (e.g., tests that start worker A then worker B).
+_ACTIVE_WORKER_CONTEXTS = 0
 
-def _kill_stale_workers() -> None:
+
+def kill_stale_workers() -> None:
     """Kill any leftover horsies worker processes from previous tests.
 
     Workers started with start_new_session=True survive parent death and share
@@ -46,6 +51,22 @@ def _kill_stale_workers() -> None:
     # Force SIGKILL if SIGTERM didn't work
     subprocess.run(['pkill', '-9', '-f', 'horsies worker'], capture_output=True)
     time.sleep(1)
+
+
+def _enter_worker_context() -> None:
+    """Enter a managed worker context and reap stale workers if outermost."""
+    global _ACTIVE_WORKER_CONTEXTS
+    if _ACTIVE_WORKER_CONTEXTS == 0:
+        kill_stale_workers()
+    _ACTIVE_WORKER_CONTEXTS += 1
+
+
+def _exit_worker_context() -> None:
+    """Exit a managed worker context and opportunistically reap stale workers."""
+    global _ACTIVE_WORKER_CONTEXTS
+    _ACTIVE_WORKER_CONTEXTS = max(0, _ACTIVE_WORKER_CONTEXTS - 1)
+    if _ACTIVE_WORKER_CONTEXTS == 0:
+        kill_stale_workers()
 
 
 def _wait_for_ready(
@@ -130,7 +151,7 @@ def run_worker(
     ready_check: ReadyCheck | None = None,
 ) -> Generator[subprocess.Popen[str], None, None]:
     """Start a worker process, yield, then terminate it."""
-    _kill_stale_workers()
+    _enter_worker_context()
 
     cmd = [
         'uv',
@@ -164,7 +185,10 @@ def run_worker(
         _wait_for_ready(proc, timeout=timeout, ready_check=ready_check)
         yield proc
     finally:
-        _kill_worker(proc)
+        try:
+            _kill_worker(proc)
+        finally:
+            _exit_worker_context()
 
 
 @contextmanager
@@ -177,7 +201,7 @@ def run_workers(
     ready_check: ReadyCheck | None = None,
 ) -> Generator[Sequence[subprocess.Popen[str]], None, None]:
     """Start multiple worker processes, yield, then terminate all."""
-    _kill_stale_workers()
+    _enter_worker_context()
 
     workers: list[subprocess.Popen[str]] = []
 
@@ -222,8 +246,11 @@ def run_workers(
         yield workers
     finally:
         # Kill all workers
-        for proc in workers:
-            _kill_worker(proc)
+        try:
+            for proc in workers:
+                _kill_worker(proc)
+        finally:
+            _exit_worker_context()
 
 
 @contextmanager

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Generator
 import os
 import pytest
 import pytest_asyncio
@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.app import Horsies
 
+from tests.e2e.helpers.worker import kill_stale_workers
 from tests.e2e.tasks import instance as default_instance
 from tests.e2e.tasks import instance_custom
 from tests.e2e.tasks import instance_cluster_cap
@@ -121,3 +122,13 @@ async def clean_db(session: AsyncSession) -> AsyncGenerator[None, None]:
         yield
     finally:
         await _cleanup_tables(session)
+
+
+@pytest.fixture(scope='session', autouse=True)
+def clean_stale_workers_session() -> Generator[None, None, None]:
+    """Reap leftover worker processes at session boundaries."""
+    kill_stale_workers()
+    try:
+        yield
+    finally:
+        kill_stale_workers()

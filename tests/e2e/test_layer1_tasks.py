@@ -24,15 +24,18 @@ from horsies.core.errors import ConfigurationError
 from sqlalchemy import text
 
 from tests.e2e.helpers.assertions import assert_ok, assert_err
+from tests.e2e.helpers.db import poll_max_during
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
 from tests.e2e.tasks import retry as retry_tasks
 from tests.e2e.tasks import instance as default_instance
+from tests.e2e.tasks import instance_retry_precedence
 from tests.e2e.tasks import instance_custom
 from tests.e2e.tasks import queues_custom
 
 
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
+RETRY_PRECEDENCE_INSTANCE = 'tests.e2e.tasks.instance_retry_precedence:app'
 CUSTOM_INSTANCE = 'tests.e2e.tasks.instance_custom:app'
 
 
@@ -343,6 +346,94 @@ async def test_no_retry_for_non_matching(broker: PostgresBroker) -> None:
             task = await session.get(TaskModel, handle.task_id)
             assert task is not None
             assert task.retry_count == 0
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_retry_precedence_task_mapper_wins_over_global_no_retry(
+    broker: PostgresBroker,
+) -> None:
+    with run_worker(
+        RETRY_PRECEDENCE_INSTANCE,
+        ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
+    ):
+        handle = instance_retry_precedence.task_mapper_wins_no_retry_task.send()
+        result = handle.get(timeout_ms=10000)
+        assert result.is_err()
+        assert result.err is not None
+        assert result.err.error_code == 'TASK_VALUE_ERROR'
+
+        async with broker.session_factory() as session:
+            task = await session.get(TaskModel, handle.task_id)
+            assert task is not None
+            assert task.retry_count == 0
+            assert task.status == TaskStatus.FAILED
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_retry_precedence_task_mapper_wins_and_retries(
+    broker: PostgresBroker,
+) -> None:
+    with run_worker(
+        RETRY_PRECEDENCE_INSTANCE,
+        ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
+    ):
+        handle = instance_retry_precedence.task_mapper_wins_retry_task.send()
+        result = handle.get(timeout_ms=10000)
+        assert result.is_err()
+        assert result.err is not None
+        assert result.err.error_code == 'TASK_VALUE_ERROR'
+
+        async with broker.session_factory() as session:
+            task = await session.get(TaskModel, handle.task_id)
+            assert task is not None
+            assert task.retry_count == 1
+            assert task.status == TaskStatus.FAILED
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_retry_precedence_global_mapper_triggers_retry(
+    broker: PostgresBroker,
+) -> None:
+    with run_worker(
+        RETRY_PRECEDENCE_INSTANCE,
+        ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
+    ):
+        handle = instance_retry_precedence.global_mapper_retry_task.send()
+        result = handle.get(timeout_ms=10000)
+        assert result.is_err()
+        assert result.err is not None
+        assert result.err.error_code == 'GLOBAL_VALUE_ERROR'
+
+        async with broker.session_factory() as session:
+            task = await session.get(TaskModel, handle.task_id)
+            assert task is not None
+            assert task.retry_count == 1
+            assert task.status == TaskStatus.FAILED
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_retry_precedence_exception_name_collision_no_retry(
+    broker: PostgresBroker,
+) -> None:
+    with run_worker(
+        RETRY_PRECEDENCE_INSTANCE,
+        ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
+    ):
+        handle = instance_retry_precedence.exception_name_collision_task.send()
+        result = handle.get(timeout_ms=10000)
+        assert result.is_err()
+        assert result.err is not None
+        assert result.err.error_code == LibraryErrorCode.UNHANDLED_EXCEPTION
+
+        async with broker.session_factory() as session:
+            task = await session.get(TaskModel, handle.task_id)
+            assert task is not None
+            assert task.retry_count == 0
+            assert task.status == TaskStatus.FAILED
 
 
 @pytest.mark.e2e
@@ -709,11 +800,11 @@ async def test_task_cancelled(broker: PostgresBroker) -> None:
 
 
 @pytest.mark.e2e
-def test_multiple_tasks_concurrent() -> None:
-    """L1.8.1: Multiple processes handle concurrent tasks (timing proves parallelism)."""
-    # 4 tasks × 500ms each with 2 processes should complete in ~1s if parallel, ~2s if serial
+@pytest.mark.asyncio(loop_scope='function')
+async def test_multiple_tasks_concurrent(broker: PostgresBroker) -> None:
+    """L1.8.1: Multiple processes handle concurrent tasks (DB proves parallelism)."""
     num_tasks = 4
-    task_duration_ms = 500
+    task_duration_ms = 800
     num_processes = 2
 
     with run_worker(
@@ -721,24 +812,27 @@ def test_multiple_tasks_concurrent() -> None:
         processes=num_processes,
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
-        start = time.time()
         handles = [
             basic_tasks.slow_task.send(task_duration_ms) for _ in range(num_tasks)
         ]
-        results = [h.get(timeout_ms=15000) for h in handles]
-        elapsed = time.time() - start
+
+        # Observe runtime concurrency directly from DB instead of wall-clock timing.
+        max_running = await poll_max_during(
+            broker.session_factory,
+            "SELECT COUNT(*) FROM horsies_tasks WHERE status = 'RUNNING'",
+            duration_s=3.0,
+            poll_interval=0.05,
+        )
 
         # All tasks should succeed
+        results = [h.get(timeout_ms=15000) for h in handles]
         assert all(r.is_ok() for r in results)
 
-        # If truly parallel with 2 processes: 4 tasks × 500ms = 2 batches × 500ms = ~1s
-        # If serial: 4 tasks × 500ms = ~2s
-        # Use loose threshold to avoid flakiness on slow CI machines
-        serial_time = (num_tasks * task_duration_ms) / 1000
-        # Should complete in less than 95% of serial time to prove some parallelism
-        assert (
-            elapsed < serial_time * 0.95
-        ), f'Elapsed {elapsed:.2f}s too close to serial time {serial_time}s'
+        # Guard against vacuous sampling and prove at least 2 tasks overlapped.
+        assert max_running > 0, 'Polling observed 0 RUNNING tasks — test may be vacuous'
+        assert max_running >= 2, (
+            f'Expected parallel execution with >=2 RUNNING tasks, observed {max_running}'
+        )
 
 
 @pytest.mark.e2e
