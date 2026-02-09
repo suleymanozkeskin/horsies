@@ -29,6 +29,44 @@ async def _drain_queue(queue: asyncio.Queue[Notify]) -> list[Notify]:
     return items
 
 
+async def _wait_for_reconnect_delivery(
+    helper_conn: psycopg.AsyncConnection[tuple[object, ...]],
+    queue: asyncio.Queue[Notify],
+    channel: str,
+    timeout_s: float = 8.0,
+    per_probe_wait_s: float = 0.4,
+) -> None:
+    """Wait until a post-kill probe notification is actually delivered."""
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    attempt = 0
+
+    while asyncio.get_running_loop().time() < deadline:
+        attempt += 1
+        payload = f"reconnect_probe_{attempt}"
+        await helper_conn.execute(
+            "SELECT pg_notify(%s, %s)",
+            (channel, payload),
+        )
+
+        probe_deadline = min(
+            deadline,
+            asyncio.get_running_loop().time() + per_probe_wait_s,
+        )
+        while asyncio.get_running_loop().time() < probe_deadline:
+            remaining = probe_deadline - asyncio.get_running_loop().time()
+            try:
+                notification = await asyncio.wait_for(queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+            if notification.payload == payload:
+                return
+
+    raise TimeoutError(
+        f"Listener did not deliver post-kill notifications on channel '{channel}' "
+        f"within {timeout_s:.1f}s"
+    )
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio(loop_scope="function")
 class TestDispatcherReconnect:
@@ -66,18 +104,11 @@ class TestDispatcherReconnect:
                 (backend_pid,),
             )
 
-            # -- Wait for reconnect --
-            # Dispatcher backoff starts at 0.2s; allow generous time for
-            # reconnect + re-LISTEN + connection setup.
-            await asyncio.sleep(2.0)
-
             # Drain any stale/error artefacts that arrived during the kill window.
             await _drain_queue(queue)
 
-            # -- Post-reconnect verify --
-            await helper_conn.execute(f"NOTIFY {CHANNEL}, 'after'")
-            notification = await asyncio.wait_for(queue.get(), timeout=RECV_TIMEOUT)
-            assert notification.payload == "after"
+            # -- Post-reconnect verify (event-driven, no fixed sleep) --
+            await _wait_for_reconnect_delivery(helper_conn, queue, CHANNEL)
 
         finally:
             await listener.close()
