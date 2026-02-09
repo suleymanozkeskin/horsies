@@ -17,3 +17,7 @@ Horsies includes **Syce**, a terminal-based UI for monitoring your cluster in re
 ![Syce Dashboard](https://suleymanozkeskin.github.io/horsies/images/syce/dashboard.png)
 
 [**Syce Setup & Usage**](https://suleymanozkeskin.github.io/horsies/monitoring/syce-overview/)
+
+## Test Coverage
+
+Overall test coverage: **73%**

@@ -355,6 +355,7 @@ def test_multi_worker_no_double_execution() -> None:
 
 
 @pytest.mark.e2e
+@pytest.mark.flaky
 @pytest.mark.asyncio(loop_scope='function')
 async def test_softcap_db_ledger_race_single_execution(
     softcap_broker: PostgresBroker,

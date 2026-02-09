@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "horsies"
-version = "0.1.0a9"
+version = "0.1.0a10"
 description = "A Python library for distributed task execution"
 readme = "README.md"
 license = "MIT"
@@ -70,6 +70,7 @@ asyncio_default_fixture_loop_scope = "function"
 markers = [
     "e2e: end-to-end tests requiring database and worker process",
     "integration: integration tests requiring a live database",
+    "flaky: timing-sensitive tests that may fail under load",
 ]
 
 [tool.pyright]
