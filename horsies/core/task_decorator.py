@@ -140,8 +140,18 @@ class TaskHandle(Generic[T]):
             broker = self._app.get_broker()
             try:
                 result = broker.get_result(self.task_id, timeout_ms)
-                self._cached_result = result
-                self._result_fetched = True
+                # WAIT_TIMEOUT is transient ("not done yet"), not terminal.
+                # Caching it would prevent subsequent get() calls from ever
+                # seeing the real result once the task completes.
+                err_value = result.err
+                is_wait_timeout = (
+                    result.is_err()
+                    and err_value is not None
+                    and err_value.error_code == LibraryErrorCode.WAIT_TIMEOUT
+                )
+                if not is_wait_timeout:
+                    self._cached_result = result
+                    self._result_fetched = True
                 return result
             except Exception as exc:
                 return self._error_result(
@@ -192,8 +202,18 @@ class TaskHandle(Generic[T]):
             broker = self._app.get_broker()
             try:
                 result = await broker.get_result_async(self.task_id, timeout_ms)
-                self._cached_result = result
-                self._result_fetched = True
+                # WAIT_TIMEOUT is transient ("not done yet"), not terminal.
+                # Caching it would prevent subsequent get_async() calls from
+                # ever seeing the real result once the task completes.
+                err_value = result.err
+                is_wait_timeout = (
+                    result.is_err()
+                    and err_value is not None
+                    and err_value.error_code == LibraryErrorCode.WAIT_TIMEOUT
+                )
+                if not is_wait_timeout:
+                    self._cached_result = result
+                    self._result_fetched = True
                 return result
             except asyncio.CancelledError:
                 raise

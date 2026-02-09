@@ -1962,7 +1962,7 @@ class Worker:
 
     def _calculate_retry_delay(
         self, retry_attempt: int, retry_policy_data: dict[str, Any]
-    ) -> int:
+    ) -> float:
         """Calculate the delay in seconds for a retry attempt."""
         # Default retry policy values (these match RetryPolicy defaults)
         intervals = retry_policy_data.get(
@@ -1992,10 +1992,10 @@ class Worker:
             jitter_range = base_delay * 0.25
             base_delay += random.uniform(-jitter_range, jitter_range)
 
-        return max(1, int(base_delay))  # Ensure at least 1 second delay
+        return float(max(1.0, base_delay))
 
     async def _schedule_delayed_notification(
-        self, delay_seconds: int, channel: str, payload: str
+        self, delay_seconds: float, channel: str, payload: str
     ) -> None:
         """Schedule a delayed notification to wake up the worker for retry."""
         try:

@@ -200,6 +200,36 @@ class TestTaskHandleGet:
         assert result.err.error_code == LibraryErrorCode.BROKER_ERROR
         assert result.err.exception is not None
 
+    def test_wait_timeout_not_cached(self) -> None:
+        """WAIT_TIMEOUT is transient; subsequent get() must re-query the broker."""
+        app = _make_app()
+        broker = MagicMock()
+        timeout_result: TaskResult[int, TaskError] = TaskResult(
+            err=TaskError(
+                error_code=LibraryErrorCode.WAIT_TIMEOUT,
+                message='timed out',
+                data={},
+            ),
+        )
+        success_result: TaskResult[int, TaskError] = TaskResult(ok=42)
+        broker.get_result.side_effect = [timeout_result, success_result]
+        app.get_broker.return_value = broker
+
+        handle: TaskHandle[int] = TaskHandle('t-6', app=app, broker_mode=True)
+
+        first = handle.get(timeout_ms=1000)
+        assert first.is_err()
+        assert first.err is not None
+        assert first.err.error_code == LibraryErrorCode.WAIT_TIMEOUT
+        assert handle._result_fetched is False
+
+        second = handle.get(timeout_ms=5000)
+        assert second.is_ok()
+        assert second.ok == 42
+        assert handle._result_fetched is True
+
+        assert broker.get_result.call_count == 2
+
 
 # =============================================================================
 # TaskHandle.get_async
@@ -292,6 +322,39 @@ class TestTaskHandleGetAsync:
 
         with pytest.raises(asyncio.CancelledError):
             await handle.get_async()
+
+    @pytest.mark.asyncio
+    async def test_wait_timeout_not_cached(self) -> None:
+        """WAIT_TIMEOUT is transient; subsequent get_async() must re-query the broker."""
+        app = _make_app()
+        broker = MagicMock()
+        timeout_result: TaskResult[str, TaskError] = TaskResult(
+            err=TaskError(
+                error_code=LibraryErrorCode.WAIT_TIMEOUT,
+                message='timed out',
+                data={},
+            ),
+        )
+        success_result: TaskResult[str, TaskError] = TaskResult(ok='done')
+        broker.get_result_async = AsyncMock(
+            side_effect=[timeout_result, success_result],
+        )
+        app.get_broker.return_value = broker
+
+        handle: TaskHandle[str] = TaskHandle('t-7', app=app, broker_mode=True)
+
+        first = await handle.get_async(timeout_ms=1000)
+        assert first.is_err()
+        assert first.err is not None
+        assert first.err.error_code == LibraryErrorCode.WAIT_TIMEOUT
+        assert handle._result_fetched is False
+
+        second = await handle.get_async(timeout_ms=5000)
+        assert second.is_ok()
+        assert second.ok == 'done'
+        assert handle._result_fetched is True
+
+        assert broker.get_result_async.call_count == 2
 
 
 # =============================================================================
