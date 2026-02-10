@@ -685,7 +685,7 @@ def _run_task_entry(
                 # Reconstruct TaskResults from serialized data (node_id-based)
                 results_by_id_raw = workflow_ctx_data.get('results_by_id', {})
 
-                results_by_id: dict[str, Any] = {}
+                results_by_id: dict[str, TaskResult[Any, TaskError]] = {}
                 for node_id, result_json in results_by_id_raw.items():
                     if isinstance(result_json, str):
                         results_by_id[node_id] = task_result_from_json(
@@ -694,7 +694,7 @@ def _run_task_entry(
 
                 # Reconstruct SubWorkflowSummaries from serialized data (node_id-based)
                 summaries_by_id_raw = workflow_ctx_data.get('summaries_by_id', {})
-                summaries_by_id: dict[str, Any] = {}
+                summaries_by_id: dict[str, SubWorkflowSummary[Any]] = {}
                 for node_id, summary_json in summaries_by_id_raw.items():
                     if isinstance(summary_json, str):
                         parsed = loads_json(summary_json)

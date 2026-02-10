@@ -1516,17 +1516,17 @@ class WorkflowContext(BaseModel):
     task_name: str
 
     # Internal storage: results keyed by node_id
-    _results_by_id: dict[str, Any] = {}
+    _results_by_id: dict[str, 'TaskResult[Any, TaskError]'] = {}
     # Internal storage: subworkflow summaries keyed by node_id
-    _summaries_by_id: dict[str, Any] = {}
+    _summaries_by_id: dict[str, 'SubWorkflowSummary[Any]'] = {}
 
     def __init__(
         self,
         workflow_id: str,
         task_index: int,
         task_name: str,
-        results_by_id: dict[str, Any] | None = None,
-        summaries_by_id: dict[str, Any] | None = None,
+        results_by_id: dict[str, 'TaskResult[Any, TaskError]'] | None = None,
+        summaries_by_id: dict[str, 'SubWorkflowSummary[Any]'] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -1635,8 +1635,8 @@ class WorkflowContext(BaseModel):
         workflow_id: str,
         task_index: int,
         task_name: str,
-        results_by_id: dict[str, Any],
-        summaries_by_id: dict[str, Any] | None = None,
+        results_by_id: dict[str, 'TaskResult[Any, TaskError]'],
+        summaries_by_id: dict[str, 'SubWorkflowSummary[Any]'] | None = None,
     ) -> 'WorkflowContext':
         """Reconstruct WorkflowContext from serialized data."""
         return cls(
