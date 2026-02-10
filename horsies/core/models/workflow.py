@@ -217,8 +217,7 @@ class SubWorkflowSummary(Generic[OkT_co]):
         def _is_str_key_dict(value: object) -> TypeGuard[dict[str, Any]]:
             if not isinstance(value, dict):
                 return False
-            items: list[tuple[Any, Any]] = list(value.items())
-            return all(isinstance(item[0], str) for item in items)
+            return all(isinstance(k, str) for k in cast(dict[Any, Any], value))
 
         # Normalize possible serde dataclass envelope:
         # {"__dataclass__": true, "module": ..., "qualname": ..., "data": {...}}
@@ -2151,7 +2150,7 @@ class WorkflowDefinitionMeta(type):
         nodes: list[tuple[str, TaskNode[Any] | SubWorkflowNode[Any]]] = []
         for attr_name, attr_value in namespace.items():
             if isinstance(attr_value, (TaskNode, SubWorkflowNode)):
-                nodes.append((attr_name, attr_value))
+                nodes.append((attr_name, cast(AnyNode, attr_value)))
 
         # Store the collected nodes on the class
         cls._workflow_nodes = nodes  # type: ignore[attr-defined]
