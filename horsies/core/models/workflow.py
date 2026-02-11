@@ -775,6 +775,8 @@ class WorkflowSpec:
             report.add(error)
         for error in self._collect_args_with_injection_errors():
             report.add(error)
+        for error in self._collect_kwargs_args_from_overlap_errors():
+            report.add(error)
         for error in self._collect_invalid_kwargs_errors():
             report.add(error)
         for error in self._collect_missing_required_param_errors():
@@ -1083,6 +1085,26 @@ class WorkflowSpec:
                         'for injected values'
                     ),
                 )
+            )
+        return errors
+
+    def _collect_kwargs_args_from_overlap_errors(self) -> list[WorkflowValidationError]:
+        """Reject nodes where kwargs and args_from share any key."""
+        errors: list[WorkflowValidationError] = []
+        for node in self.tasks:
+            overlap = set(node.kwargs.keys()) & set(node.args_from.keys())
+            if not overlap:
+                continue
+            errors.append(
+                WorkflowValidationError(
+                    message='kwargs and args_from keys must be disjoint',
+                    code=ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP,
+                    notes=[
+                        f"node '{node.name}' has overlapping key(s): {sorted(overlap)}",
+                        'args_from would silently overwrite the static kwarg value at runtime',
+                    ],
+                    help_text='remove the overlapping key from either kwargs or args_from',
+                ),
             )
         return errors
 

@@ -890,6 +890,9 @@ def my_task(workflow_meta: WorkflowMeta | None = None) -> TaskResult[str, TaskEr
 **Important:** When using `args_from` or `workflow_ctx_from`, positional `args` are not allowed.
 Put static values in `kwargs` instead.
 
+**Important:** `kwargs` and `args_from` keys must be disjoint. If the same key appears in both,
+validation fails with `E021` (`WORKFLOW_KWARGS_ARGS_FROM_OVERLAP`).
+
 For type-safe node construction with static arguments, see [Typed Node Builder](typed-node-builder).
 
 ### args_from: What the Receiving Function Gets

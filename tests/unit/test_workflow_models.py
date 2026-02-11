@@ -629,6 +629,74 @@ class TestWorkflowSpecValidation:
 
         assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
+    def test_kwargs_args_from_overlap_rejected(self) -> None:
+        """Overlapping kwargs and args_from keys raises E021."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+        fn_b = MockTaskWrapperWithParams(task_name='task_b')
+
+        node_a = TaskNode(fn=fn_a)
+        node_b = TaskNode(
+            fn=fn_b,
+            waits_for=[node_a],
+            kwargs={'required': 42, 'flag': True},
+            args_from={'required': node_a},
+        )
+
+        with pytest.raises(WorkflowValidationError) as exc:
+            WorkflowSpec(name='overlap_rejected', tasks=[node_a, node_b])
+
+        assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
+
+    def test_kwargs_args_from_disjoint_accepted(self) -> None:
+        """Disjoint kwargs and args_from keys pass validation."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+        fn_b = MockTaskWrapperWithParams(task_name='task_b')
+
+        node_a = TaskNode(fn=fn_a)
+        node_b = TaskNode(
+            fn=fn_b,
+            waits_for=[node_a],
+            kwargs={'flag': True},
+            args_from={'required': node_a},
+        )
+
+        spec = WorkflowSpec(name='disjoint_ok', tasks=[node_a, node_b])
+        assert len(spec.tasks) == 2
+
+    def test_subworkflow_kwargs_args_from_overlap_rejected(self) -> None:
+        """SubWorkflowNode with overlapping kwargs and args_from raises E021."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        class ChildWorkflow(WorkflowDefinition[int]):
+            name = 'child_overlap'
+            child = TaskNode(fn=fn_a)
+
+            class Meta:
+                output = None
+
+            @classmethod
+            def build_with(cls, app: Any, *, value: int) -> WorkflowSpec:
+                _ = value
+                return cls.build(app)
+
+        ChildWorkflow.Meta.output = ChildWorkflow.child
+
+        node_a = TaskNode(fn=fn_a)
+        child_node = SubWorkflowNode(
+            workflow_def=ChildWorkflow,
+            waits_for=[node_a],
+            kwargs={'value': 10},
+            args_from={'value': node_a},
+        )
+
+        with pytest.raises(WorkflowValidationError) as exc:
+            WorkflowSpec(
+                name='subworkflow_overlap',
+                tasks=[node_a, child_node],
+            )
+
+        assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
+
     def test_missing_required_params_rejected(self) -> None:
         """Missing required parameters raises validation error."""
         fn_a = MockTaskWrapperWithParams(task_name='task_a')

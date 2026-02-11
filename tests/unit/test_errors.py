@@ -639,6 +639,7 @@ class TestErrorCode:
             ErrorCode.WORKFLOW_SUBWORKFLOW_APP_MISSING,
             ErrorCode.WORKFLOW_INVALID_KWARG_KEY,
             ErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS,
+            ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP,
         ]
         for code in workflow_codes:
             # E001-E099 range

@@ -717,16 +717,17 @@ def _run_task_entry(
                 from horsies.core.models.workflow import WorkflowMeta
 
                 if isinstance(workflow_meta_data, dict):
-                    task_index_raw = workflow_meta_data.get('task_index', 0)
+                    meta_dict = cast(dict[str, Any], workflow_meta_data)
+                    task_index_raw: Any = meta_dict.get('task_index', 0)
                     try:
                         task_index_value = int(task_index_raw)
                     except (TypeError, ValueError):
                         task_index_value = 0
 
                     kwargs['workflow_meta'] = WorkflowMeta(
-                        workflow_id=str(workflow_meta_data.get('workflow_id', '')),
+                        workflow_id=str(meta_dict.get('workflow_id', '')),
                         task_index=task_index_value,
-                        task_name=str(workflow_meta_data.get('task_name', '')),
+                        task_name=str(meta_dict.get('task_name', '')),
                     )
             # If task doesn't declare workflow_meta, silently skip injection.
 

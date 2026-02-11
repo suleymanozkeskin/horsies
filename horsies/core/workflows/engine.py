@@ -780,6 +780,11 @@ async def _enqueue_workflow_task(
             # Cast to proper type - args_from stores {kwarg_name: task_index}
             args_from_typed = cast(dict[str, int], args_from_map)
             for kwarg_name, dep_index in args_from_typed.items():
+                if kwarg_name in kwargs:
+                    raise RuntimeError(
+                        f"args_from key '{kwarg_name}' conflicts with static kwarg "
+                        f"(task_index={task_index}, workflow_id={workflow_id})"
+                    )
                 dep_result = all_dep_results.get(dep_index)
                 if dep_result is not None:
                     # Serialize TaskResult for transport
@@ -1006,6 +1011,11 @@ async def _enqueue_subworkflow_task(
         if isinstance(args_from_map, dict):
             args_from_typed = cast(dict[str, int], args_from_map)
             for kwarg_name, dep_index in args_from_typed.items():
+                if kwarg_name in kwargs:
+                    raise RuntimeError(
+                        f"args_from key '{kwarg_name}' conflicts with static kwarg "
+                        f"(task_index={task_index}, workflow_id={workflow_id})"
+                    )
                 dep_result = all_dep_results.get(dep_index)
                 if dep_result is not None:
                     # Serialize TaskResult for transport

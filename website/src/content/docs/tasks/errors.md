@@ -168,6 +168,7 @@ horsies check myapp.instance:app
 | E016 | `WORKFLOW_ARGS_WITH_INJECTION` | Positional args used with args_from or workflow_ctx_from |
 | E019 | `WORKFLOW_INVALID_KWARG_KEY` | Unknown kwargs or args_from key for callable |
 | E020 | `WORKFLOW_MISSING_REQUIRED_PARAMS` | Missing required parameters for task or subworkflow |
+| E021 | `WORKFLOW_KWARGS_ARGS_FROM_OVERLAP` | kwargs and args_from share one or more keys |
 | E017 | `WORKFLOW_INVALID_SUBWORKFLOW_RETRY_MODE` | Invalid subworkflow retry mode |
 | E018 | `WORKFLOW_SUBWORKFLOW_APP_MISSING` | Subworkflow app reference missing |
 
