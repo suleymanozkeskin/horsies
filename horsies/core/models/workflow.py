@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 # TypeVar for TaskNode generic parameter (the "ok" type of TaskResult)
 OkT = TypeVar('OkT')
 OkT_co = TypeVar('OkT_co', covariant=True)
+OutT = TypeVar('OutT')
 
 
 # =============================================================================
@@ -828,13 +829,20 @@ class SuccessPolicy:
     """
 
 
+WorkflowTerminalResults = dict[str, 'TaskResult[Any, TaskError] | None']
+"""
+Aggregated terminal results returned by workflow get()/get_async() when no explicit
+output node is configured.
+"""
+
+
 # =============================================================================
 # WorkflowSpec
 # =============================================================================
 
 
 @dataclass
-class WorkflowSpec:
+class WorkflowSpec(Generic[OutT]):
     """
     Specification for a workflow DAG. Created via app.workflow() or WorkflowDefinition.build().
 
@@ -870,7 +878,7 @@ class WorkflowSpec:
     - PAUSE: on task failure, pause workflow for manual intervention (resume/cancel)
     """
 
-    output: TaskNode[Any] | SubWorkflowNode[Any] | None = None
+    output: TaskNode[OutT] | SubWorkflowNode[OutT] | None = None
     """
     - Explicit output node: WorkflowHandle.get() returns this node's result
     - If None: get() returns dict of all terminal node results keyed by node_id
@@ -1820,7 +1828,7 @@ class WorkflowSpec:
 
             register_workflow_spec(self)
 
-    def start(self, workflow_id: str | None = None) -> 'WorkflowHandle':
+    def start(self, workflow_id: str | None = None) -> 'WorkflowHandle[OutT]':
         """
         Start workflow execution.
 
@@ -1843,7 +1851,9 @@ class WorkflowSpec:
 
         return start_workflow(self, self.broker, workflow_id)
 
-    async def start_async(self, workflow_id: str | None = None) -> 'WorkflowHandle':
+    async def start_async(
+        self, workflow_id: str | None = None
+    ) -> 'WorkflowHandle[OutT]':
         """
         Start workflow execution (async).
 
@@ -2130,7 +2140,7 @@ class WorkflowTaskInfo:
 
 
 @dataclass
-class WorkflowHandle:
+class WorkflowHandle(Generic[OutT]):
     """
     Handle for tracking and retrieving workflow results.
 
@@ -2165,7 +2175,7 @@ class WorkflowHandle:
                 raise ValueError(f'Workflow {self.workflow_id} not found')
             return WorkflowStatus(row[0])
 
-    def get(self, timeout_ms: int | None = None) -> TaskResult[Any, TaskError]:
+    def get(self, timeout_ms: int | None = None) -> TaskResult[OutT, TaskError]:
         """
         Block until workflow completes or timeout.
 
@@ -2182,7 +2192,7 @@ class WorkflowHandle:
 
     async def get_async(
         self, timeout_ms: int | None = None
-    ) -> TaskResult[Any, TaskError]:
+    ) -> TaskResult[OutT, TaskError]:
         """Async version of get()."""
 
         from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
@@ -2201,28 +2211,34 @@ class WorkflowHandle:
                 return await self._get_error()
 
             if status == WorkflowStatus.PAUSED:
-                return TaskResult(
-                    err=TaskError(
-                        error_code='WORKFLOW_PAUSED',
-                        message='Workflow is paused awaiting intervention',
-                    )
+                return cast(
+                    'TaskResult[OutT, TaskError]',
+                    TaskResult(
+                        err=TaskError(
+                            error_code='WORKFLOW_PAUSED',
+                            message='Workflow is paused awaiting intervention',
+                        )
+                    ),
                 )
 
             # Check timeout
             elapsed = time.monotonic() - start
             if timeout_sec and elapsed >= timeout_sec:
-                return TaskResult(
-                    err=TaskError(
-                        error_code=LibraryErrorCode.WAIT_TIMEOUT,
-                        message=f'Workflow did not complete within {timeout_ms}ms',
-                    )
+                return cast(
+                    'TaskResult[OutT, TaskError]',
+                    TaskResult(
+                        err=TaskError(
+                            error_code=LibraryErrorCode.WAIT_TIMEOUT,
+                            message=f'Workflow did not complete within {timeout_ms}ms',
+                        )
+                    ),
                 )
 
             # Wait for notification or poll
             remaining = (timeout_sec - elapsed) if timeout_sec else 5.0
             await self._wait_for_completion(min(remaining, 5.0))
 
-    async def _get_result(self) -> TaskResult[Any, TaskError]:
+    async def _get_result(self) -> TaskResult[OutT, TaskError]:
         """Fetch completed workflow result."""
         from horsies.core.models.tasks import TaskResult
         from horsies.core.codec.serde import loads_json, task_result_from_json
@@ -2234,10 +2250,13 @@ class WorkflowHandle:
             )
             row = result.fetchone()
             if row and row[0]:
-                return task_result_from_json(loads_json(row[0]))
-            return TaskResult(ok=None)
+                return cast(
+                    'TaskResult[OutT, TaskError]',
+                    task_result_from_json(loads_json(row[0])),
+                )
+            return cast('TaskResult[OutT, TaskError]', TaskResult(ok=None))
 
-    async def _get_error(self) -> TaskResult[Any, TaskError]:
+    async def _get_error(self) -> TaskResult[OutT, TaskError]:
         """Fetch failed workflow error."""
         from horsies.core.models.tasks import TaskResult, TaskError
         from horsies.core.codec.serde import loads_json
@@ -2254,18 +2273,24 @@ class WorkflowHandle:
                     # Safely extract known TaskError fields with type narrowing
                     raw_code = error_data.get('error_code')
                     raw_msg = error_data.get('message')
-                    return TaskResult(
-                        err=TaskError(
-                            error_code=str(raw_code) if raw_code is not None else None,
-                            message=str(raw_msg) if raw_msg is not None else None,
-                            data=error_data.get('data'),
-                        )
+                    return cast(
+                        'TaskResult[OutT, TaskError]',
+                        TaskResult(
+                            err=TaskError(
+                                error_code=str(raw_code) if raw_code is not None else None,
+                                message=str(raw_msg) if raw_msg is not None else None,
+                                data=error_data.get('data'),
+                            )
+                        ),
                     )
             status_str = row[1] if row else 'FAILED'
-            return TaskResult(
-                err=TaskError(
-                    error_code=f'WORKFLOW_{status_str}',
-                    message=f'Workflow {status_str.lower()}',
+            return cast(
+                'TaskResult[OutT, TaskError]',
+                TaskResult(
+                    err=TaskError(
+                        error_code=f'WORKFLOW_{status_str}',
+                        message=f'Workflow {status_str.lower()}',
+                    )
                 )
             )
 
@@ -2621,7 +2646,7 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
         return cast(list[tuple[str, TaskNode[Any] | SubWorkflowNode[Any]]], nodes)
 
     @classmethod
-    def build(cls, app: 'Horsies') -> WorkflowSpec:
+    def build(cls, app: 'Horsies') -> WorkflowSpec[OkT_co]:
         """
         Build a WorkflowSpec from this workflow definition.
 
@@ -2659,7 +2684,7 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
         tasks = [node for _, node in nodes]
 
         # Get Meta configuration
-        output: TaskNode[Any] | SubWorkflowNode[Any] | None = None
+        output: TaskNode[OkT_co] | SubWorkflowNode[OkT_co] | None = None
         on_error: OnError = OnError.FAIL
         success_policy: SuccessPolicy | None = None
 
@@ -2679,7 +2704,7 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
         )
         spec.workflow_def_module = cls.__module__
         spec.workflow_def_qualname = cls.__qualname__
-        return spec
+        return cast('WorkflowSpec[OkT_co]', spec)
 
     @classmethod
     def build_with(
@@ -2687,7 +2712,7 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
         app: 'Horsies',
         *args: Any,
         **params: Any,
-    ) -> WorkflowSpec:
+    ) -> WorkflowSpec[OkT_co]:
         """
         Build a WorkflowSpec with runtime parameters.
 
@@ -2699,4 +2724,4 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
         spec = cls.build(app)
         spec.workflow_def_module = cls.__module__
         spec.workflow_def_qualname = cls.__qualname__
-        return spec
+        return cast('WorkflowSpec[OkT_co]', spec)

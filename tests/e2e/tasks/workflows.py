@@ -43,7 +43,7 @@ def final_result_task() -> TaskResult[dict[str, Any], TaskError]:
 
 
 @app.task(task_name='e2e_wf_fail')
-def fail_task(error_code: str) -> TaskResult[None, TaskError]:
+def fail_task(error_code: str) -> TaskResult[Any, TaskError]:
     """Always fails with the specified error code."""
     time.sleep(0.05)
     return TaskResult(
@@ -329,7 +329,7 @@ def sum_two_task(
 
 
 @app.task(task_name='e2e_wf_fail_with')
-def fail_with_task(error_code: str) -> TaskResult[None, TaskError]:
+def fail_with_task(error_code: str) -> TaskResult[Any, TaskError]:
     """Returns an error with the specified code."""
     time.sleep(0.05)
     return TaskResult(
@@ -395,7 +395,7 @@ def ctx_sum_task(
 
 @app.task(task_name='e2e_wf_check_upstream_skipped')
 def check_upstream_skipped_task(
-    input_result: TaskResult[int, TaskError],
+    input_result: TaskResult[Any, TaskError],
 ) -> TaskResult[str, TaskError]:
     """Checks if input is UPSTREAM_SKIPPED error."""
     time.sleep(0.05)

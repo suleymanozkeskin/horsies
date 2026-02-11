@@ -8,6 +8,7 @@ from typing import (
     ParamSpec,
     Any,
     Union,
+    cast,
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.queues import QueueMode
@@ -17,6 +18,7 @@ from horsies.core.models.workflow import (
     TaskNode,
     SubWorkflowNode,
     WorkflowSpec,
+    WorkflowTerminalResults,
     OnError,
     SuccessPolicy,
 )
@@ -47,10 +49,11 @@ from horsies.core.codec.serde import loads_json
 
 if TYPE_CHECKING:
     from horsies.core.task_decorator import TaskFunction
-    from horsies.core.models.tasks import TaskResult
+    from horsies.core.models.tasks import TaskResult, TaskError
 
 P = ParamSpec('P')
 T = TypeVar('T')
+OutT = TypeVar('OutT')
 
 _E = TypeVar('_E', bound=HorsiesError)
 
@@ -747,14 +750,45 @@ class Horsies:
         return self._suppress_sends or env_flag == '1'
 
     # -------- workflow factory --------
+    @overload
+    def workflow(
+        self,
+        name: str,
+        tasks: list[TaskNode[Any] | SubWorkflowNode[Any]],
+        on_error: OnError,
+        output: TaskNode[OutT] | SubWorkflowNode[OutT],
+        success_policy: SuccessPolicy | None = None,
+    ) -> WorkflowSpec[OutT]: ...
+
+    @overload
     def workflow(
         self,
         name: str,
         tasks: list[TaskNode[Any] | SubWorkflowNode[Any]],
         on_error: OnError = OnError.FAIL,
-        output: TaskNode[Any] | SubWorkflowNode[Any] | None = None,
+        *,
+        output: TaskNode[OutT] | SubWorkflowNode[OutT],
         success_policy: SuccessPolicy | None = None,
-    ) -> WorkflowSpec:
+    ) -> WorkflowSpec[OutT]: ...
+
+    @overload
+    def workflow(
+        self,
+        name: str,
+        tasks: list[TaskNode[Any] | SubWorkflowNode[Any]],
+        on_error: OnError = OnError.FAIL,
+        output: None = None,
+        success_policy: SuccessPolicy | None = None,
+    ) -> WorkflowSpec[WorkflowTerminalResults]: ...
+
+    def workflow(
+        self,
+        name: str,
+        tasks: list[TaskNode[Any] | SubWorkflowNode[Any]],
+        on_error: OnError = OnError.FAIL,
+        output: TaskNode[OutT] | SubWorkflowNode[OutT] | None = None,
+        success_policy: SuccessPolicy | None = None,
+    ) -> WorkflowSpec[OutT] | WorkflowSpec[WorkflowTerminalResults]:
         """
         Create a validated WorkflowSpec with proper queue and priority resolution.
 
@@ -840,4 +874,6 @@ class Horsies:
             success_policy=success_policy,
             broker=self.get_broker(),
         )
-        return spec
+        if output is None:
+            return cast('WorkflowSpec[WorkflowTerminalResults]', spec)
+        return cast('WorkflowSpec[OutT]', spec)

@@ -10,7 +10,7 @@ This module handles workflow lifecycle:
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +37,8 @@ if TYPE_CHECKING:
     from horsies.core.models.workflow import WorkflowSpec
     from horsies.core.brokers.postgres import PostgresBroker
     from horsies.core.models.tasks import TaskResult, TaskError
+
+OutT = TypeVar('OutT')
 
 
 def _as_str_list(value: object) -> list[str]:
@@ -93,10 +95,10 @@ INSERT_WORKFLOW_TASK_SQL = text("""
 
 
 async def start_workflow_async(
-    spec: 'WorkflowSpec',
+    spec: 'WorkflowSpec[OutT]',
     broker: 'PostgresBroker',
     workflow_id: str | None = None,
-) -> WorkflowHandle:
+) -> WorkflowHandle[OutT]:
     """
     Start a workflow asynchronously.
 
@@ -154,7 +156,10 @@ async def start_workflow_async(
                 logger.warning(
                     f'Workflow {wf_id} already exists, returning existing handle'
                 )
-                return WorkflowHandle(workflow_id=wf_id, broker=broker)
+                return cast(
+                    'WorkflowHandle[OutT]',
+                    WorkflowHandle(workflow_id=wf_id, broker=broker),
+                )
 
         # 1. Insert workflow record
         output_index = spec.output.index if spec.output else None
@@ -299,14 +304,17 @@ async def start_workflow_async(
 
         await session.commit()
 
-    return WorkflowHandle(workflow_id=wf_id, broker=broker)
+    return cast(
+        'WorkflowHandle[OutT]',
+        WorkflowHandle(workflow_id=wf_id, broker=broker),
+    )
 
 
 def start_workflow(
-    spec: 'WorkflowSpec',
+    spec: 'WorkflowSpec[OutT]',
     broker: 'PostgresBroker',
     workflow_id: str | None = None,
-) -> WorkflowHandle:
+) -> WorkflowHandle[OutT]:
     """
     Start a workflow synchronously.
 

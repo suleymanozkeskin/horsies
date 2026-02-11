@@ -21,10 +21,10 @@ if TYPE_CHECKING:
 _nodes_by_spec: WeakValueDictionary[tuple[str, int], Any] = WeakValueDictionary()
 
 # Strong reference to keep specs alive during execution
-_active_specs: dict[str, 'WorkflowSpec'] = {}
+_active_specs: dict[str, 'WorkflowSpec[Any]'] = {}
 
 
-def register_workflow_spec(spec: 'WorkflowSpec') -> None:
+def register_workflow_spec(spec: 'WorkflowSpec[Any]') -> None:
     """
     Register a WorkflowSpec for condition evaluation and subworkflow lookup.
 
