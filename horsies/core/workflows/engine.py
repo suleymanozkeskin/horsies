@@ -1035,6 +1035,20 @@ async def _enqueue_subworkflow_task(
             ],
             help_text='use app.get_broker() or attach app to broker before starting workflows',
         )
+
+    # Defense-in-depth: parameterized subworkflows must override build_with.
+    default_build_with = getattr(
+        WorkflowDefinition.build_with,
+        '__func__',
+        WorkflowDefinition.build_with,
+    )
+    build_with_fn = getattr(workflow_def.build_with, '__func__', workflow_def.build_with)
+    if (task_args or kwargs) and build_with_fn is default_build_with:
+        raise RuntimeError(
+            f"subworkflow '{workflow_def.name}' received runtime parameters "
+            'but uses default build_with(); override build_with(app, ...) to accept them'
+        )
+
     child_spec = workflow_def.build_with(broker.app, *task_args, **kwargs)
 
     # 5. Create child workflow with parent reference

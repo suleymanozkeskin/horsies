@@ -777,6 +777,10 @@ class WorkflowSpec:
             report.add(error)
         for error in self._collect_kwargs_args_from_overlap_errors():
             report.add(error)
+        for error in self._collect_subworkflow_default_build_with_param_errors():
+            report.add(error)
+        for error in self._collect_subworkflow_build_with_binding_errors():
+            report.add(error)
         for error in self._collect_invalid_kwargs_errors():
             report.add(error)
         for error in self._collect_missing_required_param_errors():
@@ -1106,6 +1110,138 @@ class WorkflowSpec:
                     help_text='remove the overlapping key from either kwargs or args_from',
                 ),
             )
+        return errors
+
+    def _collect_subworkflow_default_build_with_param_errors(
+        self,
+    ) -> list[WorkflowValidationError]:
+        """
+        Reject parameterized SubWorkflowNode when build_with is not overridden.
+
+        Default WorkflowDefinition.build_with(app, *args, **params) ignores all
+        runtime parameters and just forwards to build(app), which is a silent
+        data-loss foot-gun when users pass kwargs/args_from/args.
+        """
+        errors: list[WorkflowValidationError] = []
+
+        default_build_with = getattr(
+            WorkflowDefinition.build_with,
+            '__func__',
+            WorkflowDefinition.build_with,
+        )
+        for node in self.tasks:
+            if not isinstance(node, SubWorkflowNode):
+                continue
+            if node.args and (node.args_from or node.workflow_ctx_from is not None):
+                continue  # Covered by WORKFLOW_ARGS_WITH_INJECTION
+            has_runtime_params = bool(node.args) or bool(node.kwargs) or bool(node.args_from)
+            if not has_runtime_params:
+                continue
+
+            build_with_fn = getattr(
+                node.workflow_def.build_with,
+                '__func__',
+                node.workflow_def.build_with,
+            )
+            if build_with_fn is not default_build_with:
+                continue
+
+            notes: list[str] = [
+                f"subworkflow '{node.name}' provides runtime params but uses default build_with()",
+            ]
+            if node.args:
+                notes.append(f'positional args count: {len(node.args)}')
+            if node.kwargs:
+                notes.append(f'kwargs keys: {sorted(node.kwargs.keys())}')
+            if node.args_from:
+                notes.append(f'args_from keys: {sorted(node.args_from.keys())}')
+
+            errors.append(
+                WorkflowValidationError(
+                    message='subworkflow params require overriding build_with',
+                    code=ErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH,
+                    notes=notes,
+                    help_text=(
+                        f"override {node.workflow_def.__name__}.build_with(app, ...) "
+                        'to explicitly accept and apply runtime parameters'
+                    ),
+                )
+            )
+
+        return errors
+
+    def _collect_subworkflow_build_with_binding_errors(
+        self,
+    ) -> list[WorkflowValidationError]:
+        """
+        Validate subworkflow runtime parameters bind cleanly to build_with.
+
+        This fills gaps not covered by key/missing checks:
+        - too many positional arguments
+        - same param supplied by positional args and kwargs/args_from
+        """
+        errors: list[WorkflowValidationError] = []
+        for node in self.tasks:
+            if not isinstance(node, SubWorkflowNode):
+                continue
+            if node.args and (node.args_from or node.workflow_ctx_from is not None):
+                continue  # Covered by WORKFLOW_ARGS_WITH_INJECTION
+
+            # Skip to avoid duplicate noise; overlap has a dedicated validator.
+            if set(node.kwargs.keys()) & set(node.args_from.keys()):
+                continue
+
+            sig = _get_signature(node.workflow_def.build_with)
+            if sig is None:
+                continue
+
+            provided_positional = [object(), *node.args]
+            provided_kwargs = set(node.kwargs.keys()) | set(node.args_from.keys())
+
+            consumed = 0
+            accepts_var_positional = False
+            positional_bound_kw_names: set[str] = set()
+            for param in sig.parameters.values():
+                if param.kind == inspect.Parameter.VAR_POSITIONAL:
+                    accepts_var_positional = True
+                    break
+                if param.kind in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                ):
+                    if consumed < len(provided_positional):
+                        consumed += 1
+                        if param.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD:
+                            positional_bound_kw_names.add(param.name)
+
+            if consumed < len(provided_positional) and not accepts_var_positional:
+                errors.append(
+                    WorkflowValidationError(
+                        message='subworkflow build_with received too many positional args',
+                        code=ErrorCode.WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING,
+                        notes=[
+                            f"node '{node.name}' passed {len(node.args)} user positional arg(s)",
+                            "build_with signature cannot accept that many positional arguments",
+                        ],
+                        help_text='remove extra positional args or add *args to build_with',
+                    )
+                )
+                continue
+
+            duplicate = sorted(provided_kwargs & positional_bound_kw_names)
+            if duplicate:
+                errors.append(
+                    WorkflowValidationError(
+                        message='subworkflow param provided by both args and kwargs/args_from',
+                        code=ErrorCode.WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING,
+                        notes=[
+                            f"node '{node.name}' duplicates parameter(s): {duplicate}",
+                            'the same build_with parameter is bound positionally and by keyword',
+                        ],
+                        help_text='provide each build_with parameter exactly once',
+                    )
+                )
+
         return errors
 
     def _collect_invalid_kwargs_errors(self) -> list[WorkflowValidationError]:

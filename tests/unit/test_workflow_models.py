@@ -611,6 +611,104 @@ class TestWorkflowSpecValidation:
 
         assert exc.value.code == ErrorCode.WORKFLOW_ARGS_WITH_INJECTION
 
+    def test_subworkflow_params_require_overridden_build_with(self) -> None:
+        """Default build_with cannot be parameterized via kwargs."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        class ChildWorkflow(WorkflowDefinition[int]):
+            name = 'child_default_build_with'
+            child = TaskNode(fn=fn_a)
+
+            class Meta:
+                output = None
+
+        ChildWorkflow.Meta.output = ChildWorkflow.child
+
+        child_node = SubWorkflowNode(
+            workflow_def=ChildWorkflow,
+            kwargs={'x': 1},
+        )
+
+        with pytest.raises(WorkflowValidationError) as exc:
+            WorkflowSpec(name='subworkflow_default_build_with_kwargs', tasks=[child_node])
+
+        assert exc.value.code == ErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH
+
+    def test_subworkflow_default_build_with_no_params_allowed(self) -> None:
+        """Default build_with remains valid when no params are passed."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        class ChildWorkflow(WorkflowDefinition[int]):
+            name = 'child_default_build_with_no_params'
+            child = TaskNode(fn=fn_a)
+
+            class Meta:
+                output = None
+
+        ChildWorkflow.Meta.output = ChildWorkflow.child
+
+        child_node = SubWorkflowNode(workflow_def=ChildWorkflow)
+
+        spec = WorkflowSpec(name='subworkflow_default_build_with_no_params_ok', tasks=[child_node])
+        assert len(spec.tasks) == 1
+
+    def test_subworkflow_build_with_duplicate_positional_and_kwarg_rejected(self) -> None:
+        """Subworkflow build_with cannot receive same param via args and kwargs."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        class ChildWorkflow(WorkflowDefinition[int]):
+            name = 'child_build_with_duplicate_binding'
+            child = TaskNode(fn=fn_a)
+
+            class Meta:
+                output = None
+
+            @classmethod
+            def build_with(cls, app: Any, value: int) -> WorkflowSpec:
+                _ = value
+                return cls.build(app)
+
+        ChildWorkflow.Meta.output = ChildWorkflow.child
+
+        child_node = SubWorkflowNode(
+            workflow_def=ChildWorkflow,
+            args=(1,),
+            kwargs={'value': 2},
+        )
+
+        with pytest.raises(WorkflowValidationError) as exc:
+            WorkflowSpec(name='subworkflow_duplicate_binding', tasks=[child_node])
+
+        assert exc.value.code == ErrorCode.WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING
+
+    def test_subworkflow_build_with_too_many_positional_rejected(self) -> None:
+        """Subworkflow build_with rejects extra positional args."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        class ChildWorkflow(WorkflowDefinition[int]):
+            name = 'child_build_with_too_many_positional'
+            child = TaskNode(fn=fn_a)
+
+            class Meta:
+                output = None
+
+            @classmethod
+            def build_with(cls, app: Any, value: int) -> WorkflowSpec:
+                _ = value
+                return cls.build(app)
+
+        ChildWorkflow.Meta.output = ChildWorkflow.child
+
+        child_node = SubWorkflowNode(
+            workflow_def=ChildWorkflow,
+            args=(1, 2),
+        )
+
+        with pytest.raises(WorkflowValidationError) as exc:
+            WorkflowSpec(name='subworkflow_too_many_positional', tasks=[child_node])
+
+        assert exc.value.code == ErrorCode.WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING
+
     def test_invalid_args_from_key_rejected(self) -> None:
         """args_from key must match function parameter name."""
         fn_a = MockTaskWrapper(task_name='task_a')

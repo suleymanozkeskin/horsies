@@ -640,6 +640,8 @@ class TestErrorCode:
             ErrorCode.WORKFLOW_INVALID_KWARG_KEY,
             ErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS,
             ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP,
+            ErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH,
+            ErrorCode.WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING,
         ]
         for code in workflow_codes:
             # E001-E099 range
