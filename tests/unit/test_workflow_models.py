@@ -1393,15 +1393,17 @@ class TestWorkflowSpecValidation:
         WorkflowSpec(name='subworkflow_kwargs_ok', tasks=[child_node])
 
     def test_output_not_in_workflow(self) -> None:
-        """output task not in tasks raises error."""
+        """output task not in tasks raises E011."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_external = MockTaskWrapper(task_name='external')
 
         node_a = TaskNode(fn=fn_a)
         node_external = TaskNode(fn=fn_external)
 
-        with pytest.raises(WorkflowValidationError, match='not in workflow'):
+        with pytest.raises(WorkflowValidationError, match='not in workflow') as exc_info:
             WorkflowSpec(name='bad_output', tasks=[node_a], output=node_external)
+
+        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_OUTPUT
 
     def test_index_assignment(self) -> None:
         """index assigned based on list position."""
@@ -1457,27 +1459,31 @@ class TestWorkflowSpecValidation:
         assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_NODE_ID
 
     def test_success_policy_empty_cases_raises(self) -> None:
-        """SuccessPolicy with empty cases list raises error."""
+        """SuccessPolicy with empty cases list raises E012."""
         fn_a = MockTaskWrapper(task_name='task_a')
         node_a = TaskNode(fn=fn_a)
 
         policy = SuccessPolicy(cases=[])
 
-        with pytest.raises(WorkflowValidationError, match='at least one SuccessCase'):
+        with pytest.raises(WorkflowValidationError, match='at least one SuccessCase') as exc_info:
             WorkflowSpec(name='empty_cases', tasks=[node_a], success_policy=policy)
 
+        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
+
     def test_success_policy_empty_required_raises(self) -> None:
-        """SuccessCase with empty required list raises error."""
+        """SuccessCase with empty required list raises E012."""
         fn_a = MockTaskWrapper(task_name='task_a')
         node_a = TaskNode(fn=fn_a)
 
         policy = SuccessPolicy(cases=[SuccessCase(required=[])])
 
-        with pytest.raises(WorkflowValidationError, match='has no required tasks'):
+        with pytest.raises(WorkflowValidationError, match='has no required tasks') as exc_info:
             WorkflowSpec(name='empty_required', tasks=[node_a], success_policy=policy)
 
+        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
+
     def test_success_policy_invalid_task_raises(self) -> None:
-        """SuccessCase referencing task not in workflow raises error."""
+        """SuccessCase referencing task not in workflow raises E012."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
@@ -1486,10 +1492,12 @@ class TestWorkflowSpecValidation:
 
         policy = SuccessPolicy(cases=[SuccessCase(required=[node_b])])
 
-        with pytest.raises(WorkflowValidationError, match='not in workflow'):
+        with pytest.raises(WorkflowValidationError, match='not in workflow') as exc_info:
             WorkflowSpec(
                 name='invalid_policy_task', tasks=[node_a], success_policy=policy
             )
+
+        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
 
     def test_success_policy_valid(self) -> None:
         """Valid success policy passes validation."""
@@ -2717,7 +2725,7 @@ class TestSuccessPolicyOptionalValidation:
     """Tests for success_policy optional task validation."""
 
     def test_optional_task_not_in_workflow_raises(self) -> None:
-        """success_policy.optional referencing task not in workflow raises error."""
+        """success_policy.optional referencing task not in workflow raises E012."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_external = MockTaskWrapper(task_name='external')
 
@@ -2729,10 +2737,12 @@ class TestSuccessPolicyOptionalValidation:
             optional=[node_external],  # not in tasks
         )
 
-        with pytest.raises(WorkflowValidationError, match='not in workflow'):
+        with pytest.raises(WorkflowValidationError, match='not in workflow') as exc_info:
             WorkflowSpec(
                 name='bad_optional', tasks=[node_a], success_policy=policy,
             )
+
+        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
 
 
 # =============================================================================

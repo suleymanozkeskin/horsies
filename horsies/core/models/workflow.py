@@ -1767,6 +1767,12 @@ class WorkflowSpec(Generic[OutT]):
             errors.append(
                 WorkflowValidationError(
                     f"Output task '{self.output.name}' is not in workflow",
+                    code=ErrorCode.WORKFLOW_INVALID_OUTPUT,
+                    notes=[
+                        f"output task: '{self.output.name}'",
+                        f"workflow tasks: {[t.name for t in self.tasks]}",
+                    ],
+                    help_text='add the output task to the tasks list, or change output to a task already in the workflow',
                 )
             )
         return errors
@@ -1782,6 +1788,8 @@ class WorkflowSpec(Generic[OutT]):
             errors.append(
                 WorkflowValidationError(
                     'SuccessPolicy must have at least one SuccessCase',
+                    code=ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY,
+                    help_text='add at least one SuccessCase to the cases list',
                 )
             )
             return errors
@@ -1794,6 +1802,9 @@ class WorkflowSpec(Generic[OutT]):
                 errors.append(
                     WorkflowValidationError(
                         f'SuccessCase[{i}] has no required tasks',
+                        code=ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY,
+                        notes=[f'case index: {i}'],
+                        help_text='add at least one task to the required list',
                     )
                 )
             for task in case.required:
@@ -1801,6 +1812,12 @@ class WorkflowSpec(Generic[OutT]):
                     errors.append(
                         WorkflowValidationError(
                             f"SuccessCase[{i}] required task '{task.name}' is not in workflow",
+                            code=ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY,
+                            notes=[
+                                f'case index: {i}',
+                                f"task: '{task.name}'",
+                            ],
+                            help_text='add the task to the workflow tasks list',
                         )
                     )
 
@@ -1811,6 +1828,9 @@ class WorkflowSpec(Generic[OutT]):
                     errors.append(
                         WorkflowValidationError(
                             f"SuccessPolicy optional task '{task.name}' is not in workflow",
+                            code=ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY,
+                            notes=[f"task: '{task.name}'"],
+                            help_text='add the task to the workflow tasks list',
                         )
                     )
 
