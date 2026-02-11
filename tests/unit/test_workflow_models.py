@@ -832,6 +832,41 @@ class TestWorkflowSpecValidation:
 
         assert exc.value.code == ErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH
 
+    def test_subworkflow_inherited_default_build_with_requires_override(self) -> None:
+        """Inherited default build_with must still reject runtime params (E022)."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        class BaseChildWorkflow(WorkflowDefinition[int]):
+            name = 'base_child_default_build_with'
+            child = TaskNode(fn=fn_a)
+
+            class Meta:
+                output = None
+
+        BaseChildWorkflow.Meta.output = BaseChildWorkflow.child
+
+        class InheritedDefaultWorkflow(BaseChildWorkflow):
+            name = 'inherited_default_build_with'
+            child2 = TaskNode(fn=fn_a)
+
+            class Meta:
+                output = None
+
+        InheritedDefaultWorkflow.Meta.output = InheritedDefaultWorkflow.child2
+
+        child_node = SubWorkflowNode(
+            workflow_def=InheritedDefaultWorkflow,
+            kwargs={'x': 1},
+        )
+
+        with pytest.raises(WorkflowValidationError) as exc:
+            WorkflowSpec(
+                name='subworkflow_inherited_default_build_with_kwargs',
+                tasks=[child_node],
+            )
+
+        assert exc.value.code == ErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH
+
     def test_subworkflow_default_build_with_no_params_allowed(self) -> None:
         """Default build_with remains valid when no params are passed."""
         fn_a = MockTaskWrapper(task_name='task_a')
@@ -849,6 +884,86 @@ class TestWorkflowSpecValidation:
 
         spec = WorkflowSpec(name='subworkflow_default_build_with_no_params_ok', tasks=[child_node])
         assert len(spec.tasks) == 1
+
+    def test_subworkflow_inherited_custom_build_with_missing_param_rejected(self) -> None:
+        """Inherited custom build_with keeps required-param validation (E020)."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        class BaseChildWorkflow(WorkflowDefinition[int]):
+            name = 'base_child_custom_build_with_missing'
+            child = TaskNode(fn=fn_a)
+
+            class Meta:
+                output = None
+
+            @classmethod
+            def build_with(cls, app: Any, value: int) -> WorkflowSpec:
+                _ = value
+                return cls.build(app)
+
+        BaseChildWorkflow.Meta.output = BaseChildWorkflow.child
+
+        class InheritedCustomWorkflow(BaseChildWorkflow):
+            name = 'inherited_custom_build_with_missing'
+            child2 = TaskNode(fn=fn_a)
+
+            class Meta:
+                output = None
+
+        InheritedCustomWorkflow.Meta.output = InheritedCustomWorkflow.child2
+
+        child_node = SubWorkflowNode(
+            workflow_def=InheritedCustomWorkflow,
+            kwargs={},
+        )
+
+        with pytest.raises(WorkflowValidationError) as exc:
+            WorkflowSpec(
+                name='subworkflow_inherited_custom_build_with_missing',
+                tasks=[child_node],
+            )
+
+        assert exc.value.code == ErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS
+
+    def test_subworkflow_inherited_custom_build_with_invalid_kwarg_rejected(self) -> None:
+        """Inherited custom build_with keeps kwarg-key validation (E019)."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        class BaseChildWorkflow(WorkflowDefinition[int]):
+            name = 'base_child_custom_build_with_invalid_key'
+            child = TaskNode(fn=fn_a)
+
+            class Meta:
+                output = None
+
+            @classmethod
+            def build_with(cls, app: Any, value: int) -> WorkflowSpec:
+                _ = value
+                return cls.build(app)
+
+        BaseChildWorkflow.Meta.output = BaseChildWorkflow.child
+
+        class InheritedCustomWorkflow(BaseChildWorkflow):
+            name = 'inherited_custom_build_with_invalid_key'
+            child2 = TaskNode(fn=fn_a)
+
+            class Meta:
+                output = None
+
+        InheritedCustomWorkflow.Meta.output = InheritedCustomWorkflow.child2
+
+        child_node = SubWorkflowNode(
+            workflow_def=InheritedCustomWorkflow,
+            kwargs={'value': 1, 'typo': 2},
+        )
+
+        with pytest.raises(WorkflowValidationError) as exc:
+            WorkflowSpec(
+                name='subworkflow_inherited_custom_build_with_invalid_key',
+                tasks=[child_node],
+            )
+
+        assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_subworkflow_build_with_duplicate_positional_and_kwarg_rejected(self) -> None:
         """Subworkflow build_with cannot receive same param via args and kwargs."""
@@ -1950,6 +2065,145 @@ class TestWorkflowDefinition:
 
         err = exc.value
         assert err.code == ErrorCode.WORKFLOW_INVALID_SUBWORKFLOW_RETRY_MODE
+
+
+# =============================================================================
+# Workflow Output Type Mismatch Tests (E025)
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestWorkflowOutputTypeMismatch:
+    """Tests for _validate_workflow_generic_output_match (E025)."""
+
+    @staticmethod
+    def _make_app() -> Any:
+        from horsies.core.app import Horsies
+        from horsies.core.models.app import AppConfig
+        from horsies.core.models.broker import PostgresConfig
+
+        return Horsies(
+            config=AppConfig(
+                broker=PostgresConfig(
+                    database_url='postgresql+psycopg://test:test@localhost/test',
+                ),
+            ),
+        )
+
+    def test_matching_output_type_accepted(self) -> None:
+        """WorkflowDefinition[int] with TaskNode producing int passes."""
+        fn_int = MockTaskWrapperInt(task_name='producer_int')
+        app = self._make_app()
+
+        class IntWorkflow(WorkflowDefinition[int]):
+            name = 'int_workflow'
+            produce = TaskNode(fn=fn_int)
+
+            class Meta:
+                output = None
+
+        IntWorkflow.Meta.output = IntWorkflow.produce  # type: ignore[assignment]
+
+        # Should not raise
+        spec = IntWorkflow.build(app)
+        assert spec.output is not None
+
+    def test_mismatched_output_type_rejected(self) -> None:
+        """WorkflowDefinition[int] with TaskNode producing str raises E025."""
+        fn_str = MockTaskWrapper(task_name='producer_str', task_ok_type=str)
+        app = self._make_app()
+
+        class MismatchWorkflow(WorkflowDefinition[int]):
+            name = 'mismatch_workflow'
+            produce = TaskNode(fn=fn_str)
+
+            class Meta:
+                output = None
+
+        MismatchWorkflow.Meta.output = MismatchWorkflow.produce  # type: ignore[assignment]
+
+        with pytest.raises(WorkflowValidationError) as exc:
+            MismatchWorkflow.build(app)
+
+        err = exc.value
+        assert err.code == ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert 'int' in err.message
+        assert 'str' in err.message
+
+    def test_no_generic_parameter_skips_validation(self) -> None:
+        """WorkflowDefinition without generic skips output type check."""
+        fn_str = MockTaskWrapper(task_name='producer_str', task_ok_type=str)
+        app = self._make_app()
+
+        class UntypedWorkflow(WorkflowDefinition):
+            name = 'untyped_workflow'
+            produce = TaskNode(fn=fn_str)
+
+            class Meta:
+                output = None
+
+        UntypedWorkflow.Meta.output = UntypedWorkflow.produce  # type: ignore[assignment]
+
+        # Should not raise — no generic to compare against
+        spec = UntypedWorkflow.build(app)
+        assert spec.output is not None
+
+    def test_any_output_type_skips_validation(self) -> None:
+        """WorkflowDefinition[Any] with any output skips check."""
+        fn_str = MockTaskWrapper(task_name='producer_str', task_ok_type=str)
+        app = self._make_app()
+
+        class AnyWorkflow(WorkflowDefinition[Any]):
+            name = 'any_workflow'
+            produce = TaskNode(fn=fn_str)
+
+            class Meta:
+                output = None
+
+        AnyWorkflow.Meta.output = AnyWorkflow.produce  # type: ignore[assignment]
+
+        # Should not raise — Any is compatible with everything
+        spec = AnyWorkflow.build(app)
+        assert spec.output is not None
+
+    def test_no_output_skips_validation(self) -> None:
+        """Workflow without Meta.output skips type check."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+        app = self._make_app()
+
+        class NoOutputWorkflow(WorkflowDefinition[int]):
+            name = 'no_output_workflow'
+            task_a = TaskNode(fn=fn_a)
+
+        # Should not raise — no output to validate
+        spec = NoOutputWorkflow.build(app)
+        assert spec.output is None
+
+    def test_subclass_compatible_output_accepted(self) -> None:
+        """Subclass of declared type is compatible."""
+        from pydantic import BaseModel
+
+        class Base(BaseModel):
+            value: int
+
+        class Derived(Base):
+            extra: str
+
+        fn_derived = MockTaskWrapper(task_name='producer_derived', task_ok_type=Derived)
+        app = self._make_app()
+
+        class SubclassWorkflow(WorkflowDefinition[Base]):
+            name = 'subclass_workflow'
+            produce = TaskNode(fn=fn_derived)
+
+            class Meta:
+                output = None
+
+        SubclassWorkflow.Meta.output = SubclassWorkflow.produce  # type: ignore[assignment]
+
+        # Derived is subclass of Base — should pass
+        spec = SubclassWorkflow.build(app)
+        assert spec.output is not None
 
 
 # =============================================================================

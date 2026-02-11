@@ -26,6 +26,7 @@ from horsies.core.models.workflow import (
     WorkflowDefinition,
     AnyNode,
     WORKFLOW_TASK_TERMINAL_STATES,
+    validate_workflow_generic_output_match,
 )
 from horsies.core.errors import WorkflowValidationError, ErrorCode
 
@@ -120,6 +121,10 @@ async def start_workflow_async(
         ValueError: If WorkflowSpec was not created via app.workflow() (missing
                     queue/priority resolution).
     """
+    # Validate output type matches declared generic (E025)
+    if spec.workflow_def_cls is not None:
+        validate_workflow_generic_output_match(spec.workflow_def_cls, spec)
+
     # Validate that WorkflowSpec was created via app.workflow()
     # TaskNodes must have resolved queue and priority (SubWorkflowNodes don't have these)
     for node in spec.tasks:
@@ -1050,7 +1055,11 @@ async def _enqueue_subworkflow_task(
         '__func__',
         WorkflowDefinition.build_with,
     )
-    build_with_fn = getattr(workflow_def.build_with, '__func__', workflow_def.build_with)
+    build_with_fn = getattr(
+        workflow_def,
+        '_original_build_with',
+        workflow_def.build_with,
+    )
     if (task_args or kwargs) and build_with_fn is default_build_with:
         raise RuntimeError(
             f"subworkflow '{workflow_def.name}' received runtime parameters "
@@ -1058,6 +1067,9 @@ async def _enqueue_subworkflow_task(
         )
 
     child_spec = workflow_def.build_with(broker.app, *task_args, **kwargs)
+
+    # Validate that build_with override didn't produce a type mismatch
+    validate_workflow_generic_output_match(workflow_def, child_spec)
 
     # 5. Create child workflow with parent reference
     child_id = str(uuid.uuid4())

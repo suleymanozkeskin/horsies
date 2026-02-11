@@ -415,12 +415,58 @@ def _resolve_source_node_ok_type(node: 'TaskNode[Any] | SubWorkflowNode[Any]') -
     return _resolve_workflow_def_ok_type(node.workflow_def)
 
 
+def validate_workflow_generic_output_match(
+    workflow_cls: type['WorkflowDefinition[Any]'],
+    spec: 'WorkflowSpec[Any]',
+) -> None:
+    """Validate that the declared WorkflowDefinition[OkT] matches the actual spec output type.
+
+    Catches the 'lying generic' bug where a class declares e.g.
+    WorkflowDefinition[AggregatedReport] but Meta.output points to
+    a TaskNode[str].
+
+    Raises WorkflowValidationError (E025) on mismatch.
+    Skips validation when either side is unresolvable or Any.
+    """
+    if spec.output is None:
+        return
+
+    declared_ok = _resolve_workflow_def_ok_type(workflow_cls)
+    if declared_ok is None or declared_ok is Any:
+        # No generic parameter or explicitly Any — nothing to check
+        return
+
+    actual_ok = _resolve_source_node_ok_type(spec.output)
+    if actual_ok is None or actual_ok is Any:
+        # Output type unresolvable — can't validate
+        return
+
+    if not _is_ok_type_compatible(actual_ok, declared_ok):
+        raise WorkflowValidationError(
+            code=ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
+            message=(
+                f"workflow '{spec.name}' declares WorkflowDefinition"
+                f'[{_format_type_name(declared_ok)}] but Meta.output produces '
+                f'{_format_type_name(actual_ok)}'
+            ),
+            notes=[
+                f'declared generic: {_format_type_name(declared_ok)}',
+                f'actual output type: {_format_type_name(actual_ok)}',
+            ],
+            help_text='change the class generic to match the output type, or change Meta.output to a node that produces the declared type',
+        )
+
+
 def _format_type_name(annotation: Any | None) -> str:
     """Stable display for type annotations in validation notes."""
     if annotation is None:
         return 'unknown'
     if annotation is Any:
         return 'Any'
+    # Plain classes: use qualname (e.g. 'AggregatedReport' not '<class ...>')
+    if isinstance(annotation, type):
+        return annotation.__qualname__
+    # Generic aliases, unions, etc.: repr is fine
     return repr(annotation)
 
 
@@ -900,6 +946,13 @@ class WorkflowSpec(Generic[OutT]):
     - Qualified name of WorkflowDefinition class (for import fallback in workers)
     """
 
+    workflow_def_cls: type[Any] | None = field(default=None, repr=False)
+    """
+    - Reference to the WorkflowDefinition subclass that built this spec.
+    - Used by start APIs for output type mismatch validation (E025).
+    - None when spec is built directly via app.workflow() without a definition class.
+    """
+
     broker: PostgresBroker | None = field(default=None, repr=False)
     """
     - Database broker for start()/start_async()
@@ -1299,8 +1352,8 @@ class WorkflowSpec(Generic[OutT]):
                 continue
 
             build_with_fn = getattr(
-                node.workflow_def.build_with,
-                '__func__',
+                node.workflow_def,
+                '_original_build_with',
                 node.workflow_def.build_with,
             )
             if build_with_fn is not default_build_with:
@@ -1351,11 +1404,18 @@ class WorkflowSpec(Generic[OutT]):
             if set(node.kwargs.keys()) & set(node.args_from.keys()):
                 continue
 
-            sig = _get_signature(node.workflow_def.build_with)
+            original_bw = getattr(
+                node.workflow_def,
+                '_original_build_with',
+                node.workflow_def.build_with,
+            )
+            sig = _get_signature(original_bw)
             if sig is None:
                 continue
 
-            provided_positional = [object(), *node.args]
+            # _original_build_with is raw function: (cls, app, ...)
+            # Two sentinels for cls and app.
+            provided_positional = [object(), object(), *node.args]
             provided_kwargs = set(node.kwargs.keys()) | set(node.args_from.keys())
 
             consumed = 0
@@ -1417,7 +1477,11 @@ class WorkflowSpec(Generic[OutT]):
                 exclude_names: set[str] = set()
             else:
                 # SubWorkflowNode - validate against build_with signature
-                fn = node.workflow_def.build_with
+                fn = getattr(
+                    node.workflow_def,
+                    '_original_build_with',
+                    node.workflow_def.build_with,
+                )
                 exclude_names = {'app', 'cls'}
 
             sig = _get_signature(fn)
@@ -1480,7 +1544,11 @@ class WorkflowSpec(Generic[OutT]):
                 fn = node.fn
                 exclude_names: set[str] = set()
             else:
-                fn = node.workflow_def.build_with
+                fn = getattr(
+                    node.workflow_def,
+                    '_original_build_with',
+                    node.workflow_def.build_with,
+                )
                 exclude_names = {'app', 'cls'}
 
             sig = _get_signature(fn)
@@ -1568,9 +1636,14 @@ class WorkflowSpec(Generic[OutT]):
                 args_provided = list(node.args)
                 injected_kwargs: set[str] = set()
             else:
-                fn = node.workflow_def.build_with
-                # build_with(app, *args, **kwargs) always provides the first positional
-                args_provided = [object(), *node.args]
+                fn = getattr(
+                    node.workflow_def,
+                    '_original_build_with',
+                    node.workflow_def.build_with,
+                )
+                # _original_build_with is a raw function: (cls, app, *args, **kwargs)
+                # Two sentinels account for cls and app being provided automatically.
+                args_provided = [object(), object(), *node.args]
                 injected_kwargs = set()
 
             sig = _get_signature(fn)
@@ -2593,6 +2666,50 @@ class WorkflowDefinitionMeta(type):
         # Store the collected nodes on the class
         cls._workflow_nodes = nodes  # type: ignore[attr-defined]
 
+        # Resolve the true (unwrapped) build_with implementation for this class.
+        # Priority:
+        #   1) class-local override in namespace
+        #   2) inherited _original_build_with from parent workflow class
+        #   3) fallback to cls.build_with unwrapped
+        if 'build_with' in namespace:
+            raw_build_with: Any = namespace['build_with']
+            unwrapped = getattr(raw_build_with, '__func__', raw_build_with)
+        else:
+            inherited_original: Any | None = None
+            for base in bases:
+                inherited_original = getattr(base, '_original_build_with', None)
+                if inherited_original is not None:
+                    break
+            if inherited_original is not None:
+                unwrapped = inherited_original
+            else:
+                raw_build_with = cls.build_with  # type: ignore[attr-defined]
+                unwrapped = getattr(raw_build_with, '__func__', raw_build_with)
+
+        # Store true original for signature/default-build_with checks (E019-E023).
+        cls._original_build_with = unwrapped  # type: ignore[attr-defined]
+
+        original_fn = cast(
+            Callable[..., 'WorkflowSpec[Any]'],
+            unwrapped,
+        )
+
+        @classmethod  # type: ignore[misc]
+        def _wrapped_build_with(
+            klass: type,
+            app: Any,
+            *bw_args: Any,
+            **bw_params: Any,
+        ) -> 'WorkflowSpec[Any]':
+            spec = original_fn(klass, app, *bw_args, **bw_params)
+            spec.workflow_def_module = klass.__module__
+            spec.workflow_def_qualname = klass.__qualname__
+            spec.workflow_def_cls = klass
+            validate_workflow_generic_output_match(klass, spec)
+            return spec
+
+        cls.build_with = _wrapped_build_with  # type: ignore[attr-defined]
+
         return cls
 
 
@@ -2694,17 +2811,33 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
             on_error = getattr(meta, 'on_error', OnError.FAIL)
             success_policy = getattr(meta, 'success_policy', None)
 
-        # Build WorkflowSpec
-        spec = app.workflow(
-            name=cls.name,
-            tasks=tasks,
-            output=output,
-            on_error=on_error,
-            success_policy=success_policy,
-        )
+        # Build WorkflowSpec — split paths for correct type inference.
+        # When output is set, overload resolves WorkflowSpec[OkT_co] directly.
+        # When output is None, we cast since OkT_co is meaningless for
+        # outputless workflows (they use results()/results_async() instead).
+        if output is not None:
+            spec = app.workflow(
+                name=cls.name,
+                tasks=tasks,
+                output=output,
+                on_error=on_error,
+                success_policy=success_policy,
+            )
+        else:
+            spec = cast(
+                'WorkflowSpec[OkT_co]',
+                app.workflow(
+                    name=cls.name,
+                    tasks=tasks,
+                    on_error=on_error,
+                    success_policy=success_policy,
+                ),
+            )
         spec.workflow_def_module = cls.__module__
         spec.workflow_def_qualname = cls.__qualname__
-        return cast('WorkflowSpec[OkT_co]', spec)
+        spec.workflow_def_cls = cls
+        validate_workflow_generic_output_match(cls, spec)
+        return spec
 
     @classmethod
     def build_with(
@@ -2721,7 +2854,4 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
         """
         _ = args
         _ = params
-        spec = cls.build(app)
-        spec.workflow_def_module = cls.__module__
-        spec.workflow_def_qualname = cls.__qualname__
-        return cast('WorkflowSpec[OkT_co]', spec)
+        return cls.build(app)

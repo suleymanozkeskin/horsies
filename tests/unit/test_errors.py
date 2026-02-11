@@ -643,6 +643,7 @@ class TestErrorCode:
             ErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH,
             ErrorCode.WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING,
             ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
+            ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
         ]
         for code in workflow_codes:
             # E001-E099 range

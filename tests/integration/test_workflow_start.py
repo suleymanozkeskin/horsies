@@ -25,6 +25,7 @@ from .conftest import (
     make_simple_task,
     make_workflow_spec,
     make_identity_task,
+    make_args_receiver_task,
     make_retryable_task,
     make_ctx_receiver_task,
 )
@@ -283,13 +284,14 @@ class TestWorkflowStart:
         """args_from mapping stored correctly."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'args_from_a')
-        task_b = make_identity_task(app, 'args_from_b')
+        # args_from injects TaskResult[...] so the receiver must accept TaskResult.
+        task_b = make_args_receiver_task(app, 'args_from_b')
 
         node_a = TaskNode(fn=task_a, args=(1,))
         node_b = TaskNode(
             fn=task_b,
             waits_for=[node_a],
-            args_from={'value': node_a},
+            args_from={'input_result': node_a},
         )
 
         spec = make_workflow_spec(
@@ -308,7 +310,7 @@ class TestWorkflowStart:
         row = result.fetchone()
         assert row is not None
         args_from = row[0]
-        assert args_from == {'value': 0}  # Maps to task_index 0
+        assert args_from == {'input_result': 0}  # Maps to task_index 0
 
     async def test_workflow_ctx_from_stored(
         self,
