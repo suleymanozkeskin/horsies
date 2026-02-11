@@ -635,9 +635,14 @@ class TestWorkflowSpecValidation:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             WorkflowSpec(name='cycle', tasks=[node_a, node_b])
 
-        codes = [e.code for e in exc_info.value.report.errors]
+        errors = exc_info.value.report.errors
+        codes = [e.code for e in errors]
         assert ErrorCode.WORKFLOW_NO_ROOT_TASKS in codes
         assert ErrorCode.WORKFLOW_CYCLE_DETECTED in codes
+
+        cycle_error = next(e for e in errors if e.code == ErrorCode.WORKFLOW_CYCLE_DETECTED)
+        assert 'task_a' in cycle_error.notes[0]
+        assert 'task_b' in cycle_error.notes[0]
 
     def test_cycle_detection_indirect(self) -> None:
         """A -> B -> C -> A raises MultipleValidationErrors with cycle and no-root codes."""
@@ -655,9 +660,15 @@ class TestWorkflowSpecValidation:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             WorkflowSpec(name='indirect_cycle', tasks=[node_a, node_b, node_c])
 
-        codes = [e.code for e in exc_info.value.report.errors]
+        errors = exc_info.value.report.errors
+        codes = [e.code for e in errors]
         assert ErrorCode.WORKFLOW_NO_ROOT_TASKS in codes
         assert ErrorCode.WORKFLOW_CYCLE_DETECTED in codes
+
+        cycle_error = next(e for e in errors if e.code == ErrorCode.WORKFLOW_CYCLE_DETECTED)
+        assert 'task_a' in cycle_error.notes[0]
+        assert 'task_b' in cycle_error.notes[0]
+        assert 'task_c' in cycle_error.notes[0]
 
     def test_invalid_dep_reference(self) -> None:
         """Dep not in tasks list raises WORKFLOW_INVALID_DEPENDENCY."""

@@ -1189,11 +1189,19 @@ class WorkflowSpec(Generic[OutT]):
                             queue.append(task_idx)
 
         if visited != len(self.tasks):
+            cycle_nodes = [
+                t.name
+                for t in self.tasks
+                if t.index is not None and in_degree.get(t.index, 0) > 0
+            ]
             errors.append(
                 WorkflowValidationError(
                     message='cycle detected in workflow DAG',
                     code=ErrorCode.WORKFLOW_CYCLE_DETECTED,
-                    notes=['workflows must be acyclic directed graphs (DAG)'],
+                    notes=[
+                        f'nodes involved: {cycle_nodes}',
+                        'workflows must be acyclic directed graphs (DAG)',
+                    ],
                     help_text='remove circular dependencies between tasks',
                 )
             )
