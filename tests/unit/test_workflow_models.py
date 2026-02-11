@@ -41,6 +41,7 @@ class MockTaskWrapper(TaskFunction[Any, Any]):
     """Mock TaskWrapper for unit tests."""
 
     task_name: str
+    task_ok_type: Any = Any
 
     def __call__(self, *args: Any, **kwargs: Any) -> TaskResult[Any, TaskError]:
         return TaskResult(ok=None)
@@ -92,6 +93,7 @@ class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
     """Mock TaskWrapper that accepts workflow_ctx."""
 
     task_name: str
+    task_ok_type: Any = Any
 
     def __call__(
         self,
@@ -148,10 +150,11 @@ class MockTaskWrapperWithParams(TaskFunction[Any, Any]):
     """Mock TaskWrapper with required parameters for signature validation."""
 
     task_name: str
+    task_ok_type: Any = Any
 
     def __call__(
         self,
-        required: int,
+        required: TaskResult[int, TaskError],
         *,
         flag: bool,
     ) -> TaskResult[Any, TaskError]:
@@ -204,6 +207,7 @@ class MockTaskWrapperWithKwargs(TaskFunction[Any, Any]):
     """Mock TaskWrapper that accepts **kwargs (validation should allow any key)."""
 
     task_name: str
+    task_ok_type: Any = Any
 
     def __call__(self, **kwargs: Any) -> TaskResult[Any, TaskError]:
         _ = kwargs
@@ -256,6 +260,7 @@ class MockTaskWrapperWithRequiredMeta(TaskFunction[Any, Any]):
     """Mock TaskWrapper with required workflow_meta for signature validation."""
 
     task_name: str
+    task_ok_type: Any = Any
 
     def __call__(
         self,
@@ -271,6 +276,199 @@ class MockTaskWrapperWithRequiredMeta(TaskFunction[Any, Any]):
         return TaskHandle('mock')
 
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
+        return TaskHandle('mock')
+
+    def node(
+        self,
+        *,
+        waits_for: Any = None,
+        workflow_ctx_from: Any = None,
+        args_from: Any = None,
+        queue: Any = None,
+        priority: Any = None,
+        allow_failed_deps: bool = False,
+        run_when: Any = None,
+        skip_when: Any = None,
+        join: Any = 'all',
+        min_success: Any = None,
+        good_until: Any = None,
+        node_id: Any = None,
+    ) -> NodeFactory[Any, Any]:
+        return NodeFactory(
+            fn=self,  # type: ignore[arg-type]
+            waits_for=waits_for,
+            workflow_ctx_from=workflow_ctx_from,
+            args_from=args_from,
+            queue=queue,
+            priority=priority,
+            allow_failed_deps=allow_failed_deps,
+            run_when=run_when,
+            skip_when=skip_when,
+            join=join,
+            min_success=min_success,
+            good_until=good_until,
+            node_id=node_id,
+        )
+
+
+@dataclass
+class MockTaskWrapperInt(TaskFunction[Any, int]):
+    """Mock producer wrapper with concrete ok-type int."""
+
+    task_name: str
+    task_ok_type: Any = int
+
+    def __call__(self, *args: Any, **kwargs: Any) -> TaskResult[int, TaskError]:
+        _ = args
+        _ = kwargs
+        return TaskResult(ok=1)
+
+    def send(self, *args: Any, **kwargs: Any) -> TaskHandle[int]:
+        _ = args
+        _ = kwargs
+        return TaskHandle('mock')
+
+    async def send_async(self, *args: Any, **kwargs: Any) -> TaskHandle[int]:
+        _ = args
+        _ = kwargs
+        return TaskHandle('mock')
+
+    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskHandle[int]:
+        _ = delay
+        _ = args
+        _ = kwargs
+        return TaskHandle('mock')
+
+    def node(
+        self,
+        *,
+        waits_for: Any = None,
+        workflow_ctx_from: Any = None,
+        args_from: Any = None,
+        queue: Any = None,
+        priority: Any = None,
+        allow_failed_deps: bool = False,
+        run_when: Any = None,
+        skip_when: Any = None,
+        join: Any = 'all',
+        min_success: Any = None,
+        good_until: Any = None,
+        node_id: Any = None,
+    ) -> NodeFactory[Any, int]:
+        return NodeFactory(
+            fn=self,  # type: ignore[arg-type]
+            waits_for=waits_for,
+            workflow_ctx_from=workflow_ctx_from,
+            args_from=args_from,
+            queue=queue,
+            priority=priority,
+            allow_failed_deps=allow_failed_deps,
+            run_when=run_when,
+            skip_when=skip_when,
+            join=join,
+            min_success=min_success,
+            good_until=good_until,
+            node_id=node_id,
+        )
+
+
+@dataclass
+class MockTaskWrapperWithStringResultParam(TaskFunction[Any, Any]):
+    """Mock consumer expecting TaskResult[str, TaskError] for args_from."""
+
+    task_name: str
+    task_ok_type: Any = Any
+
+    def __call__(
+        self,
+        required: TaskResult[str, TaskError],
+        *,
+        flag: bool,
+    ) -> TaskResult[Any, TaskError]:
+        _ = required
+        _ = flag
+        return TaskResult(ok=None)
+
+    def send(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
+        _ = args
+        _ = kwargs
+        return TaskHandle('mock')
+
+    async def send_async(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
+        _ = args
+        _ = kwargs
+        return TaskHandle('mock')
+
+    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
+        _ = delay
+        _ = args
+        _ = kwargs
+        return TaskHandle('mock')
+
+    def node(
+        self,
+        *,
+        waits_for: Any = None,
+        workflow_ctx_from: Any = None,
+        args_from: Any = None,
+        queue: Any = None,
+        priority: Any = None,
+        allow_failed_deps: bool = False,
+        run_when: Any = None,
+        skip_when: Any = None,
+        join: Any = 'all',
+        min_success: Any = None,
+        good_until: Any = None,
+        node_id: Any = None,
+    ) -> NodeFactory[Any, Any]:
+        return NodeFactory(
+            fn=self,  # type: ignore[arg-type]
+            waits_for=waits_for,
+            workflow_ctx_from=workflow_ctx_from,
+            args_from=args_from,
+            queue=queue,
+            priority=priority,
+            allow_failed_deps=allow_failed_deps,
+            run_when=run_when,
+            skip_when=skip_when,
+            join=join,
+            min_success=min_success,
+            good_until=good_until,
+            node_id=node_id,
+        )
+
+
+@dataclass
+class MockTaskWrapperWithRawParam(TaskFunction[Any, Any]):
+    """Mock consumer with non-TaskResult annotation for args_from validation."""
+
+    task_name: str
+    task_ok_type: Any = Any
+
+    def __call__(
+        self,
+        required: int,
+        *,
+        flag: bool,
+    ) -> TaskResult[Any, TaskError]:
+        _ = required
+        _ = flag
+        return TaskResult(ok=None)
+
+    def send(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
+        _ = args
+        _ = kwargs
+        return TaskHandle('mock')
+
+    async def send_async(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
+        _ = args
+        _ = kwargs
+        return TaskHandle('mock')
+
+    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
+        _ = delay
+        _ = args
+        _ = kwargs
         return TaskHandle('mock')
 
     def node(
@@ -761,6 +959,58 @@ class TestWorkflowSpecValidation:
         spec = WorkflowSpec(name='disjoint_ok', tasks=[node_a, node_b])
         assert len(spec.tasks) == 2
 
+    def test_args_from_type_mismatch_rejected(self) -> None:
+        """args_from source ok-type must match consumer TaskResult ok-type."""
+        fn_a = MockTaskWrapperInt(task_name='task_a_int')
+        fn_b = MockTaskWrapperWithStringResultParam(task_name='task_b_expects_str')
+
+        node_a = TaskNode(fn=fn_a)
+        node_b = TaskNode(
+            fn=fn_b,
+            waits_for=[node_a],
+            kwargs={'flag': True},
+            args_from={'required': node_a},
+        )
+
+        with pytest.raises(WorkflowValidationError) as exc:
+            WorkflowSpec(name='args_from_type_mismatch', tasks=[node_a, node_b])
+
+        assert exc.value.code == ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
+
+    def test_args_from_requires_taskresult_param_annotation(self) -> None:
+        """args_from target param must be annotated as TaskResult[OkT, TaskError]."""
+        fn_a = MockTaskWrapperInt(task_name='task_a_int')
+        fn_b = MockTaskWrapperWithRawParam(task_name='task_b_raw_param')
+
+        node_a = TaskNode(fn=fn_a)
+        node_b = TaskNode(
+            fn=fn_b,
+            waits_for=[node_a],
+            kwargs={'flag': True},
+            args_from={'required': node_a},
+        )
+
+        with pytest.raises(WorkflowValidationError) as exc:
+            WorkflowSpec(name='args_from_raw_param', tasks=[node_a, node_b])
+
+        assert exc.value.code == ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
+
+    def test_args_from_type_match_accepted(self) -> None:
+        """args_from passes when producer and consumer TaskResult ok-types match."""
+        fn_a = MockTaskWrapperInt(task_name='task_a_int')
+        fn_b = MockTaskWrapperWithParams(task_name='task_b_expects_int')
+
+        node_a = TaskNode(fn=fn_a)
+        node_b = TaskNode(
+            fn=fn_b,
+            waits_for=[node_a],
+            kwargs={'flag': True},
+            args_from={'required': node_a},
+        )
+
+        spec = WorkflowSpec(name='args_from_type_match', tasks=[node_a, node_b])
+        assert len(spec.tasks) == 2
+
     def test_subworkflow_kwargs_args_from_overlap_rejected(self) -> None:
         """SubWorkflowNode with overlapping kwargs and args_from raises E021."""
         fn_a = MockTaskWrapper(task_name='task_a')
@@ -899,6 +1149,38 @@ class TestWorkflowSpecValidation:
             WorkflowSpec(name='subworkflow_invalid_args_from', tasks=[node_a, child_node])
 
         assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+
+    def test_subworkflow_args_from_type_mismatch_rejected(self) -> None:
+        """SubWorkflowNode args_from must match build_with TaskResult ok-type annotations."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        class ChildWorkflow(WorkflowDefinition[int]):
+            name = 'child_type_mismatch'
+            child = TaskNode(fn=fn_a)
+
+            class Meta:
+                output = None
+
+            @classmethod
+            def build_with(
+                cls, app: Any, *, source: TaskResult[str, TaskError]
+            ) -> WorkflowSpec:
+                _ = source
+                return cls.build(app)
+
+        ChildWorkflow.Meta.output = ChildWorkflow.child
+
+        node_a = TaskNode(fn=MockTaskWrapperInt(task_name='producer_int'))
+        child_node = SubWorkflowNode(
+            workflow_def=ChildWorkflow,
+            waits_for=[node_a],
+            args_from={'source': node_a},
+        )
+
+        with pytest.raises(WorkflowValidationError) as exc:
+            WorkflowSpec(name='subworkflow_args_from_type_mismatch', tasks=[node_a, child_node])
+
+        assert exc.value.code == ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
     def test_kwargs_validation_skipped_for_kwargs_task(self) -> None:
         """Tasks accepting **kwargs should skip key validation."""

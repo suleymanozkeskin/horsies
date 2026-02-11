@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 import re
+from types import UnionType
 from datetime import datetime
 from enum import Enum
 from typing import (
@@ -17,6 +18,10 @@ from typing import (
     Callable,
     Literal,
     ClassVar,
+    get_args,
+    get_origin,
+    get_type_hints,
+    Union,
 )
 import inspect
 import time
@@ -258,11 +263,17 @@ class SubWorkflowSummary(Generic[OkT_co]):
 from horsies.core.errors import WorkflowValidationError
 
 
-def _task_accepts_workflow_ctx(fn: Callable[..., Any]) -> bool:
+def _get_inspect_target(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Return underlying function for introspection when wrappers expose _original_fn."""
     inspect_target: Callable[..., Any] = fn
     original = getattr(fn, '_original_fn', None)
     if callable(original):
         inspect_target = original
+    return inspect_target
+
+
+def _task_accepts_workflow_ctx(fn: Callable[..., Any]) -> bool:
+    inspect_target: Callable[..., Any] = _get_inspect_target(fn)
     try:
         sig = inspect.signature(inspect_target)
     except (TypeError, ValueError):
@@ -272,11 +283,7 @@ def _task_accepts_workflow_ctx(fn: Callable[..., Any]) -> bool:
 
 def _get_signature(fn: Callable[..., Any]) -> inspect.Signature | None:
     """Return an inspectable signature for a callable, or None if unavailable."""
-    inspect_target: Callable[..., Any] = fn
-    original = getattr(fn, '_original_fn', None)
-    if callable(original):
-        inspect_target = original
-
+    inspect_target: Callable[..., Any] = _get_inspect_target(fn)
     try:
         return inspect.signature(inspect_target)
     except (TypeError, ValueError):
@@ -308,6 +315,149 @@ def _valid_kwarg_names(
     if exclude:
         names -= exclude
     return names
+
+
+def _resolved_type_hints(fn: Callable[..., Any]) -> dict[str, Any]:
+    """Return resolved type hints for a callable, or {} when unavailable."""
+    inspect_target: Callable[..., Any] = _get_inspect_target(fn)
+    targets: list[Callable[..., Any]] = [inspect_target]
+    call_attr = getattr(inspect_target, '__call__', None)
+    if callable(call_attr):
+        targets.append(call_attr)
+
+    for target in targets:
+        try:
+            return get_type_hints(target)
+        except Exception:
+            continue
+    return {}
+
+
+def _extract_taskresult_ok_type(annotation: Any) -> Any | None:
+    """Extract Ok type from TaskResult[Ok, Err], including Optional/Union wrappers."""
+    if annotation is None:
+        return None
+
+    from horsies.core.models.tasks import TaskResult
+
+    origin = get_origin(annotation)
+    if origin is TaskResult:
+        args = get_args(annotation)
+        if len(args) == 2:
+            return args[0]
+        return None
+
+    if origin in (Union, UnionType):
+        extracted = [_extract_taskresult_ok_type(member) for member in get_args(annotation)]
+        non_none = [value for value in extracted if value is not None]
+        if len(non_none) == 1:
+            return non_none[0]
+        return None
+
+    return None
+
+
+def _normalize_resolved_ok_type(value: Any | None) -> Any | None:
+    """Normalize unresolved generic/typevar outputs to None."""
+    if value is None:
+        return None
+    if isinstance(value, TypeVar):
+        return None
+    return value
+
+
+def _resolve_task_fn_ok_type(fn: Callable[..., Any]) -> Any | None:
+    """
+    Resolve TaskResult ok-type produced by a task function wrapper.
+
+    Prefers explicit wrapper metadata (task_ok_type), then falls back to
+    return-type annotations.
+    """
+    explicit_ok = getattr(fn, 'task_ok_type', None)
+    normalized = _normalize_resolved_ok_type(explicit_ok)
+    if normalized is not None:
+        return normalized
+
+    hints = _resolved_type_hints(fn)
+    ok_from_hints = _extract_taskresult_ok_type(hints.get('return'))
+    normalized = _normalize_resolved_ok_type(ok_from_hints)
+    if normalized is not None:
+        return normalized
+
+    sig = _get_signature(fn)
+    if sig is None or sig.return_annotation is inspect.Parameter.empty:
+        return None
+    ok_from_sig = _extract_taskresult_ok_type(sig.return_annotation)
+    return _normalize_resolved_ok_type(ok_from_sig)
+
+
+def _resolve_workflow_def_ok_type(
+    workflow_def: type['WorkflowDefinition[Any]'],
+) -> Any | None:
+    """Resolve WorkflowDefinition[OkT] generic output type from class bases."""
+    for cls in workflow_def.__mro__:
+        for base in getattr(cls, '__orig_bases__', ()):
+            origin = get_origin(base)
+            if getattr(origin, '__name__', '') != 'WorkflowDefinition':
+                continue
+            args = get_args(base)
+            if len(args) != 1:
+                continue
+            return _normalize_resolved_ok_type(args[0])
+    return None
+
+
+def _resolve_source_node_ok_type(node: 'TaskNode[Any] | SubWorkflowNode[Any]') -> Any | None:
+    """Resolve output ok-type for TaskNode/SubWorkflowNode source used in args_from."""
+    if isinstance(node, TaskNode):
+        return _resolve_task_fn_ok_type(node.fn)
+    return _resolve_workflow_def_ok_type(node.workflow_def)
+
+
+def _format_type_name(annotation: Any | None) -> str:
+    """Stable display for type annotations in validation notes."""
+    if annotation is None:
+        return 'unknown'
+    if annotation is Any:
+        return 'Any'
+    return repr(annotation)
+
+
+def _is_ok_type_compatible(source_ok: Any, expected_ok: Any) -> bool:
+    """
+    Return True if source TaskResult ok-type can be injected into expected type.
+
+    Rules:
+      - Any on either side is treated as compatible
+      - Exact match is compatible
+      - source subclass of expected is compatible for concrete classes
+      - Union expected accepts if any branch is compatible
+      - Union source is compatible only if all branches are compatible
+    """
+    if source_ok is Any or expected_ok is Any:
+        return True
+    if source_ok == expected_ok:
+        return True
+
+    expected_origin = get_origin(expected_ok)
+    if expected_origin in (Union, UnionType):
+        return any(
+            _is_ok_type_compatible(source_ok, branch) for branch in get_args(expected_ok)
+        )
+
+    source_origin = get_origin(source_ok)
+    if source_origin in (Union, UnionType):
+        return all(
+            _is_ok_type_compatible(branch, expected_ok) for branch in get_args(source_ok)
+        )
+
+    if isinstance(source_ok, type) and isinstance(expected_ok, type):
+        try:
+            return issubclass(source_ok, expected_ok)
+        except TypeError:
+            return False
+
+    return False
 
 
 NODE_ID_PATTERN = re.compile(r'^[A-Za-z0-9_\-:.]+$')
@@ -782,6 +932,8 @@ class WorkflowSpec:
         for error in self._collect_subworkflow_build_with_binding_errors():
             report.add(error)
         for error in self._collect_invalid_kwargs_errors():
+            report.add(error)
+        for error in self._collect_args_from_type_errors():
             report.add(error)
         for error in self._collect_missing_required_param_errors():
             report.add(error)
@@ -1293,6 +1445,109 @@ class WorkflowSpec:
                     help_text='check for typos in kwarg or args_from keys',
                 )
             )
+        return errors
+
+    def _collect_args_from_type_errors(self) -> list[WorkflowValidationError]:
+        """
+        Validate args_from source result types against callable parameter annotations.
+
+        args_from always injects TaskResult objects, so target params should be
+        annotated as TaskResult[OkT, TaskError] (or Optional/Union containing it).
+        """
+        errors: list[WorkflowValidationError] = []
+        for node in self.tasks:
+            if not node.args_from:
+                continue
+            if node.args and (node.args_from or node.workflow_ctx_from is not None):
+                continue  # Covered by WORKFLOW_ARGS_WITH_INJECTION.
+            if set(node.kwargs.keys()) & set(node.args_from.keys()):
+                continue  # Covered by WORKFLOW_KWARGS_ARGS_FROM_OVERLAP.
+
+            deps_ids = {id(dep) for dep in node.waits_for}
+            if any(id(source_node) not in deps_ids for source_node in node.args_from.values()):
+                continue  # Covered by WORKFLOW_INVALID_ARGS_FROM.
+
+            # Get the function to inspect (TaskNode vs SubWorkflowNode)
+            if isinstance(node, TaskNode):
+                fn = node.fn
+                exclude_names: set[str] = set()
+            else:
+                fn = node.workflow_def.build_with
+                exclude_names = {'app', 'cls'}
+
+            sig = _get_signature(fn)
+            if sig is None:
+                continue
+
+            hints = _resolved_type_hints(fn)
+            accepts_kwargs = _signature_accepts_kwargs(sig)
+
+            for kwarg_name, source_node in node.args_from.items():
+                if kwarg_name in exclude_names:
+                    continue
+
+                param = sig.parameters.get(kwarg_name)
+                if param is None:
+                    if accepts_kwargs:
+                        # No parameter-level annotation available for **kwargs.
+                        continue
+                    continue  # Covered by WORKFLOW_INVALID_KWARG_KEY.
+
+                annotation = hints.get(kwarg_name)
+                if annotation is None and param.annotation is not inspect.Parameter.empty:
+                    annotation = param.annotation
+                expected_ok = _extract_taskresult_ok_type(annotation)
+                if expected_ok is None:
+                    errors.append(
+                        WorkflowValidationError(
+                            message='args_from target parameter must be annotated as TaskResult[OkT, TaskError]',
+                            code=ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
+                            notes=[
+                                f"node '{node.name}' args_from['{kwarg_name}'] targets parameter '{kwarg_name}'",
+                                f"parameter annotation is {_format_type_name(annotation)}",
+                                'args_from injects TaskResult values, not raw payloads',
+                            ],
+                            help_text=(
+                                f"annotate '{kwarg_name}' as TaskResult[ExpectedType, TaskError]"
+                            ),
+                        )
+                    )
+                    continue
+
+                source_ok = _resolve_source_node_ok_type(source_node)
+                if source_ok is None:
+                    errors.append(
+                        WorkflowValidationError(
+                            message='unable to resolve args_from source output type',
+                            code=ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
+                            notes=[
+                                f"node '{node.name}' args_from['{kwarg_name}'] references source '{source_node.name}'",
+                                "source output type could not be inferred from task return annotation or workflow generic",
+                            ],
+                            help_text=(
+                                "ensure source task returns TaskResult[ConcreteType, TaskError] "
+                                'or source subworkflow subclasses WorkflowDefinition[ConcreteType]'
+                            ),
+                        )
+                    )
+                    continue
+
+                if _is_ok_type_compatible(source_ok, expected_ok):
+                    continue
+
+                errors.append(
+                    WorkflowValidationError(
+                        message='args_from source type does not match target parameter type',
+                        code=ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
+                        notes=[
+                            f"node '{node.name}' args_from['{kwarg_name}'] receives from '{source_node.name}'",
+                            f'source TaskResult ok-type: {_format_type_name(source_ok)}',
+                            f"target expects TaskResult[{_format_type_name(expected_ok)}, TaskError]",
+                        ],
+                        help_text='fix args_from wiring or update the target parameter type annotation',
+                    )
+                )
+
         return errors
 
     def _collect_missing_required_param_errors(self) -> list[WorkflowValidationError]:

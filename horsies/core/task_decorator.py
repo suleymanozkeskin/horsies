@@ -775,6 +775,8 @@ def create_task_wrapper(
             self.task_queue_name = task_options.queue_name if task_options else None
             # Keep a reference to the original function for introspection (signature checks).
             self._original_fn = fn
+            # Expose declared TaskResult ok-type for workflow args_from type checks.
+            self.task_ok_type = ok_type
             # Pre-serialize task_options so workflow engine can access retry config
             self.task_options_json: str | None = (
                 serialize_task_options(task_options) if task_options else None

@@ -123,7 +123,7 @@ def make_failing_task(app: Horsies, name: str = 'failing_task') -> Any:
     """Create a task that always fails."""
 
     @app.task(task_name=name)
-    def failing_task() -> TaskResult[str, TaskError]:
+    def failing_task() -> TaskResult[Any, TaskError]:
         return TaskResult(
             err=TaskError(error_code='DELIBERATE_FAIL', message='Test failure')
         )
