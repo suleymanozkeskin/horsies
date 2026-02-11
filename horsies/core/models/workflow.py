@@ -996,6 +996,8 @@ class WorkflowSpec(Generic[OutT]):
             report.add(error)
         for error in self._collect_args_from_type_errors():
             report.add(error)
+        for error in self._collect_excess_positional_args_errors():
+            report.add(error)
         for error in self._collect_missing_required_param_errors():
             report.add(error)
         for error in self._collect_output_errors():
@@ -1387,17 +1389,18 @@ class WorkflowSpec(Generic[OutT]):
         self,
     ) -> list[WorkflowValidationError]:
         """
-        Validate subworkflow runtime parameters bind cleanly to build_with.
+        Validate subworkflow build_with doesn't receive duplicate bindings.
 
-        This fills gaps not covered by key/missing checks:
-        - too many positional arguments
-        - same param supplied by positional args and kwargs/args_from
+        Catches: same param supplied by positional args AND kwargs/args_from.
+        Excess positional args are handled separately by E026.
         """
         errors: list[WorkflowValidationError] = []
         for node in self.tasks:
             if not isinstance(node, SubWorkflowNode):
                 continue
-            if node.args and (node.args_from or node.workflow_ctx_from is not None):
+            if not node.args:
+                continue  # No positional args — no duplicate binding possible
+            if node.args_from or node.workflow_ctx_from is not None:
                 continue  # Covered by WORKFLOW_ARGS_WITH_INJECTION
 
             # Skip to avoid duplicate noise; overlap has a dedicated validator.
@@ -1419,11 +1422,9 @@ class WorkflowSpec(Generic[OutT]):
             provided_kwargs = set(node.kwargs.keys()) | set(node.args_from.keys())
 
             consumed = 0
-            accepts_var_positional = False
             positional_bound_kw_names: set[str] = set()
             for param in sig.parameters.values():
                 if param.kind == inspect.Parameter.VAR_POSITIONAL:
-                    accepts_var_positional = True
                     break
                 if param.kind in (
                     inspect.Parameter.POSITIONAL_ONLY,
@@ -1433,20 +1434,6 @@ class WorkflowSpec(Generic[OutT]):
                         consumed += 1
                         if param.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD:
                             positional_bound_kw_names.add(param.name)
-
-            if consumed < len(provided_positional) and not accepts_var_positional:
-                errors.append(
-                    WorkflowValidationError(
-                        message='subworkflow build_with received too many positional args',
-                        code=ErrorCode.WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING,
-                        notes=[
-                            f"node '{node.name}' passed {len(node.args)} user positional arg(s)",
-                            "build_with signature cannot accept that many positional arguments",
-                        ],
-                        help_text='remove extra positional args or add *args to build_with',
-                    )
-                )
-                continue
 
             duplicate = sorted(provided_kwargs & positional_bound_kw_names)
             if duplicate:
@@ -1621,6 +1608,69 @@ class WorkflowSpec(Generic[OutT]):
                             f"target expects TaskResult[{_format_type_name(expected_ok)}, TaskError]",
                         ],
                         help_text='fix args_from wiring or update the target parameter type annotation',
+                    )
+                )
+
+        return errors
+
+    def _collect_excess_positional_args_errors(self) -> list[WorkflowValidationError]:
+        """Validate positional args don't exceed the callable's positional capacity."""
+        errors: list[WorkflowValidationError] = []
+        for node in self.tasks:
+            if not node.args:
+                continue
+
+            # Skip when args coexist with injection — already covered by E016.
+            if node.args_from or node.workflow_ctx_from is not None:
+                continue
+
+            if isinstance(node, TaskNode):
+                fn = node.fn
+                provided_count = len(node.args)
+            else:
+                fn = getattr(
+                    node.workflow_def,
+                    '_original_build_with',
+                    node.workflow_def.build_with,
+                )
+                # _original_build_with is a raw function: (cls, app, ...).
+                # Subtract the two auto-provided sentinels.
+                provided_count = len(node.args)
+
+            sig = _get_signature(fn)
+            if sig is None:
+                continue
+
+            max_positional = 0
+            accepts_var_positional = False
+            for param in sig.parameters.values():
+                if param.kind == inspect.Parameter.VAR_POSITIONAL:
+                    accepts_var_positional = True
+                    break
+                if param.kind in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                ):
+                    max_positional += 1
+
+            if accepts_var_positional:
+                continue
+
+            # For SubWorkflowNode, cls and app are auto-provided.
+            if isinstance(node, SubWorkflowNode):
+                max_positional = max(0, max_positional - 2)
+
+            if provided_count > max_positional:
+                target = 'task function' if isinstance(node, TaskNode) else 'build_with'
+                errors.append(
+                    WorkflowValidationError(
+                        message=f'too many positional args for {target}',
+                        code=ErrorCode.WORKFLOW_EXCESS_POSITIONAL_ARGS,
+                        notes=[
+                            f"node '{node.name}' provides {provided_count} positional arg(s)",
+                            f"{target} accepts at most {max_positional}",
+                        ],
+                        help_text='remove extra positional args or pass them as kwargs',
                     )
                 )
 

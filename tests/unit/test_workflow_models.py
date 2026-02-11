@@ -1020,7 +1020,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='subworkflow_too_many_positional', tasks=[child_node])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING
+        assert exc.value.code == ErrorCode.WORKFLOW_EXCESS_POSITIONAL_ARGS
 
     def test_invalid_args_from_key_rejected(self) -> None:
         """args_from key must match function parameter name."""
@@ -1159,6 +1159,63 @@ class TestWorkflowSpecValidation:
             )
 
         assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
+
+    def test_task_excess_positional_args_rejected(self) -> None:
+        """TaskNode with more positional args than the function accepts raises E026."""
+        fn_a = MockTaskWrapperWithParams(task_name='task_a')
+        # MockTaskWrapperWithParams.__call__(self, required, *, flag) → 1 positional slot
+        # Also provide flag so E020 doesn't fire alongside E026.
+        node_a = TaskNode(fn=fn_a, args=(1, 2, 3), kwargs={'flag': True})
+
+        with pytest.raises(WorkflowValidationError) as exc:
+            WorkflowSpec(name='excess_positional', tasks=[node_a])
+
+        assert exc.value.code == ErrorCode.WORKFLOW_EXCESS_POSITIONAL_ARGS
+        assert "provides 3 positional arg(s)" in exc.value.notes[0]
+        assert "accepts at most 1" in exc.value.notes[1]
+
+    def test_task_exact_positional_args_accepted(self) -> None:
+        """TaskNode with exactly the right number of positional args passes."""
+        fn_a = MockTaskWrapperWithParams(task_name='task_a')
+        # 1 positional (required) + 1 keyword (flag) → should pass
+        node_a = TaskNode(fn=fn_a, args=(1,), kwargs={'flag': True})
+
+        spec = WorkflowSpec(name='exact_positional', tasks=[node_a])
+        assert len(spec.tasks) == 1
+
+    def test_task_var_positional_allows_unlimited_args(self) -> None:
+        """TaskNode targeting a function with *args accepts any positional count."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+        # MockTaskWrapper.__call__(self, *args, **kwargs) → unlimited
+        node_a = TaskNode(fn=fn_a, args=(1, 2, 3, 4, 5))
+
+        spec = WorkflowSpec(name='var_positional', tasks=[node_a])
+        assert len(spec.tasks) == 1
+
+    def test_task_excess_positional_skipped_when_args_from_present(self) -> None:
+        """E026 skips when args_from is set — E016 handles that case."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+        fn_b = MockTaskWrapperWithParams(task_name='task_b')
+        node_a = TaskNode(fn=fn_a)
+        node_b = TaskNode(
+            fn=fn_b,
+            args=(1, 2, 3),
+            waits_for=[node_a],
+            args_from={'required': node_a},
+        )
+
+        with pytest.raises(
+            (WorkflowValidationError, MultipleValidationErrors)
+        ) as exc:
+            WorkflowSpec(name='excess_with_args_from', tasks=[node_a, node_b])
+
+        if isinstance(exc.value, MultipleValidationErrors):
+            codes = {error.code for error in exc.value.report.errors}
+        else:
+            codes = {exc.value.code}
+
+        assert ErrorCode.WORKFLOW_ARGS_WITH_INJECTION in codes
+        assert ErrorCode.WORKFLOW_EXCESS_POSITIONAL_ARGS not in codes
 
     def test_missing_required_params_rejected(self) -> None:
         """Missing required parameters raises validation error."""
