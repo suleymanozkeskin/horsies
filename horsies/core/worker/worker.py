@@ -668,15 +668,16 @@ def _run_task_entry(
                 if isinstance(data_str, str):
                     kwargs[key] = task_result_from_json(loads_json(data_str))
 
-        # Handle WorkflowContext injection (only if task declares workflow_ctx param)
+        # Handle workflow injection payloads (workflow_ctx / workflow_meta).
         workflow_ctx_data = kwargs.pop('__horsies_workflow_ctx__', None)
-        if workflow_ctx_data is not None:
+        workflow_meta_data = kwargs.pop('__horsies_workflow_meta__', None)
+        if workflow_ctx_data is not None or workflow_meta_data is not None:
             import inspect
 
             # Access the underlying function: TaskFunctionImpl stores it in _original_fn
             underlying_fn = getattr(task, '_original_fn', getattr(task, '_fn', task))
             sig = inspect.signature(underlying_fn)
-            if 'workflow_ctx' in sig.parameters:
+            if workflow_ctx_data is not None and 'workflow_ctx' in sig.parameters:
                 from horsies.core.models.workflow import (
                     WorkflowContext,
                     SubWorkflowSummary,
@@ -710,7 +711,24 @@ def _run_task_entry(
                     results_by_id=results_by_id,
                     summaries_by_id=summaries_by_id,
                 )
-            # If task doesn't declare workflow_ctx, silently skip injection
+            # If task doesn't declare workflow_ctx, silently skip injection.
+
+            if workflow_meta_data is not None and 'workflow_meta' in sig.parameters:
+                from horsies.core.models.workflow import WorkflowMeta
+
+                if isinstance(workflow_meta_data, dict):
+                    task_index_raw = workflow_meta_data.get('task_index', 0)
+                    try:
+                        task_index_value = int(task_index_raw)
+                    except (TypeError, ValueError):
+                        task_index_value = 0
+
+                    kwargs['workflow_meta'] = WorkflowMeta(
+                        workflow_id=str(workflow_meta_data.get('workflow_id', '')),
+                        task_index=task_index_value,
+                        task_name=str(workflow_meta_data.get('task_name', '')),
+                    )
+            # If task doesn't declare workflow_meta, silently skip injection.
 
         out = task(*args, **kwargs)  # __call__ returns TaskResult
         logger.info(f'Task execution completed: {[task_id]} : {[task_name]}')

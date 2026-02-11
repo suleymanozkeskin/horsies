@@ -251,6 +251,61 @@ class MockTaskWrapperWithKwargs(TaskFunction[Any, Any]):
         )
 
 
+@dataclass
+class MockTaskWrapperWithRequiredMeta(TaskFunction[Any, Any]):
+    """Mock TaskWrapper with required workflow_meta for signature validation."""
+
+    task_name: str
+
+    def __call__(
+        self,
+        workflow_meta: WorkflowMeta,
+    ) -> TaskResult[Any, TaskError]:
+        _ = workflow_meta
+        return TaskResult(ok=None)
+
+    def send(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
+        return TaskHandle('mock')
+
+    async def send_async(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
+        return TaskHandle('mock')
+
+    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
+        return TaskHandle('mock')
+
+    def node(
+        self,
+        *,
+        waits_for: Any = None,
+        workflow_ctx_from: Any = None,
+        args_from: Any = None,
+        queue: Any = None,
+        priority: Any = None,
+        allow_failed_deps: bool = False,
+        run_when: Any = None,
+        skip_when: Any = None,
+        join: Any = 'all',
+        min_success: Any = None,
+        good_until: Any = None,
+        node_id: Any = None,
+    ) -> NodeFactory[Any, Any]:
+        return NodeFactory(
+            fn=self,  # type: ignore[arg-type]
+            waits_for=waits_for,
+            workflow_ctx_from=workflow_ctx_from,
+            args_from=args_from,
+            queue=queue,
+            priority=priority,
+            allow_failed_deps=allow_failed_deps,
+            run_when=run_when,
+            skip_when=skip_when,
+            join=join,
+            min_success=min_success,
+            good_until=good_until,
+            node_id=node_id,
+        )
+
+
 # =============================================================================
 # TaskNode Tests
 # =============================================================================
@@ -583,6 +638,15 @@ class TestWorkflowSpecValidation:
             WorkflowSpec(name='missing_required', tasks=[node_a])
 
         assert exc.value.code == ErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS
+
+    def test_required_workflow_meta_treated_as_injected(self) -> None:
+        """Required workflow_meta is treated as auto-injected by validator."""
+        fn_a = MockTaskWrapperWithRequiredMeta(task_name='task_requires_meta')
+        node_a = TaskNode(fn=fn_a)
+
+        # Should not raise WORKFLOW_MISSING_REQUIRED_PARAMS
+        spec = WorkflowSpec(name='required_workflow_meta_ok', tasks=[node_a])
+        assert len(spec.tasks) == 1
 
     def test_subworkflow_missing_required_params_rejected(self) -> None:
         """SubWorkflowNode build_with required params must be provided."""

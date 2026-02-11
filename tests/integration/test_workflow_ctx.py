@@ -18,6 +18,7 @@ from horsies.core.models.workflow import (
     NodeKey,
     TaskNode,
     WorkflowContext,
+    WorkflowMeta,
     WorkflowValidationError,
 )
 from horsies.core.workflows.engine import start_workflow_async, on_workflow_task_complete
@@ -233,6 +234,41 @@ class TestWorkflowCtx:
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
         assert '__horsies_workflow_ctx__' not in kwargs
+
+    async def test_workflow_meta_injected_without_ctx_from(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """workflow_meta is injected even when workflow_ctx_from is not used."""
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'meta_only_a')
+
+        @app.task(task_name='meta_only_b')
+        def meta_reader(
+            workflow_meta: WorkflowMeta | None = None,
+        ) -> TaskResult[int, TaskError]:
+            if workflow_meta is None:
+                return TaskResult(ok=-1)
+            return TaskResult(ok=workflow_meta.task_index)
+
+        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+        node_b: TaskNode[int] = TaskNode(
+            fn=meta_reader,
+            waits_for=[node_a],
+        )
+
+        spec = make_workflow_spec(
+            broker=broker, name='meta_only', tasks=[node_a, node_b]
+        )
+        handle = await start_workflow_async(spec, broker)
+        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
+
+        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
+        meta_raw = kwargs.get('__horsies_workflow_meta__')
+        assert isinstance(meta_raw, dict)
+        assert meta_raw['workflow_id'] == handle.workflow_id
+        assert meta_raw['task_index'] == 1
+        assert meta_raw['task_name'] == 'meta_only_b'
 
     async def test_ctx_multiple_deps_result_for_each(
         self,
@@ -481,6 +517,77 @@ class TestWorkflowCtx:
         task_result = task_result_from_json(loads_json(result_json))
         assert task_result.is_ok()
         assert task_result.unwrap() == 10
+
+    async def test_worker_injects_required_workflow_meta(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """Worker injects workflow_meta so required parameter tasks run successfully."""
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'meta_worker_a')
+
+        @app.task(task_name='meta_worker_b')
+        def meta_worker_b(
+            workflow_meta: WorkflowMeta,
+        ) -> TaskResult[str, TaskError]:
+            return TaskResult(
+                ok=f'{workflow_meta.workflow_id}:{workflow_meta.task_index}:{workflow_meta.task_name}'
+            )
+
+        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+        node_b: TaskNode[str] = TaskNode(
+            fn=meta_worker_b,
+            waits_for=[node_a],
+        )
+
+        spec = make_workflow_spec(
+            broker=broker, name='meta_worker', tasks=[node_a, node_b]
+        )
+        handle = await start_workflow_async(spec, broker)
+
+        # Complete A to enqueue B
+        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
+
+        task_row_result = await session.execute(
+            text("""
+                SELECT t.id, t.task_name, t.args, t.kwargs
+                FROM horsies_tasks t
+                JOIN horsies_workflow_tasks wt ON t.id = wt.task_id
+                WHERE wt.workflow_id = :wf_id AND wt.task_index = 1
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        task_row = task_row_result.fetchone()
+        assert task_row is not None
+
+        task_id, task_name, args_json, kwargs_json = task_row
+        assert isinstance(task_id, str)
+        assert isinstance(task_name, str)
+        assert isinstance(args_json, str)
+        assert isinstance(kwargs_json, str)
+
+        # Claim the task before running (required by ownership check)
+        await self._claim_task(session, task_id, 'test-worker')
+
+        set_current_app(app)
+        database_url = broker.config.database_url.replace('+asyncpg', '').replace(
+            '+psycopg', ''
+        )
+        _initialize_worker_pool(database_url)
+        ok, result_json, worker_failure = _run_task_entry(
+            task_name=task_name,
+            args_json=args_json,
+            kwargs_json=kwargs_json,
+            task_id=task_id,
+            database_url=database_url,
+            master_worker_id='test-worker',
+        )
+        assert ok is True
+        assert worker_failure is None
+
+        task_result = task_result_from_json(loads_json(result_json))
+        assert task_result.is_ok()
+        assert task_result.unwrap() == f'{handle.workflow_id}:1:meta_worker_b'
 
     async def test_worker_ctx_missing_id_surfaces_error(
         self,

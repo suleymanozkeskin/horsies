@@ -801,6 +801,14 @@ async def _enqueue_workflow_task(
         # Will be filtered out by worker if task doesn't declare workflow_ctx param
         kwargs['__horsies_workflow_ctx__'] = ctx_data
 
+    # Inject workflow metadata for tasks that declare workflow_meta.
+    # Worker will filter it out if the function does not accept workflow_meta.
+    kwargs['__horsies_workflow_meta__'] = {
+        'workflow_id': workflow_id,
+        'task_index': task_index,
+        'task_name': row[1],
+    }
+
     # Create actual task in tasks table
     task_id = str(uuid.uuid4())
     await session.execute(
