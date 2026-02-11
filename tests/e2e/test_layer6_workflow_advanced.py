@@ -238,22 +238,21 @@ async def test_run_when_false_skips(broker: PostgresBroker) -> None:
 
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
-async def test_condition_exception_defaults_to_skip(broker: PostgresBroker) -> None:
-    """T6.3c: Exception in run_when lambda causes task to be SKIPPED."""
+async def test_condition_exception_fails_task(broker: PostgresBroker) -> None:
+    """T6.3c: Exception in run_when lambda causes task failure."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
         handle = wf_tasks.spec_condition_exception.start()
 
         status = await wait_for_workflow_completion(
             broker.session_factory, handle.workflow_id, timeout_s=15.0
         )
-        # COMPLETED because SKIPPED (not FAILED) doesn't violate default success policy
-        assert status == 'COMPLETED'
+        assert status == 'FAILED'
 
         db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
         assert len(db_tasks) == 2
 
         assert db_tasks[0]['status'] == 'COMPLETED', f"A should be COMPLETED, got {db_tasks[0]['status']}"
-        assert db_tasks[1]['status'] == 'SKIPPED', f"B should be SKIPPED (condition exception), got {db_tasks[1]['status']}"
+        assert db_tasks[1]['status'] == 'FAILED', f"B should be FAILED (condition exception), got {db_tasks[1]['status']}"
 
 
 @pytest.mark.e2e

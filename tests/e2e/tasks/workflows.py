@@ -1032,7 +1032,7 @@ spec_on_error_pause = app.workflow(
 
 
 # =============================================================================
-# L6.3c: run_when raises exception → task SKIPPED
+# L6.3c: run_when raises exception -> task FAILED
 # =============================================================================
 
 

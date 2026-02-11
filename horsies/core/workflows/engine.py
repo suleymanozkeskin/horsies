@@ -1455,6 +1455,13 @@ SKIP_READY_WORKFLOW_TASK_SQL = text("""
     WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'READY'
 """)
 
+SET_READY_WORKFLOW_TASK_TERMINAL_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET status = :status, result = :result, completed_at = NOW()
+    WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'READY'
+    RETURNING task_index
+""")
+
 
 async def _try_make_ready_and_enqueue(
     session: AsyncSession,
@@ -1617,15 +1624,46 @@ async def _try_make_ready_and_enqueue(
     workflow_name = workflow_name_row[0] if workflow_name_row else None
 
     if workflow_name:
-        should_skip_condition = await _evaluate_conditions(
+        condition_action, condition_result = await _evaluate_conditions(
             session, workflow_id, workflow_name, task_index, dependencies
         )
-        if should_skip_condition:
-            await session.execute(
-                SKIP_READY_WORKFLOW_TASK_SQL,
-                {'wf_id': workflow_id, 'idx': task_index},
+        if condition_action == 'skip':
+            if condition_result is None:
+                return
+            update_result = await session.execute(
+                SET_READY_WORKFLOW_TASK_TERMINAL_SQL,
+                {
+                    'status': 'SKIPPED',
+                    'result': dumps_json(condition_result),
+                    'wf_id': workflow_id,
+                    'idx': task_index,
+                },
             )
+            if update_result.fetchone() is None:
+                return
             await _process_dependents(session, workflow_id, task_index, broker)
+            return
+        if condition_action == 'fail':
+            if condition_result is None:
+                return
+            update_result = await session.execute(
+                SET_READY_WORKFLOW_TASK_TERMINAL_SQL,
+                {
+                    'status': 'FAILED',
+                    'result': dumps_json(condition_result),
+                    'wf_id': workflow_id,
+                    'idx': task_index,
+                },
+            )
+            if update_result.fetchone() is None:
+                return
+            should_continue = await _handle_workflow_task_failure(
+                session, workflow_id, task_index, condition_result
+            )
+            if not should_continue:
+                return
+            await _process_dependents(session, workflow_id, task_index, broker)
+            await _check_workflow_completion(session, workflow_id, broker)
             return
 
     # 7. Fetch dependency results and enqueue
@@ -1657,11 +1695,14 @@ async def _evaluate_conditions(
     workflow_name: str,
     task_index: int,
     dependencies: list[int],
-) -> bool:
+) -> tuple[str, 'TaskResult[Any, TaskError] | None']:
     """
     Evaluate run_when/skip_when conditions for a task.
 
-    Returns True if task should be SKIPPED, False to proceed with enqueue.
+    Returns:
+      ('proceed', None) when task should be enqueued.
+      ('skip', TaskResult(err=...)) when task is conditionally skipped.
+      ('fail', TaskResult(err=...)) when condition evaluation raises.
 
     Conditions are evaluated in order:
     1. If skip_when returns True → skip
@@ -1687,13 +1728,13 @@ async def _evaluate_conditions(
         if node is None:
             # Node not registered (workflow module not imported in this process)
             # Proceed without condition evaluation
-            return False
+            return ('proceed', None)
 
     node_any: AnyNode = node
 
     if node_any.skip_when is None and node_any.run_when is None:
         # No conditions to evaluate
-        return False
+        return ('proceed', None)
 
     # Build WorkflowContext for condition evaluation
     # Use workflow_ctx_from if set, otherwise use all dependencies
@@ -1747,18 +1788,55 @@ async def _evaluate_conditions(
         summaries_by_id=summaries_by_id,
     )
 
-    # Evaluate conditions
-    try:
-        if node_any.skip_when is not None and node_any.skip_when(ctx):
-            return True  # Skip
-        if node_any.run_when is not None and not node_any.run_when(ctx):
-            return True  # Skip (run_when returned False)
-    except Exception as e:
-        # Condition evaluation failed - log and proceed with skip
-        logger.warning(f'Condition evaluation failed for task {task_name}: {e}')
-        return True  # Skip on error (safer default)
+    from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
 
-    return False  # Proceed with enqueue
+    if node_any.skip_when is not None:
+        try:
+            if node_any.skip_when(ctx):
+                skip_result: TaskResult[Any, TaskError] = TaskResult(
+                    err=TaskError(
+                        error_code=LibraryErrorCode.WORKFLOW_CONDITION_SKIP_WHEN_TRUE,
+                        message='Task skipped because skip_when returned True',
+                        data={'condition': 'skip_when'},
+                    )
+                )
+                return ('skip', skip_result)
+        except Exception as e:
+            logger.warning(f'Condition evaluation failed for task {task_name}: {e}')
+            fail_result: TaskResult[Any, TaskError] = TaskResult(
+                err=TaskError(
+                    exception=e,
+                    error_code=LibraryErrorCode.WORKFLOW_CONDITION_EVALUATION_ERROR,
+                    message=f'Condition evaluation failed in skip_when: {type(e).__name__}: {e}',
+                    data={'condition': 'skip_when', 'exception_type': type(e).__name__},
+                )
+            )
+            return ('fail', fail_result)
+
+    if node_any.run_when is not None:
+        try:
+            if not node_any.run_when(ctx):
+                skip_result = TaskResult(
+                    err=TaskError(
+                        error_code=LibraryErrorCode.WORKFLOW_CONDITION_RUN_WHEN_FALSE,
+                        message='Task skipped because run_when returned False',
+                        data={'condition': 'run_when'},
+                    )
+                )
+                return ('skip', skip_result)
+        except Exception as e:
+            logger.warning(f'Condition evaluation failed for task {task_name}: {e}')
+            fail_result = TaskResult(
+                err=TaskError(
+                    exception=e,
+                    error_code=LibraryErrorCode.WORKFLOW_CONDITION_EVALUATION_ERROR,
+                    message=f'Condition evaluation failed in run_when: {type(e).__name__}: {e}',
+                    data={'condition': 'run_when', 'exception_type': type(e).__name__},
+                )
+            )
+            return ('fail', fail_result)
+
+    return ('proceed', None)
 
 
 class DependencyResults:

@@ -893,11 +893,11 @@ class TestSubworkflowIntegration:
         assert post_row is not None
         assert post_row[0] == 'SKIPPED'
 
-    async def test_condition_exception_skips_downstream_task(
+    async def test_condition_exception_fails_downstream_task(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """When run_when raises an exception, downstream task is skipped (safe default)."""
+        """When run_when raises an exception, downstream task fails."""
         session, broker, app = setup
 
         @app.task(task_name='cond_err_post')
@@ -928,10 +928,10 @@ class TestSubworkflowIntegration:
             session, broker, handle.workflow_id, 0, TaskResult(ok=1),
         )
 
-        # Downstream should be SKIPPED (exception → safe skip)
+        # Downstream should be FAILED (condition evaluation error)
         post_row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
         assert post_row is not None
-        assert post_row[0] == 'SKIPPED'
+        assert post_row[0] == 'FAILED'
 
     async def test_subworkflow_join_any_starts_on_first_dep(
         self,

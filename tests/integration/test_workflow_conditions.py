@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.codec.serde import loads_json, task_result_from_json
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.workflow import TaskNode, WorkflowContext
 from horsies.core.task_decorator import TaskFunction
@@ -86,6 +87,26 @@ class TestRunWhenSkipWhen:
         row = result.fetchone()
         return row[0] if row else 'NOT_FOUND'
 
+    async def _get_task_result(
+        self,
+        session: AsyncSession,
+        workflow_id: str,
+        task_index: int,
+    ) -> TaskResult[Any, TaskError] | None:
+        """Get stored workflow task result payload for a node."""
+        result = await session.execute(
+            text("""
+                SELECT result FROM horsies_workflow_tasks
+                WHERE workflow_id = :wf_id AND task_index = :idx
+            """),
+            {'wf_id': workflow_id, 'idx': task_index},
+        )
+        row = result.fetchone()
+        if row is None or row[0] is None:
+            return None
+        parsed = loads_json(row[0])
+        return task_result_from_json(parsed)
+
     def _make_ctx_task(
         self,
         app: Horsies,
@@ -141,6 +162,10 @@ class TestRunWhenSkipWhen:
         # Task B should be SKIPPED (skip_when returned True)
         status_b = await self._get_task_status(session, handle.workflow_id, 1)
         assert status_b == 'SKIPPED'
+        result_b = await self._get_task_result(session, handle.workflow_id, 1)
+        assert result_b is not None
+        assert result_b.is_err()
+        assert result_b.unwrap_err().error_code == 'WORKFLOW_CONDITION_SKIP_WHEN_TRUE'
 
     async def test_skip_when_false_runs_task(
         self,
@@ -219,6 +244,10 @@ class TestRunWhenSkipWhen:
         # Task B should be SKIPPED (run_when returned False)
         status_b = await self._get_task_status(session, handle.workflow_id, 1)
         assert status_b == 'SKIPPED'
+        result_b = await self._get_task_result(session, handle.workflow_id, 1)
+        assert result_b is not None
+        assert result_b.is_err()
+        assert result_b.unwrap_err().error_code == 'WORKFLOW_CONDITION_RUN_WHEN_FALSE'
 
     async def test_run_when_true_runs_task(
         self,
@@ -300,11 +329,11 @@ class TestRunWhenSkipWhen:
         status_b = await self._get_task_status(session, handle.workflow_id, 1)
         assert status_b == 'SKIPPED'
 
-    async def test_condition_error_skips_task(
+    async def test_condition_error_fails_task(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """If condition evaluation raises an error, task is SKIPPED (safe default)."""
+        """If condition evaluation raises an error, task is FAILED with a stored reason."""
         session, broker, app = setup
 
         task_a = make_simple_task(app, 'task_a')
@@ -332,9 +361,15 @@ class TestRunWhenSkipWhen:
 
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
-        # Condition error → SKIPPED
+        # Condition error -> FAILED
         status_b = await self._get_task_status(session, handle.workflow_id, 1)
-        assert status_b == 'SKIPPED'
+        assert status_b == 'FAILED'
+        result_b = await self._get_task_result(session, handle.workflow_id, 1)
+        assert result_b is not None
+        assert result_b.is_err()
+        assert result_b.unwrap_err().error_code == 'WORKFLOW_CONDITION_EVALUATION_ERROR'
+        wf_status = await self._get_workflow_status(session, handle.workflow_id)
+        assert wf_status == 'FAILED'
 
     async def test_conditions_use_workflow_ctx_from_subset(
         self,
@@ -375,19 +410,25 @@ class TestRunWhenSkipWhen:
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
         await self._complete_task(session, handle.workflow_id, 1, TaskResult(ok=4))
 
-        # Condition raises KeyError -> treated as error -> task skipped
+        # Condition raises KeyError -> treated as failure
         status_c = await self._get_task_status(session, handle.workflow_id, 2)
-        assert status_c == 'SKIPPED'
+        assert status_c == 'FAILED'
+        result_c = await self._get_task_result(session, handle.workflow_id, 2)
+        assert result_c is not None
+        assert result_c.is_err()
+        assert result_c.unwrap_err().error_code == 'WORKFLOW_CONDITION_EVALUATION_ERROR'
+        wf_status = await self._get_workflow_status(session, handle.workflow_id)
+        assert wf_status == 'FAILED'
 
     # ------------------------------------------------------------------
     # Error paths & edge cases
     # ------------------------------------------------------------------
 
-    async def test_skip_when_error_skips_task(
+    async def test_skip_when_error_fails_task(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """If skip_when raises an exception, task is SKIPPED (safe default)."""
+        """If skip_when raises an exception, task is FAILED with stored reason."""
         session, broker, app = setup
 
         task_a = make_simple_task(app, 'task_a')
@@ -414,9 +455,15 @@ class TestRunWhenSkipWhen:
         handle = await start_workflow_async(spec, broker)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
-        # skip_when raised → SKIPPED (same safe default as run_when errors)
+        # skip_when raised -> FAILED
         status_b = await self._get_task_status(session, handle.workflow_id, 1)
-        assert status_b == 'SKIPPED'
+        assert status_b == 'FAILED'
+        result_b = await self._get_task_result(session, handle.workflow_id, 1)
+        assert result_b is not None
+        assert result_b.is_err()
+        assert result_b.unwrap_err().error_code == 'WORKFLOW_CONDITION_EVALUATION_ERROR'
+        wf_status = await self._get_workflow_status(session, handle.workflow_id)
+        assert wf_status == 'FAILED'
 
     async def test_both_conditions_skip_when_false_run_when_false(
         self,
