@@ -72,7 +72,7 @@ class TestWorkflowRecovery:
         session, broker, app = setup
         task_a = make_simple_task(app, 'recover_ready_a')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         spec = make_workflow_spec(broker=broker, name='recover_ready', tasks=[node_a])
 
         handle = await start_workflow_async(spec, broker)
@@ -115,7 +115,7 @@ class TestWorkflowRecovery:
         session, broker, app = setup
         task_a = make_simple_task(app, 'recover_completed_a')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         spec = make_workflow_spec(
             broker=broker, name='recover_completed', tasks=[node_a]
         )
@@ -276,7 +276,7 @@ class TestWorkflowRecovery:
         task_b = make_simple_task(app, 'recover_paused_b')
 
         node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, args=(1,), waits_for=[node_a])
+        node_b = TaskNode(fn=task_b, kwargs={'value': 1}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker,
@@ -336,7 +336,7 @@ class TestWorkflowRecovery:
         session, broker, app = setup
         task_a = make_simple_task(app, 'recover_idempotent_a')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         spec = make_workflow_spec(
             broker=broker, name='recover_idempotent', tasks=[node_a]
         )
@@ -383,7 +383,7 @@ class TestWorkflowRecovery:
         session, broker, app = setup
         task_a = make_simple_task(app, 'recover_notify_a')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         spec = make_workflow_spec(broker=broker, name='recover_notify', tasks=[node_a])
 
         handle = await start_workflow_async(spec, broker)
@@ -430,7 +430,7 @@ class TestWorkflowRecovery:
         task_a = make_simple_task(app, 'recover_sp_a')
         task_b = make_failing_task(app, 'recover_sp_b')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b = TaskNode(fn=task_b)
 
         # Success policy: workflow succeeds if A completes
@@ -495,7 +495,7 @@ class TestWorkflowRecovery:
         session, broker, app = setup
         task_a = make_simple_task(app, 'recover_crash_a')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         spec = make_workflow_spec(
             broker=broker, name='recover_crash', tasks=[node_a]
         )
@@ -567,8 +567,8 @@ class TestWorkflowRecovery:
         task_a = make_simple_task(app, 'recover_dep_a')
         task_b = make_simple_task(app, 'recover_dep_b')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
-        node_b = TaskNode(fn=task_b, args=(1,), waits_for=[node_a])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 1}, waits_for=[node_a])
         spec = make_workflow_spec(
             broker=broker, name='recover_dep', tasks=[node_a, node_b]
         )
@@ -639,7 +639,7 @@ class TestWorkflowRecovery:
         session, broker, app = setup
         task_a = make_simple_task(app, 'recover_idem_crash_a')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         spec = make_workflow_spec(
             broker=broker, name='recover_idem_crash', tasks=[node_a]
         )
@@ -695,7 +695,7 @@ class TestWorkflowRecovery:
         session, broker, app = setup
         task_a = make_simple_task(app, 'recover_cancel_a')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         spec = make_workflow_spec(
             broker=broker, name='recover_cancel', tasks=[node_a]
         )
@@ -759,7 +759,7 @@ class TestWorkflowRecovery:
         session, broker, app = setup
         task_a = make_simple_task(app, 'recover_missing_result_a')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         spec = make_workflow_spec(
             broker=broker, name='recover_missing_result', tasks=[node_a]
         )
@@ -826,8 +826,8 @@ class TestWorkflowRecovery:
         task_a = make_simple_task(app, 'recover_pend_ok_a')
         task_b = make_simple_task(app, 'recover_pend_ok_b')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
         spec = make_workflow_spec(
             broker=broker, name='recover_pend_ok', tasks=[node_a, node_b],
         )
@@ -873,7 +873,7 @@ class TestWorkflowRecovery:
         task_b = make_simple_task(app, 'recover_pend_fail_b')
 
         node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, args=(1,), waits_for=[node_a])
+        node_b = TaskNode(fn=task_b, kwargs={'value': 1}, waits_for=[node_a])
         spec = make_workflow_spec(
             broker=broker, name='recover_pend_fail', tasks=[node_a, node_b],
         )
@@ -925,7 +925,7 @@ class TestWorkflowRecovery:
 
         node_a = TaskNode(fn=task_a)
         node_b = TaskNode(
-            fn=task_b, args=(1,), waits_for=[node_a], allow_failed_deps=True,
+            fn=task_b, kwargs={'value': 1}, waits_for=[node_a], allow_failed_deps=True,
         )
         spec = make_workflow_spec(
             broker=broker, name='recover_pend_allow', tasks=[node_a, node_b],
@@ -972,7 +972,7 @@ class TestWorkflowRecovery:
         session, broker, app = setup
         task_a = make_simple_task(app, 'recover_sub_nb_a')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=RecoveryChildWorkflow,
             waits_for=[node_a],
@@ -1028,7 +1028,7 @@ class TestWorkflowRecovery:
         session, broker, app = setup
         task_a = make_simple_task(app, 'recover_sub_wb_a')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=RecoveryChildWorkflow,
             waits_for=[node_a],
@@ -1174,7 +1174,7 @@ class TestWorkflowRecovery:
         session, broker, app = setup
         task_a = make_simple_task(app, 'recover_failed_missing_a')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         spec = make_workflow_spec(
             broker=broker, name='recover_failed_missing', tasks=[node_a],
         )
@@ -1240,7 +1240,7 @@ class TestWorkflowRecovery:
         task_a = make_simple_task(app, 'recover_sp_fail_a')
         task_b = make_failing_task(app, 'recover_sp_fail_b')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b = TaskNode(fn=task_b)
 
         # Both A and B are required — B failing means no case is satisfied

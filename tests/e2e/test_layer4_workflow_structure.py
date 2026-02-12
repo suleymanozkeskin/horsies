@@ -553,7 +553,7 @@ async def test_workflow_task_expires_before_claim(broker: PostgresBroker) -> Non
 
     node_expiring = TaskNode(
         fn=wf_tasks.step_task,
-        args=('expiring',),
+        kwargs={'step': 'expiring'},
         good_until=expiry,
     )
 
@@ -603,7 +603,7 @@ async def test_workflow_task_completes_before_expiry(broker: PostgresBroker) -> 
 
     node_valid = TaskNode(
         fn=wf_tasks.step_task,
-        args=('valid',),
+        kwargs={'step': 'valid'},
         good_until=expiry,
     )
 

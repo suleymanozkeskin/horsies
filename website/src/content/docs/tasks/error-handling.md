@@ -151,7 +151,7 @@ def save_product_record(
 
 fetch: TaskNode[str] = TaskNode(
     fn=fetch_product_page,
-    args=("https://example.com/missing",),
+    kwargs={'url': "https://example.com/missing"},
     node_id="fetch_product_page",
 )
 parse: TaskNode[ProductRecord] = TaskNode(

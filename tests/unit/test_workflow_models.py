@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import pytest
 
 from horsies.core.models.tasks import TaskResult, TaskError
-from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory
+from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, from_node
 from horsies.core.models.workflow import (
     NODE_ID_PATTERN,
     NodeKey,
@@ -514,17 +514,22 @@ class TestTaskNode:
     """Tests for TaskNode dataclass."""
 
     def test_tasknode_basic_construction(self) -> None:
-        """TaskNode can be constructed with fn, args, kwargs."""
+        """TaskNode can be constructed with fn and kwargs."""
         mock_fn = MockTaskWrapper(task_name='test_task')
         node = TaskNode(
             fn=mock_fn,
-            args=(1, 2),
             kwargs={'key': 'value'},
         )
 
         assert node.fn == mock_fn
-        assert node.args == (1, 2)
+        assert node.args == ()
         assert node.kwargs == {'key': 'value'}
+
+    def test_tasknode_rejects_positional_args_param(self) -> None:
+        """TaskNode constructor rejects args=... (kwargs-only contract)."""
+        mock_fn = MockTaskWrapper(task_name='test_task')
+        with pytest.raises(TypeError, match="unexpected keyword argument 'args'"):
+            TaskNode(fn=mock_fn, args=(1,))  # type: ignore[call-arg]
 
     def test_tasknode_name_property(self) -> None:
         """name property returns fn.task_name."""
@@ -755,44 +760,23 @@ class TestWorkflowSpecValidation:
 
         assert exc_info.value.code == ErrorCode.WORKFLOW_CTX_PARAM_MISSING
 
-    def test_args_with_args_from_rejected(self) -> None:
-        """args cannot be used when args_from is set."""
+    def test_tasknode_args_kw_rejected(self) -> None:
+        """TaskNode constructor rejects args=... directly."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
         node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(
-            fn=fn_b,
-            args=(1,),
-            waits_for=[node_a],
-            args_from={'input': node_a},
-        )
+        _ = node_a
+        with pytest.raises(TypeError, match="unexpected keyword argument 'args'"):
+            TaskNode(  # type: ignore[call-arg]
+                fn=fn_b,
+                args=(1,),
+                waits_for=[node_a],
+                args_from={'input': node_a},
+            )
 
-        with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='args_with_args_from', tasks=[node_a, node_b])
-
-        assert exc.value.code == ErrorCode.WORKFLOW_ARGS_WITH_INJECTION
-
-    def test_args_with_workflow_ctx_from_rejected(self) -> None:
-        """args cannot be used when workflow_ctx_from is set."""
-        fn_a = MockTaskWrapper(task_name='task_a')
-        fn_with_ctx = MockTaskWrapperWithCtx(task_name='task_with_ctx')
-
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(
-            fn=fn_with_ctx,
-            args=(1,),
-            waits_for=[node_a],
-            workflow_ctx_from=[node_a],
-        )
-
-        with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='args_with_ctx_from', tasks=[node_a, node_b])
-
-        assert exc.value.code == ErrorCode.WORKFLOW_ARGS_WITH_INJECTION
-
-    def test_subworkflow_args_with_args_from_rejected(self) -> None:
-        """SubWorkflowNode args cannot be used when args_from is set."""
+    def test_subworkflow_args_kw_rejected(self) -> None:
+        """SubWorkflowNode constructor rejects args=... directly."""
         fn_a = MockTaskWrapper(task_name='task_a')
 
         class ChildWorkflow(WorkflowDefinition[int]):
@@ -805,20 +789,14 @@ class TestWorkflowSpecValidation:
         ChildWorkflow.Meta.output = ChildWorkflow.child
 
         node_a = TaskNode(fn=fn_a)
-        child_node = SubWorkflowNode(
-            workflow_def=ChildWorkflow,
-            args=(1,),
-            waits_for=[node_a],
-            args_from={'value': node_a},
-        )
-
-        with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(
-                name='subworkflow_args_with_args_from',
-                tasks=[node_a, child_node],
+        _ = node_a
+        with pytest.raises(TypeError, match="unexpected keyword argument 'args'"):
+            SubWorkflowNode(  # type: ignore[call-arg]
+                workflow_def=ChildWorkflow,
+                args=(1,),
+                waits_for=[node_a],
+                args_from={'value': node_a},
             )
-
-        assert exc.value.code == ErrorCode.WORKFLOW_ARGS_WITH_INJECTION
 
     def test_subworkflow_params_require_overridden_build_with(self) -> None:
         """Default build_with cannot be parameterized via kwargs."""
@@ -976,12 +954,12 @@ class TestWorkflowSpecValidation:
 
         assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
-    def test_subworkflow_build_with_duplicate_positional_and_kwarg_rejected(self) -> None:
-        """Subworkflow build_with cannot receive same param via args and kwargs."""
+    def test_subworkflow_build_with_positional_args_constructor_rejected(self) -> None:
+        """SubWorkflowNode constructor rejects args=... immediately."""
         fn_a = MockTaskWrapper(task_name='task_a')
 
         class ChildWorkflow(WorkflowDefinition[int]):
-            name = 'child_build_with_duplicate_binding'
+            name = 'child_build_with_positional_rejected'
             child = TaskNode(fn=fn_a)
 
             class Meta:
@@ -994,23 +972,19 @@ class TestWorkflowSpecValidation:
 
         ChildWorkflow.Meta.output = ChildWorkflow.child
 
-        child_node = SubWorkflowNode(
-            workflow_def=ChildWorkflow,
-            args=(1,),
-            kwargs={'value': 2},
-        )
+        with pytest.raises(TypeError, match="unexpected keyword argument 'args'"):
+            SubWorkflowNode(  # type: ignore[call-arg]
+                workflow_def=ChildWorkflow,
+                args=(1,),
+                kwargs={'value': 2},
+            )
 
-        with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='subworkflow_duplicate_binding', tasks=[child_node])
-
-        assert exc.value.code == ErrorCode.WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING
-
-    def test_subworkflow_build_with_too_many_positional_rejected(self) -> None:
-        """Subworkflow build_with rejects extra positional args."""
+    def test_mutated_subworkflow_positional_args_rejected_by_validator(self) -> None:
+        """Validator rejects positional args even if set after construction."""
         fn_a = MockTaskWrapper(task_name='task_a')
 
         class ChildWorkflow(WorkflowDefinition[int]):
-            name = 'child_build_with_too_many_positional'
+            name = 'child_build_with_mutated_args'
             child = TaskNode(fn=fn_a)
 
             class Meta:
@@ -1023,15 +997,13 @@ class TestWorkflowSpecValidation:
 
         ChildWorkflow.Meta.output = ChildWorkflow.child
 
-        child_node = SubWorkflowNode(
-            workflow_def=ChildWorkflow,
-            args=(1, 2),
-        )
+        child_node = SubWorkflowNode(workflow_def=ChildWorkflow, kwargs={'value': 2})
+        child_node.args = (1,)  # defensive validation path
 
         with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='subworkflow_too_many_positional', tasks=[child_node])
+            WorkflowSpec(name='subworkflow_mutated_positional', tasks=[child_node])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_EXCESS_POSITIONAL_ARGS
+        assert exc.value.code == ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
 
     def test_invalid_args_from_key_rejected(self) -> None:
         """args_from key must match function parameter name."""
@@ -1171,62 +1143,39 @@ class TestWorkflowSpecValidation:
 
         assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
 
-    def test_task_excess_positional_args_rejected(self) -> None:
-        """TaskNode with more positional args than the function accepts raises E026."""
+    def test_tasknode_positional_args_constructor_rejected(self) -> None:
+        """TaskNode constructor rejects args=... immediately."""
         fn_a = MockTaskWrapperWithParams(task_name='task_a')
-        # MockTaskWrapperWithParams.__call__(self, required, *, flag) → 1 positional slot
-        # Also provide flag so E020 doesn't fire alongside E026.
-        node_a = TaskNode(fn=fn_a, args=(1, 2, 3), kwargs={'flag': True})
+        with pytest.raises(TypeError, match="unexpected keyword argument 'args'"):
+            TaskNode(fn=fn_a, args=(1,), kwargs={'flag': True})  # type: ignore[call-arg]
+
+    def test_mutated_tasknode_positional_args_rejected_by_validator(self) -> None:
+        """Validator rejects positional args even if set after construction."""
+        fn_a = MockTaskWrapperWithParams(task_name='task_a')
+        node_a = TaskNode(fn=fn_a, kwargs={'required': 1, 'flag': True})
+        node_a.args = (1,)  # defensive validation path
 
         with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='excess_positional', tasks=[node_a])
+            WorkflowSpec(name='mutated_positional_args', tasks=[node_a])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_EXCESS_POSITIONAL_ARGS
-        assert "provides 3 positional arg(s)" in exc.value.notes[0]
-        assert "accepts at most 1" in exc.value.notes[1]
+        assert exc.value.code == ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
 
-    def test_task_exact_positional_args_accepted(self) -> None:
-        """TaskNode with exactly the right number of positional args passes."""
-        fn_a = MockTaskWrapperWithParams(task_name='task_a')
-        # 1 positional (required) + 1 keyword (flag) → should pass
-        node_a = TaskNode(fn=fn_a, args=(1,), kwargs={'flag': True})
+    def test_from_node_marker_in_direct_kwargs_rejected(self) -> None:
+        """Raw from_node() marker in TaskNode kwargs is rejected."""
+        fn_a = MockTaskWrapper(task_name='producer')
+        fn_b = MockTaskWrapper(task_name='consumer')
 
-        spec = WorkflowSpec(name='exact_positional', tasks=[node_a])
-        assert len(spec.tasks) == 1
-
-    def test_task_var_positional_allows_unlimited_args(self) -> None:
-        """TaskNode targeting a function with *args accepts any positional count."""
-        fn_a = MockTaskWrapper(task_name='task_a')
-        # MockTaskWrapper.__call__(self, *args, **kwargs) → unlimited
-        node_a = TaskNode(fn=fn_a, args=(1, 2, 3, 4, 5))
-
-        spec = WorkflowSpec(name='var_positional', tasks=[node_a])
-        assert len(spec.tasks) == 1
-
-    def test_task_excess_positional_skipped_when_args_from_present(self) -> None:
-        """E026 skips when args_from is set — E016 handles that case."""
-        fn_a = MockTaskWrapper(task_name='task_a')
-        fn_b = MockTaskWrapperWithParams(task_name='task_b')
         node_a = TaskNode(fn=fn_a)
         node_b = TaskNode(
             fn=fn_b,
-            args=(1, 2, 3),
             waits_for=[node_a],
-            args_from={'required': node_a},
+            kwargs={'payload': from_node(node_a)},
         )
 
-        with pytest.raises(
-            (WorkflowValidationError, MultipleValidationErrors)
-        ) as exc:
-            WorkflowSpec(name='excess_with_args_from', tasks=[node_a, node_b])
+        with pytest.raises(WorkflowValidationError) as exc:
+            WorkflowSpec(name='marker_in_kwargs', tasks=[node_a, node_b])
 
-        if isinstance(exc.value, MultipleValidationErrors):
-            codes = {error.code for error in exc.value.report.errors}
-        else:
-            codes = {exc.value.code}
-
-        assert ErrorCode.WORKFLOW_ARGS_WITH_INJECTION in codes
-        assert ErrorCode.WORKFLOW_EXCESS_POSITIONAL_ARGS not in codes
+        assert exc.value.code == ErrorCode.WORKFLOW_INVALID_ARGS_FROM
 
     def test_missing_required_params_rejected(self) -> None:
         """Missing required parameters raises validation error."""
@@ -1694,7 +1643,7 @@ class TestWorkflowContext:
 
         # Create a mock node with node_id set
         mock_task = MockTaskWrapper('producer')
-        node: TaskNode[int] = TaskNode(fn=mock_task, args=(1,))
+        node: TaskNode[int] = TaskNode(fn=mock_task)
         node.node_id = 'node-0'  # Simulate WorkflowSpec having assigned node_id
 
         result = ctx.result_for(node)
@@ -1726,7 +1675,7 @@ class TestWorkflowContext:
         )
 
         mock_task = MockTaskWrapper('producer')
-        node: TaskNode[int] = TaskNode(fn=mock_task, args=(1,))
+        node: TaskNode[int] = TaskNode(fn=mock_task)
         # node.node_id is None (not assigned)
 
         with pytest.raises(RuntimeError, match='TaskNode node_id is not set'):
@@ -1742,7 +1691,7 @@ class TestWorkflowContext:
         )
 
         mock_task = MockTaskWrapper('producer')
-        node: TaskNode[int] = TaskNode(fn=mock_task, args=(1,))
+        node: TaskNode[int] = TaskNode(fn=mock_task)
         node.node_id = 'node-0'
 
         with pytest.raises(KeyError, match='not in workflow context'):
@@ -1759,13 +1708,13 @@ class TestWorkflowContext:
         )
 
         mock_task = MockTaskWrapper('producer')
-        node_with_result: TaskNode[int] = TaskNode(fn=mock_task, args=(1,))
+        node_with_result: TaskNode[int] = TaskNode(fn=mock_task)
         node_with_result.node_id = 'node-0'
 
-        node_without_result: TaskNode[int] = TaskNode(fn=mock_task, args=(2,))
+        node_without_result: TaskNode[int] = TaskNode(fn=mock_task)
         node_without_result.node_id = 'node-99'
 
-        node_no_index: TaskNode[int] = TaskNode(fn=mock_task, args=(3,))
+        node_no_index: TaskNode[int] = TaskNode(fn=mock_task)
         # node_no_index.node_id is None
 
         assert ctx.has_result(node_with_result) is True
@@ -1850,7 +1799,7 @@ class TestWorkflowDefinition:
 
         class SimpleWorkflow(WorkflowDefinition):
             name = 'simple'
-            fetch = TaskNode(fn=fn_a, args=(1,))
+            fetch = TaskNode(fn=fn_a, kwargs={'payload': 1})
             process = TaskNode(fn=fn_b, waits_for=[fetch], args_from={'data': fetch})
 
         # Create minimal app (no broker connection needed for build)
@@ -2042,9 +1991,9 @@ class TestWorkflowDefinition:
 
         class MultiFetchWorkflow(WorkflowDefinition):
             name = 'multi_fetch'
-            fetch_a = TaskNode(fn=fn_fetch, args=('url_a',))
-            fetch_b = TaskNode(fn=fn_fetch, args=('url_b',))
-            fetch_c = TaskNode(fn=fn_fetch, args=('url_c',))
+            fetch_a = TaskNode(fn=fn_fetch, kwargs={'url': 'url_a'})
+            fetch_b = TaskNode(fn=fn_fetch, kwargs={'url': 'url_b'})
+            fetch_c = TaskNode(fn=fn_fetch, kwargs={'url': 'url_c'})
 
         app = Horsies(
             config=AppConfig(

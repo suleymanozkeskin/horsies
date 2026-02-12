@@ -393,7 +393,7 @@ Tasks can be conditionally skipped based on runtime conditions using `run_when` 
 Skip the task if the condition returns `True`:
 
 ```python
-node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
 
 # Skip node_b if node_a's result is > 10
 node_b: TaskNode[int] = TaskNode(
@@ -409,7 +409,7 @@ node_b: TaskNode[int] = TaskNode(
 Run the task only if the condition returns `True`:
 
 ```python
-node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
 
 # Run node_b only if node_a's result is < 100
 node_b: TaskNode[int] = TaskNode(
@@ -525,7 +525,7 @@ a ── b ─┤
 @workflow
 def process_items(items: list[str]):
     for item in items:
-        yield TaskNode(fn=process_item, args=(item,))
+        yield TaskNode(fn=process_item, kwargs={'item': item})
 ```
 
 **Current:** DAG is static at submission time. All tasks must be defined before workflow starts.
@@ -563,7 +563,7 @@ def fetch_data(url: str) -> TaskResult[dict, TaskError]:
     ...
 
 # This task will retry up to 3 times when used in a workflow
-node = TaskNode(fn=fetch_data, args=("https://api.example.com",))
+node = TaskNode(fn=fetch_data, kwargs={'url': "https://api.example.com"})
 ```
 
 **Behavior:**
@@ -707,8 +707,8 @@ This ensures no result collisions when the same task function is used multiple t
 
 ```python
 # Same task used twice
-fetch_a = TaskNode(fn=fetch_data, args=("url_a",))  # index 0
-fetch_b = TaskNode(fn=fetch_data, args=("url_b",))  # index 1
+fetch_a = TaskNode(fn=fetch_data, kwargs={'url': "url_a"})  # index 0
+fetch_b = TaskNode(fn=fetch_data, kwargs={'url': "url_b"})  # index 1
 
 spec = WorkflowSpec(name="parallel_fetch", tasks=[fetch_a, fetch_b], broker=broker)
 handle = await spec.start_async()
@@ -748,7 +748,7 @@ This is distinct from `WorkflowHandle.result_for()`, which queries the database 
 ```python
 from horsies import WorkflowContext, TaskNode, TaskResult, TaskError
 
-node_a: TaskNode[int] = TaskNode(fn=fetch_data, args=("url",))
+node_a: TaskNode[int] = TaskNode(fn=fetch_data, kwargs={'url': "url"})
 node_b: TaskNode[str] = TaskNode(fn=transform, waits_for=[node_a], args_from={"data": node_a})
 node_c: TaskNode[Summary] = TaskNode(
     fn=aggregate,

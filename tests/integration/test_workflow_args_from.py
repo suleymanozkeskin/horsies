@@ -125,7 +125,7 @@ class TestArgsFromInjection:
         task_a = make_simple_task(app, 'single_args_a')
         task_b = make_args_receiver_task(app, 'single_args_b')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         node_b = TaskNode(
             fn=task_b,
             waits_for=[node_a],
@@ -162,8 +162,8 @@ class TestArgsFromInjection:
         task_b = make_simple_task(app, 'multi_args_b')
         task_c = make_multi_args_receiver_task(app, 'multi_args_c')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
-        node_b = TaskNode(fn=task_b, args=(10,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 10})
         node_c = TaskNode(
             fn=task_c,
             waits_for=[node_a, node_b],
@@ -251,7 +251,7 @@ class TestArgsFromInjection:
 
         task_a = make_simple_task(app, 'static_a')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         node_b = TaskNode(
             fn=static_and_injected,
             kwargs={'static_value': 100},  # Static kwarg
@@ -291,7 +291,7 @@ class TestArgsFromInjection:
 
         task_a = make_simple_task(app, 'same_dep_a')
 
-        node_a = TaskNode(fn=task_a, args=(25,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 25})
         node_b = TaskNode(
             fn=dual_receiver,
             waits_for=[node_a],
@@ -332,7 +332,7 @@ class TestArgsFromInjection:
         # When A fails, B is SKIPPED
         # C should receive UPSTREAM_SKIPPED for B (which is SKIPPED)
         node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, args=(1,), waits_for=[node_a])
+        node_b = TaskNode(fn=task_b, kwargs={'value': 1}, waits_for=[node_a])
         node_c = TaskNode(
             fn=task_c,
             waits_for=[node_b],
@@ -430,7 +430,7 @@ class TestArgsFromInjection:
             return TaskResult(ok=input_result.unwrap() + 5)
 
         task_a = make_simple_task(app, 'worker_args_from_a')
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         node_b = TaskNode(
             fn=worker_args_from_b,
             waits_for=[node_a],
@@ -547,7 +547,7 @@ class TestArgsFromInjection:
 
         task_a = make_simple_task(app, 'empty_args_from_a')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         node_b = TaskNode(
             fn=static_only,
             kwargs={'static_value': 100},
@@ -670,7 +670,7 @@ class TestArgsFromInjection:
 
         # A -> B -> C: A fails, B skipped, C receives UPSTREAM_SKIPPED for B
         node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, args=(1,), waits_for=[node_a])
+        node_b = TaskNode(fn=task_b, kwargs={'value': 1}, waits_for=[node_a])
         node_c = TaskNode(
             fn=worker_skipped_c,
             waits_for=[node_b],
@@ -749,8 +749,8 @@ class TestArgsFromInjection:
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=from_a.unwrap() + 1)
 
-        node_a = TaskNode(fn=task_a, args=(5,))
-        node_b = TaskNode(fn=task_b, args=(10,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 10})
         node_c = TaskNode(
             fn=partial_receiver,
             waits_for=[node_a, node_b],

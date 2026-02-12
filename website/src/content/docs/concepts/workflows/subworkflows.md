@@ -57,7 +57,7 @@ class DataPipeline(WorkflowDefinition[bool]):
     """
     name = "data_pipeline"
 
-    fetch = TaskNode(fn=fetch_data, args=("https://api.example.com",))
+    fetch = TaskNode(fn=fetch_data, kwargs={'url': "https://api.example.com"})
     transform = TaskNode(
         fn=transform,
         waits_for=[fetch],
@@ -101,7 +101,7 @@ else:
 For simple DAGs without conditions or subworkflows:
 
 ```python
-node_a = TaskNode(fn=task_a, args=(1,))
+node_a = TaskNode(fn=task_a, kwargs={'value': 1})
 node_b = TaskNode(fn=task_b, waits_for=[node_a])
 
 spec = app.workflow(
@@ -166,7 +166,7 @@ def multiply(
 class MathWorkflow(WorkflowDefinition[int]):
     name = "math"
 
-    add_node = TaskNode(fn=add, args=(5, 3))
+    add_node = TaskNode(fn=add, kwargs={'a': 5, 'b': 3})
     multiply_node = TaskNode(
         fn=multiply,
         waits_for=[add_node],
@@ -251,7 +251,7 @@ A **SubWorkflowNode** runs an entire workflow as a single node in the parent DAG
 class ChildPipeline(WorkflowDefinition[int]):
     name = "child_pipeline"
 
-    step1 = TaskNode(fn=produce_int, args=(5,))
+    step1 = TaskNode(fn=produce_int, kwargs={'value': 5})
     step2 = TaskNode(fn=double, waits_for=[step1], args_from={"value": step1})
 
     class Meta:
@@ -299,7 +299,7 @@ class DataProcessor(WorkflowDefinition[ProcessedData]):
         **_kwargs: Any,
     ) -> WorkflowSpec:
         """Build workflow with runtime parameters."""
-        fetch = TaskNode(fn=fetch_raw_data, args=(source_url,))
+        fetch = TaskNode(fn=fetch_raw_data, kwargs={'source_url': source_url})
         clean = TaskNode(fn=clean_data, waits_for=[fetch], args_from={"raw": fetch})
         process = TaskNode(fn=process_data, waits_for=[clean], args_from={"clean": clean})
 
@@ -942,7 +942,7 @@ class DataSourcePipeline(WorkflowDefinition[ProcessedData]):
         *_args: Any,
         **_kwargs: Any,
     ) -> WorkflowSpec:
-        fetch = TaskNode(fn=fetch_from_api, args=(source_url,))
+        fetch = TaskNode(fn=fetch_from_api, kwargs={'source_url': source_url})
         process = TaskNode(
             fn=parse_and_validate,
             waits_for=[fetch],

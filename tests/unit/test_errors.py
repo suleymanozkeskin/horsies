@@ -645,6 +645,10 @@ class TestErrorCode:
             ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
             ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
             ErrorCode.WORKFLOW_EXCESS_POSITIONAL_ARGS,
+            ErrorCode.WORKFLOW_CHECK_CASES_REQUIRED,
+            ErrorCode.WORKFLOW_CHECK_CASE_INVALID,
+            ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
+            ErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER,
         ]
         for code in workflow_codes:
             # E001-E099 range

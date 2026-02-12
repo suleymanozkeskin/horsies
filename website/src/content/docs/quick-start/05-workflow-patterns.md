@@ -38,7 +38,7 @@ def start_order_workflow(
 
     node_validate: TaskNode[Any] = TaskNode(
         fn=validate_order,
-        args=(order,),
+        kwargs={'order': order},
         node_id="validate_order",
     )
     reveal_type(node_validate)  # TaskNode[Any]
@@ -159,7 +159,7 @@ from .tasks import (
 def fulfillment_workflow(order: Order) -> None:
     node_validate: TaskNode[ValidatedOrder] = TaskNode(
         fn=validate_order,
-        args=(order,),
+        kwargs={'order': order},
         node_id="validate_order",
     )
     reveal_type(node_validate)  # TaskNode[ValidatedOrder]
@@ -222,7 +222,7 @@ Start a workflow without waiting for completion. Useful for background processin
 def trigger_shipment_tracking(shipment_id: str) -> bool:
     node_fetch: TaskNode[CarrierStatus] = TaskNode(
         fn=fetch_carrier_status,
-        args=(shipment_id,),
+        kwargs={'shipment_id': shipment_id},
         node_id="fetch_carrier_status",
     )
     reveal_type(node_fetch)  # TaskNode[CarrierStatus]

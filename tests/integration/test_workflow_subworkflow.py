@@ -100,7 +100,7 @@ class ParamChildWorkflow(WorkflowDefinition[int]):
         def child_task(value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
-        node = TaskNode(fn=child_task, args=(raw_value,))
+        node = TaskNode(fn=child_task, kwargs={'value': raw_value})
         return app.workflow(
             name=cls.name,
             tasks=[node],
@@ -124,7 +124,7 @@ class MultiParamChildWorkflow(WorkflowDefinition[int]):
         def child_task(first: int, second: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=first + second)
 
-        node = TaskNode(fn=child_task, args=(first_val, second_val))
+        node = TaskNode(fn=child_task, kwargs={'first': first_val, 'second': second_val})
         return app.workflow(
             name=cls.name,
             tasks=[node],
@@ -294,7 +294,7 @@ class TestSubworkflowIntegration:
 
         parent_task = make_simple_task(app, 'sub_parent_task')
 
-        node_a: TaskNode[int] = TaskNode(fn=parent_task, args=(2,))
+        node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 2})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=StartChildWorkflow,
             waits_for=[node_a],
@@ -336,7 +336,7 @@ class TestSubworkflowIntegration:
 
         parent_task = make_simple_task(app, 'sub_parent_task_fallback')
 
-        node_a: TaskNode[int] = TaskNode(fn=parent_task, args=(2,))
+        node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 2})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=ImportableChildWorkflow,
             waits_for=[node_a],
@@ -369,7 +369,7 @@ class TestSubworkflowIntegration:
 
         producer_task = make_simple_task(app, 'sub_value_producer')
 
-        node_a: TaskNode[int] = TaskNode(fn=producer_task, args=(7,))
+        node_a: TaskNode[int] = TaskNode(fn=producer_task, kwargs={'value': 7})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=ParamChildWorkflow,
             waits_for=[node_a],
@@ -599,7 +599,7 @@ class TestSubworkflowIntegration:
         node_post: TaskNode[int] = TaskNode(
             fn=post_task,
             waits_for=[node_child1, node_child2],
-            args=(1,),
+            kwargs={'value': 1},
         )
 
         spec = app.workflow(
@@ -724,7 +724,7 @@ class TestSubworkflowIntegration:
 
         parent_task = make_simple_task(app, 'load_fail_parent_task')
 
-        node_a: TaskNode[int] = TaskNode(fn=parent_task, args=(1,))
+        node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 1})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=ImportableChildWorkflow,
             waits_for=[node_a],
@@ -787,7 +787,7 @@ class TestSubworkflowIntegration:
         node_post: TaskNode[int] = TaskNode(
             fn=post_task,
             waits_for=[node_child1, node_child2],
-            args=(1,),
+            kwargs={'value': 1},
         )
 
         spec = app.workflow(
@@ -824,7 +824,7 @@ class TestSubworkflowIntegration:
 
         parent_task = make_simple_task(app, 'allow_fail_parent')
 
-        node_a: TaskNode[int] = TaskNode(fn=parent_task, args=(1,))
+        node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 1})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=StartChildWorkflow,
             waits_for=[node_a],
@@ -943,8 +943,8 @@ class TestSubworkflowIntegration:
         task_a = make_simple_task(app, 'join_any_a')
         task_b = make_simple_task(app, 'join_any_b')
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(1,))
-        node_b: TaskNode[int] = TaskNode(fn=task_b, args=(2,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(fn=task_b, kwargs={'value': 2})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=StartChildWorkflow,
             waits_for=[node_a, node_b],
@@ -981,7 +981,7 @@ class TestSubworkflowIntegration:
         task_a = make_simple_task(app, 'mid_chain_a')
         post_task = make_simple_task(app, 'mid_chain_post')
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(3,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 3})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=StartChildWorkflow,
             waits_for=[node_a],
@@ -989,7 +989,7 @@ class TestSubworkflowIntegration:
         node_post: TaskNode[int] = TaskNode(
             fn=post_task,
             waits_for=[node_child],
-            args=(1,),
+            kwargs={'value': 1},
         )
 
         spec = app.workflow(
@@ -1094,8 +1094,8 @@ class TestSubworkflowIntegration:
         task_a = make_simple_task(app, 'multi_args_a')
         task_b = make_simple_task(app, 'multi_args_b')
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(3,))
-        node_b: TaskNode[int] = TaskNode(fn=task_b, args=(5,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 3})
+        node_b: TaskNode[int] = TaskNode(fn=task_b, kwargs={'value': 5})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=MultiParamChildWorkflow,
             waits_for=[node_a, node_b],
@@ -1197,7 +1197,7 @@ class TestSubworkflowIntegration:
 
         parent_task = make_simple_task(app, 'broker_missing_parent')
 
-        node_a: TaskNode[int] = TaskNode(fn=parent_task, args=(1,))
+        node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 1})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=StartChildWorkflow,
             waits_for=[node_a],
@@ -1282,7 +1282,7 @@ class TestSubworkflowValidation:
         """args_from referencing a node not in waits_for raises WORKFLOW_INVALID_ARGS_FROM."""
         task_a_fn = make_simple_task(app, 'args_from_no_dep_a')
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a_fn, args=(1,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a_fn, kwargs={'value': 1})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=ParamChildWorkflow,
             # waits_for is empty, but args_from references node_a
@@ -1392,7 +1392,7 @@ class TestSubworkflowRecovery:
 
         parent_task = make_simple_task(app, 'recovery_parent_task')
 
-        node_a: TaskNode[int] = TaskNode(fn=parent_task, args=(1,))
+        node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 1})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=StartChildWorkflow,
             waits_for=[node_a],

@@ -140,6 +140,9 @@ class WorkflowTaskModel(Base):
 
     # Task specification
     task_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Compat: new writes always store [] (kwargs-only contract).
+    # Column retained for read compatibility with pre-kwargs-only rows.
+    # Pending future column drop once all persisted rows have been migrated.
     task_args: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     task_kwargs: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     queue_name: Mapped[str] = mapped_column(

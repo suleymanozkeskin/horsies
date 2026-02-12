@@ -48,13 +48,13 @@ class TestOrJoin:
         session, broker, app = setup
 
         task = make_simple_task(app, 'task')
-        node_a: TaskNode[int] = TaskNode(fn=task, args=(1,))
-        node_b: TaskNode[int] = TaskNode(fn=task, args=(2,))
-        node_c: TaskNode[int] = TaskNode(fn=task, args=(3,))
+        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
+        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 3})
 
         node_aggregator: TaskNode[int] = TaskNode(
             fn=task,
-            args=(0,),
+            kwargs={'value': 0},
             waits_for=[node_a, node_b, node_c],
             join='any',
         )
@@ -88,7 +88,7 @@ class TestOrJoin:
 
         node_aggregator: TaskNode[int] = TaskNode(
             fn=task,
-            args=(0,),
+            kwargs={'value': 0},
             waits_for=[node_a, node_b],
             join='any',
         )
@@ -129,11 +129,11 @@ class TestOrJoin:
         task = make_simple_task(app, 'task')
         fail_task = make_failing_task(app, 'fail_task')
         node_a: TaskNode[str] = TaskNode(fn=fail_task)
-        node_b: TaskNode[int] = TaskNode(fn=task, args=(5,))
+        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 5})
 
         node_aggregator: TaskNode[int] = TaskNode(
             fn=task,
-            args=(0,),
+            kwargs={'value': 0},
             waits_for=[node_a, node_b],
             join='any',
         )
@@ -176,8 +176,8 @@ class TestOrJoin:
         session, broker, app = setup
 
         task = make_simple_ctx_task(app, 'ctx_any_task')
-        node_a: TaskNode[int] = TaskNode(fn=task, args=(1,))
-        node_b: TaskNode[int] = TaskNode(fn=task, args=(2,))
+        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
 
         node_aggregator: TaskNode[int] = TaskNode(
             fn=task,
@@ -219,11 +219,11 @@ class TestOrJoin:
         session, broker, app = setup
 
         task = make_simple_task(app, 'task')
-        node_a: TaskNode[int] = TaskNode(fn=task, args=(1,))
+        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
 
         node_aggregator: TaskNode[int] = TaskNode(
             fn=task,
-            args=(0,),
+            kwargs={'value': 0},
             waits_for=[node_a],
             join='any',
         )
@@ -253,7 +253,7 @@ class TestOrJoin:
 
         node_aggregator: TaskNode[int] = TaskNode(
             fn=task,
-            args=(0,),
+            kwargs={'value': 0},
             waits_for=[node_a],
             join='any',
         )
@@ -289,7 +289,7 @@ class TestOrJoin:
 
         node_b: TaskNode[int] = TaskNode(
             fn=task,
-            args=(0,),
+            kwargs={'value': 0},
             waits_for=[node_a],
             join='any',
         )
@@ -297,7 +297,7 @@ class TestOrJoin:
         # C depends on B with join='all' (default)
         node_c: TaskNode[int] = TaskNode(
             fn=task,
-            args=(0,),
+            kwargs={'value': 0},
             waits_for=[node_b],
         )
 
@@ -331,12 +331,12 @@ class TestOrJoin:
         session, broker, app = setup
 
         task = make_simple_task(app, 'task')
-        node_a: TaskNode[int] = TaskNode(fn=task, args=(1,))
-        node_b: TaskNode[int] = TaskNode(fn=task, args=(2,))
+        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
 
         node_aggregator: TaskNode[int] = TaskNode(
             fn=task,
-            args=(0,),
+            kwargs={'value': 0},
             waits_for=[node_a, node_b],
             join='any',
         )
@@ -367,13 +367,13 @@ class TestOrJoin:
         session, broker, app = setup
 
         task = make_simple_task(app, 'task')
-        node_a: TaskNode[int] = TaskNode(fn=task, args=(1,))
-        node_b: TaskNode[int] = TaskNode(fn=task, args=(2,))
-        node_c: TaskNode[int] = TaskNode(fn=task, args=(3,))
+        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
+        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 3})
 
         node_aggregator: TaskNode[int] = TaskNode(
             fn=task,
-            args=(0,),
+            kwargs={'value': 0},
             waits_for=[node_a, node_b, node_c],
             join='any',
         )
@@ -402,7 +402,7 @@ class TestOrJoin:
         task = make_simple_ctx_task(app, 'ctx_any_fail')
         fail_task = make_failing_task(app, 'fail_ctx')
 
-        node_a: TaskNode[int] = TaskNode(fn=task, args=(1,))
+        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
         node_b: TaskNode[str] = TaskNode(fn=fail_task)
 
         node_aggregator: TaskNode[int] = TaskNode(
@@ -448,10 +448,10 @@ class TestOrJoin:
         node_a: TaskNode[str] = TaskNode(fn=fail_task)
         node_b: TaskNode[int] = TaskNode(
             fn=task,
-            args=(1,),
+            kwargs={'value': 1},
             waits_for=[node_a],
         )
-        node_c: TaskNode[int] = TaskNode(fn=task, args=(2,))
+        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
 
         # Aggregator: join='any', ctx from B (which will be SKIPPED)
         node_aggregator: TaskNode[int] = TaskNode(
@@ -513,14 +513,14 @@ class TestQuorumJoin:
         session, broker, app = setup
 
         task = make_simple_task(app, 'task')
-        node_a: TaskNode[int] = TaskNode(fn=task, args=(1,))
-        node_b: TaskNode[int] = TaskNode(fn=task, args=(2,))
-        node_c: TaskNode[int] = TaskNode(fn=task, args=(3,))
+        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
+        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 3})
 
         # Aggregator needs 2 out of 3 to succeed
         node_aggregator: TaskNode[int] = TaskNode(
             fn=task,
-            args=(0,),
+            kwargs={'value': 0},
             waits_for=[node_a, node_b, node_c],
             join='quorum',
             min_success=2,
@@ -553,12 +553,12 @@ class TestQuorumJoin:
         fail_task = make_failing_task(app, 'fail_task')
         node_a: TaskNode[str] = TaskNode(fn=fail_task)
         node_b: TaskNode[str] = TaskNode(fn=fail_task)
-        node_c: TaskNode[int] = TaskNode(fn=task, args=(3,))
+        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 3})
 
         # Aggregator needs 2 out of 3 to succeed
         node_aggregator: TaskNode[int] = TaskNode(
             fn=task,
-            args=(0,),
+            kwargs={'value': 0},
             waits_for=[node_a, node_b, node_c],
             join='quorum',
             min_success=2,
@@ -600,13 +600,13 @@ class TestQuorumJoin:
         task = make_simple_task(app, 'task')
         fail_task = make_failing_task(app, 'fail_task')
         node_a: TaskNode[str] = TaskNode(fn=fail_task)
-        node_b: TaskNode[int] = TaskNode(fn=task, args=(2,))
-        node_c: TaskNode[int] = TaskNode(fn=task, args=(3,))
+        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
+        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 3})
 
         # Aggregator needs 2 out of 3 to succeed
         node_aggregator: TaskNode[int] = TaskNode(
             fn=task,
-            args=(0,),
+            kwargs={'value': 0},
             waits_for=[node_a, node_b, node_c],
             join='quorum',
             min_success=2,
@@ -657,8 +657,8 @@ class TestQuorumJoin:
         session, broker, app = setup
 
         task = make_simple_ctx_task(app, 'ctx_quorum_task')
-        node_a: TaskNode[int] = TaskNode(fn=task, args=(1,))
-        node_b: TaskNode[int] = TaskNode(fn=task, args=(2,))
+        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
 
         node_aggregator: TaskNode[int] = TaskNode(
             fn=task,
@@ -701,13 +701,13 @@ class TestQuorumJoin:
         session, broker, app = setup
 
         task = make_simple_task(app, 'task')
-        node_a: TaskNode[int] = TaskNode(fn=task, args=(1,))
-        node_b: TaskNode[int] = TaskNode(fn=task, args=(2,))
-        node_c: TaskNode[int] = TaskNode(fn=task, args=(3,))
+        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
+        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 3})
 
         node_aggregator: TaskNode[int] = TaskNode(
             fn=task,
-            args=(0,),
+            kwargs={'value': 0},
             waits_for=[node_a, node_b, node_c],
             join='quorum',
             min_success=3,
@@ -742,13 +742,13 @@ class TestQuorumJoin:
         session, broker, app = setup
 
         task = make_simple_task(app, 'task')
-        node_a: TaskNode[int] = TaskNode(fn=task, args=(1,))
-        node_b: TaskNode[int] = TaskNode(fn=task, args=(2,))
-        node_c: TaskNode[int] = TaskNode(fn=task, args=(3,))
+        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
+        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 3})
 
         node_aggregator: TaskNode[int] = TaskNode(
             fn=task,
-            args=(0,),
+            kwargs={'value': 0},
             waits_for=[node_a, node_b, node_c],
             join='quorum',
             min_success=1,
@@ -780,11 +780,11 @@ class TestQuorumJoin:
 
         node_a: TaskNode[str] = TaskNode(fn=fail_task)
         node_b: TaskNode[str] = TaskNode(fn=fail_task)
-        node_c: TaskNode[int] = TaskNode(fn=task, args=(3,))
+        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 3})
 
         node_d: TaskNode[int] = TaskNode(
             fn=task,
-            args=(0,),
+            kwargs={'value': 0},
             waits_for=[node_a, node_b, node_c],
             join='quorum',
             min_success=2,
@@ -793,7 +793,7 @@ class TestQuorumJoin:
         # E depends on D with join='all' (default)
         node_e: TaskNode[int] = TaskNode(
             fn=task,
-            args=(0,),
+            kwargs={'value': 0},
             waits_for=[node_d],
         )
 
@@ -835,7 +835,7 @@ class TestQuorumJoin:
         task = make_simple_ctx_task(app, 'ctx_quorum_fail')
         fail_task = make_failing_task(app, 'fail_ctx_q')
 
-        node_a: TaskNode[int] = TaskNode(fn=task, args=(1,))
+        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
         node_b: TaskNode[str] = TaskNode(fn=fail_task)
 
         node_aggregator: TaskNode[int] = TaskNode(
@@ -878,13 +878,13 @@ class TestQuorumJoin:
         task = make_simple_task(app, 'task')
         fail_task = make_failing_task(app, 'fail_task')
 
-        node_a: TaskNode[int] = TaskNode(fn=task, args=(1,))
+        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
         node_b: TaskNode[str] = TaskNode(fn=fail_task)
-        node_c: TaskNode[int] = TaskNode(fn=task, args=(3,))
+        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 3})
 
         node_aggregator: TaskNode[int] = TaskNode(
             fn=task,
-            args=(0,),
+            kwargs={'value': 0},
             waits_for=[node_a, node_b, node_c],
             join='quorum',
             min_success=2,

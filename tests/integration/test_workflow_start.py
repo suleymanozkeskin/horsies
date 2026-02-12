@@ -19,6 +19,7 @@ from horsies.core.models.workflow import (
     WorkflowSpec,
     OnError,
 )
+from horsies.core.task_decorator import from_node
 from horsies.core.workflows.engine import start_workflow_async, on_workflow_task_complete
 
 from .conftest import (
@@ -56,7 +57,7 @@ class TestWorkflowStart:
         session, broker, app = setup
         simple_task = make_simple_task(app, 'simple_a')
 
-        node_a = TaskNode(fn=simple_task, args=(5,))
+        node_a = TaskNode(fn=simple_task, kwargs={'value': 5})
         spec = make_workflow_spec(broker=broker, name='test_wf', tasks=[node_a])
 
         handle = await start_workflow_async(spec, broker)
@@ -80,8 +81,8 @@ class TestWorkflowStart:
         task_a = make_simple_task(app, 'task_a')
         task_b = make_simple_task(app, 'task_b')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
         spec = make_workflow_spec(
             broker=broker, name='multi_task', tasks=[node_a, node_b]
         )
@@ -104,7 +105,7 @@ class TestWorkflowStart:
         session, broker, app = setup
         task_a = make_simple_task(app, 'root_task')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         spec = make_workflow_spec(broker=broker, name='root_test', tasks=[node_a])
 
         handle = await start_workflow_async(spec, broker)
@@ -135,8 +136,8 @@ class TestWorkflowStart:
         task_a = make_simple_task(app, 'root')
         task_b = make_simple_task(app, 'child')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
         spec = make_workflow_spec(
             broker=broker, name='pending_test', tasks=[node_a, node_b]
         )
@@ -163,7 +164,7 @@ class TestWorkflowStart:
         session, broker, app = setup
         task_a = make_simple_task(app, 'custom_id_task')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         spec = make_workflow_spec(broker=broker, name='custom_id', tasks=[node_a])
 
         custom_id = 'my-custom-workflow-id-123'
@@ -187,7 +188,7 @@ class TestWorkflowStart:
         session, broker, app = setup
         task_a = make_simple_task(app, 'error_policy_task')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
 
         # Test FAIL
         spec_fail = make_workflow_spec(
@@ -205,7 +206,7 @@ class TestWorkflowStart:
 
         # Test PAUSE (need fresh node)
         task_b = make_simple_task(app, 'pause_policy_task')
-        node_b = TaskNode(fn=task_b, args=(5,))
+        node_b = TaskNode(fn=task_b, kwargs={'value': 5})
         spec_pause = make_workflow_spec(
             broker=broker, name='pause_policy', tasks=[node_b], on_error=OnError.PAUSE
         )
@@ -228,8 +229,8 @@ class TestWorkflowStart:
         task_a = make_simple_task(app, 'output_a')
         task_b = make_simple_task(app, 'output_b')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='with_output', tasks=[node_a, node_b], output=node_b
@@ -255,9 +256,9 @@ class TestWorkflowStart:
         task_b = make_simple_task(app, 'dep_b')
         task_c = make_simple_task(app, 'dep_c')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,))
-        node_c = TaskNode(fn=task_c, args=(3,), waits_for=[node_a, node_b])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2})
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a, node_b])
 
         spec = make_workflow_spec(
             broker=broker, name='deps_test', tasks=[node_a, node_b, node_c]
@@ -287,7 +288,7 @@ class TestWorkflowStart:
         # args_from injects TaskResult[...] so the receiver must accept TaskResult.
         task_b = make_args_receiver_task(app, 'args_from_b')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b = TaskNode(
             fn=task_b,
             waits_for=[node_a],
@@ -321,7 +322,7 @@ class TestWorkflowStart:
         task_a = make_simple_task(app, 'ctx_a')
         task_b = make_ctx_receiver_task(app, 'ctx_b')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b = TaskNode(
             fn=task_b,
             waits_for=[node_a],
@@ -355,7 +356,7 @@ class TestWorkflowStart:
         task_a = make_simple_task(app, 'afd_a')
         task_b = make_identity_task(app, 'afd_b')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b = TaskNode(
             fn=task_b,
             waits_for=[node_a],
@@ -400,7 +401,7 @@ class TestWorkflowStart:
         session, broker, app = setup
         retryable = make_retryable_task(app, 'retry_wf_task', max_retries=5)
 
-        node_a = TaskNode(fn=retryable, args=(10,))
+        node_a = TaskNode(fn=retryable, kwargs={'value': 10})
         spec = make_workflow_spec(
             broker=broker, name='retry_policy_test', tasks=[node_a]
         )
@@ -444,8 +445,8 @@ class TestWorkflowStart:
         root = make_simple_task(app, 'retry_root')
         retryable = make_retryable_task(app, 'retry_child', max_retries=4)
 
-        node_a = TaskNode(fn=root, args=(10,))
-        node_b = TaskNode(fn=retryable, args=(20,), waits_for=[node_a])
+        node_a = TaskNode(fn=root, kwargs={'value': 10})
+        node_b = TaskNode(fn=retryable, kwargs={'value': 20}, waits_for=[node_a])
         spec = make_workflow_spec(
             broker=broker, name='retry_non_root', tasks=[node_a, node_b]
         )
@@ -488,7 +489,7 @@ class TestWorkflowStart:
         session, broker, app = setup
         task_a = make_simple_task(app, 'idempotent_a')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(
             broker=broker, name='idempotent_wf', tasks=[node_a],
         )
@@ -498,7 +499,7 @@ class TestWorkflowStart:
 
         # Second call with same ID — must reuse existing workflow
         task_b = make_simple_task(app, 'idempotent_b')
-        node_b = TaskNode(fn=task_b, args=(2,))
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2})
         spec_2 = make_workflow_spec(
             broker=broker, name='idempotent_wf_2', tasks=[node_b],
         )
@@ -528,7 +529,7 @@ class TestWorkflowStart:
         session, broker, app = setup
         task_a = make_simple_task(app, 'no_output_task')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(
             broker=broker, name='no_output_wf', tasks=[node_a],
         )
@@ -552,7 +553,7 @@ class TestWorkflowStart:
         task_a = make_simple_task(app, 'good_until_task')
 
         deadline = datetime(2099, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
-        node_a = TaskNode(fn=task_a, args=(1,), good_until=deadline)
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1}, good_until=deadline)
         spec = make_workflow_spec(
             broker=broker, name='good_until_wf', tasks=[node_a],
         )
@@ -583,9 +584,9 @@ class TestWorkflowStart:
         task_b = make_simple_task(app, 'multi_root_b')
         task_c = make_simple_task(app, 'multi_root_c')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,))
-        node_c = TaskNode(fn=task_c, args=(3,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2})
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3})
         spec = make_workflow_spec(
             broker=broker, name='multi_root_wf', tasks=[node_a, node_b, node_c],
         )
@@ -886,3 +887,94 @@ class TestNodeBuilder:
         assert row[0] is not None
         options = json.loads(row[0]) if isinstance(row[0], str) else row[0]
         assert options['good_until'] == deadline.isoformat()
+
+    async def test_node_builder_with_from_node_marker(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """.node() with from_node() stores args_from and auto-wires dependency."""
+        session, broker, app = setup
+
+        @app.task(task_name='fn_producer')
+        def producer(value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+
+        @app.task(task_name='fn_consumer')
+        def consumer(
+            upstream: TaskResult[int, TaskError],
+        ) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=upstream.unwrap() + 1)
+
+        prod = producer.node(node_id='fn_prod')(value=42)
+        cons = consumer.node(node_id='fn_cons')(upstream=from_node(prod))
+
+        spec = make_workflow_spec(
+            broker=broker,
+            name='from_node_test',
+            tasks=[prod, cons],
+        )
+
+        handle = await start_workflow_async(spec, broker)
+
+        # Verify args_from stored correctly
+        result = await session.execute(
+            text("""
+                SELECT args_from, dependencies FROM horsies_workflow_tasks
+                WHERE workflow_id = :wf_id AND node_id = 'fn_cons'
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        row = result.fetchone()
+        assert row is not None
+        args_from = row[0]
+        dependencies = row[1]
+        # args_from maps kwarg name → task_index of producer
+        assert args_from == {'upstream': 0}
+        # from_node() auto-wired the dependency
+        assert 0 in dependencies
+
+    async def test_node_builder_from_node_mixed_with_static_kwargs(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """.node() with from_node() + static kwargs stores both correctly."""
+        session, broker, app = setup
+
+        @app.task(task_name='fn_mix_producer')
+        def producer(value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+
+        @app.task(task_name='fn_mix_consumer')
+        def consumer(
+            upstream: TaskResult[int, TaskError],
+            multiplier: int = 1,
+        ) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=upstream.unwrap() * multiplier)
+
+        prod = producer.node(node_id='mix_prod')(value=10)
+        cons = consumer.node(node_id='mix_cons')(
+            upstream=from_node(prod),
+            multiplier=3,
+        )
+
+        spec = make_workflow_spec(
+            broker=broker,
+            name='from_node_mixed_test',
+            tasks=[prod, cons],
+        )
+
+        handle = await start_workflow_async(spec, broker)
+
+        result = await session.execute(
+            text("""
+                SELECT args_from, task_kwargs FROM horsies_workflow_tasks
+                WHERE workflow_id = :wf_id AND node_id = 'mix_cons'
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        row = result.fetchone()
+        assert row is not None
+        args_from = row[0]
+        task_kwargs = json.loads(row[1]) if isinstance(row[1], str) else row[1]
+        assert args_from == {'upstream': 0}
+        assert task_kwargs == {'multiplier': 3}

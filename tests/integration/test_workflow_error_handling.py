@@ -125,8 +125,8 @@ class TestOnErrorFail:
         task_a = make_simple_task(app, 'fail_happy_a')
         task_b = make_simple_task(app, 'fail_happy_b')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker,
@@ -297,7 +297,7 @@ class TestOnErrorFail:
         node_a = TaskNode(fn=task_a)
         node_b = TaskNode(
             fn=task_b,
-            args=(1,),
+            kwargs={'value': 1},
             waits_for=[node_a],
             allow_failed_deps=False,  # Default, explicit for clarity
         )
@@ -333,8 +333,8 @@ class TestOnErrorFail:
         task_c = make_simple_task(app, 'skip_prop_c')
 
         node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, args=(1,), waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, args=(2,), waits_for=[node_b])
+        node_b = TaskNode(fn=task_b, kwargs={'value': 1}, waits_for=[node_a])
+        node_c = TaskNode(fn=task_c, kwargs={'value': 2}, waits_for=[node_b])
 
         spec = make_workflow_spec(
             broker=broker,
@@ -369,7 +369,7 @@ class TestOnErrorFail:
         task_b = make_simple_task(app, 'final_fail_b')
 
         node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, args=(1,), waits_for=[node_a])
+        node_b = TaskNode(fn=task_b, kwargs={'value': 1}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker,
@@ -545,10 +545,10 @@ class TestOnErrorFail:
 
         node_a = TaskNode(fn=task_a)
         node_b = TaskNode(
-            fn=task_b, args=(1,), waits_for=[node_a], allow_failed_deps=False
+            fn=task_b, kwargs={'value': 1}, waits_for=[node_a], allow_failed_deps=False
         )
         node_c = TaskNode(
-            fn=task_c, args=(2,), waits_for=[node_b], allow_failed_deps=False
+            fn=task_c, kwargs={'value': 2}, waits_for=[node_b], allow_failed_deps=False
         )
 
         spec = make_workflow_spec(
@@ -603,7 +603,7 @@ class TestOnErrorPause:
         task_b = make_simple_task(app, 'pause_immed_b')
 
         node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, args=(1,), waits_for=[node_a])
+        node_b = TaskNode(fn=task_b, kwargs={'value': 1}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker,
@@ -675,7 +675,7 @@ class TestOnErrorPause:
         node_a = TaskNode(fn=task_a)
         node_b = TaskNode(
             fn=task_b,
-            args=(1,),
+            kwargs={'value': 1},
             waits_for=[node_a],
             allow_failed_deps=True,  # Would run with FAIL policy
         )
@@ -712,8 +712,8 @@ class TestOnErrorPause:
         task_c = make_simple_task(app, 'pause_pending_c')
 
         node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, args=(1,), waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, args=(2,), waits_for=[node_b])
+        node_b = TaskNode(fn=task_b, kwargs={'value': 1}, waits_for=[node_a])
+        node_c = TaskNode(fn=task_c, kwargs={'value': 2}, waits_for=[node_b])
 
         spec = make_workflow_spec(
             broker=broker,
@@ -747,8 +747,8 @@ class TestOnErrorPause:
         task_c = make_simple_task(app, 'pause_guard_c')
 
         node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, args=(1,))
-        node_c = TaskNode(fn=task_c, args=(2,), waits_for=[node_a])
+        node_b = TaskNode(fn=task_b, kwargs={'value': 1})
+        node_c = TaskNode(fn=task_c, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker,
@@ -791,7 +791,7 @@ class TestOnErrorPause:
         task_b = make_simple_task(app, 'pause_enqueued_b')
 
         node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, args=(1,))  # Independent root
+        node_b = TaskNode(fn=task_b, kwargs={'value': 1})  # Independent root
 
         spec = make_workflow_spec(
             broker=broker,
@@ -883,8 +883,8 @@ class TestOnErrorPause:
         task_a = make_simple_task(app, 'guard_pending_a')
         task_b = make_simple_task(app, 'guard_pending_b')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker,
@@ -934,8 +934,8 @@ class TestOnErrorPause:
         task_a = make_simple_task(app, 'guard_ready_a')
         task_b = make_simple_task(app, 'guard_ready_b')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker,
@@ -1018,8 +1018,8 @@ class TestResume:
 
         # A fails, B succeeds, C waits for B
         node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, args=(1,))
-        node_c = TaskNode(fn=task_c, args=(2,), waits_for=[node_b])
+        node_b = TaskNode(fn=task_b, kwargs={'value': 1})
+        node_c = TaskNode(fn=task_c, kwargs={'value': 2}, waits_for=[node_b])
 
         spec = make_workflow_spec(
             broker=broker,
@@ -1068,8 +1068,8 @@ class TestResume:
         task_a = make_simple_task(app, 'resume_ready_a')
         task_b = make_simple_task(app, 'resume_ready_b')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker,
@@ -1126,7 +1126,7 @@ class TestResume:
         session, broker, app = setup
         task_a = make_simple_task(app, 'resume_noop_a')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
 
         spec = make_workflow_spec(
             broker=broker,
@@ -1155,7 +1155,7 @@ class TestResume:
         session, broker, app = setup
         task_a = make_simple_task(app, 'resume_completed_a')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
 
         spec = make_workflow_spec(
             broker=broker,
@@ -1232,7 +1232,7 @@ class TestResume:
         task_b = make_simple_task(app, 'resume_terminal_b')
 
         node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, args=(1,), waits_for=[node_a])
+        node_b = TaskNode(fn=task_b, kwargs={'value': 1}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker,
@@ -1287,7 +1287,7 @@ class TestResume:
 
         # A and B are independent roots
         node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, args=(1,))
+        node_b = TaskNode(fn=task_b, kwargs={'value': 1})
 
         spec = make_workflow_spec(
             broker=broker,
@@ -1510,7 +1510,7 @@ class TestAllowFailedDeps:
             )
 
         node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, args=(50,))
+        node_b = TaskNode(fn=task_b, kwargs={'value': 50})
         node_c = TaskNode(
             fn=partial_receiver,
             waits_for=[node_a, node_b],
@@ -1551,7 +1551,7 @@ class TestAllowFailedDeps:
 
         # A (fails) -> B (skipped) -> C (allow_failed_deps=True)
         node_a = TaskNode(fn=task_fail)
-        node_b = TaskNode(fn=task_skip, args=(1,), waits_for=[node_a])
+        node_b = TaskNode(fn=task_skip, kwargs={'value': 1}, waits_for=[node_a])
         node_c = TaskNode(
             fn=task_recv,
             waits_for=[node_b],
@@ -1616,7 +1616,7 @@ class TestAllowFailedDeps:
         node_a = TaskNode(fn=task_a)
         node_b = TaskNode(
             fn=task_b,
-            args=(42,),
+            kwargs={'value': 42},
             waits_for=[node_a],
             allow_failed_deps=True,
             # No args_from - task doesn't receive upstream result
@@ -1669,7 +1669,7 @@ class TestValidationGuards:
         task_a = make_simple_task(app, 'unresolved_queue')
 
         # Create TaskNode without resolving queue (bypasses app.workflow())
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         # Direct construction - queue is None
         from horsies.core.models.workflow import WorkflowSpec
 
@@ -1690,7 +1690,7 @@ class TestValidationGuards:
         task_a = make_simple_task(app, 'unresolved_priority')
 
         # Create TaskNode with queue but no priority
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         node_a.queue = 'default'  # Set queue manually
         # priority is still None
 
@@ -1731,7 +1731,7 @@ class TestSuccessPolicy:
         task_a = make_simple_task(app, 'sp_default_a')
         task_b = make_failing_task(app, 'sp_default_b')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b = TaskNode(fn=task_b)
 
         # No success_policy set
@@ -1766,7 +1766,7 @@ class TestSuccessPolicy:
         task_a = make_simple_task(app, 'sp_satisfied_a')
         task_b = make_failing_task(app, 'sp_satisfied_b')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b = TaskNode(fn=task_b)
 
         # Success policy: workflow succeeds if A completes
@@ -1807,7 +1807,7 @@ class TestSuccessPolicy:
         task_b = make_simple_task(app, 'sp_unsatisfied_b')
 
         node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, args=(1,), waits_for=[node_a])
+        node_b = TaskNode(fn=task_b, kwargs={'value': 1}, waits_for=[node_a])
 
         # Success policy: workflow succeeds only if B completes
         # But B waits for A, so if A fails, B is SKIPPED
@@ -1843,9 +1843,9 @@ class TestSuccessPolicy:
         task_b = make_failing_task(app, 'sp_optional_b')
         task_c = make_simple_task(app, 'sp_optional_c')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b = TaskNode(fn=task_b)  # Will fail - marked as optional
-        node_c = TaskNode(fn=task_c, args=(2,))
+        node_c = TaskNode(fn=task_c, kwargs={'value': 2})
 
         # Success policy: workflow succeeds if A completes, B is optional
         policy = SuccessPolicy(
@@ -1891,7 +1891,7 @@ class TestSuccessPolicy:
         task_b = make_simple_task(app, 'sp_multi_b')
 
         node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, args=(1,))
+        node_b = TaskNode(fn=task_b, kwargs={'value': 1})
 
         # Success policy: workflow succeeds if A OR B completes
         policy = SuccessPolicy(
@@ -1936,7 +1936,7 @@ class TestSuccessPolicy:
         task_b = make_simple_task(app, 'sp_notmet_b')
 
         node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, args=(1,), waits_for=[node_a])
+        node_b = TaskNode(fn=task_b, kwargs={'value': 1}, waits_for=[node_a])
 
         # Success policy: require B (which will be SKIPPED due to A failure)
         policy = SuccessPolicy(cases=[SuccessCase(required=[node_b])])

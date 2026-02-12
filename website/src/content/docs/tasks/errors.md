@@ -165,15 +165,21 @@ horsies check myapp.instance:app
 | E013 | `WORKFLOW_INVALID_JOIN` | Invalid join configuration |
 | E014 | `WORKFLOW_UNRESOLVED_QUEUE` | Queue name not resolved |
 | E015 | `WORKFLOW_UNRESOLVED_PRIORITY` | Priority not resolved |
-| E016 | `WORKFLOW_ARGS_WITH_INJECTION` | Positional args used with args_from or workflow_ctx_from |
+| E016 | `WORKFLOW_ARGS_WITH_INJECTION` | Positional args used with args_from or workflow_ctx_from (legacy — positional args now banned via E026) |
+| E017 | `WORKFLOW_INVALID_SUBWORKFLOW_RETRY_MODE` | Invalid subworkflow retry mode |
+| E018 | `WORKFLOW_SUBWORKFLOW_APP_MISSING` | Subworkflow app reference missing |
 | E019 | `WORKFLOW_INVALID_KWARG_KEY` | Unknown kwargs or args_from key for callable |
 | E020 | `WORKFLOW_MISSING_REQUIRED_PARAMS` | Missing required parameters for task or subworkflow |
 | E021 | `WORKFLOW_KWARGS_ARGS_FROM_OVERLAP` | kwargs and args_from share one or more keys |
 | E022 | `WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH` | Subworkflow params passed but build_with is not overridden |
 | E023 | `WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING` | Subworkflow build_with binding error (duplicate param binding) |
-| E026 | `WORKFLOW_EXCESS_POSITIONAL_ARGS` | Too many positional args for task function or subworkflow build_with |
-| E017 | `WORKFLOW_INVALID_SUBWORKFLOW_RETRY_MODE` | Invalid subworkflow retry mode |
-| E018 | `WORKFLOW_SUBWORKFLOW_APP_MISSING` | Subworkflow app reference missing |
+| E024 | `WORKFLOW_ARGS_FROM_TYPE_MISMATCH` | args_from source result type doesn't match target parameter |
+| E025 | `WORKFLOW_OUTPUT_TYPE_MISMATCH` | Output node type doesn't match WorkflowSpec generic |
+| E026 | `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED` | Positional args are not supported for workflow nodes |
+| E027 | `WORKFLOW_CHECK_CASES_REQUIRED` | Parameterized workflow builder missing test cases |
+| E028 | `WORKFLOW_CHECK_CASE_INVALID` | Workflow builder test case is invalid |
+| E029 | `WORKFLOW_CHECK_BUILDER_EXCEPTION` | Workflow builder raised an exception or returned non-WorkflowSpec |
+| E030 | `WORKFLOW_CHECK_UNDECORATED_BUILDER` | Function returns WorkflowSpec but lacks @app.workflow_builder |
 
 ### Task Definition (E100-E199)
 

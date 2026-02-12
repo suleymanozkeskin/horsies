@@ -81,7 +81,9 @@ horsies scheduler myapp.instance:app --loglevel=DEBUG
 
 ### horsies check
 
-Validate configuration, task registration, and optionally broker connectivity without starting services.
+Validate configuration, task registration, workflow structure, and optionally broker connectivity without starting services. Runs the same validation that workers and schedulers perform at startup.
+
+For details on validation phases, `@app.workflow_builder`, the guarantee model, and CI usage, see [Startup Validation](../configuration/app-config#startup-validation-appcheck).
 
 ```bash
 horsies check <module> [OPTIONS]
@@ -103,7 +105,7 @@ horsies check <module> [OPTIONS]
 **Examples:**
 
 ```bash
-# Validate tasks and config
+# Validate tasks, config, and workflows
 horsies check myapp.instance:app
 
 # Include broker connectivity check

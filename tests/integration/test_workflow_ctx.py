@@ -175,7 +175,7 @@ class TestWorkflowCtx:
                 return TaskResult(err=result.err_value)
             return TaskResult(ok=result.unwrap())
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
         node_b: TaskNode[int] = TaskNode(
             fn=ctx_reader,
             waits_for=[node_a],
@@ -219,7 +219,7 @@ class TestWorkflowCtx:
                 return TaskResult(ok=0)
             return TaskResult(ok=1)
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
         node_b: TaskNode[int] = TaskNode(
             fn=ctx_reader,
             waits_for=[node_a],
@@ -251,7 +251,7 @@ class TestWorkflowCtx:
                 return TaskResult(ok=-1)
             return TaskResult(ok=workflow_meta.task_index)
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
         node_b: TaskNode[int] = TaskNode(
             fn=meta_reader,
             waits_for=[node_a],
@@ -289,8 +289,8 @@ class TestWorkflowCtx:
             second = workflow_ctx.result_for(node_b).unwrap()
             return TaskResult(ok=first + second)
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(1,))
-        node_b: TaskNode[int] = TaskNode(fn=task_b, args=(2,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(fn=task_b, kwargs={'value': 2})
         node_c: TaskNode[int] = TaskNode(
             fn=ctx_reader,
             waits_for=[node_a, node_b],
@@ -336,7 +336,7 @@ class TestWorkflowCtx:
             return TaskResult(ok='unexpected')
 
         node_a = TaskNode(fn=failing_task)
-        node_b = TaskNode(fn=task_b, args=(1,), waits_for=[node_a])
+        node_b = TaskNode(fn=task_b, kwargs={'value': 1}, waits_for=[node_a])
         node_c = TaskNode(
             fn=ctx_reader,
             waits_for=[node_b],
@@ -430,7 +430,7 @@ class TestWorkflowCtx:
         task_a = make_simple_task(app, 'no_ctx_param_a')
         task_b = make_no_ctx_task(app, 'no_ctx_param_b')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         node_b = TaskNode(
             fn=task_b,
             waits_for=[node_a],
@@ -462,7 +462,7 @@ class TestWorkflowCtx:
                 return TaskResult(err=TaskError(error_code='NO_CTX', message='missing'))
             return TaskResult(ok=workflow_ctx.result_for(node_a).unwrap())
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
         node_b: TaskNode[int] = TaskNode(
             fn=ctx_worker_b,
             waits_for=[node_a],
@@ -534,7 +534,7 @@ class TestWorkflowCtx:
                 ok=f'{workflow_meta.workflow_id}:{workflow_meta.task_index}:{workflow_meta.task_name}'
             )
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
         node_b: TaskNode[str] = TaskNode(
             fn=meta_worker_b,
             waits_for=[node_a],
@@ -597,7 +597,7 @@ class TestWorkflowCtx:
         session, broker, app = setup
         task_a = make_simple_task(app, 'ctx_missing_id_a')
 
-        missing_node: TaskNode[int] = TaskNode(fn=task_a, args=(1,))
+        missing_node: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
 
         @app.task(task_name='ctx_missing_id_b')
         def ctx_missing_id_b(
@@ -608,7 +608,7 @@ class TestWorkflowCtx:
             # missing_node.node_id is None -> should raise RuntimeError
             return TaskResult(ok=workflow_ctx.result_for(missing_node).unwrap())
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
         node_b: TaskNode[int] = TaskNode(
             fn=ctx_missing_id_b,
             waits_for=[node_a],
@@ -677,7 +677,7 @@ class TestWorkflowCtx:
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(1,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b: TaskNode[int] = TaskNode(
             fn=ctx_reader,
             # waits_for intentionally omitted — node_a is NOT a dependency
@@ -707,7 +707,7 @@ class TestWorkflowCtx:
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(1,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b: TaskNode[int] = TaskNode(
             fn=ctx_reader,
             waits_for=[node_a],
@@ -725,7 +725,7 @@ class TestWorkflowCtx:
 
         # node_c was never part of this workflow — its node_id won't be in context
         task_c = make_simple_task(app, 'key_err_c')
-        node_c: TaskNode[int] = TaskNode(fn=task_c, args=(1,))
+        node_c: TaskNode[int] = TaskNode(fn=task_c, kwargs={'value': 1})
         # Manually assign a node_id so result_for reaches the KeyError branch
         node_c.node_id = 'nonexistent-node-id'
 
@@ -746,7 +746,7 @@ class TestWorkflowCtx:
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(1,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b: TaskNode[int] = TaskNode(
             fn=ctx_reader,
             waits_for=[node_a],
@@ -778,7 +778,7 @@ class TestWorkflowCtx:
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(1,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b: TaskNode[int] = TaskNode(
             fn=ctx_reader,
             waits_for=[node_a],
@@ -795,12 +795,12 @@ class TestWorkflowCtx:
         ctx = self._build_ctx_from_kwargs(kwargs)
 
         # node_id is set but not in context
-        absent_node: TaskNode[int] = TaskNode(fn=task_a, args=(1,))
+        absent_node: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         absent_node.node_id = 'absent-id'
         assert ctx.has_result(absent_node) is False
 
         # node_id is None
-        unset_node: TaskNode[int] = TaskNode(fn=task_a, args=(1,))
+        unset_node: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         assert unset_node.node_id is None
         assert ctx.has_result(unset_node) is False
 
@@ -818,7 +818,7 @@ class TestWorkflowCtx:
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(1,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b: TaskNode[int] = TaskNode(
             fn=ctx_reader,
             waits_for=[node_a],
@@ -855,7 +855,7 @@ class TestWorkflowCtx:
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(1,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b: TaskNode[int] = TaskNode(
             fn=ctx_reader,
             waits_for=[node_a],
@@ -887,7 +887,7 @@ class TestWorkflowCtx:
         # does NOT declare workflow_ctx. Normally WorkflowSpec validation rejects
         # this (E010), so we bypass validation by manually injecting
         # __horsies_workflow_ctx__ into the task's kwargs at the DB level.
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(1,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b: TaskNode[int] = TaskNode(
             fn=no_ctx_task,
             waits_for=[node_a],

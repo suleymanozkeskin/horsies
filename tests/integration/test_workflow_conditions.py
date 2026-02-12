@@ -132,7 +132,7 @@ class TestRunWhenSkipWhen:
         # Create tasks
         task_a = make_simple_task(app, 'task_a')
         task_b = self._make_ctx_task(app, 'task_b_ctx')
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
 
         # Condition: skip if result > 5
         def should_skip(ctx: WorkflowContext) -> bool:
@@ -176,7 +176,7 @@ class TestRunWhenSkipWhen:
 
         task_a = make_simple_task(app, 'task_a')
         task_b = self._make_ctx_task(app, 'task_b_ctx_false')
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(2,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 2})
 
         # Condition: skip if result > 10
         def should_skip(ctx: WorkflowContext) -> bool:
@@ -215,7 +215,7 @@ class TestRunWhenSkipWhen:
 
         task_a = make_simple_task(app, 'task_a')
         task_b = self._make_ctx_task(app, 'task_b_ctx_run_false')
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
 
         # Condition: run only if result < 5
         def should_run(ctx: WorkflowContext) -> bool:
@@ -258,7 +258,7 @@ class TestRunWhenSkipWhen:
 
         task_a = make_simple_task(app, 'task_a')
         task_b = self._make_ctx_task(app, 'task_b_ctx_run_true')
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(1,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
 
         # Condition: run only if result < 5
         def should_run(ctx: WorkflowContext) -> bool:
@@ -297,7 +297,7 @@ class TestRunWhenSkipWhen:
 
         task_a = make_simple_task(app, 'task_a')
         task_b = self._make_ctx_task(app, 'task_b_ctx_skip_priority')
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
 
         # Both conditions would normally conflict
         def should_skip(_ctx: WorkflowContext) -> bool:
@@ -338,7 +338,7 @@ class TestRunWhenSkipWhen:
 
         task_a = make_simple_task(app, 'task_a')
         task_b = self._make_ctx_task(app, 'task_b_ctx_condition_error')
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
 
         def broken_condition(_ctx: WorkflowContext) -> bool:
             raise ValueError('Deliberate error in condition')
@@ -382,8 +382,8 @@ class TestRunWhenSkipWhen:
         task_b = make_simple_task(app, 'cond_subset_b')
         task_c = self._make_ctx_task(app, 'cond_subset_c_ctx')
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(1,))
-        node_b: TaskNode[int] = TaskNode(fn=task_b, args=(2,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(fn=task_b, kwargs={'value': 2})
 
         def should_run(ctx: WorkflowContext) -> bool:
             # node_b is not in workflow_ctx_from, so this should raise KeyError
@@ -433,7 +433,7 @@ class TestRunWhenSkipWhen:
 
         task_a = make_simple_task(app, 'task_a')
         task_b = self._make_ctx_task(app, 'task_b_ctx_skip_error')
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
 
         def broken_skip(_ctx: WorkflowContext) -> bool:
             raise RuntimeError('Deliberate error in skip_when')
@@ -474,7 +474,7 @@ class TestRunWhenSkipWhen:
 
         task_a = make_simple_task(app, 'task_a')
         task_b = self._make_ctx_task(app, 'task_b_ctx_both_false')
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
 
         def skip_false(_ctx: WorkflowContext) -> bool:
             return False  # Don't skip
@@ -513,7 +513,7 @@ class TestRunWhenSkipWhen:
 
         task_a = make_simple_task(app, 'task_a')
         task_b = self._make_ctx_task(app, 'task_b_ctx_both_pass')
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
 
         def skip_false(_ctx: WorkflowContext) -> bool:
             return False
@@ -558,7 +558,7 @@ class TestRunWhenSkipWhen:
         task_b = self._make_ctx_task(app, 'cascade_b_ctx')
         task_c = self._make_ctx_task(app, 'cascade_c_ctx')
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
 
         def always_skip(_ctx: WorkflowContext) -> bool:
             return True
@@ -607,7 +607,7 @@ class TestRunWhenSkipWhen:
         task_b = self._make_ctx_task(app, 'allow_skip_b_ctx')
         task_c = self._make_ctx_task(app, 'allow_skip_c_ctx')
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
 
         def always_skip(_ctx: WorkflowContext) -> bool:
             return True
@@ -660,7 +660,7 @@ class TestRunWhenSkipWhen:
         task_a = make_simple_task(app, 'wf_complete_a')
         task_b = self._make_ctx_task(app, 'wf_complete_b_ctx')
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
 
         def always_skip(_ctx: WorkflowContext) -> bool:
             return True
@@ -704,7 +704,7 @@ class TestRunWhenSkipWhen:
         task_a = make_simple_task(app, 'failed_dep_cond_a')
         task_b = self._make_ctx_task(app, 'failed_dep_cond_b_ctx')
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(5,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
 
         # Condition: run only if upstream succeeded
         def run_if_ok(ctx: WorkflowContext) -> bool:
@@ -756,8 +756,8 @@ class TestRunWhenSkipWhen:
         task_b = make_simple_task(app, 'no_ctx_from_b')
         task_c = self._make_ctx_task(app, 'no_ctx_from_c_ctx')
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a, args=(1,))
-        node_b: TaskNode[int] = TaskNode(fn=task_b, args=(2,))
+        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(fn=task_b, kwargs={'value': 2})
 
         def check_both_deps(ctx: WorkflowContext) -> bool:
             # Without workflow_ctx_from, both deps should be in context

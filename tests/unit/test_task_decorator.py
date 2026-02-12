@@ -13,9 +13,12 @@ from horsies.core.exception_mapper import ExceptionMapper
 from horsies.core.models.tasks import LibraryErrorCode, TaskError, TaskResult
 from horsies.core.models.workflow import WorkflowContextMissingIdError
 from horsies.core.task_decorator import (
+    FromNodeMarker,
+    NodeFactory,
     TaskHandle,
     create_task_wrapper,
     effective_priority,
+    from_node,
 )
 
 
@@ -845,3 +848,336 @@ class TestCreateTaskWrapperSchedule:
 
         result = handle.get()
         assert result.is_err()
+
+
+# =============================================================================
+# FromNodeMarker / from_node()
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestFromNodeMarker:
+    """Tests for FromNodeMarker and from_node() helper."""
+
+    def test_from_node_returns_marker_with_correct_node(self) -> None:
+        """from_node() wraps the upstream node in a FromNodeMarker."""
+        from horsies.core.models.workflow import TaskNode
+
+        upstream_node = TaskNode(fn=_make_task_fn(), kwargs={'value': 1})
+
+        result = from_node(upstream_node)
+
+        assert isinstance(result, FromNodeMarker)
+        assert result.node is upstream_node
+
+    def test_marker_repr_is_readable(self) -> None:
+        """FromNodeMarker repr includes the wrapped node."""
+        mock_node = MagicMock(name='MockNode')
+
+        marker = FromNodeMarker(mock_node)
+
+        assert 'FromNodeMarker' in repr(marker)
+        assert 'MockNode' in repr(marker)
+
+    def test_from_node_rejects_non_node_value(self) -> None:
+        """from_node() rejects non-node inputs with a structured error."""
+        from horsies.core.errors import WorkflowValidationError
+
+        with pytest.raises(WorkflowValidationError) as exc_info:
+            from_node('not_a_node')  # type: ignore[arg-type]
+
+        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_ARGS_FROM
+
+
+# =============================================================================
+# NodeFactory — positional arg rejection
+# =============================================================================
+
+
+def _make_task_fn(app: MagicMock | None = None) -> Any:
+    """Create a minimal wrapper via create_task_wrapper for NodeFactory tests."""
+    def sample(value: int, label: str = 'default') -> TaskResult[int, TaskError]:
+        return TaskResult(ok=value)
+
+    if app is None:
+        app = _make_app()
+    return create_task_wrapper(sample, app, 'test.sample')
+
+
+@pytest.mark.unit
+class TestNodeFactoryPositionalRejection:
+    """Tests for NodeFactory rejecting positional .node()() calls (D.1)."""
+
+    def test_positional_args_raise_workflow_validation_error(self) -> None:
+        """Positional args in .node()() raise WorkflowValidationError(E026)."""
+        from horsies.core.errors import WorkflowValidationError
+
+        task_fn = _make_task_fn()
+        factory = task_fn.node()
+
+        with pytest.raises(WorkflowValidationError) as exc_info:
+            factory(42)  # positional — forbidden
+
+        assert exc_info.value.code == ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
+        assert 'positional' in exc_info.value.message
+
+    def test_kwargs_only_succeeds(self) -> None:
+        """Kwargs-only .node()() call succeeds and creates TaskNode."""
+        from horsies.core.models.workflow import TaskNode
+
+        task_fn = _make_task_fn()
+        factory = task_fn.node()
+
+        node = factory(value=10, label='test')
+
+        assert isinstance(node, TaskNode)
+        assert node.kwargs == {'value': 10, 'label': 'test'}
+        assert node.args == ()
+
+    def test_empty_call_succeeds(self) -> None:
+        """Empty .node()() call (no args) succeeds — all args from injection/defaults."""
+        from horsies.core.models.workflow import TaskNode
+
+        task_fn = _make_task_fn()
+        factory = task_fn.node()
+
+        node = factory()
+
+        assert isinstance(node, TaskNode)
+        assert node.kwargs == {}
+        assert node.args == ()
+
+
+# =============================================================================
+# NodeFactory — from_node() marker conversion
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestNodeFactoryFromNodeConversion:
+    """Tests for NodeFactory converting from_node() markers (C.1)."""
+
+    def test_marker_kwarg_becomes_args_from_entry(self) -> None:
+        """from_node() kwarg is extracted into args_from dict."""
+        from horsies.core.models.workflow import TaskNode
+
+        app = _make_app()
+
+        # Producer
+        def produce(value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+        producer_fn = create_task_wrapper(produce, app, 'test.produce')
+        producer_node = TaskNode(fn=producer_fn, kwargs={'value': 42})
+
+        # Consumer
+        def consume(data: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=0)
+        consumer_fn = create_task_wrapper(consume, app, 'test.consume')
+        factory = consumer_fn.node()
+
+        node = factory(data=from_node(producer_node))
+
+        assert node.args_from == {'data': producer_node}
+        assert node.kwargs == {}  # marker removed from static kwargs
+
+    def test_marker_auto_wires_waits_for(self) -> None:
+        """from_node() automatically adds upstream to waits_for."""
+        from horsies.core.models.workflow import TaskNode
+
+        app = _make_app()
+
+        def produce(value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+        producer_fn = create_task_wrapper(produce, app, 'test.produce')
+        producer_node = TaskNode(fn=producer_fn, kwargs={'value': 42})
+
+        def consume(data: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=0)
+        consumer_fn = create_task_wrapper(consume, app, 'test.consume')
+        factory = consumer_fn.node()
+
+        node = factory(data=from_node(producer_node))
+
+        assert producer_node in node.waits_for
+
+    def test_marker_does_not_duplicate_waits_for(self) -> None:
+        """If upstream is already in waits_for, from_node() doesn't add it again."""
+        from horsies.core.models.workflow import TaskNode
+
+        app = _make_app()
+
+        def produce(value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+        producer_fn = create_task_wrapper(produce, app, 'test.produce')
+        producer_node = TaskNode(fn=producer_fn, kwargs={'value': 42})
+
+        def consume(data: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=0)
+        consumer_fn = create_task_wrapper(consume, app, 'test.consume')
+        # Explicit waits_for already includes producer
+        factory = consumer_fn.node(waits_for=[producer_node])
+
+        node = factory(data=from_node(producer_node))
+
+        assert node.waits_for.count(producer_node) == 1
+        assert node.args_from == {'data': producer_node}
+
+    def test_multiple_markers_from_different_upstreams(self) -> None:
+        """Multiple from_node() markers from different upstreams all wire correctly."""
+        from horsies.core.models.workflow import TaskNode
+
+        app = _make_app()
+
+        def produce_a(value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+        fn_a = create_task_wrapper(produce_a, app, 'test.produce_a')
+        node_a = TaskNode(fn=fn_a, kwargs={'value': 1})
+
+        def produce_b(value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+        fn_b = create_task_wrapper(produce_b, app, 'test.produce_b')
+        node_b = TaskNode(fn=fn_b, kwargs={'value': 2})
+
+        def consume(
+            first: TaskResult[int, TaskError],
+            second: TaskResult[int, TaskError],
+        ) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=0)
+        consumer_fn = create_task_wrapper(consume, app, 'test.consume')
+        factory = consumer_fn.node()
+
+        node = factory(first=from_node(node_a), second=from_node(node_b))
+
+        assert node.args_from == {'first': node_a, 'second': node_b}
+        assert node_a in node.waits_for
+        assert node_b in node.waits_for
+        assert node.kwargs == {}
+
+    def test_mixed_static_and_marker_kwargs(self) -> None:
+        """Static kwargs and from_node() markers coexist correctly."""
+        from horsies.core.models.workflow import TaskNode
+
+        app = _make_app()
+
+        def produce(value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+        producer_fn = create_task_wrapper(produce, app, 'test.produce')
+        producer_node = TaskNode(fn=producer_fn, kwargs={'value': 42})
+
+        def consume(
+            data: TaskResult[int, TaskError],
+            label: str = 'default',
+        ) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=0)
+        consumer_fn = create_task_wrapper(consume, app, 'test.consume')
+        factory = consumer_fn.node()
+
+        node = factory(data=from_node(producer_node), label='custom')
+
+        assert node.args_from == {'data': producer_node}
+        assert node.kwargs == {'label': 'custom'}
+        assert producer_node in node.waits_for
+
+
+# =============================================================================
+# NodeFactory — from_node() conflict detection
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestNodeFactoryFromNodeConflicts:
+    """Tests for conflict detection between from_node() and explicit args_from."""
+
+    def test_marker_conflicts_with_explicit_args_from_raises(self) -> None:
+        """Same key in from_node() and explicit args_from raises E021."""
+        from horsies.core.errors import WorkflowValidationError
+        from horsies.core.models.workflow import TaskNode
+
+        app = _make_app()
+
+        def produce(value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+        producer_fn = create_task_wrapper(produce, app, 'test.produce')
+        producer_node = TaskNode(fn=producer_fn, kwargs={'value': 42})
+
+        def consume(data: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=0)
+        consumer_fn = create_task_wrapper(consume, app, 'test.consume')
+        # Explicit args_from for 'data'
+        factory = consumer_fn.node(args_from={'data': producer_node})
+
+        # Also from_node() for 'data' — conflict
+        with pytest.raises(WorkflowValidationError) as exc_info:
+            factory(data=from_node(producer_node))
+
+        assert exc_info.value.code == ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
+        assert 'data' in str(exc_info.value)
+
+    def test_disjoint_marker_and_explicit_args_from_merges(self) -> None:
+        """Disjoint from_node() and explicit args_from keys merge correctly."""
+        from horsies.core.models.workflow import TaskNode
+
+        app = _make_app()
+
+        def produce_a(value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+        fn_a = create_task_wrapper(produce_a, app, 'test.produce_a')
+        node_a = TaskNode(fn=fn_a, kwargs={'value': 1})
+
+        def produce_b(value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+        fn_b = create_task_wrapper(produce_b, app, 'test.produce_b')
+        node_b = TaskNode(fn=fn_b, kwargs={'value': 2})
+
+        def consume(
+            first: TaskResult[int, TaskError],
+            second: TaskResult[int, TaskError],
+        ) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=0)
+        consumer_fn = create_task_wrapper(consume, app, 'test.consume')
+        # 'first' via explicit args_from, 'second' via from_node()
+        factory = consumer_fn.node(
+            args_from={'first': node_a},
+            waits_for=[node_a],
+        )
+
+        node = factory(second=from_node(node_b))  # type: ignore[call-arg]
+
+        assert node.args_from == {'first': node_a, 'second': node_b}  # type: ignore[union-attr]
+        assert node_a in node.waits_for  # type: ignore[union-attr]
+        assert node_b in node.waits_for  # type: ignore[union-attr]
+
+
+# =============================================================================
+# NodeFactory — manual args_from preserved
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestNodeFactoryManualArgsFrom:
+    """Tests that manual args_from continues to work without from_node()."""
+
+    def test_manual_args_from_still_works(self) -> None:
+        """Explicit args_from without markers is forwarded unchanged."""
+        from horsies.core.models.workflow import TaskNode
+
+        app = _make_app()
+
+        def produce(value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+        producer_fn = create_task_wrapper(produce, app, 'test.produce')
+        producer_node = TaskNode(fn=producer_fn, kwargs={'value': 42})
+
+        def consume(data: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=0)
+        consumer_fn = create_task_wrapper(consume, app, 'test.consume')
+        factory = consumer_fn.node(
+            args_from={'data': producer_node},
+            waits_for=[producer_node],
+        )
+
+        node = factory()  # type: ignore[call-arg]  # no kwargs needed — all from injection
+
+        assert node.args_from == {'data': producer_node}  # type: ignore[union-attr]
+        assert producer_node in node.waits_for  # type: ignore[union-attr]
+        assert node.kwargs == {}  # type: ignore[union-attr]

@@ -114,7 +114,7 @@
 
 ### NodeFactory[P, T] (typed node builder)
 - Returned by task_function.node(**workflow_opts)
-- Called with task arguments: node_factory(*args, **kwargs) -> TaskNode[T]
+- Called with task arguments: node_factory(**kwargs) -> TaskNode[T]
 - Two-step pattern: step 1 sets workflow options, step 2 sets task arguments
 - Example: my_task.node(waits_for=[dep], args_from={"x": dep})(extra_arg="val")
 - Workflow options: waits_for, workflow_ctx_from, args_from, queue, priority,
@@ -122,7 +122,7 @@
 
 ### TaskNode[T]
 - T = ok type of the task's TaskResult
-- fn: TaskFunction, args: tuple, kwargs: dict
+- fn: TaskFunction, kwargs: dict (args field exists but is init=False — not a construction param)
 - waits_for: list of TaskNode | SubWorkflowNode (wait for terminal)
 - args_from: dict[str, TaskNode | SubWorkflowNode] (inject TaskResult as kwarg)
 - workflow_ctx_from: list[TaskNode | SubWorkflowNode] | None (subset for WorkflowContext)
@@ -140,7 +140,7 @@
 ### SubWorkflowNode[T]
 - T = child workflow's output type (from WorkflowDefinition[T])
 - workflow_def: type[WorkflowDefinition[T]]
-- args, kwargs: passed to workflow_def.build_with(app, *args, **kwargs)
+- kwargs: passed to workflow_def.build_with(app, **kwargs)
 - waits_for, args_from, workflow_ctx_from: same semantics as TaskNode
 - join, min_success, allow_failed_deps: same as TaskNode
 - run_when, skip_when: same conditional execution as TaskNode
@@ -235,7 +235,7 @@
 - Subclass with name (ClassVar[str]) and TaskNode/SubWorkflowNode class attributes
 - class Meta: output, on_error, success_policy
 - .build(app) -> WorkflowSpec
-- .build_with(app, *args, **params) -> WorkflowSpec (with runtime parameters)
+- .build_with(app, **params) -> WorkflowSpec (with runtime parameters; kwargs-only)
 - .get_workflow_nodes() -> list[tuple[str, TaskNode | SubWorkflowNode]]
 - Node IDs auto-assigned from attribute names
 
@@ -329,10 +329,14 @@
   - Phase 1: Config validation (implicit at AppConfig construction)
   - Phase 2: Task module imports — imports each module, collects import/definition errors
   - Phase 3: Workflow validation — triggered during imports (WorkflowSpec DAG construction)
-  - Phase 4: Runtime policy safety — retry_policy, exception_mapper, auto_retry_for validation
-  - Phase 5 (--live only): Broker connectivity — async SELECT 1 against PostgreSQL
+  - Phase 4: Workflow builders — executes @app.workflow_builder functions, validates returned specs, detects undecorated builders (E030)
+  - Phase 5: Runtime policy safety — validates retry/exception-mapper policy metadata
+  - Phase 6 (--live only): Broker connectivity — async SELECT 1 against PostgreSQL
+- Guarantee model:
+  - Strong: @app.workflow_builder decorated functions are fully executed and validated for exercised builder cases
+  - Best-effort: undecorated builder detection (E030) is heuristic — only scans directly discovered modules
 - Returns list[HorsiesError]; empty = all passed
-- Errors are collected (not fail-fast): all phases run and all errors surface together
+- Errors are collected within each phase; check returns early before later phases when earlier phases fail
 - Worker and scheduler also run check() at startup before accepting work
 - On success: prints "ok: all validations passed" with task count
 - On failure: prints Rust-style ValidationReport to stderr, exits with code 1
@@ -340,16 +344,22 @@
 ### Error Types and Reporting
 
 #### ErrorCode (enum, startup/validation errors E001-E399)
-- Workflow validation (E001-E020):
+- Workflow validation (E001-E030):
   - E001 WORKFLOW_NO_NAME, E002 WORKFLOW_NO_NODES
   - E003 WORKFLOW_INVALID_NODE_ID, E004 WORKFLOW_DUPLICATE_NODE_ID
   - E005 WORKFLOW_NO_ROOT_TASKS, E006 WORKFLOW_INVALID_DEPENDENCY
   - E007 WORKFLOW_CYCLE_DETECTED, E008 WORKFLOW_INVALID_ARGS_FROM
   - E009 WORKFLOW_INVALID_CTX_FROM, E010 WORKFLOW_CTX_PARAM_MISSING
   - E011 WORKFLOW_INVALID_OUTPUT, E012 WORKFLOW_INVALID_SUCCESS_POLICY
-  - E013 WORKFLOW_INVALID_JOIN, E016 WORKFLOW_ARGS_WITH_INJECTION
-  - E017 WORKFLOW_INVALID_SUBWORKFLOW_RETRY_MODE, E018 WORKFLOW_SUBWORKFLOW_APP_MISSING
-  - E019 WORKFLOW_INVALID_KWARG_KEY, E020 WORKFLOW_MISSING_REQUIRED_PARAMS
+  - E013 WORKFLOW_INVALID_JOIN, E014 WORKFLOW_UNRESOLVED_QUEUE, E015 WORKFLOW_UNRESOLVED_PRIORITY
+  - E016 WORKFLOW_ARGS_WITH_INJECTION (legacy), E017 WORKFLOW_INVALID_SUBWORKFLOW_RETRY_MODE
+  - E018 WORKFLOW_SUBWORKFLOW_APP_MISSING, E019 WORKFLOW_INVALID_KWARG_KEY
+  - E020 WORKFLOW_MISSING_REQUIRED_PARAMS, E021 WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
+  - E022 WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH, E023 WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING
+  - E024 WORKFLOW_ARGS_FROM_TYPE_MISMATCH, E025 WORKFLOW_OUTPUT_TYPE_MISMATCH
+  - E026 WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
+  - E027 WORKFLOW_CHECK_CASES_REQUIRED, E028 WORKFLOW_CHECK_CASE_INVALID
+  - E029 WORKFLOW_CHECK_BUILDER_EXCEPTION, E030 WORKFLOW_CHECK_UNDECORATED_BUILDER
 - Task definition (E100-E103):
   - E100 TASK_NO_RETURN_TYPE, E101 TASK_INVALID_RETURN_TYPE
   - E102 TASK_INVALID_OPTIONS, E103 TASK_INVALID_QUEUE

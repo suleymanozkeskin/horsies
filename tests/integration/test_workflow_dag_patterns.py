@@ -119,9 +119,9 @@ class TestDAGPatterns:
         task_b = make_simple_task(app, 'linear_b')
         task_c = make_simple_task(app, 'linear_c')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, args=(3,), waits_for=[node_b])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_b])
 
         spec = make_workflow_spec(
             broker=broker, name='linear', tasks=[node_a, node_b, node_c]
@@ -167,10 +167,10 @@ class TestDAGPatterns:
         task_c = make_simple_task(app, 'fan_out_c')
         task_d = make_simple_task(app, 'fan_out_d')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, args=(3,), waits_for=[node_a])
-        node_d = TaskNode(fn=task_d, args=(4,), waits_for=[node_a])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
+        node_d = TaskNode(fn=task_d, kwargs={'value': 4}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='fan_out', tasks=[node_a, node_b, node_c, node_d]
@@ -206,9 +206,9 @@ class TestDAGPatterns:
         task_b = make_simple_task(app, 'prio_b')
         task_c = make_simple_task(app, 'prio_c')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a], priority=10)
-        node_c = TaskNode(fn=task_c, args=(3,), waits_for=[node_a], priority=50)
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a], priority=10)
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a], priority=50)
 
         spec = make_workflow_spec(
             broker=broker, name='prio_ready', tasks=[node_a, node_b, node_c]
@@ -264,10 +264,10 @@ class TestDAGPatterns:
         task_c = make_simple_task(app, 'fan_in_c')
         task_d = make_simple_task(app, 'fan_in_d')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,))
-        node_c = TaskNode(fn=task_c, args=(3,))
-        node_d = TaskNode(fn=task_d, args=(4,), waits_for=[node_a, node_b, node_c])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2})
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3})
+        node_d = TaskNode(fn=task_d, kwargs={'value': 4}, waits_for=[node_a, node_b, node_c])
 
         spec = make_workflow_spec(
             broker=broker, name='fan_in', tasks=[node_a, node_b, node_c, node_d]
@@ -308,10 +308,10 @@ class TestDAGPatterns:
         task_c = make_simple_task(app, 'diamond_c')
         task_d = make_simple_task(app, 'diamond_d')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, args=(3,), waits_for=[node_a])
-        node_d = TaskNode(fn=task_d, args=(4,), waits_for=[node_b, node_c])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
+        node_d = TaskNode(fn=task_d, kwargs={'value': 4}, waits_for=[node_b, node_c])
 
         spec = make_workflow_spec(
             broker=broker, name='diamond', tasks=[node_a, node_b, node_c, node_d]
@@ -345,9 +345,9 @@ class TestDAGPatterns:
         session, broker, app = setup
         tasks = [make_simple_task(app, f'deep_{i}') for i in range(5)]
 
-        nodes = [TaskNode(fn=tasks[0], args=(0,))]
+        nodes = [TaskNode(fn=tasks[0], kwargs={'value': 0})]
         for i in range(1, 5):
-            nodes.append(TaskNode(fn=tasks[i], args=(i,), waits_for=[nodes[i - 1]]))
+            nodes.append(TaskNode(fn=tasks[i], kwargs={'value': i}, waits_for=[nodes[i - 1]]))
 
         spec = make_workflow_spec(broker=broker, name='deep', tasks=nodes)
 
@@ -379,9 +379,9 @@ class TestDAGPatterns:
         task_b = make_simple_task(app, 'multi_root_b')
         task_c = make_simple_task(app, 'multi_root_c')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,))
-        node_c = TaskNode(fn=task_c, args=(3,), waits_for=[node_a, node_b])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2})
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a, node_b])
 
         spec = make_workflow_spec(
             broker=broker, name='multi_root', tasks=[node_a, node_b, node_c]
@@ -413,9 +413,9 @@ class TestDAGPatterns:
         task_b = make_simple_task(app, 'multi_term_b')
         task_c = make_simple_task(app, 'multi_term_c')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, args=(3,), waits_for=[node_a])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
 
         # No explicit output - both B and C are terminals
         spec = make_workflow_spec(
@@ -444,11 +444,11 @@ class TestDAGPatterns:
         task_d = make_simple_task(app, 'mixed_d')
         task_e = make_simple_task(app, 'mixed_e')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, args=(3,), waits_for=[node_a])
-        node_d = TaskNode(fn=task_d, args=(4,), waits_for=[node_b])
-        node_e = TaskNode(fn=task_e, args=(5,), waits_for=[node_c, node_d])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
+        node_d = TaskNode(fn=task_d, kwargs={'value': 4}, waits_for=[node_b])
+        node_e = TaskNode(fn=task_e, kwargs={'value': 5}, waits_for=[node_c, node_d])
 
         spec = make_workflow_spec(
             broker=broker, name='mixed', tasks=[node_a, node_b, node_c, node_d, node_e]
@@ -492,7 +492,7 @@ class TestDAGPatterns:
         session, broker, app = setup
         task_a = make_simple_task(app, 'single_a')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(broker=broker, name='single', tasks=[node_a])
 
         handle = await start_workflow_async(spec, broker)
@@ -513,12 +513,12 @@ class TestDAGPatterns:
         middle_tasks = [make_simple_task(app, f'wide_mid_{i}') for i in range(10)]
         task_c = make_simple_task(app, 'wide_sink')
 
-        node_a = TaskNode(fn=task_a, args=(0,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 0})
         middle_nodes = [
-            TaskNode(fn=middle_tasks[i], args=(i + 1,), waits_for=[node_a])
+            TaskNode(fn=middle_tasks[i], kwargs={'value': i + 1}, waits_for=[node_a])
             for i in range(10)
         ]
-        node_c = TaskNode(fn=task_c, args=(99,), waits_for=middle_nodes)
+        node_c = TaskNode(fn=task_c, kwargs={'value': 99}, waits_for=middle_nodes)
 
         spec = make_workflow_spec(
             broker=broker,
@@ -562,10 +562,10 @@ class TestDAGPatterns:
         task_c = make_simple_task(app, 'rev_c')
         task_d = make_simple_task(app, 'rev_d')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,))
-        node_c = TaskNode(fn=task_c, args=(3,))
-        node_d = TaskNode(fn=task_d, args=(4,), waits_for=[node_a, node_b, node_c])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2})
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3})
+        node_d = TaskNode(fn=task_d, kwargs={'value': 4}, waits_for=[node_a, node_b, node_c])
 
         spec = make_workflow_spec(
             broker=broker, name='rev_fan_in', tasks=[node_a, node_b, node_c, node_d],
@@ -602,10 +602,10 @@ class TestDAGPatterns:
         task_c = make_simple_task(app, 'dfail_c')
         task_d = make_simple_task(app, 'dfail_d')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, args=(3,), waits_for=[node_a])
-        node_d = TaskNode(fn=task_d, args=(4,), waits_for=[node_b, node_c])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
+        node_d = TaskNode(fn=task_d, kwargs={'value': 4}, waits_for=[node_b, node_c])
 
         spec = make_workflow_spec(
             broker=broker, name='diamond_fail', tasks=[node_a, node_b, node_c, node_d],
@@ -643,10 +643,10 @@ class TestDAGPatterns:
         task_c = make_simple_task(app, 'rfail_c')
         task_d = make_simple_task(app, 'rfail_d')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, args=(3,), waits_for=[node_a])
-        node_d = TaskNode(fn=task_d, args=(4,), waits_for=[node_a])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
+        node_d = TaskNode(fn=task_d, kwargs={'value': 4}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='root_fail', tasks=[node_a, node_b, node_c, node_d],
@@ -678,11 +678,11 @@ class TestDAGPatterns:
         task_d = make_simple_task(app, 'mfail_d')
         task_e = make_simple_task(app, 'mfail_e')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, args=(3,), waits_for=[node_a])
-        node_d = TaskNode(fn=task_d, args=(4,), waits_for=[node_b])
-        node_e = TaskNode(fn=task_e, args=(5,), waits_for=[node_c, node_d])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
+        node_d = TaskNode(fn=task_d, kwargs={'value': 4}, waits_for=[node_b])
+        node_e = TaskNode(fn=task_e, kwargs={'value': 5}, waits_for=[node_c, node_d])
 
         spec = make_workflow_spec(
             broker=broker,

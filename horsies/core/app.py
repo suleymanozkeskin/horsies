@@ -40,9 +40,12 @@ from horsies.core.errors import (
     ValidationReport,
     raise_collected,
 )
+import inspect
 import os
 import importlib
 import glob
+import sys
+from dataclasses import dataclass
 from fnmatch import fnmatch
 from horsies.core.utils.imports import import_by_path
 from horsies.core.codec.serde import loads_json
@@ -56,6 +59,21 @@ T = TypeVar('T')
 OutT = TypeVar('OutT')
 
 _E = TypeVar('_E', bound=HorsiesError)
+
+# Sentinel attribute name stamped on functions decorated with @app.workflow_builder
+_BUILDER_ATTR = '__horsies_workflow_builder__'
+
+# Attribute name for opt-out of undecorated builder detection
+_NO_CHECK_ATTR = '__horsies_no_check__'
+
+
+@dataclass
+class _WorkflowBuilderMeta:
+    """Internal metadata for a registered workflow builder."""
+
+    fn: Callable[..., Any]
+    cases: list[dict[str, Any]]
+    location: SourceLocation | None
 
 
 def _no_location(error: _E) -> _E:
@@ -81,6 +99,7 @@ class Horsies:
         self.tasks: TaskRegistry[Callable[..., Any]] = TaskRegistry()
         self.logger = get_logger('app')
         self._discovered_task_modules: list[str] = []
+        self._workflow_builders: list[_WorkflowBuilderMeta] = []
         # When True, task sends/schedules are suppressed (used during import/discovery)
         self._suppress_sends: bool = False
         # Role indicates context: 'producer', 'worker', or 'scheduler'
@@ -284,6 +303,9 @@ class Horsies:
         Phase 1: Config — already validated at construction (implicit pass).
         Phase 2: Task module imports — import each module, collect errors.
         Phase 3: Workflow validation — happens during imports (WorkflowSpec construction).
+        Phase 3.1: Workflow builder execution — run registered builders under send suppression.
+        Phase 3.2: Undecorated builder detection — fail-closed on missing decorators.
+        Phase 3.5: Policy safety checks — runtime retry/mapping validation.
         Phase 4 (if live): Broker connectivity — async SELECT 1.
 
         Args:
@@ -297,6 +319,16 @@ class Horsies:
 
         # Phase 2: task module imports (also triggers Phase 3 workflow validation)
         all_errors.extend(self._check_task_imports())
+        if all_errors:
+            return all_errors
+
+        # Phase 3.1: execute registered workflow builders under send suppression
+        all_errors.extend(self._check_workflow_builders())
+        if all_errors:
+            return all_errors
+
+        # Phase 3.2: detect undecorated top-level WorkflowSpec-returning functions
+        all_errors.extend(self._check_undecorated_builders())
         if all_errors:
             return all_errors
 
@@ -876,4 +908,289 @@ class Horsies:
         )
         if output is None:
             return cast('WorkflowSpec[WorkflowTerminalResults]', spec)
-        return cast('WorkflowSpec[OutT]', spec)
+        return spec
+
+    # -------- workflow builder contract --------
+    def workflow_builder(
+        self,
+        *,
+        cases: list[dict[str, Any]] | None = None,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """Decorator registering a workflow builder for check-phase validation.
+
+        Builders are functions that return WorkflowSpec. During `horsies check`,
+        registered builders are executed under send suppression to validate the
+        workflows they produce.
+
+        Args:
+            cases: For parameterized builders (with required params), a list of
+                   kwarg dicts to invoke the builder with. Required when the
+                   builder has parameters without defaults.
+        """
+
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            location = SourceLocation.from_function(fn)
+            setattr(fn, _BUILDER_ATTR, True)
+            self._workflow_builders.append(
+                _WorkflowBuilderMeta(
+                    fn=fn,
+                    cases=cases or [],
+                    location=location,
+                ),
+            )
+            return fn
+
+        return decorator
+
+    def get_workflow_builders(self) -> list[_WorkflowBuilderMeta]:
+        """Return registered builders (for tests and introspection)."""
+        return list(self._workflow_builders)
+
+    def _check_workflow_builders(self) -> list[HorsiesError]:
+        """Execute registered builders under send suppression, collect errors."""
+        errors: list[HorsiesError] = []
+        prev_suppress = self._suppress_sends
+        self.suppress_sends(True)
+        try:
+            for meta in self._workflow_builders:
+                errors.extend(self._run_single_builder(meta))
+        finally:
+            self.suppress_sends(prev_suppress)
+        return errors
+
+    def _run_single_builder(
+        self,
+        meta: _WorkflowBuilderMeta,
+    ) -> list[HorsiesError]:
+        """Run a single builder (all cases or auto-invoke) and collect errors."""
+        errors: list[HorsiesError] = []
+        fn = meta.fn
+        fn_name = getattr(fn, '__qualname__', fn.__name__)
+        sig = inspect.signature(fn)
+
+        # Determine if builder has required params
+        required_params = [
+            p
+            for p in sig.parameters.values()
+            if p.default is inspect.Parameter.empty
+            and p.kind not in (
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            )
+        ]
+        has_required = len(required_params) > 0
+
+        if not has_required:
+            # Zero-arg or all-defaults builder: auto-run once
+            errors.extend(self._invoke_builder(fn, fn_name, {}, meta.location))
+            return errors
+
+        # Parameterized builder: must have cases
+        if not meta.cases:
+            errors.append(
+                ConfigurationError(
+                    message=f"parameterized builder '{fn_name}' missing cases",
+                    code=ErrorCode.WORKFLOW_CHECK_CASES_REQUIRED,
+                    location=meta.location,
+                    notes=[
+                        f'required params: {[p.name for p in required_params]}',
+                    ],
+                    help_text=(
+                        'add cases= to @app.workflow_builder() with at least one '
+                        'dict of kwargs covering each required parameter'
+                    ),
+                ),
+            )
+            return errors
+
+        # Validate and run each case
+        param_names = set(sig.parameters.keys())
+        for idx, case in enumerate(meta.cases):
+            if not isinstance(case, dict):  # type: ignore[reportUnnecessaryIsInstance]
+                errors.append(
+                    ConfigurationError(
+                        message=f"builder '{fn_name}' case[{idx}] is not a dict",
+                        code=ErrorCode.WORKFLOW_CHECK_CASE_INVALID,
+                        location=meta.location,
+                        notes=[f'got {type(case).__name__}'],
+                        help_text='each case must be a dict of keyword arguments',
+                    ),
+                )
+                continue
+
+            # Check for unknown keys
+            unknown_keys = set(case.keys()) - param_names
+            if unknown_keys:
+                errors.append(
+                    ConfigurationError(
+                        message=f"builder '{fn_name}' case[{idx}] has unknown keys",
+                        code=ErrorCode.WORKFLOW_CHECK_CASE_INVALID,
+                        location=meta.location,
+                        notes=[
+                            f'unknown: {sorted(unknown_keys)}',
+                            f'valid params: {sorted(param_names)}',
+                        ],
+                        help_text='case keys must match builder parameter names',
+                    ),
+                )
+                continue
+
+            # Check for missing required keys
+            missing_keys = {p.name for p in required_params} - set(case.keys())
+            if missing_keys:
+                errors.append(
+                    ConfigurationError(
+                        message=f"builder '{fn_name}' case[{idx}] missing required keys",
+                        code=ErrorCode.WORKFLOW_CHECK_CASE_INVALID,
+                        location=meta.location,
+                        notes=[
+                            f'missing: {sorted(missing_keys)}',
+                        ],
+                        help_text='each case must provide all required parameters',
+                    ),
+                )
+                continue
+
+            errors.extend(self._invoke_builder(fn, fn_name, case, meta.location))
+
+        return errors
+
+    def _invoke_builder(
+        self,
+        fn: Callable[..., Any],
+        fn_name: str,
+        kwargs: dict[str, Any],
+        location: SourceLocation | None,
+    ) -> list[HorsiesError]:
+        """Call a builder with kwargs and collect any errors it produces."""
+        errors: list[HorsiesError] = []
+        try:
+            result = fn(**kwargs)
+            if not self._is_workflow_spec_like(result):
+                case_summary = f' with {kwargs}' if kwargs else ''
+                errors.append(
+                    _no_location(
+                        ConfigurationError(
+                            message=f"builder '{fn_name}' returned non-WorkflowSpec{case_summary}",
+                            code=ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
+                            location=location,
+                            notes=[f'got {type(result).__name__}'],
+                            help_text='workflow builders must return a WorkflowSpec instance',
+                        ),
+                    ),
+                )
+        except MultipleValidationErrors as exc:
+            errors.extend(exc.report.errors)
+        except HorsiesError as exc:
+            errors.append(exc)
+        except Exception as exc:
+            case_summary = f' with {kwargs}' if kwargs else ''
+            errors.append(
+                _no_location(
+                    ConfigurationError(
+                        message=f"builder '{fn_name}' raised an unexpected exception{case_summary}",
+                        code=ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
+                        location=location,
+                        notes=[f'{type(exc).__name__}: {exc}'],
+                        help_text='workflow builders must not raise non-horsies exceptions during check',
+                    ),
+                ),
+            )
+        return errors
+
+    def _check_undecorated_builders(self) -> list[HorsiesError]:
+        """Detect top-level functions returning WorkflowSpec without decorator."""
+        errors: list[HorsiesError] = []
+
+        for module_path in self._discovered_task_modules:
+            module = self._resolve_imported_module(module_path)
+            if module is None:
+                continue
+
+            try:
+                hints_by_name = self._collect_module_function_return_hints(module)
+            except Exception:
+                # If we can't resolve type hints (forward refs, etc.), skip module
+                continue
+
+            for fn_name, return_hint in hints_by_name.items():
+                fn_obj = getattr(module, fn_name)
+
+                # Skip if already decorated
+                if getattr(fn_obj, _BUILDER_ATTR, False):
+                    continue
+
+                # Skip if explicitly opted out
+                if getattr(fn_obj, _NO_CHECK_ATTR, False):
+                    continue
+
+                if self._hint_is_workflow_spec(return_hint):
+                    location = SourceLocation.from_function(fn_obj)
+                    errors.append(
+                        ConfigurationError(
+                            message=f"undecorated workflow builder '{fn_name}'",
+                            code=ErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER,
+                            location=location,
+                            notes=[
+                                f"function '{fn_name}' returns WorkflowSpec but is not decorated with @app.workflow_builder",
+                            ],
+                            help_text=(
+                                'add @app.workflow_builder() to register this builder for check validation;\n'
+                                f'or set {fn_name}.__horsies_no_check__ = True to suppress this warning'
+                            ),
+                        ),
+                    )
+
+        return errors
+
+    @staticmethod
+    def _resolve_imported_module(module_path: str) -> Any | None:
+        """Look up an already-imported module by path or dotted name."""
+        if module_path.endswith('.py') or os.path.sep in module_path:
+            abs_path = os.path.realpath(module_path)
+            # Find module in sys.modules by filename
+            for mod in sys.modules.values():
+                mod_file = getattr(mod, '__file__', None)
+                if mod_file is not None and os.path.realpath(mod_file) == abs_path:
+                    return mod
+            return None
+        return sys.modules.get(module_path)
+
+    @staticmethod
+    def _collect_module_function_return_hints(
+        module: Any,
+    ) -> dict[str, Any]:
+        """Get return type hints for top-level functions in a module."""
+        result: dict[str, Any] = {}
+        for name, obj in inspect.getmembers(module, inspect.isfunction):
+            # Only top-level functions defined in this module
+            if getattr(obj, '__module__', None) != module.__name__:
+                continue
+            try:
+                hints = inspect.get_annotations(obj, eval_str=True)
+            except Exception:
+                continue
+            return_hint = hints.get('return')
+            if return_hint is not None:
+                result[name] = return_hint
+        return result
+
+    @staticmethod
+    def _hint_is_workflow_spec(hint: Any) -> bool:
+        """Check if a type hint resolves to WorkflowSpec[...] or bare WorkflowSpec."""
+        from typing import get_origin
+
+        if hint is WorkflowSpec:
+            return True
+        origin = get_origin(hint)
+        if origin is WorkflowSpec:
+            return True
+        return False
+
+    @staticmethod
+    def _is_workflow_spec_like(value: Any) -> bool:
+        """Return True for WorkflowSpec instances and test doubles with spec shape."""
+        if isinstance(value, WorkflowSpec):
+            return True
+        required_attrs = ('name', 'tasks', 'on_error', 'broker')
+        return all(hasattr(value, attr) for attr in required_attrs)

@@ -202,18 +202,74 @@ def check(self, *, live: bool = False) -> list[HorsiesError]
 | Phase | What it validates | Gating |
 |-------|-------------------|--------|
 | 1. Config | `AppConfig`, `RecoveryConfig`, `ScheduleConfig` consistency | Validated at construction (implicit pass) |
-| 2. Task imports | Imports all discovered task modules, collects import/registration errors | Errors stop progression to Phase 4 |
+| 2. Task imports | Imports all discovered task modules, collects import/registration errors | Errors stop progression to Phases 4-6 |
 | 3. Workflows | `WorkflowSpec` DAG validation (triggered during module imports) | Collected alongside Phase 2 |
-| 4. Broker (if `live=True`) | Connects to PostgreSQL and runs `SELECT 1` | Only runs if Phases 2-3 pass |
+| 4. Workflow builders | Executes `@app.workflow_builder` functions, validates returned specs, detects undecorated builders | Errors stop progression to Phases 5-6 |
+| 5. Runtime policy safety | Validates retry/exception-mapper policy metadata after imports | Errors stop progression to Phase 6 |
+| 6. Broker (if `live=True`) | Connects to PostgreSQL and runs `SELECT 1` | Only runs if Phases 2-5 pass |
 
 **Returns** an empty list when all validations pass, or a list of `HorsiesError` instances with Rust-style formatting.
 
 **CLI equivalent:**
 
 ```bash
-horsies check myapp.instance:app        # Phases 1-3
-horsies check myapp.instance:app --live  # Phases 1-4
+horsies check myapp.instance:app        # Phases 1-5
+horsies check myapp.instance:app --live  # Phases 1-6
 ```
+
+### `@app.workflow_builder`
+
+Register a workflow builder function for check-phase validation. During `horsies check`, registered builders are executed under send suppression (no tasks are actually enqueued) to validate the `WorkflowSpec` they produce.
+
+```python
+# Zero-parameter builder — called with no arguments during check
+@app.workflow_builder()
+def build_etl_pipeline() -> WorkflowSpec:
+    ...
+
+# Parameterized builder — requires cases= for check to exercise
+@app.workflow_builder(cases=[
+    {'region': 'us-east'},
+    {'region': 'eu-west'},
+])
+def build_regional_pipeline(region: str) -> WorkflowSpec:
+    ...
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `cases` | `list[dict[str, Any]] \| None` | Kwarg dicts to invoke the builder with during check. Required when the builder has parameters without defaults. |
+
+**What check validates per builder invocation:**
+
+- Builder does not raise exceptions (E029)
+- Builder returns a `WorkflowSpec` instance (E029)
+- The returned `WorkflowSpec` passes full DAG validation (node IDs, dependencies, kwargs, args_from types, etc.)
+
+### Guarantee Model
+
+`horsies check` has two validation paths with different guarantee levels:
+
+**Strong guarantee (decorated builders):** Functions registered with `@app.workflow_builder` are executed during check. Every `WorkflowSpec` they produce is fully validated — DAG structure, kwargs against function signatures, `args_from` type compatibility, missing required params, and more. For the exercised builder cases, this catches structural workflow validity errors before runtime.
+
+**Best-effort (undecorated builder detection):** Check also scans discovered task modules for top-level functions whose return type annotation is `WorkflowSpec` but lack the `@app.workflow_builder` decorator. These produce E030 check errors. This detection is heuristic:
+
+- It only scans modules directly listed in `discover_tasks()`, not sub-modules of discovered packages.
+- Functions re-exported in `__init__.py` from sub-modules may not be detected.
+
+E030 is a safety net, not an absolute proof that no undecorated builders exist.
+
+### CI Playbook
+
+For deterministic, high-confidence workflow validity in CI:
+
+1. Decorate every workflow entrypoint with `@app.workflow_builder(...)`.
+2. For parameterized builders, provide `cases=` that cover all meaningful branches and shapes.
+3. Ensure all builder modules are imported by the app used in `horsies check` (no hidden or dynamic registration paths).
+4. Run `horsies check` in CI and fail the pipeline on any errors.
+5. Treat E030 as additional lint signal, not the primary guarantee mechanism.
 
 ## Logging Configuration
 

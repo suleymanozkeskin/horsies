@@ -55,9 +55,9 @@ def fail_task(error_code: str) -> TaskResult[Any, TaskError]:
 # L4.1: Linear Chain (A → B → C)
 # =============================================================================
 
-node_linear_a = TaskNode(fn=step_task, args=('A',))
-node_linear_b = TaskNode(fn=step_task, args=('B',), waits_for=[node_linear_a])
-node_linear_c = TaskNode(fn=step_task, args=('C',), waits_for=[node_linear_b])
+node_linear_a = TaskNode(fn=step_task, kwargs={"step": 'A'})
+node_linear_b = TaskNode(fn=step_task, kwargs={"step": 'B'}, waits_for=[node_linear_a])
+node_linear_c = TaskNode(fn=step_task, kwargs={"step": 'C'}, waits_for=[node_linear_b])
 
 spec_linear = app.workflow(
     name='e2e_linear',
@@ -69,23 +69,17 @@ spec_linear = app.workflow(
 # L4.2: Fan-Out (root → B, C, D)
 # =============================================================================
 
-node_fanout_root = TaskNode(fn=step_task, args=('root',))
+node_fanout_root = TaskNode(fn=step_task, kwargs={"step": 'root'})
 node_fanout_b = TaskNode(
-    fn=slow_step_task,
-    args=('B',),
-    kwargs={'delay_ms': 500},
+    fn=slow_step_task, kwargs={"step": 'B', 'delay_ms': 500},
     waits_for=[node_fanout_root],
 )
 node_fanout_c = TaskNode(
-    fn=slow_step_task,
-    args=('C',),
-    kwargs={'delay_ms': 500},
+    fn=slow_step_task, kwargs={"step": 'C', 'delay_ms': 500},
     waits_for=[node_fanout_root],
 )
 node_fanout_d = TaskNode(
-    fn=slow_step_task,
-    args=('D',),
-    kwargs={'delay_ms': 500},
+    fn=slow_step_task, kwargs={"step": 'D', 'delay_ms': 500},
     waits_for=[node_fanout_root],
 )
 
@@ -99,11 +93,11 @@ spec_fanout = app.workflow(
 # L4.3: Fan-In (A, B, C → AGG)
 # =============================================================================
 
-node_fanin_a = TaskNode(fn=slow_step_task, args=('A',), kwargs={'delay_ms': 200})
-node_fanin_b = TaskNode(fn=slow_step_task, args=('B',), kwargs={'delay_ms': 400})
-node_fanin_c = TaskNode(fn=slow_step_task, args=('C',), kwargs={'delay_ms': 600})
+node_fanin_a = TaskNode(fn=slow_step_task, kwargs={"step": 'A', 'delay_ms': 200})
+node_fanin_b = TaskNode(fn=slow_step_task, kwargs={"step": 'B', 'delay_ms': 400})
+node_fanin_c = TaskNode(fn=slow_step_task, kwargs={"step": 'C', 'delay_ms': 600})
 node_fanin_agg = TaskNode(
-    fn=step_task, args=('AGG',), waits_for=[node_fanin_a, node_fanin_b, node_fanin_c]
+    fn=step_task, kwargs={"step": 'AGG'}, waits_for=[node_fanin_a, node_fanin_b, node_fanin_c]
 )
 
 spec_fanin = app.workflow(
@@ -116,21 +110,17 @@ spec_fanin = app.workflow(
 # L4.4: Diamond (A → B, C → D)
 # =============================================================================
 
-node_diamond_a = TaskNode(fn=step_task, args=('A',))
+node_diamond_a = TaskNode(fn=step_task, kwargs={"step": 'A'})
 node_diamond_b = TaskNode(
-    fn=slow_step_task,
-    args=('B',),
-    kwargs={'delay_ms': 200},
+    fn=slow_step_task, kwargs={"step": 'B', 'delay_ms': 200},
     waits_for=[node_diamond_a],
 )
 node_diamond_c = TaskNode(
-    fn=slow_step_task,
-    args=('C',),
-    kwargs={'delay_ms': 400},
+    fn=slow_step_task, kwargs={"step": 'C', 'delay_ms': 400},
     waits_for=[node_diamond_a],
 )
 node_diamond_d = TaskNode(
-    fn=step_task, args=('D',), waits_for=[node_diamond_b, node_diamond_c]
+    fn=step_task, kwargs={"step": 'D'}, waits_for=[node_diamond_b, node_diamond_c]
 )
 
 spec_diamond = app.workflow(
@@ -151,18 +141,18 @@ spec_diamond = app.workflow(
 #     G
 # =============================================================================
 
-node_complex_a = TaskNode(fn=step_task, args=('A',))
-node_complex_b = TaskNode(fn=step_task, args=('B',), waits_for=[node_complex_a])
-node_complex_c = TaskNode(fn=step_task, args=('C',), waits_for=[node_complex_a])
-node_complex_d = TaskNode(fn=step_task, args=('D',), waits_for=[node_complex_a])
+node_complex_a = TaskNode(fn=step_task, kwargs={"step": 'A'})
+node_complex_b = TaskNode(fn=step_task, kwargs={"step": 'B'}, waits_for=[node_complex_a])
+node_complex_c = TaskNode(fn=step_task, kwargs={"step": 'C'}, waits_for=[node_complex_a])
+node_complex_d = TaskNode(fn=step_task, kwargs={"step": 'D'}, waits_for=[node_complex_a])
 node_complex_e = TaskNode(
-    fn=step_task, args=('E',), waits_for=[node_complex_b, node_complex_c]
+    fn=step_task, kwargs={"step": 'E'}, waits_for=[node_complex_b, node_complex_c]
 )
 node_complex_f = TaskNode(
-    fn=step_task, args=('F',), waits_for=[node_complex_c, node_complex_d]
+    fn=step_task, kwargs={"step": 'F'}, waits_for=[node_complex_c, node_complex_d]
 )
 node_complex_g = TaskNode(
-    fn=step_task, args=('G',), waits_for=[node_complex_e, node_complex_f]
+    fn=step_task, kwargs={"step": 'G'}, waits_for=[node_complex_e, node_complex_f]
 )
 
 spec_complex = app.workflow(
@@ -183,9 +173,9 @@ spec_complex = app.workflow(
 # L4.6: Output Task (explicit output vs default terminal results)
 # =============================================================================
 
-node_output_step1 = TaskNode(fn=step_task, args=('step1',))
+node_output_step1 = TaskNode(fn=step_task, kwargs={"step": 'step1'})
 node_output_step2 = TaskNode(
-    fn=step_task, args=('step2',), waits_for=[node_output_step1]
+    fn=step_task, kwargs={"step": 'step2'}, waits_for=[node_output_step1]
 )
 node_output_final = TaskNode(fn=final_result_task, waits_for=[node_output_step2])
 
@@ -200,7 +190,7 @@ spec_output = app.workflow(
 # L4.8: Single-Node Workflow (boundary)
 # =============================================================================
 
-node_single = TaskNode(fn=step_task, args=('ONLY',))
+node_single = TaskNode(fn=step_task, kwargs={"step": 'ONLY'})
 
 spec_single_node = app.workflow(
     name='e2e_single_node',
@@ -212,9 +202,9 @@ spec_single_node = app.workflow(
 # L4.9: Linear Failure Cascade (A → B(fail) → C(skipped))
 # =============================================================================
 
-node_lfm_a = TaskNode(fn=step_task, args=('A',))
-node_lfm_b = TaskNode(fn=fail_task, args=('MID_FAIL',), waits_for=[node_lfm_a])
-node_lfm_c = TaskNode(fn=step_task, args=('C',), waits_for=[node_lfm_b])
+node_lfm_a = TaskNode(fn=step_task, kwargs={"step": 'A'})
+node_lfm_b = TaskNode(fn=fail_task, kwargs={"error_code": 'MID_FAIL'}, waits_for=[node_lfm_a])
+node_lfm_c = TaskNode(fn=step_task, kwargs={"step": 'C'}, waits_for=[node_lfm_b])
 
 spec_linear_fail_mid = app.workflow(
     name='e2e_linear_fail_mid',
@@ -226,16 +216,16 @@ spec_linear_fail_mid = app.workflow(
 # L4.10: Fan-Out with One Failing Branch (root → B(fail), C, D)
 # =============================================================================
 
-node_fof_root = TaskNode(fn=step_task, args=('root',))
+node_fof_root = TaskNode(fn=step_task, kwargs={"step": 'root'})
 node_fof_b = TaskNode(
-    fn=fail_task, args=('BRANCH_FAIL',), waits_for=[node_fof_root],
+    fn=fail_task, kwargs={"error_code": 'BRANCH_FAIL'}, waits_for=[node_fof_root],
 )
 node_fof_c = TaskNode(
-    fn=slow_step_task, args=('C',), kwargs={'delay_ms': 300},
+    fn=slow_step_task, kwargs={"step": 'C', 'delay_ms': 300},
     waits_for=[node_fof_root],
 )
 node_fof_d = TaskNode(
-    fn=slow_step_task, args=('D',), kwargs={'delay_ms': 300},
+    fn=slow_step_task, kwargs={"step": 'D', 'delay_ms': 300},
     waits_for=[node_fof_root],
 )
 
@@ -249,11 +239,11 @@ spec_fanout_one_fail = app.workflow(
 # L4.11: Fan-In with Failing Dep (A(fail), B, C → AGG(skipped))
 # =============================================================================
 
-node_fif_a = TaskNode(fn=fail_task, args=('FI_FAIL',))
-node_fif_b = TaskNode(fn=slow_step_task, args=('B',), kwargs={'delay_ms': 200})
-node_fif_c = TaskNode(fn=slow_step_task, args=('C',), kwargs={'delay_ms': 200})
+node_fif_a = TaskNode(fn=fail_task, kwargs={"error_code": 'FI_FAIL'})
+node_fif_b = TaskNode(fn=slow_step_task, kwargs={"step": 'B', 'delay_ms': 200})
+node_fif_c = TaskNode(fn=slow_step_task, kwargs={"step": 'C', 'delay_ms': 200})
 node_fif_agg = TaskNode(
-    fn=step_task, args=('AGG',),
+    fn=step_task, kwargs={"step": 'AGG'},
     waits_for=[node_fif_a, node_fif_b, node_fif_c],
 )
 
@@ -267,13 +257,13 @@ spec_fanin_one_fail = app.workflow(
 # L4.12-13: Slow Linear (cancellation + timeout tests)
 # =============================================================================
 
-node_slow_a = TaskNode(fn=slow_step_task, args=('A',), kwargs={'delay_ms': 200})
+node_slow_a = TaskNode(fn=slow_step_task, kwargs={"step": 'A', 'delay_ms': 200})
 node_slow_b = TaskNode(
-    fn=slow_step_task, args=('B',), kwargs={'delay_ms': 1000},
+    fn=slow_step_task, kwargs={"step": 'B', 'delay_ms': 1000},
     waits_for=[node_slow_a],
 )
 node_slow_c = TaskNode(
-    fn=slow_step_task, args=('C',), kwargs={'delay_ms': 1000},
+    fn=slow_step_task, kwargs={"step": 'C', 'delay_ms': 1000},
     waits_for=[node_slow_b],
 )
 
@@ -487,7 +477,7 @@ def dual_reader_task(
 # L5.1: args_from single dependency (A → B)
 # =============================================================================
 
-node_df_a = TaskNode(fn=produce_int_task, args=(5,))
+node_df_a = TaskNode(fn=produce_int_task, kwargs={"value": 5})
 node_df_b = TaskNode(
     fn=double_task,
     node_id='e2e_wf_double',
@@ -505,8 +495,8 @@ spec_args_from_single = app.workflow(
 # L5.2: args_from multiple dependencies (A, B → C)
 # =============================================================================
 
-node_df_multi_a = TaskNode(fn=produce_int_task, args=(10,))
-node_df_multi_b = TaskNode(fn=produce_int_task, args=(20,))
+node_df_multi_a = TaskNode(fn=produce_int_task, kwargs={"value": 10})
+node_df_multi_b = TaskNode(fn=produce_int_task, kwargs={"value": 20})
 node_df_multi_c = TaskNode(
     fn=sum_two_task,
     node_id='e2e_wf_sum_two',
@@ -524,7 +514,7 @@ spec_args_from_multi = app.workflow(
 # L5.3: workflow_ctx result_for (A → B)
 # =============================================================================
 
-node_ctx_a = TaskNode(fn=produce_int_task, args=(42,))
+node_ctx_a = TaskNode(fn=produce_int_task, kwargs={"value": 42})
 node_ctx_b = TaskNode(
     fn=ctx_reader_task,
     node_id='e2e_wf_ctx_reader',
@@ -542,8 +532,8 @@ spec_ctx_single = app.workflow(
 # L5.4: workflow_ctx with multiple deps (A, B → C)
 # =============================================================================
 
-node_ctx_multi_a = TaskNode(fn=produce_int_task, args=(100,))
-node_ctx_multi_b = TaskNode(fn=produce_int_task, args=(200,))
+node_ctx_multi_a = TaskNode(fn=produce_int_task, kwargs={"value": 100})
+node_ctx_multi_b = TaskNode(fn=produce_int_task, kwargs={"value": 200})
 node_ctx_multi_c = TaskNode(
     fn=ctx_sum_task,
     node_id='e2e_wf_ctx_sum',
@@ -561,7 +551,7 @@ spec_ctx_multi = app.workflow(
 # L5.5: FAILED propagation (A fails → B with allow_failed_deps)
 # =============================================================================
 
-node_failed_a = TaskNode(fn=fail_with_task, args=('DELIBERATE_FAIL',))
+node_failed_a = TaskNode(fn=fail_with_task, kwargs={"error_code": 'DELIBERATE_FAIL'})
 node_failed_b = TaskNode(
     fn=check_upstream_skipped_task,  # Use task that returns success even with error input
     node_id='e2e_wf_check_upstream_skipped',
@@ -585,10 +575,9 @@ spec_failed_propagation = app.workflow(
 # L5.6: SKIPPED propagation (A fails → B skipped → C sees UPSTREAM_SKIPPED)
 # =============================================================================
 
-node_skipped_a = TaskNode(fn=fail_with_task, args=('CAUSE_SKIP',))
+node_skipped_a = TaskNode(fn=fail_with_task, kwargs={"error_code": 'CAUSE_SKIP'})
 node_skipped_b = TaskNode(
-    fn=passthrough_task,
-    args=(999,),
+    fn=passthrough_task, kwargs={"value": 999},
     waits_for=[node_skipped_a],
     # allow_failed_deps=False (default) means B will be SKIPPED when A fails
 )
@@ -615,8 +604,8 @@ spec_skipped_propagation = app.workflow(
 # L5.7: Join + ctx deps terminal gating (A, B → C with join=any, ctx from B)
 # =============================================================================
 
-node_join_ctx_a = TaskNode(fn=slow_step_task, args=('A',), kwargs={'delay_ms': 100})
-node_join_ctx_b = TaskNode(fn=slow_step_task, args=('B',), kwargs={'delay_ms': 300})
+node_join_ctx_a = TaskNode(fn=slow_step_task, kwargs={"step": 'A', 'delay_ms': 100})
+node_join_ctx_b = TaskNode(fn=slow_step_task, kwargs={"step": 'B', 'delay_ms': 300})
 node_join_ctx_c = TaskNode(
     fn=ctx_reader_str_task,  # Use string reader since slow_step_task returns strings
     node_id='e2e_wf_ctx_reader_str',
@@ -636,15 +625,14 @@ spec_join_ctx_gating = app.workflow(
 #       A → {B, C} → D (D uses args_from from B and ctx for C)
 # =============================================================================
 
-node_mixed_a = TaskNode(fn=produce_int_task, args=(7,))
+node_mixed_a = TaskNode(fn=produce_int_task, kwargs={"value": 7})
 node_mixed_b = TaskNode(
     fn=double_task,
     waits_for=[node_mixed_a],
     args_from={'input_result': node_mixed_a},
 )
 node_mixed_c = TaskNode(
-    fn=produce_int_task,
-    args=(3,),
+    fn=produce_int_task, kwargs={"value": 3},
     waits_for=[node_mixed_a],
 )
 node_mixed_d = TaskNode(
@@ -665,7 +653,7 @@ spec_mixed_dataflow = app.workflow(
 # L5.9: Transitive args_from chain (A → B → C)
 # =============================================================================
 
-node_chain_a = TaskNode(fn=produce_int_task, args=(3,))
+node_chain_a = TaskNode(fn=produce_int_task, kwargs={"value": 3})
 node_chain_b = TaskNode(
     fn=double_task,
     waits_for=[node_chain_a],
@@ -688,7 +676,7 @@ spec_args_from_chain = app.workflow(
 # L5.10: Failed dep with args_from, no success_policy (workflow FAILED)
 # =============================================================================
 
-node_fail_np_a = TaskNode(fn=fail_with_task, args=('DATAFLOW_FAIL',))
+node_fail_np_a = TaskNode(fn=fail_with_task, kwargs={"error_code": 'DATAFLOW_FAIL'})
 node_fail_np_b = TaskNode(
     fn=double_task,
     waits_for=[node_fail_np_a],
@@ -706,7 +694,7 @@ spec_args_from_fail_workflow = app.workflow(
 # L5.11: args_from with dict result (serialization round-trip)
 # =============================================================================
 
-node_dict_a = TaskNode(fn=produce_dict_task, args=('test_value',))
+node_dict_a = TaskNode(fn=produce_dict_task, kwargs={"value": 'test_value'})
 node_dict_b = TaskNode(
     fn=receive_dict_task,
     node_id='e2e_wf_receive_dict',
@@ -724,7 +712,7 @@ spec_args_from_dict = app.workflow(
 # L5.12: Same node via both args_from and workflow_ctx (dual injection)
 # =============================================================================
 
-node_dual_a = TaskNode(fn=produce_int_task, args=(77,))
+node_dual_a = TaskNode(fn=produce_int_task, kwargs={"value": 77})
 node_dual_b = TaskNode(
     fn=dual_reader_task,
     node_id='e2e_wf_dual_reader',
@@ -810,9 +798,9 @@ def retry_then_ok_task(
 # L6.2: Join=quorum with ctx gating (A, B, C → D with join=quorum, ctx from C)
 # =============================================================================
 
-node_quorum_a = TaskNode(fn=slow_mark_task, args=('A',), kwargs={'delay_ms': 100})
-node_quorum_b = TaskNode(fn=slow_mark_task, args=('B',), kwargs={'delay_ms': 150})
-node_quorum_c = TaskNode(fn=slow_mark_task, args=('C',), kwargs={'delay_ms': 300})
+node_quorum_a = TaskNode(fn=slow_mark_task, kwargs={"value": 'A', 'delay_ms': 100})
+node_quorum_b = TaskNode(fn=slow_mark_task, kwargs={"value": 'B', 'delay_ms': 150})
+node_quorum_c = TaskNode(fn=slow_mark_task, kwargs={"value": 'C', 'delay_ms': 300})
 node_quorum_d = TaskNode(
     fn=ctx_reader_str_task,  # Use string-aware ctx reader
     waits_for=[node_quorum_a, node_quorum_b, node_quorum_c],
@@ -832,7 +820,7 @@ spec_quorum_ctx_gating = app.workflow(
 # =============================================================================
 
 # For conditions to work, TaskNodes must be at module scope
-node_cond_a = TaskNode(fn=produce_int_task, args=(100,))
+node_cond_a = TaskNode(fn=produce_int_task, kwargs={"value": 100})
 
 # skip_when takes priority: if skip_when returns True, task is SKIPPED
 # even if run_when would return True
@@ -860,7 +848,7 @@ spec_skip_when_priority = app.workflow(
 )
 
 # run_when=False causes skip
-node_run_when_a = TaskNode(fn=produce_int_task, args=(50,))
+node_run_when_a = TaskNode(fn=produce_int_task, kwargs={"value": 50})
 node_run_when_b = TaskNode(
     fn=mark_task,
     kwargs={'value': 'should_be_skipped'},
@@ -886,15 +874,15 @@ spec_run_when_false = app.workflow(
 # =============================================================================
 
 # A longer pipeline for pause testing
-node_pause_a = TaskNode(fn=slow_mark_task, args=('A',), kwargs={'delay_ms': 100})
+node_pause_a = TaskNode(fn=slow_mark_task, kwargs={"value": 'A', 'delay_ms': 100})
 node_pause_b = TaskNode(
-    fn=slow_mark_task, args=('B',), kwargs={'delay_ms': 200}, waits_for=[node_pause_a]
+    fn=slow_mark_task, kwargs={"value": 'B', 'delay_ms': 200}, waits_for=[node_pause_a]
 )
 node_pause_c = TaskNode(
-    fn=slow_mark_task, args=('C',), kwargs={'delay_ms': 200}, waits_for=[node_pause_b]
+    fn=slow_mark_task, kwargs={"value": 'C', 'delay_ms': 200}, waits_for=[node_pause_b]
 )
 node_pause_d = TaskNode(
-    fn=slow_mark_task, args=('D',), kwargs={'delay_ms': 100}, waits_for=[node_pause_c]
+    fn=slow_mark_task, kwargs={"value": 'D', 'delay_ms': 100}, waits_for=[node_pause_c]
 )
 
 spec_pausable = app.workflow(
@@ -907,8 +895,8 @@ spec_pausable = app.workflow(
 # L6.6: Success policy satisfied (A required, B optional)
 # =============================================================================
 
-node_sp_a = TaskNode(fn=mark_task, args=('required_A',))
-node_sp_b_fail = TaskNode(fn=fail_task, args=('OPTIONAL_FAIL',))
+node_sp_a = TaskNode(fn=mark_task, kwargs={"value": 'required_A'})
+node_sp_b_fail = TaskNode(fn=fail_task, kwargs={"error_code": 'OPTIONAL_FAIL'})
 
 spec_success_policy_satisfied = app.workflow(
     name='e2e_success_policy_satisfied',
@@ -924,8 +912,8 @@ spec_success_policy_satisfied = app.workflow(
 # L6.7: Success policy not met (A and B required, B fails)
 # =============================================================================
 
-node_sp_req_a = TaskNode(fn=mark_task, args=('required_A',))
-node_sp_req_b_fail = TaskNode(fn=fail_task, args=('REQUIRED_FAIL',))
+node_sp_req_a = TaskNode(fn=mark_task, kwargs={"value": 'required_A'})
+node_sp_req_b_fail = TaskNode(fn=fail_task, kwargs={"error_code": 'REQUIRED_FAIL'})
 
 spec_success_policy_not_met = app.workflow(
     name='e2e_success_policy_not_met',
@@ -940,8 +928,8 @@ spec_success_policy_not_met = app.workflow(
 # L6.8: Multiple success cases (case1: A required, case2: B required)
 # =============================================================================
 
-node_sp_multi_a_fail = TaskNode(fn=fail_task, args=('CASE1_FAIL',))
-node_sp_multi_b = TaskNode(fn=mark_task, args=('case2_ok',))
+node_sp_multi_a_fail = TaskNode(fn=fail_task, kwargs={"error_code": 'CASE1_FAIL'})
+node_sp_multi_b = TaskNode(fn=mark_task, kwargs={"value": 'case2_ok'})
 
 spec_success_policy_multi = app.workflow(
     name='e2e_success_policy_multi',
@@ -978,12 +966,11 @@ spec_success_policy_multi = app.workflow(
 # L6.2b: Join=quorum impossible (A fails, B fails, C ok → D with min_success=3)
 # =============================================================================
 
-node_qi_a = TaskNode(fn=fail_task, args=('QI_FAIL_A',))
-node_qi_b = TaskNode(fn=fail_task, args=('QI_FAIL_B',))
-node_qi_c = TaskNode(fn=mark_task, args=('C_ok',))
+node_qi_a = TaskNode(fn=fail_task, kwargs={"error_code": 'QI_FAIL_A'})
+node_qi_b = TaskNode(fn=fail_task, kwargs={"error_code": 'QI_FAIL_B'})
+node_qi_c = TaskNode(fn=mark_task, kwargs={"value": 'C_ok'})
 node_qi_d = TaskNode(
-    fn=mark_task,
-    args=('D_should_skip',),
+    fn=mark_task, kwargs={"value": 'D_should_skip'},
     waits_for=[node_qi_a, node_qi_b, node_qi_c],
     join='quorum',
     min_success=3,
@@ -999,11 +986,10 @@ spec_quorum_impossible = app.workflow(
 # L6.2c: Join=any with all deps failing (A fails, B fails → C with join=any)
 # =============================================================================
 
-node_jaf_a = TaskNode(fn=fail_task, args=('JAF_FAIL_A',))
-node_jaf_b = TaskNode(fn=fail_task, args=('JAF_FAIL_B',))
+node_jaf_a = TaskNode(fn=fail_task, kwargs={"error_code": 'JAF_FAIL_A'})
+node_jaf_b = TaskNode(fn=fail_task, kwargs={"error_code": 'JAF_FAIL_B'})
 node_jaf_c = TaskNode(
-    fn=mark_task,
-    args=('C_should_skip',),
+    fn=mark_task, kwargs={"value": 'C_should_skip'},
     waits_for=[node_jaf_a, node_jaf_b],
     join='any',
 )
@@ -1020,9 +1006,9 @@ spec_join_any_all_fail = app.workflow(
 
 from horsies.core.models.workflow import OnError
 
-node_oep_a = TaskNode(fn=step_task, args=('A',))
-node_oep_b = TaskNode(fn=fail_task, args=('PAUSE_FAIL',), waits_for=[node_oep_a])
-node_oep_c = TaskNode(fn=step_task, args=('C',), waits_for=[node_oep_b])
+node_oep_a = TaskNode(fn=step_task, kwargs={"step": 'A'})
+node_oep_b = TaskNode(fn=fail_task, kwargs={"error_code": 'PAUSE_FAIL'}, waits_for=[node_oep_a])
+node_oep_c = TaskNode(fn=step_task, kwargs={"step": 'C'}, waits_for=[node_oep_b])
 
 spec_on_error_pause = app.workflow(
     name='e2e_on_error_pause',
@@ -1040,7 +1026,7 @@ def _raise_runtime_error(_: WorkflowContext) -> bool:
     raise RuntimeError('Condition evaluation blew up')
 
 
-node_ce_a = TaskNode(fn=produce_int_task, args=(42,))
+node_ce_a = TaskNode(fn=produce_int_task, kwargs={"value": 42})
 node_ce_b = TaskNode(
     fn=mark_task,
     kwargs={'value': 'should_skip'},
@@ -1059,7 +1045,7 @@ spec_condition_exception = app.workflow(
 # L6.3d: run_when=True → task runs normally
 # =============================================================================
 
-node_rwt_a = TaskNode(fn=produce_int_task, args=(42,))
+node_rwt_a = TaskNode(fn=produce_int_task, kwargs={"value": 42})
 node_rwt_b = TaskNode(
     fn=mark_task,
     kwargs={'value': 'should_run'},

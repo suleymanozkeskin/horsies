@@ -189,7 +189,7 @@ def start_order_processing(order: Order) -> None:
     """Start the order processing workflow."""
     validate_node: TaskNode[ValidatedOrder] = TaskNode(
         fn=validate_order,
-        args=(order,),
+        kwargs={'order': order},
         node_id="validate_order",
     )
     reveal_type(validate_node)  # TaskNode[ValidatedOrder]

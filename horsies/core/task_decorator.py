@@ -40,11 +40,71 @@ from horsies.core.exception_mapper import (
     ExceptionMapper,
     resolve_exception_error_code,
 )
-from horsies.core.errors import TaskDefinitionError, ConfigurationError, ErrorCode, SourceLocation
+from horsies.core.errors import (
+    TaskDefinitionError,
+    ConfigurationError,
+    WorkflowValidationError,
+    ErrorCode,
+    SourceLocation,
+)
 
 P = ParamSpec('P')
 T = TypeVar('T')
 E = TypeVar('E')
+
+
+class FromNodeMarker:
+    """Marker for injecting an upstream node's result into a `.node()()` kwarg.
+
+    Created via `from_node(upstream_node)`. When passed as a kwarg value to
+    `NodeFactory.__call__()`, the factory converts it to an `args_from` entry
+    and auto-wires the dependency.
+
+    Not intended for direct construction — use `from_node()` instead.
+    """
+
+    __slots__ = ('_node',)
+
+    def __init__(self, node: 'TaskNode[Any] | SubWorkflowNode[Any]') -> None:
+        self._node = node
+
+    @property
+    def node(self) -> 'TaskNode[Any] | SubWorkflowNode[Any]':
+        """The upstream node whose result will be injected."""
+        return self._node
+
+    def __repr__(self) -> str:
+        return f'FromNodeMarker(node={self._node!r})'
+
+
+def from_node(upstream: 'TaskNode[Any] | SubWorkflowNode[Any]') -> Any:
+    """Mark a `.node()()` kwarg as injected from an upstream node's result.
+
+    When used as a kwarg value in the second call of the two-stage
+    `.node()()` API, the NodeFactory will:
+    1. Add the upstream node to `args_from` under this kwarg's key.
+    2. Auto-add the upstream node to `waits_for` if not already present.
+
+    Returns Any so pyright accepts it in place of any expected kwarg type.
+
+    Example::
+
+        producer_node = produce.node()(value=42)
+        consumer_node = consume.node()(data=from_node(producer_node))
+        # Equivalent to:
+        # TaskNode(fn=consume, args_from={"data": producer_node}, waits_for=[producer_node])
+    """
+    from horsies.core.models.workflow import TaskNode, SubWorkflowNode
+
+    if not isinstance(upstream, (TaskNode, SubWorkflowNode)):
+        raise WorkflowValidationError(
+            message='from_node() expects a TaskNode or SubWorkflowNode',
+            code=ErrorCode.WORKFLOW_INVALID_ARGS_FROM,
+            notes=[f'got {type(upstream).__name__}'],
+            help_text='pass a node instance created by TaskNode(...) / SubWorkflowNode(...) or .node()()',
+        )
+
+    return FromNodeMarker(upstream)
 
 
 def effective_priority(
@@ -345,15 +405,63 @@ class NodeFactory(Generic[P, T]):
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> 'TaskNode[T]':
         from horsies.core.models.workflow import TaskNode
 
+        # D.1: Reject positional args — workflow nodes are kwargs-only
+        if args:
+            raise WorkflowValidationError(
+                message='positional arguments not allowed in .node()() calls',
+                code=ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED,
+                notes=[
+                    f"task '{self._fn.task_name}' received {len(args)} positional arg(s)",
+                    'workflow nodes use kwargs-only; pass all arguments by keyword',
+                ],
+                help_text='change .node()(val1, val2) to .node()(param1=val1, param2=val2)',
+            )
+
+        # C.1: Scan kwargs for FromNodeMarker instances
+        marker_args_from: dict[str, 'TaskNode[Any] | SubWorkflowNode[Any]'] = {}
+        static_kwargs: dict[str, Any] = {}
+
+        for key, value in kwargs.items():
+            if isinstance(value, FromNodeMarker):
+                marker_args_from[key] = value.node
+            else:
+                static_kwargs[key] = value
+
+        # Merge explicit args_from with marker-derived args_from
+        explicit_args_from = dict(self._args_from) if self._args_from else {}
+
+        # Detect overlap: marker key vs explicit args_from key
+        marker_explicit_overlap = set(marker_args_from.keys()) & set(explicit_args_from.keys())
+        if marker_explicit_overlap:
+            raise WorkflowValidationError(
+                message='from_node() marker conflicts with explicit args_from',
+                code=ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP,
+                notes=[
+                    f"task '{self._fn.task_name}' has key(s) in both from_node() "
+                    f"and args_from: {sorted(marker_explicit_overlap)}",
+                    'each injected key must come from exactly one source',
+                ],
+                help_text='remove the key from either from_node() kwargs or the explicit args_from dict',
+            )
+
+        merged_args_from = {**explicit_args_from, **marker_args_from}
+
+        # Auto-wire waits_for from markers
+        waits_for = list(self._waits_for) if self._waits_for else []
+        existing_deps = set(id(dep) for dep in waits_for)
+        for upstream in marker_args_from.values():
+            if id(upstream) not in existing_deps:
+                waits_for.append(upstream)
+                existing_deps.add(id(upstream))
+
         return TaskNode(
             fn=self._fn,
-            args=args,
-            kwargs=dict(kwargs),
-            waits_for=list(self._waits_for) if self._waits_for else [],
+            kwargs=static_kwargs,
+            waits_for=waits_for,
             workflow_ctx_from=list(self._workflow_ctx_from)
             if self._workflow_ctx_from
             else None,
-            args_from=dict(self._args_from) if self._args_from else {},
+            args_from=merged_args_from,
             queue=self._queue,
             priority=self._priority,
             allow_failed_deps=self._allow_failed_deps,

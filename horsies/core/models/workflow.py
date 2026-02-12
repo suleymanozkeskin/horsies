@@ -541,7 +541,7 @@ class TaskNode(Generic[OkT_co]):
 
     Example:
         ```python
-        fetch = TaskNode(fn=fetch_data, args=("url",))
+        fetch = TaskNode(fn=fetch_data, kwargs={"url": "https://example.com"})
         process = TaskNode(
             fn=process_data,
             waits_for=[fetch],           # wait for fetch to be terminal
@@ -552,10 +552,10 @@ class TaskNode(Generic[OkT_co]):
     """
 
     fn: TaskFunction[Any, OkT_co]
-    args: tuple[Any, ...] = ()
+    args: tuple[Any, ...] = field(default_factory=tuple, init=False)
     """
-    - Positional arguments passed to the task function
-    - Not allowed when args_from or workflow_ctx_from are set; use kwargs instead
+    Internal compatibility slot for positional args.
+    Workflow nodes are kwargs-only; this field is not accepted in constructors.
     """
     kwargs: dict[str, Any] = field(default_factory=lambda: {})
     waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] = field(
@@ -697,15 +697,15 @@ class SubWorkflowNode(Generic[OkT_co]):
     - Must implement build_with() for parameterization
     """
 
-    args: tuple[Any, ...] = ()
+    args: tuple[Any, ...] = field(default_factory=tuple, init=False)
     """
-    - Positional arguments passed to workflow_def.build_with(app, *args, **kwargs)
-    - Not allowed when args_from or workflow_ctx_from are set; use kwargs instead
+    Internal compatibility slot for positional args.
+    Workflow nodes are kwargs-only; this field is not accepted in constructors.
     """
 
     kwargs: dict[str, Any] = field(default_factory=lambda: {})
     """
-    - Keyword arguments passed to workflow_def.build_with(app, *args, **kwargs)
+    - Keyword arguments passed to workflow_def.build_with(app, **kwargs)
     - Use with args_from to inject upstream results as parameters
     """
 
@@ -984,19 +984,17 @@ class WorkflowSpec(Generic[OutT]):
             report.add(error)
         for error in self._collect_workflow_ctx_from_errors():
             report.add(error)
-        for error in self._collect_args_with_injection_errors():
+        for error in self._collect_positional_args_not_supported_errors():
+            report.add(error)
+        for error in self._collect_from_node_marker_kwargs_errors():
             report.add(error)
         for error in self._collect_kwargs_args_from_overlap_errors():
             report.add(error)
         for error in self._collect_subworkflow_default_build_with_param_errors():
             report.add(error)
-        for error in self._collect_subworkflow_build_with_binding_errors():
-            report.add(error)
         for error in self._collect_invalid_kwargs_errors():
             report.add(error)
         for error in self._collect_args_from_type_errors():
-            report.add(error)
-        for error in self._collect_excess_positional_args_errors():
             report.add(error)
         for error in self._collect_missing_required_param_errors():
             report.add(error)
@@ -1278,41 +1276,63 @@ class WorkflowSpec(Generic[OutT]):
                 )
         return errors
 
-    def _collect_args_with_injection_errors(self) -> list[WorkflowValidationError]:
-        """Reject positional args when args_from/workflow_ctx_from are set."""
+    def _collect_positional_args_not_supported_errors(
+        self,
+    ) -> list[WorkflowValidationError]:
+        """Reject positional args on workflow nodes."""
         errors: list[WorkflowValidationError] = []
         for node in self.tasks:
             if not node.args:
                 continue
-            has_args_from = bool(node.args_from)
-            has_ctx_from = node.workflow_ctx_from is not None
-            if not has_args_from and not has_ctx_from:
+            errors.append(
+                WorkflowValidationError(
+                    message='positional args are not supported for workflow nodes',
+                    code=ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED,
+                    notes=[
+                        f"node '{node.name}' sets args=(...)",
+                        'workflow node inputs must be provided via kwargs and/or args_from',
+                    ],
+                    help_text='remove args=... and pass static values via kwargs=...',
+                )
+            )
+        return errors
+
+    def _collect_from_node_marker_kwargs_errors(
+        self,
+    ) -> list[WorkflowValidationError]:
+        """Reject raw from_node() markers in kwargs.
+
+        from_node() markers are intended for `.node()()` calls where they are
+        translated into args_from mappings. If users place markers directly in
+        TaskNode/SubWorkflowNode kwargs, that conversion never runs.
+        """
+        from horsies.core.task_decorator import FromNodeMarker
+
+        errors: list[WorkflowValidationError] = []
+        for node in self.tasks:
+            marker_keys = [
+                key
+                for key, value in node.kwargs.items()
+                if isinstance(value, FromNodeMarker)
+            ]
+            if not marker_keys:
                 continue
-
-            injected_sources: list[str] = []
-            if has_args_from:
-                injected_sources.append('args_from')
-            if has_ctx_from:
-                injected_sources.append('workflow_ctx_from')
-
-            injected_str = ' and '.join(injected_sources)
 
             errors.append(
                 WorkflowValidationError(
-                    message=(
-                        'positional args not allowed when using args_from or workflow_ctx_from'
-                    ),
-                    code=ErrorCode.WORKFLOW_ARGS_WITH_INJECTION,
+                    message='from_node() markers are not allowed in kwargs',
+                    code=ErrorCode.WORKFLOW_INVALID_ARGS_FROM,
                     notes=[
-                        f"node '{node.name}' sets args=(...) and also {injected_str}",
-                        'positional args are only supported when args_from/workflow_ctx_from are not used',
+                        f"node '{node.name}' has from_node() marker value(s) in kwargs: {sorted(marker_keys)}",
+                        'from_node() markers must be translated to args_from mappings',
                     ],
                     help_text=(
-                        'move static inputs into kwargs=... and reserve args_from/workflow_ctx_from '
-                        'for injected values'
+                        'use .node()(..., key=from_node(upstream)) so conversion runs, '
+                        'or use explicit args_from={...}'
                     ),
                 )
             )
+
         return errors
 
     def _collect_kwargs_args_from_overlap_errors(self) -> list[WorkflowValidationError]:
@@ -1341,9 +1361,9 @@ class WorkflowSpec(Generic[OutT]):
         """
         Reject parameterized SubWorkflowNode when build_with is not overridden.
 
-        Default WorkflowDefinition.build_with(app, *args, **params) ignores all
+        Default WorkflowDefinition.build_with(app, **params) ignores all
         runtime parameters and just forwards to build(app), which is a silent
-        data-loss foot-gun when users pass kwargs/args_from/args.
+        data-loss foot-gun when users pass kwargs/args_from.
         """
         errors: list[WorkflowValidationError] = []
 
@@ -1355,9 +1375,7 @@ class WorkflowSpec(Generic[OutT]):
         for node in self.tasks:
             if not isinstance(node, SubWorkflowNode):
                 continue
-            if node.args and (node.args_from or node.workflow_ctx_from is not None):
-                continue  # Covered by WORKFLOW_ARGS_WITH_INJECTION
-            has_runtime_params = bool(node.args) or bool(node.kwargs) or bool(node.args_from)
+            has_runtime_params = bool(node.kwargs) or bool(node.args_from)
             if not has_runtime_params:
                 continue
 
@@ -1372,8 +1390,6 @@ class WorkflowSpec(Generic[OutT]):
             notes: list[str] = [
                 f"subworkflow '{node.name}' provides runtime params but uses default build_with()",
             ]
-            if node.args:
-                notes.append(f'positional args count: {len(node.args)}')
             if node.kwargs:
                 notes.append(f'kwargs keys: {sorted(node.kwargs.keys())}')
             if node.args_from:
@@ -1390,72 +1406,6 @@ class WorkflowSpec(Generic[OutT]):
                     ),
                 )
             )
-
-        return errors
-
-    def _collect_subworkflow_build_with_binding_errors(
-        self,
-    ) -> list[WorkflowValidationError]:
-        """
-        Validate subworkflow build_with doesn't receive duplicate bindings.
-
-        Catches: same param supplied by positional args AND kwargs/args_from.
-        Excess positional args are handled separately by E026.
-        """
-        errors: list[WorkflowValidationError] = []
-        for node in self.tasks:
-            if not isinstance(node, SubWorkflowNode):
-                continue
-            if not node.args:
-                continue  # No positional args — no duplicate binding possible
-            if node.args_from or node.workflow_ctx_from is not None:
-                continue  # Covered by WORKFLOW_ARGS_WITH_INJECTION
-
-            # Skip to avoid duplicate noise; overlap has a dedicated validator.
-            if set(node.kwargs.keys()) & set(node.args_from.keys()):
-                continue
-
-            original_bw = getattr(
-                node.workflow_def,
-                '_original_build_with',
-                node.workflow_def.build_with,
-            )
-            sig = _get_signature(original_bw)
-            if sig is None:
-                continue
-
-            # _original_build_with is raw function: (cls, app, ...)
-            # Two sentinels for cls and app.
-            provided_positional = [object(), object(), *node.args]
-            provided_kwargs = set(node.kwargs.keys()) | set(node.args_from.keys())
-
-            consumed = 0
-            positional_bound_kw_names: set[str] = set()
-            for param in sig.parameters.values():
-                if param.kind == inspect.Parameter.VAR_POSITIONAL:
-                    break
-                if param.kind in (
-                    inspect.Parameter.POSITIONAL_ONLY,
-                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                ):
-                    if consumed < len(provided_positional):
-                        consumed += 1
-                        if param.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD:
-                            positional_bound_kw_names.add(param.name)
-
-            duplicate = sorted(provided_kwargs & positional_bound_kw_names)
-            if duplicate:
-                errors.append(
-                    WorkflowValidationError(
-                        message='subworkflow param provided by both args and kwargs/args_from',
-                        code=ErrorCode.WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING,
-                        notes=[
-                            f"node '{node.name}' duplicates parameter(s): {duplicate}",
-                            'the same build_with parameter is bound positionally and by keyword',
-                        ],
-                        help_text='provide each build_with parameter exactly once',
-                    )
-                )
 
         return errors
 
@@ -1525,8 +1475,6 @@ class WorkflowSpec(Generic[OutT]):
         for node in self.tasks:
             if not node.args_from:
                 continue
-            if node.args and (node.args_from or node.workflow_ctx_from is not None):
-                continue  # Covered by WORKFLOW_ARGS_WITH_INJECTION.
             if set(node.kwargs.keys()) & set(node.args_from.keys()):
                 continue  # Covered by WORKFLOW_KWARGS_ARGS_FROM_OVERLAP.
 
@@ -1621,77 +1569,14 @@ class WorkflowSpec(Generic[OutT]):
 
         return errors
 
-    def _collect_excess_positional_args_errors(self) -> list[WorkflowValidationError]:
-        """Validate positional args don't exceed the callable's positional capacity."""
-        errors: list[WorkflowValidationError] = []
-        for node in self.tasks:
-            if not node.args:
-                continue
-
-            # Skip when args coexist with injection — already covered by E016.
-            if node.args_from or node.workflow_ctx_from is not None:
-                continue
-
-            if isinstance(node, TaskNode):
-                fn = node.fn
-                provided_count = len(node.args)
-            else:
-                fn = getattr(
-                    node.workflow_def,
-                    '_original_build_with',
-                    node.workflow_def.build_with,
-                )
-                # _original_build_with is a raw function: (cls, app, ...).
-                # Subtract the two auto-provided sentinels.
-                provided_count = len(node.args)
-
-            sig = _get_signature(fn)
-            if sig is None:
-                continue
-
-            max_positional = 0
-            accepts_var_positional = False
-            for param in sig.parameters.values():
-                if param.kind == inspect.Parameter.VAR_POSITIONAL:
-                    accepts_var_positional = True
-                    break
-                if param.kind in (
-                    inspect.Parameter.POSITIONAL_ONLY,
-                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                ):
-                    max_positional += 1
-
-            if accepts_var_positional:
-                continue
-
-            # For SubWorkflowNode, cls and app are auto-provided.
-            if isinstance(node, SubWorkflowNode):
-                max_positional = max(0, max_positional - 2)
-
-            if provided_count > max_positional:
-                target = 'task function' if isinstance(node, TaskNode) else 'build_with'
-                errors.append(
-                    WorkflowValidationError(
-                        message=f'too many positional args for {target}',
-                        code=ErrorCode.WORKFLOW_EXCESS_POSITIONAL_ARGS,
-                        notes=[
-                            f"node '{node.name}' provides {provided_count} positional arg(s)",
-                            f"{target} accepts at most {max_positional}",
-                        ],
-                        help_text='remove extra positional args or pass them as kwargs',
-                    )
-                )
-
-        return errors
-
     def _collect_missing_required_param_errors(self) -> list[WorkflowValidationError]:
-        """Validate required parameters are provided via args/kwargs/args_from."""
+        """Validate required parameters are provided via kwargs/args_from."""
         errors: list[WorkflowValidationError] = []
         for node in self.tasks:
             # Get the function to inspect (TaskNode vs SubWorkflowNode)
             if isinstance(node, TaskNode):
                 fn = node.fn
-                args_provided = list(node.args)
+                args_provided: list[object] = []
                 injected_kwargs: set[str] = set()
             else:
                 fn = getattr(
@@ -1699,9 +1584,9 @@ class WorkflowSpec(Generic[OutT]):
                     '_original_build_with',
                     node.workflow_def.build_with,
                 )
-                # _original_build_with is a raw function: (cls, app, *args, **kwargs)
+                # _original_build_with is a raw function: (cls, app, **kwargs).
                 # Two sentinels account for cls and app being provided automatically.
-                args_provided = [object(), object(), *node.args]
+                args_provided = [object(), object()]
                 injected_kwargs = set()
 
             sig = _get_signature(fn)
@@ -1760,7 +1645,7 @@ class WorkflowSpec(Generic[OutT]):
                     notes=[
                         f"node '{node.name}' missing required parameter(s): {sorted(missing)}",
                     ],
-                    help_text='provide required params via args=..., kwargs=..., or args_from',
+                    help_text='provide required params via kwargs=... or args_from',
                 )
             )
         return errors
@@ -2806,7 +2691,7 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
         class ScrapeWorkflow(WorkflowDefinition[PersistResult]):
             name = "scrape_pipeline"
 
-            fetch = TaskNode(fn=fetch_listing, args=("url",))
+            fetch = TaskNode(fn=fetch_listing, kwargs={"url": "url"})
             parse = TaskNode(fn=parse_listing, waits_for=[fetch], args_from={"raw": fetch})
             persist = TaskNode(fn=persist_listing, waits_for=[parse], args_from={"data": parse})
 
@@ -2921,15 +2806,13 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
     def build_with(
         cls,
         app: 'Horsies',
-        *args: Any,
         **params: Any,
     ) -> WorkflowSpec[OkT_co]:
         """
         Build a WorkflowSpec with runtime parameters.
 
-        Subclasses can override this to apply params to TaskNodes.
+        Subclasses can override this to apply keyword params to TaskNodes.
         Default implementation forwards to build().
         """
-        _ = args
         _ = params
         return cls.build(app)

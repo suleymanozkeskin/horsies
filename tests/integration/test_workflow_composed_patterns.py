@@ -156,12 +156,12 @@ class TestComposedPatterns:
         task_c = make_simple_task(app, 'dja_c')
         task_d = make_simple_task(app, 'dja_d')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, args=(3,), waits_for=[node_a])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
         node_d = TaskNode(
             fn=task_d,
-            args=(4,),
+            kwargs={'value': 4},
             waits_for=[node_b, node_c],
             join='any',
         )
@@ -208,12 +208,12 @@ class TestComposedPatterns:
         task_c = make_simple_task(app, 'djaf_c')
         task_d = make_simple_task(app, 'djaf_d')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, args=(3,), waits_for=[node_a])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
         node_d = TaskNode(
             fn=task_d,
-            args=(4,),
+            kwargs={'value': 4},
             waits_for=[node_b, node_c],
             join='any',
         )
@@ -272,9 +272,9 @@ class TestComposedPatterns:
             c_status = 'err' if c_result.is_err() else 'ok'
             return TaskResult(ok=f'b={b_status},c={c_status}')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b = TaskNode(fn=task_b, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, args=(5,), waits_for=[node_a])
+        node_c = TaskNode(fn=task_c, kwargs={'value': 5}, waits_for=[node_a])
         node_d = TaskNode(
             fn=diamond_sink,
             waits_for=[node_b, node_c],
@@ -342,8 +342,8 @@ class TestComposedPatterns:
         task_c = make_failing_task(app, 'fsp_c')
         task_d = make_failing_task(app, 'fsp_d')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
         node_c = TaskNode(fn=task_c, waits_for=[node_a])
         node_d = TaskNode(fn=task_d, waits_for=[node_a])
 
@@ -408,12 +408,12 @@ class TestComposedPatterns:
         task_b = make_simple_task(app, 'dskip_b')
         task_d = make_simple_task(app, 'dskip_d')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
 
         def always_skip(_ctx: WorkflowContext) -> bool:
             return True
 
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
         node_c = TaskNode(
             fn=task_c_ctx,
             kwargs={'value': 3},
@@ -423,7 +423,7 @@ class TestComposedPatterns:
         )
         node_d = TaskNode(
             fn=task_d,
-            args=(4,),
+            kwargs={'value': 4},
             waits_for=[node_b, node_c],
             allow_failed_deps=False,
         )
@@ -471,12 +471,12 @@ class TestComposedPatterns:
         task_b = make_simple_task(app, 'dska_b')
         task_d = make_simple_task(app, 'dska_d')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
 
         def always_skip(_ctx: WorkflowContext) -> bool:
             return True
 
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
         node_c = TaskNode(
             fn=task_c_ctx,
             kwargs={'value': 3},
@@ -486,7 +486,7 @@ class TestComposedPatterns:
         )
         node_d = TaskNode(
             fn=task_d,
-            args=(4,),
+            kwargs={'value': 4},
             waits_for=[node_b, node_c],
             allow_failed_deps=True,
         )
@@ -533,14 +533,14 @@ class TestComposedPatterns:
         task_e = make_simple_task(app, 'wfq_e')
         task_f = make_simple_task(app, 'wfq_f')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, args=(3,), waits_for=[node_a])
-        node_d = TaskNode(fn=task_d, args=(4,), waits_for=[node_a])
-        node_e = TaskNode(fn=task_e, args=(5,), waits_for=[node_a])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
+        node_d = TaskNode(fn=task_d, kwargs={'value': 4}, waits_for=[node_a])
+        node_e = TaskNode(fn=task_e, kwargs={'value': 5}, waits_for=[node_a])
         node_f = TaskNode(
             fn=task_f,
-            args=(0,),
+            kwargs={'value': 0},
             waits_for=[node_b, node_c, node_d, node_e],
             join='quorum',
             min_success=2,
@@ -599,16 +599,16 @@ class TestComposedPatterns:
         task_d = make_recovery_task(app, 'mdr_d')
         task_e = make_simple_task(app, 'mdr_e')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b = TaskNode(fn=task_b, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, args=(3,), waits_for=[node_a])
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
         node_d = TaskNode(
             fn=task_d,
             waits_for=[node_b],
             args_from={'input_result': node_b},
             allow_failed_deps=True,
         )
-        node_e = TaskNode(fn=task_e, args=(5,), waits_for=[node_c, node_d])
+        node_e = TaskNode(fn=task_e, kwargs={'value': 5}, waits_for=[node_c, node_d])
 
         spec = make_workflow_spec(
             name='mixed_recovery',
@@ -678,9 +678,9 @@ class TestComposedPatterns:
         ) -> TaskResult[str, TaskError]:
             return TaskResult(ok=f'b={b_result is not None},c={c_result is not None}')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, args=(3,), waits_for=[node_a])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
         node_d = TaskNode(
             fn=partial_receiver,
             waits_for=[node_b, node_c],
@@ -741,12 +741,12 @@ class TestComposedPatterns:
         task_d = make_simple_task(app, 'qcs_d')
         task_e = make_simple_task(app, 'qcs_e')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
 
         def always_skip(_ctx: WorkflowContext) -> bool:
             return True
 
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
         node_c = TaskNode(
             fn=task_c_ctx,
             kwargs={'value': 3},
@@ -754,10 +754,10 @@ class TestComposedPatterns:
             workflow_ctx_from=[node_a],
             skip_when=always_skip,
         )
-        node_d = TaskNode(fn=task_d, args=(4,), waits_for=[node_a])
+        node_d = TaskNode(fn=task_d, kwargs={'value': 4}, waits_for=[node_a])
         node_e = TaskNode(
             fn=task_e,
-            args=(0,),
+            kwargs={'value': 0},
             waits_for=[node_b, node_c, node_d],
             join='quorum',
             min_success=2,
@@ -829,8 +829,8 @@ class TestComposedPatterns:
             args_from={'input_result': node_a},
             allow_failed_deps=True,
         )
-        node_c = TaskNode(fn=task_c, args=(1,), waits_for=[node_b])
-        node_d = TaskNode(fn=task_d, args=(2,), waits_for=[node_c])
+        node_c = TaskNode(fn=task_c, kwargs={'value': 1}, waits_for=[node_b])
+        node_d = TaskNode(fn=task_d, kwargs={'value': 2}, waits_for=[node_c])
 
         spec = make_workflow_spec(
             name='double_failure',
@@ -887,7 +887,7 @@ class TestComposedPatterns:
         task_c = make_failing_task(app, 'sprd_c')
         task_d = make_recovery_task(app, 'sprd_d')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b = TaskNode(fn=task_b, waits_for=[node_a])
         node_c = TaskNode(fn=task_c, waits_for=[node_a])
         node_d = TaskNode(
@@ -965,7 +965,7 @@ class TestComposedPatterns:
         ) -> TaskResult[str, TaskError]:
             return TaskResult(ok='received')
 
-        node_a = TaskNode(fn=task_a, args=(5,))
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
 
         def always_skip(_ctx: WorkflowContext) -> bool:
             return True
@@ -1042,16 +1042,16 @@ class TestComposedPatterns:
         task_d = make_simple_task(app, 'jai_d')
         task_e = make_simple_task(app, 'jai_e')
 
-        node_a = TaskNode(fn=task_a, args=(1,))
-        node_b = TaskNode(fn=task_b, args=(2,), waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, args=(3,), waits_for=[node_a])
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
         node_d = TaskNode(
             fn=task_d,
-            args=(4,),
+            kwargs={'value': 4},
             waits_for=[node_b, node_c],
             join='any',
         )
-        node_e = TaskNode(fn=task_e, args=(5,), waits_for=[node_d])
+        node_e = TaskNode(fn=task_e, kwargs={'value': 5}, waits_for=[node_d])
 
         spec = make_workflow_spec(
             name='join_any_intermediate',
@@ -1105,7 +1105,7 @@ class TestComposedPatterns:
         task_b = make_simple_task(app, 'psp_b')
 
         node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, args=(1,))
+        node_b = TaskNode(fn=task_b, kwargs={'value': 1})
 
         policy = SuccessPolicy(cases=[SuccessCase(required=[node_b])])
 

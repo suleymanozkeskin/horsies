@@ -53,6 +53,22 @@ def _as_str_list(value: object) -> list[str]:
     return str_items
 
 
+def _guard_no_positional_args(node_name: str, args: tuple[Any, ...]) -> None:
+    """Raise if a workflow node still carries positional args.
+
+    Under the kwargs-only contract, all runtime parameters must be
+    passed via ``kwargs``.  Positional ``args`` should be empty for
+    every new write.  This guard catches leftover callers that were
+    not migrated.
+    """
+    if args:
+        raise ValueError(
+            f"Workflow node '{node_name}' has positional args={args!r}. "
+            'Positional args are not supported for workflow nodes; '
+            'use kwargs instead.',
+        )
+
+
 # -- SQL constants for start_workflow_async --
 
 CHECK_WORKFLOW_EXISTS_SQL = text(
@@ -218,6 +234,7 @@ async def start_workflow_async(
 
             if isinstance(node, SubWorkflowNode):
                 # SubWorkflowNode: no fn, queue, priority, good_until
+                _guard_no_positional_args(node.name, node.args)
                 await session.execute(
                     INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL,
                     {
@@ -226,7 +243,7 @@ async def start_workflow_async(
                         'idx': node.index,
                         'node_id': node.node_id,
                         'name': node.name,
-                        'args': dumps_json(node.args),
+                        'args': dumps_json(()),  # kwargs-only: positional args not persisted
                         'kwargs': dumps_json(node.kwargs),
                         'queue': 'default',  # SubWorkflowNode doesn't have queue
                         'priority': 100,  # SubWorkflowNode doesn't have priority
@@ -249,6 +266,7 @@ async def start_workflow_async(
             else:
                 # TaskNode: has fn, queue, priority, good_until
                 task = node
+                _guard_no_positional_args(task.name, task.args)
 
                 # Get task_options_json from the task function (set by @task decorator)
                 # and merge in TaskNode.good_until if set
@@ -273,7 +291,7 @@ async def start_workflow_async(
                         'idx': task.index,
                         'node_id': task.node_id,
                         'name': task.name,
-                        'args': dumps_json(task.args),
+                        'args': dumps_json(()),  # kwargs-only: positional args not persisted
                         'kwargs': dumps_json(task.kwargs),
                         # Queue: use override, else task's declared queue, else "default"
                         'queue': task.queue
@@ -836,6 +854,9 @@ async def _enqueue_workflow_task(
             'name': row[1],  # task_name
             'queue': row[4],  # queue_name
             'priority': row[5],  # priority
+            # Compat: new writes store [] for task_args (kwargs-only).
+            # Old persisted rows may still carry non-empty task_args;
+            # passing them through preserves backward compatibility.
             'args': row[2],  # task_args (already JSON string)
             'kwargs': dumps_json(kwargs),
             'max_retries': max_retries,
@@ -1007,6 +1028,9 @@ async def _enqueue_subworkflow_task(
         return None
 
     # 3. Parse static kwargs and merge args_from
+    # Compat: new writes store [] for task_args (kwargs-only).
+    # Old persisted rows may still carry positional args for build_with();
+    # they are passed through via *task_args to preserve backward compat.
     raw_args = loads_json(task_args_json) if task_args_json else []
     task_args: tuple[Any, ...] = ()
     if isinstance(raw_args, list):
@@ -1134,6 +1158,7 @@ async def _enqueue_subworkflow_task(
 
         if child_is_subworkflow:
             child_sub = child_node
+            _guard_no_positional_args(child_sub.name, child_sub.args)
             await session.execute(
                 INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL,
                 {
@@ -1142,7 +1167,7 @@ async def _enqueue_subworkflow_task(
                     'idx': child_sub.index,
                     'node_id': child_sub.node_id,
                     'name': child_sub.name,
-                    'args': dumps_json(child_sub.args),
+                    'args': dumps_json(()),  # kwargs-only: positional args not persisted
                     'kwargs': dumps_json(child_sub.kwargs),
                     'queue': 'default',
                     'priority': 100,
@@ -1164,6 +1189,7 @@ async def _enqueue_subworkflow_task(
             )
         else:
             child_task = child_node
+            _guard_no_positional_args(child_task.name, child_task.args)
             child_task_options_json: str | None = getattr(
                 child_task.fn, 'task_options_json', None
             )
@@ -1184,7 +1210,7 @@ async def _enqueue_subworkflow_task(
                     'idx': child_task.index,
                     'node_id': child_task.node_id,
                     'name': child_task.name,
-                    'args': dumps_json(child_task.args),
+                    'args': dumps_json(()),  # kwargs-only: positional args not persisted
                     'kwargs': dumps_json(child_task.kwargs),
                     'queue': child_task.queue
                     or getattr(child_task.fn, 'task_queue_name', None)

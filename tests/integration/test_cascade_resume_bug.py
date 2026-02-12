@@ -62,7 +62,7 @@ class PausingChildWorkflow(WorkflowDefinition[int]):
             return TaskResult(ok=value * 2)
 
         node_c: TaskNode[int] = TaskNode(fn=child_task_c)
-        node_d: TaskNode[int] = TaskNode(fn=child_task_d, args=(1,), waits_for=[node_c])
+        node_d: TaskNode[int] = TaskNode(fn=child_task_d, kwargs={'value': 1}, waits_for=[node_c])
 
         return app.workflow(
             name=cls.name,
@@ -112,7 +112,7 @@ class TestCascadeResumeMissingCompletionCheck:
 
         parent_task_fn = make_simple_task(app, 'cascade_parent_task_a')
 
-        node_a: TaskNode[int] = TaskNode(fn=parent_task_fn, args=(1,))
+        node_a: TaskNode[int] = TaskNode(fn=parent_task_fn, kwargs={'value': 1})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=PausingChildWorkflow,
         )
