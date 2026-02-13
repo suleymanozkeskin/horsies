@@ -119,7 +119,7 @@ config = AppConfig(
 
 **Why this matters:**
 
-In production, task durations vary wildly. Without hard cap mode, a worker processing slow tasks (10s each) might prefetch additional tasks while a worker processing fast tasks (100ms each) sits idle waiting for work. Hard cap mode ensures fair distribution.
+In production, task durations vary wildly. Without hard cap mode, a worker processing slow tasks (10s each) prefetches additional tasks while a worker processing fast tasks (100ms each) sits idle waiting for work. Hard cap mode ensures fair distribution.
 
 ### Soft Cap Mode (with Prefetch)
 

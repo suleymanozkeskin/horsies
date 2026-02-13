@@ -100,7 +100,7 @@ Library utilises these heartbeats to keep track of health and take action.
 Horsies is in alpha. The API may change between releases.
 Fundamentals will likely remain the same.
 
-Note: I as the author, personally tested this library on a Celery dependent large codebase with great results.
+The library has been tested on a large Celery-dependent codebase with successful results.
 
 ## Is it optimised for linux?
 

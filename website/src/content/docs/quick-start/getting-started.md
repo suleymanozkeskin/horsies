@@ -121,7 +121,7 @@ myproject/
 ```
 
 Adjust to your project needs.
-Better to isolate entry points, configs, task/worfklow definitions.
+Isolate entry points, configs, and workflow definitions.
 
 ## Next Steps
 

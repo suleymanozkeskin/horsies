@@ -654,7 +654,7 @@ When no success case is satisfied:
 ### 1. Use allow_failed_deps for Recovery
 
 ```python
-# Primary task that might fail
+# Primary task that can fail
 primary = TaskNode("primary_fetch", fetch_data)
 
 # Recovery handler receives the error
