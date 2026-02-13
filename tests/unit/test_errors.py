@@ -634,7 +634,6 @@ class TestErrorCode:
             ErrorCode.WORKFLOW_INVALID_JOIN,
             ErrorCode.WORKFLOW_UNRESOLVED_QUEUE,
             ErrorCode.WORKFLOW_UNRESOLVED_PRIORITY,
-            ErrorCode.WORKFLOW_ARGS_WITH_INJECTION,
             ErrorCode.WORKFLOW_INVALID_SUBWORKFLOW_RETRY_MODE,
             ErrorCode.WORKFLOW_SUBWORKFLOW_APP_MISSING,
             ErrorCode.WORKFLOW_INVALID_KWARG_KEY,
