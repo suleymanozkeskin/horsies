@@ -59,7 +59,7 @@ from .core.models.resilience import WorkerResilienceConfig
 from .core.types.status import TaskStatus, TASK_TERMINAL_STATES
 from .core.errors import ErrorCode, ValidationReport, MultipleValidationErrors
 from .core.exception_mapper import ExceptionMapper
-from .core.task_decorator import from_node
+from .core.task_decorator import from_node, TaskHandle
 
 __all__ = [
     # Core
@@ -120,6 +120,8 @@ __all__ = [
     'WorkerResilienceConfig',
     # Exception mapper
     'ExceptionMapper',
+    # Task handle
+    'TaskHandle',
     # Node injection
     'from_node',
 ]

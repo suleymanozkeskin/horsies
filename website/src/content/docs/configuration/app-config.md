@@ -219,34 +219,7 @@ horsies check myapp.instance:app --live  # Phases 1-6
 
 ### `@app.workflow_builder`
 
-Register a workflow builder function for check-phase validation. During `horsies check`, registered builders are executed under send suppression (no tasks are actually enqueued) to validate the `WorkflowSpec` they produce.
-
-```python
-# Zero-parameter builder — called with no arguments during check
-@app.workflow_builder()
-def build_etl_pipeline() -> WorkflowSpec:
-    ...
-
-# Parameterized builder — requires cases= for check to exercise
-@app.workflow_builder(cases=[
-    {'region': 'us-east'},
-    {'region': 'eu-west'},
-])
-def build_regional_pipeline(region: str) -> WorkflowSpec:
-    ...
-```
-
-**Parameters:**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `cases` | `list[dict[str, Any]] \| None` | Kwarg dicts to invoke the builder with during check. Required when the builder has parameters without defaults. |
-
-**What check validates per builder invocation:**
-
-- Builder does not raise exceptions (E029)
-- Builder returns a `WorkflowSpec` instance (E029)
-- The returned `WorkflowSpec` passes full DAG validation (node IDs, dependencies, kwargs, args_from types, etc.)
+Register workflow builder functions for check-phase validation. For full API reference and examples, see [Workflow API — @app.workflow_builder](../concepts/workflows/workflow-api#appworkflow_builder).
 
 ### Guarantee Model
 

@@ -76,3 +76,40 @@ The `.node()` method on task functions returns a `NodeFactory` for type-safe `Ta
 | `good_until` | `datetime` | `None` | Task expiry deadline |
 
 See [Typed Node Builder](typed-node-builder) for usage examples.
+
+### `@app.workflow_builder`
+
+Register a function that builds a `WorkflowSpec` for validation during `horsies check`. Registered builders are executed under send suppression (no tasks are enqueued) so the returned `WorkflowSpec` can be fully validated — DAG structure, kwargs against function signatures, `args_from` type compatibility, etc.
+
+```python
+from horsies import Horsies, WorkflowSpec
+
+app = Horsies(config)
+
+# Zero-parameter builder — called automatically during check
+@app.workflow_builder()
+def build_etl_pipeline() -> WorkflowSpec:
+    return app.workflow("etl", tasks=[...])
+
+# Parameterized builder — provide cases= for check to exercise
+@app.workflow_builder(cases=[
+    {"region": "us-east"},
+    {"region": "eu-west"},
+])
+def build_regional_pipeline(region: str) -> WorkflowSpec:
+    return app.workflow(f"pipeline-{region}", tasks=[...])
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `cases` | `list[dict[str, Any]] \| None` | No | Kwarg dicts to invoke the builder with during check. Required when the builder has parameters without defaults. |
+
+**Errors:**
+
+| Code | When |
+|------|------|
+| E027 | Parameterized builder missing `cases=` |
+| E029 | Builder raises an exception or does not return a `WorkflowSpec` |
+| E030 | Function returns `WorkflowSpec` but lacks `@app.workflow_builder` |
+
+For the guarantee model and CI usage, see [Startup Validation](../../configuration/app-config#startup-validation-appcheck).

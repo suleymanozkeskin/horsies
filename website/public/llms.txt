@@ -13,6 +13,7 @@
 - @app.task("name", exception_mapper={ValueError: "VALIDATION_ERROR"}) -> per-task exception mapping
 - @app.task("name", default_unhandled_error_code="MY_ERROR") -> override default error code
 - app.workflow(name, tasks, on_error, output, success_policy) -> WorkflowSpec
+- @app.workflow_builder(cases=[...]) -> decorator; registers a WorkflowSpec builder for `horsies check` validation
 - app.discover_tasks(["myapp.tasks", "myapp.workflows"]) -> register modules for import
 - app.expand_module_globs(["src/**/*_tasks.py"]) -> list[str] (resolve glob patterns)
 - app.import_task_modules() -> list[str] (import discovered modules)
@@ -238,6 +239,16 @@
 - .build_with(app, **params) -> WorkflowSpec (with runtime parameters; kwargs-only)
 - .get_workflow_nodes() -> list[tuple[str, TaskNode | SubWorkflowNode]]
 - Node IDs auto-assigned from attribute names
+
+### @app.workflow_builder (check-phase validation)
+- @app.workflow_builder() -> decorator; registers a WorkflowSpec builder for `horsies check`
+- @app.workflow_builder(cases=[{"region": "us-east"}, ...]) -> for parameterized builders
+- Zero-arg builders: auto-invoked during check with no arguments
+- Parameterized builders: requires cases= kwarg dicts covering each required parameter
+- Builders run under send suppression (no tasks enqueued); returned WorkflowSpec is fully validated
+- E027: parameterized builder missing cases=
+- E029: builder raised exception or returned non-WorkflowSpec
+- E030: function returns WorkflowSpec but lacks @app.workflow_builder
 
 ### start_workflow / start_workflow_async
 - start_workflow(spec, broker, workflow_id=None) -> WorkflowHandle
