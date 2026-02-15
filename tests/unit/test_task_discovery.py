@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from unittest import mock
 
 import pytest
 
 from horsies.core.app import Horsies
+from horsies.core.cli import discover_app
+from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 
@@ -346,3 +349,187 @@ class TestExpandAndDiscoverIntegration:
         discovered = app.get_discovered_task_modules()
         assert os.path.realpath(tmp_path / "my_tasks.py") in discovered
         assert os.path.realpath(tmp_path / "other_tasks.py") in discovered
+
+
+@pytest.mark.unit
+class TestCheckTaskImportsErrorClassification:
+    """Tests for _check_task_imports() error code classification.
+
+    Verifies that import resolution failures (E206) are distinguished
+    from module execution errors (E210).
+    """
+
+    def test_missing_dotted_module_returns_e206(self) -> None:
+        """Non-existent dotted module path → E206 (CLI_INVALID_ARGS)."""
+        app = _make_app()
+        app.discover_tasks(['nonexistent.module.path.xyzzy'])
+
+        errors = app.check()
+
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.CLI_INVALID_ARGS
+        assert 'failed to import module' in errors[0].message
+
+    def test_missing_file_path_returns_e206(self, tmp_path: Path) -> None:
+        """Non-existent file path → E206 (CLI_INVALID_ARGS)."""
+        app = _make_app()
+        missing = str(tmp_path / 'does_not_exist.py')
+        app.discover_tasks([missing])
+
+        errors = app.check()
+
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.CLI_INVALID_ARGS
+        assert 'task module not found' in errors[0].message
+
+    def test_type_error_in_module_returns_e210(self, tmp_path: Path) -> None:
+        """Module that raises TypeError during import → E210 (MODULE_EXEC_ERROR)."""
+        bad_module = tmp_path / 'bad_type.py'
+        bad_module.write_text('raise TypeError("missing required argument")')
+
+        app = _make_app()
+        app.discover_tasks([str(bad_module)])
+
+        errors = app.check()
+
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.MODULE_EXEC_ERROR
+        assert 'error while importing module' in errors[0].message
+        assert 'TypeError' in errors[0].notes[0]
+        assert 'missing required argument' in errors[0].notes[0]
+
+    def test_attribute_error_in_module_returns_e210(self, tmp_path: Path) -> None:
+        """Module that raises AttributeError during import → E210 (MODULE_EXEC_ERROR)."""
+        bad_module = tmp_path / 'bad_attr.py'
+        bad_module.write_text('None.nonexistent_method()')
+
+        app = _make_app()
+        app.discover_tasks([str(bad_module)])
+
+        errors = app.check()
+
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.MODULE_EXEC_ERROR
+        assert 'AttributeError' in errors[0].notes[0]
+
+    def test_import_error_in_module_returns_e206(self, tmp_path: Path) -> None:
+        """Module that raises ImportError (missing dependency) → E206 (CLI_INVALID_ARGS)."""
+        bad_module = tmp_path / 'bad_import.py'
+        bad_module.write_text('from nonexistent_package_xyzzy import something')
+
+        app = _make_app()
+        app.discover_tasks([str(bad_module)])
+
+        errors = app.check()
+
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.CLI_INVALID_ARGS
+        assert 'failed to import module' in errors[0].message
+
+    def test_syntax_error_in_module_returns_e210(self, tmp_path: Path) -> None:
+        """Module with syntax error → E210 (MODULE_EXEC_ERROR)."""
+        bad_module = tmp_path / 'bad_syntax.py'
+        bad_module.write_text('def broken(\n')
+
+        app = _make_app()
+        app.discover_tasks([str(bad_module)])
+
+        errors = app.check()
+
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.MODULE_EXEC_ERROR
+        assert 'SyntaxError' in errors[0].notes[0]
+
+    def test_help_text_differs_between_e206_and_e210(self, tmp_path: Path) -> None:
+        """E206 help text points at importability; E210 at module-level code bugs."""
+        exec_module = tmp_path / 'exec_err.py'
+        exec_module.write_text('raise RuntimeError("boom")')
+
+        app = _make_app()
+        app.discover_tasks(['nonexistent.module.xyzzy', str(exec_module)])
+
+        errors = app.check()
+
+        # check() early-returns on first phase errors, so both should appear
+        assert len(errors) == 2
+        e206 = [e for e in errors if e.code == ErrorCode.CLI_INVALID_ARGS]
+        e210 = [e for e in errors if e.code == ErrorCode.MODULE_EXEC_ERROR]
+        assert len(e206) == 1
+        assert len(e210) == 1
+        assert 'importable' in (e206[0].help_text or '')
+        assert 'module-level code' in (e210[0].help_text or '')
+
+
+@pytest.mark.unit
+class TestDiscoverAppErrorClassification:
+    """Tests for discover_app() error code classification.
+
+    Verifies that file-path and dotted-path branches both
+    correctly classify import errors vs execution errors.
+    """
+
+    def test_file_path_type_error_returns_e210(self, tmp_path: Path) -> None:
+        """File that raises TypeError during import → E210 via discover_app()."""
+        bad_file = tmp_path / 'bad_app.py'
+        bad_file.write_text('raise TypeError("bad call")')
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            discover_app(f'{bad_file}:app')
+
+        assert exc_info.value.code == ErrorCode.MODULE_EXEC_ERROR
+        assert 'TypeError' in exc_info.value.notes[0]
+
+    def test_file_path_import_error_returns_e206(self, tmp_path: Path) -> None:
+        """File that raises ImportError → E206 via discover_app()."""
+        bad_file = tmp_path / 'bad_deps.py'
+        bad_file.write_text('from nonexistent_package_xyzzy import foo')
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            discover_app(f'{bad_file}:app')
+
+        assert exc_info.value.code == ErrorCode.CLI_INVALID_ARGS
+
+    def test_dotted_path_type_error_returns_e210(self, tmp_path: Path) -> None:
+        """Dotted module that raises TypeError → E210 via discover_app()."""
+        # Create a module that raises TypeError, importable via sys.path
+        pkg = tmp_path / 'test_pkg_e210'
+        pkg.mkdir()
+        (pkg / '__init__.py').write_text('')
+        (pkg / 'crasher.py').write_text('raise TypeError("bad decorator arg")')
+
+        original_path = sys.path.copy()
+        sys.modules.pop('test_pkg_e210.crasher', None)
+        sys.modules.pop('test_pkg_e210', None)
+        try:
+            sys.path.insert(0, str(tmp_path))
+            with pytest.raises(ConfigurationError) as exc_info:
+                discover_app('test_pkg_e210.crasher:app')
+
+            assert exc_info.value.code == ErrorCode.MODULE_EXEC_ERROR
+            assert 'TypeError' in exc_info.value.notes[0]
+        finally:
+            sys.path[:] = original_path
+            sys.modules.pop('test_pkg_e210.crasher', None)
+            sys.modules.pop('test_pkg_e210', None)
+
+    def test_dotted_path_import_error_returns_e206(self, tmp_path: Path) -> None:
+        """Dotted module that raises ImportError (not ModuleNotFoundError) → E206."""
+        pkg = tmp_path / 'test_pkg_e206'
+        pkg.mkdir()
+        (pkg / '__init__.py').write_text('')
+        (pkg / 'bad_dep.py').write_text('from nonexistent_package_xyzzy import bar')
+
+        original_path = sys.path.copy()
+        sys.modules.pop('test_pkg_e206.bad_dep', None)
+        sys.modules.pop('test_pkg_e206', None)
+        try:
+            sys.path.insert(0, str(tmp_path))
+            with pytest.raises(ConfigurationError) as exc_info:
+                discover_app('test_pkg_e206.bad_dep:app')
+
+            # ModuleNotFoundError (subclass of ImportError) → E206
+            assert exc_info.value.code == ErrorCode.CLI_INVALID_ARGS
+        finally:
+            sys.path[:] = original_path
+            sys.modules.pop('test_pkg_e206.bad_dep', None)
+            sys.modules.pop('test_pkg_e206', None)

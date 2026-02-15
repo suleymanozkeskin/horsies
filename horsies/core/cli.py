@@ -178,7 +178,25 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
             )
 
         # import_file_path adds parent directory to sys.path
-        module = import_file_path(file_path)
+        try:
+            module = import_file_path(file_path)
+        except ImportError as e:
+            raise ConfigurationError(
+                message=f'failed to import module: {file_path}',
+                code=ErrorCode.CLI_INVALID_ARGS,
+                notes=[str(e)],
+                help_text='check that the module and its dependencies are importable',
+            )
+        except Exception as e:
+            raise ConfigurationError(
+                message=f'error while importing module: {file_path}',
+                code=ErrorCode.MODULE_EXEC_ERROR,
+                notes=[f'{type(e).__name__}: {e}'],
+                help_text=(
+                    'the module was found but raised an error during import;\n'
+                    'check the module-level code for bugs'
+                ),
+            )
         module_name = module.__name__
         sys_path_root = os.path.dirname(file_path)
     else:
@@ -196,6 +214,26 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
                 help_text=(
                     'ensure you are running from the correct directory\n'
                     'or set PYTHONPATH to include your project root'
+                ),
+            )
+        except ImportError as e:
+            raise ConfigurationError(
+                message=f'failed to import module: {module_path}',
+                code=ErrorCode.CLI_INVALID_ARGS,
+                notes=[str(e)],
+                help_text=(
+                    'ensure the module and its dependencies are importable;\n'
+                    'check PYTHONPATH or run from the project root'
+                ),
+            )
+        except Exception as e:
+            raise ConfigurationError(
+                message=f'error while importing module: {module_path}',
+                code=ErrorCode.MODULE_EXEC_ERROR,
+                notes=[f'{type(e).__name__}: {e}'],
+                help_text=(
+                    'the module was found but raised an error during import;\n'
+                    'check the module-level code for bugs'
                 ),
             )
         module_name = module_path

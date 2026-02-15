@@ -201,6 +201,9 @@ horsies check myapp.instance:app
 | E205 | `CONFIG_INVALID_SCHEDULE` | Invalid schedule configuration |
 | E206 | `CLI_INVALID_ARGS` | Invalid CLI arguments |
 | E207 | `WORKER_INVALID_LOCATOR` | Invalid worker locator |
+| E208 | `CONFIG_INVALID_RESILIENCE` | Invalid resilience configuration |
+| E209 | `CONFIG_INVALID_EXCEPTION_MAPPER` | Invalid exception mapper |
+| E210 | `MODULE_EXEC_ERROR` | Module raised an error during import |
 
 ### Registry (E300-E399)
 

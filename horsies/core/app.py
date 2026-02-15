@@ -376,7 +376,7 @@ class Horsies:
                     errors.extend(exc.report.errors)
                 except HorsiesError as exc:
                     errors.append(exc)
-                except Exception as exc:
+                except (ModuleNotFoundError, ImportError) as exc:
                     errors.append(
                         _no_location(
                             ConfigurationError(
@@ -387,6 +387,20 @@ class Horsies:
                                     'ensure the module is importable; '
                                     'for file paths include .py and a valid path, '
                                     'for dotted paths verify PYTHONPATH or run from the project root'
+                                ),
+                            )
+                        )
+                    )
+                except Exception as exc:
+                    errors.append(
+                        _no_location(
+                            ConfigurationError(
+                                message=f'error while importing module: {module_path}',
+                                code=ErrorCode.MODULE_EXEC_ERROR,
+                                notes=[f'{type(exc).__name__}: {exc}'],
+                                help_text=(
+                                    'the module was found but raised an error during import;\n'
+                                    'check the module-level code for bugs'
                                 ),
                             )
                         )
