@@ -112,6 +112,35 @@ horsies check myapp.instance:app
 horsies check myapp.instance:app --live
 ```
 
+### horsies get-docs
+
+Fetch the full documentation locally as markdown files. Useful for AI agents (Claude Code, Cursor, Copilot, etc.) that need to read docs without web requests.
+
+```bash
+horsies get-docs [OPTIONS]
+```
+
+**Options:**
+
+| Option | Default | Description |
+| ------ | ------- | ----------- |
+| `--output DIR` | .horsies-docs | Output directory |
+
+**Examples:**
+
+```bash
+# Fetch docs to default location
+horsies get-docs
+
+# Custom output directory
+horsies get-docs --output my-docs/
+
+# Update existing docs (idempotent — overwrites cleanly)
+horsies get-docs
+```
+
+Uses git sparse checkout when git is available, falls back to tarball download otherwise. No app instance or database connection required.
+
 ## Module Formats
 
 The recommended format is a dotted module path with an explicit variable name:

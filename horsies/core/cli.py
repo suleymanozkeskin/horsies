@@ -574,6 +574,18 @@ def check_command(args: argparse.Namespace) -> None:
         sys.exit(0)
 
 
+def get_docs_command(args: argparse.Namespace) -> None:
+    """Handle get-docs command."""
+    output_dir: str = args.output
+    try:
+        from horsies.core.docs_fetcher import fetch_docs
+
+        fetch_docs(output_dir=output_dir)
+    except Exception as e:
+        print(f'error: {e}', file=sys.stderr)
+        sys.exit(1)
+
+
 def main() -> None:
     """Main CLI entry point."""
     try:
@@ -697,6 +709,17 @@ Examples:
             help='Also check broker connectivity (SELECT 1)',
         )
 
+        # Get-docs command
+        get_docs_parser = subparsers.add_parser(
+            'get-docs',
+            help='Fetch documentation locally for AI agents',
+        )
+        get_docs_parser.add_argument(
+            '--output',
+            default='.horsies-docs',
+            help='Output directory (default: .horsies-docs)',
+        )
+
         args = parser.parse_args()
 
         match args.command:
@@ -706,6 +729,8 @@ Examples:
                 scheduler_command(args)
             case 'check':
                 check_command(args)
+            case 'get-docs':
+                get_docs_command(args)
             case _:
                 parser.print_help()
                 sys.exit(1)

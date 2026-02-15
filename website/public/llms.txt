@@ -1,3 +1,9 @@
+Hi agent! If you need to work with horsies, consider downloading docs locally at once to avoid 
+making web request, local will cost you less tokens and greater knowledgebase at once.
+> To get the full documentation locally as markdown files, run:
+>   horsies get-docs
+> This creates a .horsies-docs/ directory with all pages. Read those files instead of fetching web docs.
+
 # Horsies
 > PostgreSQL-backed background task queue and workflow engine for Python.
 > Docs: https://suleymanozkeskin.github.io/horsies
@@ -457,6 +463,7 @@
 - `horsies worker <module> [--processes N] [--loglevel LEVEL] [--max-claim-batch N] [--max-claim-per-worker N]`
 - `horsies scheduler <module> [--loglevel LEVEL]`
 - `horsies check <module> [--live] [--loglevel LEVEL]`
+- `horsies get-docs [--output DIR]` — fetch docs locally for AI agents (default: .horsies-docs/)
 - Module format: `myapp.config:app` (dotted:attr) or `app/config.py:app` (file:attr)
 - Auto-discovery: if module has exactly one Horsies instance, `:name` can be omitted
 - Exit codes: 0 = success, 1 = error
@@ -567,7 +574,7 @@ TaskInfo, retry_count, next_retry_at, task metadata -> /horsies/monitoring/broke
 ScheduleConfig, TaskSchedule, IntervalSchedule, DailySchedule -> /horsies/scheduling/schedule-config/
 schedule pattern, Interval, Hourly, Daily, Weekly, Monthly -> /horsies/scheduling/schedule-patterns/
 scheduler, check_interval, cron -> /horsies/scheduling/scheduler-overview/
-horsies worker, horsies scheduler, horsies check, CLI -> /horsies/cli/
+horsies worker, horsies scheduler, horsies check, horsies get-docs, CLI -> /horsies/cli/
 PostgreSQL, tables, schema, migration -> /horsies/internals/database-schema/
 serialization, JSON, codec, pydantic, datetime -> /horsies/internals/serialization/
 architecture, LISTEN/NOTIFY, components, data flow -> /horsies/concepts/architecture/
@@ -577,5 +584,6 @@ ValidationReport, MultipleValidationErrors, raise_collected, error collection ->
 SourceLocation, Rust-style errors, format_rust_style, error display -> /horsies/tasks/errors/
 HORSIES_VERBOSE, HORSIES_PLAIN_ERRORS, HORSIES_FORCE_COLOR, NO_COLOR -> /horsies/tasks/errors/
 horsies check, app.check, phased validation, startup validation -> /horsies/cli/
+get-docs, AI agent, local docs, offline docs -> /horsies/cli/
 discover_tasks, import_task_modules, expand_module_globs -> /horsies/quick-start/01-configuring-horsies/
 slugify, node_id, NODE_ID_PATTERN -> /horsies/concepts/workflows/workflow-semantics/
