@@ -136,7 +136,7 @@ impl App {
         Ok(Self {
             tick_rate,
             frame_rate,
-            theme: Theme::new(ThemeFlavor::Mocha),
+            theme: Theme::new(ThemeFlavor::HorsiesDark),
             should_quit: false,
             should_suspend: false,
             action_tx,
