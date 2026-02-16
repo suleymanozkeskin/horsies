@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING, TextIO
 
+from horsies.core.utils.url import mask_database_url
+
 if TYPE_CHECKING:
     from horsies.core.app import Horsies
 
@@ -181,13 +183,7 @@ def print_banner(
     _write_kv(lines, 'queues', queues_str)
 
     # Broker info (mask password)
-    broker_url = app.config.broker.database_url
-    if '@' in broker_url:
-        pre, post = broker_url.split('@', 1)
-        if ':' in pre:
-            scheme_user = pre.rsplit(':', 1)[0]
-            broker_url = f'{scheme_user}:****@{post}'
-    _write_kv(lines, 'broker', broker_url)
+    _write_kv(lines, 'broker', mask_database_url(app.config.broker.database_url))
 
     # Cluster-wide cap
     if hasattr(app.config, 'cluster_wide_cap') and app.config.cluster_wide_cap:

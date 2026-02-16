@@ -1,11 +1,11 @@
 # app/core/models/app.py
-from typing import List, Optional, Any
+from typing import List, Optional
 from pydantic import BaseModel, model_validator, Field, ConfigDict
 from horsies.core.models.queues import QueueMode, CustomQueueConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.resilience import WorkerResilienceConfig
-from horsies.core.models.schedule import ScheduleConfig
+from horsies.core.models.schedule import ScheduleConfig, SchedulePattern
 from horsies.core.exception_mapper import (
     ExceptionMapper,
     validate_exception_mapper,
@@ -17,7 +17,7 @@ from horsies.core.errors import (
     ValidationReport,
     raise_collected,
 )
-from urllib.parse import urlparse, urlunparse
+from horsies.core.utils.url import mask_database_url
 import logging
 import os
 
@@ -229,7 +229,7 @@ class AppConfig(BaseModel):
             lines.append(f'  claim_lease_ms: {self.claim_lease_ms}ms')
 
         # Broker config with masked password
-        masked_url = self._mask_database_url(self.broker.database_url)
+        masked_url = mask_database_url(self.broker.database_url)
         lines.append(f'  broker:')
         lines.append(f'    database_url: {masked_url}')
         lines.append(f'    pool_size: {self.broker.pool_size}')
@@ -289,65 +289,26 @@ class AppConfig(BaseModel):
         return '\n'.join(lines)
 
     @staticmethod
-    def _mask_database_url(url: str) -> str:
-        """Mask password in database URL for secure logging."""
-        try:
-            parsed = urlparse(url)
-            if parsed.password:
-                # Replace password with asterisks
-                netloc = parsed.netloc.replace(f':{parsed.password}@', ':***@')
-                masked = urlunparse(
-                    (
-                        parsed.scheme,
-                        netloc,
-                        parsed.path,
-                        parsed.params,
-                        parsed.query,
-                        parsed.fragment,
-                    )
-                )
-                return masked
-            return url
-        except Exception:
-            # If parsing fails, just return a generic masked version
-            return (
-                url.split('@')[0].rsplit(':', 1)[0] + ':***@' + url.split('@')[1]
-                if '@' in url
-                else url
-            )
-
-    @staticmethod
-    def _format_schedule_pattern(pattern: Any) -> str:
+    def _format_schedule_pattern(pattern: SchedulePattern) -> str:
         """Format schedule pattern for concise logging."""
-        from horsies.core.models.schedule import (
-            IntervalSchedule,
-            HourlySchedule,
-            DailySchedule,
-            WeeklySchedule,
-            MonthlySchedule,
-        )
-
-        if isinstance(pattern, IntervalSchedule):
-            parts: list[str] = []
-            if pattern.days:
-                parts.append(f'{pattern.days}d')
-            if pattern.hours:
-                parts.append(f'{pattern.hours}h')
-            if pattern.minutes:
-                parts.append(f'{pattern.minutes}m')
-            if pattern.seconds:
-                parts.append(f'{pattern.seconds}s')
-            return f"every {' '.join(parts)}"
-        elif isinstance(pattern, HourlySchedule):
-            return f'hourly at :{pattern.minute:02d}:{pattern.second:02d}'
-        elif isinstance(pattern, DailySchedule):
-            return f"daily at {pattern.time.strftime('%H:%M:%S')}"
-        elif isinstance(pattern, WeeklySchedule):
-            days = ', '.join(d.value for d in pattern.days)
-            return f"weekly on {days} at {pattern.time.strftime('%H:%M:%S')}"
-        elif isinstance(pattern, MonthlySchedule):
-            return (
-                f"monthly on day {pattern.day} at {pattern.time.strftime('%H:%M:%S')}"
-            )
-        else:
-            return str(pattern)
+        match pattern.type:
+            case 'interval':
+                parts: list[str] = []
+                if pattern.days:
+                    parts.append(f'{pattern.days}d')
+                if pattern.hours:
+                    parts.append(f'{pattern.hours}h')
+                if pattern.minutes:
+                    parts.append(f'{pattern.minutes}m')
+                if pattern.seconds:
+                    parts.append(f'{pattern.seconds}s')
+                return f"every {' '.join(parts)}"
+            case 'hourly':
+                return f'hourly at :{pattern.minute:02d}:{pattern.second:02d}'
+            case 'daily':
+                return f"daily at {pattern.time.strftime('%H:%M:%S')}"
+            case 'weekly':
+                days = ', '.join(d.value for d in pattern.days)
+                return f"weekly on {days} at {pattern.time.strftime('%H:%M:%S')}"
+            case 'monthly':
+                return f"monthly on day {pattern.day} at {pattern.time.strftime('%H:%M:%S')}"
