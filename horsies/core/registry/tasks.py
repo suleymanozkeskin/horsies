@@ -6,11 +6,16 @@ from horsies.core.errors import RegistryError, ErrorCode
 T = TypeVar('T')
 
 
-class NotRegistered(RegistryError):
-    """Raised when a task name is not present in the registry."""
+class NotRegistered(RegistryError, KeyError):
+    """Raised when a task name is not present in the registry.
+
+    Inherits from KeyError so MutableMapping.__contains__ works correctly
+    (it catches KeyError to implement the ``in`` operator).
+    """
 
     def __init__(self, task_name: str) -> None:
-        super().__init__(
+        RegistryError.__init__(
+            self,
             message=f"task '{task_name}' not registered",
             code=ErrorCode.TASK_NOT_REGISTERED,
             notes=[f"requested task: '{task_name}'"],

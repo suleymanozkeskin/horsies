@@ -635,7 +635,7 @@ def _run_task_entry(
         # Resolve from TaskRegistry
         try:
             app = get_current_app()
-            task = app.tasks[task_name]  # may raise NotRegistered(KeyError)
+            task = app.tasks[task_name]  # may raise NotRegistered
         except Exception as e:
             logger.error(f'Failed to resolve task {task_name}: {e}')
             tr: TaskResult[Any, TaskError] = TaskResult(

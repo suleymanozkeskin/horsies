@@ -16,7 +16,19 @@ from horsies.core.errors import (
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
+from horsies.core.models.schedule import (
+    DailySchedule,
+    HourlySchedule,
+    IntervalSchedule,
+    MonthlySchedule,
+    ScheduleConfig,
+    TaskSchedule,
+    Weekday,
+    WeeklySchedule,
+)
 from horsies.core.utils.url import mask_database_url
+
+from datetime import time as datetime_time
 
 
 # Shared broker config for all tests
@@ -582,3 +594,168 @@ class TestLogConfig:
             with patch.dict('os.environ', env, clear=True):
                 config.log_config(logger=logger)
         logger.info.assert_called_once()
+
+    def test_log_config_none_logger_uses_root(self) -> None:
+        """log_config with no logger should use root logger."""
+        config = AppConfig(broker=BROKER)
+        with patch.dict('os.environ', {}, clear=False):
+            env = {k: v for k, v in __import__('os').environ.items() if k != 'HORSIES_CHILD_PROCESS'}
+            with patch.dict('os.environ', env, clear=True):
+                with patch('logging.getLogger') as mock_get_logger:
+                    mock_logger = MagicMock()
+                    mock_get_logger.return_value = mock_logger
+                    config.log_config(logger=None)
+                    mock_get_logger.assert_called_once_with()
+                    mock_logger.info.assert_called_once()
+
+
+@pytest.mark.unit
+class TestFormatForLoggingExtended:
+    """Tests for _format_for_logging covering cluster_wide_cap, claim_lease_ms, exception_mapper, schedule."""
+
+    def test_cluster_wide_cap_displayed(self) -> None:
+        """cluster_wide_cap should appear in formatted output when set."""
+        config = AppConfig(broker=BROKER, cluster_wide_cap=50)
+        formatted = config._format_for_logging()
+        assert 'cluster_wide_cap: 50' in formatted
+
+    def test_cluster_wide_cap_omitted_when_none(self) -> None:
+        """cluster_wide_cap should not appear when None."""
+        config = AppConfig(broker=BROKER)
+        formatted = config._format_for_logging()
+        assert 'cluster_wide_cap' not in formatted
+
+    def test_claim_lease_ms_displayed(self) -> None:
+        """claim_lease_ms should appear in formatted output when set."""
+        config = AppConfig(
+            broker=BROKER,
+            prefetch_buffer=4,
+            claim_lease_ms=30_000,
+        )
+        formatted = config._format_for_logging()
+        assert 'claim_lease_ms: 30000ms' in formatted
+
+    def test_claim_lease_ms_omitted_when_none(self) -> None:
+        """claim_lease_ms should not appear when None."""
+        config = AppConfig(broker=BROKER)
+        formatted = config._format_for_logging()
+        assert 'claim_lease_ms' not in formatted
+
+    def test_exception_mapper_displayed(self) -> None:
+        """Non-empty exception mapper should show mapping count."""
+        config = AppConfig(
+            broker=BROKER,
+            exception_mapper={ValueError: 'VALUE_ERROR', TypeError: 'TYPE_ERROR'},
+        )
+        formatted = config._format_for_logging()
+        assert 'exception_mapper: 2 mapping(s)' in formatted
+
+    def test_custom_default_error_code_displayed(self) -> None:
+        """Non-default unhandled error code should appear in output."""
+        config = AppConfig(
+            broker=BROKER,
+            default_unhandled_error_code='MY_ERROR',
+        )
+        formatted = config._format_for_logging()
+        assert 'default_unhandled_error_code: MY_ERROR' in formatted
+
+    def test_default_error_code_omitted_when_default(self) -> None:
+        """Default unhandled error code should not appear in output."""
+        config = AppConfig(broker=BROKER)
+        formatted = config._format_for_logging()
+        assert 'default_unhandled_error_code' not in formatted
+
+    def test_retention_hours_displayed(self) -> None:
+        """Retention hours should appear in formatted output."""
+        config = AppConfig(broker=BROKER)
+        formatted = config._format_for_logging()
+        assert 'retention_hours:' in formatted
+        assert 'heartbeats=24' in formatted
+        assert 'worker_states=168' in formatted
+        assert 'terminal_records=720' in formatted
+
+    def test_schedule_displayed(self) -> None:
+        """Schedule config should appear when set."""
+        config = AppConfig(
+            broker=BROKER,
+            schedule=ScheduleConfig(
+                enabled=True,
+                schedules=[
+                    TaskSchedule(
+                        name='daily_cleanup',
+                        task_name='cleanup',
+                        pattern=DailySchedule(time=datetime_time(3, 0, 0)),
+                    ),
+                ],
+                check_interval_seconds=5,
+            ),
+        )
+        formatted = config._format_for_logging()
+        assert 'schedule:' in formatted
+        assert 'enabled: True' in formatted
+        assert '1 schedule(s)' in formatted
+        assert 'daily_cleanup' in formatted
+        assert 'cleanup' in formatted
+        assert 'check_interval: 5s' in formatted
+
+    def test_schedule_omitted_when_none(self) -> None:
+        """Schedule section should not appear when schedule is None."""
+        config = AppConfig(broker=BROKER)
+        formatted = config._format_for_logging()
+        assert 'schedule:' not in formatted
+
+
+@pytest.mark.unit
+class TestFormatSchedulePattern:
+    """Tests for AppConfig._format_schedule_pattern covering all match cases."""
+
+    def test_interval_all_components(self) -> None:
+        """Interval with days, hours, minutes, seconds should format all parts."""
+        pattern = IntervalSchedule(days=1, hours=2, minutes=30, seconds=15)
+        result = AppConfig._format_schedule_pattern(pattern)
+        assert result == 'every 1d 2h 30m 15s'
+
+    def test_interval_hours_only(self) -> None:
+        """Interval with only hours should format just hours."""
+        pattern = IntervalSchedule(hours=4)
+        result = AppConfig._format_schedule_pattern(pattern)
+        assert result == 'every 4h'
+
+    def test_interval_minutes_and_seconds(self) -> None:
+        """Interval with minutes and seconds only."""
+        pattern = IntervalSchedule(minutes=10, seconds=30)
+        result = AppConfig._format_schedule_pattern(pattern)
+        assert result == 'every 10m 30s'
+
+    def test_hourly(self) -> None:
+        """Hourly pattern should format with zero-padded minute:second."""
+        pattern = HourlySchedule(minute=5, second=30)
+        result = AppConfig._format_schedule_pattern(pattern)
+        assert result == 'hourly at :05:30'
+
+    def test_hourly_defaults(self) -> None:
+        """Hourly with default second should zero-pad correctly."""
+        pattern = HourlySchedule(minute=15)
+        result = AppConfig._format_schedule_pattern(pattern)
+        assert result == 'hourly at :15:00'
+
+    def test_daily(self) -> None:
+        """Daily pattern should format time as HH:MM:SS."""
+        pattern = DailySchedule(time=datetime_time(14, 30, 0))
+        result = AppConfig._format_schedule_pattern(pattern)
+        assert result == 'daily at 14:30:00'
+
+    def test_weekly(self) -> None:
+        """Weekly pattern should list day names and time."""
+        pattern = WeeklySchedule(
+            days=[Weekday.MONDAY, Weekday.FRIDAY],
+            time=datetime_time(9, 0, 0),
+        )
+        result = AppConfig._format_schedule_pattern(pattern)
+        assert result == 'weekly on monday, friday at 09:00:00'
+
+    def test_monthly(self) -> None:
+        """Monthly pattern should show day number and time."""
+        pattern = MonthlySchedule(day=15, time=datetime_time(3, 0, 0))
+        result = AppConfig._format_schedule_pattern(pattern)
+        assert result == 'monthly on day 15 at 03:00:00'

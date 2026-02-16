@@ -20,4 +20,4 @@ Horsies includes **Syce**, a terminal-based UI for monitoring your cluster in re
 
 ## Test Coverage
 
-Overall test coverage: **76%**
+Overall test coverage: **77%**
