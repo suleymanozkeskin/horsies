@@ -56,6 +56,8 @@ Task liveness tracking.
 | `hostname` | VARCHAR(255) | Machine hostname |
 | `pid` | INT | Process ID |
 
+Indexes: `(task_id, role, sent_at DESC)`
+
 ## horsies_worker_states
 
 Worker monitoring snapshots (timeseries).
@@ -123,32 +125,19 @@ await conn.run_sync(Base.metadata.create_all)
 
 Protected by advisory lock to prevent race conditions.
 
-## Maintenance
+## Automatic Retention Cleanup
 
-### Heartbeat Cleanup
+The worker's reaper loop prunes old rows automatically every hour based on [RecoveryConfig](../../configuration/recovery-config) retention settings:
 
-```sql
-DELETE FROM horsies_heartbeats WHERE sent_at < NOW() - INTERVAL '24 hours';
-```
+| Table | Config field | Default | Condition |
+|-------|-------------|---------|-----------|
+| `horsies_heartbeats` | `heartbeat_retention_hours` | 24h | `sent_at` older than threshold |
+| `horsies_worker_states` | `worker_state_retention_hours` | 7 days | `snapshot_at` older than threshold |
+| `horsies_tasks` | `terminal_record_retention_hours` | 30 days | Terminal status + oldest timestamp older than threshold |
+| `horsies_workflows` | `terminal_record_retention_hours` | 30 days | Terminal status + oldest timestamp older than threshold |
+| `horsies_workflow_tasks` | `terminal_record_retention_hours` | 30 days | Parent workflow is terminal and older than threshold |
 
-### Worker State Cleanup
-
-```sql
-DELETE FROM horsies_worker_states WHERE snapshot_at < NOW() - INTERVAL '7 days';
-```
-
-### Completed Task Archival
-
-```sql
--- Move old completed tasks to archive
-INSERT INTO horsies_tasks_archive SELECT * FROM horsies_tasks
-WHERE status IN ('COMPLETED', 'FAILED')
-  AND completed_at < NOW() - INTERVAL '30 days';
-
-DELETE FROM horsies_tasks
-WHERE status IN ('COMPLETED', 'FAILED')
-  AND completed_at < NOW() - INTERVAL '30 days';
-```
+Terminal statuses: COMPLETED, FAILED, CANCELLED. Set any retention field to `None` to disable cleanup for that category. See [Recovery Config](../../configuration/recovery-config#retention-cleanup) for configuration details.
 
 ## File Location
 

@@ -285,7 +285,11 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - check_interval_ms: int (default 30_000, range 1s-10min)
 - runner_heartbeat_interval_ms: int (default 30_000, range 1s-2min)
 - claimer_heartbeat_interval_ms: int (default 30_000, range 1s-2min)
+- heartbeat_retention_hours: int | None (default 24, range 1-8760, None disables pruning)
+- worker_state_retention_hours: int | None (default 168 / 7 days, range 1-8760, None disables pruning)
+- terminal_record_retention_hours: int | None (default 720 / 30 days, range 1-43800, None disables pruning)
 - Constraint: stale thresholds must be >= 2x heartbeat intervals
+- Reaper prunes heartbeats, worker_states, and terminal task/workflow rows hourly based on retention settings
 
 ### WorkerResilienceConfig
 - db_retry_initial_ms: int (default 500, range 100ms-60s)

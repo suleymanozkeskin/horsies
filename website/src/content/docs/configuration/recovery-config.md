@@ -42,8 +42,11 @@ config = AppConfig(
 | `check_interval_ms` | `int` | 30,000 | How often to check for stale tasks |
 | `runner_heartbeat_interval_ms` | `int` | 30,000 | RUNNING task heartbeat frequency |
 | `claimer_heartbeat_interval_ms` | `int` | 30,000 | CLAIMED task heartbeat frequency |
+| `heartbeat_retention_hours` | `int \| None` | 24 | Hours to keep heartbeat rows; `None` disables pruning |
+| `worker_state_retention_hours` | `int \| None` | 168 (7 days) | Hours to keep worker_state snapshots; `None` disables pruning |
+| `terminal_record_retention_hours` | `int \| None` | 720 (30 days) | Hours to keep terminal task/workflow rows; `None` disables pruning |
 
-All time values are in milliseconds.
+All time values for thresholds and intervals are in milliseconds. Retention values are in hours.
 
 ## Recovery Behaviors
 
@@ -117,6 +120,36 @@ The config validates that thresholds are safe:
 RecoveryConfig(
     runner_heartbeat_interval_ms=30_000,
     running_stale_threshold_ms=30_000,  # Must be >= 60_000 (2x heartbeat)
+)
+```
+
+## Retention Cleanup
+
+The reaper loop automatically prunes old rows every hour. Three categories are cleaned independently:
+
+| Category | Config field | Default | What gets deleted |
+|----------|-------------|---------|-------------------|
+| Heartbeats | `heartbeat_retention_hours` | 24h | `horsies_heartbeats` rows older than threshold |
+| Worker states | `worker_state_retention_hours` | 7 days | `horsies_worker_states` snapshots older than threshold |
+| Terminal records | `terminal_record_retention_hours` | 30 days | `horsies_tasks`, `horsies_workflows`, and `horsies_workflow_tasks` rows in COMPLETED/FAILED/CANCELLED status older than threshold |
+
+Set any field to `None` to disable pruning for that category.
+
+```python
+RecoveryConfig(
+    heartbeat_retention_hours=48,              # Keep heartbeats for 2 days
+    worker_state_retention_hours=24 * 14,      # Keep worker snapshots for 2 weeks
+    terminal_record_retention_hours=24 * 90,   # Keep terminal records for 90 days
+)
+```
+
+To disable all automatic cleanup:
+
+```python
+RecoveryConfig(
+    heartbeat_retention_hours=None,
+    worker_state_retention_hours=None,
+    terminal_record_retention_hours=None,
 )
 ```
 
