@@ -59,6 +59,7 @@ T = TypeVar('T')
 OutT = TypeVar('OutT')
 
 _E = TypeVar('_E', bound=HorsiesError)
+_F = TypeVar('_F', bound=Callable[..., Any])
 
 # Sentinel attribute name stamped on functions decorated with @app.workflow_builder
 _BUILDER_ATTR = '__horsies_workflow_builder__'
@@ -929,7 +930,7 @@ class Horsies:
         self,
         *,
         cases: list[dict[str, Any]] | None = None,
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    ) -> Callable[[_F], _F]:
         """Decorator registering a workflow builder for check-phase validation.
 
         Builders are functions that return WorkflowSpec. During `horsies check`,
@@ -942,7 +943,7 @@ class Horsies:
                    builder has parameters without defaults.
         """
 
-        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        def decorator(fn: _F) -> _F:
             location = SourceLocation.from_function(fn)
             setattr(fn, _BUILDER_ATTR, True)
             self._workflow_builders.append(
