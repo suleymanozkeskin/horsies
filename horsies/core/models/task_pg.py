@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Integer,
+    Index,
     Enum as SQLAlchemyEnum,
     Float,
     ARRAY,
@@ -153,6 +154,14 @@ class TaskHeartbeatModel(Base):
     """Normalized heartbeat entries for task liveness tracking."""
 
     __tablename__ = 'horsies_heartbeats'
+    __table_args__ = (
+        Index(
+            'idx_horsies_heartbeats_task_role_sent',
+            'task_id',
+            'role',
+            text('sent_at DESC'),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     task_id: Mapped[str] = mapped_column(String(36), nullable=False)

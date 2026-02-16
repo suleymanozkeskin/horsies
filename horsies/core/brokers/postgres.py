@@ -168,6 +168,11 @@ SET_TASK_COLUMN_DEFAULTS_SQL = text("""
     ALTER COLUMN updated_at SET DEFAULT NOW();
 """)
 
+CREATE_HEARTBEATS_TASK_ROLE_SENT_INDEX_SQL = text("""
+    CREATE INDEX IF NOT EXISTS idx_horsies_heartbeats_task_role_sent
+    ON horsies_heartbeats (task_id, role, sent_at DESC);
+""")
+
 # ---- TUI/syce notification triggers ----
 # These fire on ANY status change so the TUI gets real-time updates.
 # They are separate from the worker-oriented triggers above.
@@ -525,6 +530,7 @@ class PostgresBroker:
             # Migration: ensure NOT NULL columns have server-side DEFAULTs
             # for existing tables created before server_default was added.
             await conn.execute(SET_TASK_COLUMN_DEFAULTS_SQL)
+            await conn.execute(CREATE_HEARTBEATS_TASK_ROLE_SENT_INDEX_SQL)
 
         await self._create_triggers()
         await self._create_workflow_schema()

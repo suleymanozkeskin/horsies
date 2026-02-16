@@ -1041,6 +1041,13 @@ INSERT_WORKER_STATE_SQL = text("""
     )
 """)
 
+DELETE_EXPIRED_HEARTBEATS_SQL = text("""
+    DELETE FROM horsies_heartbeats
+    WHERE sent_at < NOW() - INTERVAL '24 hours'
+""")
+
+_HEARTBEAT_RETENTION_CLEANUP_INTERVAL_S = 3600.0
+
 
 _FINALIZER_DRAIN_TIMEOUT_S: float = 30.0
 
@@ -2296,6 +2303,7 @@ class Worker:
         recovery_cfg = self.cfg.recovery_config
         check_interval_ms = recovery_cfg.check_interval_ms
         temp_broker = None
+        next_heartbeat_cleanup_at = time.monotonic()
 
         logger.info(
             f'Reaper configuration: auto_requeue_claimed={recovery_cfg.auto_requeue_stale_claimed}, '
@@ -2348,6 +2356,25 @@ class Worker:
                             await s.commit()
                     except Exception as wf_err:
                         logger.error(f'Workflow recovery error: {wf_err}')
+
+                    now_monotonic = time.monotonic()
+                    if now_monotonic >= next_heartbeat_cleanup_at:
+                        try:
+                            async with temp_broker.session_factory() as s:
+                                result = await s.execute(DELETE_EXPIRED_HEARTBEATS_SQL)
+                                await s.commit()
+                            deleted = int(result.rowcount or 0)
+                            if deleted > 0:
+                                logger.info(
+                                    f'Reaper pruned {deleted} stale heartbeat row(s)'
+                                )
+                        except Exception as hb_err:
+                            logger.error(f'Heartbeat retention cleanup error: {hb_err}')
+                        finally:
+                            next_heartbeat_cleanup_at = (
+                                now_monotonic
+                                + _HEARTBEAT_RETENTION_CLEANUP_INTERVAL_S
+                            )
 
                 except Exception as e:
                     logger.error(f'Reaper loop error: {e}')

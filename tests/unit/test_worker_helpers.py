@@ -14,11 +14,13 @@ from psycopg.errors import DeadlockDetected, SerializationFailure
 from horsies.core.worker.worker import (
     Worker,
     WorkerConfig,
+    DELETE_EXPIRED_HEARTBEATS_SQL,
     _build_sys_path_roots,
     _dedupe_paths,
     _derive_sys_path_roots_from_file,
     _is_retryable_db_error,
 )
+from horsies.core.models.recovery import RecoveryConfig
 
 
 # ---------------------------------------------------------------------------
@@ -308,3 +310,64 @@ class TestWorkerStop:
 
         assert finalizer_task.cancelled()
         worker.listener.close.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# 8. Worker._reaper_loop heartbeat retention
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestReaperHeartbeatRetention:
+    """Tests for heartbeat retention cleanup in the reaper loop."""
+
+    @pytest.mark.asyncio
+    async def test_reaper_prunes_expired_heartbeats(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        worker = _make_worker()
+        worker.cfg.recovery_config = RecoveryConfig(
+            auto_requeue_stale_claimed=False,
+            auto_fail_stale_running=False,
+            check_interval_ms=1_000,
+        )
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.commit = AsyncMock()
+        delete_result = MagicMock(rowcount=3)
+
+        async def _execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+            if stmt is DELETE_EXPIRED_HEARTBEATS_SQL:
+                worker._stop.set()
+                return delete_result
+            return MagicMock(rowcount=0)
+
+        session.execute = AsyncMock(side_effect=_execute)
+
+        created_brokers: list[Any] = []
+
+        class _FakeBroker:
+            def __init__(self, config: Any):
+                self.config = config
+                self.app = None
+                self.session_factory = MagicMock(return_value=session)
+                self.close_async = AsyncMock()
+                created_brokers.append(self)
+
+        recover_mock = AsyncMock(return_value=0)
+        monkeypatch.setattr(
+            'horsies.core.brokers.postgres.PostgresBroker', _FakeBroker
+        )
+        monkeypatch.setattr(
+            'horsies.core.workflows.recovery.recover_stuck_workflows', recover_mock
+        )
+
+        await worker._reaper_loop()
+
+        assert any(
+            call.args and call.args[0] is DELETE_EXPIRED_HEARTBEATS_SQL
+            for call in session.execute.await_args_list
+        )
+        assert recover_mock.await_count >= 1
+        assert len(created_brokers) == 1
+        created_brokers[0].close_async.assert_awaited_once()
