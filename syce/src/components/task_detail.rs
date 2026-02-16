@@ -289,9 +289,38 @@ impl<'a> TaskDetailPanel<'a> {
             lines.push(DetailLine::new(Line::from(vec![
                 Span::styled("Error", Style::default().fg(theme.error).bold()),
             ])));
-            for error_line in Self::format_json(&self.task.failed_reason) {
+
+            let has_failed_reason = self.task.failed_reason.as_ref().is_some_and(|s| !s.is_empty());
+            let has_result = self.task.result.as_ref().is_some_and(|s| !s.is_empty());
+
+            if has_failed_reason {
                 lines.push(DetailLine::new(Line::from(vec![
-                    Span::styled(format!("  {}", error_line), Style::default().fg(theme.error)),
+                    Span::styled("  Reason:", Style::default().fg(theme.error).bold()),
+                ])));
+                for error_line in Self::format_json(&self.task.failed_reason) {
+                    lines.push(DetailLine::new(Line::from(vec![
+                        Span::styled(format!("    {}", error_line), Style::default().fg(theme.error)),
+                    ])));
+                }
+            }
+
+            if has_result {
+                if has_failed_reason {
+                    lines.push(DetailLine::new(Line::from("")));
+                }
+                lines.push(DetailLine::new(Line::from(vec![
+                    Span::styled("  Result:", Style::default().fg(theme.error).bold()),
+                ])));
+                for result_line in Self::format_json(&self.task.result) {
+                    lines.push(DetailLine::new(Line::from(vec![
+                        Span::styled(format!("    {}", result_line), Style::default().fg(theme.error)),
+                    ])));
+                }
+            }
+
+            if !has_failed_reason && !has_result {
+                lines.push(DetailLine::new(Line::from(vec![
+                    Span::styled("  -", Style::default().fg(theme.error)),
                 ])));
             }
         }

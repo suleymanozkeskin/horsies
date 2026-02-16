@@ -372,25 +372,43 @@ impl<'a> WorkflowDetailPanel<'a> {
 
                 // Status details for terminal states
                 if task.status == "COMPLETED" {
-                    // Show brief status
                     lines.push(DetailLine::new(Line::from(vec![
                         Span::styled("        ", Style::default()),
                         Span::styled("status: ", Style::default().fg(theme.muted)),
                         Span::styled("COMPLETED", Style::default().fg(theme.success)),
                     ])));
                 } else if task.status == "FAILED" {
-                    if let Some(error) = &task.error {
-                        let truncated = if error.len() > 50 {
-                            format!("{}...", &error[..47])
-                        } else {
-                            error.clone()
-                        };
-                        lines.push(DetailLine::new(Line::from(vec![
-                            Span::styled("        ", Style::default()),
-                            Span::styled("error: ", Style::default().fg(theme.error)),
-                            Span::styled(truncated, Style::default().fg(theme.error)),
-                        ])));
-                    }
+                    // Extract error from result field (backend writes error info there, not to error column)
+                    let error_summary = task.result.as_ref().and_then(|r| {
+                        serde_json::from_str::<serde_json::Value>(r).ok().and_then(|v| {
+                            v.get("err").and_then(|err| {
+                                let code = err.get("error_code").and_then(|c| c.as_str());
+                                let msg = err.get("message").and_then(|m| m.as_str());
+                                match (code, msg) {
+                                    (Some(c), Some(m)) => Some(format!("{}: {}", c, m)),
+                                    (Some(c), None) => Some(c.to_string()),
+                                    (None, Some(m)) => Some(m.to_string()),
+                                    (None, None) => None,
+                                }
+                            })
+                        })
+                    }).or_else(|| task.error.clone());
+
+                    let display = match &error_summary {
+                        Some(s) => {
+                            if s.len() > 60 {
+                                format!("{}...", &s[..57])
+                            } else {
+                                s.clone()
+                            }
+                        }
+                        None => "FAILED".to_string(),
+                    };
+                    lines.push(DetailLine::new(Line::from(vec![
+                        Span::styled("        ", Style::default()),
+                        Span::styled("error: ", Style::default().fg(theme.error)),
+                        Span::styled(display, Style::default().fg(theme.error)),
+                    ])));
                 } else if task.status == "RUNNING" {
                     lines.push(DetailLine::new(Line::from(vec![
                         Span::styled("        ", Style::default()),
@@ -402,6 +420,13 @@ impl<'a> WorkflowDetailPanel<'a> {
                         Span::styled("        ", Style::default()),
                         Span::styled("status: ", Style::default().fg(theme.muted)),
                         Span::styled("SKIPPED", Style::default().fg(theme.muted)),
+                    ])));
+                } else if task.status == "ENQUEUED" || task.status == "READY" {
+                    let color = Self::status_color(&task.status, theme);
+                    lines.push(DetailLine::new(Line::from(vec![
+                        Span::styled("        ", Style::default()),
+                        Span::styled("status: ", Style::default().fg(theme.muted)),
+                        Span::styled(task.status.clone(), Style::default().fg(color)),
                     ])));
                 }
             }
@@ -605,8 +630,8 @@ impl<'a> WorkflowDetailPanel<'a> {
         let dag_lines = self.build_dag_lines(theme);
         lines.extend(dag_lines);
 
-        // Show workflow result or error if terminal
-        if self.workflow.status == "COMPLETED" || self.workflow.status == "FAILED" {
+        // Show workflow result/error for terminal and paused states
+        if self.workflow.status == "COMPLETED" || self.workflow.status == "FAILED" || self.workflow.status == "PAUSED" {
             lines.push(DetailLine::new(Line::from("")));
 
             if self.workflow.status == "COMPLETED" {
@@ -615,7 +640,6 @@ impl<'a> WorkflowDetailPanel<'a> {
                         "Result",
                         Style::default().fg(theme.success).bold(),
                     )])));
-                    // Pretty-print if it's JSON
                     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
                         if let Ok(pretty) = serde_json::to_string_pretty(&parsed) {
                             for line in pretty.lines() {
@@ -634,16 +658,57 @@ impl<'a> WorkflowDetailPanel<'a> {
                         ])));
                     }
                 }
-            } else if self.workflow.status == "FAILED" {
-                if let Some(error) = &self.workflow.error {
+            } else {
+                // FAILED or PAUSED — show error and/or result
+                let error_color = if self.workflow.status == "PAUSED" { Color::Magenta } else { theme.error };
+                let header = if self.workflow.status == "PAUSED" { "Paused Error" } else { "Error" };
+
+                let has_error = self.workflow.error.as_ref().is_some_and(|s| !s.is_empty());
+                let has_result = self.workflow.result.as_ref().is_some_and(|s| !s.is_empty());
+
+                if has_error || has_result {
                     lines.push(DetailLine::new(Line::from(vec![Span::styled(
-                        "Error",
-                        Style::default().fg(theme.error).bold(),
+                        header,
+                        Style::default().fg(error_color).bold(),
                     )])));
-                    for line in error.lines() {
-                        lines.push(DetailLine::new(Line::from(vec![
-                            Span::styled(format!("  {}", line), Style::default().fg(theme.error)),
-                        ])));
+                }
+
+                if let Some(error) = &self.workflow.error {
+                    if !error.is_empty() {
+                        for line in error.lines() {
+                            lines.push(DetailLine::new(Line::from(vec![
+                                Span::styled(format!("  {}", line), Style::default().fg(error_color)),
+                            ])));
+                        }
+                    }
+                }
+
+                if let Some(result) = &self.workflow.result {
+                    if !result.is_empty() {
+                        if has_error {
+                            lines.push(DetailLine::new(Line::from("")));
+                            lines.push(DetailLine::new(Line::from(vec![Span::styled(
+                                "  Result:",
+                                Style::default().fg(error_color).bold(),
+                            )])));
+                        }
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
+                            if let Ok(pretty) = serde_json::to_string_pretty(&parsed) {
+                                for line in pretty.lines() {
+                                    lines.push(DetailLine::new(Line::from(vec![
+                                        Span::styled(format!("    {}", line), Style::default().fg(error_color)),
+                                    ])));
+                                }
+                            } else {
+                                lines.push(DetailLine::new(Line::from(vec![
+                                    Span::styled(format!("    {}", result), Style::default().fg(error_color)),
+                                ])));
+                            }
+                        } else {
+                            lines.push(DetailLine::new(Line::from(vec![
+                                Span::styled(format!("    {}", result), Style::default().fg(error_color)),
+                            ])));
+                        }
                     }
                 }
             }

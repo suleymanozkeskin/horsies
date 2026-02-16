@@ -325,6 +325,11 @@ impl<'a> Dashboard<'a> {
                 ])
                 .style(Style::default().fg(theme.error)),
                 Row::new(vec![
+                    Cell::from("CANCELLED"),
+                    Cell::from(format!("{}", summary.cancelled.unwrap_or(0))),
+                ])
+                .style(Style::default().fg(theme.muted)),
+                Row::new(vec![
                     Cell::from("TOTAL"),
                     Cell::from(format!("{}", summary.total())),
                 ])
