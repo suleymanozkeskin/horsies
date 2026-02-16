@@ -17,7 +17,7 @@ from sqlalchemy import text
 
 from horsies.core.codec.serde import loads_json, task_result_from_json
 from horsies.core.logging import get_logger
-from horsies.core.models.workflow import WORKFLOW_TASK_TERMINAL_STATES
+from horsies.core.models.workflow import WF_TASK_TERMINAL_VALUES
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,8 +25,6 @@ if TYPE_CHECKING:
     from horsies.core.models.tasks import TaskResult, TaskError
 
 logger = get_logger('workflow.recovery')
-
-_WF_TASK_TERMINAL_VALUES: list[str] = [s.value for s in WORKFLOW_TASK_TERMINAL_STATES]
 
 
 GET_PENDING_WITH_TERMINAL_DEPS_SQL = text("""
@@ -171,7 +169,7 @@ async def recover_stuck_workflows(
     # transition is missed due to timing
     pending_ready = await session.execute(
         GET_PENDING_WITH_TERMINAL_DEPS_SQL,
-        {'wf_task_terminal_states': _WF_TASK_TERMINAL_VALUES},
+        {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES},
     )
 
     for row in pending_ready.fetchall():
@@ -323,7 +321,7 @@ async def recover_stuck_workflows(
     # - workflow_tasks row stays RUNNING/ENQUEUED indefinitely
     crashed_worker_tasks = await session.execute(
         GET_CRASHED_WORKER_TASKS_SQL,
-        {'wf_task_terminal_states': _WF_TASK_TERMINAL_VALUES},
+        {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES},
     )
 
     for row in crashed_worker_tasks.fetchall():
@@ -383,7 +381,7 @@ async def recover_stuck_workflows(
     # This happens if worker crashed after completing last task but before updating workflow
     terminal_candidates = await session.execute(
         GET_TERMINAL_WORKFLOW_CANDIDATES_SQL,
-        {'wf_task_terminal_states': _WF_TASK_TERMINAL_VALUES},
+        {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES},
     )
 
     for row in terminal_candidates.fetchall():
@@ -505,7 +503,7 @@ async def _get_dependency_results(
         {
             'wf_id': workflow_id,
             'indices': dependency_indices,
-            'wf_task_terminal_states': _WF_TASK_TERMINAL_VALUES,
+            'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES,
         },
     )
 

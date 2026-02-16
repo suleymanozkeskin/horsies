@@ -43,27 +43,6 @@ class SerializationError(Exception):
     pass
 
 
-def _is_json_native(x: object) -> TypeGuard[Json]:
-    """
-    Check if a value is a JSON-native type (by our stricter definition: dict keys must be str).
-    """
-    if x is None or isinstance(x, (bool, int, float, str)):
-        return True
-
-    if isinstance(x, list):
-        items = cast(List[object], x)
-        return all(_is_json_native(item) for item in items)
-
-    if isinstance(x, dict):
-        _dict = cast(Dict[object, object], x)
-        for key, value in _dict.items():
-            if not isinstance(key, str) or not _is_json_native(value):
-                return False
-        return True
-
-    return False
-
-
 def _exception_to_json(ex: BaseException) -> Dict[str, Json]:
     """
     Convert a BaseException to a JSON-serializable dictionary.

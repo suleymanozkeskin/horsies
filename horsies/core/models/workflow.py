@@ -142,6 +142,8 @@ WORKFLOW_TASK_TERMINAL_STATES: frozenset[WorkflowTaskStatus] = frozenset(
     }
 )
 
+WF_TASK_TERMINAL_VALUES: list[str] = [s.value for s in WORKFLOW_TASK_TERMINAL_STATES]
+
 
 class OnError(str, Enum):
     """

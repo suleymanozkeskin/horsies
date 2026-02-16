@@ -26,14 +26,12 @@ from horsies.core.models.workflow import (
     WorkflowTaskStatus,
     WorkflowDefinition,
     AnyNode,
-    WORKFLOW_TASK_TERMINAL_STATES,
+    WF_TASK_TERMINAL_VALUES,
     validate_workflow_generic_output_match,
 )
 from horsies.core.errors import WorkflowValidationError, ErrorCode
 
 logger = get_logger('workflow.engine')
-
-_WF_TASK_TERMINAL_VALUES: list[str] = [s.value for s in WORKFLOW_TASK_TERMINAL_STATES]
 
 if TYPE_CHECKING:
     from horsies.core.models.workflow import WorkflowSpec
@@ -1622,7 +1620,7 @@ async def _try_make_ready_and_enqueue(
             {
                 'wf_id': workflow_id,
                 'node_ids': ctx_from_ids,
-                'wf_task_terminal_states': _WF_TASK_TERMINAL_VALUES,
+                'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES,
             },
         )
         ctx_terminal = ctx_terminal_result.scalar_one()
@@ -1915,7 +1913,7 @@ async def _get_dependency_results(
         {
             'wf_id': workflow_id,
             'indices': dependency_indices,
-            'wf_task_terminal_states': _WF_TASK_TERMINAL_VALUES,
+            'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES,
         },
     )
 
@@ -1975,7 +1973,7 @@ async def _get_dependency_results_with_names(
         {
             'wf_id': workflow_id,
             'node_ids': dependency_node_ids,
-            'wf_task_terminal_states': _WF_TASK_TERMINAL_VALUES,
+            'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES,
         },
     )
 
@@ -2081,7 +2079,7 @@ async def _check_workflow_completion(
         GET_WORKFLOW_COMPLETION_STATUS_SQL,
         {
             'wf_id': workflow_id,
-            'wf_task_terminal_states': _WF_TASK_TERMINAL_VALUES,
+            'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES,
         },
     )
 
