@@ -25,7 +25,7 @@ from typing import (
 )
 import inspect
 import time
-from horsies.core.utils.loop_runner import LoopRunner
+from horsies.core.utils.loop_runner import get_shared_runner
 from horsies.core.errors import (
     ErrorCode,
     SourceLocation,
@@ -2192,12 +2192,7 @@ class WorkflowHandle(Generic[OutT]):
 
     def status(self) -> WorkflowStatus:
         """Get current workflow status."""
-
-        runner = LoopRunner()
-        try:
-            return runner.call(self.status_async)
-        finally:
-            runner.stop()
+        return get_shared_runner().call(self.status_async)
 
     async def status_async(self) -> WorkflowStatus:
         """Async version of status()."""
@@ -2220,59 +2215,86 @@ class WorkflowHandle(Generic[OutT]):
             Otherwise: TaskResult containing dict of terminal task results
         """
 
-        runner = LoopRunner()
-        try:
-            return runner.call(self.get_async, timeout_ms)
-        finally:
-            runner.stop()
+        return get_shared_runner().call(self.get_async, timeout_ms)
 
     async def get_async(
-        self, timeout_ms: int | None = None
+        self, timeout_ms: int | None = None,
     ) -> TaskResult[OutT, TaskError]:
         """Async version of get()."""
-
+        import asyncio
         from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
 
         start = time.monotonic()
         timeout_sec = timeout_ms / 1000 if timeout_ms else None
 
+        # Subscribe to workflow_done once before the loop
+        q: asyncio.Queue[Any] | None = None
+        try:
+            q = await self.broker.listener.listen('workflow_done')
+        except RuntimeError:
+            # Cross-loop access (sync handle.get() via LoopRunner) —
+            # fall back to sleep-based polling.
+            pass
+
+        try:
+            while True:
+                # Check current status
+                status = await self.status_async()
+
+                if status == WorkflowStatus.COMPLETED:
+                    return await self._get_result()
+
+                if status in (WorkflowStatus.FAILED, WorkflowStatus.CANCELLED):
+                    return await self._get_error()
+
+                if status == WorkflowStatus.PAUSED:
+                    return cast(
+                        'TaskResult[OutT, TaskError]',
+                        TaskResult(
+                            err=TaskError(
+                                error_code='WORKFLOW_PAUSED',
+                                message='Workflow is paused awaiting intervention',
+                            )
+                        ),
+                    )
+
+                # Check timeout
+                elapsed = time.monotonic() - start
+                if timeout_sec and elapsed >= timeout_sec:
+                    return cast(
+                        'TaskResult[OutT, TaskError]',
+                        TaskResult(
+                            err=TaskError(
+                                error_code=LibraryErrorCode.WAIT_TIMEOUT,
+                                message=f'Workflow did not complete within {timeout_ms}ms',
+                            )
+                        ),
+                    )
+
+                # Wait for notification or poll
+                remaining = (timeout_sec - elapsed) if timeout_sec else 5.0
+                wait_time = min(remaining, 5.0)
+
+                if q is not None:
+                    # Drain queue looking for our workflow_id
+                    try:
+                        await asyncio.wait_for(
+                            self._drain_queue_for_workflow(q), timeout=wait_time,
+                        )
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(min(wait_time, 1.0))
+        finally:
+            if q is not None:
+                await self.broker.listener.unsubscribe('workflow_done', q)
+
+    async def _drain_queue_for_workflow(self, q: Any) -> None:
+        """Drain notifications until one matches this workflow."""
         while True:
-            # Check current status
-            status = await self.status_async()
-
-            if status == WorkflowStatus.COMPLETED:
-                return await self._get_result()
-
-            if status in (WorkflowStatus.FAILED, WorkflowStatus.CANCELLED):
-                return await self._get_error()
-
-            if status == WorkflowStatus.PAUSED:
-                return cast(
-                    'TaskResult[OutT, TaskError]',
-                    TaskResult(
-                        err=TaskError(
-                            error_code='WORKFLOW_PAUSED',
-                            message='Workflow is paused awaiting intervention',
-                        )
-                    ),
-                )
-
-            # Check timeout
-            elapsed = time.monotonic() - start
-            if timeout_sec and elapsed >= timeout_sec:
-                return cast(
-                    'TaskResult[OutT, TaskError]',
-                    TaskResult(
-                        err=TaskError(
-                            error_code=LibraryErrorCode.WAIT_TIMEOUT,
-                            message=f'Workflow did not complete within {timeout_ms}ms',
-                        )
-                    ),
-                )
-
-            # Wait for notification or poll
-            remaining = (timeout_sec - elapsed) if timeout_sec else 5.0
-            await self._wait_for_completion(min(remaining, 5.0))
+            note = await q.get()
+            if note.payload == self.workflow_id:
+                return
 
     async def _get_result(self) -> TaskResult[OutT, TaskError]:
         """Fetch completed workflow result."""
@@ -2330,30 +2352,6 @@ class WorkflowHandle(Generic[OutT]):
                 )
             )
 
-    async def _wait_for_completion(self, timeout_sec: float) -> None:
-        """Wait for workflow_done notification or poll interval."""
-        import asyncio
-
-        try:
-            q = await self.broker.listener.listen('workflow_done')
-            try:
-
-                async def _wait_for_workflow() -> None:
-                    while True:
-                        note = await q.get()
-                        if note.payload == self.workflow_id:
-                            return
-
-                await asyncio.wait_for(_wait_for_workflow(), timeout=timeout_sec)
-            finally:
-                await self.broker.listener.unsubscribe('workflow_done', q)
-        except asyncio.TimeoutError:
-            pass  # Polling fallback
-        except RuntimeError:
-            # Cross-loop access: listener dispatcher is on a different event loop
-            # (e.g. sync handle.get() via LoopRunner). Fall back to sleep-based polling.
-            await asyncio.sleep(min(timeout_sec, 1.0))
-
     def results(self) -> dict[str, TaskResult[Any, TaskError]]:
         """
         Get all task results keyed by unique identifier.
@@ -2361,13 +2359,7 @@ class WorkflowHandle(Generic[OutT]):
         Keys are `node_id` values. If a TaskNode did not specify a node_id,
         WorkflowSpec auto-assigns one as "{workflow_name}:{task_index}".
         """
-        from horsies.core.utils.loop_runner import LoopRunner
-
-        runner = LoopRunner()
-        try:
-            return runner.call(self.results_async)
-        finally:
-            runner.stop()
+        return get_shared_runner().call(self.results_async)
 
     async def results_async(self) -> dict[str, TaskResult[Any, TaskError]]:
         """
@@ -2415,13 +2407,7 @@ class WorkflowHandle(Generic[OutT]):
                 # Task hasn't completed yet - wait or check later
                 pass
         """
-        from horsies.core.utils.loop_runner import LoopRunner
-
-        runner = LoopRunner()
-        try:
-            return runner.call(self.result_for_async, node)
-        finally:
-            runner.stop()
+        return get_shared_runner().call(self.result_for_async, node)
 
     async def result_for_async(
         self, node: TaskNode[OkT] | NodeKey[OkT]
@@ -2474,13 +2460,7 @@ class WorkflowHandle(Generic[OutT]):
 
     def tasks(self) -> list[WorkflowTaskInfo]:
         """Get status of all tasks in workflow."""
-        from horsies.core.utils.loop_runner import LoopRunner
-
-        runner = LoopRunner()
-        try:
-            return runner.call(self.tasks_async)
-        finally:
-            runner.stop()
+        return get_shared_runner().call(self.tasks_async)
 
     async def tasks_async(self) -> list[WorkflowTaskInfo]:
         """Async version of tasks()."""
@@ -2509,13 +2489,7 @@ class WorkflowHandle(Generic[OutT]):
 
     def cancel(self) -> None:
         """Request workflow cancellation."""
-        from horsies.core.utils.loop_runner import LoopRunner
-
-        runner = LoopRunner()
-        try:
-            runner.call(self.cancel_async)
-        finally:
-            runner.stop()
+        get_shared_runner().call(self.cancel_async)
 
     async def cancel_async(self) -> None:
         """Async version of cancel()."""
@@ -2546,13 +2520,7 @@ class WorkflowHandle(Generic[OutT]):
         Returns:
             True if workflow was paused, False if not RUNNING (no-op)
         """
-        from horsies.core.utils.loop_runner import LoopRunner
-
-        runner = LoopRunner()
-        try:
-            return runner.call(self.pause_async)
-        finally:
-            runner.stop()
+        return get_shared_runner().call(self.pause_async)
 
     async def pause_async(self) -> bool:
         """
@@ -2575,13 +2543,7 @@ class WorkflowHandle(Generic[OutT]):
         Returns:
             True if workflow was resumed, False if not PAUSED (no-op)
         """
-        from horsies.core.utils.loop_runner import LoopRunner
-
-        runner = LoopRunner()
-        try:
-            return runner.call(self.resume_async)
-        finally:
-            runner.stop()
+        return get_shared_runner().call(self.resume_async)
 
     async def resume_async(self) -> bool:
         """

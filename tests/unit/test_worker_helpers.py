@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from psycopg import InterfaceError, OperationalError
@@ -244,3 +245,66 @@ class TestComputeClaimExpiresAt:
         expected_low = before + timedelta(milliseconds=lease_ms)
         expected_high = after + timedelta(milliseconds=lease_ms)
         assert expected_low <= result <= expected_high
+
+
+# ---------------------------------------------------------------------------
+# 7. Worker.stop() shutdown behavior
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestWorkerStop:
+    """Tests for shutdown behavior of tracked background tasks."""
+
+    @pytest.mark.asyncio
+    async def test_stop_drains_finalizers_but_cancels_service_tasks(self) -> None:
+        worker = _make_worker()
+        worker.listener.close = AsyncMock()
+
+        service_task = worker._spawn_background(asyncio.sleep(999), name='service-test')
+
+        async def _quick_finalizer() -> None:
+            await asyncio.sleep(0.01)
+
+        finalizer_task = worker._spawn_background(
+            _quick_finalizer(), name='finalizer-test', finalizer=True
+        )
+
+        await worker.stop(finalizer_timeout_s=1.0)
+
+        assert service_task.cancelled()
+        assert finalizer_task.done()
+        assert not finalizer_task.cancelled()
+        worker.listener.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_stop_force_cancels_finalizers(self) -> None:
+        worker = _make_worker()
+        worker.listener.close = AsyncMock()
+
+        never_set = asyncio.Event()
+        finalizer_task = worker._spawn_background(
+            never_set.wait(), name='finalizer-force', finalizer=True
+        )
+        await asyncio.sleep(0)
+
+        await worker.stop(force=True, finalizer_timeout_s=1.0)
+
+        assert finalizer_task.cancelled()
+        worker.listener.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_stop_timeout_cancels_pending_finalizers(self) -> None:
+        worker = _make_worker()
+        worker.listener.close = AsyncMock()
+
+        never_set = asyncio.Event()
+        finalizer_task = worker._spawn_background(
+            never_set.wait(), name='finalizer-timeout', finalizer=True
+        )
+        await asyncio.sleep(0)
+
+        await worker.stop(finalizer_timeout_s=0.01)
+
+        assert finalizer_task.cancelled()
+        worker.listener.close.assert_awaited_once()

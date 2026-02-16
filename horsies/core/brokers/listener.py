@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections import defaultdict
-from typing import DefaultDict, Optional, Set
+from typing import DefaultDict, Optional, Sequence, Set
 from asyncio import Task, Queue  # precise type for Pylance/mypy
 
 import psycopg
@@ -32,6 +32,8 @@ from psycopg import sql
 from horsies.core.logging import get_logger
 
 logger = get_logger('listener')
+
+_SUBSCRIBER_QUEUE_MAXSIZE: int = 4096
 
 
 class PostgresListener:
@@ -358,10 +360,55 @@ class PostgresListener:
                         self._dispatcher(), name='pg-listener-dispatcher'
                     )
 
-            # Create a fresh queue for this subscriber.
-            q: Queue[Notify] = asyncio.Queue()
+            # Create a fresh bounded queue for this subscriber.
+            q: Queue[Notify] = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_MAXSIZE)
             self._subs[channel_name].add(q)
             return q
+
+    async def listen_many(
+        self, channel_names: Sequence[str],
+    ) -> list[Queue[Notify]]:
+        """Subscribe to multiple channels in a single lock acquisition.
+
+        More efficient than calling listen() in a loop because the
+        dispatcher is stopped/restarted at most once.
+
+        Returns queues in the same order as *channel_names*.
+        """
+        await self._ensure_connections()
+
+        async with self._lock:
+            new_channels = [
+                ch for ch in channel_names if ch not in self._listen_channels
+            ]
+
+            if new_channels:
+                # Stop dispatcher once for all new channels
+                if self._dispatcher_task is not None:
+                    self._dispatcher_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await self._dispatcher_task
+                    self._dispatcher_task = None
+
+                disp_conn = await self._ensure_dispatcher_connection()
+                for ch in new_channels:
+                    await disp_conn.execute(
+                        sql.SQL('LISTEN {}').format(sql.Identifier(ch))
+                    )
+                    self._listen_channels.add(ch)
+
+                # Restart dispatcher
+                self._dispatcher_task = asyncio.create_task(
+                    self._dispatcher(), name='pg-listener-dispatcher',
+                )
+
+            # Create bounded queues for all requested channels
+            queues: list[Queue[Notify]] = []
+            for ch in channel_names:
+                q: Queue[Notify] = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_MAXSIZE)
+                self._subs[ch].add(q)
+                queues.append(q)
+            return queues
 
     async def unlisten(
         self, channel_name: str, q: Optional[Queue[Notify]] = None

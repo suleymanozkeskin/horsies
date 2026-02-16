@@ -1042,6 +1042,22 @@ INSERT_WORKER_STATE_SQL = text("""
 """)
 
 
+_FINALIZER_DRAIN_TIMEOUT_S: float = 30.0
+
+
+def _collect_psutil_metrics() -> tuple[float, float, float]:
+    """Collect process metrics. Blocking — must run in a thread."""
+    import psutil
+
+    process = psutil.Process()
+    memory_info = process.memory_info()
+    return (
+        memory_info.rss / 1024 / 1024,
+        process.memory_percent(),
+        process.cpu_percent(interval=0.1),
+    )
+
+
 class Worker:
     """
     Async master that:
@@ -1068,10 +1084,35 @@ class Worker:
         # any import/validation errors surface in the main process at startup.
         self._executor: Optional[ProcessPoolExecutor] = None
         self._stop = asyncio.Event()
+        self._service_tasks: set[asyncio.Task[Any]] = set()
+        self._finalizer_tasks: set[asyncio.Task[Any]] = set()
 
     def request_stop(self) -> None:
         """Request worker to stop gracefully."""
         self._stop.set()
+
+    def _spawn_background(
+        self,
+        coro: Any,
+        *,
+        name: str,
+        finalizer: bool = False,
+    ) -> asyncio.Task[Any]:
+        """Create a tracked background task with automatic cleanup."""
+        task_group = self._finalizer_tasks if finalizer else self._service_tasks
+        task = asyncio.create_task(coro, name=name)
+        task_group.add(task)
+
+        def _on_done(t: asyncio.Task[Any]) -> None:
+            task_group.discard(t)
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error(f'Background task {t.get_name()!r} failed: {exc}')
+
+        task.add_done_callback(_on_done)
+        return task
 
     def _create_executor(self) -> ProcessPoolExecutor:
         child_database_url = self.cfg.dsn.replace('+asyncpg', '').replace(
@@ -1201,25 +1242,63 @@ class Worker:
             self.cfg.max_claim_batch,
         )
 
-        # Subscribe to each queue channel (and optionally a global)
-        self._queues = [
-            await self.listener.listen(f'task_queue_{q}') for q in self.cfg.queues
-        ]
-        logger.info(f'Subscribed to queues: {self.cfg.queues}')
-        self._global = await self.listener.listen('task_new')
-        logger.info('Subscribed to global queue')
+        # Subscribe to each queue channel (and a global) in one batch
+        all_channels = [f'task_queue_{q}' for q in self.cfg.queues] + ['task_new']
+        all_queues = await self.listener.listen_many(all_channels)
+        self._queues = all_queues[:-1]
+        self._global = all_queues[-1]
+        logger.info(f'Subscribed to queues: {self.cfg.queues} + global')
         # Start claimer heartbeat loop (CLAIMED coverage)
-        asyncio.create_task(self._claimer_heartbeat_loop())
+        self._spawn_background(
+            self._claimer_heartbeat_loop(), name='claimer-heartbeat',
+        )
         # Start worker state heartbeat loop for monitoring
-        asyncio.create_task(self._worker_state_heartbeat_loop())
+        self._spawn_background(
+            self._worker_state_heartbeat_loop(), name='worker-state-heartbeat',
+        )
         logger.info('Worker state heartbeat loop started for monitoring')
         # Start reaper loop for automatic stale task handling
         if self.cfg.recovery_config:
-            asyncio.create_task(self._reaper_loop())
+            self._spawn_background(self._reaper_loop(), name='reaper')
             logger.info('Reaper loop started for automatic stale task recovery')
 
-    async def stop(self) -> None:
+    async def stop(
+        self,
+        *,
+        force: bool = False,
+        finalizer_timeout_s: float = _FINALIZER_DRAIN_TIMEOUT_S,
+    ) -> None:
         self._stop.set()
+        # Service loops are safe to cancel.
+        if self._service_tasks:
+            service_tasks = tuple(self._service_tasks)
+            for task in service_tasks:
+                task.cancel()
+            await asyncio.gather(*service_tasks, return_exceptions=True)
+            self._service_tasks.clear()
+
+        # Finalizers persist task outcomes and should be drained gracefully.
+        if self._finalizer_tasks:
+            finalizer_tasks = tuple(self._finalizer_tasks)
+            if force:
+                for task in finalizer_tasks:
+                    task.cancel()
+                await asyncio.gather(*finalizer_tasks, return_exceptions=True)
+            else:
+                done, pending = await asyncio.wait(
+                    finalizer_tasks, timeout=max(0.0, finalizer_timeout_s)
+                )
+                if pending:
+                    logger.warning(
+                        'Worker stop timed out with %s finalize task(s) still running; cancelling pending finalizers',
+                        len(pending),
+                    )
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                if done:
+                    await asyncio.gather(*done, return_exceptions=True)
+            self._finalizer_tasks.clear()
         # Close the Postgres listener early to avoid UNLISTEN races on dispatcher connection
         try:
             await self.listener.close()
@@ -1757,7 +1836,11 @@ class Worker:
             return
 
         # When done, record the outcome
-        asyncio.create_task(self._finalize_after(fut, task_id))
+        self._spawn_background(
+            self._finalize_after(fut, task_id),
+            name=f'finalize-{task_id}',
+            finalizer=True,
+        )
 
     # ----- finalize (write back to DB + notify) -----
 
@@ -2010,10 +2093,11 @@ class Worker:
 
         # Schedule a delayed notification using asyncio for the task's actual queue
         queue_name = await self._get_task_queue_name(task_id)
-        asyncio.create_task(
+        self._spawn_background(
             self._schedule_delayed_notification(
-                delay_seconds, f'task_queue_{queue_name}', f'retry:{task_id}'
-            )
+                delay_seconds, f'task_queue_{queue_name}', f'retry:{task_id}',
+            ),
+            name=f'delayed-notify-{task_id}',
         )
 
         logger.info(
@@ -2117,11 +2201,10 @@ class Worker:
 
     async def _update_worker_state(self) -> None:
         """Update worker state snapshot in database for monitoring."""
-        import psutil
-
         try:
-            process = psutil.Process()
-            memory_info = process.memory_info()
+            rss_mb, mem_pct, cpu_pct = await asyncio.to_thread(
+                _collect_psutil_metrics,
+            )
 
             # Get current task counts
             running = await self._count_only_running_for_worker()
@@ -2163,9 +2246,9 @@ class Worker:
                         'recovery': Jsonb(recovery_dict) if recovery_dict else None,
                         'running': running,
                         'claimed': claimed,
-                        'mem_mb': memory_info.rss / 1024 / 1024,
-                        'mem_pct': process.memory_percent(),
-                        'cpu_pct': process.cpu_percent(interval=0.1),
+                        'mem_mb': rss_mb,
+                        'mem_pct': mem_pct,
+                        'cpu_pct': cpu_pct,
                         'started': self._started_at,
                     },
                 )

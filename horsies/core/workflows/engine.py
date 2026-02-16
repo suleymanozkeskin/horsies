@@ -10,6 +10,7 @@ This module handles workflow lifecycle:
 from __future__ import annotations
 
 import uuid
+from collections import deque
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from sqlalchemy import text
@@ -351,13 +352,9 @@ def start_workflow(
     Returns:
         WorkflowHandle for tracking and retrieving results
     """
-    from horsies.core.utils.loop_runner import LoopRunner
+    from horsies.core.utils.loop_runner import get_shared_runner
 
-    runner = LoopRunner()
-    try:
-        return runner.call(start_workflow_async, spec, broker, workflow_id)
-    finally:
-        runner.stop()
+    return get_shared_runner().call(start_workflow_async, spec, broker, workflow_id)
 
 
 # -- SQL constants for pause_workflow --
@@ -440,10 +437,10 @@ async def _cascade_pause_to_children(
     Iteratively pause all running child workflows using BFS.
     Avoids deep recursion for deeply nested workflows.
     """
-    queue = [workflow_id]
+    queue: deque[str] = deque([workflow_id])
 
     while queue:
-        current_id = queue.pop(0)
+        current_id = queue.popleft()
 
         # Find running child workflows
         children = await session.execute(
@@ -486,13 +483,9 @@ def pause_workflow_sync(
     Returns:
         True if workflow was paused, False if not RUNNING (no-op)
     """
-    from horsies.core.utils.loop_runner import LoopRunner
+    from horsies.core.utils.loop_runner import get_shared_runner
 
-    runner = LoopRunner()
-    try:
-        return runner.call(pause_workflow, broker, workflow_id)
-    finally:
-        runner.stop()
+    return get_shared_runner().call(pause_workflow, broker, workflow_id)
 
 
 # -- SQL constants for resume_workflow --
@@ -628,10 +621,10 @@ async def _cascade_resume_to_children(
     Iteratively resume all paused child workflows using BFS.
     Avoids deep recursion for deeply nested workflows.
     """
-    queue = [workflow_id]
+    queue: deque[str] = deque([workflow_id])
 
     while queue:
-        current_id = queue.pop(0)
+        current_id = queue.popleft()
 
         # Find paused child workflows
         children = await session.execute(
@@ -710,13 +703,9 @@ def resume_workflow_sync(
     Returns:
         True if workflow was resumed, False if not PAUSED (no-op)
     """
-    from horsies.core.utils.loop_runner import LoopRunner
+    from horsies.core.utils.loop_runner import get_shared_runner
 
-    runner = LoopRunner()
-    try:
-        return runner.call(resume_workflow, broker, workflow_id)
-    finally:
-        runner.stop()
+    return get_shared_runner().call(resume_workflow, broker, workflow_id)
 
 
 # -- SQL constants for _enqueue_workflow_task --

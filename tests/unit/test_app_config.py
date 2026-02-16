@@ -16,6 +16,7 @@ from horsies.core.errors import (
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
+from horsies.core.utils.url import mask_database_url
 
 
 # Shared broker config for all tests
@@ -513,12 +514,12 @@ class TestAppConfigImmutability:
 
 @pytest.mark.unit
 class TestLogConfig:
-    """Tests for log_config, _format_for_logging, and _mask_database_url."""
+    """Tests for log_config, _format_for_logging, and mask_database_url."""
 
     def test_mask_database_url_hides_password(self) -> None:
         """Password in database URL should be masked."""
         url = 'postgresql+psycopg://user:secret@localhost/db'
-        masked = AppConfig._mask_database_url(url)
+        masked = mask_database_url(url)
         assert 'secret' not in masked
         assert '***' in masked
         assert 'user' in masked
@@ -527,7 +528,7 @@ class TestLogConfig:
     def test_mask_database_url_no_password(self) -> None:
         """URL without password should remain unchanged."""
         url = 'postgresql+psycopg://localhost/db'
-        masked = AppConfig._mask_database_url(url)
+        masked = mask_database_url(url)
         assert masked == url
 
     def test_mask_database_url_malformed_fallback(self) -> None:
@@ -535,7 +536,7 @@ class TestLogConfig:
         # Force the except branch by providing something that urlparse
         # handles but has no parsed password, while still containing @
         url = 'not-a-real-scheme://user:secret@host/db'
-        masked = AppConfig._mask_database_url(url)
+        masked = mask_database_url(url)
         assert 'secret' not in masked
 
     def test_format_for_logging_contains_queue_mode(self) -> None:

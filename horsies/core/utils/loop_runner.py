@@ -1,6 +1,7 @@
 # app/core/utils/looprunner.py
 from __future__ import annotations
 import asyncio
+import atexit
 import threading
 from concurrent.futures import Future
 from typing import Any, Awaitable, Callable
@@ -42,3 +43,29 @@ class LoopRunner:
             coro_fn(*args, **kwargs), self._loop
         )
         return fut.result()  # propagate exceptions
+
+
+_shared_runner: LoopRunner | None = None
+_shared_lock = threading.Lock()
+
+
+def _shutdown_shared_runner() -> None:
+    global _shared_runner
+    if _shared_runner is not None:
+        _shared_runner.stop()
+        _shared_runner = None
+
+
+def get_shared_runner() -> LoopRunner:
+    """Return a lazily-created, process-wide LoopRunner."""
+    global _shared_runner
+    if _shared_runner is not None:
+        return _shared_runner
+    with _shared_lock:
+        if _shared_runner is not None:
+            return _shared_runner
+        runner = LoopRunner()
+        runner.start()
+        atexit.register(_shutdown_shared_runner)
+        _shared_runner = runner
+        return runner
