@@ -15,6 +15,10 @@ from horsies.core.worker.worker import (
     Worker,
     WorkerConfig,
     DELETE_EXPIRED_HEARTBEATS_SQL,
+    DELETE_EXPIRED_TASKS_SQL,
+    DELETE_EXPIRED_WORKER_STATES_SQL,
+    DELETE_EXPIRED_WORKFLOWS_SQL,
+    DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
     _build_sys_path_roots,
     _dedupe_paths,
     _derive_sys_path_roots_from_file,
@@ -328,6 +332,8 @@ class TestReaperHeartbeatRetention:
             auto_requeue_stale_claimed=False,
             auto_fail_stale_running=False,
             check_interval_ms=1_000,
+            worker_state_retention_hours=None,
+            terminal_record_retention_hours=None,
         )
 
         session = AsyncMock()
@@ -368,6 +374,75 @@ class TestReaperHeartbeatRetention:
             call.args and call.args[0] is DELETE_EXPIRED_HEARTBEATS_SQL
             for call in session.execute.await_args_list
         )
+        assert recover_mock.await_count >= 1
+        assert len(created_brokers) == 1
+        created_brokers[0].close_async.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_reaper_prunes_worker_state_and_terminal_rows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worker = _make_worker()
+        worker.cfg.recovery_config = RecoveryConfig(
+            auto_requeue_stale_claimed=False,
+            auto_fail_stale_running=False,
+            check_interval_ms=1_000,
+            heartbeat_retention_hours=12,
+            worker_state_retention_hours=48,
+            terminal_record_retention_hours=72,
+        )
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.commit = AsyncMock()
+
+        expected_rowcounts = {
+            DELETE_EXPIRED_HEARTBEATS_SQL: 5,
+            DELETE_EXPIRED_WORKER_STATES_SQL: 7,
+            DELETE_EXPIRED_WORKFLOW_TASKS_SQL: 11,
+            DELETE_EXPIRED_WORKFLOWS_SQL: 13,
+            DELETE_EXPIRED_TASKS_SQL: 17,
+        }
+
+        async def _execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+            if stmt in expected_rowcounts:
+                if stmt is DELETE_EXPIRED_TASKS_SQL:
+                    worker._stop.set()
+                return MagicMock(rowcount=expected_rowcounts[stmt])
+            return MagicMock(rowcount=0)
+
+        session.execute = AsyncMock(side_effect=_execute)
+
+        created_brokers: list[Any] = []
+
+        class _FakeBroker:
+            def __init__(self, config: Any):
+                self.config = config
+                self.app = None
+                self.session_factory = MagicMock(return_value=session)
+                self.close_async = AsyncMock()
+                created_brokers.append(self)
+
+        recover_mock = AsyncMock(return_value=0)
+        monkeypatch.setattr(
+            'horsies.core.brokers.postgres.PostgresBroker', _FakeBroker
+        )
+        monkeypatch.setattr(
+            'horsies.core.workflows.recovery.recover_stuck_workflows', recover_mock
+        )
+
+        await worker._reaper_loop()
+
+        executed_statements = [
+            call.args[0]
+            for call in session.execute.await_args_list
+            if call.args
+        ]
+        for statement in expected_rowcounts:
+            assert statement in executed_statements
+
+        assert session.commit.await_count >= 1
         assert recover_mock.await_count >= 1
         assert len(created_brokers) == 1
         created_brokers[0].close_async.assert_awaited_once()

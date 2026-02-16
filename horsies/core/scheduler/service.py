@@ -139,6 +139,24 @@ class Scheduler:
             raise RuntimeError('State manager not initialized')
 
         now = datetime.now(timezone.utc)
+        configured_names = {schedule.name for schedule in self.schedule_config.schedules}
+
+        # Remove stale DB state entries for schedules that no longer exist in config.
+        try:
+            existing_states = await self.state_manager.get_all_states()
+            removed = [
+                state.schedule_name
+                for state in existing_states
+                if state.schedule_name not in configured_names
+            ]
+            for name in removed:
+                await self.state_manager.delete_state(name)
+            if removed:
+                logger.info(
+                    f'Pruned {len(removed)} stale schedule_state row(s): {removed}'
+                )
+        except Exception as e:
+            logger.warning(f'Failed to prune stale schedule state rows: {e}')
 
         for schedule in self.schedule_config.schedules:
             if not schedule.enabled:

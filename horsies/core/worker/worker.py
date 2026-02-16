@@ -1043,10 +1043,35 @@ INSERT_WORKER_STATE_SQL = text("""
 
 DELETE_EXPIRED_HEARTBEATS_SQL = text("""
     DELETE FROM horsies_heartbeats
-    WHERE sent_at < NOW() - INTERVAL '24 hours'
+    WHERE sent_at < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
 """)
 
-_HEARTBEAT_RETENTION_CLEANUP_INTERVAL_S = 3600.0
+DELETE_EXPIRED_WORKER_STATES_SQL = text("""
+    DELETE FROM horsies_worker_states
+    WHERE snapshot_at < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
+""")
+
+DELETE_EXPIRED_WORKFLOW_TASKS_SQL = text("""
+    DELETE FROM horsies_workflow_tasks wt
+    USING horsies_workflows w
+    WHERE wt.workflow_id = w.id
+      AND w.status IN ('COMPLETED', 'FAILED', 'CANCELLED')
+      AND COALESCE(w.completed_at, w.updated_at, w.created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
+""")
+
+DELETE_EXPIRED_WORKFLOWS_SQL = text("""
+    DELETE FROM horsies_workflows
+    WHERE status IN ('COMPLETED', 'FAILED', 'CANCELLED')
+      AND COALESCE(completed_at, updated_at, created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
+""")
+
+DELETE_EXPIRED_TASKS_SQL = text("""
+    DELETE FROM horsies_tasks
+    WHERE status IN ('COMPLETED', 'FAILED', 'CANCELLED')
+      AND COALESCE(completed_at, failed_at, updated_at, created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
+""")
+
+_RETENTION_CLEANUP_INTERVAL_S = 3600.0
 
 
 _FINALIZER_DRAIN_TIMEOUT_S: float = 30.0
@@ -2237,6 +2262,9 @@ class Worker:
                     'check_interval_ms': self.cfg.recovery_config.check_interval_ms,
                     'runner_heartbeat_interval_ms': self.cfg.recovery_config.runner_heartbeat_interval_ms,
                     'claimer_heartbeat_interval_ms': self.cfg.recovery_config.claimer_heartbeat_interval_ms,
+                    'heartbeat_retention_hours': self.cfg.recovery_config.heartbeat_retention_hours,
+                    'worker_state_retention_hours': self.cfg.recovery_config.worker_state_retention_hours,
+                    'terminal_record_retention_hours': self.cfg.recovery_config.terminal_record_retention_hours,
                 }
 
             async with self.sf() as s:
@@ -2294,6 +2322,7 @@ class Worker:
         Periodically checks for and recovers stale tasks based on RecoveryConfig:
         - Requeues tasks stuck in CLAIMED (safe - user code never ran)
         - Marks stale RUNNING tasks as FAILED (not safe to requeue)
+        - Prunes old telemetry and terminal records based on retention settings
         """
         from horsies.core.brokers.postgres import PostgresBroker
 
@@ -2303,7 +2332,7 @@ class Worker:
         recovery_cfg = self.cfg.recovery_config
         check_interval_ms = recovery_cfg.check_interval_ms
         temp_broker = None
-        next_heartbeat_cleanup_at = time.monotonic()
+        next_retention_cleanup_at = time.monotonic()
 
         logger.info(
             f'Reaper configuration: auto_requeue_claimed={recovery_cfg.auto_requeue_stale_claimed}, '
@@ -2358,22 +2387,77 @@ class Worker:
                         logger.error(f'Workflow recovery error: {wf_err}')
 
                     now_monotonic = time.monotonic()
-                    if now_monotonic >= next_heartbeat_cleanup_at:
+                    if now_monotonic >= next_retention_cleanup_at:
                         try:
+                            deleted_heartbeats = 0
+                            deleted_worker_states = 0
+                            deleted_workflow_tasks = 0
+                            deleted_workflows = 0
+                            deleted_tasks = 0
+
                             async with temp_broker.session_factory() as s:
-                                result = await s.execute(DELETE_EXPIRED_HEARTBEATS_SQL)
+                                if recovery_cfg.heartbeat_retention_hours is not None:
+                                    hb_result = await s.execute(
+                                        DELETE_EXPIRED_HEARTBEATS_SQL,
+                                        {
+                                            'retention_hours': recovery_cfg.heartbeat_retention_hours,
+                                        },
+                                    )
+                                    deleted_heartbeats = int(hb_result.rowcount or 0)
+
+                                if recovery_cfg.worker_state_retention_hours is not None:
+                                    ws_result = await s.execute(
+                                        DELETE_EXPIRED_WORKER_STATES_SQL,
+                                        {
+                                            'retention_hours': recovery_cfg.worker_state_retention_hours,
+                                        },
+                                    )
+                                    deleted_worker_states = int(ws_result.rowcount or 0)
+
+                                if recovery_cfg.terminal_record_retention_hours is not None:
+                                    params = {
+                                        'retention_hours': recovery_cfg.terminal_record_retention_hours
+                                    }
+                                    wt_result = await s.execute(
+                                        DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
+                                        params,
+                                    )
+                                    wf_result = await s.execute(
+                                        DELETE_EXPIRED_WORKFLOWS_SQL,
+                                        params,
+                                    )
+                                    task_result = await s.execute(
+                                        DELETE_EXPIRED_TASKS_SQL,
+                                        params,
+                                    )
+                                    deleted_workflow_tasks = int(wt_result.rowcount or 0)
+                                    deleted_workflows = int(wf_result.rowcount or 0)
+                                    deleted_tasks = int(task_result.rowcount or 0)
+
                                 await s.commit()
-                            deleted = int(result.rowcount or 0)
-                            if deleted > 0:
+
+                            if (
+                                deleted_heartbeats > 0
+                                or deleted_worker_states > 0
+                                or deleted_workflow_tasks > 0
+                                or deleted_workflows > 0
+                                or deleted_tasks > 0
+                            ):
                                 logger.info(
-                                    f'Reaper pruned {deleted} stale heartbeat row(s)'
+                                    'Reaper retention cleanup: heartbeats=%s worker_states=%s workflow_tasks=%s workflows=%s tasks=%s',
+                                    deleted_heartbeats,
+                                    deleted_worker_states,
+                                    deleted_workflow_tasks,
+                                    deleted_workflows,
+                                    deleted_tasks,
                                 )
-                        except Exception as hb_err:
-                            logger.error(f'Heartbeat retention cleanup error: {hb_err}')
+                        except Exception as cleanup_err:
+                            logger.error(
+                                f'Retention cleanup error: {cleanup_err}'
+                            )
                         finally:
-                            next_heartbeat_cleanup_at = (
-                                now_monotonic
-                                + _HEARTBEAT_RETENTION_CLEANUP_INTERVAL_S
+                            next_retention_cleanup_at = (
+                                now_monotonic + _RETENTION_CLEANUP_INTERVAL_S
                             )
 
                 except Exception as e:

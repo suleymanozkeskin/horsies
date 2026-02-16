@@ -253,6 +253,11 @@ class AppConfig(BaseModel):
         lines.append(
             f'    heartbeat_intervals: runner={self.recovery.runner_heartbeat_interval_ms}ms, claimer={self.recovery.claimer_heartbeat_interval_ms}ms'
         )
+        lines.append(
+            f'    retention_hours: heartbeats={self.recovery.heartbeat_retention_hours}, '
+            f'worker_states={self.recovery.worker_state_retention_hours}, '
+            f'terminal_records={self.recovery.terminal_record_retention_hours}'
+        )
 
         # Resilience config
         lines.append('  resilience:')

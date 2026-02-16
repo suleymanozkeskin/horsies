@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -490,3 +490,45 @@ class TestValidateSchedules:
         exc = exc_info.value
         assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'invalid queue configuration' in exc.message
+
+
+# =============================================================================
+# _initialize_schedules
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestInitializeSchedules:
+    """Tests for Scheduler._initialize_schedules."""
+
+    @pytest.mark.asyncio
+    async def test_prunes_removed_schedule_state_rows(self) -> None:
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(
+                    name='kept',
+                    task_name='my_task',
+                    pattern=IntervalSchedule(seconds=5),
+                ),
+            ],
+        )
+        app = _make_app(schedule_config=config)
+        scheduler = Scheduler(app)
+
+        stale_state = MagicMock()
+        stale_state.schedule_name = 'removed'
+        kept_state = MagicMock()
+        kept_state.schedule_name = 'kept'
+
+        state_manager = MagicMock()
+        state_manager.get_all_states = AsyncMock(return_value=[stale_state, kept_state])
+        state_manager.delete_state = AsyncMock(return_value=True)
+        state_manager.get_state = AsyncMock(return_value=None)
+        state_manager.initialize_state = AsyncMock()
+        state_manager.update_next_run = AsyncMock()
+        scheduler.state_manager = state_manager
+
+        await scheduler._initialize_schedules()
+
+        state_manager.get_all_states.assert_awaited_once()
+        state_manager.delete_state.assert_awaited_once_with('removed')

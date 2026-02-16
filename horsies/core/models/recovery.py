@@ -28,6 +28,9 @@ class RecoveryConfig(BaseModel):
     - check_interval_ms: How often the reaper checks for stale tasks
     - runner_heartbeat_interval_ms: How often RUNNING tasks send heartbeats from inside the task process
     - claimer_heartbeat_interval_ms: How often CLAIMED tasks send heartbeats
+    - heartbeat_retention_hours: Keep heartbeat rows for this long (None disables cleanup)
+    - worker_state_retention_hours: Keep worker_state rows for this long (None disables cleanup)
+    - terminal_record_retention_hours: Keep terminal task/workflow rows for this long (None disables cleanup)
     """
 
     auto_requeue_stale_claimed: bool = Field(
@@ -64,6 +67,30 @@ class RecoveryConfig(BaseModel):
     claimer_heartbeat_interval_ms: Annotated[int, Field(ge=1_000, le=120_000)] = Field(
         default=30_000,  # 30 seconds
         description='How often worker sends heartbeats for CLAIMED tasks in milliseconds (5s-2min)',
+    )
+
+    heartbeat_retention_hours: Annotated[
+        int | None, Field(ge=1, le=24 * 365),
+    ] = Field(
+        default=24,
+        description='How long to keep heartbeat rows in hours; set None to disable pruning',
+    )
+
+    worker_state_retention_hours: Annotated[
+        int | None, Field(ge=1, le=24 * 365),
+    ] = Field(
+        default=24 * 7,
+        description='How long to keep worker_state snapshots in hours; set None to disable pruning',
+    )
+
+    terminal_record_retention_hours: Annotated[
+        int | None, Field(ge=1, le=24 * 365 * 5),
+    ] = Field(
+        default=24 * 30,
+        description=(
+            'How long to keep terminal rows in tasks/workflows/workflow_tasks in hours; '
+            'set None to disable pruning'
+        ),
     )
 
     @model_validator(mode='after')
