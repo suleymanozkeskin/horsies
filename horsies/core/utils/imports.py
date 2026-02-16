@@ -22,6 +22,10 @@ from horsies.core.logging import get_logger
 
 logger = get_logger('imports')
 
+# Cache: realpath → list of module names registered in sys.modules.
+# Avoids O(n) scan of sys.modules on every import_file_path / unload_file_path call.
+_realpath_to_modules: dict[str, list[str]] = {}
+
 
 def find_project_root(start_dir: str) -> str | None:
     """
@@ -123,11 +127,15 @@ def import_file_path(
     if not os.path.exists(file_path):
         raise FileNotFoundError(f'Module file not found: {file_path}')
 
-    # Check if already loaded
-    for name, mod in list(sys.modules.items()):
-        mod_file = getattr(mod, '__file__', None)
-        if mod_file and os.path.realpath(mod_file) == file_path:
-            return mod
+    # Check cache first (O(1) instead of scanning sys.modules)
+    cached_names = _realpath_to_modules.get(file_path)
+    if cached_names:
+        for name in cached_names:
+            mod = sys.modules.get(name)
+            if mod is not None:
+                return mod
+        # Cache entry stale — clear it and fall through
+        del _realpath_to_modules[file_path]
 
     # Add parent directory to sys.path if requested
     if add_parent_to_path:
@@ -148,9 +156,14 @@ def import_file_path(
     sys.modules[module_name] = mod
 
     # Also register under basename for compatibility
+    registered_names = [module_name]
     basename = os.path.splitext(os.path.basename(file_path))[0]
     if basename != module_name and basename not in sys.modules:
         sys.modules[basename] = mod
+        registered_names.append(basename)
+
+    # Update cache
+    _realpath_to_modules[file_path] = registered_names
 
     spec.loader.exec_module(mod)
     return mod
@@ -163,6 +176,16 @@ def unload_file_path(file_path: str) -> list[str]:
     """
     file_path = os.path.realpath(file_path)
     removed: list[str] = []
+
+    # Try cache first (O(1))
+    cached_names = _realpath_to_modules.pop(file_path, None)
+    if cached_names:
+        for name in cached_names:
+            if sys.modules.pop(name, None) is not None:
+                removed.append(name)
+        return removed
+
+    # Fallback: linear scan for modules not loaded via import_file_path
     for name, mod in list(sys.modules.items()):
         mod_file = getattr(mod, '__file__', None)
         if not mod_file:

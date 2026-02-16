@@ -67,16 +67,7 @@ LOGO_TEXT = r"""
 """
 
 # Full banner combining horse and logo
-BANNER = (
-    HORSE_BRAILLE
-    + r"""
-    __                    _
-   / /_  ____  __________(_)__  _____
-  / __ \/ __ \/ ___/ ___/ / _ \/ ___/      {version}
- / / / / /_/ / /  (__  ) /  __(__  )       distributed task queue
-/_/ /_/\____/_/  /____/_/\___/____/        and workflow engine
-"""
-)
+BANNER = HORSE_BRAILLE + LOGO_TEXT
 
 
 def get_version() -> str:

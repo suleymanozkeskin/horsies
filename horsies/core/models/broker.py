@@ -1,4 +1,3 @@
-import warnings
 from pydantic import BaseModel, Field, field_validator
 from horsies.core.errors import ConfigurationError, ErrorCode
 
@@ -35,45 +34,3 @@ class PostgresConfig(BaseModel):
                 help_text="use 'postgresql+psycopg://user:pass@host/db'",
             )
         return v
-
-
-# =============================================================================
-# DEPRECATED: These exceptions are no longer raised by the broker.
-# Use TaskResult with LibraryErrorCode.TASK_NOT_FOUND and LibraryErrorCode.WAIT_TIMEOUT instead.
-# =============================================================================
-
-
-class TaskNotFoundError(Exception):
-    """
-    DEPRECATED: No longer raised by broker.get_result().
-
-    The broker now returns TaskResult(err=TaskError(error_code=LibraryErrorCode.TASK_NOT_FOUND)).
-    Check result.is_err() and result.err.error_code instead of catching this exception.
-    """
-
-    def __init__(self, *args: object) -> None:
-        warnings.warn(
-            'TaskNotFoundError is deprecated. '
-            'Use TaskResult with LibraryErrorCode.TASK_NOT_FOUND instead.',
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        super().__init__(*args)
-
-
-class TaskTimeoutError(Exception):
-    """
-    DEPRECATED: No longer raised by broker.get_result().
-
-    The broker now returns TaskResult(err=TaskError(error_code=LibraryErrorCode.WAIT_TIMEOUT)).
-    Check result.is_err() and result.err.error_code instead of catching this exception.
-    """
-
-    def __init__(self, *args: object) -> None:
-        warnings.warn(
-            'TaskTimeoutError is deprecated. '
-            'Use TaskResult with LibraryErrorCode.WAIT_TIMEOUT instead.',
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        super().__init__(*args)
