@@ -690,6 +690,11 @@ def create_task_wrapper(
             )
             return error_result
 
+    # Pre-serialize task_options once so the send/send_async/schedule closures
+    # below can reuse the JSON string instead of re-serializing on every call.
+    _pre_serialized_options: str | None = (
+        serialize_task_options(task_options) if task_options else None
+    )
     def send(
         *args: P.args,
         **kwargs: P.kwargs,
@@ -732,10 +737,6 @@ def create_task_wrapper(
             broker = app.get_broker()
             good_until = task_options.good_until if task_options else None
 
-            task_options_json = None
-            if task_options:
-                task_options_json = serialize_task_options(task_options)
-
             task_id = broker.enqueue(
                 task_name,
                 args,
@@ -743,7 +744,7 @@ def create_task_wrapper(
                 validated_queue_name,
                 priority=priority,
                 good_until=good_until,
-                task_options=task_options_json,
+                task_options=_pre_serialized_options,
             )
             return TaskHandle(task_id, app, broker_mode=True)
         except BaseException as e:
@@ -789,10 +790,6 @@ def create_task_wrapper(
             broker = app.get_broker()
             good_until = task_options.good_until if task_options else None
 
-            task_options_json = None
-            if task_options:
-                task_options_json = serialize_task_options(task_options)
-
             task_id = await broker.enqueue_async(
                 task_name,
                 args,
@@ -800,7 +797,7 @@ def create_task_wrapper(
                 validated,
                 priority=priority,
                 good_until=good_until,
-                task_options=task_options_json,
+                task_options=_pre_serialized_options,
             )
             return TaskHandle(task_id, app, broker_mode=True)
         except BaseException as e:
@@ -851,10 +848,6 @@ def create_task_wrapper(
             good_until = task_options.good_until if task_options else None
             sent_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
 
-            task_options_json = None
-            if task_options:
-                task_options_json = serialize_task_options(task_options)
-
             task_id = broker.enqueue(
                 task_name,
                 args,
@@ -863,7 +856,7 @@ def create_task_wrapper(
                 priority=priority,
                 good_until=good_until,
                 sent_at=sent_at,
-                task_options=task_options_json,
+                task_options=_pre_serialized_options,
             )
             return TaskHandle(task_id, app, broker_mode=True)
         except BaseException as e:
@@ -885,10 +878,8 @@ def create_task_wrapper(
             self._original_fn = fn
             # Expose declared TaskResult ok-type for workflow args_from type checks.
             self.task_ok_type = ok_type
-            # Pre-serialize task_options so workflow engine can access retry config
-            self.task_options_json: str | None = (
-                serialize_task_options(task_options) if task_options else None
-            )
+            # Reuse the value already computed in the outer scope
+            self.task_options_json: str | None = _pre_serialized_options
             # Expose mapper config for app.check() safety validation.
             # Frozen to prevent post-definition mutation.
             self.exception_mapper: Mapping[type[BaseException], str] | None = (

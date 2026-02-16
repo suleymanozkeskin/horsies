@@ -184,8 +184,10 @@ def to_jsonable(value: Any) -> Json:
     Returns:
         A JSON-serializable value. For more information, see `Json` Union type.
     """
-    # Is value a JSON-native type?
-    if _is_json_native(value):
+    # Fast O(1) primitive check — the recursive _is_json_native() guard was
+    # removed here because the Mapping/Sequence branches below already handle
+    # dicts and lists recursively, making the deep pre-scan redundant (O(2N)).
+    if value is None or isinstance(value, (bool, int, float, str)):
         return value
 
     # datetime.datetime is a subclass of datetime.date — check datetime first.
