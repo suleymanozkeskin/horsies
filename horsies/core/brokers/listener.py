@@ -107,6 +107,21 @@ class PostgresListener:
         # A lock used to serialize LISTEN/UNLISTEN and subscription book-keeping.
         self._lock = asyncio.Lock()
 
+        # Event-loop ownership: listener state (lock/tasks/connections) is loop-affine.
+        self._owner_loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def _bind_or_validate_loop(self) -> None:
+        """Bind to first caller loop and reject cross-loop access thereafter."""
+        current_loop = asyncio.get_running_loop()
+        if self._owner_loop is None:
+            self._owner_loop = current_loop
+            return
+        if self._owner_loop is not current_loop:
+            raise RuntimeError(
+                'PostgresListener is bound to a different event loop. '
+                'Do not share a broker/listener instance across async loop and sync LoopRunner contexts.'
+            )
+
     def _remove_local_subscription(
         self, channel_name: str, q: Optional[Queue[Notify]]
     ) -> bool:
@@ -129,6 +144,7 @@ class PostgresListener:
         Establish the notification connections (autocommit) and start the
         dispatcher task. Safe to call multiple times.
         """
+        self._bind_or_validate_loop()
         await self._ensure_connections()
         # Defer starting the dispatcher until at least one channel is LISTENed.
         if self._health_check_task is None:
@@ -349,6 +365,7 @@ class PostgresListener:
         - Server-side LISTEN is issued only once per channel
         - Dispatcher automatically starts after first subscription
         """
+        self._bind_or_validate_loop()
         await self._ensure_connections()
 
         async with self._lock:
@@ -392,6 +409,7 @@ class PostgresListener:
 
         Returns queues in the same order as *channel_names*.
         """
+        self._bind_or_validate_loop()
         await self._ensure_connections()
 
         async with self._lock:
@@ -448,6 +466,7 @@ class PostgresListener:
         - Removes server-side LISTEN when local subscriber count reaches zero
         - Cleans up local bookkeeping for empty channels
         """
+        self._bind_or_validate_loop()
         async with self._lock:
             no_local_subs = self._remove_local_subscription(channel_name, q)
             # If nobody is listening locally, drop the server-side LISTEN.
@@ -483,6 +502,7 @@ class PostgresListener:
         - Drops server-side LISTEN when local subscriber count reaches zero
         - Prevents channel tracking from growing without bound
         """
+        self._bind_or_validate_loop()
         async with self._lock:
             no_local_subs = self._remove_local_subscription(channel_name, q)
             if no_local_subs and channel_name in self._listen_channels:
@@ -493,6 +513,37 @@ class PostgresListener:
                 self._listen_channels.discard(channel_name)
 
     async def close(self) -> None:
+        """
+        Stop the dispatcher, health monitor and close the notification connection.
+        Safe to call more than once.
+
+        If called from a non-owner loop, close is handed off to the owner loop
+        to avoid cross-loop task/connection misuse during teardown.
+        """
+        current_loop = asyncio.get_running_loop()
+        if self._owner_loop is not None and self._owner_loop is not current_loop:
+            owner_loop = self._owner_loop
+            if owner_loop.is_closed():
+                logger.warning(
+                    'Skipping listener close from non-owner loop: owner loop already closed'
+                )
+                return
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._close_impl(), owner_loop
+                )
+            except RuntimeError:
+                logger.warning(
+                    'Skipping listener close from non-owner loop: owner loop not running'
+                )
+                return
+            await asyncio.wrap_future(fut)
+            return
+
+        self._bind_or_validate_loop()
+        await self._close_impl()
+
+    async def _close_impl(self) -> None:
         """
         Stop the dispatcher, health monitor and close the notification connection.
         Safe to call more than once.
@@ -522,3 +573,4 @@ class PostgresListener:
         # Release local bookkeeping to avoid process-lifetime growth.
         self._subs.clear()
         self._listen_channels.clear()
+        self._owner_loop = None

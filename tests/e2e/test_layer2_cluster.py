@@ -355,7 +355,6 @@ def test_multi_worker_no_double_execution() -> None:
 
 
 @pytest.mark.e2e
-@pytest.mark.flaky
 @pytest.mark.asyncio(loop_scope='function')
 async def test_softcap_db_ledger_race_single_execution(
     softcap_broker: PostgresBroker,
@@ -392,7 +391,7 @@ async def test_softcap_db_ledger_race_single_execution(
             queue_name='default',
         )
 
-        first_owner = await _wait_for_claimed_owner(
+        await _wait_for_claimed_owner(
             softcap_broker.session_factory,
             ledger_task_id,
             timeout_s=10.0,
@@ -419,9 +418,10 @@ async def test_softcap_db_ledger_race_single_execution(
         assert ledger_task.status == TaskStatus.COMPLETED, (
             f'Expected COMPLETED, got {ledger_task.status}'
         )
-        assert ledger_task.claimed_by_worker_id != first_owner, (
-            f'Expected reclaim to a second worker, still owned by {first_owner}'
-        )
+        # Note: We intentionally do NOT assert which worker ended up running the task.
+        # Worker A's claim loop can re-claim its own expired lease before Worker B polls,
+        # making the owner non-deterministic. The DB ledger assertions below are the
+        # definitive single-execution proof.
 
         result = await session.execute(
             text("SELECT COUNT(*) FROM e2e_execution_attempts WHERE token = :token"),
@@ -1143,6 +1143,9 @@ async def test_softcap_expired_claim_requeued(
                 assert task.status == TaskStatus.COMPLETED, (
                     f'Expected COMPLETED, got {task.status}'
                 )
+                assert task.claimed_by_worker_id is not None, (
+                    'Reclaimed COMPLETED task must record a live owner'
+                )
                 assert task.claimed_by_worker_id != dead_worker_id, (
                     f'Task was not reclaimed: still assigned to {dead_worker_id}'
                 )
@@ -1153,8 +1156,111 @@ async def test_softcap_expired_claim_requeued(
                 assert 'err' not in result_data or result_data['err'] is None, (
                     f'Expected clean result, got error: {result_data.get("err")}'
                 )
+                assert result_data.get('ok') == f'executed:{token}', (
+                    f'Unexpected completion payload: {result_data}'
+                )
 
             # Verify atomic token file exists exactly once (single execution)
+            token_file = Path(log_dir) / token
+            assert token_file.exists(), f'Token file {token} not created'
+            all_files = list(Path(log_dir).iterdir())
+            assert len(all_files) == 1, (
+                f'Expected exactly 1 token file, found {len(all_files)}: '
+                f'{[f.name for f in all_files]}'
+            )
+        finally:
+            os.environ.pop('E2E_IDEMPOTENT_LOG_DIR', None)
+
+
+# =============================================================================
+# L2.17 Soft Cap — Owner Transition After Worker Crash
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_softcap_owner_transition_after_worker_crash(
+    softcap_broker: PostgresBroker,
+) -> None:
+    """L2.17: A CLAIMED task transitions owner after original worker crashes."""
+    blocker_duration_ms = 6_000
+    token = 'softcap_owner_transition'
+
+    with tempfile.TemporaryDirectory() as log_dir:
+        os.environ['E2E_IDEMPOTENT_LOG_DIR'] = log_dir
+        try:
+            with run_worker(
+                SOFTCAP_INSTANCE,
+                processes=1,
+                timeout=20.0,
+                ready_check=_make_ready_check(instance_softcap.healthcheck),
+            ) as worker_a_proc:
+                blocker_task_id = softcap_broker.enqueue(
+                    task_name='e2e_softcap_blocker',
+                    args=(blocker_duration_ms,),
+                    kwargs={},
+                    queue_name='default',
+                )
+                await wait_for_status(
+                    softcap_broker.session_factory,
+                    blocker_task_id,
+                    'RUNNING',
+                    timeout_s=10.0,
+                )
+
+                task_id = softcap_broker.enqueue(
+                    task_name='e2e_softcap_slow_idempotent',
+                    args=(token, 100),
+                    kwargs={},
+                    queue_name='default',
+                )
+
+                first_owner = await _wait_for_claimed_owner(
+                    softcap_broker.session_factory,
+                    task_id,
+                    timeout_s=10.0,
+                )
+
+                # claim_lease_ms=500 in SOFTCAP_INSTANCE; wait to guarantee expiry.
+                await asyncio.sleep(1.2)
+
+                os.killpg(worker_a_proc.pid, signal.SIGKILL)
+                worker_a_proc.wait(timeout=5.0)
+
+                with run_worker(
+                    SOFTCAP_INSTANCE,
+                    processes=1,
+                    timeout=20.0,
+                    ready_check=_make_ready_check(instance_softcap.healthcheck),
+                ):
+                    await wait_for_all_terminal(
+                        softcap_broker.session_factory,
+                        [task_id],
+                        timeout_s=30.0,
+                    )
+
+            async with softcap_broker.session_factory() as session:
+                task = await session.get(TaskModel, task_id)
+                assert task is not None
+                assert task.status == TaskStatus.COMPLETED, (
+                    f'Expected COMPLETED, got {task.status}'
+                )
+                assert task.claimed_by_worker_id is not None, (
+                    'Completed task should retain final owner id'
+                )
+                assert task.claimed_by_worker_id != first_owner, (
+                    f'Expected owner transition after crash, still owned by {first_owner}'
+                )
+
+                assert task.result is not None, 'COMPLETED task should have a result'
+                result_data: dict[str, Any] = json.loads(task.result)
+                assert 'err' not in result_data or result_data['err'] is None, (
+                    f'Expected clean result, got error: {result_data.get("err")}'
+                )
+                assert result_data.get('ok') == f'executed:{token}', (
+                    f'Unexpected completion payload: {result_data}'
+                )
+
             token_file = Path(log_dir) / token
             assert token_file.exists(), f'Token file {token} not created'
             all_files = list(Path(log_dir).iterdir())

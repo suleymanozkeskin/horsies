@@ -1,6 +1,6 @@
 # app/core/brokers/postgres.py
 from __future__ import annotations
-import uuid, asyncio, hashlib
+import uuid, asyncio, hashlib, contextlib
 from typing import Any, Optional, TYPE_CHECKING
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
@@ -650,13 +650,19 @@ class PostgresBroker:
                         )
                     )
 
-            # Listen for task completion notifications with polling fallback
-            # Multiple clients can listen to task_done; each filters for their specific task_id
-            q = await self.listener.listen('task_done')
+            # Listen for task completion notifications when listener loop ownership permits.
+            # Cross-loop access (e.g., sync LoopRunner + async test loop sharing one broker)
+            # falls back to pure DB polling.
+            q = None
             try:
-                poll_interval = (
-                    5.0  # Fallback polling interval (handles lost notifications)
+                q = await self.listener.listen('task_done')
+            except RuntimeError as e:
+                self.logger.debug(
+                    'Listener unavailable on current event loop; falling back to polling for task_done: %s',
+                    e,
                 )
+            try:
+                poll_interval = 5.0 if q is not None else 0.2
 
                 while True:
                     # Calculate remaining timeout
@@ -680,87 +686,60 @@ class PostgresBroker:
                         else poll_interval
                     )
 
-                    try:
+                    if q is not None:
+                        try:
 
-                        async def _wait_for_task() -> None:
-                            # Filter notifications: only process our specific task_id
-                            while True:
-                                note = (
-                                    await q.get()
-                                )  # Blocks until any task_done notification
-                                if (
-                                    note.payload == task_id
-                                ):  # Check if it's for our task
-                                    return  # Found our task completion!
+                            async def _wait_for_task() -> None:
+                                # Filter notifications: only process our specific task_id
+                                while True:
+                                    note = (
+                                        await q.get()
+                                    )  # Blocks until any task_done notification
+                                    if (
+                                        note.payload == task_id
+                                    ):  # Check if it's for our task
+                                        return  # Found our task completion!
 
-                        # Wait for our specific task notification with timeout
-                        await asyncio.wait_for(_wait_for_task(), timeout=wait_time)
-                        break  # Got our task completion notification
+                            # Wait for our specific task notification with timeout
+                            await asyncio.wait_for(_wait_for_task(), timeout=wait_time)
+                        except asyncio.TimeoutError:
+                            pass
+                    else:
+                        await asyncio.sleep(wait_time)
 
-                    except asyncio.TimeoutError:
-                        # Fallback polling: handles lost notifications or crashed workers
-                        # Ensures eventual consistency even if NOTIFY system fails
-                        async with self.session_factory() as session:
-                            row = await session.get(TaskModel, task_id)
-                            if row is None:
-                                return TaskResult(
-                                    err=TaskError(
-                                        error_code=LibraryErrorCode.TASK_NOT_FOUND,
-                                        message=f'Task {task_id} not found in database',
-                                        data={'task_id': task_id},
-                                    )
+                    # Poll database each cycle (notification path still polls to avoid
+                    # races where NOTIFY arrives slightly before terminal row commit).
+                    async with self.session_factory() as session:
+                        row = await session.get(TaskModel, task_id)
+                        if row is None:
+                            return TaskResult(
+                                err=TaskError(
+                                    error_code=LibraryErrorCode.TASK_NOT_FOUND,
+                                    message=f'Task {task_id} not found in database',
+                                    data={'task_id': task_id},
                                 )
-                            if row.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
-                                self.logger.debug(
-                                    f'Task {task_id} completed, polling database'
+                            )
+                        if row.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+                            self.logger.debug(
+                                f'Task {task_id} completed, polling database'
+                            )
+                            return task_result_from_json(loads_json(row.result))
+                        if row.status == TaskStatus.CANCELLED:
+                            self.logger.error(f'Task {task_id} was cancelled')
+                            return TaskResult(
+                                err=TaskError(
+                                    error_code=LibraryErrorCode.TASK_CANCELLED,
+                                    message=f'Task {task_id} was cancelled before completion',
+                                    data={'task_id': task_id},
                                 )
-                                return task_result_from_json(loads_json(row.result))
-                            if row.status == TaskStatus.CANCELLED:
-                                self.logger.error(f'Task {task_id} was cancelled')
-                                return TaskResult(
-                                    err=TaskError(
-                                        error_code=LibraryErrorCode.TASK_CANCELLED,
-                                        message=f'Task {task_id} was cancelled before completion',
-                                        data={'task_id': task_id},
-                                    )
-                                )
-                        # Task still not done, continue waiting...
+                            )
 
             finally:
                 # Clean up subscription. If this was the last local waiter,
                 # listener.unsubscribe() also drops server-side LISTEN state.
-                await self.listener.unsubscribe('task_done', q)
-
-            # Final database check to get actual task result after notification
-            async with self.session_factory() as session:
-                row = await session.get(TaskModel, task_id)
-                if row is None:
-                    self.logger.error(f'Task {task_id} not found')
-                    return TaskResult(
-                        err=TaskError(
-                            error_code=LibraryErrorCode.TASK_NOT_FOUND,
-                            message=f'Task {task_id} not found in database',
-                            data={'task_id': task_id},
-                        )
-                    )
-                if row.status == TaskStatus.CANCELLED:
-                    self.logger.error(f'Task {task_id} was cancelled')
-                    return TaskResult(
-                        err=TaskError(
-                            error_code=LibraryErrorCode.TASK_CANCELLED,
-                            message=f'Task {task_id} was cancelled before completion',
-                            data={'task_id': task_id},
-                        )
-                    )
-                if row.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
-                    return TaskResult(
-                        err=TaskError(
-                            error_code=LibraryErrorCode.WAIT_TIMEOUT,
-                            message=f'Task {task_id} not completed after notification (status: {row.status}). Task may still be running.',
-                            data={'task_id': task_id, 'status': str(row.status)},
-                        )
-                    )
-                return task_result_from_json(loads_json(row.result))
+                if q is not None:
+                    with contextlib.suppress(RuntimeError):
+                        await self.listener.unsubscribe('task_done', q)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

@@ -377,6 +377,35 @@ class TestGetResultAsync:
         with pytest.raises(asyncio.CancelledError):
             await broker.get_result_async('task-123')
 
+    @pytest.mark.asyncio
+    async def test_cross_loop_listener_error_falls_back_to_polling(self) -> None:
+        """RuntimeError from listener.listen should fall back to DB polling."""
+        broker = _make_broker()
+        broker.listener.listen = AsyncMock(
+            side_effect=RuntimeError('different event loop')
+        )
+        broker.listener.unsubscribe = AsyncMock()
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        row_running = _make_task_row(status=TaskStatus.RUNNING)
+        row_completed = _make_task_row(
+            status=TaskStatus.COMPLETED,
+            result='{"__task_result__":true,"ok":"done","err":null}',
+        )
+        # First get() is the initial quick-path check, second is first polling pass.
+        session.get = AsyncMock(side_effect=[row_running, row_completed])
+        broker.session_factory = MagicMock(return_value=session)
+
+        with patch('horsies.core.brokers.postgres.asyncio.sleep', new=AsyncMock()):
+            result = await broker.get_result_async('task-123', timeout_ms=1000)
+
+        assert result.is_ok()
+        assert result.unwrap() == 'done'
+        broker.listener.listen.assert_awaited_once_with('task_done')
+        broker.listener.unsubscribe.assert_not_awaited()
+
 
 # ---------------------------------------------------------------------------
 # TestMonitoringQueries

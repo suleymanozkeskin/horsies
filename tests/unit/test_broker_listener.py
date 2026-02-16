@@ -8,6 +8,7 @@ subscribe/unsubscribe flows, and graceful shutdown.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
@@ -487,6 +488,15 @@ class TestListen:
     """Tests for listen(): subscription management and LISTEN commands."""
 
     @pytest.mark.asyncio
+    async def test_cross_loop_access_raises_runtime_error(self) -> None:
+        """listen() should fail fast when called from a different event loop."""
+        listener = _make_listener()
+        listener._owner_loop = object()  # Force mismatch with current running loop.
+
+        with pytest.raises(RuntimeError, match='different event loop'):
+            await listener.listen('task_done')
+
+    @pytest.mark.asyncio
     async def test_first_subscriber_issues_listen_and_starts_dispatcher(self) -> None:
         """First subscriber for a channel should issue LISTEN and start dispatcher."""
         listener = _make_listener()
@@ -760,3 +770,41 @@ class TestClose:
             await listener.close()
 
         assert listener._fd_registered is False
+
+    @pytest.mark.asyncio
+    async def test_cross_loop_close_hands_off_to_owner_loop(self) -> None:
+        """close() should hand off cleanup to the owner loop when called cross-loop."""
+        listener = _make_listener()
+        owner_loop = MagicMock()
+        owner_loop.is_closed.return_value = False
+        listener._owner_loop = owner_loop
+
+        def _mock_run_coroutine_threadsafe(
+            coro: Any, _loop: asyncio.AbstractEventLoop
+        ) -> concurrent.futures.Future[None]:
+            # Prevent "coroutine was never awaited" warnings in this unit test.
+            coro.close()
+            fut: concurrent.futures.Future[None] = concurrent.futures.Future()
+            fut.set_result(None)
+            return fut
+
+        with patch(
+            'asyncio.run_coroutine_threadsafe',
+            side_effect=_mock_run_coroutine_threadsafe,
+        ) as mock_threadsafe:
+            await listener.close()
+
+        mock_threadsafe.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cross_loop_close_noops_when_owner_loop_closed(self) -> None:
+        """close() should return without raising when owner loop is already closed."""
+        listener = _make_listener()
+        owner_loop = MagicMock()
+        owner_loop.is_closed.return_value = True
+        listener._owner_loop = owner_loop
+
+        with patch('asyncio.run_coroutine_threadsafe') as mock_threadsafe:
+            await listener.close()
+
+        mock_threadsafe.assert_not_called()
