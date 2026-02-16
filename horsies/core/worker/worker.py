@@ -1066,9 +1066,16 @@ DELETE_EXPIRED_WORKFLOWS_SQL = text("""
 """)
 
 DELETE_EXPIRED_TASKS_SQL = text("""
-    DELETE FROM horsies_tasks
-    WHERE status IN ('COMPLETED', 'FAILED', 'CANCELLED')
-      AND COALESCE(completed_at, failed_at, updated_at, created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
+    DELETE FROM horsies_tasks t
+    WHERE t.status IN ('COMPLETED', 'FAILED', 'CANCELLED')
+      AND COALESCE(t.completed_at, t.failed_at, t.updated_at, t.created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
+      AND NOT EXISTS (
+          SELECT 1
+          FROM horsies_workflow_tasks wt
+          JOIN horsies_workflows w ON w.id = wt.workflow_id
+          WHERE wt.task_id = t.id
+            AND w.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
+      )
 """)
 
 _RETENTION_CLEANUP_INTERVAL_S = 3600.0
