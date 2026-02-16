@@ -1318,6 +1318,15 @@ class Worker:
             except Exception as e:
                 logger.error(f'Error shutting down executor: {e}')
             logger.info('Worker executor shutdown')
+        # Release per-process registries/caches on shutdown.
+        try:
+            from horsies.core.workflows.registry import clear_workflow_registry
+            from horsies.core.codec.serde import clear_serde_caches
+
+            clear_workflow_registry()
+            clear_serde_caches()
+        except Exception as e:
+            logger.error(f'Error clearing workflow/serde registries: {e}')
         logger.info('Worker stopped')
 
     def _preload_modules_main(self) -> None:

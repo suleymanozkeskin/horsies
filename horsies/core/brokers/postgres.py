@@ -721,7 +721,8 @@ class PostgresBroker:
                         # Task still not done, continue waiting...
 
             finally:
-                # Clean up subscription (keeps server-side LISTEN active for other waiters)
+                # Clean up subscription. If this was the last local waiter,
+                # listener.unsubscribe() also drops server-side LISTEN state.
                 await self.listener.unsubscribe('task_done', q)
 
             # Final database check to get actual task result after notification

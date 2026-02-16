@@ -66,7 +66,7 @@ class PostgresListener:
         # Process notification
         pass
 
-    # Cleanup: remove local subscription (keeps server-side LISTEN active)
+    # Cleanup: remove local subscription
     await listener.unsubscribe("task_done", queue)
     await listener.close()
 
@@ -106,6 +106,23 @@ class PostgresListener:
 
         # A lock used to serialize LISTEN/UNLISTEN and subscription book-keeping.
         self._lock = asyncio.Lock()
+
+    def _remove_local_subscription(
+        self, channel_name: str, q: Optional[Queue[Notify]]
+    ) -> bool:
+        """Remove a local subscriber and compact empty bookkeeping.
+
+        Returns True when no local subscribers remain for the channel.
+        """
+        subs = self._subs.get(channel_name)
+        if subs is None:
+            return True
+        if q is not None:
+            subs.discard(q)
+        if not subs:
+            self._subs.pop(channel_name, None)
+            return True
+        return False
 
     async def start(self) -> None:
         """
@@ -416,9 +433,8 @@ class PostgresListener:
         """
         Remove subscription and issue UNLISTEN if no subscribers remain.
 
-        This completely removes the server-side LISTEN when the last subscriber
-        unsubscribes. Use unsubscribe() instead if you want to keep the server-side
-        LISTEN active to avoid LISTEN/UNLISTEN races.
+        This removes the server-side LISTEN when the last local subscriber for the
+        channel is removed.
 
         Parameters
         ----------
@@ -427,16 +443,14 @@ class PostgresListener:
         q : Optional[Queue[Notify]]
             Specific queue to remove. If None, only checks for server-side cleanup.
 
-        Warning
-        -------
-        Can cause LISTEN races if other subscribers are still using the channel.
-        Consider using unsubscribe() instead for better performance.
+        Notes
+        -----
+        - Removes server-side LISTEN when local subscriber count reaches zero
+        - Cleans up local bookkeeping for empty channels
         """
         async with self._lock:
-            if q is not None:
-                self._subs[channel_name].discard(q)
+            no_local_subs = self._remove_local_subscription(channel_name, q)
             # If nobody is listening locally, drop the server-side LISTEN.
-            no_local_subs = not self._subs[channel_name]
             if no_local_subs and channel_name in self._listen_channels:
                 # Only UNLISTEN via the command connection to avoid racing dispatcher notifies iterator
                 if self._command_conn and not self._command_conn.closed:
@@ -450,11 +464,11 @@ class PostgresListener:
         self, channel_name: str, q: Optional[Queue[Notify]] = None
     ) -> None:
         """
-        Remove local queue subscription while keeping server-side LISTEN active.
+        Remove a local queue subscription.
 
-        This is the preferred way to clean up subscriptions as it avoids expensive
-        LISTEN/UNLISTEN operations when multiple subscribers use the same channel.
-        The server-side LISTEN remains active for other current/future subscribers.
+        If the removed queue was the last local subscriber for the channel, this
+        also issues UNLISTEN and removes local channel tracking to prevent
+        unbounded metadata growth over long runtimes.
 
         Parameters
         ----------
@@ -465,13 +479,18 @@ class PostgresListener:
 
         Notes
         -----
-        - More efficient than unlisten() for temporary subscriptions
-        - Prevents LISTEN/UNLISTEN races in high-traffic scenarios
-        - Server-side LISTEN remains active until listener.close()
+        - Cleans up empty local subscription entries
+        - Drops server-side LISTEN when local subscriber count reaches zero
+        - Prevents channel tracking from growing without bound
         """
         async with self._lock:
-            if q is not None:
-                self._subs[channel_name].discard(q)
+            no_local_subs = self._remove_local_subscription(channel_name, q)
+            if no_local_subs and channel_name in self._listen_channels:
+                if self._command_conn and not self._command_conn.closed:
+                    await self._command_conn.execute(
+                        sql.SQL('UNLISTEN {}').format(sql.Identifier(channel_name))
+                    )
+                self._listen_channels.discard(channel_name)
 
     async def close(self) -> None:
         """
@@ -499,3 +518,7 @@ class PostgresListener:
         if self._command_conn and not self._command_conn.closed:
             await self._command_conn.close()
             self._command_conn = None
+
+        # Release local bookkeeping to avoid process-lifetime growth.
+        self._subs.clear()
+        self._listen_channels.clear()

@@ -24,6 +24,13 @@ _nodes_by_spec: WeakValueDictionary[tuple[str, int], Any] = WeakValueDictionary(
 _active_specs: dict[str, 'WorkflowSpec[Any]'] = {}
 
 
+def _remove_spec_nodes(name: str, spec: 'WorkflowSpec[Any]') -> None:
+    """Remove node index entries for a previously-registered spec."""
+    for node in spec.tasks:
+        if node.index is not None:
+            _nodes_by_spec.pop((name, node.index), None)
+
+
 def register_workflow_spec(spec: 'WorkflowSpec[Any]') -> None:
     """
     Register a WorkflowSpec for condition evaluation and subworkflow lookup.
@@ -31,6 +38,9 @@ def register_workflow_spec(spec: 'WorkflowSpec[Any]') -> None:
     Called automatically when WorkflowSpec is created.
     Workers need to import the same module to have access to conditions.
     """
+    existing = _active_specs.get(spec.name)
+    if existing is not None and existing is not spec:
+        _remove_spec_nodes(spec.name, existing)
     _active_specs[spec.name] = spec
     for node in spec.tasks:
         if node.index is not None:
@@ -41,12 +51,14 @@ def unregister_workflow_spec(name: str) -> None:
     """Remove a workflow spec from the registry."""
     if name in _active_specs:
         spec = _active_specs[name]
-        for node in spec.tasks:
-            if node.index is not None:
-                key = (name, node.index)
-                if key in _nodes_by_spec:
-                    del _nodes_by_spec[key]
+        _remove_spec_nodes(name, spec)
         del _active_specs[name]
+
+
+def clear_workflow_registry() -> None:
+    """Clear all registered workflow specs and node lookups."""
+    _active_specs.clear()
+    _nodes_by_spec.clear()
 
 
 def get_task_node(workflow_name: str, task_index: int) -> 'TaskNode[Any] | None':

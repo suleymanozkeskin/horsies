@@ -156,6 +156,27 @@ def import_file_path(
     return mod
 
 
+def unload_file_path(file_path: str) -> list[str]:
+    """Unload all modules loaded from the given file path.
+
+    Returns the list of removed module names.
+    """
+    file_path = os.path.realpath(file_path)
+    removed: list[str] = []
+    for name, mod in list(sys.modules.items()):
+        mod_file = getattr(mod, '__file__', None)
+        if not mod_file:
+            continue
+        try:
+            if os.path.realpath(mod_file) == file_path:
+                sys.modules.pop(name, None)
+                removed.append(name)
+        except OSError:
+            # Ignore odd module __file__ values that cannot be resolved
+            continue
+    return removed
+
+
 # Legacy alias for backward compatibility
 def import_by_path(path: str, module_name: str | None = None) -> Any:
     """

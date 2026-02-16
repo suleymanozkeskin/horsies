@@ -14,6 +14,7 @@ from horsies.core.utils.imports import (
     import_file_path,
     import_module_path,
     find_project_root,
+    unload_file_path,
 )
 from horsies.core.worker.worker import _locate_app
 
@@ -175,6 +176,24 @@ class TestImportFilePath:
             assert parent not in [p for p in sys.path if p not in original_path]
         finally:
             sys.path[:] = original_path
+
+    def test_unload_file_path_removes_registered_module_keys(self, tmp_path: Path) -> None:
+        """unload_file_path should remove synthetic and basename aliases."""
+        mod_file = tmp_path / 'to_unload.py'
+        mod_file.write_text('VALUE = 7')
+
+        realpath = str(mod_file.resolve())
+        synthetic_name = _compute_synthetic_module_name(realpath)
+        sys.modules.pop(synthetic_name, None)
+        sys.modules.pop('to_unload', None)
+
+        import_file_path(str(mod_file))
+        removed = unload_file_path(str(mod_file))
+
+        assert synthetic_name in removed
+        assert 'to_unload' in removed
+        assert synthetic_name not in sys.modules
+        assert 'to_unload' not in sys.modules
 
 
 @pytest.mark.unit

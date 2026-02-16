@@ -115,6 +115,12 @@ _DATACLASS_CACHE: Dict[
 ] = {}  # cache of resolved dataclass types by module name and qualname
 
 
+def clear_serde_caches() -> None:
+    """Clear module-level rehydration caches."""
+    _CLASS_CACHE.clear()
+    _DATACLASS_CACHE.clear()
+
+
 def _qualified_class_path(cls: type) -> tuple[str, str]:
     """
     Get the module and qualname for a class, with validation for importability.

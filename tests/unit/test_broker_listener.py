@@ -578,7 +578,7 @@ class TestUnlisten:
 
         await listener.unlisten('task_done', q)
 
-        assert q not in listener._subs['task_done']
+        assert 'task_done' not in listener._subs
         assert 'task_done' not in listener._listen_channels
         mock_conn.execute.assert_awaited_once()
 
@@ -611,6 +611,7 @@ class TestUnlisten:
 
         await listener.unlisten('ch', None)
 
+        assert 'ch' not in listener._subs
         assert 'ch' not in listener._listen_channels
 
     @pytest.mark.asyncio
@@ -636,11 +637,11 @@ class TestUnlisten:
 
 @pytest.mark.unit
 class TestUnsubscribe:
-    """Tests for unsubscribe(): local queue removal without UNLISTEN."""
+    """Tests for unsubscribe(): local queue cleanup and channel tracking removal."""
 
     @pytest.mark.asyncio
-    async def test_removes_queue_from_local_subs(self) -> None:
-        """Should remove queue from local subs without issuing UNLISTEN."""
+    async def test_removes_queue_and_issues_unlisten_when_last(self) -> None:
+        """Should remove queue and issue UNLISTEN when it was the last subscriber."""
         listener = _make_listener()
         q: asyncio.Queue[Notify] = asyncio.Queue()
         listener._subs['task_done'] = {q}
@@ -650,11 +651,27 @@ class TestUnsubscribe:
 
         await listener.unsubscribe('task_done', q)
 
-        assert q not in listener._subs['task_done']
-        # No UNLISTEN should be issued
-        mock_conn.execute.assert_not_awaited()
-        # Channel should still be in _listen_channels
+        assert 'task_done' not in listener._subs
+        mock_conn.execute.assert_awaited_once()
+        assert 'task_done' not in listener._listen_channels
+
+    @pytest.mark.asyncio
+    async def test_no_unlisten_when_other_subscribers_remain(self) -> None:
+        """Should keep channel tracked when other local subscribers remain."""
+        listener = _make_listener()
+        q1: asyncio.Queue[Notify] = asyncio.Queue()
+        q2: asyncio.Queue[Notify] = asyncio.Queue()
+        listener._subs['task_done'] = {q1, q2}
+        listener._listen_channels.add('task_done')
+        mock_conn = _make_mock_conn()
+        listener._command_conn = mock_conn
+
+        await listener.unsubscribe('task_done', q1)
+
+        assert q1 not in listener._subs['task_done']
+        assert q2 in listener._subs['task_done']
         assert 'task_done' in listener._listen_channels
+        mock_conn.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_noop_when_queue_is_none(self) -> None:
@@ -715,6 +732,8 @@ class TestClose:
         cmd_conn.close.assert_awaited_once()
         assert listener._dispatcher_conn is None
         assert listener._command_conn is None
+        assert len(listener._subs) == 0
+        assert len(listener._listen_channels) == 0
 
     @pytest.mark.asyncio
     async def test_safe_to_call_when_already_closed(self) -> None:
