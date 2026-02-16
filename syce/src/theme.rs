@@ -67,7 +67,7 @@ impl Theme {
             surface: Color::Rgb(0x0D, 0x0D, 0x0D),      // #0D0D0D
             surface_alt: Color::Rgb(0x1A, 0x1A, 0x10),   // #1A1A10
             text: Color::Rgb(0xF5, 0xF5, 0xF0),         // #F5F5F0
-            muted: Color::Rgb(0x8B, 0x8B, 0x7A),        // #8B8B7A
+            muted: Color::Rgb(0xC9, 0xC9, 0xBC),        // #C9C9BC
             accent: Color::Rgb(0xDA, 0xA5, 0x20),       // #DAA520
             success: Color::Rgb(0x00, 0xFF, 0xAA),      // #00FFAA
             warning: Color::Rgb(0xFF, 0xD7, 0x00),      // #FFD700
