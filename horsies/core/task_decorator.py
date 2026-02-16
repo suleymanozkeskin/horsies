@@ -697,7 +697,7 @@ def create_task_wrapper(
         """Execute task asynchronously via app's broker."""
         # Prevent import side-effects: if the worker is importing modules for
         # discovery, suppress enqueuing and return an immediate error result.
-        if hasattr(app, 'are_sends_suppressed') and app.are_sends_suppressed():
+        if app.are_sends_suppressed():
             try:
                 app.logger.warning(
                     'Send suppressed for %s during module import/discovery; no task enqueued',
@@ -757,7 +757,7 @@ def create_task_wrapper(
         **kwargs: P.kwargs,
     ) -> TaskHandle[T]:
         """Async variant for frameworks like FastAPI."""
-        if hasattr(app, 'are_sends_suppressed') and app.are_sends_suppressed():
+        if app.are_sends_suppressed():
             try:
                 app.logger.warning(
                     'Send (async) suppressed for %s during module import/discovery; no task enqueued',
@@ -815,7 +815,7 @@ def create_task_wrapper(
         **kwargs: P.kwargs,
     ) -> TaskHandle[T]:
         """Execute task asynchronously after a delay."""
-        if hasattr(app, 'are_sends_suppressed') and app.are_sends_suppressed():
+        if app.are_sends_suppressed():
             try:
                 app.logger.warning(
                     'Schedule suppressed for %s during module import/discovery; no task enqueued',

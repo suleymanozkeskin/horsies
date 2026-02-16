@@ -186,40 +186,39 @@ def print_banner(
     _write_kv(lines, 'broker', mask_database_url(app.config.broker.database_url))
 
     # Cluster-wide cap
-    if hasattr(app.config, 'cluster_wide_cap') and app.config.cluster_wide_cap:
+    if app.config.cluster_wide_cap is not None:
         _write_kv(lines, 'cluster_cap', f'{app.config.cluster_wide_cap} (cluster-wide)')
 
     # Prefetch buffer
-    if hasattr(app.config, 'prefetch_buffer') and app.config.prefetch_buffer > 0:
+    if app.config.prefetch_buffer > 0:
         _write_kv(lines, 'prefetch', str(app.config.prefetch_buffer))
 
     lines.append('')
 
     # [recovery] section
-    if hasattr(app.config, 'recovery') and app.config.recovery:
-        recovery = app.config.recovery
-        _write_section_header(lines, 'recovery')
-        _write_kv(
-            lines,
-            'requeue_stale_claimed',
-            _format_bool(recovery.auto_requeue_stale_claimed),
-        )
-        _write_kv(
-            lines,
-            'fail_stale_running',
-            _format_bool(recovery.auto_fail_stale_running),
-        )
-        _write_kv(
-            lines,
-            'check_interval',
-            _format_ms(recovery.check_interval_ms),
-        )
-        _write_kv(
-            lines,
-            'heartbeat_interval',
-            _format_ms(recovery.runner_heartbeat_interval_ms),
-        )
-        lines.append('')
+    recovery = app.config.recovery
+    _write_section_header(lines, 'recovery')
+    _write_kv(
+        lines,
+        'requeue_stale_claimed',
+        _format_bool(recovery.auto_requeue_stale_claimed),
+    )
+    _write_kv(
+        lines,
+        'fail_stale_running',
+        _format_bool(recovery.auto_fail_stale_running),
+    )
+    _write_kv(
+        lines,
+        'check_interval',
+        _format_ms(recovery.check_interval_ms),
+    )
+    _write_kv(
+        lines,
+        'heartbeat_interval',
+        _format_ms(recovery.runner_heartbeat_interval_ms),
+    )
+    lines.append('')
 
     # [tasks] section
     if show_tasks:
