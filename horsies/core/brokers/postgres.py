@@ -572,17 +572,16 @@ class PostgresBroker:
         now = datetime.now(timezone.utc)
         sent = sent_at or now
 
-        # Parse retry configuration from task_options
+        # Parse retry configuration from task_options.
+        # task_options is always produced by serialize_task_options() — malformed JSON
+        # is a bug, not a runtime condition, and must not be silently swallowed.
         max_retries = 0
         if task_options:
-            try:
-                options_data = loads_json(task_options)
-                if isinstance(options_data, dict):
-                    retry_policy = options_data.get('retry_policy')
-                    if isinstance(retry_policy, dict):
-                        max_retries = retry_policy.get('max_retries', 3)
-            except Exception:
-                pass
+            options_data = loads_json(task_options)
+            if isinstance(options_data, dict):
+                retry_policy = options_data.get('retry_policy')
+                if isinstance(retry_policy, dict):
+                    max_retries = retry_policy.get('max_retries', 3)
 
         async with self.session_factory() as session:
             task = TaskModel(
