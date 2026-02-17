@@ -384,7 +384,9 @@ class TaskOptions(BaseModel):
 # Rebuild SubWorkflowError to resolve forward reference to SubWorkflowSummary
 def _rebuild_subworkflow_error() -> None:
     """Rebuild SubWorkflowError after SubWorkflowSummary is importable."""
-    from horsies.core.models.workflow import SubWorkflowSummary
+    from horsies.core.models.workflow import SubWorkflowSummary  # noqa: F811
+
+    _ = SubWorkflowSummary  # keep in scope for model_rebuild forward ref resolution
 
     SubWorkflowError.model_rebuild()
 

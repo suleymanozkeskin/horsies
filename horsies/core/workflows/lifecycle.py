@@ -13,11 +13,6 @@ from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
     WorkflowHandle,
     SubWorkflowNode,
-    WorkflowStatus,
-    WorkflowTaskStatus,
-    WorkflowDefinition,
-    AnyNode,
-    WF_TASK_TERMINAL_VALUES,
     validate_workflow_generic_output_match,
 )
 from horsies.core.errors import WorkflowValidationError, ErrorCode
@@ -42,7 +37,6 @@ logger = get_logger('workflow.engine')
 if TYPE_CHECKING:
     from horsies.core.models.workflow import WorkflowSpec
     from horsies.core.brokers.postgres import PostgresBroker
-    from horsies.core.models.tasks import TaskResult, TaskError
 
 OutT = TypeVar('OutT')
 
@@ -56,6 +50,9 @@ def _as_str_list(value: object) -> list[str]:
             return []
         str_items.append(item)
     return str_items
+
+
+_LIFECYCLE_PRIVATE_EXPORTS = (_as_str_list,)
 
 
 def _guard_no_positional_args(node_name: str, args: tuple[Any, ...]) -> None:
@@ -647,4 +644,3 @@ def resume_workflow_sync(
     from horsies.core.utils.loop_runner import get_shared_runner
 
     return get_shared_runner().call(resume_workflow, broker, workflow_id)
-

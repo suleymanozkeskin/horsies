@@ -14,21 +14,18 @@ from datetime import datetime, timezone, timedelta
 from importlib import import_module
 from typing import Any, Optional, Sequence
 import hashlib
+import sys
 from psycopg.types.json import Jsonb
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from horsies.core.app import Horsies
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.codec.serde import (
     loads_json,
-    dumps_json,
     task_result_from_json,
 )
 from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
-from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.logging import get_logger
-from horsies.core.worker.current import get_current_app, set_current_app
-from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.worker.current import set_current_app
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.utils.db import is_retryable_connection_error
 

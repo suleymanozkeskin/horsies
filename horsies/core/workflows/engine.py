@@ -5,16 +5,13 @@
 from __future__ import annotations
 
 import uuid
-from collections import deque
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.codec.serde import dumps_json, loads_json, task_result_from_json
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
-    WorkflowHandle,
     SubWorkflowNode,
     SubWorkflowSummary,
     WorkflowStatus,
@@ -30,7 +27,6 @@ from horsies.core.workflows.sql import *  # noqa: F401, F403
 logger = get_logger('workflow.engine')
 
 if TYPE_CHECKING:
-    from horsies.core.models.workflow import WorkflowSpec
     from horsies.core.brokers.postgres import PostgresBroker
     from horsies.core.models.tasks import TaskResult, TaskError
 
@@ -1703,15 +1699,15 @@ def _node_from_workflow_def(
     return None
 
 # --- Backward-compat barrel re-exports from lifecycle.py ---
-from horsies.core.workflows.lifecycle import (  # noqa: E402, F401
-    _as_str_list,
-    _guard_no_positional_args,
-    start_workflow_async,
-    start_workflow,
-    pause_workflow,
-    pause_workflow_sync,
-    resume_workflow,
-    resume_workflow_sync,
-    _cascade_pause_to_children,
-    _cascade_resume_to_children,
-)
+from horsies.core.workflows import lifecycle as _lifecycle  # noqa: E402
+
+_as_str_list = _lifecycle._as_str_list
+_guard_no_positional_args = _lifecycle._guard_no_positional_args
+start_workflow_async = _lifecycle.start_workflow_async
+start_workflow = _lifecycle.start_workflow
+pause_workflow = _lifecycle.pause_workflow
+pause_workflow_sync = _lifecycle.pause_workflow_sync
+resume_workflow = _lifecycle.resume_workflow
+resume_workflow_sync = _lifecycle.resume_workflow_sync
+_cascade_pause_to_children = _lifecycle._cascade_pause_to_children
+_cascade_resume_to_children = _lifecycle._cascade_resume_to_children

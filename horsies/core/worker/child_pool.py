@@ -51,3 +51,6 @@ def _initialize_worker_pool(database_url: str) -> None:
         open=True,
     )
     atexit.register(_cleanup_worker_pool)
+
+
+_CHILD_POOL_API = (_get_worker_pool, _initialize_worker_pool)

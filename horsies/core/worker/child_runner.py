@@ -691,3 +691,6 @@ def _run_task_entry(
         # Always stop the heartbeat thread when task completes (success/failure/error)
         heartbeat_stop_event.set()
         logger.debug(f'Heartbeat stop signal sent for task {task_id}')
+
+
+_CHILD_RUNNER_ENTRYPOINTS = (_child_initializer, _run_task_entry)

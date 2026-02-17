@@ -8,7 +8,10 @@ from sqlalchemy import text
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.task_pg import TaskModel, Base
-from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel  # noqa: F401
+from horsies.core.models.workflow_pg import (
+    WorkflowModel as _WorkflowModel,
+    WorkflowTaskModel as _WorkflowTaskModel,
+)
 from horsies.core.types.status import TaskStatus
 from horsies.core.codec.serde import (
     args_to_json,
@@ -22,6 +25,9 @@ from horsies.core.logging import get_logger
 
 if TYPE_CHECKING:
     from horsies.core.models.tasks import TaskResult, TaskError
+
+# Ensure workflow tables are registered in SQLAlchemy metadata.
+_ = (_WorkflowModel, _WorkflowTaskModel)
 
 # ---- Task notification trigger queries ----
 
