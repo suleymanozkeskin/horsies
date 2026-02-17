@@ -1128,7 +1128,7 @@ class TestWorkflowRecovery:
         await session.commit()
 
         # Now simulate a crash: revert parent node back to RUNNING
-        # (as if the _on_subworkflow_complete callback was interrupted)
+        # (as if the on_subworkflow_complete callback was interrupted)
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks

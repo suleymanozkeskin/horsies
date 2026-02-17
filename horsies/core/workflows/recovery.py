@@ -162,7 +162,7 @@ async def recover_stuck_workflows(
     """
     recovered = 0
 
-    from horsies.core.workflows.engine import _get_dependency_results
+    from horsies.core.workflows.engine import get_dependency_results
 
     # Case 0: PENDING tasks with all dependencies terminal (race condition during parallel completion)
     # This happens when multiple dependencies complete concurrently and the PENDING→READY
@@ -207,11 +207,11 @@ async def recover_stuck_workflows(
             )
             dep_results: dict[
                 int, 'TaskResult[Any, TaskError]'
-            ] = await _get_dependency_results(session, workflow_id, dependencies)
+            ] = await get_dependency_results(session, workflow_id, dependencies)
 
-            from horsies.core.workflows.engine import _enqueue_workflow_task
+            from horsies.core.workflows.engine import enqueue_workflow_task
 
-            task_id = await _enqueue_workflow_task(
+            task_id = await enqueue_workflow_task(
                 session, workflow_id, task_index, dep_results
             )
             if task_id:
@@ -237,11 +237,11 @@ async def recover_stuck_workflows(
         # Fetch dependency results and re-enqueue
         dep_results: dict[
             int, 'TaskResult[Any, TaskError]'
-        ] = await _get_dependency_results(session, workflow_id, dependencies)
+        ] = await get_dependency_results(session, workflow_id, dependencies)
 
-        from horsies.core.workflows.engine import _enqueue_workflow_task
+        from horsies.core.workflows.engine import enqueue_workflow_task
 
-        task_id = await _enqueue_workflow_task(
+        task_id = await enqueue_workflow_task(
             session, workflow_id, task_index, dep_results
         )
         if task_id:
@@ -265,17 +265,17 @@ async def recover_stuck_workflows(
 
         if broker is not None:
             from horsies.core.workflows.engine import (
-                _enqueue_subworkflow_task,
-                _get_dependency_results,
+                enqueue_subworkflow_task,
+                get_dependency_results,
             )
 
             dep_indices: list[int] = (
                 cast(list[int], dependencies) if isinstance(dependencies, list) else []
             )
-            dep_results = await _get_dependency_results(
+            dep_results = await get_dependency_results(
                 session, workflow_id, dep_indices
             )
-            await _enqueue_subworkflow_task(
+            await enqueue_subworkflow_task(
                 session, broker, workflow_id, task_index, dep_results, depth, root_wf_id
             )
             logger.info(
@@ -295,7 +295,7 @@ async def recover_stuck_workflows(
         recovered += 1
 
     # Case 1.6: Child workflows completed but parent node not updated
-    # This happens if the _on_subworkflow_complete callback failed or was interrupted
+    # This happens if the on_subworkflow_complete callback failed or was interrupted
     completed_children = await session.execute(GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL)
 
     for row in completed_children.fetchall():
@@ -305,9 +305,9 @@ async def recover_stuck_workflows(
         child_status = row[3]
 
         # Re-trigger the subworkflow completion callback
-        from horsies.core.workflows.engine import _on_subworkflow_complete
+        from horsies.core.workflows.engine import on_subworkflow_complete
 
-        await _on_subworkflow_complete(session, child_id, broker)
+        await on_subworkflow_complete(session, child_id, broker)
         logger.info(
             f'Recovered stuck child workflow completion: child={child_id}, '
             f'parent={parent_wf_id}:{parent_task_idx}, child_status={child_status}'
@@ -392,16 +392,16 @@ async def recover_stuck_workflows(
 
         # Compute final result
         from horsies.core.workflows.engine import (
-            _get_workflow_final_result,
-            _evaluate_workflow_success,
-            _get_workflow_failure_error,
+            get_workflow_final_result,
+            evaluate_workflow_success,
+            get_workflow_failure_error,
         )
 
-        final_result = await _get_workflow_final_result(session, workflow_id)
+        final_result = await get_workflow_final_result(session, workflow_id)
 
         # Evaluate success using success_policy (or default behavior)
         has_error = existing_error is not None
-        workflow_succeeded = await _evaluate_workflow_success(
+        workflow_succeeded = await evaluate_workflow_success(
             session, workflow_id, success_policy_data, has_error, failed_count
         )
 
@@ -415,7 +415,7 @@ async def recover_stuck_workflows(
             # Compute error if not already set
             error_payload = existing_error
             if error_payload is None:
-                error_payload = await _get_workflow_failure_error(
+                error_payload = await get_workflow_failure_error(
                     session, workflow_id, success_policy_data
                 )
 
@@ -433,96 +433,3 @@ async def recover_stuck_workflows(
         recovered += 1
 
     return recovered
-
-
-GET_FIRST_FAILED_TASK_RESULT_SQL = text("""
-    SELECT result
-    FROM horsies_workflow_tasks
-    WHERE workflow_id = :wf_id
-      AND status = 'FAILED'
-    ORDER BY task_index ASC
-    LIMIT 1
-""")
-
-
-async def _get_first_failed_task_error(
-    session: 'AsyncSession',
-    workflow_id: str,
-) -> str | None:
-    """
-    Get the error payload from the first failed task in a workflow.
-
-    Returns the serialized TaskError from the first FAILED task (ordered by task_index),
-    or None if no failed task has an error.
-    """
-    from horsies.core.codec.serde import dumps_json
-
-    result = await session.execute(
-        GET_FIRST_FAILED_TASK_RESULT_SQL,
-        {'wf_id': workflow_id},
-    )
-
-    row = result.fetchone()
-    if row is None or row[0] is None:
-        return None
-
-    task_result = task_result_from_json(loads_json(row[0]))
-    if task_result.is_err() and task_result.err:
-        return dumps_json(task_result.err)
-
-    return None
-
-
-GET_DEPENDENCY_RESULTS_SQL = text("""
-    SELECT task_index, status, result
-    FROM horsies_workflow_tasks
-    WHERE workflow_id = :wf_id
-      AND task_index = ANY(:indices)
-      AND status = ANY(:wf_task_terminal_states)
-""")
-
-
-async def _get_dependency_results(
-    session: 'AsyncSession',
-    workflow_id: str,
-    dependency_indices: list[int],
-) -> dict[int, 'TaskResult[Any, TaskError]']:
-    """
-    Fetch TaskResults for dependencies in terminal states.
-
-    - COMPLETED/FAILED: returns actual TaskResult from stored result
-    - SKIPPED: returns sentinel TaskResult with UPSTREAM_SKIPPED error
-    """
-    from horsies.core.models.tasks import TaskError, LibraryErrorCode, TaskResult
-
-    if not dependency_indices:
-        return {}
-
-    result = await session.execute(
-        GET_DEPENDENCY_RESULTS_SQL,
-        {
-            'wf_id': workflow_id,
-            'indices': dependency_indices,
-            'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES,
-        },
-    )
-
-    results: dict[int, TaskResult[Any, TaskError]] = {}
-    for row in result.fetchall():
-        task_index = row[0]
-        status = row[1]
-        stored_result = row[2]
-
-        if status == 'SKIPPED':
-            # Inject sentinel TaskResult for SKIPPED dependencies
-            results[task_index] = TaskResult(
-                err=TaskError(
-                    error_code=LibraryErrorCode.UPSTREAM_SKIPPED,
-                    message='Upstream dependency was SKIPPED',
-                    data={'dependency_index': task_index},
-                )
-            )
-        elif stored_result:
-            results[task_index] = task_result_from_json(loads_json(stored_result))
-
-    return results
