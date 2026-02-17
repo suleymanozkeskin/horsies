@@ -474,7 +474,7 @@ class TestOnErrorFail:
 
         # SET_WORKFLOW_ERROR_SQL does unconditional SET error = :error,
         # but MARK_WORKFLOW_FAILED_SQL uses COALESCE(:error, error).
-        # At finalization, _get_workflow_failure_error is called with no success_policy,
+        # At finalization, get_workflow_failure_error is called with no success_policy,
         # which returns first failed task's error (ORDER BY task_index ASC).
         # However, COALESCE(:error, error) means: if new error is non-null, use it;
         # if null, keep existing. So the finalization error (first task's) wins.
@@ -874,10 +874,10 @@ class TestOnErrorPause:
         setup: _SetupTuple,
     ) -> None:
         """
-        _try_make_ready_and_enqueue does not transition PENDING -> READY
+        try_make_ready_and_enqueue does not transition PENDING -> READY
         when workflow is PAUSED.
         """
-        from horsies.core.workflows.engine import _try_make_ready_and_enqueue
+        from horsies.core.workflows.engine import try_make_ready_and_enqueue
 
         session, broker, app = setup
         task_a = make_simple_task(app, 'guard_pending_a')
@@ -913,7 +913,7 @@ class TestOnErrorPause:
         await session.commit()
 
         # Try to make B ready - the guard should block this
-        await _try_make_ready_and_enqueue(session, broker, handle.workflow_id, 1)
+        await try_make_ready_and_enqueue(session, broker, handle.workflow_id, 1)
         await session.commit()
 
         # B should still be PENDING (guard blocked PENDING -> READY)
@@ -925,10 +925,10 @@ class TestOnErrorPause:
         setup: _SetupTuple,
     ) -> None:
         """
-        _enqueue_workflow_task does not transition READY -> ENQUEUED
+        enqueue_workflow_task does not transition READY -> ENQUEUED
         when workflow is PAUSED.
         """
-        from horsies.core.workflows.engine import _enqueue_workflow_task
+        from horsies.core.workflows.engine import enqueue_workflow_task
 
         session, broker, app = setup
         task_a = make_simple_task(app, 'guard_ready_a')
@@ -967,7 +967,7 @@ class TestOnErrorPause:
         assert await _get_task_status(session, handle.workflow_id, 1) == 'READY'
 
         # Try to enqueue B - the guard should block this
-        result = await _enqueue_workflow_task(session, handle.workflow_id, 1, {})
+        result = await enqueue_workflow_task(session, handle.workflow_id, 1, {})
         await session.commit()
 
         # Result should be None (guard blocked the enqueue)
@@ -1224,7 +1224,7 @@ class TestResume:
 
         Single task fails -> PAUSE -> resume -> no more tasks to run -> FAILED.
         Resume sets RUNNING, then re-evaluates; since all tasks are terminal,
-        _check_workflow_completion is NOT called by resume itself, but
+        check_workflow_completion is NOT called by resume itself, but
         the workflow should still transition when evaluated.
         """
         session, broker, app = setup
@@ -1262,9 +1262,9 @@ class TestResume:
         assert await _get_task_status(session, handle.workflow_id, 1) == 'SKIPPED'
 
         # Now all tasks are terminal. Check what state the workflow ended up in.
-        # resume_workflow doesn't call _check_workflow_completion directly,
-        # but _try_make_ready_and_enqueue -> SKIP cascade -> _process_dependents ->
-        # eventually _check_workflow_completion should fire.
+        # resume_workflow doesn't call check_workflow_completion directly,
+        # but try_make_ready_and_enqueue -> SKIP cascade -> _process_dependents ->
+        # eventually check_workflow_completion should fire.
         # If it didn't, we may end up stuck in RUNNING - that would be a bug to catch.
         final_status = await _get_workflow_status(session, handle.workflow_id)
         assert final_status == 'FAILED', (
@@ -1278,7 +1278,7 @@ class TestResume:
         """After resume, remaining tasks complete but workflow is FAILED due to earlier error.
 
         A (fails) -> PAUSE -> resume -> B completes -> workflow FAILED.
-        Error column still set from A's failure. _evaluate_workflow_success checks
+        Error column still set from A's failure. evaluate_workflow_success checks
         `not has_error and failed == 0`, so with has_error=True, workflow is FAILED.
         """
         session, broker, app = setup

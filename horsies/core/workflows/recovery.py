@@ -162,7 +162,7 @@ async def recover_stuck_workflows(
     """
     recovered = 0
 
-    from horsies.core.workflows.engine import _get_dependency_results
+    from horsies.core.workflows.engine import get_dependency_results
 
     # Case 0: PENDING tasks with all dependencies terminal (race condition during parallel completion)
     # This happens when multiple dependencies complete concurrently and the PENDING→READY
@@ -207,11 +207,11 @@ async def recover_stuck_workflows(
             )
             dep_results: dict[
                 int, 'TaskResult[Any, TaskError]'
-            ] = await _get_dependency_results(session, workflow_id, dependencies)
+            ] = await get_dependency_results(session, workflow_id, dependencies)
 
-            from horsies.core.workflows.engine import _enqueue_workflow_task
+            from horsies.core.workflows.engine import enqueue_workflow_task
 
-            task_id = await _enqueue_workflow_task(
+            task_id = await enqueue_workflow_task(
                 session, workflow_id, task_index, dep_results
             )
             if task_id:
@@ -237,11 +237,11 @@ async def recover_stuck_workflows(
         # Fetch dependency results and re-enqueue
         dep_results: dict[
             int, 'TaskResult[Any, TaskError]'
-        ] = await _get_dependency_results(session, workflow_id, dependencies)
+        ] = await get_dependency_results(session, workflow_id, dependencies)
 
-        from horsies.core.workflows.engine import _enqueue_workflow_task
+        from horsies.core.workflows.engine import enqueue_workflow_task
 
-        task_id = await _enqueue_workflow_task(
+        task_id = await enqueue_workflow_task(
             session, workflow_id, task_index, dep_results
         )
         if task_id:
@@ -265,17 +265,17 @@ async def recover_stuck_workflows(
 
         if broker is not None:
             from horsies.core.workflows.engine import (
-                _enqueue_subworkflow_task,
-                _get_dependency_results,
+                enqueue_subworkflow_task,
+                get_dependency_results,
             )
 
             dep_indices: list[int] = (
                 cast(list[int], dependencies) if isinstance(dependencies, list) else []
             )
-            dep_results = await _get_dependency_results(
+            dep_results = await get_dependency_results(
                 session, workflow_id, dep_indices
             )
-            await _enqueue_subworkflow_task(
+            await enqueue_subworkflow_task(
                 session, broker, workflow_id, task_index, dep_results, depth, root_wf_id
             )
             logger.info(
@@ -295,7 +295,7 @@ async def recover_stuck_workflows(
         recovered += 1
 
     # Case 1.6: Child workflows completed but parent node not updated
-    # This happens if the _on_subworkflow_complete callback failed or was interrupted
+    # This happens if the on_subworkflow_complete callback failed or was interrupted
     completed_children = await session.execute(GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL)
 
     for row in completed_children.fetchall():
@@ -305,9 +305,9 @@ async def recover_stuck_workflows(
         child_status = row[3]
 
         # Re-trigger the subworkflow completion callback
-        from horsies.core.workflows.engine import _on_subworkflow_complete
+        from horsies.core.workflows.engine import on_subworkflow_complete
 
-        await _on_subworkflow_complete(session, child_id, broker)
+        await on_subworkflow_complete(session, child_id, broker)
         logger.info(
             f'Recovered stuck child workflow completion: child={child_id}, '
             f'parent={parent_wf_id}:{parent_task_idx}, child_status={child_status}'
@@ -392,16 +392,16 @@ async def recover_stuck_workflows(
 
         # Compute final result
         from horsies.core.workflows.engine import (
-            _get_workflow_final_result,
-            _evaluate_workflow_success,
-            _get_workflow_failure_error,
+            get_workflow_final_result,
+            evaluate_workflow_success,
+            get_workflow_failure_error,
         )
 
-        final_result = await _get_workflow_final_result(session, workflow_id)
+        final_result = await get_workflow_final_result(session, workflow_id)
 
         # Evaluate success using success_policy (or default behavior)
         has_error = existing_error is not None
-        workflow_succeeded = await _evaluate_workflow_success(
+        workflow_succeeded = await evaluate_workflow_success(
             session, workflow_id, success_policy_data, has_error, failed_count
         )
 
@@ -415,7 +415,7 @@ async def recover_stuck_workflows(
             # Compute error if not already set
             error_payload = existing_error
             if error_payload is None:
-                error_payload = await _get_workflow_failure_error(
+                error_payload = await get_workflow_failure_error(
                     session, workflow_id, success_policy_data
                 )
 

@@ -1,7 +1,5 @@
 """Workflow execution engine — DAG resolution, task completion, dependency management."""
 
-# pyright: reportPrivateUsage=false
-
 from __future__ import annotations
 
 import uuid
@@ -37,7 +35,7 @@ OutT = TypeVar('OutT')
 
 
 
-async def _enqueue_workflow_task(
+async def enqueue_workflow_task(
     session: AsyncSession,
     workflow_id: str,
     task_index: int,
@@ -170,7 +168,7 @@ async def _enqueue_workflow_task(
 
 
 
-async def _enqueue_subworkflow_task(
+async def enqueue_subworkflow_task(
     session: AsyncSession,
     broker: 'PostgresBroker',
     workflow_id: str,
@@ -275,7 +273,7 @@ async def _enqueue_subworkflow_task(
         )
         if should_continue:
             await _process_dependents(session, workflow_id, task_index, broker)
-            await _check_workflow_completion(session, workflow_id, broker)
+            await check_workflow_completion(session, workflow_id, broker)
 
         return None
 
@@ -410,7 +408,7 @@ async def _enqueue_subworkflow_task(
 
         if child_is_subworkflow:
             child_sub = child_node
-            _guard_no_positional_args(child_sub.name, child_sub.args)
+            guard_no_positional_args(child_sub.name, child_sub.args)
             await session.execute(
                 INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL,
                 {
@@ -441,7 +439,7 @@ async def _enqueue_subworkflow_task(
             )
         else:
             child_task = child_node
-            _guard_no_positional_args(child_task.name, child_task.args)
+            guard_no_positional_args(child_task.name, child_task.args)
             child_task_options_json: str | None = getattr(
                 child_task.fn, 'task_options_json', None
             )
@@ -494,7 +492,7 @@ async def _enqueue_subworkflow_task(
     for child_root in child_root_nodes:
         if child_root.index is not None:
             if isinstance(child_root, SubWorkflowNode):
-                await _enqueue_subworkflow_task(
+                await enqueue_subworkflow_task(
                     session,
                     broker,
                     child_id,
@@ -504,7 +502,7 @@ async def _enqueue_subworkflow_task(
                     root_workflow_id,
                 )
             else:
-                await _enqueue_workflow_task(session, child_id, child_root.index, {})
+                await enqueue_workflow_task(session, child_id, child_root.index, {})
 
     logger.info(f'Started child workflow {child_id} for {workflow_name}:{task_index}')
     return child_id
@@ -529,7 +527,7 @@ async def _build_workflow_context_data(
     Also fetches SubWorkflowSummary for SubWorkflowNodes.
     """
     # Fetch results for the specified node_ids
-    dep_results = await _get_dependency_results_with_names(
+    dep_results = await get_dependency_results_with_names(
         session, workflow_id, ctx_from_ids
     )
 
@@ -629,7 +627,7 @@ async def on_workflow_task_complete(
     await _process_dependents(session, workflow_id, task_index, broker)
 
     # 6. Check if workflow is complete
-    await _check_workflow_completion(session, workflow_id, broker)
+    await check_workflow_completion(session, workflow_id, broker)
 
 
 
@@ -666,7 +664,7 @@ async def _process_dependents(
     root_wf_id = wf_row[1] if wf_row else workflow_id
 
     for row in dependents.fetchall():
-        await _try_make_ready_and_enqueue(
+        await try_make_ready_and_enqueue(
             session, broker, workflow_id, row[0], depth, root_wf_id
         )
 
@@ -679,7 +677,7 @@ async def _process_dependents(
 
 
 
-async def _try_make_ready_and_enqueue(
+async def try_make_ready_and_enqueue(
     session: AsyncSession,
     broker: 'PostgresBroker | None',
     workflow_id: str,
@@ -796,7 +794,7 @@ async def _try_make_ready_and_enqueue(
         return  # Stay PENDING
 
     # Ensure workflow_ctx_from deps are terminal before enqueueing
-    ctx_from_ids = _as_str_list(raw_ctx_from)
+    ctx_from_ids = as_str_list(raw_ctx_from)
     if ctx_from_ids:
         ctx_terminal_result = await session.execute(
             COUNT_CTX_TERMINAL_DEPS_SQL,
@@ -879,21 +877,21 @@ async def _try_make_ready_and_enqueue(
             if not should_continue:
                 return
             await _process_dependents(session, workflow_id, task_index, broker)
-            await _check_workflow_completion(session, workflow_id, broker)
+            await check_workflow_completion(session, workflow_id, broker)
             return
 
     # 7. Fetch dependency results and enqueue
-    dep_results = await _get_dependency_results(session, workflow_id, dependencies)
+    dep_results = await get_dependency_results(session, workflow_id, dependencies)
 
     if is_subworkflow and broker is not None:
         # SubWorkflowNode: start child workflow
         actual_root = root_workflow_id or workflow_id
-        await _enqueue_subworkflow_task(
+        await enqueue_subworkflow_task(
             session, broker, workflow_id, task_index, dep_results, depth, actual_root
         )
     else:
         # Regular TaskNode: enqueue as task
-        await _enqueue_workflow_task(session, workflow_id, task_index, dep_results)
+        await enqueue_workflow_task(session, workflow_id, task_index, dep_results)
 
 
 
@@ -963,7 +961,7 @@ async def _evaluate_conditions(
                 ctx_from_ids.append(dep_node.node_id)
 
     # Fetch results for context
-    dep_results = await _get_dependency_results_with_names(
+    dep_results = await get_dependency_results_with_names(
         session, workflow_id, ctx_from_ids
     )
 
@@ -1059,7 +1057,7 @@ class DependencyResults:
 
 
 
-async def _get_dependency_results(
+async def get_dependency_results(
     session: AsyncSession,
     workflow_id: str,
     dependency_indices: list[int],
@@ -1107,7 +1105,7 @@ async def _get_dependency_results(
 
 
 
-async def _get_dependency_results_with_names(
+async def get_dependency_results_with_names(
     session: AsyncSession,
     workflow_id: str,
     dependency_node_ids: list[str],
@@ -1172,7 +1170,7 @@ async def _get_dependency_results_with_names(
 
 
 
-async def _check_workflow_completion(
+async def check_workflow_completion(
     session: AsyncSession,
     workflow_id: str,
     broker: 'PostgresBroker | None' = None,
@@ -1226,10 +1224,10 @@ async def _check_workflow_completion(
         return  # Already finalized
 
     # All tasks done - determine final result
-    final_result = await _get_workflow_final_result(session, workflow_id)
+    final_result = await get_workflow_final_result(session, workflow_id)
 
     # Determine final status using success policy or default behavior
-    workflow_succeeded = await _evaluate_workflow_success(
+    workflow_succeeded = await evaluate_workflow_success(
         session, workflow_id, success_policy_data, has_error, failed
     )
 
@@ -1245,7 +1243,7 @@ async def _check_workflow_completion(
     else:
         # Recompute failure error from terminal task results for deterministic
         # final error selection (e.g., first failed task by task_index).
-        error_json: str | None = await _get_workflow_failure_error(
+        error_json: str | None = await get_workflow_failure_error(
             session, workflow_id, success_policy_data
         )
 
@@ -1272,13 +1270,13 @@ async def _check_workflow_completion(
     parent_row = parent_result.fetchone()
     if parent_row and parent_row[0] is not None:
         # This is a child workflow - notify parent
-        await _on_subworkflow_complete(session, workflow_id, broker)
+        await on_subworkflow_complete(session, workflow_id, broker)
 
 
 
 
 
-async def _on_subworkflow_complete(
+async def on_subworkflow_complete(
     session: AsyncSession,
     child_workflow_id: str,
     broker: 'PostgresBroker | None' = None,
@@ -1405,12 +1403,12 @@ async def _on_subworkflow_complete(
     await _process_dependents(session, parent_wf_id, parent_task_idx, broker)
 
     # 8. Check parent completion
-    await _check_workflow_completion(session, parent_wf_id, broker)
+    await check_workflow_completion(session, parent_wf_id, broker)
 
 
 
 
-async def _evaluate_workflow_success(
+async def evaluate_workflow_success(
     session: AsyncSession,
     workflow_id: str,
     success_policy_data: dict[str, Any] | str | None,
@@ -1467,7 +1465,7 @@ async def _evaluate_workflow_success(
 
 
 
-async def _get_workflow_failure_error(
+async def get_workflow_failure_error(
     session: AsyncSession,
     workflow_id: str,
     success_policy_data: dict[str, Any] | str | None,
@@ -1531,7 +1529,7 @@ async def _get_workflow_failure_error(
 
 
 
-async def _get_workflow_final_result(
+async def get_workflow_final_result(
     session: AsyncSession,
     workflow_id: str,
 ) -> str:
@@ -1620,7 +1618,7 @@ async def _handle_workflow_task_failure(
     if on_error == 'fail':
         # Store error but keep status RUNNING until DAG fully resolves
         # This allows allow_failed_deps tasks to run and produce meaningful final result
-        # Status will be set to FAILED in _check_workflow_completion when all tasks are terminal
+        # Status will be set to FAILED in check_workflow_completion when all tasks are terminal
         await session.execute(
             SET_WORKFLOW_ERROR_SQL,
             {'wf_id': workflow_id, 'error': error_payload},
@@ -1701,13 +1699,13 @@ def _node_from_workflow_def(
 # --- Backward-compat barrel re-exports from lifecycle.py ---
 from horsies.core.workflows import lifecycle as _lifecycle  # noqa: E402
 
-_as_str_list = _lifecycle._as_str_list
-_guard_no_positional_args = _lifecycle._guard_no_positional_args
+as_str_list = _lifecycle.as_str_list
+guard_no_positional_args = _lifecycle.guard_no_positional_args
 start_workflow_async = _lifecycle.start_workflow_async
 start_workflow = _lifecycle.start_workflow
 pause_workflow = _lifecycle.pause_workflow
 pause_workflow_sync = _lifecycle.pause_workflow_sync
 resume_workflow = _lifecycle.resume_workflow
 resume_workflow_sync = _lifecycle.resume_workflow_sync
-_cascade_pause_to_children = _lifecycle._cascade_pause_to_children
-_cascade_resume_to_children = _lifecycle._cascade_resume_to_children
+cascade_pause_to_children = _lifecycle.cascade_pause_to_children
+cascade_resume_to_children = _lifecycle.cascade_resume_to_children

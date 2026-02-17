@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 OutT = TypeVar('OutT')
 
 
-def _as_str_list(value: object) -> list[str]:
+def as_str_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     str_items: list[str] = []
@@ -52,10 +52,10 @@ def _as_str_list(value: object) -> list[str]:
     return str_items
 
 
-_LIFECYCLE_PRIVATE_EXPORTS = (_as_str_list,)
+_LIFECYCLE_PRIVATE_EXPORTS = (as_str_list,)
 
 
-def _guard_no_positional_args(node_name: str, args: tuple[Any, ...]) -> None:
+def guard_no_positional_args(node_name: str, args: tuple[Any, ...]) -> None:
     """Raise if a workflow node still carries positional args.
 
     Under the kwargs-only contract, all runtime parameters must be
@@ -101,8 +101,8 @@ async def start_workflow_async(
     """
     # Deferred import to avoid circular dependency with engine.py
     from horsies.core.workflows.engine import (
-        _enqueue_workflow_task,
-        _enqueue_subworkflow_task,
+        enqueue_workflow_task,
+        enqueue_subworkflow_task,
     )
 
     # Validate output type matches declared generic (E025)
@@ -202,7 +202,7 @@ async def start_workflow_async(
 
             if isinstance(node, SubWorkflowNode):
                 # SubWorkflowNode: no fn, queue, priority, good_until
-                _guard_no_positional_args(node.name, node.args)
+                guard_no_positional_args(node.name, node.args)
                 await session.execute(
                     INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL,
                     {
@@ -234,7 +234,7 @@ async def start_workflow_async(
             else:
                 # TaskNode: has fn, queue, priority, good_until
                 task = node
-                _guard_no_positional_args(task.name, task.args)
+                guard_no_positional_args(task.name, task.args)
 
                 # Get task_options_json from the task function (set by @task decorator)
                 # and merge in TaskNode.good_until if set
@@ -286,12 +286,12 @@ async def start_workflow_async(
             if root_node.index is not None:
                 if isinstance(root_node, SubWorkflowNode):
                     # Start child workflow
-                    await _enqueue_subworkflow_task(
+                    await enqueue_subworkflow_task(
                         session, broker, wf_id, root_node.index, {}, 0, wf_id
                     )
                 else:
                     # Enqueue regular task
-                    await _enqueue_workflow_task(session, wf_id, root_node.index, {})
+                    await enqueue_workflow_task(session, wf_id, root_node.index, {})
 
         await session.commit()
 
@@ -361,7 +361,7 @@ async def pause_workflow(
             return False
 
         # Cascade pause to running child workflows (iterative BFS)
-        await _cascade_pause_to_children(session, workflow_id)
+        await cascade_pause_to_children(session, workflow_id)
 
         # Notify clients of pause (so get() returns immediately with WORKFLOW_PAUSED)
         await session.execute(
@@ -376,7 +376,7 @@ async def pause_workflow(
 
 
 
-async def _cascade_pause_to_children(
+async def cascade_pause_to_children(
     session: AsyncSession,
     workflow_id: str,
 ) -> None:
@@ -460,11 +460,11 @@ async def resume_workflow(
     """
     # Deferred imports to avoid circular dependency with engine.py
     from horsies.core.workflows.engine import (
-        _try_make_ready_and_enqueue,
-        _get_dependency_results,
-        _enqueue_workflow_task,
-        _enqueue_subworkflow_task,
-        _check_workflow_completion,
+        try_make_ready_and_enqueue,
+        get_dependency_results,
+        enqueue_workflow_task,
+        enqueue_subworkflow_task,
+        check_workflow_completion,
     )
 
     async with broker.session_factory() as session:
@@ -489,7 +489,7 @@ async def resume_workflow(
         pending_indices = [r[0] for r in pending_result.fetchall()]
 
         for task_index in pending_indices:
-            await _try_make_ready_and_enqueue(
+            await try_make_ready_and_enqueue(
                 session, broker, workflow_id, task_index, depth, root_wf_id
             )
 
@@ -507,12 +507,12 @@ async def resume_workflow(
             dep_indices: list[int] = (
                 cast(list[int], dependencies) if isinstance(dependencies, list) else []
             )
-            dep_results = await _get_dependency_results(
+            dep_results = await get_dependency_results(
                 session, workflow_id, dep_indices
             )
 
             if is_subworkflow:
-                await _enqueue_subworkflow_task(
+                await enqueue_subworkflow_task(
                     session,
                     broker,
                     workflow_id,
@@ -522,17 +522,17 @@ async def resume_workflow(
                     root_wf_id,
                 )
             else:
-                await _enqueue_workflow_task(
+                await enqueue_workflow_task(
                     session, workflow_id, task_index, dep_results
                 )
 
         # 4. Cascade resume to paused child workflows
-        await _cascade_resume_to_children(session, broker, workflow_id)
+        await cascade_resume_to_children(session, broker, workflow_id)
 
         # 5. Re-check completion after resume processing.
         # Resume may transition pending tasks directly to SKIPPED/terminal without
         # any subsequent task completion callback to trigger finalization.
-        await _check_workflow_completion(session, workflow_id, broker)
+        await check_workflow_completion(session, workflow_id, broker)
 
         await session.commit()
         return True
@@ -541,7 +541,7 @@ async def resume_workflow(
 
 
 
-async def _cascade_resume_to_children(
+async def cascade_resume_to_children(
     session: AsyncSession,
     broker: 'PostgresBroker',
     workflow_id: str,
@@ -552,11 +552,11 @@ async def _cascade_resume_to_children(
     """
     # Deferred imports to avoid circular dependency with engine.py
     from horsies.core.workflows.engine import (
-        _try_make_ready_and_enqueue,
-        _get_dependency_results,
-        _enqueue_workflow_task,
-        _enqueue_subworkflow_task,
-        _check_workflow_completion,
+        try_make_ready_and_enqueue,
+        get_dependency_results,
+        enqueue_workflow_task,
+        enqueue_subworkflow_task,
+        check_workflow_completion,
     )
 
     queue: deque[str] = deque([workflow_id])
@@ -587,7 +587,7 @@ async def _cascade_resume_to_children(
                 {'wf_id': child_id},
             )
             for pending_row in child_pending.fetchall():
-                await _try_make_ready_and_enqueue(
+                await try_make_ready_and_enqueue(
                     session, broker, child_id, pending_row[0], child_depth, child_root
                 )
 
@@ -602,10 +602,10 @@ async def _cascade_resume_to_children(
                 dep_indices: list[int] = (
                     cast(list[int], deps) if isinstance(deps, list) else []
                 )
-                dep_res = await _get_dependency_results(session, child_id, dep_indices)
+                dep_res = await get_dependency_results(session, child_id, dep_indices)
 
                 if is_sub:
-                    await _enqueue_subworkflow_task(
+                    await enqueue_subworkflow_task(
                         session,
                         broker,
                         child_id,
@@ -615,11 +615,11 @@ async def _cascade_resume_to_children(
                         child_root,
                     )
                 else:
-                    await _enqueue_workflow_task(session, child_id, task_idx, dep_res)
+                    await enqueue_workflow_task(session, child_id, task_idx, dep_res)
 
             # Check completion: resume may transition all pending tasks to
             # SKIPPED/terminal without any subsequent callback to finalize.
-            await _check_workflow_completion(session, child_id, broker)
+            await check_workflow_completion(session, child_id, broker)
 
             # Add to queue to resume its children
             queue.append(child_id)

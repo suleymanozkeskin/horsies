@@ -88,7 +88,7 @@ RESUME_CHILD_WORKFLOW_SQL = text("""
     SET status = 'RUNNING', updated_at = NOW()
     WHERE id = :wf_id AND status = 'PAUSED'
 """)
-# -- SQL constants for _enqueue_workflow_task --
+# -- SQL constants for enqueue_workflow_task --
 
 ENQUEUE_WORKFLOW_TASK_SQL = text("""
     UPDATE horsies_workflow_tasks wt
@@ -112,7 +112,7 @@ INSERT_TASK_FOR_WORKFLOW_SQL = text("""
 LINK_WORKFLOW_TASK_SQL = text("""
     UPDATE horsies_workflow_tasks SET task_id = :tid WHERE workflow_id = :wf_id AND task_index = :idx
 """)
-# -- SQL constants for _enqueue_subworkflow_task --
+# -- SQL constants for enqueue_subworkflow_task --
 
 ENQUEUE_SUBWORKFLOW_TASK_SQL = text("""
     UPDATE horsies_workflow_tasks wt
@@ -186,7 +186,7 @@ GET_DEPENDENT_TASKS_SQL = text("""
 GET_WORKFLOW_DEPTH_SQL = text(
     """SELECT depth, root_workflow_id FROM horsies_workflows WHERE id = :wf_id"""
 )
-# -- SQL constants for _try_make_ready_and_enqueue --
+# -- SQL constants for try_make_ready_and_enqueue --
 
 GET_TASK_CONFIG_SQL = text("""
     SELECT wt.status, wt.dependencies, wt.allow_failed_deps,
@@ -239,7 +239,7 @@ GET_WORKFLOW_DEF_PATH_SQL = text("""
     FROM horsies_workflows
     WHERE id = :wf_id
 """)
-# -- SQL constants for _get_dependency_results --
+# -- SQL constants for get_dependency_results --
 
 GET_DEPENDENCY_RESULTS_SQL = text("""
     SELECT task_index, status, result
@@ -248,7 +248,7 @@ GET_DEPENDENCY_RESULTS_SQL = text("""
       AND task_index = ANY(:indices)
       AND status = ANY(:wf_task_terminal_states)
 """)
-# -- SQL constants for _get_dependency_results_with_names --
+# -- SQL constants for get_dependency_results_with_names --
 
 GET_DEPENDENCY_RESULTS_WITH_NAMES_SQL = text("""
     SELECT task_index, task_name, node_id, status, result
@@ -257,7 +257,7 @@ GET_DEPENDENCY_RESULTS_WITH_NAMES_SQL = text("""
       AND node_id = ANY(:node_ids)
       AND status = ANY(:wf_task_terminal_states)
 """)
-# -- SQL constants for _check_workflow_completion --
+# -- SQL constants for check_workflow_completion --
 
 LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL = text("""
     SELECT id
@@ -297,7 +297,7 @@ GET_PARENT_WORKFLOW_INFO_SQL = text("""
     SELECT parent_workflow_id, parent_task_index
     FROM horsies_workflows WHERE id = :wf_id
 """)
-# -- SQL constants for _on_subworkflow_complete --
+# -- SQL constants for on_subworkflow_complete --
 
 GET_CHILD_WORKFLOW_INFO_SQL = text("""
     SELECT w.status, w.result, w.error, w.parent_workflow_id, w.parent_task_index,
@@ -313,14 +313,14 @@ UPDATE_PARENT_NODE_RESULT_SQL = text("""
     SET status = :status, result = :result, sub_workflow_summary = :summary, completed_at = NOW()
     WHERE workflow_id = :wf_id AND task_index = :idx
 """)
-# -- SQL constants for _evaluate_workflow_success --
+# -- SQL constants for evaluate_workflow_success --
 
 GET_TASK_STATUSES_SQL = text("""
     SELECT task_index, status
     FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id
 """)
-# -- SQL constants for _get_workflow_failure_error --
+# -- SQL constants for get_workflow_failure_error --
 
 GET_FIRST_FAILED_TASK_RESULT_SQL = text("""
     SELECT result FROM horsies_workflow_tasks
@@ -334,7 +334,7 @@ GET_FIRST_FAILED_REQUIRED_TASK_SQL = text("""
       AND task_index = ANY(:required)
     ORDER BY task_index ASC LIMIT 1
 """)
-# -- SQL constants for _get_workflow_final_result --
+# -- SQL constants for get_workflow_final_result --
 
 GET_WORKFLOW_OUTPUT_INDEX_SQL = text(
     """SELECT output_task_index FROM horsies_workflows WHERE id = :wf_id"""

@@ -11,7 +11,7 @@ Scenario:
 
 Expected: child workflow transitions to FAILED.
 Bug: child stays RUNNING because _cascade_resume_to_children never calls
-     _check_workflow_completion for the child.
+     check_workflow_completion for the child.
 """
 
 from __future__ import annotations
@@ -218,7 +218,7 @@ class TestCascadeResumeMissingCompletionCheck:
         )
 
         # BUG: child workflow should be FAILED (all tasks terminal)
-        # but _cascade_resume_to_children doesn't call _check_workflow_completion
+        # but _cascade_resume_to_children doesn't call check_workflow_completion
         child_final_res = await session.execute(
             text('SELECT status FROM horsies_workflows WHERE id = :wf_id'),
             {'wf_id': child_wf_id},
