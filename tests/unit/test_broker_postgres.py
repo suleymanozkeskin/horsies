@@ -8,6 +8,7 @@ error handling, and delegation patterns.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -201,18 +202,16 @@ class TestEnqueueAsync:
         assert added_task.max_retries == 5
 
     @pytest.mark.asyncio
-    async def test_malformed_task_options_falls_back_to_zero_retries(self) -> None:
-        """Malformed task_options JSON should not crash; max_retries defaults to 0."""
+    async def test_malformed_task_options_raises(self) -> None:
+        """Malformed task_options JSON is a bug and must not be silently swallowed."""
         broker = _make_broker()
         session = _make_enqueue_session()
         broker.session_factory = MagicMock(return_value=session)
 
-        await broker.enqueue_async(
-            'my_task', (), {}, task_options='NOT_VALID_JSON{{',
-        )
-
-        added_task = session.add.call_args[0][0]
-        assert added_task.max_retries == 0
+        with pytest.raises(json.JSONDecodeError):
+            await broker.enqueue_async(
+                'my_task', (), {}, task_options='NOT_VALID_JSON{{',
+            )
 
     @pytest.mark.asyncio
     async def test_with_good_until_passes_expiry(self) -> None:
