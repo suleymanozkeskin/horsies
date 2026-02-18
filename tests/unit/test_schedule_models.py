@@ -248,6 +248,7 @@ class TestTaskSchedule:
 
         assert schedule.enabled is True
         assert schedule.catch_up_missed is False
+        assert schedule.max_catch_up_runs == 100
         assert schedule.timezone == 'UTC'
         assert schedule.args == ()
         assert schedule.kwargs == {}
@@ -265,6 +266,7 @@ class TestTaskSchedule:
             enabled=False,
             timezone='America/New_York',
             catch_up_missed=True,
+            max_catch_up_runs=250,
         )
 
         assert schedule.name == 'full'
@@ -275,6 +277,7 @@ class TestTaskSchedule:
         assert schedule.enabled is False
         assert schedule.timezone == 'America/New_York'
         assert schedule.catch_up_missed is True
+        assert schedule.max_catch_up_runs == 250
 
     def test_name_is_required(self) -> None:
         """name field is required."""
@@ -282,6 +285,16 @@ class TestTaskSchedule:
             TaskSchedule(  # type: ignore[call-arg]
                 task_name='my_task',
                 pattern=IntervalSchedule(seconds=10),
+            )
+
+    def test_max_catch_up_runs_validation(self) -> None:
+        """max_catch_up_runs must stay within configured bounds."""
+        with pytest.raises(ValidationError):
+            TaskSchedule(
+                name='test',
+                task_name='my_task',
+                pattern=IntervalSchedule(seconds=10),
+                max_catch_up_runs=0,
             )
 
 

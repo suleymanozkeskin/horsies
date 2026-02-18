@@ -284,7 +284,7 @@ class Scheduler:
 
             # Now we have exclusive access to this schedule's execution
             # Get current state
-            state = await self.state_manager.get_state(schedule.name)
+            state = await self.state_manager.get_state(schedule.name, session=session)
 
             if state is None:
                 # Schedule state missing (shouldn't happen after initialization)
@@ -296,7 +296,10 @@ class Scheduler:
                     schedule.pattern, check_time, schedule.timezone
                 )
                 await self.state_manager.initialize_state(
-                    schedule.name, next_run, config_hash
+                    schedule.name,
+                    next_run,
+                    config_hash,
+                    session=session,
                 )
                 await session.commit()
                 return
@@ -309,30 +312,32 @@ class Scheduler:
             # Execute schedule with catch-up logic
             try:
                 # Calculate missed runs if catch_up_missed is enabled
-                missed_runs: list[datetime] = []
+                due_runs: list[datetime] = []
                 if schedule.catch_up_missed and state.next_run_at:
-                    missed_runs = self._calculate_missed_runs(
+                    due_runs = self._calculate_missed_runs(
                         schedule=schedule,
-                        last_scheduled_run=state.next_run_at,
+                        first_due_run=state.next_run_at,
                         current_time=check_time,
+                        max_runs=schedule.max_catch_up_runs,
                     )
 
-                if missed_runs:
-                    logger.warning(
-                        f"Schedule '{schedule.name}' missed {len(missed_runs)} run(s), "
-                        f'catching up...'
-                    )
-                    # Enqueue all missed runs
+                if due_runs:
+                    if len(due_runs) > 1:
+                        logger.warning(
+                            f"Schedule '{schedule.name}' has {len(due_runs)} due run(s), "
+                            f'catching up with cap={schedule.max_catch_up_runs}'
+                        )
+                    # Enqueue all currently due runs
                     last_task_id = ''
-                    for missed_time in missed_runs:
+                    for due_time in due_runs:
                         last_task_id = await self._enqueue_scheduled_task(schedule)
                         logger.info(
                             f"Schedule '{schedule.name}' catch-up: enqueued task {last_task_id} "
-                            f'for missed run at {missed_time}'
+                            f'for scheduled run at {due_time}'
                         )
 
                     # After catch-up, calculate next run from the last scheduled slot to preserve cadence
-                    last_slot = missed_runs[-1]
+                    last_slot = due_runs[-1]
                     next_run = calculate_next_run(
                         schedule.pattern, last_slot, schedule.timezone
                     )
@@ -343,6 +348,7 @@ class Scheduler:
                         task_id=last_task_id,
                         executed_at=check_time,
                         next_run_at=next_run,
+                        session=session,
                     )
                 else:
                     # Normal execution: single run
@@ -363,6 +369,7 @@ class Scheduler:
                         task_id=task_id,
                         executed_at=check_time,
                         next_run_at=next_run,
+                        session=session,
                     )
 
                 await session.commit()
@@ -379,41 +386,48 @@ class Scheduler:
     def _calculate_missed_runs(
         self,
         schedule: TaskSchedule,
-        last_scheduled_run: datetime,
+        first_due_run: datetime,
         current_time: datetime,
+        max_runs: int,
     ) -> list[datetime]:
         """
-        Calculate all missed runs between last scheduled run and current time.
+        Calculate all due runs between first due run and current time (inclusive).
 
         Args:
             schedule: TaskSchedule configuration
-            last_scheduled_run: The last scheduled run time (may not have executed)
+            first_due_run: First due scheduled run
             current_time: Current time
+            max_runs: Upper bound on runs returned in one pass
 
         Returns:
-            List of missed run times, sorted chronologically
+            List of due run times, sorted chronologically
         """
-        missed: list[datetime] = []
-        threshold = self.schedule_config.check_interval_seconds * 2
+        due_runs: list[datetime] = []
+        if first_due_run > current_time:
+            return due_runs
 
-        # Only catch up if significantly in the past
-        if (current_time - last_scheduled_run).total_seconds() <= threshold:
-            return missed
-
-        # Calculate all runs between last_scheduled_run and current_time
-        cursor = last_scheduled_run
-        while True:
-            # Calculate next run from cursor
+        cursor = first_due_run
+        while cursor <= current_time and len(due_runs) < max_runs:
+            due_runs.append(cursor)
             next_run = calculate_next_run(schedule.pattern, cursor, schedule.timezone)
-
-            # Stop if next run is in the future
-            if next_run > current_time:
+            if next_run <= cursor:
+                logger.error(
+                    "Non-monotonic next_run calculated for schedule '%s': current=%s next=%s",
+                    schedule.name,
+                    cursor,
+                    next_run,
+                )
                 break
-
-            missed.append(next_run)
             cursor = next_run
 
-        return missed
+        if cursor <= current_time and len(due_runs) >= max_runs:
+            logger.warning(
+                "Catch-up cap reached for schedule '%s' (cap=%s), backlog remains",
+                schedule.name,
+                max_runs,
+            )
+
+        return due_runs
 
     def _preload_task_modules(self) -> None:
         """Import discovered task modules so @app.task registrations run."""
@@ -498,49 +512,22 @@ class Scheduler:
             self._validate_schedule_signature(sched)
 
     def _validate_schedule_signature(self, schedule: TaskSchedule) -> None:
-        """Ensure required task parameters are satisfied by schedule args/kwargs."""
+        """Ensure schedule args/kwargs bind cleanly to the task signature."""
         task = self.app.tasks.get(schedule.task_name)
         original_fn = getattr(task, '_original_fn', None) if task else None
         if original_fn is None:
             return  # Cannot validate without original function signature
 
         sig = inspect.signature(original_fn)
-        args_provided = list(schedule.args)
-        kwargs_provided = schedule.kwargs
-        missing: list[str] = []
-
-        consumed_positional = 0
-        for param in sig.parameters.values():
-            if param.kind in (
-                inspect.Parameter.VAR_POSITIONAL,
-                inspect.Parameter.VAR_KEYWORD,
-            ):
-                continue  # skip *args/**kwargs
-            if param.default is not inspect.Parameter.empty:
-                continue  # optional
-
-            if param.kind in (
-                inspect.Parameter.POSITIONAL_ONLY,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            ):
-                if consumed_positional < len(args_provided):
-                    consumed_positional += 1
-                    continue
-                if param.name in kwargs_provided:
-                    continue
-                missing.append(param.name)
-            elif param.kind == inspect.Parameter.KEYWORD_ONLY:
-                if param.name in kwargs_provided:
-                    continue
-                missing.append(param.name)
-
-        if missing:
+        try:
+            sig.bind(*schedule.args, **schedule.kwargs)
+        except TypeError as e:
             raise ConfigurationError(
-                message=f"schedule '{schedule.name}' is missing required params for task '{schedule.task_name}'",
+                message=f"schedule '{schedule.name}' args/kwargs do not match task '{schedule.task_name}' signature",
                 code=ErrorCode.CONFIG_INVALID_SCHEDULE,
-                notes=[f'missing required parameters: {missing}'],
-                help_text='add missing params to args=(...) or kwargs={{...}} in TaskSchedule',
-            )
+                notes=[f'signature bind error: {e}'],
+                help_text='update TaskSchedule args/kwargs to match task function parameters',
+            ) from e
 
     async def _enqueue_scheduled_task(self, schedule: TaskSchedule) -> str:
         """

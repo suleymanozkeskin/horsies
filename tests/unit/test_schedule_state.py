@@ -88,6 +88,18 @@ class TestGetState:
 
         assert result is None
 
+    @pytest.mark.asyncio
+    async def test_uses_provided_session_without_factory(self) -> None:
+        """When session is provided, no new session is opened."""
+        manager, session = _make_manager()
+        session.get = AsyncMock(return_value=None)
+
+        result = await manager.get_state('sched-1', session=session)
+
+        assert result is None
+        session.get.assert_awaited_once_with(ScheduleStateModel, 'sched-1')
+        manager.session_factory.assert_not_called()
+
 
 # =============================================================================
 # get_due_states
@@ -136,6 +148,20 @@ class TestGetDueStates:
         result = await manager.get_due_states(['a'], _utc_now())
 
         assert result == []
+
+    @pytest.mark.asyncio
+    async def test_query_includes_null_next_run_states(self) -> None:
+        """next_run_at IS NULL rows should be considered due."""
+        manager, session = _make_manager()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value = []
+        session.execute = AsyncMock(return_value=mock_result)
+
+        await manager.get_due_states(['a'], _utc_now())
+
+        stmt = session.execute.await_args.args[0]
+        compiled = str(stmt)
+        assert 'IS NULL' in compiled
 
 
 # =============================================================================

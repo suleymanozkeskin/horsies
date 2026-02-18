@@ -202,6 +202,12 @@ class TaskSchedule(BaseModel):
     catch_up_missed: bool = Field(
         default=False, description='Execute missed runs if scheduler was down'
     )
+    max_catch_up_runs: int = Field(
+        default=100,
+        ge=1,
+        le=10000,
+        description='Maximum runs to enqueue per scheduler tick when catch_up_missed=True',
+    )
 
 
 class ScheduleConfig(BaseModel):

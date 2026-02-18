@@ -149,7 +149,29 @@ class TestValidateScheduleSignature:
 
         exc = exc_info.value
         assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
-        assert 'missing required params' in exc.message
+        assert 'args/kwargs do not match' in exc.message
+
+    def test_unexpected_kwarg_raises_configuration_error(self) -> None:
+        """Unexpected kwargs are rejected at scheduler startup."""
+
+        def needs_value(value: int) -> str:
+            return str(value)
+
+        task_mock = _make_task_mock(needs_value)
+        scheduler = self._make_scheduler({'task_a': task_mock})
+        schedule = TaskSchedule(
+            name='s',
+            task_name='task_a',
+            pattern=IntervalSchedule(seconds=5),
+            kwargs={'unknown': 42},
+        )
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            scheduler._validate_schedule_signature(schedule)
+
+        exc = exc_info.value
+        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert 'args/kwargs do not match' in exc.message
 
     def test_satisfied_by_args(self) -> None:
         """Required param satisfied by positional args passes."""
@@ -339,7 +361,7 @@ class TestScheduleAdvisoryKey:
 class TestCalculateMissedRuns:
     """Tests for Scheduler._calculate_missed_runs."""
 
-    def _make_scheduler(self, check_interval: int = 1) -> Scheduler:
+    def _make_scheduler(self) -> Scheduler:
         config = ScheduleConfig(
             schedules=[
                 TaskSchedule(
@@ -348,50 +370,47 @@ class TestCalculateMissedRuns:
                     pattern=IntervalSchedule(seconds=5),
                 ),
             ],
-            check_interval_seconds=check_interval,
         )
         app = _make_app(schedule_config=config)
         return Scheduler(app)
 
-    def test_within_threshold_returns_empty(self) -> None:
-        """Gap within threshold (check_interval * 2) returns no missed runs."""
-        scheduler = self._make_scheduler(check_interval=5)
+    def test_includes_first_due_run(self) -> None:
+        """Catch-up includes the first overdue scheduled slot."""
+        scheduler = self._make_scheduler()
         schedule = TaskSchedule(
             name='s',
             task_name='my_task',
             pattern=IntervalSchedule(seconds=2),
         )
-        # Gap of 8s, threshold = 5*2 = 10s → within threshold
         last = _utc(2025, 6, 1, 12, 0, 0)
-        now = _utc(2025, 6, 1, 12, 0, 8)
+        now = _utc(2025, 6, 1, 12, 0, 1)
 
-        result = scheduler._calculate_missed_runs(schedule, last, now)
+        result = scheduler._calculate_missed_runs(schedule, last, now, max_runs=10)
 
-        assert result == []
+        assert result == [last]
 
-    def test_gap_returns_correct_missed_list(self) -> None:
-        """Significant gap produces correct number of missed runs."""
-        scheduler = self._make_scheduler(check_interval=1)
+    def test_gap_returns_correct_due_list(self) -> None:
+        """Gap produces all due runs including first due slot."""
+        scheduler = self._make_scheduler()
         schedule = TaskSchedule(
             name='s',
             task_name='my_task',
             pattern=IntervalSchedule(seconds=5),
         )
-        # Gap of 17s, threshold = 1*2 = 2s → should catch up
-        # Missed runs at: +5s, +10s, +15s (next at +20s is future)
         last = _utc(2025, 6, 1, 12, 0, 0)
         now = _utc(2025, 6, 1, 12, 0, 17)
 
-        result = scheduler._calculate_missed_runs(schedule, last, now)
+        result = scheduler._calculate_missed_runs(schedule, last, now, max_runs=10)
 
-        assert len(result) == 3
-        assert result[0] == _utc(2025, 6, 1, 12, 0, 5)
-        assert result[1] == _utc(2025, 6, 1, 12, 0, 10)
-        assert result[2] == _utc(2025, 6, 1, 12, 0, 15)
+        assert len(result) == 4
+        assert result[0] == _utc(2025, 6, 1, 12, 0, 0)
+        assert result[1] == _utc(2025, 6, 1, 12, 0, 5)
+        assert result[2] == _utc(2025, 6, 1, 12, 0, 10)
+        assert result[3] == _utc(2025, 6, 1, 12, 0, 15)
 
     def test_chronologically_ordered(self) -> None:
-        """Missed runs are in ascending chronological order."""
-        scheduler = self._make_scheduler(check_interval=1)
+        """Due runs are in ascending chronological order."""
+        scheduler = self._make_scheduler()
         schedule = TaskSchedule(
             name='s',
             task_name='my_task',
@@ -400,10 +419,29 @@ class TestCalculateMissedRuns:
         last = _utc(2025, 6, 1, 12, 0, 0)
         now = _utc(2025, 6, 1, 12, 0, 12)
 
-        result = scheduler._calculate_missed_runs(schedule, last, now)
+        result = scheduler._calculate_missed_runs(schedule, last, now, max_runs=10)
 
         for i in range(1, len(result)):
             assert result[i] > result[i - 1]
+
+    def test_respects_max_runs_cap(self) -> None:
+        """Catch-up caps due runs for a single tick."""
+        scheduler = self._make_scheduler()
+        schedule = TaskSchedule(
+            name='s',
+            task_name='my_task',
+            pattern=IntervalSchedule(seconds=1),
+        )
+        last = _utc(2025, 6, 1, 12, 0, 0)
+        now = _utc(2025, 6, 1, 12, 0, 5)
+
+        result = scheduler._calculate_missed_runs(schedule, last, now, max_runs=3)
+
+        assert result == [
+            _utc(2025, 6, 1, 12, 0, 0),
+            _utc(2025, 6, 1, 12, 0, 1),
+            _utc(2025, 6, 1, 12, 0, 2),
+        ]
 
 
 # =============================================================================
@@ -532,3 +570,81 @@ class TestInitializeSchedules:
 
         state_manager.get_all_states.assert_awaited_once()
         state_manager.delete_state.assert_awaited_once_with('removed')
+
+
+# =============================================================================
+# _check_schedule transactional session usage
+# =============================================================================
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestCheckScheduleSessionUsage:
+    """Ensure lock-protected checks use one DB session for state read/write."""
+
+    async def test_state_reads_and_updates_use_lock_session(self) -> None:
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(
+                    name='s',
+                    task_name='my_task',
+                    pattern=IntervalSchedule(seconds=5),
+                ),
+            ],
+        )
+        app = _make_app(schedule_config=config)
+        scheduler = Scheduler(app)
+
+        session = AsyncMock()
+        broker = MagicMock()
+        broker.session_factory.return_value.__aenter__ = AsyncMock(return_value=session)
+        broker.session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+        scheduler.broker = broker
+
+        state = MagicMock()
+        now = _utc(2025, 6, 1, 12, 0, 0)
+        state.next_run_at = _utc(2025, 6, 1, 11, 59, 59)
+        state_manager = MagicMock()
+        state_manager.get_state = AsyncMock(return_value=state)
+        state_manager.update_after_run = AsyncMock()
+        scheduler.state_manager = state_manager
+
+        scheduler._enqueue_scheduled_task = AsyncMock(return_value='task-1')  # type: ignore[method-assign]
+
+        await scheduler._check_schedule(config.schedules[0], now)
+
+        state_manager.get_state.assert_awaited_once_with('s', session=session)
+        assert state_manager.update_after_run.await_count == 1
+        update_kwargs = state_manager.update_after_run.await_args.kwargs
+        assert update_kwargs['session'] is session
+
+    async def test_missing_state_initializes_using_lock_session(self) -> None:
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(
+                    name='s',
+                    task_name='my_task',
+                    pattern=IntervalSchedule(seconds=5),
+                ),
+            ],
+        )
+        app = _make_app(schedule_config=config)
+        scheduler = Scheduler(app)
+
+        session = AsyncMock()
+        broker = MagicMock()
+        broker.session_factory.return_value.__aenter__ = AsyncMock(return_value=session)
+        broker.session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+        scheduler.broker = broker
+
+        state_manager = MagicMock()
+        state_manager.get_state = AsyncMock(return_value=None)
+        state_manager.initialize_state = AsyncMock()
+        scheduler.state_manager = state_manager
+
+        await scheduler._check_schedule(config.schedules[0], _utc(2025, 6, 1, 12, 0, 0))
+
+        state_manager.get_state.assert_awaited_once()
+        assert state_manager.initialize_state.await_count == 1
+        init_kwargs = state_manager.initialize_state.await_args.kwargs
+        assert init_kwargs['session'] is session

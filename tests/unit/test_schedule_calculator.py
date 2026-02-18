@@ -297,6 +297,55 @@ class TestCalculateNextRunWeeklyBoundary:
 
 
 # =============================================================================
+# DST edge cases
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestCalculateNextRunDst:
+    """DST-specific behavior for daily/weekly/monthly schedules."""
+
+    def test_daily_nonexistent_local_time_skips_to_next_day(self) -> None:
+        """On spring-forward day, nonexistent local time should be skipped."""
+        from_time = _utc(2025, 3, 9, 6, 0, 0)  # 01:00 local NY (before jump)
+        pattern = DailySchedule(time=datetime_time(2, 30, 0))
+
+        result = calculate_next_run(pattern, from_time, tz_str='America/New_York')
+
+        assert result == _utc(2025, 3, 10, 6, 30, 0)
+
+    def test_weekly_nonexistent_local_time_skips_to_next_valid_week(self) -> None:
+        """Weekly schedule should skip a DST-gap Sunday slot."""
+        from_time = _utc(2025, 3, 8, 12, 0, 0)  # Saturday morning local NY
+        pattern = WeeklySchedule(
+            days=[Weekday.SUNDAY],
+            time=datetime_time(2, 30, 0),
+        )
+
+        result = calculate_next_run(pattern, from_time, tz_str='America/New_York')
+
+        assert result == _utc(2025, 3, 16, 6, 30, 0)
+
+    def test_monthly_nonexistent_local_time_skips_to_next_valid_month(self) -> None:
+        """Monthly schedule should skip a DST-gap local wall time."""
+        from_time = _utc(2025, 3, 1, 0, 0, 0)
+        pattern = MonthlySchedule(day=9, time=datetime_time(2, 30, 0))
+
+        result = calculate_next_run(pattern, from_time, tz_str='America/New_York')
+
+        assert result == _utc(2025, 4, 9, 6, 30, 0)
+
+    def test_ambiguous_fall_back_time_uses_earliest_occurrence(self) -> None:
+        """Ambiguous local times (fall-back) choose the earliest UTC instant."""
+        from_time = _utc(2025, 11, 2, 4, 59, 0)  # 00:59 local NY
+        pattern = DailySchedule(time=datetime_time(1, 30, 0))
+
+        result = calculate_next_run(pattern, from_time, tz_str='America/New_York')
+
+        assert result == _utc(2025, 11, 2, 5, 30, 0)
+
+
+# =============================================================================
 # Error cases
 # =============================================================================
 

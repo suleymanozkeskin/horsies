@@ -2,7 +2,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from horsies.core.models.task_pg import ScheduleStateModel
 from horsies.core.logging import get_logger
@@ -58,7 +58,11 @@ class ScheduleStateManager:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]):
         self.session_factory = session_factory
 
-    async def get_state(self, schedule_name: str) -> Optional[ScheduleStateModel]:
+    async def get_state(
+        self,
+        schedule_name: str,
+        session: Optional[AsyncSession] = None,
+    ) -> Optional[ScheduleStateModel]:
         """
         Retrieve current state for a schedule.
 
@@ -68,9 +72,11 @@ class ScheduleStateManager:
         Returns:
             ScheduleStateModel if exists, None otherwise
         """
-        async with self.session_factory() as session:
-            result = await session.get(ScheduleStateModel, schedule_name)
-            return result
+        if session is not None:
+            return await session.get(ScheduleStateModel, schedule_name)
+
+        async with self.session_factory() as owned_session:
+            return await owned_session.get(ScheduleStateModel, schedule_name)
 
     async def get_due_states(
         self,
@@ -94,7 +100,12 @@ class ScheduleStateManager:
             stmt = (
                 select(ScheduleStateModel)
                 .where(ScheduleStateModel.schedule_name.in_(schedule_names))
-                .where(ScheduleStateModel.next_run_at <= now)
+                .where(
+                    or_(
+                        ScheduleStateModel.next_run_at.is_(None),
+                        ScheduleStateModel.next_run_at <= now,
+                    )
+                )
                 .order_by(ScheduleStateModel.next_run_at.asc())
             )
             result = await session.execute(stmt)
@@ -105,6 +116,7 @@ class ScheduleStateManager:
         schedule_name: str,
         next_run_at: datetime,
         config_hash: Optional[str] = None,
+        session: Optional[AsyncSession] = None,
     ) -> ScheduleStateModel:
         """
         Initialize state for a new schedule.
@@ -116,30 +128,56 @@ class ScheduleStateManager:
         Returns:
             Created ScheduleStateModel
         """
-        async with self.session_factory() as session:
-            # Check if already exists (race condition guard)
-            existing = await session.get(ScheduleStateModel, schedule_name)
-            if existing:
-                logger.debug(f"Schedule '{schedule_name}' already initialized")
-                return existing
-
-            # Create new state
-            state = ScheduleStateModel(
+        if session is not None:
+            return await self._initialize_state_on_session(
+                session=session,
                 schedule_name=schedule_name,
-                last_run_at=None,
                 next_run_at=next_run_at,
-                last_task_id=None,
-                run_count=0,
                 config_hash=config_hash,
-                updated_at=datetime.now(timezone.utc),
+                commit=False,
             )
-            session.add(state)
+
+        async with self.session_factory() as owned_session:
+            return await self._initialize_state_on_session(
+                session=owned_session,
+                schedule_name=schedule_name,
+                next_run_at=next_run_at,
+                config_hash=config_hash,
+                commit=True,
+            )
+
+    async def _initialize_state_on_session(
+        self,
+        session: AsyncSession,
+        schedule_name: str,
+        next_run_at: datetime,
+        config_hash: Optional[str],
+        commit: bool,
+    ) -> ScheduleStateModel:
+        # Check if already exists (race condition guard)
+        existing = await session.get(ScheduleStateModel, schedule_name)
+        if existing:
+            logger.debug(f"Schedule '{schedule_name}' already initialized")
+            return existing
+
+        # Create new state
+        state = ScheduleStateModel(
+            schedule_name=schedule_name,
+            last_run_at=None,
+            next_run_at=next_run_at,
+            last_task_id=None,
+            run_count=0,
+            config_hash=config_hash,
+            updated_at=datetime.now(timezone.utc),
+        )
+        session.add(state)
+        if commit:
             await session.commit()
             await session.refresh(state)
-            logger.info(
-                f"Initialized schedule state for '{schedule_name}', next_run_at={next_run_at}"
-            )
-            return state
+        logger.info(
+            f"Initialized schedule state for '{schedule_name}', next_run_at={next_run_at}"
+        )
+        return state
 
     async def update_after_run(
         self,
@@ -147,6 +185,7 @@ class ScheduleStateManager:
         task_id: str,
         executed_at: datetime,
         next_run_at: datetime,
+        session: Optional[AsyncSession] = None,
     ) -> None:
         """
         Update schedule state after successful task enqueue.
@@ -157,36 +196,67 @@ class ScheduleStateManager:
             executed_at: When the schedule was executed (UTC)
             next_run_at: Calculated next run time (UTC)
         """
-        async with self.session_factory() as session:
-            # Use raw SQL for atomic update with increment
-            result = await session.execute(
-                UPDATE_SCHEDULE_AFTER_RUN_SQL,
-                {
-                    'schedule_name': schedule_name,
-                    'executed_at': executed_at,
-                    'next_run_at': next_run_at,
-                    'task_id': task_id,
-                    'now': datetime.now(timezone.utc),
-                },
+        if session is not None:
+            await self._update_after_run_on_session(
+                session=session,
+                schedule_name=schedule_name,
+                task_id=task_id,
+                executed_at=executed_at,
+                next_run_at=next_run_at,
+                commit=False,
             )
+            return
+
+        async with self.session_factory() as owned_session:
+            await self._update_after_run_on_session(
+                session=owned_session,
+                schedule_name=schedule_name,
+                task_id=task_id,
+                executed_at=executed_at,
+                next_run_at=next_run_at,
+                commit=True,
+            )
+
+    async def _update_after_run_on_session(
+        self,
+        session: AsyncSession,
+        schedule_name: str,
+        task_id: str,
+        executed_at: datetime,
+        next_run_at: datetime,
+        commit: bool,
+    ) -> None:
+        # Use raw SQL for atomic update with increment
+        result = await session.execute(
+            UPDATE_SCHEDULE_AFTER_RUN_SQL,
+            {
+                'schedule_name': schedule_name,
+                'executed_at': executed_at,
+                'next_run_at': next_run_at,
+                'task_id': task_id,
+                'now': datetime.now(timezone.utc),
+            },
+        )
+        if commit:
             await session.commit()
 
-            rows_updated = getattr(result, 'rowcount', 0)
-            if rows_updated == 0:
-                logger.warning(
-                    f"Failed to update schedule state for '{schedule_name}' - not found"
-                )
-            else:
-                logger.debug(
-                    f"Updated schedule '{schedule_name}': "
-                    f'last_run={executed_at}, next_run={next_run_at}, task_id={task_id}'
-                )
+        rows_updated = getattr(result, 'rowcount', 0)
+        if rows_updated == 0:
+            logger.warning(
+                f"Failed to update schedule state for '{schedule_name}' - not found"
+            )
+        else:
+            logger.debug(
+                f"Updated schedule '{schedule_name}': "
+                f'last_run={executed_at}, next_run={next_run_at}, task_id={task_id}'
+            )
 
     async def update_next_run(
         self,
         schedule_name: str,
         next_run_at: datetime,
         config_hash: Optional[str] = None,
+        session: Optional[AsyncSession] = None,
     ) -> None:
         """
         Update next_run_at and optionally config_hash (used for rescheduling without execution).
@@ -196,34 +266,59 @@ class ScheduleStateManager:
             next_run_at: New next run time (UTC)
             config_hash: Optional new config hash
         """
-        async with self.session_factory() as session:
-            # Build UPDATE query dynamically based on whether config_hash is provided
-            if config_hash is not None:
-                query = UPDATE_SCHEDULE_NEXT_RUN_WITH_HASH_SQL
-                params = {
-                    'schedule_name': schedule_name,
-                    'next_run_at': next_run_at,
-                    'config_hash': config_hash,
-                    'now': datetime.now(timezone.utc),
-                }
-            else:
-                query = UPDATE_SCHEDULE_NEXT_RUN_SQL
-                params = {
-                    'schedule_name': schedule_name,
-                    'next_run_at': next_run_at,
-                    'now': datetime.now(timezone.utc),
-                }
+        if session is not None:
+            await self._update_next_run_on_session(
+                session=session,
+                schedule_name=schedule_name,
+                next_run_at=next_run_at,
+                config_hash=config_hash,
+                commit=False,
+            )
+            return
 
-            result = await session.execute(query, params)
+        async with self.session_factory() as owned_session:
+            await self._update_next_run_on_session(
+                session=owned_session,
+                schedule_name=schedule_name,
+                next_run_at=next_run_at,
+                config_hash=config_hash,
+                commit=True,
+            )
+
+    async def _update_next_run_on_session(
+        self,
+        session: AsyncSession,
+        schedule_name: str,
+        next_run_at: datetime,
+        config_hash: Optional[str],
+        commit: bool,
+    ) -> None:
+        # Build UPDATE query dynamically based on whether config_hash is provided
+        if config_hash is not None:
+            query = UPDATE_SCHEDULE_NEXT_RUN_WITH_HASH_SQL
+            params = {
+                'schedule_name': schedule_name,
+                'next_run_at': next_run_at,
+                'config_hash': config_hash,
+                'now': datetime.now(timezone.utc),
+            }
+        else:
+            query = UPDATE_SCHEDULE_NEXT_RUN_SQL
+            params = {
+                'schedule_name': schedule_name,
+                'next_run_at': next_run_at,
+                'now': datetime.now(timezone.utc),
+            }
+
+        result = await session.execute(query, params)
+        if commit:
             await session.commit()
 
-            rows_updated = getattr(result, 'rowcount', 0)
-            if rows_updated == 0:
-                logger.warning(
-                    f"Failed to update next_run for '{schedule_name}' - not found"
-                )
-            else:
-                logger.debug(f"Updated next_run for '{schedule_name}': {next_run_at}")
+        rows_updated = getattr(result, 'rowcount', 0)
+        if rows_updated == 0:
+            logger.warning(f"Failed to update next_run for '{schedule_name}' - not found")
+        else:
+            logger.debug(f"Updated next_run for '{schedule_name}': {next_run_at}")
 
     async def delete_state(self, schedule_name: str) -> bool:
         """
