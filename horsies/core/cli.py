@@ -28,9 +28,9 @@ from horsies.core.errors import (
 )
 from horsies.core.logging import get_logger
 from horsies.core.models.resilience import WorkerResilienceConfig
-from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.scheduler import Scheduler
 from horsies.core.worker.worker import Worker, WorkerConfig
+from horsies.core.types.result import is_err, is_ok
 from horsies.core.utils.imports import (
     import_file_path,
     setup_sys_path_from_cwd,
@@ -44,39 +44,40 @@ async def _ensure_schema_with_retry(
 ) -> None:
     attempts = 0
     while True:
-        try:
-            await broker.ensure_schema_initialized()
+        result = await broker.ensure_schema_initialized()
+        if is_ok(result):
             return
-        except Exception as exc:
-            if not is_retryable_connection_error(exc):
-                raise
 
-            attempts += 1
-            match resilience.db_retry_max_attempts:
-                case 0:
-                    should_retry = True
-                case _:
-                    should_retry = attempts <= resilience.db_retry_max_attempts
+        err = result.err_value
+        if not err.retryable:
+            raise RuntimeError(err.message) from err.exception
 
-            if not should_retry:
-                logger.error(
-                    f'Database initialization failed after {attempts} attempts: {exc}'
-                )
-                raise
+        attempts += 1
+        match resilience.db_retry_max_attempts:
+            case 0:
+                should_retry = True
+            case _:
+                should_retry = attempts <= resilience.db_retry_max_attempts
 
-            exponent = max(0, attempts - 1)
-            base_ms = min(
-                resilience.db_retry_max_ms,
-                int(resilience.db_retry_initial_ms * (2**exponent)),
-            )
-            jitter_range = base_ms * 0.25
-            delay_ms = base_ms + random.uniform(-jitter_range, jitter_range)
-            delay_s = max(0.1, delay_ms / 1000.0)
+        if not should_retry:
             logger.error(
-                f'Database initialization failed: {exc}. Retrying in {delay_s:.1f}s '
-                f'(attempt {attempts}/{resilience.db_retry_max_attempts or "inf"})'
+                f'Database initialization failed after {attempts} attempts: {err.message}'
             )
-            await asyncio.sleep(delay_s)
+            raise RuntimeError(err.message) from err.exception
+
+        exponent = max(0, attempts - 1)
+        base_ms = min(
+            resilience.db_retry_max_ms,
+            int(resilience.db_retry_initial_ms * (2**exponent)),
+        )
+        jitter_range = base_ms * 0.25
+        delay_ms = base_ms + random.uniform(-jitter_range, jitter_range)
+        delay_s = max(0.1, delay_ms / 1000.0)
+        logger.error(
+            f'Database initialization failed: {err.message}. Retrying in {delay_s:.1f}s '
+            f'(attempt {attempts}/{resilience.db_retry_max_attempts or "inf"})'
+        )
+        await asyncio.sleep(delay_s)
 
 
 def _resolve_module_argument(args: argparse.Namespace) -> str:
@@ -455,7 +456,9 @@ def worker_command(args: argparse.Namespace) -> None:
             try:
                 await worker.run_forever()
             finally:
-                await broker.close_async()
+                close_result = await broker.close_async()
+                if is_err(close_result):
+                    logger.error(f'Broker close failed: {close_result.err_value.message}')
 
         try:
             asyncio.run(run_worker())
@@ -540,6 +543,15 @@ def scheduler_command(args: argparse.Namespace) -> None:
 
         async def run_scheduler() -> None:
             try:
+                # Ensure schema exists with retry, same as worker path
+                broker = app.get_broker()
+                logger.info('Ensuring Postgres schema and triggers are initialized...')
+                await _ensure_schema_with_retry(
+                    broker,
+                    app.config.resilience,
+                    logger,
+                )
+
                 scheduler = Scheduler(app)
 
                 loop = asyncio.get_running_loop()

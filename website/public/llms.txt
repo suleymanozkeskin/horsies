@@ -85,6 +85,27 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - sub_workflow_summary: SubWorkflowSummary[Any]
 - Pattern match to distinguish: case SubWorkflowError() vs case TaskError()
 
+### BrokerResult[T] (infrastructure Result type)
+- All PostgresBroker methods return BrokerResult[T] = Ok[T] | Err[BrokerOperationError]
+- Ok(value): operation succeeded
+- Err(BrokerOperationError): operation failed
+- Use is_ok(result) / is_err(result) type guards, or result.unwrap() to extract value
+- BrokerOperationError fields: code (BrokerErrorCode), message (str), retryable (bool), exception (BaseException | None)
+- BrokerErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, CLEANUP_FAILED, CLOSE_FAILED
+- retryable=True: transient (connection blip), retryable=False: permanent (schema drift, code bug)
+- Broker methods: enqueue_async -> BrokerResult[str], get_task_info_async -> BrokerResult[TaskInfo | None],
+  ensure_schema_initialized -> BrokerResult[None], get_stale_tasks -> BrokerResult[list[dict]],
+  get_worker_stats -> BrokerResult[list[dict]], get_expired_tasks -> BrokerResult[list[dict]],
+  mark_stale_tasks_as_failed -> BrokerResult[int], requeue_stale_claimed -> BrokerResult[int],
+  close_async -> BrokerResult[None]
+- Note: get_result_async still returns TaskResult[T, TaskError] (task execution result, not broker infra)
+
+### Result[T, E] (vendored Ok/Err type)
+- from horsies import Result, Ok, Err, is_ok, is_err
+- Ok(value).unwrap() -> value, Err(error).unwrap() -> raises UnwrapError
+- .ok_value / .err_value properties, .is_ok() / .is_err() methods
+- is_ok(result) / is_err(result) are TypeIs type guards for narrowing
+
 ### @app.task Decorator
 - Decorated function must return TaskResult[T, TaskError]
 - Options: task_name, queue_name, good_until, retry_policy, exception_mapper, default_unhandled_error_code
@@ -102,8 +123,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .task_id -> str
 - .get(timeout_ms=None) -> TaskResult[T, TaskError] (blocking)
 - .get_async(timeout_ms=None) -> TaskResult[T, TaskError] (async blocking)
-- .info(include_result=False, include_failed_reason=False) -> TaskInfo | None
-- .info_async(include_result=False, include_failed_reason=False) -> TaskInfo | None
+- .info(include_result=False, include_failed_reason=False) -> BrokerResult[TaskInfo | None]
+- .info_async(include_result=False, include_failed_reason=False) -> BrokerResult[TaskInfo | None]
 
 ### TaskInfo
 - .task_id -> str, .task_name -> str, .status -> TaskStatus
@@ -576,6 +597,7 @@ heartbeat, crash, stale, worker recovery -> /horsies/workers/heartbeats-recovery
 syce, dashboard, TUI, monitor -> /horsies/monitoring/syce-overview/
 get_queue_stats, get_worker_states, broker methods -> /horsies/monitoring/broker-methods/
 TaskInfo, retry_count, next_retry_at, task metadata -> /horsies/monitoring/broker-methods/
+BrokerResult, BrokerOperationError, BrokerErrorCode, retryable, Ok, Err, Result -> /horsies/monitoring/broker-methods/
 ScheduleConfig, TaskSchedule, IntervalSchedule, DailySchedule -> /horsies/scheduling/schedule-config/
 schedule pattern, Interval, Hourly, Daily, Weekly, Monthly -> /horsies/scheduling/schedule-patterns/
 scheduler, check_interval, cron -> /horsies/scheduling/scheduler-overview/

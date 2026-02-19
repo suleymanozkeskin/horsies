@@ -16,6 +16,8 @@ from horsies.core.errors import ConfigurationError, RegistryError, ErrorCode
 from horsies.core.scheduler.state import ScheduleStateManager
 from horsies.core.scheduler.calculator import calculate_next_run, should_run_now
 from horsies.core.logging import get_logger
+from horsies.core.brokers.result_types import BrokerResult
+from horsies.core.types.result import is_err
 from horsies.core.worker.worker import import_by_path
 
 logger = get_logger('scheduler')
@@ -63,13 +65,22 @@ class Scheduler:
         )
 
     async def start(self) -> None:
-        """Initialize broker, state manager, and database schema."""
+        """Initialize broker, state manager, and database schema.
+
+        Schema initialization retry is handled at the CLI orchestration level
+        (see scheduler_command in cli.py), not here. This method assumes the
+        schema is ready or will succeed on first attempt.
+        """
         if self._initialized:
             return
 
-        # Initialize broker for task enqueuing
         self.broker = self.app.get_broker()
-        await self.broker.ensure_schema_initialized()
+        init_result = await self.broker.ensure_schema_initialized()
+        if is_err(init_result):
+            err = init_result.err_value
+            raise RuntimeError(
+                f'Schema initialization failed: {err.message}',
+            ) from err.exception
         logger.info('Broker initialized')
 
         # Import task modules so task registry is populated for scheduled names
@@ -93,8 +104,11 @@ class Scheduler:
         self._stop.set()
 
         if self.broker:
-            await self.broker.close_async()
-            logger.info('Broker closed')
+            close_result = await self.broker.close_async()
+            if is_err(close_result):
+                logger.error(f'Broker close failed: {close_result.err_value.message}')
+            else:
+                logger.info('Broker closed')
 
         logger.info('Scheduler stopped')
 
@@ -325,45 +339,79 @@ class Scheduler:
                     if len(due_runs) > 1:
                         logger.warning(
                             f"Schedule '{schedule.name}' has {len(due_runs)} due run(s), "
-                            f'catching up with cap={schedule.max_catch_up_runs}'
+                            f'catching up with cap={schedule.max_catch_up_runs}',
                         )
-                    # Enqueue all currently due runs
+
                     last_task_id = ''
+                    caught_up: list[datetime] = []
                     for due_time in due_runs:
-                        last_task_id = await self._enqueue_scheduled_task(schedule)
+                        result = await self._enqueue_scheduled_task(schedule)
+                        if is_err(result):
+                            err = result.err_value
+                            level = 'transient' if err.retryable else 'permanent'
+                            logger.error(
+                                f"Schedule '{schedule.name}' catch-up failed at run "
+                                f'{len(caught_up) + 1}/{len(due_runs)} ({level}): {err.message}',
+                            )
+                            break
+                        last_task_id = result.ok_value
+                        caught_up.append(due_time)
                         logger.info(
                             f"Schedule '{schedule.name}' catch-up: enqueued task {last_task_id} "
-                            f'for scheduled run at {due_time}'
+                            f'for scheduled run at {due_time}',
                         )
 
-                    # After catch-up, calculate next run from the last scheduled slot to preserve cadence
-                    last_slot = due_runs[-1]
-                    next_run = calculate_next_run(
-                        schedule.pattern, last_slot, schedule.timezone
-                    )
+                    if caught_up:
+                        # Save progress for runs that succeeded — prevents
+                        # double-enqueue on the next tick.
+                        last_slot = caught_up[-1]
+                        next_run = calculate_next_run(
+                            schedule.pattern, last_slot, schedule.timezone,
+                        )
+                        await self.state_manager.update_after_run(
+                            schedule_name=schedule.name,
+                            task_id=last_task_id,
+                            executed_at=check_time,
+                            next_run_at=next_run,
+                            session=session,
+                        )
+                        await session.commit()
+                        if len(caught_up) < len(due_runs):
+                            logger.warning(
+                                f"Schedule '{schedule.name}' partially caught up: "
+                                f'{len(caught_up)}/{len(due_runs)} runs enqueued',
+                            )
+                    else:
+                        # All failed — don't advance state, will retry next tick
+                        await session.rollback()
 
-                    # Update state with last caught-up task
-                    await self.state_manager.update_after_run(
-                        schedule_name=schedule.name,
-                        task_id=last_task_id,
-                        executed_at=check_time,
-                        next_run_at=next_run,
-                        session=session,
-                    )
                 else:
                     # Normal execution: single run
-                    task_id = await self._enqueue_scheduled_task(schedule)
+                    result = await self._enqueue_scheduled_task(schedule)
+                    if is_err(result):
+                        err = result.err_value
+                        if err.retryable:
+                            logger.warning(
+                                f"Schedule '{schedule.name}' enqueue failed (transient), "
+                                f'will retry next tick: {err.message}',
+                            )
+                        else:
+                            logger.error(
+                                f"Schedule '{schedule.name}' enqueue failed (permanent): "
+                                f'{err.message}',
+                            )
+                        await session.rollback()
+                        return
+
+                    task_id = result.ok_value
                     logger.info(
                         f"Schedule '{schedule.name}' executed: enqueued task {task_id} "
-                        f"for task '{schedule.task_name}'"
+                        f"for task '{schedule.task_name}'",
                     )
 
-                    # Calculate next run time
                     next_run = calculate_next_run(
-                        schedule.pattern, check_time, schedule.timezone
+                        schedule.pattern, check_time, schedule.timezone,
                     )
-
-                    # Update state
                     await self.state_manager.update_after_run(
                         schedule_name=schedule.name,
                         task_id=task_id,
@@ -371,15 +419,13 @@ class Scheduler:
                         next_run_at=next_run,
                         session=session,
                     )
-
-                await session.commit()
+                    await session.commit()
 
             except Exception as e:
                 logger.error(
-                    f"Failed to execute schedule '{schedule.name}': {e}", exc_info=True
+                    f"Failed to execute schedule '{schedule.name}': {e}", exc_info=True,
                 )
                 await session.rollback()
-                # Don't update state on failure - will retry next check
 
         # Advisory lock automatically released at transaction end
 
@@ -529,49 +575,34 @@ class Scheduler:
                 help_text='update TaskSchedule args/kwargs to match task function parameters',
             ) from e
 
-    async def _enqueue_scheduled_task(self, schedule: TaskSchedule) -> str:
-        """
-        Enqueue a scheduled task via the broker.
+    async def _enqueue_scheduled_task(
+        self,
+        schedule: TaskSchedule,
+    ) -> BrokerResult[str]:
+        """Enqueue a scheduled task via the broker.
 
-        Args:
-            schedule: TaskSchedule configuration
-
-        Returns:
-            Task ID of enqueued task
-
-        Raises:
-            Exception: If task enqueuing fails
+        Returns Ok(task_id) on success, Err(BrokerOperationError) on broker failure.
+        Raises ValueError/RuntimeError for programming errors (missing task, bad queue).
         """
         if not self.broker:
             raise RuntimeError('Broker not initialized')
 
-        # Validate that task is registered
         if schedule.task_name not in self.app.tasks:
             raise ValueError(
                 f"Task '{schedule.task_name}' not registered. "
-                f'Available tasks: {list(self.app.tasks.keys())}'
+                f'Available tasks: {list(self.app.tasks.keys())}',
             )
 
-        # Validate queue_name against app configuration
-        try:
-            validated_queue_name = self._resolve_schedule_queue(schedule)
-        except ValueError as e:
-            raise ValueError(
-                f"Invalid queue configuration for schedule '{schedule.name}': {e}"
-            )
+        validated_queue_name = self._resolve_schedule_queue(schedule)
 
-        # Determine priority for the queue
         from horsies.core.task_decorator import effective_priority
 
         priority = effective_priority(self.app, validated_queue_name)
 
-        # Enqueue task via broker
-        task_id = await self.broker.enqueue_async(
+        return await self.broker.enqueue_async(
             task_name=schedule.task_name,
             args=schedule.args,
             kwargs=schedule.kwargs,
             queue_name=validated_queue_name,
             priority=priority,
         )
-
-        return task_id

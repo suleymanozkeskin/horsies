@@ -89,12 +89,12 @@ class TestTaskDoneFanout:
             queues.append(q)
 
         # Enqueue one task so the UPDATE trigger has a row to fire on
-        task_id = await broker.enqueue_async(
+        task_id = (await broker.enqueue_async(
             task_name='e2e_simple',
             args=(0,),
             kwargs={},
             queue_name='default',
-        )
+        )).unwrap()
 
         # Complete it via direct SQL (fires NOTIFY task_done, <task_id>)
         await session.execute(
@@ -146,12 +146,12 @@ class TestTaskDoneFanout:
             q = await broker.listener.listen('task_done')
             queues.append(q)
 
-        task_id = await broker.enqueue_async(
+        task_id = (await broker.enqueue_async(
             task_name='e2e_simple',
             args=(0,),
             kwargs={},
             queue_name='default',
-        )
+        )).unwrap()
 
         # Patch put_nowait on every queue to count deliveries
         delivery_count = 0
@@ -232,12 +232,12 @@ class TestTaskDoneFanout:
         # Enqueue M tasks
         task_ids: list[str] = []
         for i in range(M_COMPLETIONS):
-            tid = await broker.enqueue_async(
+            tid = (await broker.enqueue_async(
                 task_name='e2e_simple',
                 args=(i,),
                 kwargs={},
                 queue_name='default',
-            )
+            )).unwrap()
             task_ids.append(tid)
 
         # Complete all M tasks (each fires NOTIFY to all N queues)
@@ -325,12 +325,12 @@ class TestTaskDoneFanout:
             # Enqueue M tasks
             task_ids: list[str] = []
             for i in range(M):
-                tid = await broker.enqueue_async(
+                tid = (await broker.enqueue_async(
                     task_name='e2e_simple',
                     args=(i,),
                     kwargs={},
                     queue_name='default',
-                )
+                )).unwrap()
                 task_ids.append(tid)
 
             # Complete all M tasks, measure time for all notifications to arrive
@@ -407,12 +407,12 @@ class TestFanoutBoundary:
         await broker.listener.unsubscribe('task_done', q)
 
         # Fire a completion with zero subscribers; should be a safe no-op.
-        task_id = await broker.enqueue_async(
+        task_id = (await broker.enqueue_async(
             task_name='e2e_simple',
             args=(0,),
             kwargs={},
             queue_name='default',
-        )
+        )).unwrap()
         await session.execute(
             text("""
                 UPDATE horsies_tasks
@@ -428,12 +428,12 @@ class TestFanoutBoundary:
         # Verify delivery still works by subscribing and firing a new completion.
         probe_q = await broker.listener.listen('task_done')
         try:
-            task_id_2 = await broker.enqueue_async(
+            task_id_2 = (await broker.enqueue_async(
                 task_name='e2e_simple',
                 args=(1,),
                 kwargs={},
                 queue_name='default',
-            )
+            )).unwrap()
             await session.execute(
                 text("""
                     UPDATE horsies_tasks
@@ -459,12 +459,12 @@ class TestFanoutBoundary:
         """Degenerate case: 1 subscriber, 1 NOTIFY, queue receives exactly 1 item."""
         q = await broker.listener.listen('task_done')
         try:
-            task_id = await broker.enqueue_async(
+            task_id = (await broker.enqueue_async(
                 task_name='e2e_simple',
                 args=(0,),
                 kwargs={},
                 queue_name='default',
-            )
+            )).unwrap()
             await session.execute(
                 text("""
                     UPDATE horsies_tasks
@@ -510,20 +510,20 @@ class TestFanoutBoundary:
 
         pre_ids: list[str] = []
         for i in range(20):
-            tid = await broker.enqueue_async(
+            tid = (await broker.enqueue_async(
                 task_name='e2e_simple',
                 args=(i,),
                 kwargs={},
                 queue_name='default',
-            )
+            )).unwrap()
             pre_ids.append(tid)
 
-        post_id = await broker.enqueue_async(
+        post_id = (await broker.enqueue_async(
             task_name='e2e_simple',
             args=(99,),
             kwargs={},
             queue_name='default',
-        )
+        )).unwrap()
 
         async def _complete_inflight(ids: list[str]) -> None:
             for tid in ids:
@@ -679,12 +679,12 @@ class TestFanoutErrorPaths:
             # Fire 3 notifications to exceed maxsize
             task_ids: list[str] = []
             for i in range(3):
-                tid = await broker.enqueue_async(
+                tid = (await broker.enqueue_async(
                     task_name='e2e_simple',
                     args=(i,),
                     kwargs={},
                     queue_name='default',
-                )
+                )).unwrap()
                 task_ids.append(tid)
 
             for tid in task_ids:
@@ -731,12 +731,12 @@ class TestFanoutContracts:
         """The Notify.payload on subscriber queues contains the completed task_id."""
         q = await broker.listener.listen('task_done')
         try:
-            task_id = await broker.enqueue_async(
+            task_id = (await broker.enqueue_async(
                 task_name='e2e_simple',
                 args=(0,),
                 kwargs={},
                 queue_name='default',
-            )
+            )).unwrap()
             await session.execute(
                 text("""
                     UPDATE horsies_tasks
@@ -773,12 +773,12 @@ class TestFanoutContracts:
         q_new = await broker.listener.listen('task_new')
 
         try:
-            task_id = await broker.enqueue_async(
+            task_id = (await broker.enqueue_async(
                 task_name='e2e_simple',
                 args=(0,),
                 kwargs={},
                 queue_name='default',
-            )
+            )).unwrap()
 
             # Drain any task_new notifications from the enqueue itself
             await _wait_until(lambda: q_new.qsize() >= 1, timeout_s=2.0)
@@ -827,12 +827,12 @@ class TestFanoutContracts:
             queues.append(q)
 
         try:
-            task_id = await broker.enqueue_async(
+            task_id = (await broker.enqueue_async(
                 task_name='e2e_simple',
                 args=(0,),
                 kwargs={},
                 queue_name='default',
-            )
+            )).unwrap()
             await session.execute(
                 text("""
                     UPDATE horsies_tasks

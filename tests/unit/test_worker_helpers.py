@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from psycopg import InterfaceError, OperationalError
+
+from horsies.core.types.result import Ok
 from psycopg.errors import DeadlockDetected, SerializationFailure
 
 from horsies.core.worker.worker import (
@@ -357,7 +359,7 @@ class TestReaperHeartbeatRetention:
                 self.config = config
                 self.app = None
                 self.session_factory = MagicMock(return_value=session)
-                self.close_async = AsyncMock()
+                self.close_async = AsyncMock(return_value=Ok(None))
                 created_brokers.append(self)
 
         recover_mock = AsyncMock(return_value=0)
@@ -421,7 +423,7 @@ class TestReaperHeartbeatRetention:
                 self.config = config
                 self.app = None
                 self.session_factory = MagicMock(return_value=session)
-                self.close_async = AsyncMock()
+                self.close_async = AsyncMock(return_value=Ok(None))
                 created_brokers.append(self)
 
         recover_mock = AsyncMock(return_value=0)

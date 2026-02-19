@@ -14,6 +14,7 @@ from horsies.core.models.schedule import (
     TaskSchedule,
 )
 from horsies.core.scheduler.service import Scheduler
+from horsies.core.types.result import Ok
 
 
 def _utc(
@@ -609,7 +610,7 @@ class TestCheckScheduleSessionUsage:
         state_manager.update_after_run = AsyncMock()
         scheduler.state_manager = state_manager
 
-        scheduler._enqueue_scheduled_task = AsyncMock(return_value='task-1')  # type: ignore[method-assign]
+        scheduler._enqueue_scheduled_task = AsyncMock(return_value=Ok('task-1'))  # type: ignore[method-assign]
 
         await scheduler._check_schedule(config.schedules[0], now)
 

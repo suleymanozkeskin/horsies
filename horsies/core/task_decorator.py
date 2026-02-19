@@ -23,6 +23,9 @@ from datetime import datetime, timedelta, timezone
 from pydantic import TypeAdapter, ValidationError
 from horsies.core.codec.serde import serialize_task_options
 
+from horsies.core.types.result import is_err
+from horsies.core.brokers.result_types import BrokerResult
+
 if TYPE_CHECKING:
     from horsies.core.app import Horsies
     from horsies.core.models.tasks import TaskOptions
@@ -301,8 +304,12 @@ class TaskHandle(Generic[T]):
         *,
         include_result: bool = False,
         include_failed_reason: bool = False,
-    ) -> 'TaskInfo | None':
-        """Fetch metadata for this task from the broker."""
+    ) -> 'BrokerResult[TaskInfo | None]':
+        """Fetch metadata for this task from the broker.
+
+        Returns Ok(TaskInfo) if found, Ok(None) if not found,
+        Err(BrokerOperationError) on infrastructure failure.
+        """
         if not self._broker_mode or not self._app:
             raise RuntimeError(
                 'TaskHandle.info() requires a broker-backed task handle '
@@ -321,8 +328,12 @@ class TaskHandle(Generic[T]):
         *,
         include_result: bool = False,
         include_failed_reason: bool = False,
-    ) -> 'TaskInfo | None':
-        """Async version of info()."""
+    ) -> 'BrokerResult[TaskInfo | None]':
+        """Async version of info().
+
+        Returns Ok(TaskInfo) if found, Ok(None) if not found,
+        Err(BrokerOperationError) on infrastructure failure.
+        """
         if not self._broker_mode or not self._app:
             raise RuntimeError(
                 'TaskHandle.info_async() requires a broker-backed task handle '
@@ -737,7 +748,7 @@ def create_task_wrapper(
             broker = app.get_broker()
             good_until = task_options.good_until if task_options else None
 
-            task_id = broker.enqueue(
+            result = broker.enqueue(
                 task_name,
                 args,
                 kwargs,
@@ -746,12 +757,19 @@ def create_task_wrapper(
                 good_until=good_until,
                 task_options=_pre_serialized_options,
             )
-            return TaskHandle(task_id, app, broker_mode=True)
-        except BaseException as e:
+        except Exception as e:
+            # LoopRunner infrastructure failure (thread death, etc.)
             return _immediate_error_handle(
                 e,
                 f'Failed to enqueue task {fn.__name__}: {e}',
             )
+        if is_err(result):
+            err = result.err_value
+            return _immediate_error_handle(
+                err.exception or RuntimeError(err.message),
+                f'Failed to enqueue task {fn.__name__}: {err.message}',
+            )
+        return TaskHandle(result.ok_value, app, broker_mode=True)
 
     async def send_async(
         *args: P.args,
@@ -788,23 +806,29 @@ def create_task_wrapper(
             )
         try:
             broker = app.get_broker()
-            good_until = task_options.good_until if task_options else None
-
-            task_id = await broker.enqueue_async(
-                task_name,
-                args,
-                kwargs,
-                validated,
-                priority=priority,
-                good_until=good_until,
-                task_options=_pre_serialized_options,
-            )
-            return TaskHandle(task_id, app, broker_mode=True)
-        except BaseException as e:
+        except Exception as e:
             return _immediate_error_handle(
                 e,
-                f'Failed to enqueue task {fn.__name__}: {e}',
+                f'Failed to get broker for {fn.__name__}: {e}',
             )
+        good_until = task_options.good_until if task_options else None
+
+        result = await broker.enqueue_async(
+            task_name,
+            args,
+            kwargs,
+            validated,
+            priority=priority,
+            good_until=good_until,
+            task_options=_pre_serialized_options,
+        )
+        if is_err(result):
+            err = result.err_value
+            return _immediate_error_handle(
+                err.exception or RuntimeError(err.message),
+                f'Failed to enqueue task {fn.__name__}: {err.message}',
+            )
+        return TaskHandle(result.ok_value, app, broker_mode=True)
 
     def schedule(
         delay: int,
@@ -848,7 +872,7 @@ def create_task_wrapper(
             good_until = task_options.good_until if task_options else None
             sent_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
 
-            task_id = broker.enqueue(
+            result = broker.enqueue(
                 task_name,
                 args,
                 kwargs,
@@ -858,12 +882,19 @@ def create_task_wrapper(
                 sent_at=sent_at,
                 task_options=_pre_serialized_options,
             )
-            return TaskHandle(task_id, app, broker_mode=True)
-        except BaseException as e:
+        except Exception as e:
+            # LoopRunner infrastructure failure
             return _immediate_error_handle(
                 e,
                 f'Failed to schedule task {fn.__name__}: {e}',
             )
+        if is_err(result):
+            err = result.err_value
+            return _immediate_error_handle(
+                err.exception or RuntimeError(err.message),
+                f'Failed to schedule task {fn.__name__}: {err.message}',
+            )
+        return TaskHandle(result.ok_value, app, broker_mode=True)
 
     class TaskFunctionImpl:
         def __init__(self) -> None:

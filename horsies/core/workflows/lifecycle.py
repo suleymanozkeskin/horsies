@@ -132,7 +132,12 @@ async def start_workflow_async(
 
     wf_id = workflow_id or str(uuid.uuid4())
 
-    await broker.ensure_schema_initialized()
+    from horsies.core.types.result import is_err
+
+    init_result = await broker.ensure_schema_initialized()
+    if is_err(init_result):
+        err = init_result.err_value
+        raise RuntimeError(f'Schema initialization failed: {err.message}') from err.exception
 
     async with broker.session_factory() as session:
         # Check if workflow already exists (idempotent start)

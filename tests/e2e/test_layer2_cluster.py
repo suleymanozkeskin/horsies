@@ -143,7 +143,7 @@ async def test_multi_worker_distribution(broker: PostgresBroker) -> None:
                 args=(task_duration_ms,),
                 kwargs={},
                 queue_name='default',
-            )
+            ).unwrap()
             for _ in range(num_tasks)
         ]
 
@@ -205,7 +205,7 @@ async def test_cluster_wide_cap(cluster_cap_broker: PostgresBroker) -> None:
                 args=(task_duration_ms,),
                 kwargs={},
                 queue_name='default',
-            )
+            ).unwrap()
             for _ in range(num_tasks)
         ]
 
@@ -267,7 +267,7 @@ async def test_per_queue_concurrency_cap(custom_broker: PostgresBroker) -> None:
                 args=(task_duration_ms,),
                 kwargs={},
                 queue_name=queue_name,
-            )
+            ).unwrap()
             for _ in range(num_tasks)
         ]
 
@@ -376,7 +376,7 @@ async def test_softcap_db_ledger_race_single_execution(
             args=(blocker_duration_ms,),
             kwargs={},
             queue_name='default',
-        )
+        ).unwrap()
         await wait_for_status(
             softcap_broker.session_factory,
             blocker_task_id,
@@ -389,7 +389,7 @@ async def test_softcap_db_ledger_race_single_execution(
             args=(token,),
             kwargs={},
             queue_name='default',
-        )
+        ).unwrap()
 
         await _wait_for_claimed_owner(
             softcap_broker.session_factory,
@@ -479,7 +479,7 @@ async def test_stale_running_marked_failed_on_crash(
             args=(task_duration_ms,),
             kwargs={},
             queue_name='default',
-        )
+        ).unwrap()
 
         # Wait until task reaches RUNNING
         await wait_for_status(
@@ -540,7 +540,7 @@ async def test_stale_claimed_requeued_and_completed(
         args=(),
         kwargs={},
         queue_name='default',
-    )
+    ).unwrap()
 
     # Manually set the row to CLAIMED with a stale timestamp, simulating a
     # worker that died before executing the task
@@ -611,7 +611,7 @@ async def test_cluster_cap_not_leaked_on_failure(
                 args=(),
                 kwargs={},
                 queue_name='default',
-            )
+            ).unwrap()
             for _ in range(num_failing)
         ]
 
@@ -636,7 +636,7 @@ async def test_cluster_cap_not_leaked_on_failure(
                 args=(task_duration_ms,),
                 kwargs={},
                 queue_name='default',
-            )
+            ).unwrap()
             for _ in range(num_slow)
         ]
 
@@ -733,7 +733,7 @@ async def test_per_queue_caps_independent_across_queues(
                 args=(task_duration_ms,),
                 kwargs={},
                 queue_name='high',
-            )
+            ).unwrap()
             for _ in range(num_tasks_per_queue)
         ]
         normal_ids = [
@@ -742,7 +742,7 @@ async def test_per_queue_caps_independent_across_queues(
                 args=(task_duration_ms,),
                 kwargs={},
                 queue_name='normal',
-            )
+            ).unwrap()
             for _ in range(num_tasks_per_queue)
         ]
 
@@ -811,7 +811,7 @@ async def test_queue_priority_ordering(custom_broker: PostgresBroker) -> None:
             args=(task_duration_ms,),
             kwargs={},
             queue_name='low',
-        )
+        ).unwrap()
         for _ in range(num_tasks_per_queue)
     ]
 
@@ -822,7 +822,7 @@ async def test_queue_priority_ordering(custom_broker: PostgresBroker) -> None:
             args=(task_duration_ms,),
             kwargs={},
             queue_name='high',
-        )
+        ).unwrap()
         for _ in range(num_tasks_per_queue)
     ]
 
@@ -895,7 +895,7 @@ async def test_single_worker_crash_remaining_continue(
                 args=(task_duration_ms,),
                 kwargs={},
                 queue_name='default',
-            )
+            ).unwrap()
             for _ in range(num_tasks)
         ]
 
@@ -977,7 +977,7 @@ async def test_concurrent_enqueue_during_processing(
                 args=(task_duration_ms,),
                 kwargs={},
                 queue_name='default',
-            )
+            ).unwrap()
             for _ in range(batch_size)
         ]
 
@@ -996,7 +996,7 @@ async def test_concurrent_enqueue_during_processing(
                 args=(task_duration_ms,),
                 kwargs={},
                 queue_name='default',
-            )
+            ).unwrap()
             for _ in range(batch_size)
         ]
 
@@ -1105,7 +1105,7 @@ async def test_softcap_expired_claim_requeued(
                 args=(token, 100),
                 kwargs={},
                 queue_name='default',
-            )
+            ).unwrap()
 
             # Manually set to CLAIMED with an already-expired lease and a dead worker
             async with softcap_broker.session_factory() as session:
@@ -1200,7 +1200,7 @@ async def test_softcap_owner_transition_after_worker_crash(
                     args=(blocker_duration_ms,),
                     kwargs={},
                     queue_name='default',
-                )
+                ).unwrap()
                 await wait_for_status(
                     softcap_broker.session_factory,
                     blocker_task_id,
@@ -1213,7 +1213,7 @@ async def test_softcap_owner_transition_after_worker_crash(
                     args=(token, 100),
                     kwargs={},
                     queue_name='default',
-                )
+                ).unwrap()
 
                 first_owner = await _wait_for_claimed_owner(
                     softcap_broker.session_factory,

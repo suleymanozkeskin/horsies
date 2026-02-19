@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
 from horsies.core.errors import ConfigurationError, ErrorCode, TaskDefinitionError
 from horsies.core.exception_mapper import ExceptionMapper
 from horsies.core.models.tasks import LibraryErrorCode, TaskError, TaskResult
@@ -20,6 +21,7 @@ from horsies.core.task_decorator import (
     effective_priority,
     from_node,
 )
+from horsies.core.types.result import Err, Ok
 
 
 # =============================================================================
@@ -665,7 +667,7 @@ class TestCreateTaskWrapperSend:
 
         app = _make_app()
         broker = MagicMock()
-        broker.enqueue.return_value = 'task-abc'
+        broker.enqueue.return_value = Ok('task-abc')
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
@@ -675,13 +677,18 @@ class TestCreateTaskWrapperSend:
         assert handle._broker_mode is True
 
     def test_send_broker_exception_returns_error_handle(self) -> None:
-        """Broker exception during enqueue returns error handle."""
+        """Broker Err result during enqueue returns error handle."""
         def good_fn(x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
         broker = MagicMock()
-        broker.enqueue.side_effect = ConnectionError('db gone')
+        broker.enqueue.return_value = Err(BrokerOperationError(
+            code=BrokerErrorCode.ENQUEUE_FAILED,
+            message='db gone',
+            retryable=True,
+            exception=ConnectionError('db gone'),
+        ))
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
@@ -726,7 +733,7 @@ class TestCreateTaskWrapperSendAsync:
 
         app = _make_app()
         broker = MagicMock()
-        broker.enqueue_async = AsyncMock(return_value='task-xyz')
+        broker.enqueue_async = AsyncMock(return_value=Ok('task-xyz'))
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
@@ -737,13 +744,18 @@ class TestCreateTaskWrapperSendAsync:
 
     @pytest.mark.asyncio
     async def test_send_async_broker_exception(self) -> None:
-        """Broker error during async enqueue returns error handle."""
+        """Broker Err result during async enqueue returns error handle."""
         def good_fn(x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
         broker = MagicMock()
-        broker.enqueue_async = AsyncMock(side_effect=RuntimeError('fail'))
+        broker.enqueue_async = AsyncMock(return_value=Err(BrokerOperationError(
+            code=BrokerErrorCode.ENQUEUE_FAILED,
+            message='fail',
+            retryable=False,
+            exception=RuntimeError('fail'),
+        )))
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
@@ -804,7 +816,7 @@ class TestCreateTaskWrapperSchedule:
 
         app = _make_app()
         broker = MagicMock()
-        broker.enqueue.return_value = 'sched-1'
+        broker.enqueue.return_value = Ok('sched-1')
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
@@ -817,13 +829,18 @@ class TestCreateTaskWrapperSchedule:
         assert call_kwargs.kwargs.get('sent_at') is not None
 
     def test_schedule_broker_exception_returns_error_handle(self) -> None:
-        """Broker exception during schedule returns error handle."""
+        """Broker Err result during schedule returns error handle."""
         def good_fn(x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
         broker = MagicMock()
-        broker.enqueue.side_effect = ConnectionError('gone')
+        broker.enqueue.return_value = Err(BrokerOperationError(
+            code=BrokerErrorCode.ENQUEUE_FAILED,
+            message='gone',
+            retryable=True,
+            exception=ConnectionError('gone'),
+        ))
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 

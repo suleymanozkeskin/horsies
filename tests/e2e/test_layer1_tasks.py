@@ -21,6 +21,7 @@ from horsies.core.models.tasks import LibraryErrorCode, TaskResult, TaskError
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.errors import ConfigurationError
+from horsies.core.types.result import is_ok
 from sqlalchemy import text
 
 from tests.e2e.helpers.assertions import assert_ok, assert_err
@@ -496,7 +497,7 @@ async def test_priority_ordering(custom_broker: PostgresBroker) -> None:
         queue_name='low',
         priority=100,
         sent_at=sent_base,
-    )
+    ).unwrap()
     # High priority (1) submitted second
     task_id_high = custom_broker.enqueue(
         task_name='e2e_high',
@@ -505,7 +506,7 @@ async def test_priority_ordering(custom_broker: PostgresBroker) -> None:
         queue_name='high',
         priority=1,
         sent_at=sent_base + timedelta(milliseconds=50),
-    )
+    ).unwrap()
 
     # Now start worker - should claim high priority first despite later submission
     with run_worker(
@@ -559,7 +560,7 @@ async def test_task_expires_before_claim(broker: PostgresBroker) -> None:
         kwargs={},
         queue_name='default',
         good_until=expiry,
-    )
+    ).unwrap()
 
     # Wait until the task is definitely expired.
     while datetime.now(timezone.utc) <= expiry:
@@ -590,7 +591,7 @@ async def test_task_completes_before_expiry(broker: PostgresBroker) -> None:
         kwargs={},
         queue_name='default',
         good_until=expiry,
-    )
+    ).unwrap()
 
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
@@ -615,7 +616,7 @@ async def test_good_until_already_past(broker: PostgresBroker) -> None:
         kwargs={},
         queue_name='default',
         good_until=past,
-    )
+    ).unwrap()
 
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
@@ -641,7 +642,7 @@ def test_worker_resolution_error(broker: PostgresBroker) -> None:
         args=(),
         kwargs={},
         queue_name='default',
-    )
+    ).unwrap()
 
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
@@ -677,7 +678,7 @@ def test_wait_timeout(broker: PostgresBroker) -> None:
         args=(5,),
         kwargs={},
         queue_name='default',
-    )
+    ).unwrap()
 
     # Wait with very short timeout - task never completes
     result = broker.get_result(task_id, timeout_ms=500)
@@ -777,7 +778,7 @@ async def test_task_cancelled(broker: PostgresBroker) -> None:
         args=(5,),
         kwargs={},
         queue_name='default',
-    )
+    ).unwrap()
 
     # Cancel directly in DB (no cancel API exists)
     async with broker.session_factory() as session:
@@ -939,7 +940,9 @@ def test_task_handle_info() -> None:
         result = handle.get(timeout_ms=5000)
         assert_ok(result)
 
-        info = handle.info()
+        info_result = handle.info()
+        assert is_ok(info_result)
+        info = info_result.ok_value
         assert info is not None
         assert info.task_id == handle.task_id
         assert info.task_name == 'e2e_simple'
@@ -960,7 +963,9 @@ async def test_task_handle_info_async() -> None:
         result = handle.get(timeout_ms=5000)
         assert_ok(result)
 
-        info = await handle.info_async()
+        info_result = await handle.info_async()
+        assert is_ok(info_result)
+        info = info_result.ok_value
         assert info is not None
         assert info.task_id == handle.task_id
         assert info.task_name == 'e2e_simple'

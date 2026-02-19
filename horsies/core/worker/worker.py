@@ -27,6 +27,7 @@ from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
 from horsies.core.logging import get_logger
 from horsies.core.worker.current import set_current_app
 from horsies.core.models.resilience import WorkerResilienceConfig
+from horsies.core.types.result import Ok, Err, is_err
 from horsies.core.utils.db import is_retryable_connection_error
 
 # --- Imports from sibling modules (extracted for maintainability) ---
@@ -1357,6 +1358,11 @@ class Worker:
         - Requeues tasks stuck in CLAIMED (safe - user code never ran)
         - Marks stale RUNNING tasks as FAILED (not safe to requeue)
         - Prunes old telemetry and terminal records based on retention settings
+
+        Non-retryable errors (schema drift, code bugs) are tracked per-operation.
+        After _REAPER_MAX_PERMANENT_FAILURES consecutive permanent failures, the
+        failing operation is disabled for the process lifetime to avoid spamming
+        logs every check_interval_ms forever.
         """
         from horsies.core.brokers.postgres import PostgresBroker
 
@@ -1368,10 +1374,18 @@ class Worker:
         temp_broker = None
         next_retention_cleanup_at = time.monotonic()
 
+        # Per-operation consecutive permanent failure counters.
+        # Transient failures and successes reset the counter.
+        _REAPER_MAX_PERMANENT_FAILURES = 3
+        requeue_permanent_failures = 0
+        requeue_disabled = False
+        mark_failed_permanent_failures = 0
+        mark_failed_disabled = False
+
         logger.info(
             f'Reaper configuration: auto_requeue_claimed={recovery_cfg.auto_requeue_stale_claimed}, '
             f'auto_fail_running={recovery_cfg.auto_fail_stale_running}, '
-            f'check_interval={check_interval_ms}ms ({check_interval_ms/1000:.1f}s)'
+            f'check_interval={check_interval_ms}ms ({check_interval_ms/1000:.1f}s)',
         )
 
         try:
@@ -1385,24 +1399,72 @@ class Worker:
             while not self._stop.is_set():
                 try:
                     # Auto-requeue stale CLAIMED tasks
-                    if recovery_cfg.auto_requeue_stale_claimed:
-                        requeued = await temp_broker.requeue_stale_claimed(
-                            stale_threshold_ms=recovery_cfg.claimed_stale_threshold_ms
-                        )
-                        if requeued > 0:
-                            logger.info(
-                                f'Reaper requeued {requeued} stale CLAIMED task(s)'
-                            )
+                    if recovery_cfg.auto_requeue_stale_claimed and not requeue_disabled:
+                        match await temp_broker.requeue_stale_claimed(
+                            stale_threshold_ms=recovery_cfg.claimed_stale_threshold_ms,
+                        ):
+                            case Ok(requeued):
+                                requeue_permanent_failures = 0
+                                if requeued > 0:
+                                    logger.info(
+                                        f'Reaper requeued {requeued} stale CLAIMED task(s)',
+                                    )
+                            case Err(err) if err.retryable:
+                                requeue_permanent_failures = 0
+                                logger.warning(
+                                    f'Reaper requeue_stale_claimed transient failure '
+                                    f'(will retry next cycle): {err.message}',
+                                )
+                            case Err(err):
+                                requeue_permanent_failures += 1
+                                if requeue_permanent_failures >= _REAPER_MAX_PERMANENT_FAILURES:
+                                    requeue_disabled = True
+                                    logger.critical(
+                                        f'Reaper requeue_stale_claimed disabled after '
+                                        f'{requeue_permanent_failures} consecutive permanent '
+                                        f'failures. Last error: {err.message}. '
+                                        f'Requires deploy or manual intervention.',
+                                    )
+                                else:
+                                    logger.error(
+                                        f'Reaper requeue_stale_claimed permanent failure '
+                                        f'({requeue_permanent_failures}/{_REAPER_MAX_PERMANENT_FAILURES} '
+                                        f'before disable): {err.message}',
+                                    )
 
                     # Auto-fail stale RUNNING tasks
-                    if recovery_cfg.auto_fail_stale_running:
-                        failed = await temp_broker.mark_stale_tasks_as_failed(
-                            stale_threshold_ms=recovery_cfg.running_stale_threshold_ms
-                        )
-                        if failed > 0:
-                            logger.warning(
-                                f'Reaper marked {failed} stale RUNNING task(s) as FAILED'
-                            )
+                    if recovery_cfg.auto_fail_stale_running and not mark_failed_disabled:
+                        match await temp_broker.mark_stale_tasks_as_failed(
+                            stale_threshold_ms=recovery_cfg.running_stale_threshold_ms,
+                        ):
+                            case Ok(failed):
+                                mark_failed_permanent_failures = 0
+                                if failed > 0:
+                                    logger.warning(
+                                        f'Reaper marked {failed} stale RUNNING task(s) as FAILED',
+                                    )
+                            case Err(err) if err.retryable:
+                                mark_failed_permanent_failures = 0
+                                logger.warning(
+                                    f'Reaper mark_stale_tasks_as_failed transient failure '
+                                    f'(will retry next cycle): {err.message}',
+                                )
+                            case Err(err):
+                                mark_failed_permanent_failures += 1
+                                if mark_failed_permanent_failures >= _REAPER_MAX_PERMANENT_FAILURES:
+                                    mark_failed_disabled = True
+                                    logger.critical(
+                                        f'Reaper mark_stale_tasks_as_failed disabled after '
+                                        f'{mark_failed_permanent_failures} consecutive permanent '
+                                        f'failures. Last error: {err.message}. '
+                                        f'Requires deploy or manual intervention.',
+                                    )
+                                else:
+                                    logger.error(
+                                        f'Reaper mark_stale_tasks_as_failed permanent failure '
+                                        f'({mark_failed_permanent_failures}/{_REAPER_MAX_PERMANENT_FAILURES} '
+                                        f'before disable): {err.message}',
+                                    )
 
                     # Recover stuck workflows
                     try:
@@ -1511,10 +1573,11 @@ class Worker:
             return
         finally:
             if temp_broker is not None:
-                try:
-                    await temp_broker.close_async()
-                except Exception as e:
-                    logger.error(f'Error closing reaper broker: {e}')
+                close_result = await temp_broker.close_async()
+                if is_err(close_result):
+                    logger.error(
+                        f'Error closing reaper broker: {close_result.err_value.message}'
+                    )
 
 
 """

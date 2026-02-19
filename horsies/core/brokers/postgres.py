@@ -6,6 +6,11 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy import text
 from horsies.core.brokers.listener import PostgresListener
+from horsies.core.brokers.result_types import (
+    BrokerErrorCode,
+    BrokerOperationError,
+    BrokerResult,
+)
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.task_pg import TaskModel, Base
 from horsies.core.models.workflow_pg import (
@@ -13,6 +18,7 @@ from horsies.core.models.workflow_pg import (
     WorkflowTaskModel as _WorkflowTaskModel,
 )
 from horsies.core.types.status import TaskStatus
+from horsies.core.types.result import Err, Ok
 from horsies.core.codec.serde import (
     args_to_json,
     kwargs_to_json,
@@ -20,6 +26,7 @@ from horsies.core.codec.serde import (
     task_result_from_json,
 )
 from horsies.core.models.tasks import TaskInfo
+from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.utils.loop_runner import LoopRunner
 from horsies.core.logging import get_logger
 
@@ -28,6 +35,21 @@ if TYPE_CHECKING:
 
 # Ensure workflow tables are registered in SQLAlchemy metadata.
 _ = (_WorkflowModel, _WorkflowTaskModel)
+
+
+def _broker_err(
+    code: BrokerErrorCode,
+    message: str,
+    exc: BaseException,
+) -> Err[BrokerOperationError]:
+    """Build an Err with retryable classification from the raw exception."""
+    return Err(BrokerOperationError(
+        code=code,
+        message=message,
+        retryable=is_retryable_connection_error(exc),
+        exception=exc,
+    ))
+
 
 # ---- Task notification trigger queries ----
 
@@ -543,14 +565,24 @@ class PostgresBroker:
         await self.listener.start()
         self._initialized = True
 
-    async def ensure_schema_initialized(self) -> None:
+    async def ensure_schema_initialized(self) -> BrokerResult[None]:
         """
         Public entry point to ensure tables and triggers exist.
 
         Safe to call multiple times and from multiple processes; internally
         guarded by a PostgreSQL advisory lock to avoid DDL races.
+
+        Returns Ok(None) on success, Err(BrokerOperationError) on failure.
         """
-        await self._ensure_initialized()
+        try:
+            await self._ensure_initialized()
+            return Ok(None)
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.SCHEMA_INIT_FAILED,
+                f'Schema initialization failed: {exc}',
+                exc,
+            )
 
     # ----------------- Async API -----------------
 
@@ -565,45 +597,52 @@ class PostgresBroker:
         sent_at: Optional[datetime] = None,
         good_until: Optional[datetime] = None,
         task_options: Optional[str] = None,
-    ) -> str:
-        await self._ensure_initialized()
+    ) -> BrokerResult[str]:
+        try:
+            await self._ensure_initialized()
 
-        task_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc)
-        sent = sent_at or now
+            task_id = str(uuid.uuid4())
+            now = datetime.now(timezone.utc)
+            sent = sent_at or now
 
-        # Parse retry configuration from task_options.
-        # task_options is always produced by serialize_task_options() — malformed JSON
-        # is a bug, not a runtime condition, and must not be silently swallowed.
-        max_retries = 0
-        if task_options:
-            options_data = loads_json(task_options)
-            if isinstance(options_data, dict):
-                retry_policy = options_data.get('retry_policy')
-                if isinstance(retry_policy, dict):
-                    max_retries = retry_policy.get('max_retries', 3)
+            # Parse retry configuration from task_options.
+            # task_options is always produced by serialize_task_options() — malformed JSON
+            # is a bug, not a runtime condition, and must not be silently swallowed.
+            max_retries = 0
+            if task_options:
+                options_data = loads_json(task_options)
+                if isinstance(options_data, dict):
+                    retry_policy = options_data.get('retry_policy')
+                    if isinstance(retry_policy, dict):
+                        max_retries = retry_policy.get('max_retries', 3)
 
-        async with self.session_factory() as session:
-            task = TaskModel(
-                id=task_id,
-                task_name=task_name,
-                queue_name=queue_name,
-                priority=priority,
-                args=args_to_json(args) if args else None,
-                kwargs=kwargs_to_json(kwargs) if kwargs else None,
-                status=TaskStatus.PENDING,
-                sent_at=sent,
-                good_until=good_until,
-                max_retries=max_retries,
-                task_options=task_options,
-                created_at=now,
-                updated_at=now,
+            async with self.session_factory() as session:
+                task = TaskModel(
+                    id=task_id,
+                    task_name=task_name,
+                    queue_name=queue_name,
+                    priority=priority,
+                    args=args_to_json(args) if args else None,
+                    kwargs=kwargs_to_json(kwargs) if kwargs else None,
+                    status=TaskStatus.PENDING,
+                    sent_at=sent,
+                    good_until=good_until,
+                    max_retries=max_retries,
+                    task_options=task_options,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(task)
+                await session.commit()
+
+            # PostgreSQL trigger automatically sends task_new + task_queue_{queue_name} notifications
+            return Ok(task_id)
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.ENQUEUE_FAILED,
+                f'Failed to enqueue task {task_name}: {exc}',
+                exc,
             )
-            session.add(task)
-            await session.commit()
-
-        # PostgreSQL trigger automatically sends task_new + task_queue_{queue_name} notifications
-        return task_id
 
     async def get_result_async(
         self, task_id: str, timeout_ms: Optional[int] = None
@@ -758,162 +797,167 @@ class PostgresBroker:
                 )
             )
 
-    async def close_async(self) -> None:
-        await self.listener.close()
-        await self.async_engine.dispose()
+    async def close_async(self) -> BrokerResult[None]:
+        """Close listener and engine, attempting both even if one fails."""
+        errors: list[BaseException] = []
+        try:
+            await self.listener.close()
+        except Exception as exc:
+            errors.append(exc)
+        try:
+            await self.async_engine.dispose()
+        except Exception as exc:
+            errors.append(exc)
+        if errors:
+            return _broker_err(
+                BrokerErrorCode.CLOSE_FAILED,
+                f'Close failed ({len(errors)} error(s)): {errors[0]}',
+                errors[0],
+            )
+        return Ok(None)
 
     # ------------- Operational & Monitoring Methods -------------
 
     async def get_stale_tasks(
-        self, stale_threshold_minutes: int = 2
-    ) -> list[dict[str, Any]]:
-        """
-        Identify potentially crashed tasks based on heartbeat absence.
-
-        Finds RUNNING tasks whose workers haven't sent heartbeats within the threshold,
-        indicating the worker process may have crashed or become unresponsive.
-
-        Args:
-            stale_threshold_minutes: Minutes without heartbeat to consider stale
-
-        Returns:
-            List of task info dicts: id, worker_hostname, worker_pid, last_heartbeat
-        """
-        async with self.session_factory() as session:
-            result = await session.execute(
-                GET_STALE_TASKS_SQL,
-                {'stale_threshold': stale_threshold_minutes},
+        self,
+        stale_threshold_minutes: int = 2,
+    ) -> BrokerResult[list[dict[str, Any]]]:
+        """Identify potentially crashed tasks based on heartbeat absence."""
+        try:
+            async with self.session_factory() as session:
+                result = await session.execute(
+                    GET_STALE_TASKS_SQL,
+                    {'stale_threshold': stale_threshold_minutes},
+                )
+                columns = result.keys()
+                return Ok([dict(zip(columns, row)) for row in result.fetchall()])
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.MONITORING_QUERY_FAILED,
+                f'get_stale_tasks failed: {exc}',
+                exc,
             )
-            columns = result.keys()
-            return [dict(zip(columns, row)) for row in result.fetchall()]
 
-    async def get_worker_stats(self) -> list[dict[str, Any]]:
-        """
-        Gather statistics about active worker processes.
+    async def get_worker_stats(self) -> BrokerResult[list[dict[str, Any]]]:
+        """Gather statistics about active worker processes."""
+        try:
+            async with self.session_factory() as session:
+                result = await session.execute(GET_WORKER_STATS_SQL)
+                columns = result.keys()
+                return Ok([dict(zip(columns, row)) for row in result.fetchall()])
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.MONITORING_QUERY_FAILED,
+                f'get_worker_stats failed: {exc}',
+                exc,
+            )
 
-        Groups RUNNING tasks by worker to show load distribution and health.
-        Useful for monitoring worker performance and identifying bottlenecks.
-
-        Returns:
-            List of worker stats: worker_hostname, worker_pid, active_tasks, oldest_task_start
-        """
-        async with self.session_factory() as session:
-            result = await session.execute(GET_WORKER_STATS_SQL)
-
-            columns = result.keys()
-            return [dict(zip(columns, row)) for row in result.fetchall()]
-
-    async def get_expired_tasks(self) -> list[dict[str, Any]]:
-        """
-        Find tasks that expired before worker processing.
-
-        Identifies PENDING tasks that exceeded their good_until deadline,
-        indicating potential worker capacity issues or scheduling problems.
-
-        Returns:
-            List of expired task info: id, task_name, queue_name, good_until, expired_for
-        """
-        async with self.session_factory() as session:
-            result = await session.execute(GET_EXPIRED_TASKS_SQL)
-
-            columns = result.keys()
-            return [dict(zip(columns, row)) for row in result.fetchall()]
+    async def get_expired_tasks(self) -> BrokerResult[list[dict[str, Any]]]:
+        """Find tasks that expired before worker processing."""
+        try:
+            async with self.session_factory() as session:
+                result = await session.execute(GET_EXPIRED_TASKS_SQL)
+                columns = result.keys()
+                return Ok([dict(zip(columns, row)) for row in result.fetchall()])
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.MONITORING_QUERY_FAILED,
+                f'get_expired_tasks failed: {exc}',
+                exc,
+            )
 
     async def mark_stale_tasks_as_failed(
-        self, stale_threshold_ms: int = 300_000
-    ) -> int:
+        self,
+        stale_threshold_ms: int = 300_000,
+    ) -> BrokerResult[int]:
         """
         Clean up crashed worker tasks by marking them as FAILED.
 
-        Updates RUNNING tasks that haven't received heartbeats within the threshold.
-        This is typically called by a cleanup process to handle worker crashes.
-        Creates a proper TaskResult with WORKER_CRASHED error code.
-
-        Args:
-            stale_threshold_ms: Milliseconds without heartbeat to consider crashed (default: 300000 = 5 minutes)
-
-        Returns:
-            Number of tasks marked as failed
+        Creates a proper TaskResult with WORKER_CRASHED error code for each stale task.
         """
-        from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
-        from horsies.core.codec.serde import dumps_json
+        try:
+            from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
+            from horsies.core.codec.serde import dumps_json
 
-        # Convert milliseconds to seconds for PostgreSQL INTERVAL
-        stale_threshold_seconds = stale_threshold_ms / 1000.0
+            # Convert milliseconds to seconds for PostgreSQL INTERVAL
+            stale_threshold_seconds = stale_threshold_ms / 1000.0
 
-        async with self.session_factory() as session:
-            # First, find stale tasks and get their metadata
-            stale_tasks_result = await session.execute(
-                SELECT_STALE_RUNNING_TASKS_SQL,
-                {'stale_threshold': stale_threshold_seconds},
-            )
-
-            stale_tasks = stale_tasks_result.fetchall()
-            if not stale_tasks:
-                return 0
-
-            # Mark each stale task as failed with proper TaskResult
-            for task_row in stale_tasks:
-                task_id = task_row[0]
-                worker_pid = task_row[1]
-                worker_hostname = task_row[2]
-                worker_id = task_row[3]
-                started_at = task_row[4]
-                last_heartbeat = task_row[5]
-
-                # Create TaskResult with WORKER_CRASHED error
-                task_error = TaskError(
-                    error_code=LibraryErrorCode.WORKER_CRASHED,
-                    message=f'Worker process crashed (no runner heartbeat for {stale_threshold_ms}ms = {stale_threshold_ms/1000:.1f}s)',
-                    data={
-                        'stale_threshold_ms': stale_threshold_ms,
-                        'stale_threshold_seconds': stale_threshold_seconds,
-                        'worker_pid': worker_pid,
-                        'worker_hostname': worker_hostname,
-                        'worker_id': worker_id,
-                        'started_at': started_at.isoformat() if started_at else None,
-                        'last_heartbeat': last_heartbeat.isoformat()
-                        if last_heartbeat
-                        else None,
-                        'detected_at': datetime.now(timezone.utc).isoformat(),
-                    },
-                )
-                task_result: TaskResult[None, TaskError] = TaskResult(err=task_error)
-                result_json = dumps_json(task_result)
-
-                # Update task with proper result
-                await session.execute(
-                    MARK_STALE_TASK_FAILED_SQL,
-                    {
-                        'task_id': task_id,
-                        'failed_reason': f'Worker process crashed (no runner heartbeat for {stale_threshold_ms}ms = {stale_threshold_ms/1000:.1f}s)',
-                        'result': result_json,
-                    },
+            async with self.session_factory() as session:
+                stale_tasks_result = await session.execute(
+                    SELECT_STALE_RUNNING_TASKS_SQL,
+                    {'stale_threshold': stale_threshold_seconds},
                 )
 
-            await session.commit()
-            return len(stale_tasks)
+                stale_tasks = stale_tasks_result.fetchall()
+                if not stale_tasks:
+                    return Ok(0)
 
-    async def requeue_stale_claimed(self, stale_threshold_ms: int = 120_000) -> int:
-        """
-        Requeue tasks stuck in CLAIMED without recent claimer heartbeat.
+                for task_row in stale_tasks:
+                    task_id = task_row[0]
+                    worker_pid = task_row[1]
+                    worker_hostname = task_row[2]
+                    worker_id = task_row[3]
+                    started_at = task_row[4]
+                    last_heartbeat = task_row[5]
 
-        Args:
-            stale_threshold_ms: Milliseconds without heartbeat to consider stale (default: 120000 = 2 minutes)
+                    task_error = TaskError(
+                        error_code=LibraryErrorCode.WORKER_CRASHED,
+                        message=f'Worker process crashed (no runner heartbeat for {stale_threshold_ms}ms = {stale_threshold_ms/1000:.1f}s)',
+                        data={
+                            'stale_threshold_ms': stale_threshold_ms,
+                            'stale_threshold_seconds': stale_threshold_seconds,
+                            'worker_pid': worker_pid,
+                            'worker_hostname': worker_hostname,
+                            'worker_id': worker_id,
+                            'started_at': started_at.isoformat() if started_at else None,
+                            'last_heartbeat': last_heartbeat.isoformat()
+                            if last_heartbeat
+                            else None,
+                            'detected_at': datetime.now(timezone.utc).isoformat(),
+                        },
+                    )
+                    task_result: TaskResult[None, TaskError] = TaskResult(err=task_error)
+                    result_json = dumps_json(task_result)
 
-        Returns:
-            Number of tasks requeued
-        """
-        # Convert milliseconds to seconds for PostgreSQL INTERVAL
-        stale_threshold_seconds = stale_threshold_ms / 1000.0
+                    await session.execute(
+                        MARK_STALE_TASK_FAILED_SQL,
+                        {
+                            'task_id': task_id,
+                            'failed_reason': f'Worker process crashed (no runner heartbeat for {stale_threshold_ms}ms = {stale_threshold_ms/1000:.1f}s)',
+                            'result': result_json,
+                        },
+                    )
 
-        async with self.session_factory() as session:
-            result = await session.execute(
-                REQUEUE_STALE_CLAIMED_SQL,
-                {'stale_threshold': stale_threshold_seconds},
+                await session.commit()
+                return Ok(len(stale_tasks))
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.CLEANUP_FAILED,
+                f'mark_stale_tasks_as_failed failed: {exc}',
+                exc,
             )
-            await session.commit()
-            return getattr(result, 'rowcount', 0)
+
+    async def requeue_stale_claimed(
+        self,
+        stale_threshold_ms: int = 120_000,
+    ) -> BrokerResult[int]:
+        """Requeue tasks stuck in CLAIMED without recent claimer heartbeat."""
+        try:
+            stale_threshold_seconds = stale_threshold_ms / 1000.0
+
+            async with self.session_factory() as session:
+                result = await session.execute(
+                    REQUEUE_STALE_CLAIMED_SQL,
+                    {'stale_threshold': stale_threshold_seconds},
+                )
+                await session.commit()
+                return Ok(getattr(result, 'rowcount', 0))
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.CLEANUP_FAILED,
+                f'requeue_stale_claimed failed: {exc}',
+                exc,
+            )
 
     # ----------------- Sync API Facades -----------------
 
@@ -928,21 +972,26 @@ class PostgresBroker:
         sent_at: Optional[datetime] = None,
         good_until: Optional[datetime] = None,
         task_options: Optional[str] = None,
-    ) -> str:
-        """
-        Synchronous task submission (runs enqueue_async in background loop).
-        """
-        return self._loop_runner.call(
-            self.enqueue_async,
-            task_name,
-            args,
-            kwargs,
-            queue_name,
-            priority=priority,
-            sent_at=sent_at,
-            good_until=good_until,
-            task_options=task_options,
-        )
+    ) -> BrokerResult[str]:
+        """Synchronous task submission (runs enqueue_async in background loop)."""
+        try:
+            return self._loop_runner.call(
+                self.enqueue_async,
+                task_name,
+                args,
+                kwargs,
+                queue_name,
+                priority=priority,
+                sent_at=sent_at,
+                good_until=good_until,
+                task_options=task_options,
+            )
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.ENQUEUE_FAILED,
+                f'Failed to enqueue task {task_name} (sync): {exc}',
+                exc,
+            )
 
     def get_result(
         self, task_id: str, timeout_ms: Optional[int] = None
@@ -965,111 +1014,122 @@ class PostgresBroker:
         *,
         include_result: bool = False,
         include_failed_reason: bool = False,
-    ) -> 'TaskInfo | None':
-        """Fetch metadata for a task by ID."""
-        await self._ensure_initialized()
+    ) -> BrokerResult[TaskInfo | None]:
+        """Fetch metadata for a task by ID.
 
-        async with self.session_factory() as session:
-            base_columns = [
-                'id',
-                'task_name',
-                'status',
-                'queue_name',
-                'priority',
-                'retry_count',
-                'max_retries',
-                'next_retry_at',
-                'sent_at',
-                'claimed_at',
-                'started_at',
-                'completed_at',
-                'failed_at',
-                'worker_hostname',
-                'worker_pid',
-                'worker_process_name',
-            ]
-            if include_result:
-                base_columns.append('result')
-            if include_failed_reason:
-                base_columns.append('failed_reason')
+        Returns Ok(TaskInfo) if found, Ok(None) if not found,
+        Err(BrokerOperationError) on infrastructure failure.
+        """
+        try:
+            await self._ensure_initialized()
 
-            query = text(
-                f"""
-                SELECT {', '.join(base_columns)}
-                FROM horsies_tasks
-                WHERE id = :id
-            """
-            )
-            result = await session.execute(query, {'id': task_id})
-            row = result.fetchone()
-            if row is None:
-                return None
+            async with self.session_factory() as session:
+                base_columns = [
+                    'id',
+                    'task_name',
+                    'status',
+                    'queue_name',
+                    'priority',
+                    'retry_count',
+                    'max_retries',
+                    'next_retry_at',
+                    'sent_at',
+                    'claimed_at',
+                    'started_at',
+                    'completed_at',
+                    'failed_at',
+                    'worker_hostname',
+                    'worker_pid',
+                    'worker_process_name',
+                ]
+                if include_result:
+                    base_columns.append('result')
+                if include_failed_reason:
+                    base_columns.append('failed_reason')
 
-            result_value = None
-            failed_reason = None
+                query = text(
+                    f"""
+                    SELECT {', '.join(base_columns)}
+                    FROM horsies_tasks
+                    WHERE id = :id
+                """
+                )
+                result = await session.execute(query, {'id': task_id})
+                row = result.fetchone()
+                if row is None:
+                    return Ok(None)
 
-            idx = 0
-            task_id_value = row[idx]
-            idx += 1
-            task_name = row[idx]
-            idx += 1
-            status = TaskStatus(row[idx])
-            idx += 1
-            queue_name = row[idx]
-            idx += 1
-            priority = row[idx]
-            idx += 1
-            retry_count = row[idx] or 0
-            idx += 1
-            max_retries = row[idx] or 0
-            idx += 1
-            next_retry_at = row[idx]
-            idx += 1
-            sent_at = row[idx]
-            idx += 1
-            claimed_at = row[idx]
-            idx += 1
-            started_at = row[idx]
-            idx += 1
-            completed_at = row[idx]
-            idx += 1
-            failed_at = row[idx]
-            idx += 1
-            worker_hostname = row[idx]
-            idx += 1
-            worker_pid = row[idx]
-            idx += 1
-            worker_process_name = row[idx]
-            idx += 1
+                result_value = None
+                failed_reason = None
 
-            if include_result:
-                raw_result = row[idx]
+                idx = 0
+                task_id_value = row[idx]
                 idx += 1
-                if raw_result:
-                    result_value = task_result_from_json(loads_json(raw_result))
+                task_name = row[idx]
+                idx += 1
+                status = TaskStatus(row[idx])
+                idx += 1
+                queue_name = row[idx]
+                idx += 1
+                priority = row[idx]
+                idx += 1
+                retry_count = row[idx] or 0
+                idx += 1
+                max_retries = row[idx] or 0
+                idx += 1
+                next_retry_at = row[idx]
+                idx += 1
+                sent_at = row[idx]
+                idx += 1
+                claimed_at = row[idx]
+                idx += 1
+                started_at = row[idx]
+                idx += 1
+                completed_at = row[idx]
+                idx += 1
+                failed_at = row[idx]
+                idx += 1
+                worker_hostname = row[idx]
+                idx += 1
+                worker_pid = row[idx]
+                idx += 1
+                worker_process_name = row[idx]
+                idx += 1
 
-            if include_failed_reason:
-                failed_reason = row[idx]
+                if include_result:
+                    raw_result = row[idx]
+                    idx += 1
+                    if raw_result:
+                        result_value = task_result_from_json(loads_json(raw_result))
 
-            return TaskInfo(
-                task_id=task_id_value,
-                task_name=task_name,
-                status=status,
-                queue_name=queue_name,
-                priority=priority,
-                retry_count=retry_count,
-                max_retries=max_retries,
-                next_retry_at=next_retry_at,
-                sent_at=sent_at,
-                claimed_at=claimed_at,
-                started_at=started_at,
-                completed_at=completed_at,
-                failed_at=failed_at,
-                worker_hostname=worker_hostname,
-                worker_pid=worker_pid,
-                worker_process_name=worker_process_name,
-                result=result_value,
-                failed_reason=failed_reason,
+                if include_failed_reason:
+                    failed_reason = row[idx]
+
+                return Ok(TaskInfo(
+                    task_id=task_id_value,
+                    task_name=task_name,
+                    status=status,
+                    queue_name=queue_name,
+                    priority=priority,
+                    retry_count=retry_count,
+                    max_retries=max_retries,
+                    next_retry_at=next_retry_at,
+                    sent_at=sent_at,
+                    claimed_at=claimed_at,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                    failed_at=failed_at,
+                    worker_hostname=worker_hostname,
+                    worker_pid=worker_pid,
+                    worker_process_name=worker_process_name,
+                    result=result_value,
+                    failed_reason=failed_reason,
+                ))
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+                f'get_task_info failed for {task_id}: {exc}',
+                exc,
             )
 
     def get_task_info(
@@ -1078,20 +1138,31 @@ class PostgresBroker:
         *,
         include_result: bool = False,
         include_failed_reason: bool = False,
-    ) -> 'TaskInfo | None':
+    ) -> BrokerResult[TaskInfo | None]:
         """Synchronous wrapper for get_task_info_async()."""
-        return self._loop_runner.call(
-            self.get_task_info_async,
-            task_id,
-            include_result=include_result,
-            include_failed_reason=include_failed_reason,
-        )
-
-    def close(self) -> None:
-        """
-        Synchronous cleanup (runs close_async in background loop).
-        """
         try:
-            self._loop_runner.call(self.close_async)
+            return self._loop_runner.call(
+                self.get_task_info_async,
+                task_id,
+                include_result=include_result,
+                include_failed_reason=include_failed_reason,
+            )
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+                f'get_task_info failed for {task_id} (sync): {exc}',
+                exc,
+            )
+
+    def close(self) -> BrokerResult[None]:
+        """Synchronous cleanup (runs close_async in background loop)."""
+        try:
+            return self._loop_runner.call(self.close_async)
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.CLOSE_FAILED,
+                f'close failed (sync): {exc}',
+                exc,
+            )
         finally:
             self._loop_runner.stop()
