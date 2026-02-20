@@ -703,9 +703,14 @@ def create_task_wrapper(
 
     # Pre-serialize task_options once so the send/send_async/schedule closures
     # below can reuse the JSON string instead of re-serializing on every call.
-    _pre_serialized_options: str | None = (
-        serialize_task_options(task_options) if task_options else None
-    )
+    _pre_serialized_options: str | None = None
+    if task_options is not None:
+        _opts_result = serialize_task_options(task_options)
+        if is_err(_opts_result):
+            raise ValueError(
+                f'Failed to serialize task_options for {task_name}: {_opts_result.err_value}',
+            )
+        _pre_serialized_options = _opts_result.ok_value
     def send(
         *args: P.args,
         **kwargs: P.kwargs,

@@ -746,7 +746,7 @@ class TestWorkflowRecovery:
         status, result_json = wt_result.fetchone()
         assert status == 'FAILED'
 
-        task_result = task_result_from_json(loads_json(result_json))
+        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
         assert task_result.is_err()
         assert task_result.err is not None
         assert task_result.err.error_code == LibraryErrorCode.TASK_CANCELLED
@@ -810,7 +810,7 @@ class TestWorkflowRecovery:
         status, result_json = wt_result.fetchone()
         assert status == 'FAILED'
 
-        task_result = task_result_from_json(loads_json(result_json))
+        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
         assert task_result.is_err()
         assert task_result.err is not None
         assert task_result.err.error_code == LibraryErrorCode.RESULT_NOT_AVAILABLE
@@ -1224,7 +1224,7 @@ class TestWorkflowRecovery:
         status, result_json = wt_result.fetchone()
         assert status == 'FAILED'
 
-        task_result = task_result_from_json(loads_json(result_json))
+        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
         assert task_result.is_err()
         assert task_result.err is not None
         assert task_result.err.error_code == LibraryErrorCode.WORKER_CRASHED

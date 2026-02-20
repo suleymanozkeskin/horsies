@@ -22,10 +22,28 @@ from horsies.core.codec.serde import (
     json_to_args,
     json_to_kwargs,
     dumps_json,
+    serialize_error_payload,
     SerializationError,
     task_result_from_json,
 )
 from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
+from horsies.core.types.result import is_err
+
+
+def _serialization_error_response(
+    task_name: str,
+    error: SerializationError,
+) -> tuple[bool, str, str | None]:
+    """Build a WORKER_SERIALIZATION_ERROR response for a serde failure."""
+    logger.error(f'Serialization error for task {task_name}: {error}')
+    tr: TaskResult[None, TaskError] = TaskResult(
+        err=TaskError(
+            error_code=LibraryErrorCode.WORKER_SERIALIZATION_ERROR,
+            message=str(error),
+            data={'task_name': task_name},
+        ),
+    )
+    return (True, serialize_error_payload(tr), f'SerializationError: {error}')
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.logging import get_logger
 from horsies.core.worker.current import get_current_app, set_current_app
@@ -318,7 +336,7 @@ def _mark_task_skipped_for_workflow_stop(
             message=f'Task skipped - workflow is {workflow_status}',
         )
     )
-    result_json = dumps_json(result)
+    result_json = serialize_error_payload(result)
     cursor.execute(
         """
         UPDATE horsies_tasks
@@ -563,10 +581,24 @@ def _run_task_entry(
             logger.debug(
                 f'Heartbeat stop signal sent for task {task_id} (resolution failed)'
             )
-            return (True, dumps_json(tr), f'{type(e).__name__}: {e}')
+            return (True, serialize_error_payload(tr), f'{type(e).__name__}: {e}')
 
-        args = json_to_args(loads_json(args_json))
-        kwargs = json_to_kwargs(loads_json(kwargs_json))
+        # Deserialize task arguments
+        args_json_result = loads_json(args_json)
+        if is_err(args_json_result):
+            return _serialization_error_response(task_name, args_json_result.err_value)
+        args_result = json_to_args(args_json_result.ok_value)
+        if is_err(args_result):
+            return _serialization_error_response(task_name, args_result.err_value)
+        args = args_result.ok_value
+
+        kwargs_json_result = loads_json(kwargs_json)
+        if is_err(kwargs_json_result):
+            return _serialization_error_response(task_name, kwargs_json_result.err_value)
+        kwargs_result = json_to_kwargs(kwargs_json_result.ok_value)
+        if is_err(kwargs_result):
+            return _serialization_error_response(task_name, kwargs_result.err_value)
+        kwargs = kwargs_result.ok_value
 
         # Deserialize injected TaskResults from workflow args_from
         for key, value in list(kwargs.items()):
@@ -575,11 +607,16 @@ def _run_task_entry(
                 and '__horsies_taskresult__' in value
                 and value['__horsies_taskresult__']
             ):
-                # value is a dict with "data" key containing serialized TaskResult
                 task_result_dict = cast(dict[str, Any], value)
                 data_str = task_result_dict.get('data')
                 if isinstance(data_str, str):
-                    kwargs[key] = task_result_from_json(loads_json(data_str))
+                    data_json_result = loads_json(data_str)
+                    if is_err(data_json_result):
+                        return _serialization_error_response(task_name, data_json_result.err_value)
+                    tr_result = task_result_from_json(data_json_result.ok_value)
+                    if is_err(tr_result):
+                        return _serialization_error_response(task_name, tr_result.err_value)
+                    kwargs[key] = tr_result.ok_value
 
         # Handle workflow injection payloads (workflow_ctx / workflow_meta).
         workflow_ctx_data = kwargs.pop('__horsies_workflow_ctx__', None)
@@ -587,7 +624,6 @@ def _run_task_entry(
         if workflow_ctx_data is not None or workflow_meta_data is not None:
             import inspect
 
-            # Access the underlying function: TaskFunctionImpl stores it in _original_fn
             underlying_fn = getattr(task, '_original_fn', getattr(task, '_fn', task))
             sig = inspect.signature(underlying_fn)
             if workflow_ctx_data is not None and 'workflow_ctx' in sig.parameters:
@@ -596,25 +632,29 @@ def _run_task_entry(
                     SubWorkflowSummary,
                 )
 
-                # Reconstruct TaskResults from serialized data (node_id-based)
                 results_by_id_raw = workflow_ctx_data.get('results_by_id', {})
-
                 results_by_id: dict[str, TaskResult[Any, TaskError]] = {}
                 for node_id, result_json in results_by_id_raw.items():
                     if isinstance(result_json, str):
-                        results_by_id[node_id] = task_result_from_json(
-                            loads_json(result_json)
-                        )
+                        rj = loads_json(result_json)
+                        if is_err(rj):
+                            return _serialization_error_response(task_name, rj.err_value)
+                        tr_r = task_result_from_json(rj.ok_value)
+                        if is_err(tr_r):
+                            return _serialization_error_response(task_name, tr_r.err_value)
+                        results_by_id[node_id] = tr_r.ok_value
 
-                # Reconstruct SubWorkflowSummaries from serialized data (node_id-based)
                 summaries_by_id_raw = workflow_ctx_data.get('summaries_by_id', {})
                 summaries_by_id: dict[str, SubWorkflowSummary[Any]] = {}
                 for node_id, summary_json in summaries_by_id_raw.items():
                     if isinstance(summary_json, str):
-                        parsed = loads_json(summary_json)
+                        sj = loads_json(summary_json)
+                        if is_err(sj):
+                            return _serialization_error_response(task_name, sj.err_value)
+                        parsed = sj.ok_value
                         if isinstance(parsed, dict):
                             summaries_by_id[node_id] = SubWorkflowSummary.from_json(
-                                parsed
+                                parsed,
                             )
 
                 kwargs['workflow_ctx'] = WorkflowContext.from_serialized(
@@ -648,7 +688,10 @@ def _run_task_entry(
         logger.info(f'Task execution completed: {[task_id]} : {[task_name]}')
 
         if isinstance(out, TaskResult):
-            return (True, dumps_json(out), None)
+            ser = dumps_json(out)
+            if is_err(ser):
+                return _serialization_error_response(task_name, ser.err_value)
+            return (True, ser.ok_value, None)
 
         if out is None:
             tr: TaskResult[Any, TaskError] = TaskResult(
@@ -656,23 +699,15 @@ def _run_task_entry(
                     error_code=LibraryErrorCode.TASK_EXCEPTION,
                     message=f'Task {task_name} returned None instead of TaskResult or value',
                     data={'task_name': task_name},
-                )
+                ),
             )
-            return (True, dumps_json(tr), 'Task returned None')
+            return (True, serialize_error_payload(tr), 'Task returned None')
 
         # Plain value → wrap into success
-        return (True, dumps_json(TaskResult(ok=out)), None)
-
-    except SerializationError as se:
-        logger.error(f'Serialization error for task {task_name}: {se}')
-        tr = TaskResult(
-            err=TaskError(
-                error_code=LibraryErrorCode.WORKER_SERIALIZATION_ERROR,
-                message=str(se),
-                data={'task_name': task_name},
-            )
-        )
-        return (True, dumps_json(tr), f'SerializationError: {se}')
+        ser = dumps_json(TaskResult(ok=out))
+        if is_err(ser):
+            return _serialization_error_response(task_name, ser.err_value)
+        return (True, ser.ok_value, None)
 
     except BaseException as e:
         logger.error(f'Task exception: {task_name}: {e}')
@@ -685,7 +720,7 @@ def _run_task_entry(
                 exception=e,  # pydantic will accept and we flatten on serialization if needed elsewhere
             )
         )
-        return (True, dumps_json(tr), None)
+        return (True, serialize_error_payload(tr), None)
 
     finally:
         # Always stop the heartbeat thread when task completes (success/failure/error)

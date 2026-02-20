@@ -62,7 +62,7 @@ class KwargsChildWorkflow(WorkflowDefinition[int]):
                 if isinstance(data_str, str):
                     from horsies.core.codec.serde import task_result_from_json
 
-                    tr = task_result_from_json(loads_json(data_str))
+                    tr = task_result_from_json(loads_json(data_str).unwrap()).unwrap()
                     raw_value = tr.unwrap() if tr.is_ok() else 0
 
         node = TaskNode(fn=child_task, kwargs={'value': raw_value})
@@ -128,8 +128,8 @@ class TestKwargsOnlyWrites:
         row = result.fetchone()
         assert row is not None
 
-        task_args = loads_json(row[0]) if row[0] else []
-        task_kwargs = loads_json(row[1]) if row[1] else {}
+        task_args = loads_json(row[0]).unwrap() if row[0] else []
+        task_kwargs = loads_json(row[1]).unwrap() if row[1] else {}
 
         assert task_args == [], f'Expected empty task_args, got {task_args}'
         assert isinstance(task_kwargs, dict)
@@ -166,8 +166,8 @@ class TestKwargsOnlyWrites:
         row = result.fetchone()
         assert row is not None
 
-        task_args = loads_json(row[0]) if row[0] else []
-        task_kwargs = loads_json(row[1]) if row[1] else {}
+        task_args = loads_json(row[0]).unwrap() if row[0] else []
+        task_kwargs = loads_json(row[1]).unwrap() if row[1] else {}
 
         assert task_args == [], f'Expected empty task_args, got {task_args}'
         assert isinstance(task_kwargs, dict)
@@ -286,7 +286,7 @@ class TestOldRowBackwardCompat:
         assert task_row is not None
 
         # Old args should be passed through
-        dispatched_args = loads_json(task_row[0]) if task_row[0] else []
+        dispatched_args = loads_json(task_row[0]).unwrap() if task_row[0] else []
         assert dispatched_args == [10], f'Expected [10], got {dispatched_args}'
 
 
@@ -496,8 +496,8 @@ class TestRecoveryKwargsCompat:
         task_row = task_result.fetchone()
         assert task_row is not None
 
-        dispatched_args = loads_json(task_row[0]) if task_row[0] else []
-        dispatched_kwargs = loads_json(task_row[1]) if task_row[1] else {}
+        dispatched_args = loads_json(task_row[0]).unwrap() if task_row[0] else []
+        dispatched_kwargs = loads_json(task_row[1]).unwrap() if task_row[1] else {}
 
         assert dispatched_args == [], f'Expected empty args, got {dispatched_args}'
         assert isinstance(dispatched_kwargs, dict)

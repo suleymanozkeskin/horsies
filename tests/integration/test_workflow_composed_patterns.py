@@ -138,7 +138,7 @@ class TestComposedPatterns:
         )
         kwargs_row = task_result.fetchone()
         assert kwargs_row is not None and kwargs_row[0] is not None
-        return cast(dict[str, Any], loads_json(kwargs_row[0]))
+        return cast(dict[str, Any], loads_json(kwargs_row[0]).unwrap())
 
     # -----------------------------------------------------------------
     # Test 1: Diamond + join="any" on sink
@@ -311,8 +311,8 @@ class TestComposedPatterns:
 
         # Verify D's kwargs contain both injected results
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 3)
-        b_injected = cast(dict[str, Any], loads_json(kwargs['b_result']['data']))
-        c_injected = cast(dict[str, Any], loads_json(kwargs['c_result']['data']))
+        b_injected = cast(dict[str, Any], loads_json(kwargs['b_result']['data']).unwrap())
+        c_injected = cast(dict[str, Any], loads_json(kwargs['c_result']['data']).unwrap())
         # B failed → err present
         assert 'err' in b_injected
         assert b_injected['err']['error_code'] == 'B_FAILED'
@@ -1009,8 +1009,8 @@ class TestComposedPatterns:
 
         # Verify D received UPSTREAM_SKIPPED sentinels
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 3)
-        b_injected = cast(dict[str, Any], loads_json(kwargs['b_result']['data']))
-        c_injected = cast(dict[str, Any], loads_json(kwargs['c_result']['data']))
+        b_injected = cast(dict[str, Any], loads_json(kwargs['b_result']['data']).unwrap())
+        c_injected = cast(dict[str, Any], loads_json(kwargs['c_result']['data']).unwrap())
         assert 'err' in b_injected
         assert b_injected['err']['error_code'] == 'UPSTREAM_SKIPPED'
         assert 'err' in c_injected

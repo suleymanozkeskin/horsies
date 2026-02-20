@@ -33,6 +33,7 @@ from horsies.core.utils.db import is_retryable_connection_error
 # --- Imports from sibling modules (extracted for maintainability) ---
 from horsies.core.worker.config import WorkerConfig  # noqa: F401
 from horsies.core.worker.child_pool import _initialize_worker_pool  # noqa: F401
+from horsies.core.codec.serde import serialize_error_payload
 from horsies.core.worker.child_runner import (  # noqa: F401
     _locate_app,
     _child_initializer,
@@ -977,7 +978,39 @@ class Worker:
                 return
 
             # Parse the TaskResult we produced
-            tr = task_result_from_json(loads_json(result_json_str))
+            _loads_r = loads_json(result_json_str)
+            if is_err(_loads_r):
+                logger.error(f'Task {task_id} result JSON is corrupt: {_loads_r.err_value}')
+                _err_tr: TaskResult[None, TaskError] = TaskResult(
+                    err=TaskError(
+                        error_code=LibraryErrorCode.WORKER_SERIALIZATION_ERROR,
+                        message=f'Result JSON corrupt: {_loads_r.err_value}',
+                        data={'task_id': task_id},
+                    ),
+                )
+                await s.execute(
+                    MARK_TASK_FAILED_SQL,
+                    {'now': now, 'result_json': serialize_error_payload(_err_tr), 'id': task_id},
+                )
+                await s.commit()
+                return
+            _tr_r = task_result_from_json(_loads_r.ok_value)
+            if is_err(_tr_r):
+                logger.error(f'Task {task_id} result deser failed: {_tr_r.err_value}')
+                _err_tr = TaskResult(
+                    err=TaskError(
+                        error_code=LibraryErrorCode.WORKER_SERIALIZATION_ERROR,
+                        message=f'Result deser failed: {_tr_r.err_value}',
+                        data={'task_id': task_id},
+                    ),
+                )
+                await s.execute(
+                    MARK_TASK_FAILED_SQL,
+                    {'now': now, 'result_json': serialize_error_payload(_err_tr), 'id': task_id},
+                )
+                await s.commit()
+                return
+            tr = _tr_r.ok_value
             if tr.is_err():
                 # Check if this task should be retried
                 task_error = tr.unwrap_err()
@@ -1097,7 +1130,12 @@ class Worker:
 
         # Parse task options to check auto_retry_for (nested in retry_policy)
         try:
-            task_options_data = loads_json(row.task_options) if row.task_options else {}
+            if not row.task_options:
+                return False
+            opts_r = loads_json(row.task_options)
+            if is_err(opts_r):
+                return False
+            task_options_data = opts_r.ok_value
             if not isinstance(task_options_data, dict):
                 return False
             retry_policy_raw = task_options_data.get('retry_policy', {})
@@ -1141,13 +1179,17 @@ class Worker:
 
         # Parse retry policy from task options
         try:
-            task_options_data = loads_json(row.task_options) if row.task_options else {}
-            if not isinstance(task_options_data, dict):
+            if not row.task_options:
                 retry_policy_data = {}
             else:
-                retry_policy_data = task_options_data.get('retry_policy', {})
-                if not isinstance(retry_policy_data, dict):
+                opts_r = loads_json(row.task_options)
+                task_options_data = opts_r.ok_value if not is_err(opts_r) else {}
+                if not isinstance(task_options_data, dict):
                     retry_policy_data = {}
+                else:
+                    retry_policy_data = task_options_data.get('retry_policy', {})
+                    if not isinstance(retry_policy_data, dict):
+                        retry_policy_data = {}
         except Exception:
             retry_policy_data = {}
 

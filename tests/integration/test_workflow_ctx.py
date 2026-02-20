@@ -132,7 +132,7 @@ class TestWorkflowCtx:
         if not task_row or not task_row[0]:
             return {}
 
-        data = loads_json(task_row[0])
+        data = loads_json(task_row[0]).unwrap()
         return data if isinstance(data, dict) else {}
 
     def _build_ctx_from_kwargs(self, kwargs: dict[str, Any]) -> WorkflowContext:
@@ -147,7 +147,7 @@ class TestWorkflowCtx:
         raw_results = typed_ctx_data.get('results_by_id')
         if _is_str_to_str_dict(raw_results):
             for node_id, result_json in raw_results.items():
-                results_by_id[node_id] = task_result_from_json(loads_json(result_json))
+                results_by_id[node_id] = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
 
         return WorkflowContext.from_serialized(
             workflow_id=typed_ctx_data.get('workflow_id', ''),
@@ -514,7 +514,7 @@ class TestWorkflowCtx:
         assert ok is True
         assert worker_failure is None
 
-        task_result = task_result_from_json(loads_json(result_json))
+        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
         assert task_result.is_ok()
         assert task_result.unwrap() == 10
 
@@ -585,7 +585,7 @@ class TestWorkflowCtx:
         assert ok is True
         assert worker_failure is None
 
-        task_result = task_result_from_json(loads_json(result_json))
+        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
         assert task_result.is_ok()
         assert task_result.unwrap() == f'{handle.workflow_id}:1:meta_worker_b'
 
@@ -659,7 +659,7 @@ class TestWorkflowCtx:
         assert ok is True
         assert worker_failure is None
 
-        task_result = task_result_from_json(loads_json(result_json))
+        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
         assert task_result.is_err()
         assert task_result.unwrap_err().error_code == 'WORKFLOW_CTX_MISSING_ID'
 
@@ -920,7 +920,7 @@ class TestWorkflowCtx:
         assert isinstance(kwargs_json, str)
 
         # Inject ctx data into kwargs to simulate the engine path
-        original_kwargs = loads_json(kwargs_json)
+        original_kwargs = loads_json(kwargs_json).unwrap()
         assert isinstance(original_kwargs, dict)
         original_kwargs['__horsies_workflow_ctx__'] = {
             'workflow_id': handle.workflow_id,
@@ -928,7 +928,7 @@ class TestWorkflowCtx:
             'task_name': 'skip_ctx_b',
             'results_by_id': {},
         }
-        modified_kwargs_json = dumps_json(original_kwargs)
+        modified_kwargs_json = dumps_json(original_kwargs).unwrap()
 
         await self._claim_task(session, task_id, 'test-worker')
 
@@ -948,7 +948,7 @@ class TestWorkflowCtx:
         assert ok is True
         assert worker_failure is None
 
-        task_result = task_result_from_json(loads_json(result_json))
+        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
         assert task_result.is_ok()
         # value=0 (default) + 100 = 100 — ctx was silently skipped
         assert task_result.unwrap() == 100

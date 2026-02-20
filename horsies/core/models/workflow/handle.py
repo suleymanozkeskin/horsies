@@ -13,8 +13,14 @@ from typing import (
 )
 
 from sqlalchemy import text
-
+import asyncio
+from horsies.core.logging import get_logger
 from horsies.core.utils.loop_runner import get_shared_runner
+from horsies.core.codec.serde import loads_json, task_result_from_json
+from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
+from horsies.core.types.result import is_err
+
+logger = get_logger('workflow.handle')
 
 from .enums import OkT, OutT, WorkflowStatus, WorkflowTaskStatus
 from .context import WorkflowHandleMissingIdError
@@ -22,7 +28,6 @@ from .nodes import NodeKey
 
 if TYPE_CHECKING:
     from horsies.core.brokers.postgres import PostgresBroker
-    from horsies.core.models.tasks import TaskResult, TaskError
     from .nodes import TaskNode
 
 
@@ -141,8 +146,6 @@ class WorkflowHandle(Generic[OutT]):
         self, timeout_ms: int | None = None,
     ) -> TaskResult[OutT, TaskError]:
         """Async version of get()."""
-        import asyncio
-        from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
 
         start = time.monotonic()
         timeout_sec = timeout_ms / 1000 if timeout_ms else None
@@ -218,9 +221,6 @@ class WorkflowHandle(Generic[OutT]):
 
     async def _get_result(self) -> TaskResult[OutT, TaskError]:
         """Fetch completed workflow result."""
-        from horsies.core.models.tasks import TaskResult
-        from horsies.core.codec.serde import loads_json, task_result_from_json
-
         async with self.broker.session_factory() as session:
             result = await session.execute(
                 GET_WORKFLOW_RESULT_SQL,
@@ -228,17 +228,27 @@ class WorkflowHandle(Generic[OutT]):
             )
             row = result.fetchone()
             if row and row[0]:
-                return cast(
-                    'TaskResult[OutT, TaskError]',
-                    task_result_from_json(loads_json(row[0])),
-                )
+                loads_r = loads_json(row[0])
+                if is_err(loads_r):
+                    return cast('TaskResult[OutT, TaskError]', TaskResult(
+                        err=TaskError(
+                            error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            message=f'Workflow result JSON corrupt: {loads_r.err_value}',
+                        ),
+                    ))
+                tr_r = task_result_from_json(loads_r.ok_value)
+                if is_err(tr_r):
+                    return cast('TaskResult[OutT, TaskError]', TaskResult(
+                        err=TaskError(
+                            error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            message=f'Workflow result deser failed: {tr_r.err_value}',
+                        ),
+                    ))
+                return cast('TaskResult[OutT, TaskError]', tr_r.ok_value)
             return cast('TaskResult[OutT, TaskError]', TaskResult(ok=None))
 
     async def _get_error(self) -> TaskResult[OutT, TaskError]:
         """Fetch failed workflow error."""
-        from horsies.core.models.tasks import TaskResult, TaskError
-        from horsies.core.codec.serde import loads_json
-
         async with self.broker.session_factory() as session:
             result = await session.execute(
                 GET_WORKFLOW_ERROR_SQL,
@@ -246,7 +256,24 @@ class WorkflowHandle(Generic[OutT]):
             )
             row = result.fetchone()
             if row and row[0]:
-                error_data = loads_json(row[0])
+                loads_r = loads_json(row[0])
+                if is_err(loads_r):
+                    logger.warning(
+                        'Workflow %s error payload corrupt: %s',
+                        self.workflow_id,
+                        loads_r.err_value,
+                    )
+                    return cast(
+                        'TaskResult[OutT, TaskError]',
+                        TaskResult(
+                            err=TaskError(
+                                error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                                message=f'Workflow error payload corrupt: {loads_r.err_value}',
+                                data={'workflow_id': self.workflow_id},
+                            )
+                        ),
+                    )
+                error_data = loads_r.ok_value
                 if isinstance(error_data, dict):
                     # Safely extract known TaskError fields with type narrowing
                     raw_code = error_data.get('error_code')
@@ -288,18 +315,34 @@ class WorkflowHandle(Generic[OutT]):
         Keys are `node_id` values. If a TaskNode did not specify a node_id,
         WorkflowSpec auto-assigns one as "{workflow_name}:{task_index}".
         """
-        from horsies.core.codec.serde import loads_json, task_result_from_json
-
         async with self.broker.session_factory() as session:
             result = await session.execute(
                 GET_WORKFLOW_TASK_RESULTS_SQL,
                 {'wf_id': self.workflow_id},
             )
 
-            return {
-                row[0]: task_result_from_json(loads_json(row[1]))
-                for row in result.fetchall()
-            }
+            out: dict[str, TaskResult[Any, TaskError]] = {}
+            for row in result.fetchall():
+                loads_r = loads_json(row[1])
+                if is_err(loads_r):
+                    out[row[0]] = TaskResult(
+                        err=TaskError(
+                            error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            message=f'Result JSON corrupt for node {row[0]}: {loads_r.err_value}',
+                        ),
+                    )
+                    continue
+                tr_r = task_result_from_json(loads_r.ok_value)
+                if is_err(tr_r):
+                    out[row[0]] = TaskResult(
+                        err=TaskError(
+                            error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            message=f'Result deser failed for node {row[0]}: {tr_r.err_value}',
+                        ),
+                    )
+                    continue
+                out[row[0]] = tr_r.ok_value
+            return out
 
     def result_for(
         self, node: TaskNode[OkT] | NodeKey[OkT]
@@ -333,8 +376,6 @@ class WorkflowHandle(Generic[OutT]):
         self, node: TaskNode[OkT] | NodeKey[OkT]
     ) -> TaskResult[OkT, TaskError]:
         """Async version of result_for(). See result_for() for full documentation."""
-        from horsies.core.codec.serde import loads_json, task_result_from_json
-
         node_id: str | None
         if isinstance(node, NodeKey):
             node_id = node.node_id
@@ -354,12 +395,6 @@ class WorkflowHandle(Generic[OutT]):
             )
             row = result.fetchone()
             if row is None or row[0] is None:
-                from horsies.core.models.tasks import (
-                    TaskResult,
-                    TaskError,
-                    LibraryErrorCode,
-                )
-
                 return cast(
                     'TaskResult[OkT, TaskError]',
                     TaskResult(
@@ -373,10 +408,23 @@ class WorkflowHandle(Generic[OutT]):
                     ),
                 )
 
-            return cast(
-                'TaskResult[OkT, TaskError]',
-                task_result_from_json(loads_json(row[0])),
-            )
+            loads_r = loads_json(row[0])
+            if is_err(loads_r):
+                return cast('TaskResult[OkT, TaskError]', TaskResult(
+                    err=TaskError(
+                        error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                        message=f'Result JSON corrupt for node {node_id}: {loads_r.err_value}',
+                    ),
+                ))
+            tr_r = task_result_from_json(loads_r.ok_value)
+            if is_err(tr_r):
+                return cast('TaskResult[OkT, TaskError]', TaskResult(
+                    err=TaskError(
+                        error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                        message=f'Result deser failed for node {node_id}: {tr_r.err_value}',
+                    ),
+                ))
+            return cast('TaskResult[OkT, TaskError]', tr_r.ok_value)
 
     def tasks(self) -> list[WorkflowTaskInfo]:
         """Get status of all tasks in workflow."""
@@ -384,28 +432,46 @@ class WorkflowHandle(Generic[OutT]):
 
     async def tasks_async(self) -> list[WorkflowTaskInfo]:
         """Async version of tasks()."""
-        from horsies.core.codec.serde import loads_json, task_result_from_json
-
         async with self.broker.session_factory() as session:
             result = await session.execute(
                 GET_WORKFLOW_TASKS_SQL,
                 {'wf_id': self.workflow_id},
             )
 
-            return [
-                WorkflowTaskInfo(
+            out: list[WorkflowTaskInfo] = []
+            for row in result.fetchall():
+                task_result_value: TaskResult[Any, TaskError] | None = None
+                if row[4]:
+                    loads_r = loads_json(row[4])
+                    if is_err(loads_r):
+                        task_result_value = TaskResult(
+                            err=TaskError(
+                                error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                                message=f'Result JSON corrupt: {loads_r.err_value}',
+                            ),
+                        )
+                    else:
+                        tr_r = task_result_from_json(loads_r.ok_value)
+                        if is_err(tr_r):
+                            task_result_value = TaskResult(
+                                err=TaskError(
+                                    error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                                    message=f'Result deser failed: {tr_r.err_value}',
+                                ),
+                            )
+                        else:
+                            task_result_value = tr_r.ok_value
+
+                out.append(WorkflowTaskInfo(
                     node_id=row[0],
                     index=row[1],
                     name=row[2],
                     status=WorkflowTaskStatus(row[3]),
-                    result=task_result_from_json(loads_json(row[4]))
-                    if row[4]
-                    else None,
+                    result=task_result_value,
                     started_at=row[5],
                     completed_at=row[6],
-                )
-                for row in result.fetchall()
-            ]
+                ))
+            return out
 
     def cancel(self) -> None:
         """Request workflow cancellation."""

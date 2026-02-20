@@ -9,7 +9,8 @@ from unittest.mock import patch
 
 import pytest
 
-from horsies.core.codec.serde import SerializationError, rehydrate_value, to_jsonable
+from horsies.core.codec.serde import rehydrate_value, to_jsonable
+from horsies.core.types.result import is_err
 from horsies.core.worker.worker import import_by_path
 
 
@@ -43,7 +44,7 @@ class Simple:
         original_path = sys.path.copy()
         try:
             mod = import_by_path(str(mod_file))
-            result = to_jsonable(mod.Simple(x=42, name='hello'))
+            result = to_jsonable(mod.Simple(x=42, name='hello')).unwrap()
 
             assert isinstance(result, dict)
             assert set(result.keys()) == {'__dataclass__', 'module', 'qualname', 'data'}
@@ -88,7 +89,7 @@ class OuterDC:
                 model_field=mod.InnerModel(label='ok'),
             )
 
-            result = to_jsonable(outer)
+            result = to_jsonable(outer).unwrap()
 
             assert isinstance(result, dict)
             assert result['__dataclass__'] is True
@@ -116,7 +117,7 @@ class TestDataclassSerializationErrors:
     """Error paths during dataclass serialization."""
 
     def test_main_module_rejected(self, tmp_path: Path) -> None:
-        """Class with __module__ == '__main__' raises SerializationError."""
+        """Class with __module__ == '__main__' returns Err(SerializationError)."""
         pkg = tmp_path / 'serdemain'
         pkg.mkdir()
         (pkg / '__init__.py').write_text('')
@@ -138,8 +139,9 @@ class MainPayload:
             instance = mod.MainPayload(value=1)
 
             with patch.object(type(instance), '__module__', '__main__'):
-                with pytest.raises(SerializationError, match="__main__"):
-                    to_jsonable(instance)
+                result = to_jsonable(instance)
+                assert is_err(result)
+                assert '__main__' in str(result.err_value)
         finally:
             sys.path[:] = original_path
 
@@ -150,13 +152,15 @@ class MainPayload:
         class LocalPayload:
             value: int
 
-        with pytest.raises(SerializationError, match="local class"):
-            to_jsonable(LocalPayload(value=1))
+        result = to_jsonable(LocalPayload(value=1))
+        assert is_err(result)
+        assert 'local class' in str(result.err_value)
 
     def test_unsupported_type_raises(self) -> None:
-        """Non-serializable type raises SerializationError with type name."""
-        with pytest.raises(SerializationError, match="object"):
-            to_jsonable(object())
+        """Non-serializable type returns Err(SerializationError) with type name."""
+        result = to_jsonable(object())
+        assert is_err(result)
+        assert 'object' in str(result.err_value)
 
 
 # ---------------------------------------------------------------------------
@@ -191,8 +195,8 @@ class SimpleDC:
             mod = import_by_path(str(mod_file))
             original = mod.SimpleDC(x=99, name='round-trip')
 
-            json_data = to_jsonable(original)
-            rehydrated = rehydrate_value(json_data)
+            json_data = to_jsonable(original).unwrap()
+            rehydrated = rehydrate_value(json_data).unwrap()
 
             assert type(rehydrated).__name__ == 'SimpleDC'
             assert rehydrated.x == 99
@@ -224,8 +228,8 @@ class InitFalseDC:
             instance = mod.InitFalseDC(3)
             instance.y = 9
 
-            json_data = to_jsonable(instance)
-            rehydrated = rehydrate_value(json_data)
+            json_data = to_jsonable(instance).unwrap()
+            rehydrated = rehydrate_value(json_data).unwrap()
 
             assert rehydrated.x == 3
             assert rehydrated.y == 9
@@ -267,8 +271,8 @@ class OuterDC:
                 model=mod.InnerModel(name='ok'),
             )
 
-            json_data = to_jsonable(outer)
-            rehydrated = rehydrate_value(json_data)
+            json_data = to_jsonable(outer).unwrap()
+            rehydrated = rehydrate_value(json_data).unwrap()
 
             assert isinstance(rehydrated, mod.OuterDC)
             assert isinstance(rehydrated.inner, mod.InnerDC)
@@ -308,8 +312,8 @@ class Container:
                 lookup={'key': mod.Item(label='c')},
             )
 
-            json_data = to_jsonable(container)
-            rehydrated = rehydrate_value(json_data)
+            json_data = to_jsonable(container).unwrap()
+            rehydrated = rehydrate_value(json_data).unwrap()
 
             assert type(rehydrated).__name__ == 'Container'
             assert len(rehydrated.items) == 2
@@ -330,26 +334,28 @@ class TestDataclassRehydrationErrors:
     """Error paths during dataclass rehydration from raw tagged dicts."""
 
     def test_rehydrate_import_error(self) -> None:
-        """Bad module name raises SerializationError matching 'Could not import'."""
+        """Bad module name returns Err(SerializationError) matching 'Could not import'."""
         raw = {
             '__dataclass__': True,
             'module': 'nonexistent.module.xyz',
             'qualname': 'SomeClass',
             'data': {},
         }
-        with pytest.raises(SerializationError, match="Could not import"):
-            rehydrate_value(raw)
+        result = rehydrate_value(raw)
+        assert is_err(result)
+        assert 'Could not import' in str(result.err_value)
 
     def test_rehydrate_not_a_dataclass(self) -> None:
-        """Module exists but name is not a dataclass raises SerializationError."""
+        """Module exists but name is not a dataclass returns Err(SerializationError)."""
         raw = {
             '__dataclass__': True,
             'module': 'os.path',
             'qualname': 'join',
             'data': {},
         }
-        with pytest.raises(SerializationError, match="is not a dataclass"):
-            rehydrate_value(raw)
+        result = rehydrate_value(raw)
+        assert is_err(result)
+        assert 'is not a dataclass' in str(result.err_value)
 
     def test_rehydrate_data_not_dict(self, tmp_path: Path) -> None:
         """data field as a list raises SerializationError matching 'must be a dict'."""
@@ -379,8 +385,9 @@ class Payload:
                 'qualname': 'Payload',
                 'data': [1, 2, 3],
             }
-            with pytest.raises(SerializationError, match="must be a dict"):
-                rehydrate_value(raw)
+            result = rehydrate_value(raw)
+            assert is_err(result)
+            assert 'must be a dict' in str(result.err_value)
         finally:
             sys.path[:] = original_path
 
@@ -405,13 +412,13 @@ class Minimal:
         try:
             mod = import_by_path(str(mod_file))
             # Serialize normally first
-            json_data = to_jsonable(mod.Minimal(x=10))
+            json_data = to_jsonable(mod.Minimal(x=10)).unwrap()
 
             # Inject an extra field that doesn't exist on the dataclass
             assert isinstance(json_data, dict)
             json_data['data']['nonexistent_field'] = 'should be ignored'
 
-            rehydrated = rehydrate_value(json_data)
+            rehydrated = rehydrate_value(json_data).unwrap()
 
             assert rehydrated.x == 10
             assert not hasattr(rehydrated, 'nonexistent_field')
@@ -450,8 +457,9 @@ class Strict:
                 'qualname': 'Strict',
                 'data': {'x': 'not_an_int'},
             }
-            with pytest.raises(SerializationError, match="Failed to rehydrate dataclass"):
-                rehydrate_value(raw)
+            result = rehydrate_value(raw)
+            assert is_err(result)
+            assert 'Failed to rehydrate dataclass' in str(result.err_value)
         finally:
             sys.path[:] = original_path
 

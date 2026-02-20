@@ -86,6 +86,7 @@ Returned by `handle.get()` for issues retrieving results:
 | `TASK_NOT_FOUND` | Task ID doesn't exist in database |
 | `TASK_CANCELLED` | Task was cancelled before completion |
 | `RESULT_NOT_AVAILABLE` | Result cache is empty for an immediate/sync handle |
+| `RESULT_DESERIALIZATION_ERROR` | Stored result JSON is corrupt or could not be deserialized |
 
 ### Broker Errors
 
@@ -107,7 +108,7 @@ Returned when result retrieval fails due to broker or database issues:
 | Code | When |
 | ---- | ---- |
 | `RETURN_TYPE_MISMATCH` | Returned value doesn't match declared type |
-| `PYDANTIC_HYDRATION_ERROR` | Couldn't deserialize arguments |
+| `PYDANTIC_HYDRATION_ERROR` | Task succeeded but return value could not be rehydrated to declared type |
 
 ### Lifecycle Errors
 

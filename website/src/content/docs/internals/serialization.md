@@ -11,15 +11,18 @@ Located at `horsies/core/codec/serde.py`. Handles serialization (`to_jsonable`) 
 
 ## Serialization Functions
 
-| Function | Purpose |
-| -------- | ------- |
-| `to_jsonable(value)` | Convert a value to a JSON-serializable structure |
-| `rehydrate_value(value)` | Restore typed objects from JSON structures |
-| `args_to_json(args)` | Serialize positional arguments |
-| `kwargs_to_json(kwargs)` | Serialize keyword arguments |
-| `dumps_json(value)` | Serialize a value to a JSON string |
-| `loads_json(json_str)` | Deserialize a JSON string |
-| `task_result_from_json(data)` | Deserialize a `TaskResult` |
+All serialization and deserialization functions return `SerdeResult[T]` (an alias for `Result[T, SerializationError]`) instead of raising exceptions. Callers check the result with `is_err()` and handle failures explicitly.
+
+| Function | Returns | Purpose |
+| -------- | ------- | ------- |
+| `to_jsonable(value)` | `SerdeResult[Json]` | Convert a value to a JSON-serializable structure |
+| `rehydrate_value(value)` | `SerdeResult[Any]` | Restore typed objects from JSON structures |
+| `args_to_json(args)` | `SerdeResult[str]` | Serialize positional arguments |
+| `kwargs_to_json(kwargs)` | `SerdeResult[str]` | Serialize keyword arguments |
+| `dumps_json(value)` | `SerdeResult[str]` | Serialize a value to a JSON string |
+| `loads_json(json_str)` | `SerdeResult[Json]` | Deserialize a JSON string |
+| `task_result_from_json(data)` | `SerdeResult[TaskResult]` | Deserialize a `TaskResult` |
+| `serialize_error_payload(tr)` | `str` | Serialize a `TaskResult` error with hardcoded fallback (never fails) |
 
 ## Supported Types
 
@@ -179,7 +182,7 @@ Datetime types also work as fields inside dataclasses and dicts — the recursiv
 - File handles, connections
 - Functions, lambdas
 
-Attempting to serialize an unsupported type raises `SerializationError`.
+Attempting to serialize an unsupported type returns `Err(SerializationError)`.
 
 ## TaskResult Serialization
 
@@ -198,7 +201,8 @@ TaskResult(err=TaskError(...))
 | Code | Cause |
 | ---- | ----- |
 | `WORKER_SERIALIZATION_ERROR` | Task result could not be serialized to JSON |
-| `PYDANTIC_HYDRATION_ERROR` | Rehydration of a Pydantic model failed (missing module, validation error) |
+| `PYDANTIC_HYDRATION_ERROR` | Task succeeded but return value could not be rehydrated to declared type |
+| `RESULT_DESERIALIZATION_ERROR` | Stored result JSON is corrupt or could not be deserialized |
 
 ## Return Type Validation
 

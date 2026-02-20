@@ -8,7 +8,6 @@ error handling, and delegation patterns.
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -207,7 +206,11 @@ class TestEnqueueAsync:
 
     @pytest.mark.asyncio
     async def test_malformed_task_options_raises(self) -> None:
-        """Malformed task_options JSON propagates as Err(ENQUEUE_FAILED)."""
+        """Malformed task_options JSON propagates as Err(ENQUEUE_FAILED).
+
+        loads_json returns Err(SerializationError), which enqueue_async checks
+        explicitly and returns as Err(BrokerOperationError(ENQUEUE_FAILED)).
+        """
         broker = _make_broker()
         session = _make_enqueue_session()
         broker.session_factory = MagicMock(return_value=session)
@@ -218,7 +221,7 @@ class TestEnqueueAsync:
 
         assert is_err(result)
         assert result.err_value.code == BrokerErrorCode.ENQUEUE_FAILED
-        assert isinstance(result.err_value.exception, json.JSONDecodeError)
+        assert 'JSON' in result.err_value.message
 
     @pytest.mark.asyncio
     async def test_with_good_until_passes_expiry(self) -> None:

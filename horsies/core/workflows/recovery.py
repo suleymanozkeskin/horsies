@@ -17,6 +17,7 @@ from sqlalchemy import text
 
 from horsies.core.codec.serde import loads_json, task_result_from_json
 from horsies.core.logging import get_logger
+from horsies.core.types.result import is_err
 from horsies.core.models.workflow import WF_TASK_TERMINAL_VALUES
 
 if TYPE_CHECKING:
@@ -212,7 +213,7 @@ async def recover_stuck_workflows(
             from horsies.core.workflows.engine import enqueue_workflow_task
 
             task_id = await enqueue_workflow_task(
-                session, workflow_id, task_index, dep_results
+                session, workflow_id, task_index, dep_results, broker
             )
             if task_id:
                 logger.info(
@@ -242,7 +243,7 @@ async def recover_stuck_workflows(
         from horsies.core.workflows.engine import enqueue_workflow_task
 
         task_id = await enqueue_workflow_task(
-            session, workflow_id, task_index, dep_results
+            session, workflow_id, task_index, dep_results, broker
         )
         if task_id:
             logger.info(
@@ -335,9 +336,22 @@ async def recover_stuck_workflows(
 
         # Deserialize TaskResult from tasks.result, or build a synthetic one
         if raw_task_result is not None:
-            result: TaskResult[Any, TaskError] = task_result_from_json(
-                loads_json(raw_task_result),
-            )
+            _loads_r = loads_json(raw_task_result)
+            _tr_r = task_result_from_json(_loads_r.ok_value) if not is_err(_loads_r) else None
+            if _tr_r is not None and not is_err(_tr_r):
+                result: TaskResult[Any, TaskError] = _tr_r.ok_value
+            else:
+                # Stored result is corrupt — treat as a crash with no usable result
+                logger.warning(
+                    f'Recovery: task {task_id} has corrupt result JSON, building synthetic error',
+                )
+                result = TaskResult(
+                    err=TaskError(
+                        error_code=LibraryErrorCode.WORKER_CRASHED,
+                        message='Stored task result is corrupt and could not be deserialized',
+                        data={'task_id': task_id, 'task_status': task_status, 'recovery': 'case_1_7'},
+                    ),
+                )
         else:
             # No result stored (e.g. crash before result, DB issue, or cancellation)
             if task_status == 'CANCELLED':

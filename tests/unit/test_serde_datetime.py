@@ -9,7 +9,8 @@ from typing import Any
 
 import pytest
 
-from horsies.core.codec.serde import SerializationError, rehydrate_value, to_jsonable
+from horsies.core.codec.serde import rehydrate_value, to_jsonable
+from horsies.core.types.result import is_err
 from horsies.core.worker.worker import import_by_path
 
 
@@ -24,12 +25,12 @@ class TestDatetimeSerialization:
 
     def test_naive_datetime(self) -> None:
         value = dt.datetime(2025, 6, 15, 10, 30, 45)
-        result = to_jsonable(value)
+        result = to_jsonable(value).unwrap()
         assert result == {'__datetime__': True, 'value': '2025-06-15T10:30:45'}
 
     def test_utc_datetime(self) -> None:
         value = dt.datetime(2025, 6, 15, 10, 30, 45, tzinfo=dt.timezone.utc)
-        result = to_jsonable(value)
+        result = to_jsonable(value).unwrap()
         assert result == {
             '__datetime__': True,
             'value': '2025-06-15T10:30:45+00:00',
@@ -38,7 +39,7 @@ class TestDatetimeSerialization:
     def test_non_utc_offset_datetime(self) -> None:
         tz = dt.timezone(dt.timedelta(hours=5, minutes=30))
         value = dt.datetime(2025, 1, 1, 12, 0, 0, tzinfo=tz)
-        result = to_jsonable(value)
+        result = to_jsonable(value).unwrap()
         assert result == {
             '__datetime__': True,
             'value': '2025-01-01T12:00:00+05:30',
@@ -47,7 +48,7 @@ class TestDatetimeSerialization:
     def test_negative_offset_datetime(self) -> None:
         tz = dt.timezone(dt.timedelta(hours=-8))
         value = dt.datetime(2025, 12, 31, 23, 59, 59, tzinfo=tz)
-        result = to_jsonable(value)
+        result = to_jsonable(value).unwrap()
         assert result == {
             '__datetime__': True,
             'value': '2025-12-31T23:59:59-08:00',
@@ -55,7 +56,7 @@ class TestDatetimeSerialization:
 
     def test_datetime_with_microseconds(self) -> None:
         value = dt.datetime(2025, 6, 15, 10, 30, 45, 123456)
-        result = to_jsonable(value)
+        result = to_jsonable(value).unwrap()
         assert result == {
             '__datetime__': True,
             'value': '2025-06-15T10:30:45.123456',
@@ -63,22 +64,22 @@ class TestDatetimeSerialization:
 
     def test_date(self) -> None:
         value = dt.date(2025, 6, 15)
-        result = to_jsonable(value)
+        result = to_jsonable(value).unwrap()
         assert result == {'__date__': True, 'value': '2025-06-15'}
 
     def test_naive_time(self) -> None:
         value = dt.time(14, 30, 0)
-        result = to_jsonable(value)
+        result = to_jsonable(value).unwrap()
         assert result == {'__time__': True, 'value': '14:30:00'}
 
     def test_tz_aware_time(self) -> None:
         value = dt.time(14, 30, 0, tzinfo=dt.timezone.utc)
-        result = to_jsonable(value)
+        result = to_jsonable(value).unwrap()
         assert result == {'__time__': True, 'value': '14:30:00+00:00'}
 
     def test_time_with_microseconds(self) -> None:
         value = dt.time(14, 30, 0, 123456)
-        result = to_jsonable(value)
+        result = to_jsonable(value).unwrap()
         assert result == {'__time__': True, 'value': '14:30:00.123456'}
 
 
@@ -88,13 +89,13 @@ class TestDatetimeSubclassOrdering:
 
     def test_datetime_not_tagged_as_date(self) -> None:
         value = dt.datetime(2025, 6, 15, 10, 0, 0)
-        result = to_jsonable(value)
+        result = to_jsonable(value).unwrap()
         assert '__datetime__' in result  # type: ignore[operator]
         assert '__date__' not in result  # type: ignore[operator]
 
     def test_date_tagged_as_date(self) -> None:
         value = dt.date(2025, 6, 15)
-        result = to_jsonable(value)
+        result = to_jsonable(value).unwrap()
         assert '__date__' in result  # type: ignore[operator]
         assert '__datetime__' not in result  # type: ignore[operator]
 
@@ -110,57 +111,57 @@ class TestDatetimeRoundTrip:
 
     def test_naive_datetime_roundtrip(self) -> None:
         original = dt.datetime(2025, 6, 15, 10, 30, 45)
-        restored = rehydrate_value(to_jsonable(original))
+        restored = rehydrate_value(to_jsonable(original).unwrap()).unwrap()
         assert restored == original
         assert isinstance(restored, dt.datetime)
 
     def test_utc_datetime_roundtrip(self) -> None:
         original = dt.datetime(2025, 6, 15, 10, 30, 45, tzinfo=dt.timezone.utc)
-        restored = rehydrate_value(to_jsonable(original))
+        restored = rehydrate_value(to_jsonable(original).unwrap()).unwrap()
         assert restored == original
         assert restored.tzinfo is not None
 
     def test_non_utc_offset_roundtrip(self) -> None:
         tz = dt.timezone(dt.timedelta(hours=5, minutes=30))
         original = dt.datetime(2025, 1, 1, 12, 0, 0, tzinfo=tz)
-        restored = rehydrate_value(to_jsonable(original))
+        restored = rehydrate_value(to_jsonable(original).unwrap()).unwrap()
         assert restored == original
         assert restored.utcoffset() == dt.timedelta(hours=5, minutes=30)
 
     def test_negative_offset_roundtrip(self) -> None:
         tz = dt.timezone(dt.timedelta(hours=-8))
         original = dt.datetime(2025, 12, 31, 23, 59, 59, tzinfo=tz)
-        restored = rehydrate_value(to_jsonable(original))
+        restored = rehydrate_value(to_jsonable(original).unwrap()).unwrap()
         assert restored == original
         assert restored.utcoffset() == dt.timedelta(hours=-8)
 
     def test_datetime_microseconds_roundtrip(self) -> None:
         original = dt.datetime(2025, 6, 15, 10, 30, 45, 123456)
-        restored = rehydrate_value(to_jsonable(original))
+        restored = rehydrate_value(to_jsonable(original).unwrap()).unwrap()
         assert restored == original
         assert restored.microsecond == 123456
 
     def test_date_roundtrip(self) -> None:
         original = dt.date(2025, 6, 15)
-        restored = rehydrate_value(to_jsonable(original))
+        restored = rehydrate_value(to_jsonable(original).unwrap()).unwrap()
         assert restored == original
         assert type(restored) is dt.date
 
     def test_naive_time_roundtrip(self) -> None:
         original = dt.time(14, 30, 0)
-        restored = rehydrate_value(to_jsonable(original))
+        restored = rehydrate_value(to_jsonable(original).unwrap()).unwrap()
         assert restored == original
         assert type(restored) is dt.time
 
     def test_tz_aware_time_roundtrip(self) -> None:
         original = dt.time(14, 30, 0, tzinfo=dt.timezone.utc)
-        restored = rehydrate_value(to_jsonable(original))
+        restored = rehydrate_value(to_jsonable(original).unwrap()).unwrap()
         assert restored == original
         assert restored.tzinfo is not None
 
     def test_time_microseconds_roundtrip(self) -> None:
         original = dt.time(14, 30, 0, 123456)
-        restored = rehydrate_value(to_jsonable(original))
+        restored = rehydrate_value(to_jsonable(original).unwrap()).unwrap()
         assert restored == original
         assert restored.microsecond == 123456
 
@@ -179,8 +180,8 @@ class TestDatetimeNestedInContainers:
             'created_at': dt.datetime(2025, 6, 15, 10, 0, 0, tzinfo=dt.timezone.utc),
             'label': 'test',
         }
-        json_data = to_jsonable(original)
-        restored = rehydrate_value(json_data)
+        json_data = to_jsonable(original).unwrap()
+        restored = rehydrate_value(json_data).unwrap()
         assert restored['created_at'] == original['created_at']
         assert isinstance(restored['created_at'], dt.datetime)
         assert restored['label'] == 'test'
@@ -190,8 +191,8 @@ class TestDatetimeNestedInContainers:
             dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc),
             dt.datetime(2025, 6, 15, tzinfo=dt.timezone.utc),
         ]
-        json_data = to_jsonable(original)
-        restored = rehydrate_value(json_data)
+        json_data = to_jsonable(original).unwrap()
+        restored = rehydrate_value(json_data).unwrap()
         assert restored == original
         assert all(isinstance(item, dt.datetime) for item in restored)
 
@@ -203,8 +204,8 @@ class TestDatetimeNestedInContainers:
             'count': 42,
             'name': 'test',
         }
-        json_data = to_jsonable(original)
-        restored = rehydrate_value(json_data)
+        json_data = to_jsonable(original).unwrap()
+        restored = rehydrate_value(json_data).unwrap()
         assert isinstance(restored['timestamp'], dt.datetime)
         assert type(restored['date_only']) is dt.date
         assert type(restored['time_only']) is dt.time
@@ -252,8 +253,8 @@ class Event:
                 event_date=dt.date(2025, 6, 15),
             )
 
-            json_data = to_jsonable(original)
-            restored = rehydrate_value(json_data)
+            json_data = to_jsonable(original).unwrap()
+            restored = rehydrate_value(json_data).unwrap()
 
             assert isinstance(restored, mod.Event)
             assert restored.name == 'deploy'
@@ -277,10 +278,11 @@ class Event:
 class TestDatetimeSerializationErrors:
     """Verify to_jsonable rejects unsupported datetime module types."""
 
-    def test_timedelta_raises_serialization_error(self) -> None:
-        """timedelta is not serializable — must raise SerializationError."""
-        with pytest.raises(SerializationError, match='timedelta'):
-            to_jsonable(dt.timedelta(hours=1))
+    def test_timedelta_returns_serialization_error(self) -> None:
+        """timedelta is not serializable — must return Err(SerializationError)."""
+        result = to_jsonable(dt.timedelta(hours=1))
+        assert is_err(result)
+        assert 'timedelta' in str(result.err_value)
 
 
 # ---------------------------------------------------------------------------
@@ -303,9 +305,10 @@ class TestDatetimeRehydrationErrors:
     def test_rehydrate_rejects_invalid_iso_string(
         self, tagged_dict: dict[str, Any],
     ) -> None:
-        """Invalid ISO format string raises ValueError."""
-        with pytest.raises(ValueError):
-            rehydrate_value(tagged_dict)
+        """Invalid ISO format string returns Err(SerializationError)."""
+        result = rehydrate_value(tagged_dict)
+        assert is_err(result)
+        assert 'rehydration failed' in str(result.err_value)
 
     @pytest.mark.parametrize(
         'tagged_dict',
@@ -318,6 +321,7 @@ class TestDatetimeRehydrationErrors:
     def test_rehydrate_rejects_missing_value_key(
         self, tagged_dict: dict[str, Any],
     ) -> None:
-        """Missing 'value' key raises KeyError."""
-        with pytest.raises(KeyError):
-            rehydrate_value(tagged_dict)
+        """Missing 'value' key returns Err(SerializationError)."""
+        result = rehydrate_value(tagged_dict)
+        assert is_err(result)
+        assert 'rehydration failed' in str(result.err_value)

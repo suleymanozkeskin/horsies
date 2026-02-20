@@ -46,6 +46,7 @@ Errors from `handle.get()` / `get_async()`. These indicate issues retrieving the
 | `TASK_NOT_FOUND` | Task ID doesn't exist in database | No |
 | `TASK_CANCELLED` | Task was cancelled before completion | No |
 | `RESULT_NOT_AVAILABLE` | Result cache was never set | No |
+| `RESULT_DESERIALIZATION_ERROR` | Stored result JSON is corrupt or could not be deserialized | No |
 
 #### Broker Errors
 
@@ -71,7 +72,7 @@ Errors from type/schema validation.
 | Code | Description | Auto-Retry? |
 | ---- | ----------- | ----------- |
 | `RETURN_TYPE_MISMATCH` | Task return type doesn't match declaration | No |
-| `PYDANTIC_HYDRATION_ERROR` | Failed to hydrate Pydantic model from result | No |
+| `PYDANTIC_HYDRATION_ERROR` | Task succeeded but its return value could not be rehydrated to the declared type | No |
 
 #### Lifecycle Errors
 

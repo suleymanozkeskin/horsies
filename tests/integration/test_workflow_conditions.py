@@ -104,8 +104,8 @@ class TestRunWhenSkipWhen:
         row = result.fetchone()
         if row is None or row[0] is None:
             return None
-        parsed = loads_json(row[0])
-        return task_result_from_json(parsed)
+        parsed = loads_json(row[0]).unwrap()
+        return task_result_from_json(parsed).unwrap()
 
     def _make_ctx_task(
         self,

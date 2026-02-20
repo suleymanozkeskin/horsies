@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from horsies.core.utils.imports import import_by_path
 from horsies.core.codec.serde import loads_json
+from horsies.core.types.result import is_err
 
 if TYPE_CHECKING:
     from horsies.core.task_decorator import TaskFunction
@@ -467,20 +468,20 @@ class Horsies:
             if not isinstance(task_options_json, str) or not task_options_json:
                 continue
 
-            try:
-                options = loads_json(task_options_json)
-            except Exception as exc:
+            options_result = loads_json(task_options_json)
+            if is_err(options_result):
                 errors.append(
                     _no_location(
                         ConfigurationError(
                             message='invalid task_options_json',
                             code=ErrorCode.TASK_INVALID_OPTIONS,
-                            notes=[f"task '{task_name}'", str(exc)],
+                            notes=[f"task '{task_name}'", str(options_result.err_value)],
                             help_text='task options metadata must be valid JSON',
                         )
                     )
                 )
                 continue
+            options = options_result.ok_value
             if not isinstance(options, dict):
                 errors.append(
                     _no_location(

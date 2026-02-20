@@ -266,13 +266,18 @@ class Scheduler:
         """
         from horsies.core.codec.serde import dumps_json
 
-        config_str = dumps_json(
+        ser_result = dumps_json(
             {
                 'pattern': schedule.pattern.model_dump(),
                 'timezone': schedule.timezone,
-            }
+            },
         )
-        return hashlib.sha256(config_str.encode('utf-8')).hexdigest()
+        if is_err(ser_result):
+            # model_dump() output is always JSON-safe; failure here is a bug
+            raise RuntimeError(
+                f"Failed to serialize config for schedule '{schedule.name}': {ser_result.err_value}",
+            )
+        return hashlib.sha256(ser_result.ok_value.encode('utf-8')).hexdigest()
 
     async def _check_schedule(
         self, schedule: TaskSchedule, check_time: datetime

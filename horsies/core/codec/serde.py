@@ -15,7 +15,7 @@ from typing import (
 import datetime as dt
 import json
 import traceback as tb
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 import dataclasses
 from horsies.core.models.tasks import (
     TaskOptions,
@@ -23,6 +23,7 @@ from horsies.core.models.tasks import (
     TaskError,
     LibraryErrorCode,
 )
+from horsies.core.types.result import Ok, Err, Result, is_err
 from importlib import import_module
 from horsies.core.logging import get_logger
 
@@ -34,25 +35,24 @@ Json = Union[None, bool, int, float, str, List['Json'], Dict[str, 'Json']]
 Union type for JSON-serializable values.
 """
 
+type SerdeResult[T] = Result[T, SerializationError]
+
 
 class SerializationError(Exception):
     """
-    Raised when a value cannot be serialized to JSON.
+    Raised when a value cannot be serialized to or deserialized from JSON.
     """
 
     pass
 
 
-def _exception_to_json(ex: BaseException) -> Dict[str, Json]:
-    """
-    Convert a BaseException to a JSON-serializable dictionary.
+# ---------------------------------------------------------------------------
+# Infallible helpers (no Result needed)
+# ---------------------------------------------------------------------------
 
-    Returns:
-        A dict with following key-value pairs:
-        - "type": str
-        - "message": str
-        - "traceback": str
-    """
+
+def _exception_to_json(ex: BaseException) -> Dict[str, Json]:
+    """Convert a BaseException to a JSON-serializable dictionary."""
     return {
         'type': type(ex).__name__,
         'message': str(ex),
@@ -61,29 +61,11 @@ def _exception_to_json(ex: BaseException) -> Dict[str, Json]:
 
 
 def _task_error_to_json(err: TaskError) -> Dict[str, Json]:
+    """Convert a TaskError to a JSON-serializable dictionary.
+
+    Handles the exception field manually to avoid pydantic trying to
+    serialize BaseException subclasses.
     """
-    Convert a `TaskError` BaseModel to a JSON-serializable dictionary.
-    After converting to JSON, if the `exception` field is a `BaseException`,
-    it will be converted to a JSON-serializable dictionary.
-    If the `exception` field is already a JSON-serializable dictionary, it will be returned as is.
-    If the `exception` field is not a `BaseException` or a JSON-serializable dictionary,
-    it will be coerced to a simple shape of string.
-    For more information, see `TaskError` model definition.
-
-    Args:
-        err: The `TaskError` BaseModel to convert to JSON.
-
-    Returns:
-        A dict with following key-value pairs:
-        - "__task_error__": bool
-        - "error_code": str | LibraryErrorCode
-        - "message": str
-        - "data": dict[str, Json]
-    """
-    # data = err.model_dump(mode="json")
-    # ex = data.pop("exception", None)
-
-    # Avoid pydantic trying to serialize Exception; handle it manually
     ex = err.exception
     data = err.model_dump(mode='json', exclude={'exception'})
 
@@ -106,6 +88,10 @@ def _is_task_result(value: Any) -> TypeGuard[TaskResult[Any, TaskError]]:
     return isinstance(value, TaskResult)
 
 
+# ---------------------------------------------------------------------------
+# Caches
+# ---------------------------------------------------------------------------
+
 _CLASS_CACHE: Dict[
     str, Type[BaseModel]
 ] = {}  # cache of resolved Pydantic classes by module name and qualname
@@ -121,74 +107,72 @@ def clear_serde_caches() -> None:
     _DATACLASS_CACHE.clear()
 
 
-def _qualified_class_path(cls: type) -> tuple[str, str]:
-    """
-    Get the module and qualname for a class, with validation for importability.
+# ---------------------------------------------------------------------------
+# Serialization path (Python → JSON)
+# ---------------------------------------------------------------------------
 
-    Raises SerializationError if the class is not importable by workers:
-    - Defined in __main__ (entrypoint script)
-    - Defined inside a function (local class with <locals> in qualname)
+
+def _qualified_class_path(cls: type) -> SerdeResult[tuple[str, str]]:
+    """Get module and qualname for a class, validating importability.
+
+    Returns Err if the class is defined in __main__ or inside a function.
     """
     module_name = cls.__module__
     qualname = cls.__qualname__
 
-    # STRICT CHECK: Refuse to serialize classes defined in the entrypoint script
     if module_name in ('__main__', '__mp_main__'):
-        raise SerializationError(
+        return Err(SerializationError(
             f"Cannot serialize '{qualname}' because it is defined in '__main__'. "
-            'Please move this class to a separate module (file) so it can be imported by the worker.'
-        )
+            'Please move this class to a separate module (file) so it can be imported by the worker.',
+        ))
 
-    # STRICT CHECK: Refuse to serialize local classes (defined inside functions)
     if '<locals>' in qualname:
-        raise SerializationError(
+        return Err(SerializationError(
             f"Cannot serialize '{qualname}' because it is a local class defined inside a function. "
-            'Please move this class to module level so it can be imported by the worker.'
-        )
+            'Please move this class to module level so it can be imported by the worker.',
+        ))
 
-    return (module_name, qualname)
+    return Ok((module_name, qualname))
 
 
-def _qualified_model_path(model: BaseModel) -> tuple[str, str]:
+def _qualified_model_path(model: BaseModel) -> SerdeResult[tuple[str, str]]:
     """Get qualified path for a Pydantic BaseModel instance."""
     return _qualified_class_path(type(model))
 
 
-def _qualified_dataclass_path(instance: Any) -> tuple[str, str]:
+def _qualified_dataclass_path(instance: Any) -> SerdeResult[tuple[str, str]]:
     """Get qualified path for a dataclass instance."""
     return _qualified_class_path(type(instance))
 
 
-def to_jsonable(value: Any) -> Json:
-    """
-    Convert value to JSON with special handling for Pydantic models, TaskError, TaskResult.
+def to_jsonable(value: Any) -> SerdeResult[Json]:
+    """Convert a Python value to a JSON-serializable form.
 
-    Args:
-        value: The value to convert to JSON.
-
-    Returns:
-        A JSON-serializable value. For more information, see `Json` Union type.
+    Every recursive step propagates Result — a failure at any nesting
+    depth surfaces as Err to the caller.
     """
-    # Fast O(1) primitive check — the recursive _is_json_native() guard was
-    # removed here because the Mapping/Sequence branches below already handle
-    # dicts and lists recursively, making the deep pre-scan redundant (O(2N)).
+    # Primitives — always safe
     if value is None or isinstance(value, (bool, int, float, str)):
-        return value
+        return Ok(value)
 
     # datetime.datetime is a subclass of datetime.date — check datetime first.
     if isinstance(value, dt.datetime):
-        return {'__datetime__': True, 'value': value.isoformat()}
+        return Ok({'__datetime__': True, 'value': value.isoformat()})
 
     if isinstance(value, dt.date):
-        return {'__date__': True, 'value': value.isoformat()}
+        return Ok({'__date__': True, 'value': value.isoformat()})
 
     if isinstance(value, dt.time):
-        return {'__time__': True, 'value': value.isoformat()}
+        return Ok({'__time__': True, 'value': value.isoformat()})
 
     # Is value a `TaskResult`?
     if _is_task_result(value):
-        # Represent discriminated union explicitly
-        ok_json = to_jsonable(value.ok) if value.is_ok() else None
+        ok_json: Json = None
+        if value.is_ok():
+            ok_result = to_jsonable(value.ok)
+            if is_err(ok_result):
+                return ok_result
+            ok_json = ok_result.ok_value
         err_json: Optional[Dict[str, Json]] = None
         if value.err is not None:
             if isinstance(value.err, TaskError):
@@ -196,371 +180,101 @@ def to_jsonable(value: Any) -> Json:
             elif isinstance(value.err, BaseModel):
                 err_json = value.err.model_dump()  # if someone used a model for error
             else:
-                # last resort: stringify
                 err_json = {'message': str(value.err)}
-        return {'__task_result__': True, 'ok': ok_json, 'err': err_json}
+        return Ok({'__task_result__': True, 'ok': ok_json, 'err': err_json})
 
-    # Is value a `TaskError`?
+    # TaskError (standalone)
     if isinstance(value, TaskError):
-        return _task_error_to_json(value)
+        return Ok(_task_error_to_json(value))
 
-    # Is value a `BaseModel`?
+    # Pydantic BaseModel
     if isinstance(value, BaseModel):
-        # Include type metadata so we can rehydrate on the other side
-        module, qualname = _qualified_model_path(value)
-        return {
+        path_result = _qualified_model_path(value)
+        if is_err(path_result):
+            return path_result
+        module, qualname = path_result.ok_value
+        return Ok({
             '__pydantic_model__': True,
             'module': module,
             'qualname': qualname,
-            # Use mode="json" to ensure JSON-compatible field values
             'data': value.model_dump(mode='json'),
-        }
+        })
 
-    # Dataclass support - serialize with metadata for round-trip reconstruction
-    # Use field-by-field conversion instead of asdict() to preserve nested type metadata
+    # Dataclass
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        module, qualname = _qualified_dataclass_path(value)
-        # Convert each field via to_jsonable to preserve nested Pydantic/dataclass metadata
+        path_result = _qualified_dataclass_path(value)
+        if is_err(path_result):
+            return path_result
+        module, qualname = path_result.ok_value
         field_data: Dict[str, Json] = {}
         for field in dataclasses.fields(value):
             field_value = getattr(value, field.name)
-            field_data[field.name] = to_jsonable(field_value)
-        return {
+            field_result = to_jsonable(field_value)
+            if is_err(field_result):
+                return field_result
+            field_data[field.name] = field_result.ok_value
+        return Ok({
             '__dataclass__': True,
             'module': module,
             'qualname': qualname,
             'data': field_data,
-        }
+        })
 
-    # Handle dictionary-like objects (Mappings). This is a generic way to handle
-    # not only `dict` but also other dictionary-like types such as `OrderedDict`
-    # or `defaultdict`. It ensures all keys are strings and that values are
-    # recursively made JSON-serializable.
+    # Mapping (dict-like)
     if isinstance(value, Mapping):
         mapping = cast(Mapping[object, object], value)
-        return {str(key): to_jsonable(item) for key, item in mapping.items()}
+        result_dict: Dict[str, Json] = {}
+        for key, item in mapping.items():
+            item_result = to_jsonable(item)
+            if is_err(item_result):
+                return item_result
+            result_dict[str(key)] = item_result.ok_value
+        return Ok(result_dict)
 
-    # Handle list-like objects (Sequences). This handles not only `list` but also
-    # other sequence types like `tuple` or `set`. The check excludes `str`,
-    # `bytes`, and `bytearray`, as they are treated as primitive types rather
-    # than sequences of characters. It recursively ensures all items in the
-    # sequence are JSON-serializable.
+    # Sequence (list-like, excluding str/bytes)
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         seq = cast(Sequence[object], value)
-        return [to_jsonable(item) for item in seq]
+        result_list: List[Json] = []
+        for item in seq:
+            item_result = to_jsonable(item)
+            if is_err(item_result):
+                return item_result
+            result_list.append(item_result.ok_value)
+        return Ok(result_list)
 
-    raise SerializationError(f'Cannot serialize value of type {type(value).__name__}')
-
-
-def dumps_json(value: Any) -> str:
-    """
-    Serialize a value to JSON string.
-
-    Args:
-        value: The value to serialize.
-
-    Returns:
-        A JSON string.
-    """
-    return json.dumps(
-        to_jsonable(value),
-        ensure_ascii=False,
-        separators=(',', ':'),
-        allow_nan=False,  # Prevent NaN values in JSON
-    )
+    return Err(SerializationError(
+        f'Cannot serialize value of type {type(value).__name__}',
+    ))
 
 
-def loads_json(s: Optional[str]) -> Json:
-    """
-    Deserialize a JSON string to a JSON value.
+def dumps_json(value: Any) -> SerdeResult[str]:
+    """Serialize a Python value to a JSON string."""
+    jsonable_result = to_jsonable(value)
+    if is_err(jsonable_result):
+        return jsonable_result
+    try:
+        return Ok(json.dumps(
+            jsonable_result.ok_value,
+            ensure_ascii=False,
+            separators=(',', ':'),
+            allow_nan=False,
+        ))
+    except (ValueError, TypeError) as exc:
+        return Err(SerializationError(f'json.dumps failed: {exc}'))
 
-    Args:
-        s: The JSON string to deserialize.
 
-    Returns:
-        A JSON value. For more information, see `Json` Union type.
-    """
-    return json.loads(s) if s else None
-
-
-def args_to_json(args: tuple[Any, ...]) -> str:
-    """
-    Serialize a tuple of arguments to a JSON string.
-
-    Args:
-        args: The tuple of arguments to serialize.
-
-    Returns:
-        A JSON string.
-    """
+def args_to_json(args: tuple[Any, ...]) -> SerdeResult[str]:
+    """Serialize a tuple of positional arguments to a JSON string."""
     return dumps_json(list(args))
 
 
-def kwargs_to_json(kwargs: dict[str, Any]) -> str:
-    """
-    Serialize a dictionary of keyword arguments to a JSON string.
-
-    Args:
-        kwargs: The dictionary of keyword arguments to serialize.
-
-    Returns:
-        A JSON string.
-    """
+def kwargs_to_json(kwargs: dict[str, Any]) -> SerdeResult[str]:
+    """Serialize a dictionary of keyword arguments to a JSON string."""
     return dumps_json(kwargs)
 
 
-def rehydrate_value(value: Json) -> Any:
-    """
-    Recursively rehydrate a JSON value, restoring Pydantic models from their serialized form.
-
-    Args:
-        value: The JSON value to rehydrate.
-
-    Returns:
-        The rehydrated value with Pydantic models restored.
-
-    Raises:
-        SerializationError: If a Pydantic model cannot be rehydrated.
-    """
-    # Handle Pydantic model rehydration
-    if isinstance(value, dict) and value.get('__pydantic_model__'):
-        module_name = cast(str, value.get('module'))
-        qualname = cast(str, value.get('qualname'))
-        data = value.get('data')
-
-        cache_key = f'{module_name}:{qualname}'
-
-        try:
-            # 1. Check Cache
-            if cache_key in _CLASS_CACHE:
-                cls = _CLASS_CACHE[cache_key]
-            else:
-                # 2. Dynamic Import
-                try:
-                    module = import_module(module_name)
-                except ImportError as e:
-                    raise SerializationError(
-                        f"Could not import module '{module_name}'. "
-                        f'Did you move the file without leaving a re-export shim? Error: {e}'
-                    )
-
-                # 3. Resolve Class
-                cls = module
-                # Handle nested classes (e.g. ClassA.ClassB)
-                for part in qualname.split('.'):
-                    cls = getattr(cls, part)
-
-                if not (isinstance(cls, type) and issubclass(cls, BaseModel)):
-                    raise SerializationError(f'{cache_key} is not a BaseModel')
-
-                # 4. Save to Cache
-                _CLASS_CACHE[cache_key] = cls
-
-            # 5. Validate/Hydrate
-            return cls.model_validate(data)
-
-        except Exception as e:
-            # Catch Pydantic ValidationErrors or AttributeErrors here
-            logger.error(
-                f'Failed to rehydrate Pydantic model {cache_key}: {type(e).__name__}: {e}'
-            )
-            raise SerializationError(f'Failed to rehydrate {cache_key}: {str(e)}')
-
-    # Handle dataclass rehydration
-    if isinstance(value, dict) and value.get('__dataclass__'):
-        module_name = cast(str, value.get('module'))
-        qualname = cast(str, value.get('qualname'))
-        data = value.get('data')
-
-        cache_key = f'{module_name}:{qualname}'
-
-        try:
-            # 1. Check Cache
-            if cache_key in _DATACLASS_CACHE:
-                dc_cls = _DATACLASS_CACHE[cache_key]
-            else:
-                # 2. Dynamic Import
-                try:
-                    module = import_module(module_name)
-                except ImportError as e:
-                    raise SerializationError(
-                        f"Could not import module '{module_name}'. "
-                        f'Did you move the file without leaving a re-export shim? Error: {e}'
-                    )
-
-                # 3. Resolve Class
-                resolved: Any = module
-                # Handle nested classes (e.g. ClassA.ClassB)
-                for part in qualname.split('.'):
-                    resolved = getattr(resolved, part)
-
-                if not isinstance(resolved, type) or not dataclasses.is_dataclass(
-                    resolved
-                ):
-                    raise SerializationError(f'{cache_key} is not a dataclass')
-
-                dc_cls = resolved
-                # 4. Save to Cache
-                _DATACLASS_CACHE[cache_key] = dc_cls
-
-            # 5. Instantiate dataclass with rehydrated field values
-            if not isinstance(data, dict):
-                raise SerializationError(
-                    f'Dataclass data must be a dict, got {type(data)}'
-                )
-
-            # Rehydrate each field to restore nested Pydantic/dataclass types
-            rehydrated_data = {k: rehydrate_value(v) for k, v in data.items()}
-
-            # Separate init=True fields from init=False fields
-            dc_fields = {f.name: f for f in dataclasses.fields(dc_cls)}
-            init_kwargs: Dict[str, Any] = {}
-            non_init_fields: Dict[str, Any] = {}
-            for field_name, field_value in rehydrated_data.items():
-                field_def = dc_fields.get(field_name)
-                if field_def is None:
-                    # Field not in dataclass definition - skip (could be removed field)
-                    continue
-                if field_def.init:
-                    init_kwargs[field_name] = field_value
-                else:
-                    non_init_fields[field_name] = field_value
-
-            # Construct with init fields only
-            instance = dc_cls(**init_kwargs)
-
-            # Set non-init fields directly on the instance
-            for fname, fvalue in non_init_fields.items():
-                object.__setattr__(instance, fname, fvalue)
-
-            return instance
-
-        except SerializationError:
-            raise
-        except Exception as e:
-            logger.error(
-                f'Failed to rehydrate dataclass {cache_key}: {type(e).__name__}: {e}'
-            )
-            raise SerializationError(
-                f'Failed to rehydrate dataclass {cache_key}: {str(e)}'
-            )
-
-    # Handle datetime rehydration (datetime before date — subclass ordering)
-    if isinstance(value, dict) and value.get('__datetime__'):
-        return dt.datetime.fromisoformat(cast(str, value['value']))
-
-    if isinstance(value, dict) and value.get('__date__'):
-        return dt.date.fromisoformat(cast(str, value['value']))
-
-    if isinstance(value, dict) and value.get('__time__'):
-        return dt.time.fromisoformat(cast(str, value['value']))
-
-    # Handle nested TaskResult rehydration
-    if isinstance(value, dict) and value.get('__task_result__'):
-        return task_result_from_json(value)
-
-    # Recursively rehydrate nested dicts
-    if isinstance(value, dict):
-        return {k: rehydrate_value(v) for k, v in value.items()}
-
-    # Recursively rehydrate nested lists
-    if isinstance(value, list):
-        return [rehydrate_value(item) for item in value]
-
-    # Return primitive values as-is
-    return value
-
-
-def json_to_args(j: Json) -> List[Any]:
-    """
-    Deserialize a JSON value to a list of arguments, rehydrating Pydantic models.
-
-    Args:
-        j: The JSON value to deserialize.
-
-    Returns:
-        A list of arguments with Pydantic models rehydrated.
-
-    Raises:
-        SerializationError: If the JSON value is not a list.
-    """
-    if j is None:
-        return []
-    if isinstance(j, list):
-        return [rehydrate_value(item) for item in j]
-    raise SerializationError('Args payload is not a list JSON.')
-
-
-def json_to_kwargs(j: Json) -> Dict[str, Any]:
-    """
-    Deserialize a JSON value to a dictionary of keyword arguments, rehydrating Pydantic models.
-
-    Args:
-        j: The JSON value to deserialize.
-
-    Returns:
-        A dictionary of keyword arguments with Pydantic models rehydrated.
-
-    Raises:
-        SerializationError: If the JSON value is not a dict.
-    """
-    if j is None:
-        return {}
-    if isinstance(j, dict):
-        return {k: rehydrate_value(v) for k, v in j.items()}
-    raise SerializationError('Kwargs payload is not a dict JSON.')
-
-
-def task_result_from_json(j: Json) -> TaskResult[Any, TaskError]:
-    """
-    Rehydrate `TaskResult` from JSON.
-    NOTES:
-        - We don't recreate `Exception` objects;
-        - We keep the flattened structure inside `TaskError.exception` (as dict) or `None`.
-
-    Args:
-        j: The JSON string to deserialize.
-
-    Returns:
-        A `TaskResult`.
-    """
-    if not isinstance(j, dict) or '__task_result__' not in j:
-        # Accept legacy "ok"/"err" shape if present
-        if isinstance(j, dict) and ('ok' in j or 'err' in j):
-            payload = j
-        else:
-            raise SerializationError('Not a TaskResult JSON')
-    else:
-        payload = j
-
-    ok = payload.get('ok', None)
-    err = payload.get('err', None)
-
-    # meaning task itself returned an error
-    if err is not None:
-        # Build TaskError from dict, letting pydantic validate
-        if isinstance(err, dict) and err.get('__task_error__'):
-            err = {k: v for k, v in err.items() if k != '__task_error__'}
-        task_err = TaskError.model_validate(err)
-        return TaskResult(err=task_err)
-    else:
-        # Try to rehydrate pydantic BaseModel if we have metadata (using reusable function)
-        try:
-            ok_value = rehydrate_value(ok)
-            return TaskResult(ok=ok_value)
-        except SerializationError as e:
-            # Any failure during rehydration becomes a library error
-            logger.warning(f'PYDANTIC_HYDRATION_ERROR: {e}')
-            return TaskResult(
-                err=TaskError(
-                    error_code=LibraryErrorCode.PYDANTIC_HYDRATION_ERROR,
-                    message=str(e),
-                    data={},
-                )
-            )
-
-
-def serialize_task_options(task_options: TaskOptions) -> str:
+def serialize_task_options(task_options: TaskOptions) -> SerdeResult[str]:
+    """Serialize TaskOptions to a JSON string."""
     return dumps_json(
         {
             'retry_policy': task_options.retry_policy.model_dump(mode='json')
@@ -569,5 +283,292 @@ def serialize_task_options(task_options: TaskOptions) -> str:
             'good_until': task_options.good_until.isoformat()
             if task_options.good_until
             else None,
-        }
+        },
     )
+
+
+# ---------------------------------------------------------------------------
+# Deserialization path (JSON → Python)
+# ---------------------------------------------------------------------------
+
+
+def loads_json(s: Optional[str]) -> SerdeResult[Json]:
+    """Deserialize a JSON string.
+
+    Returns Ok(None) for empty/None input. Wraps json.JSONDecodeError
+    as SerializationError so callers handle a single error type.
+    """
+    if not s:
+        return Ok(None)
+    try:
+        return Ok(json.loads(s))
+    except (json.JSONDecodeError, ValueError) as exc:
+        return Err(SerializationError(f'JSON parse failed: {exc}'))
+
+
+def rehydrate_value(value: Json) -> SerdeResult[Any]:
+    """Recursively rehydrate a JSON value, restoring typed objects.
+
+    Every recursive step propagates Result. Fixes the ValueError leak
+    from datetime.fromisoformat that existed in the old raising version.
+    """
+    # Pydantic model rehydration
+    if isinstance(value, dict) and value.get('__pydantic_model__'):
+        module_name = cast(str, value.get('module'))
+        qualname = cast(str, value.get('qualname'))
+        data = value.get('data')
+        cache_key = f'{module_name}:{qualname}'
+
+        try:
+            if cache_key in _CLASS_CACHE:
+                cls = _CLASS_CACHE[cache_key]
+            else:
+                try:
+                    mod = import_module(module_name)
+                except ImportError as e:
+                    return Err(SerializationError(
+                        f"Could not import module '{module_name}'. "
+                        f'Did you move the file without leaving a re-export shim? Error: {e}',
+                    ))
+
+                cls = mod
+                for part in qualname.split('.'):
+                    cls = getattr(cls, part)
+
+                if not (isinstance(cls, type) and issubclass(cls, BaseModel)):
+                    return Err(SerializationError(f'{cache_key} is not a BaseModel'))
+
+                _CLASS_CACHE[cache_key] = cls
+
+            return Ok(cls.model_validate(data))
+
+        except Exception as e:
+            logger.error(
+                f'Failed to rehydrate Pydantic model {cache_key}: {type(e).__name__}: {e}',
+            )
+            return Err(SerializationError(f'Failed to rehydrate {cache_key}: {e}'))
+
+    # Dataclass rehydration
+    if isinstance(value, dict) and value.get('__dataclass__'):
+        module_name = cast(str, value.get('module'))
+        qualname = cast(str, value.get('qualname'))
+        data = value.get('data')
+        cache_key = f'{module_name}:{qualname}'
+
+        try:
+            if cache_key in _DATACLASS_CACHE:
+                dc_cls = _DATACLASS_CACHE[cache_key]
+            else:
+                try:
+                    mod = import_module(module_name)
+                except ImportError as e:
+                    return Err(SerializationError(
+                        f"Could not import module '{module_name}'. "
+                        f'Did you move the file without leaving a re-export shim? Error: {e}',
+                    ))
+
+                resolved: Any = mod
+                for part in qualname.split('.'):
+                    resolved = getattr(resolved, part)
+
+                if not isinstance(resolved, type) or not dataclasses.is_dataclass(resolved):
+                    return Err(SerializationError(f'{cache_key} is not a dataclass'))
+
+                dc_cls = resolved
+                _DATACLASS_CACHE[cache_key] = dc_cls
+
+            if not isinstance(data, dict):
+                return Err(SerializationError(
+                    f'Dataclass data must be a dict, got {type(data)}',
+                ))
+
+            # Rehydrate each field
+            rehydrated_data: Dict[str, Any] = {}
+            for k, v in data.items():
+                field_result = rehydrate_value(v)
+                if is_err(field_result):
+                    return field_result
+                rehydrated_data[k] = field_result.ok_value
+
+            dc_fields = {f.name: f for f in dataclasses.fields(dc_cls)}
+            init_kwargs: Dict[str, Any] = {}
+            non_init_fields: Dict[str, Any] = {}
+            for field_name, field_value in rehydrated_data.items():
+                field_def = dc_fields.get(field_name)
+                if field_def is None:
+                    continue
+                if field_def.init:
+                    init_kwargs[field_name] = field_value
+                else:
+                    non_init_fields[field_name] = field_value
+
+            instance = dc_cls(**init_kwargs)
+            for fname, fvalue in non_init_fields.items():
+                object.__setattr__(instance, fname, fvalue)
+
+            return Ok(instance)
+
+        except Exception as e:
+            logger.error(
+                f'Failed to rehydrate dataclass {cache_key}: {type(e).__name__}: {e}',
+            )
+            return Err(SerializationError(f'Failed to rehydrate dataclass {cache_key}: {e}'))
+
+    # Datetime rehydration (datetime before date — subclass ordering)
+    # Bug fix: fromisoformat can raise ValueError, which previously leaked
+    # as a raw ValueError instead of SerializationError.
+    if isinstance(value, dict) and value.get('__datetime__'):
+        try:
+            return Ok(dt.datetime.fromisoformat(cast(str, value['value'])))
+        except (ValueError, KeyError) as exc:
+            return Err(SerializationError(f'datetime rehydration failed: {exc}'))
+
+    if isinstance(value, dict) and value.get('__date__'):
+        try:
+            return Ok(dt.date.fromisoformat(cast(str, value['value'])))
+        except (ValueError, KeyError) as exc:
+            return Err(SerializationError(f'date rehydration failed: {exc}'))
+
+    if isinstance(value, dict) and value.get('__time__'):
+        try:
+            return Ok(dt.time.fromisoformat(cast(str, value['value'])))
+        except (ValueError, KeyError) as exc:
+            return Err(SerializationError(f'time rehydration failed: {exc}'))
+
+    # Nested TaskResult (mutual recursion with task_result_from_json)
+    if isinstance(value, dict) and value.get('__task_result__'):
+        return task_result_from_json(value)
+
+    # Recursively rehydrate nested dicts
+    if isinstance(value, dict):
+        result_dict: Dict[str, Any] = {}
+        for k, v in value.items():
+            v_result = rehydrate_value(v)
+            if is_err(v_result):
+                return v_result
+            result_dict[k] = v_result.ok_value
+        return Ok(result_dict)
+
+    # Recursively rehydrate nested lists
+    if isinstance(value, list):
+        result_list: List[Any] = []
+        for item in value:
+            item_result = rehydrate_value(item)
+            if is_err(item_result):
+                return item_result
+            result_list.append(item_result.ok_value)
+        return Ok(result_list)
+
+    # Primitive — return as-is
+    return Ok(value)
+
+
+def json_to_args(j: Json) -> SerdeResult[List[Any]]:
+    """Deserialize a JSON value to a list of arguments."""
+    if j is None:
+        return Ok([])
+    if not isinstance(j, list):
+        return Err(SerializationError('Args payload is not a list JSON.'))
+    result_list: List[Any] = []
+    for item in j:
+        item_result = rehydrate_value(item)
+        if is_err(item_result):
+            return item_result
+        result_list.append(item_result.ok_value)
+    return Ok(result_list)
+
+
+def json_to_kwargs(j: Json) -> SerdeResult[Dict[str, Any]]:
+    """Deserialize a JSON value to a dictionary of keyword arguments."""
+    if j is None:
+        return Ok({})
+    if not isinstance(j, dict):
+        return Err(SerializationError('Kwargs payload is not a dict JSON.'))
+    result_dict: Dict[str, Any] = {}
+    for k, v in j.items():
+        v_result = rehydrate_value(v)
+        if is_err(v_result):
+            return v_result
+        result_dict[k] = v_result.ok_value
+    return Ok(result_dict)
+
+
+def task_result_from_json(j: Json) -> SerdeResult[TaskResult[Any, TaskError]]:
+    """Rehydrate a TaskResult from JSON.
+
+    Triple outcome:
+    - Ok(TaskResult(ok=value)) — deserialization succeeded, task succeeded
+    - Ok(TaskResult(err=TaskError(...))) — deserialization succeeded, task failed
+    - Err(SerializationError) — deserialization itself failed (corrupt data)
+
+    The PYDANTIC_HYDRATION_ERROR conversion on the ok-path is deliberate:
+    if the user's return type changed between serialization and deserialization,
+    the task result should be an error, not a crash.
+    """
+    if not isinstance(j, dict) or '__task_result__' not in j:
+        # Accept legacy "ok"/"err" shape
+        if isinstance(j, dict) and ('ok' in j or 'err' in j):
+            payload = j
+        else:
+            return Err(SerializationError('Not a TaskResult JSON'))
+    else:
+        payload = j
+
+    ok = payload.get('ok', None)
+    err = payload.get('err', None)
+
+    # Task returned an error
+    if err is not None:
+        if isinstance(err, dict) and err.get('__task_error__'):
+            err = {k: v for k, v in err.items() if k != '__task_error__'}
+        # Bug fix: ValidationError from model_validate was previously unhandled
+        try:
+            task_err = TaskError.model_validate(err)
+        except (ValidationError, Exception) as exc:
+            return Err(SerializationError(
+                f'Failed to validate TaskError from JSON: {exc}',
+            ))
+        return Ok(TaskResult(err=task_err))
+
+    # Task returned a success — rehydrate the ok value
+    ok_result = rehydrate_value(ok)
+    if is_err(ok_result):
+        # Rehydration failure becomes a domain-level error, not infrastructure error.
+        # The JSON was structurally valid but the ok value couldn't be restored
+        # (e.g., user's Pydantic model changed between versions).
+        logger.warning(f'PYDANTIC_HYDRATION_ERROR: {ok_result.err_value}')
+        return Ok(TaskResult(
+            err=TaskError(
+                error_code=LibraryErrorCode.PYDANTIC_HYDRATION_ERROR,
+                message=str(ok_result.err_value),
+                data={},
+            ),
+        ))
+    return Ok(TaskResult(ok=ok_result.ok_value))
+
+
+# ---------------------------------------------------------------------------
+# Safe error serialization
+# ---------------------------------------------------------------------------
+
+# Last-resort JSON when serializing an error payload itself fails.
+# Hardcoded to avoid infinite recursion in error handlers.
+FALLBACK_ERROR_JSON = (
+    '{"__task_result__":true,"ok":null,"err":'
+    '{"error_code":"WORKER_SERIALIZATION_ERROR",'
+    '"message":"secondary serialization failure","data":null}}'
+)
+
+
+def serialize_error_payload(tr: TaskResult[Any, TaskError]) -> str:
+    """Serialize a library-constructed TaskResult for error responses.
+
+    Returns the JSON string on success, or a hardcoded fallback if
+    serialization somehow fails (should never happen for string-only
+    TaskError payloads, but we refuse to raise).
+    """
+    result = dumps_json(tr)
+    if is_err(result):
+        logger.error(f'Secondary serialization failure: {result.err_value}')
+        return FALLBACK_ERROR_JSON
+    return result.ok_value

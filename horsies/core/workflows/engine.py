@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from horsies.core.codec.serde import dumps_json, loads_json, task_result_from_json
+from horsies.core.codec.serde import dumps_json, loads_json, task_result_from_json, serialize_error_payload, SerdeResult
+from horsies.core.types.result import is_err
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
     SubWorkflowNode,
@@ -31,6 +32,66 @@ if TYPE_CHECKING:
 OutT = TypeVar('OutT')
 
 
+def _ser(result: SerdeResult[str], context: str, fallback: str | None = None) -> str | None:
+    """Extract a serde serialization Result, logging and returning fallback on error."""
+    if is_err(result):
+        logger.error(f'Serialization failed ({context}): {result.err_value}')
+        return fallback
+    return result.ok_value
+
+
+def _deser_json(raw: str | None, context: str, fallback: Any = None) -> Any:
+    """Deserialize JSON, returning fallback on error."""
+    if not raw:
+        return fallback
+    r = loads_json(raw)
+    if is_err(r):
+        logger.warning(f'JSON parse failed ({context}): {r.err_value}')
+        return fallback
+    return r.ok_value
+
+
+async def _fail_enqueued_task(
+    session: Any,
+    workflow_id: str,
+    task_index: int,
+    message: str,
+    broker: 'PostgresBroker | None' = None,
+) -> None:
+    """Mark an ENQUEUED workflow task as FAILED when pre-enqueue parsing fails.
+
+    Without this, an early return after the READY→ENQUEUED transition
+    strands the task (ENQUEUED, task_id IS NULL, no recovery path).
+
+    When broker is provided, also runs the full failure-propagation chain
+    (on_error handling, dependent cascade, workflow completion check).
+    """
+    from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
+
+    tr: TaskResult[None, TaskError] = TaskResult(
+        err=TaskError(
+            error_code=LibraryErrorCode.WORKER_SERIALIZATION_ERROR,
+            message=message,
+            data={'workflow_id': workflow_id, 'task_index': task_index},
+        ),
+    )
+    await session.execute(
+        MARK_WORKFLOW_TASK_FAILED_SQL,
+        {
+            'wf_id': workflow_id,
+            'idx': task_index,
+            'result': serialize_error_payload(tr),
+        },
+    )
+    if broker is not None:
+        should_continue = await _handle_workflow_task_failure(
+            session, workflow_id, task_index, tr,
+        )
+        if should_continue:
+            await _process_dependents(session, workflow_id, task_index, broker)
+            await check_workflow_completion(session, workflow_id, broker)
+
+
 
 
 
@@ -40,6 +101,7 @@ async def enqueue_workflow_task(
     workflow_id: str,
     task_index: int,
     all_dep_results: dict[int, 'TaskResult[Any, TaskError]'],
+    broker: 'PostgresBroker | None' = None,
 ) -> str | None:
     """
     Enqueue a single workflow task.
@@ -69,21 +131,20 @@ async def enqueue_workflow_task(
     max_retries = 0
     good_until_str: str | None = None
     if task_options_str:
-        try:
-            options_data = loads_json(task_options_str)
-            if isinstance(options_data, dict):
-                retry_policy = options_data.get('retry_policy')
-                if isinstance(retry_policy, dict):
-                    max_retries = retry_policy.get('max_retries', 3)
-                # Extract good_until if present
-                good_until_raw = options_data.get('good_until')
-                if good_until_raw is not None:
-                    good_until_str = str(good_until_raw)
-        except Exception:
-            pass
+        options_data = _deser_json(task_options_str, 'task_options', fallback={})
+        if isinstance(options_data, dict):
+            retry_policy = options_data.get('retry_policy')
+            if isinstance(retry_policy, dict):
+                max_retries = retry_policy.get('max_retries', 3)
+            good_until_raw = options_data.get('good_until')
+            if good_until_raw is not None:
+                good_until_str = str(good_until_raw)
 
-    # Start with static kwargs
-    raw_kwargs = loads_json(row[3])
+    # Start with static kwargs — corrupt kwargs is fatal for this task
+    raw_kwargs = _deser_json(row[3], 'workflow task kwargs')
+    if raw_kwargs is None and row[3]:
+        await _fail_enqueued_task(session, workflow_id, task_index, f'Corrupt kwargs JSON for task {task_index}', broker)
+        return None
     kwargs: dict[str, Any] = raw_kwargs if isinstance(raw_kwargs, dict) else {}
 
     # Inject args_from: map kwarg_name -> TaskResult from dependency
@@ -91,7 +152,10 @@ async def enqueue_workflow_task(
         args_from_raw = row[6]
         # args_from is stored as JSONB, may come back as dict directly
         if isinstance(args_from_raw, str):
-            args_from_map = loads_json(args_from_raw)
+            args_from_map = _deser_json(args_from_raw, 'args_from')
+            if args_from_map is None:
+                await _fail_enqueued_task(session, workflow_id, task_index, f'Corrupt args_from JSON for task {task_index}', broker)
+                return None
         else:
             args_from_map = args_from_raw
 
@@ -107,9 +171,17 @@ async def enqueue_workflow_task(
                 dep_result = all_dep_results.get(dep_index)
                 if dep_result is not None:
                     # Serialize TaskResult for transport
+                    dep_ser = _ser(dumps_json(dep_result), f'dep_result for {kwarg_name}')
+                    if dep_ser is None:
+                        await _fail_enqueued_task(
+                            session, workflow_id, task_index,
+                            f'Failed to serialize dep_result for kwarg {kwarg_name!r} (task {task_index})',
+                            broker,
+                        )
+                        return None
                     kwargs[kwarg_name] = {
                         '__horsies_taskresult__': True,
-                        'data': dumps_json(dep_result),
+                        'data': dep_ser,
                     }
 
     # Inject workflow_ctx if workflow_ctx_from is set
@@ -133,6 +205,15 @@ async def enqueue_workflow_task(
         'task_name': row[1],
     }
 
+    # Serialize kwargs before creating the task — fail early on corrupt data
+    kwargs_json = _ser(dumps_json(kwargs), 'workflow task kwargs')
+    if kwargs_json is None:
+        await _fail_enqueued_task(
+            session, workflow_id, task_index,
+            f'Failed to serialize kwargs for task {task_index}', broker,
+        )
+        return None
+
     # Create actual task in tasks table
     task_id = str(uuid.uuid4())
     await session.execute(
@@ -146,7 +227,7 @@ async def enqueue_workflow_task(
             # Old persisted rows may still carry non-empty task_args;
             # passing them through preserves backward compatibility.
             'args': row[2],  # task_args (already JSON string)
-            'kwargs': dumps_json(kwargs),
+            'kwargs': kwargs_json,
             'max_retries': max_retries,
             'task_options': task_options_str,
             'good_until': good_until_str,
@@ -227,7 +308,10 @@ async def enqueue_subworkflow_task(
     )
     workflow_name_row = workflow_name_result.fetchone()
     if workflow_name_row is None:
-        logger.error(f'Workflow {workflow_id} not found')
+        await _fail_enqueued_task(
+            session, workflow_id, task_index,
+            f'Workflow {workflow_id} not found during subworkflow enqueue', broker,
+        )
         return None
 
     workflow_name = workflow_name_row[0]
@@ -261,7 +345,7 @@ async def enqueue_subworkflow_task(
             {
                 'wf_id': workflow_id,
                 'idx': task_index,
-                'result': dumps_json(TaskResult(err=error)),
+                'result': _ser(dumps_json(TaskResult(err=error)), 'subworkflow load error', fallback='null'),
             },
         )
         logger.error(f'SubWorkflowNode load failed for {workflow_name}:{task_index}')
@@ -281,17 +365,23 @@ async def enqueue_subworkflow_task(
     # Compat: new writes store [] for task_args (kwargs-only).
     # Old persisted rows may still carry positional args for build_with();
     # they are passed through via *task_args to preserve backward compat.
-    raw_args = loads_json(task_args_json) if task_args_json else []
+    raw_args = _deser_json(task_args_json, 'subworkflow args', fallback=[])
     task_args: tuple[Any, ...] = ()
     if isinstance(raw_args, list):
         task_args = tuple(raw_args)
-    raw_kwargs = loads_json(task_kwargs_json) if task_kwargs_json else {}
+    raw_kwargs = _deser_json(task_kwargs_json, 'subworkflow kwargs')
+    if raw_kwargs is None and task_kwargs_json:
+        await _fail_enqueued_task(session, workflow_id, task_index, f'Corrupt kwargs JSON for subworkflow task {task_index}', broker)
+        return None
     kwargs: dict[str, Any] = raw_kwargs if isinstance(raw_kwargs, dict) else {}
 
     if args_from_raw:
         # args_from is stored as JSONB, may come back as dict directly
         if isinstance(args_from_raw, str):
-            args_from_map = loads_json(args_from_raw)
+            args_from_map = _deser_json(args_from_raw, 'subworkflow args_from')
+            if args_from_map is None:
+                await _fail_enqueued_task(session, workflow_id, task_index, f'Corrupt args_from JSON for subworkflow task {task_index}', broker)
+                return None
         else:
             args_from_map = args_from_raw
 
@@ -306,9 +396,17 @@ async def enqueue_subworkflow_task(
                 dep_result = all_dep_results.get(dep_index)
                 if dep_result is not None:
                     # Serialize TaskResult for transport
+                    dep_ser = _ser(dumps_json(dep_result), f'dep_result for {kwarg_name}')
+                    if dep_ser is None:
+                        await _fail_enqueued_task(
+                            session, workflow_id, task_index,
+                            f'Failed to serialize dep_result for kwarg {kwarg_name!r} (subworkflow task {task_index})',
+                            broker,
+                        )
+                        return None
                     kwargs[kwarg_name] = {
                         '__horsies_taskresult__': True,
-                        'data': dumps_json(dep_result),
+                        'data': dep_ser,
                     }
 
     # 4. Build child WorkflowSpec (parameterized)
@@ -377,7 +475,7 @@ async def enqueue_subworkflow_task(
             'name': child_spec.name,
             'on_error': child_spec.on_error.value,
             'output_idx': child_output_index,
-            'success_policy': dumps_json(child_success_policy_json)
+            'success_policy': _ser(dumps_json(child_success_policy_json), 'child success_policy')
             if child_success_policy_json
             else None,
             'wf_module': child_spec.workflow_def_module,
@@ -409,6 +507,13 @@ async def enqueue_subworkflow_task(
         if child_is_subworkflow:
             child_sub = child_node
             guard_no_positional_args(child_sub.name, child_sub.args)
+            child_kwargs_json = _ser(dumps_json(child_sub.kwargs), 'child sub kwargs')
+            if child_kwargs_json is None:
+                await _fail_enqueued_task(
+                    session, workflow_id, task_index,
+                    f'Failed to serialize kwargs for child sub {child_sub.name}', broker,
+                )
+                return None
             await session.execute(
                 INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL,
                 {
@@ -417,12 +522,12 @@ async def enqueue_subworkflow_task(
                     'idx': child_sub.index,
                     'node_id': child_sub.node_id,
                     'name': child_sub.name,
-                    'args': dumps_json(()),  # kwargs-only: positional args not persisted
-                    'kwargs': dumps_json(child_sub.kwargs),
+                    'args': _ser(dumps_json(()), 'positional args', fallback='[]'),
+                    'kwargs': child_kwargs_json,
                     'queue': 'default',
                     'priority': 100,
                     'deps': child_dep_indices,
-                    'args_from': dumps_json(child_args_from_indices)
+                    'args_from': _ser(dumps_json(child_args_from_indices), 'child args_from')
                     if child_args_from_indices
                     else None,
                     'ctx_from': child_ctx_from_ids,
@@ -446,12 +551,19 @@ async def enqueue_subworkflow_task(
             if child_task.good_until is not None:
                 child_base_options: dict[str, Any] = {}
                 if child_task_options_json:
-                    parsed = loads_json(child_task_options_json)
+                    parsed = _deser_json(child_task_options_json, 'child task_options', fallback={})
                     if isinstance(parsed, dict):
                         child_base_options = parsed
                 child_base_options['good_until'] = child_task.good_until.isoformat()
-                child_task_options_json = dumps_json(child_base_options)
+                child_task_options_json = _ser(dumps_json(child_base_options), 'child task_options')
 
+            child_kwargs_json = _ser(dumps_json(child_task.kwargs), 'child task kwargs')
+            if child_kwargs_json is None:
+                await _fail_enqueued_task(
+                    session, workflow_id, task_index,
+                    f'Failed to serialize kwargs for child task {child_task.name}', broker,
+                )
+                return None
             await session.execute(
                 INSERT_WORKFLOW_TASK_SQL,
                 {
@@ -460,8 +572,8 @@ async def enqueue_subworkflow_task(
                     'idx': child_task.index,
                     'node_id': child_task.node_id,
                     'name': child_task.name,
-                    'args': dumps_json(()),  # kwargs-only: positional args not persisted
-                    'kwargs': dumps_json(child_task.kwargs),
+                    'args': _ser(dumps_json(()), 'positional args', fallback='[]'),
+                    'kwargs': child_kwargs_json,
                     'queue': child_task.queue
                     or getattr(child_task.fn, 'task_queue_name', None)
                     or 'default',
@@ -469,7 +581,7 @@ async def enqueue_subworkflow_task(
                     if child_task.priority is not None
                     else 100,
                     'deps': child_dep_indices,
-                    'args_from': dumps_json(child_args_from_indices)
+                    'args_from': _ser(dumps_json(child_args_from_indices), 'child args_from')
                     if child_args_from_indices
                     else None,
                     'ctx_from': child_ctx_from_ids,
@@ -502,7 +614,7 @@ async def enqueue_subworkflow_task(
                     root_workflow_id,
                 )
             else:
-                await enqueue_workflow_task(session, child_id, child_root.index, {})
+                await enqueue_workflow_task(session, child_id, child_root.index, {}, broker)
 
     logger.info(f'Started child workflow {child_id} for {workflow_name}:{task_index}')
     return child_id
@@ -533,7 +645,9 @@ async def _build_workflow_context_data(
 
     results_by_id: dict[str, str] = {}
     for node_id, result in dep_results.by_id.items():
-        results_by_id[node_id] = dumps_json(result)
+        ser = _ser(dumps_json(result), 'workflow ctx result', fallback='null')
+        if ser is not None:
+            results_by_id[node_id] = ser
 
     # Fetch summaries for SubWorkflowNodes
     summaries_by_id: dict[str, str] = {}
@@ -599,7 +713,7 @@ async def on_workflow_task_complete(
         UPDATE_WORKFLOW_TASK_RESULT_SQL,
         {
             'status': new_status,
-            'result': dumps_json(result),
+            'result': _ser(dumps_json(result), 'task completion result', fallback='null'),
             'wf_id': workflow_id,
             'idx': task_index,
         },
@@ -848,7 +962,7 @@ async def try_make_ready_and_enqueue(
                 SET_READY_WORKFLOW_TASK_TERMINAL_SQL,
                 {
                     'status': 'SKIPPED',
-                    'result': dumps_json(condition_result),
+                    'result': _ser(dumps_json(condition_result), 'skip_when result', fallback='null'),
                     'wf_id': workflow_id,
                     'idx': task_index,
                 },
@@ -864,7 +978,7 @@ async def try_make_ready_and_enqueue(
                 SET_READY_WORKFLOW_TASK_TERMINAL_SQL,
                 {
                     'status': 'FAILED',
-                    'result': dumps_json(condition_result),
+                    'result': _ser(dumps_json(condition_result), 'run_when result', fallback='null'),
                     'wf_id': workflow_id,
                     'idx': task_index,
                 },
@@ -891,7 +1005,7 @@ async def try_make_ready_and_enqueue(
         )
     else:
         # Regular TaskNode: enqueue as task
-        await enqueue_workflow_task(session, workflow_id, task_index, dep_results)
+        await enqueue_workflow_task(session, workflow_id, task_index, dep_results, broker)
 
 
 
@@ -976,12 +1090,12 @@ async def _evaluate_conditions(
             node_id = row[0]
             summary_json = row[1]
             if node_id and summary_json:
-                try:
-                    parsed = loads_json(summary_json)
-                    if isinstance(parsed, dict):
+                parsed = _deser_json(summary_json, 'summary')
+                if isinstance(parsed, dict):
+                    try:
                         summaries_by_id[node_id] = SubWorkflowSummary.from_json(parsed)
-                except Exception:
-                    continue
+                    except Exception:
+                        continue
 
     # Get task name for context
     task_name = node_any.name
@@ -1098,7 +1212,27 @@ async def get_dependency_results(
                 )
             )
         elif stored_result:
-            results[task_index] = task_result_from_json(loads_json(stored_result))
+            deser = _deser_json(stored_result, 'dep result json')
+            if deser is None:
+                results[task_index] = TaskResult(
+                    err=TaskError(
+                        error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                        message=f'Dependency result JSON corrupt (task_index={task_index})',
+                        data={'workflow_id': workflow_id, 'task_index': task_index, 'stage': 'json_parse', 'status': status},
+                    ),
+                )
+                continue
+            parsed_tr = task_result_from_json(deser)
+            if is_err(parsed_tr):
+                results[task_index] = TaskResult(
+                    err=TaskError(
+                        error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                        message=f'Dependency result deser failed (task_index={task_index}): {parsed_tr.err_value}',
+                        data={'workflow_id': workflow_id, 'task_index': task_index, 'stage': 'task_result_parse', 'status': status},
+                    ),
+                )
+                continue
+            results[task_index] = parsed_tr.ok_value
 
     return results
 
@@ -1150,7 +1284,27 @@ async def get_dependency_results_with_names(
                 )
             )
         elif stored_result:
-            task_result = task_result_from_json(loads_json(stored_result))
+            deser = _deser_json(stored_result, 'dep result with names json')
+            if deser is None:
+                task_result = TaskResult(
+                    err=TaskError(
+                        error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                        message=f'Dependency result JSON corrupt (task_index={task_index})',
+                        data={'workflow_id': workflow_id, 'task_index': task_index, 'stage': 'json_parse', 'status': status},
+                    ),
+                )
+            else:
+                parsed_tr = task_result_from_json(deser)
+                if is_err(parsed_tr):
+                    task_result = TaskResult(
+                        err=TaskError(
+                            error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            message=f'Dependency result deser failed (task_index={task_index}): {parsed_tr.err_value}',
+                            data={'workflow_id': workflow_id, 'task_index': task_index, 'stage': 'task_result_parse', 'status': status},
+                        ),
+                    )
+                else:
+                    task_result = parsed_tr.ok_value
         else:
             continue  # No result to include
 
@@ -1315,22 +1469,22 @@ async def on_subworkflow_complete(
     # 2. Build SubWorkflowSummary
     child_output: Any = None
     if child_result_json:
-        try:
-            parsed_result = task_result_from_json(loads_json(child_result_json))
-            if parsed_result.is_ok():
-                child_output = parsed_result.ok
-        except Exception:
-            pass
+        deser = _deser_json(child_result_json, 'child result json')
+        if deser is not None:
+            parsed_tr = task_result_from_json(deser)
+            if not is_err(parsed_tr):
+                parsed_result = parsed_tr.ok_value
+                if parsed_result.is_ok():
+                    child_output = parsed_result.ok
 
     error_summary: str | None = None
     if child_error:
-        try:
-            error_data = loads_json(child_error)
-            if isinstance(error_data, dict):
-                msg = error_data.get('message')
-                if isinstance(msg, str):
-                    error_summary = msg
-        except Exception:
+        error_data = _deser_json(child_error, 'child error')
+        if isinstance(error_data, dict):
+            msg = error_data.get('message')
+            if isinstance(msg, str):
+                error_summary = msg
+        elif error_data is None:
             error_summary = str(child_error)[:200]
 
     child_summary = SubWorkflowSummary(
@@ -1358,7 +1512,7 @@ async def on_subworkflow_complete(
             sub_workflow_id=child_workflow_id,
             sub_workflow_summary=child_summary,
         )
-        parent_node_result = dumps_json(TaskResult(err=error))
+        parent_node_result = _ser(dumps_json(TaskResult(err=error)), 'parent node error', fallback='null')
 
     # 4. Update parent node
     await session.execute(
@@ -1366,7 +1520,7 @@ async def on_subworkflow_complete(
         {
             'status': parent_node_status,
             'result': parent_node_result,
-            'summary': dumps_json(child_summary),
+            'summary': _ser(dumps_json(child_summary), 'child summary', fallback='null'),
             'wf_id': parent_wf_id,
             'idx': parent_task_idx,
         },
@@ -1426,11 +1580,14 @@ async def evaluate_workflow_success(
         return not has_error and failed == 0
 
     # Guard: JSONB may come back as string depending on driver
-    policy: dict[str, Any]
+    policy: dict[str, Any] | None
     if isinstance(success_policy_data, str):
-        policy = loads_json(success_policy_data)  # type: ignore[assignment]
+        policy = _deser_json(success_policy_data, 'success_policy')
     else:
         policy = success_policy_data
+    if not isinstance(policy, dict):
+        logger.warning(f'Corrupt success_policy for workflow, treating as no policy')
+        return not has_error and failed == 0
 
     # Build status map by task_index
     result = await session.execute(
@@ -1486,17 +1643,24 @@ async def get_workflow_failure_error(
         )
         row = result.fetchone()
         if row and row[0]:
-            task_result = task_result_from_json(loads_json(row[0]))
-            if task_result.is_err() and task_result.err:
-                return dumps_json(task_result.err)
+            deser = _deser_json(row[0], 'first failed task result')
+            if deser is not None:
+                parsed_tr = task_result_from_json(deser)
+                if not is_err(parsed_tr):
+                    task_result = parsed_tr.ok_value
+                    if task_result.is_err() and task_result.err:
+                        return _ser(dumps_json(task_result.err), 'task error', fallback='null')
         return None
 
     # Guard: JSONB may come back as string depending on driver
-    policy: dict[str, Any]
+    policy: dict[str, Any] | None
     if isinstance(success_policy_data, str):
-        policy = loads_json(success_policy_data)  # type: ignore[assignment]
+        policy = _deser_json(success_policy_data, 'success_policy')
     else:
         policy = success_policy_data
+    if not isinstance(policy, dict):
+        logger.warning(f'Corrupt success_policy for workflow, treating as no policy')
+        return None
 
     # With success_policy: find first failed required task or use sentinel error
     # Collect all required indices across all cases
@@ -1512,16 +1676,24 @@ async def get_workflow_failure_error(
         )
         row = result.fetchone()
         if row and row[0]:
-            task_result = task_result_from_json(loads_json(row[0]))
-            if task_result.is_err() and task_result.err:
-                return dumps_json(task_result.err)
+            deser = _deser_json(row[0], 'first failed required task result')
+            if deser is not None:
+                parsed_tr = task_result_from_json(deser)
+                if not is_err(parsed_tr):
+                    task_result = parsed_tr.ok_value
+                    if task_result.is_err() and task_result.err:
+                        return _ser(dumps_json(task_result.err), 'task error', fallback='null')
 
     # No required task failed, but no case was satisfied (all SKIPPED?)
-    return dumps_json(
-        TaskError(
-            error_code=LibraryErrorCode.WORKFLOW_SUCCESS_CASE_NOT_MET,
-            message='No success case was satisfied',
-        )
+    return _ser(
+        dumps_json(
+            TaskError(
+                error_code=LibraryErrorCode.WORKFLOW_SUCCESS_CASE_NOT_MET,
+                message='No success case was satisfied',
+            )
+        ),
+        'success case not met error',
+        fallback='null',
     )
 
 
@@ -1553,7 +1725,7 @@ async def get_workflow_final_result(
             {'wf_id': workflow_id, 'idx': wf_row[0]},
         )
         output_row = output_result.fetchone()
-        return output_row[0] if output_row and output_row[0] else dumps_json(None)
+        return output_row[0] if output_row and output_row[0] else 'null'
 
     # Find terminal tasks (not in any other task's dependencies)
     terminal_results = await session.execute(
@@ -1571,7 +1743,16 @@ async def get_workflow_final_result(
         unique_key = node_id
         if row[2]:
             # Rehydrate to TaskResult and serialize back (will be parsed on get())
-            results_dict[unique_key] = task_result_from_json(loads_json(row[2]))
+            deser = _deser_json(row[2], 'terminal task result json')
+            if deser is not None:
+                parsed_tr = task_result_from_json(deser)
+                if not is_err(parsed_tr):
+                    results_dict[unique_key] = parsed_tr.ok_value
+                else:
+                    logger.warning(f'task_result_from_json failed (terminal task): {parsed_tr.err_value}')
+                    results_dict[unique_key] = None
+            else:
+                results_dict[unique_key] = None
         else:
             results_dict[unique_key] = None
 
@@ -1579,7 +1760,7 @@ async def get_workflow_final_result(
     from horsies.core.models.tasks import TaskResult
 
     wrapped_result: TaskResult[dict[str, Any], Any] = TaskResult(ok=results_dict)
-    return dumps_json(wrapped_result)
+    return _ser(dumps_json(wrapped_result), 'wrapped result', fallback='null')
 
 
 
@@ -1613,7 +1794,7 @@ async def _handle_workflow_task_failure(
     on_error = wf_row[0]
 
     # Extract TaskError for storage (not the full TaskResult)
-    error_payload = dumps_json(result.err) if result.is_err() and result.err else None
+    error_payload = _ser(dumps_json(result.err), 'error payload') if result.is_err() and result.err else None
 
     if on_error == 'fail':
         # Store error but keep status RUNNING until DAG fully resolves

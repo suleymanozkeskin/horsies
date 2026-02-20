@@ -8,7 +8,16 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from horsies.core.codec.serde import dumps_json, loads_json
+from horsies.core.codec.serde import dumps_json, loads_json, SerializationError, SerdeResult
+from horsies.core.types.result import is_err as _is_err
+
+
+def _ser_or_raise(result: SerdeResult[str], context: str) -> str:
+    """Extract a serde Result or raise with context. Used at workflow-start
+    boundaries where serialization failure means the workflow cannot be created."""
+    if _is_err(result):
+        raise SerializationError(f'Failed to serialize {context}: {result.err_value}')
+    return result.ok_value
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
     WorkflowHandle,
@@ -183,7 +192,7 @@ async def start_workflow_async(
                 'name': spec.name,
                 'on_error': spec.on_error.value,
                 'output_idx': output_index,
-                'success_policy': dumps_json(success_policy_json)
+                'success_policy': _ser_or_raise(dumps_json(success_policy_json), 'success_policy')
                 if success_policy_json
                 else None,
                 'wf_module': spec.workflow_def_module,
@@ -192,6 +201,10 @@ async def start_workflow_async(
         )
 
         # 2. Insert all workflow_tasks
+        # NOTE: Serialization failures (_ser_or_raise) can raise mid-loop after
+        # prior INSERTs have executed. This is safe because commit happens after
+        # the entire loop (line ~317). An exception here rolls back the
+        # uncommitted transaction — no partial workflow state is persisted.
         for node in spec.tasks:
             dep_indices = [d.index for d in node.waits_for if d.index is not None]
             args_from_indices = {
@@ -216,12 +229,12 @@ async def start_workflow_async(
                         'idx': node.index,
                         'node_id': node.node_id,
                         'name': node.name,
-                        'args': dumps_json(()),  # kwargs-only: positional args not persisted
-                        'kwargs': dumps_json(node.kwargs),
+                        'args': _ser_or_raise(dumps_json(()), 'positional args'),  # kwargs-only: positional args not persisted
+                        'kwargs': _ser_or_raise(dumps_json(node.kwargs), f'kwargs for node {node.name}'),
                         'queue': 'default',  # SubWorkflowNode doesn't have queue
                         'priority': 100,  # SubWorkflowNode doesn't have priority
                         'deps': dep_indices,
-                        'args_from': dumps_json(args_from_indices)
+                        'args_from': _ser_or_raise(dumps_json(args_from_indices), 'args_from')
                         if args_from_indices
                         else None,
                         'ctx_from': ctx_from_ids,
@@ -250,11 +263,18 @@ async def start_workflow_async(
                     # Merge good_until from TaskNode into task_options
                     base_options: dict[str, Any] = {}
                     if task_options_json:
-                        parsed = loads_json(task_options_json)
-                        if isinstance(parsed, dict):
-                            base_options = parsed
+                        parsed_r = loads_json(task_options_json)
+                        if _is_err(parsed_r):
+                            raise SerializationError(
+                                f'Corrupt task_options_json for node {task.name}: {parsed_r.err_value}',
+                            )
+                        if isinstance(parsed_r.ok_value, dict):
+                            base_options = parsed_r.ok_value
                     base_options['good_until'] = task.good_until.isoformat()
-                    task_options_json = dumps_json(base_options)
+                    task_options_json = _ser_or_raise(
+                        dumps_json(base_options),
+                        f'task_options for node {task.name}',
+                    )
 
                 await session.execute(
                     INSERT_WORKFLOW_TASK_SQL,
@@ -264,8 +284,8 @@ async def start_workflow_async(
                         'idx': task.index,
                         'node_id': task.node_id,
                         'name': task.name,
-                        'args': dumps_json(()),  # kwargs-only: positional args not persisted
-                        'kwargs': dumps_json(task.kwargs),
+                        'args': _ser_or_raise(dumps_json(()), 'positional args'),  # kwargs-only: positional args not persisted
+                        'kwargs': _ser_or_raise(dumps_json(task.kwargs), f'kwargs for node {task.name}'),
                         # Queue: use override, else task's declared queue, else "default"
                         'queue': task.queue
                         or getattr(task.fn, 'task_queue_name', None)
@@ -273,7 +293,7 @@ async def start_workflow_async(
                         # Priority: use override, else default
                         'priority': task.priority if task.priority is not None else 100,
                         'deps': dep_indices,
-                        'args_from': dumps_json(args_from_indices)
+                        'args_from': _ser_or_raise(dumps_json(args_from_indices), 'args_from')
                         if args_from_indices
                         else None,
                         'ctx_from': ctx_from_ids,
@@ -296,7 +316,7 @@ async def start_workflow_async(
                     )
                 else:
                     # Enqueue regular task
-                    await enqueue_workflow_task(session, wf_id, root_node.index, {})
+                    await enqueue_workflow_task(session, wf_id, root_node.index, {}, broker)
 
         await session.commit()
 
@@ -528,7 +548,7 @@ async def resume_workflow(
                 )
             else:
                 await enqueue_workflow_task(
-                    session, workflow_id, task_index, dep_results
+                    session, workflow_id, task_index, dep_results, broker
                 )
 
         # 4. Cascade resume to paused child workflows
@@ -620,7 +640,7 @@ async def cascade_resume_to_children(
                         child_root,
                     )
                 else:
-                    await enqueue_workflow_task(session, child_id, task_idx, dep_res)
+                    await enqueue_workflow_task(session, child_id, task_idx, dep_res, broker)
 
             # Check completion: resume may transition all pending tasks to
             # SKIPPED/terminal without any subsequent callback to finalize.

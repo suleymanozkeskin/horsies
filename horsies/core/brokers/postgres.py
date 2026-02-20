@@ -18,7 +18,7 @@ from horsies.core.models.workflow_pg import (
     WorkflowTaskModel as _WorkflowTaskModel,
 )
 from horsies.core.types.status import TaskStatus
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.codec.serde import (
     args_to_json,
     kwargs_to_json,
@@ -610,11 +610,28 @@ class PostgresBroker:
             # is a bug, not a runtime condition, and must not be silently swallowed.
             max_retries = 0
             if task_options:
-                options_data = loads_json(task_options)
+                opts_r = loads_json(task_options)
+                if is_err(opts_r):
+                    return _broker_err(BrokerErrorCode.ENQUEUE_FAILED, f'task_options JSON corrupt: {opts_r.err_value}', opts_r.err_value)
+                options_data = opts_r.ok_value
                 if isinstance(options_data, dict):
                     retry_policy = options_data.get('retry_policy')
                     if isinstance(retry_policy, dict):
                         max_retries = retry_policy.get('max_retries', 3)
+
+            args_json: str | None = None
+            if args:
+                args_r = args_to_json(args)
+                if is_err(args_r):
+                    return _broker_err(BrokerErrorCode.ENQUEUE_FAILED, f'Failed to serialize args: {args_r.err_value}', args_r.err_value)
+                args_json = args_r.ok_value
+
+            kwargs_json: str | None = None
+            if kwargs:
+                kwargs_r = kwargs_to_json(kwargs)
+                if is_err(kwargs_r):
+                    return _broker_err(BrokerErrorCode.ENQUEUE_FAILED, f'Failed to serialize kwargs: {kwargs_r.err_value}', kwargs_r.err_value)
+                kwargs_json = kwargs_r.ok_value
 
             async with self.session_factory() as session:
                 task = TaskModel(
@@ -622,8 +639,8 @@ class PostgresBroker:
                     task_name=task_name,
                     queue_name=queue_name,
                     priority=priority,
-                    args=args_to_json(args) if args else None,
-                    kwargs=kwargs_to_json(kwargs) if kwargs else None,
+                    args=args_json,
+                    kwargs=kwargs_json,
                     status=TaskStatus.PENDING,
                     sent_at=sent,
                     good_until=good_until,
@@ -683,7 +700,21 @@ class PostgresBroker:
                     )
                 if row.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
                     self.logger.info(f'Task {task_id} already completed')
-                    return task_result_from_json(loads_json(row.result))
+                    _lr = loads_json(row.result)
+                    if is_err(_lr):
+                        return TaskResult(err=TaskError(
+                            error_code=LibraryErrorCode.BROKER_ERROR,
+                            message=f'Result JSON corrupt: {_lr.err_value}',
+                            data={'task_id': task_id},
+                        ))
+                    _trr = task_result_from_json(_lr.ok_value)
+                    if is_err(_trr):
+                        return TaskResult(err=TaskError(
+                            error_code=LibraryErrorCode.BROKER_ERROR,
+                            message=f'Result deser failed: {_trr.err_value}',
+                            data={'task_id': task_id},
+                        ))
+                    return _trr.ok_value
                 if row.status == TaskStatus.CANCELLED:
                     self.logger.info(f'Task {task_id} was cancelled')
                     return TaskResult(
@@ -767,7 +798,21 @@ class PostgresBroker:
                             self.logger.debug(
                                 f'Task {task_id} completed, polling database'
                             )
-                            return task_result_from_json(loads_json(row.result))
+                            _lr = loads_json(row.result)
+                            if is_err(_lr):
+                                return TaskResult(err=TaskError(
+                                    error_code=LibraryErrorCode.BROKER_ERROR,
+                                    message=f'Result JSON corrupt: {_lr.err_value}',
+                                    data={'task_id': task_id},
+                                ))
+                            _trr = task_result_from_json(_lr.ok_value)
+                            if is_err(_trr):
+                                return TaskResult(err=TaskError(
+                                    error_code=LibraryErrorCode.BROKER_ERROR,
+                                    message=f'Result deser failed: {_trr.err_value}',
+                                    data={'task_id': task_id},
+                                ))
+                            return _trr.ok_value
                         if row.status == TaskStatus.CANCELLED:
                             self.logger.error(f'Task {task_id} was cancelled')
                             return TaskResult(
@@ -917,7 +962,13 @@ class PostgresBroker:
                         },
                     )
                     task_result: TaskResult[None, TaskError] = TaskResult(err=task_error)
-                    result_json = dumps_json(task_result)
+                    ser_r = dumps_json(task_result)
+                    # Library-constructed TaskError with string primitives — can't fail,
+                    # but if it somehow does, skip this task rather than abort the entire cleanup.
+                    if is_err(ser_r):
+                        self.logger.error(f'Failed to serialize crash result for task {task_id}: {ser_r.err_value}')
+                        continue
+                    result_json = ser_r.ok_value
 
                     await session.execute(
                         MARK_STALE_TASK_FAILED_SQL,
@@ -1100,7 +1151,13 @@ class PostgresBroker:
                     raw_result = row[idx]
                     idx += 1
                     if raw_result:
-                        result_value = task_result_from_json(loads_json(raw_result))
+                        _lr = loads_json(raw_result)
+                        if is_err(_lr):
+                            return _broker_err(BrokerErrorCode.TASK_INFO_QUERY_FAILED, f'Result JSON corrupt: {_lr.err_value}', _lr.err_value)
+                        _trr = task_result_from_json(_lr.ok_value)
+                        if is_err(_trr):
+                            return _broker_err(BrokerErrorCode.TASK_INFO_QUERY_FAILED, f'Result deser failed: {_trr.err_value}', _trr.err_value)
+                        result_value = _trr.ok_value
 
                 if include_failed_reason:
                     failed_reason = row[idx]

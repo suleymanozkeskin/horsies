@@ -95,7 +95,7 @@ async def _get_workflow_error(
     )
     row = result.fetchone()
     if row and row[0]:
-        return loads_json(row[0])  # type: ignore[return-value]
+        return loads_json(row[0]).unwrap()  # type: ignore[return-value]
     return None
 
 
@@ -243,8 +243,8 @@ class TestOnErrorFail:
             text('SELECT kwargs FROM horsies_tasks WHERE id = :tid'),
             {'tid': task_id},
         )
-        kwargs = loads_json(task_result.fetchone()[0])
-        injected = loads_json(kwargs['input_result']['data'])
+        kwargs = loads_json(task_result.fetchone()[0]).unwrap()
+        injected = loads_json(kwargs['input_result']['data']).unwrap()
         assert 'err' in injected
         assert injected['err']['error_code'] == 'INJECTED_ERR'
 
@@ -530,7 +530,7 @@ class TestOnErrorFail:
             {'wf_id': handle.workflow_id},
         )
         result_json = result.fetchone()[0]
-        result_data = loads_json(result_json)
+        result_data = loads_json(result_json).unwrap()
         assert result_data.get('ok') == 999
 
     async def test_skip_propagates_through_chain(
@@ -1393,8 +1393,8 @@ class TestAllowFailedDeps:
             text('SELECT kwargs FROM horsies_tasks WHERE id = :tid'),
             {'tid': task_id},
         )
-        kwargs = loads_json(task_result.fetchone()[0])
-        injected = loads_json(kwargs['input_result']['data'])
+        kwargs = loads_json(task_result.fetchone()[0]).unwrap()
+        injected = loads_json(kwargs['input_result']['data']).unwrap()
         assert 'err' in injected
 
     async def test_allow_failed_deps_can_recover(
@@ -1440,7 +1440,7 @@ class TestAllowFailedDeps:
             text('SELECT result FROM horsies_workflows WHERE id = :wf_id'),
             {'wf_id': handle.workflow_id},
         )
-        result_data = loads_json(wf_result.fetchone()[0])
+        result_data = loads_json(wf_result.fetchone()[0]).unwrap()
         assert result_data.get('ok') == 999
 
     async def test_allow_failed_deps_chain(
@@ -1595,11 +1595,11 @@ class TestAllowFailedDeps:
             text('SELECT kwargs FROM horsies_tasks WHERE id = :tid'),
             {'tid': task_id},
         )
-        kwargs = loads_json(task_result.fetchone()[0])
+        kwargs = loads_json(task_result.fetchone()[0]).unwrap()
 
         # input_result should be the sentinel
         assert 'input_result' in kwargs
-        injected = loads_json(kwargs['input_result']['data'])
+        injected = loads_json(kwargs['input_result']['data']).unwrap()
 
         assert 'err' in injected
         assert injected['err']['error_code'] == 'UPSTREAM_SKIPPED'

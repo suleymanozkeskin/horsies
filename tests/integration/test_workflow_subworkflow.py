@@ -36,7 +36,7 @@ from .conftest import make_simple_task
 
 def _decode_task_result(value: Any) -> TaskResult[Any, TaskError] | None:
     if isinstance(value, str):
-        return task_result_from_json(loads_json(value))
+        return task_result_from_json(loads_json(value).unwrap()).unwrap()
     return None
 
 
@@ -47,7 +47,7 @@ def _extract_taskresult_value(raw: Any, default: int = 0) -> int:
         if raw_dict.get('__horsies_taskresult__'):
             data_str = raw_dict.get('data')
             if isinstance(data_str, str):
-                tr = task_result_from_json(loads_json(data_str))
+                tr = task_result_from_json(loads_json(data_str).unwrap()).unwrap()
                 return tr.unwrap() if tr.is_ok() else default
     if isinstance(raw, int):
         return raw
@@ -93,7 +93,7 @@ class ParamChildWorkflow(WorkflowDefinition[int]):
             if raw_dict.get('__horsies_taskresult__'):
                 data_str = raw_dict.get('data')
                 if isinstance(data_str, str):
-                    tr = task_result_from_json(loads_json(data_str))
+                    tr = task_result_from_json(loads_json(data_str).unwrap()).unwrap()
                     raw_value = tr.unwrap() if tr.is_ok() else 0
 
         @app.task(task_name='param_child_task')
@@ -504,7 +504,7 @@ class TestSubworkflowIntegration:
         )
         summary_json = summary_row.scalar_one()
         assert summary_json is not None
-        parsed_summary = loads_json(summary_json) if isinstance(summary_json, str) else summary_json
+        parsed_summary = loads_json(summary_json).unwrap() if isinstance(summary_json, str) else summary_json
         assert isinstance(parsed_summary, dict)
         summary = SubWorkflowSummary.from_json(parsed_summary)
         assert summary.status == WorkflowStatus.FAILED
@@ -1071,7 +1071,7 @@ class TestSubworkflowIntegration:
         )
         summary_json = summary_row.scalar_one()
         assert summary_json is not None
-        parsed = loads_json(summary_json) if isinstance(summary_json, str) else summary_json
+        parsed = loads_json(summary_json).unwrap() if isinstance(summary_json, str) else summary_json
         assert isinstance(parsed, dict)
         summary = SubWorkflowSummary.from_json(parsed)
         assert summary.status == WorkflowStatus.FAILED
@@ -1476,7 +1476,7 @@ class TestSubworkflowRecovery:
             """),
             {
                 'child_id': child_id,
-                'error': dumps_json({'message': 'child task crashed'}),
+                'error': dumps_json({'message': 'child task crashed'}).unwrap(),
             },
         )
         # Also mark child's task as FAILED for accurate task counts
@@ -1492,7 +1492,7 @@ class TestSubworkflowRecovery:
                 'result': dumps_json(TaskResult(err=TaskError(
                     error_code='CHILD_CRASH',
                     message='child task crashed',
-                ))),
+                ))).unwrap(),
             },
         )
         await session.commit()
