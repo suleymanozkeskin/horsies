@@ -57,6 +57,7 @@ async def _fail_enqueued_task(
     task_index: int,
     message: str,
     broker: 'PostgresBroker | None' = None,
+    error_code: str = 'WORKFLOW_ENQUEUE_FAILED',
 ) -> None:
     """Mark an ENQUEUED workflow task as FAILED when pre-enqueue parsing fails.
 
@@ -66,11 +67,11 @@ async def _fail_enqueued_task(
     When broker is provided, also runs the full failure-propagation chain
     (on_error handling, dependent cascade, workflow completion check).
     """
-    from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
+    from horsies.core.models.tasks import TaskResult, TaskError
 
     tr: TaskResult[None, TaskError] = TaskResult(
         err=TaskError(
-            error_code=LibraryErrorCode.WORKER_SERIALIZATION_ERROR,
+            error_code=error_code,
             message=message,
             data={'workflow_id': workflow_id, 'task_index': task_index},
         ),
@@ -143,7 +144,14 @@ async def enqueue_workflow_task(
     # Start with static kwargs — corrupt kwargs is fatal for this task
     raw_kwargs = _deser_json(row[3], 'workflow task kwargs')
     if raw_kwargs is None and row[3]:
-        await _fail_enqueued_task(session, workflow_id, task_index, f'Corrupt kwargs JSON for task {task_index}', broker)
+        await _fail_enqueued_task(
+            session,
+            workflow_id,
+            task_index,
+            f'Corrupt kwargs JSON for task {task_index}',
+            broker,
+            error_code='WORKER_SERIALIZATION_ERROR',
+        )
         return None
     kwargs: dict[str, Any] = raw_kwargs if isinstance(raw_kwargs, dict) else {}
 
@@ -154,7 +162,14 @@ async def enqueue_workflow_task(
         if isinstance(args_from_raw, str):
             args_from_map = _deser_json(args_from_raw, 'args_from')
             if args_from_map is None:
-                await _fail_enqueued_task(session, workflow_id, task_index, f'Corrupt args_from JSON for task {task_index}', broker)
+                await _fail_enqueued_task(
+                    session,
+                    workflow_id,
+                    task_index,
+                    f'Corrupt args_from JSON for task {task_index}',
+                    broker,
+                    error_code='WORKER_SERIALIZATION_ERROR',
+                )
                 return None
         else:
             args_from_map = args_from_raw
@@ -164,10 +179,17 @@ async def enqueue_workflow_task(
             args_from_typed = cast(dict[str, int], args_from_map)
             for kwarg_name, dep_index in args_from_typed.items():
                 if kwarg_name in kwargs:
-                    raise RuntimeError(
-                        f"args_from key '{kwarg_name}' conflicts with static kwarg "
-                        f"(task_index={task_index}, workflow_id={workflow_id})"
+                    await _fail_enqueued_task(
+                        session,
+                        workflow_id,
+                        task_index,
+                        (
+                            f"args_from key '{kwarg_name}' conflicts with static kwarg "
+                            f"(task {task_index})"
+                        ),
+                        broker,
                     )
+                    return None
                 dep_result = all_dep_results.get(dep_index)
                 if dep_result is not None:
                     # Serialize TaskResult for transport
@@ -177,6 +199,7 @@ async def enqueue_workflow_task(
                             session, workflow_id, task_index,
                             f'Failed to serialize dep_result for kwarg {kwarg_name!r} (task {task_index})',
                             broker,
+                            error_code='WORKER_SERIALIZATION_ERROR',
                         )
                         return None
                     kwargs[kwarg_name] = {
@@ -211,6 +234,7 @@ async def enqueue_workflow_task(
         await _fail_enqueued_task(
             session, workflow_id, task_index,
             f'Failed to serialize kwargs for task {task_index}', broker,
+            error_code='WORKER_SERIALIZATION_ERROR',
         )
         return None
 
@@ -311,6 +335,7 @@ async def enqueue_subworkflow_task(
         await _fail_enqueued_task(
             session, workflow_id, task_index,
             f'Workflow {workflow_id} not found during subworkflow enqueue', broker,
+            error_code='WORKFLOW_ENQUEUE_FAILED',
         )
         return None
 
@@ -371,7 +396,14 @@ async def enqueue_subworkflow_task(
         task_args = tuple(raw_args)
     raw_kwargs = _deser_json(task_kwargs_json, 'subworkflow kwargs')
     if raw_kwargs is None and task_kwargs_json:
-        await _fail_enqueued_task(session, workflow_id, task_index, f'Corrupt kwargs JSON for subworkflow task {task_index}', broker)
+        await _fail_enqueued_task(
+            session,
+            workflow_id,
+            task_index,
+            f'Corrupt kwargs JSON for subworkflow task {task_index}',
+            broker,
+            error_code='WORKER_SERIALIZATION_ERROR',
+        )
         return None
     kwargs: dict[str, Any] = raw_kwargs if isinstance(raw_kwargs, dict) else {}
 
@@ -380,7 +412,14 @@ async def enqueue_subworkflow_task(
         if isinstance(args_from_raw, str):
             args_from_map = _deser_json(args_from_raw, 'subworkflow args_from')
             if args_from_map is None:
-                await _fail_enqueued_task(session, workflow_id, task_index, f'Corrupt args_from JSON for subworkflow task {task_index}', broker)
+                await _fail_enqueued_task(
+                    session,
+                    workflow_id,
+                    task_index,
+                    f'Corrupt args_from JSON for subworkflow task {task_index}',
+                    broker,
+                    error_code='WORKER_SERIALIZATION_ERROR',
+                )
                 return None
         else:
             args_from_map = args_from_raw
@@ -389,10 +428,17 @@ async def enqueue_subworkflow_task(
             args_from_typed = cast(dict[str, int], args_from_map)
             for kwarg_name, dep_index in args_from_typed.items():
                 if kwarg_name in kwargs:
-                    raise RuntimeError(
-                        f"args_from key '{kwarg_name}' conflicts with static kwarg "
-                        f"(task_index={task_index}, workflow_id={workflow_id})"
+                    await _fail_enqueued_task(
+                        session,
+                        workflow_id,
+                        task_index,
+                        (
+                            f"args_from key '{kwarg_name}' conflicts with static kwarg "
+                            f"(subworkflow task {task_index})"
+                        ),
+                        broker,
                     )
+                    return None
                 dep_result = all_dep_results.get(dep_index)
                 if dep_result is not None:
                     # Serialize TaskResult for transport
@@ -402,6 +448,7 @@ async def enqueue_subworkflow_task(
                             session, workflow_id, task_index,
                             f'Failed to serialize dep_result for kwarg {kwarg_name!r} (subworkflow task {task_index})',
                             broker,
+                            error_code='WORKER_SERIALIZATION_ERROR',
                         )
                         return None
                     kwargs[kwarg_name] = {
@@ -410,38 +457,56 @@ async def enqueue_subworkflow_task(
                     }
 
     # 4. Build child WorkflowSpec (parameterized)
-    if broker.app is None:
-        raise WorkflowValidationError(
-            message='Broker missing app reference for subworkflow',
-            code=ErrorCode.WORKFLOW_SUBWORKFLOW_APP_MISSING,
-            notes=[
-                'Subworkflows require a Horsies app instance to build the child spec',
-                'Ensure broker.app is set (Horsies.get_broker() does this automatically)',
-            ],
-            help_text='use app.get_broker() or attach app to broker before starting workflows',
+    try:
+        if broker.app is None:
+            raise WorkflowValidationError(
+                message='Broker missing app reference for subworkflow',
+                code=ErrorCode.WORKFLOW_SUBWORKFLOW_APP_MISSING,
+                notes=[
+                    'Subworkflows require a Horsies app instance to build the child spec',
+                    'Ensure broker.app is set (Horsies.get_broker() does this automatically)',
+                ],
+                help_text='use app.get_broker() or attach app to broker before starting workflows',
+            )
+
+        # Defense-in-depth: parameterized subworkflows must override build_with.
+        default_build_with = getattr(
+            WorkflowDefinition.build_with,
+            '__func__',
+            WorkflowDefinition.build_with,
         )
-
-    # Defense-in-depth: parameterized subworkflows must override build_with.
-    default_build_with = getattr(
-        WorkflowDefinition.build_with,
-        '__func__',
-        WorkflowDefinition.build_with,
-    )
-    build_with_fn = getattr(
-        workflow_def,
-        '_original_build_with',
-        workflow_def.build_with,
-    )
-    if (task_args or kwargs) and build_with_fn is default_build_with:
-        raise RuntimeError(
-            f"subworkflow '{workflow_def.name}' received runtime parameters "
-            'but uses default build_with(); override build_with(app, ...) to accept them'
+        build_with_fn = getattr(
+            workflow_def,
+            '_original_build_with',
+            workflow_def.build_with,
         )
+        if (task_args or kwargs) and build_with_fn is default_build_with:
+            raise RuntimeError(
+                f"subworkflow '{workflow_def.name}' received runtime parameters "
+                'but uses default build_with(); override build_with(app, ...) to accept them'
+            )
 
-    child_spec = workflow_def.build_with(broker.app, *task_args, **kwargs)
+        child_spec = workflow_def.build_with(broker.app, *task_args, **kwargs)
 
-    # Validate that build_with override didn't produce a type mismatch
-    validate_workflow_generic_output_match(workflow_def, child_spec)
+        # Validate that build_with override didn't produce a type mismatch
+        validate_workflow_generic_output_match(workflow_def, child_spec)
+    except Exception as exc:
+        logger.error(
+            f'Subworkflow enqueue build failed for {workflow_name}:{task_index}: '
+            f'{type(exc).__name__}: {exc}'
+        )
+        await _fail_enqueued_task(
+            session,
+            workflow_id,
+            task_index,
+            (
+                f'Subworkflow build failed: {type(exc).__name__}: {str(exc)[:200]} '
+                f'(workflow {workflow_name}:{task_index})'
+            ),
+            broker,
+            error_code='WORKFLOW_ENQUEUE_FAILED',
+        )
+        return None
 
     # 5. Create child workflow with parent reference
     child_id = str(uuid.uuid4())
@@ -506,12 +571,27 @@ async def enqueue_subworkflow_task(
 
         if child_is_subworkflow:
             child_sub = child_node
-            guard_no_positional_args(child_sub.name, child_sub.args)
+            try:
+                guard_no_positional_args(child_sub.name, child_sub.args)
+            except ValueError as exc:
+                await _fail_enqueued_task(
+                    session,
+                    workflow_id,
+                    task_index,
+                    (
+                        f'Invalid child subworkflow node args for {child_sub.name}: '
+                        f'{str(exc)[:200]}'
+                    ),
+                    broker,
+                    error_code='WORKFLOW_ENQUEUE_FAILED',
+                )
+                return None
             child_kwargs_json = _ser(dumps_json(child_sub.kwargs), 'child sub kwargs')
             if child_kwargs_json is None:
                 await _fail_enqueued_task(
                     session, workflow_id, task_index,
                     f'Failed to serialize kwargs for child sub {child_sub.name}', broker,
+                    error_code='WORKER_SERIALIZATION_ERROR',
                 )
                 return None
             await session.execute(
@@ -544,7 +624,21 @@ async def enqueue_subworkflow_task(
             )
         else:
             child_task = child_node
-            guard_no_positional_args(child_task.name, child_task.args)
+            try:
+                guard_no_positional_args(child_task.name, child_task.args)
+            except ValueError as exc:
+                await _fail_enqueued_task(
+                    session,
+                    workflow_id,
+                    task_index,
+                    (
+                        f'Invalid child task node args for {child_task.name}: '
+                        f'{str(exc)[:200]}'
+                    ),
+                    broker,
+                    error_code='WORKFLOW_ENQUEUE_FAILED',
+                )
+                return None
             child_task_options_json: str | None = getattr(
                 child_task.fn, 'task_options_json', None
             )
@@ -562,6 +656,7 @@ async def enqueue_subworkflow_task(
                 await _fail_enqueued_task(
                     session, workflow_id, task_index,
                     f'Failed to serialize kwargs for child task {child_task.name}', broker,
+                    error_code='WORKER_SERIALIZATION_ERROR',
                 )
                 return None
             await session.execute(

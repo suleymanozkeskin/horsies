@@ -12,9 +12,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import TaskResult, TaskError
-from horsies.core.models.workflow import TaskNode, WorkflowSpec, OnError
+from horsies.core.models.workflow import (
+    TaskNode,
+    WorkflowSpec,
+    OnError,
+    SubWorkflowNode,
+    WorkflowDefinition,
+)
 from horsies.core.errors import WorkflowValidationError
-from horsies.core.workflows.engine import start_workflow_async, on_workflow_task_complete
+from horsies.core.workflows.engine import (
+    start_workflow_async,
+    on_workflow_task_complete,
+    enqueue_workflow_task,
+    enqueue_subworkflow_task,
+)
 from horsies.core.codec.serde import loads_json
 
 from .conftest import (
@@ -1058,6 +1069,167 @@ class TestResume:
         # C should now be ENQUEUED (resume re-evaluated PENDING tasks)
         c_status = await _get_task_status(session, handle.workflow_id, 2)
         assert c_status == 'ENQUEUED', f'Expected ENQUEUED but got {c_status}'
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio(loop_scope='function')
+class TestEnqueuedFailureConversion:
+    """Post-ENQUEUED failures should convert to FAILED, not raise and strand state."""
+
+    @pytest_asyncio.fixture
+    async def setup(
+        self,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> _SetupTuple:
+        await session.execute(text('TRUNCATE horsies_workflow_tasks, horsies_workflows, horsies_tasks CASCADE'))
+        await session.commit()
+        return session, broker, app
+
+    async def test_enqueue_workflow_task_args_from_conflict_marks_failed(
+        self,
+        setup: _SetupTuple,
+    ) -> None:
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'enq_conflict_a')
+        task_b = make_args_receiver_task(app, 'enq_conflict_b')
+
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        # Start with a valid node config, then corrupt persisted kwargs to force
+        # a runtime args_from/static conflict post-ENQUEUED transition.
+        node_b = TaskNode(
+            fn=task_b,
+            waits_for=[node_a],
+            args_from={'input_result': node_a},
+            allow_failed_deps=True,
+        )
+
+        spec = make_workflow_spec(
+            broker=broker,
+            name='enq_conflict_regular',
+            tasks=[node_a, node_b],
+            on_error=OnError.FAIL,
+        )
+        handle = await start_workflow_async(spec, broker)
+
+        await session.execute(
+            text("""
+                UPDATE horsies_workflow_tasks
+                SET status = 'READY',
+                    task_kwargs = '{"input_result": 123}'
+                WHERE workflow_id = :wf_id AND task_index = 1
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        await session.commit()
+
+        result = await enqueue_workflow_task(
+            session,
+            handle.workflow_id,
+            1,
+            {0: TaskResult(ok=1)},
+            broker,
+        )
+        await session.commit()
+
+        assert result is None
+        row = (
+            await session.execute(
+                text("""
+                    SELECT status, task_id, result
+                    FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf_id AND task_index = 1
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+        ).fetchone()
+        assert row is not None
+        assert row[0] == 'FAILED'
+        assert row[1] is None
+        assert row[2] is not None
+        stored = row[2] if isinstance(row[2], dict) else loads_json(row[2]).unwrap()
+        assert isinstance(stored, dict)
+        err = stored.get('err')
+        assert isinstance(err, dict)
+        assert err.get('error_code') == 'WORKFLOW_ENQUEUE_FAILED'
+        msg = err.get('message')
+        assert isinstance(msg, str)
+        assert 'args_from key' in msg
+
+    async def test_enqueue_subworkflow_build_exception_marks_failed(
+        self,
+        setup: _SetupTuple,
+    ) -> None:
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'enq_sub_conflict_a')
+
+        class BrokenChild(WorkflowDefinition[int]):
+            name = 'broken_child_for_enqueue'
+
+            @classmethod
+            def build_with(cls, app: Horsies, *args: Any, **params: Any) -> WorkflowSpec[int]:
+                _ = app, args, params
+                raise RuntimeError('boom from build_with')
+
+        node_a = TaskNode(fn=task_a, kwargs={'value': 2})
+        node_sub: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=BrokenChild,
+            waits_for=[node_a],
+        )
+
+        spec = app.workflow(
+            name='enq_sub_build_exception',
+            tasks=[node_a, node_sub],
+            on_error=OnError.FAIL,
+        )
+        handle = await start_workflow_async(spec, broker)
+
+        await session.execute(
+            text("""
+                UPDATE horsies_workflow_tasks
+                SET status = 'READY'
+                WHERE workflow_id = :wf_id AND task_index = 1
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        await session.commit()
+
+        result = await enqueue_subworkflow_task(
+            session,
+            broker,
+            handle.workflow_id,
+            1,
+            {0: TaskResult(ok=2)},
+            0,
+            handle.workflow_id,
+        )
+        await session.commit()
+
+        assert result is None
+        row = (
+            await session.execute(
+                text("""
+                    SELECT status, task_id, sub_workflow_id, result
+                    FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf_id AND task_index = 1
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+        ).fetchone()
+        assert row is not None
+        assert row[0] == 'FAILED'
+        assert row[1] is None
+        assert row[2] is None
+        assert row[3] is not None
+        stored = row[3] if isinstance(row[3], dict) else loads_json(row[3]).unwrap()
+        assert isinstance(stored, dict)
+        err = stored.get('err')
+        assert isinstance(err, dict)
+        assert err.get('error_code') == 'WORKFLOW_ENQUEUE_FAILED'
+        msg = err.get('message')
+        assert isinstance(msg, str)
+        assert 'Subworkflow build failed' in msg
 
     async def test_resume_enqueues_ready_tasks(
         self,

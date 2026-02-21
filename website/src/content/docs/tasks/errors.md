@@ -91,6 +91,7 @@ Errors specific to workflow execution.
 | `UPSTREAM_SKIPPED` | Upstream task in workflow was skipped | No |
 | `WORKFLOW_CTX_MISSING_ID` | Workflow context is missing required ID | No |
 | `WORKFLOW_SUCCESS_CASE_NOT_MET` | Workflow success condition was not satisfied | No |
+| `WORKFLOW_ENQUEUE_FAILED` | Workflow node failed after READY→ENQUEUED transition during enqueue/build | No |
 
 ### User-Defined Error Codes
 

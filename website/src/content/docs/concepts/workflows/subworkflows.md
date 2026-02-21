@@ -779,6 +779,12 @@ broker = PostgresBroker(...)
 broker.app = app  # Attach before start_workflow
 ```
 
+**Runtime note (post-ENQUEUED path)**:
+If this condition is hit while a workflow is already running (for example, dependency completion triggers
+subworkflow enqueue and `broker.app` is `None`), Horsies does not re-raise `WorkflowValidationError` to the caller.
+Instead, it marks the `SubWorkflowNode` as `FAILED` with `TaskError.error_code = WORKFLOW_ENQUEUE_FAILED` so the
+workflow can continue deterministic failure propagation without leaving the node stranded in `ENQUEUED`.
+
 ### Error: `WORKFLOW_CTX_PARAM_MISSING`
 
 **Cause**: `workflow_ctx_from` is set but task function lacks the parameter.

@@ -1188,11 +1188,11 @@ class TestSubworkflowIntegration:
         assert grandchild_info[0] == 2
         assert grandchild_info[1] == handle.workflow_id
 
-    async def test_broker_app_missing_raises(
+    async def test_broker_app_missing_marks_node_failed(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """When broker.app is None during subworkflow enqueue, raises WorkflowValidationError."""
+        """When broker.app is None at enqueue time, node is FAILED (no post-ENQUEUED raise)."""
         session, broker, app = setup
 
         parent_task = make_simple_task(app, 'broker_missing_parent')
@@ -1215,13 +1215,26 @@ class TestSubworkflowIntegration:
         original_app = broker.app
         broker.app = None
         try:
-            # Completing dep triggers subworkflow enqueue → broker.app is None → raises
-            with pytest.raises(WorkflowValidationError, match='Broker missing app reference'):
-                await self._complete_task(
-                    session, broker, handle.workflow_id, 0, TaskResult(ok=1),
-                )
+            # Completing dep triggers subworkflow enqueue → broker.app is None.
+            # Post-ENQUEUED failures are converted to FAILED state instead of raising.
+            await self._complete_task(
+                session, broker, handle.workflow_id, 0, TaskResult(ok=1),
+            )
         finally:
             broker.app = original_app
+
+        row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+        assert row is not None
+        status, child_id, result_json = row
+        assert status == 'FAILED'
+        assert child_id is None
+
+        tr = _decode_task_result(result_json)
+        assert tr is not None and tr.is_err()
+        assert tr.err is not None
+        assert tr.err.error_code == 'WORKFLOW_ENQUEUE_FAILED'
+        assert tr.err.message is not None
+        assert 'Broker missing app reference' in tr.err.message
 
 
 # =============================================================================
