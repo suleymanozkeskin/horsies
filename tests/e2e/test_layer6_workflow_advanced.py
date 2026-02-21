@@ -23,6 +23,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import TaskResult
 
 from tests.e2e.helpers.assertions import assert_ok, assert_err
+from tests.e2e.helpers.db import wait_for_status
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.helpers.workflow import (
     get_workflow_tasks,
@@ -813,3 +814,191 @@ async def test_on_error_pause_resume_completes(broker: PostgresBroker) -> None:
         assert db_tasks[1]['status'] == 'FAILED', f"B should be FAILED, got {db_tasks[1]['status']}"
         # C depends on B which failed, so C should be SKIPPED
         assert db_tasks[2]['status'] == 'SKIPPED', f"C should be SKIPPED (B failed), got {db_tasks[2]['status']}"
+
+
+# =============================================================================
+# T6.9c: Workflow recovery after worker crash (full chain)
+# =============================================================================
+
+RECOVERY_INSTANCE = 'tests.e2e.tasks.instance_recovery:app'
+
+
+def _make_recovery_ready_check() -> Callable[[], bool]:
+    """Ready check for the recovery app instance."""
+    from horsies.core.task_decorator import TaskHandle
+    from tests.e2e.tasks import instance_recovery
+
+    handle: TaskHandle[str] | None = None
+
+    def _check() -> bool:
+        nonlocal handle
+        if handle is None:
+            handle = instance_recovery.healthcheck.send()
+        result = handle.get(timeout_ms=2000)
+        return result.is_ok()
+
+    return _check
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_workflow_recovers_after_worker_crash(
+    recovery_broker: PostgresBroker,
+) -> None:
+    """T6.9c: Workflow with in-flight tasks recovers after worker crash.
+
+    DAG: A(50ms) -> B(50ms) -> C(60s) -> E(50ms, recovery queue) -> F(50ms, recovery queue)
+                            -> D(60s) -/
+
+    E has allow_failed_deps=True so it runs after C,D are marked FAILED.
+    E and F are on "recovery" queue (max_concurrency=1) — sequential execution.
+
+    Kill worker after A,B complete and C,D are RUNNING.
+    Restart worker. Recovery chain:
+        reaper marks C,D FAILED (WORKER_CRASHED)
+        -> recover_stuck_workflows resolves wt mismatch
+        -> E runs (allow_failed_deps=True) on recovery queue
+        -> F runs after E on recovery queue
+        -> workflow finalizes as FAILED (C,D failed despite E,F succeeding)
+    """
+    import json
+    import os
+    import signal
+
+    from sqlalchemy import text as sa_text
+    from tests.e2e.tasks import instance_recovery
+
+    with run_worker(
+        RECOVERY_INSTANCE,
+        processes=2,
+        ready_check=_make_recovery_ready_check(),
+    ) as worker_proc:
+        handle = instance_recovery.spec_recovery_crash.start()
+
+        # Wait until A (idx 0) and B (idx 1) are COMPLETED in workflow_tasks
+        async def _ab_completed() -> bool:
+            tasks = await get_workflow_tasks(
+                recovery_broker.session_factory, handle.workflow_id,
+            )
+            if len(tasks) < 6:
+                return False
+            return (
+                tasks[0]['status'] == 'COMPLETED'
+                and tasks[1]['status'] == 'COMPLETED'
+            )
+
+        reached = await _wait_until(_ab_completed, timeout_s=15.0)
+        assert reached, 'A and B should complete before crash'
+
+        # Get underlying task_ids for C (idx 2) and D (idx 3)
+        async with recovery_broker.session_factory() as session:
+            result = await session.execute(
+                sa_text("""
+                    SELECT task_index, task_id FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf_id AND task_index IN (2, 3)
+                    ORDER BY task_index
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+            rows = result.fetchall()
+            assert len(rows) == 2, f'Expected 2 rows for C,D, got {len(rows)}'
+            task_id_c = rows[0][1]
+            task_id_d = rows[1][1]
+
+        assert task_id_c is not None, 'C should have been enqueued (task_id set)'
+        assert task_id_d is not None, 'D should have been enqueued (task_id set)'
+
+        # Wait until both underlying tasks are actually RUNNING
+        await wait_for_status(
+            recovery_broker.session_factory, task_id_c, 'RUNNING', timeout_s=15.0,
+        )
+        await wait_for_status(
+            recovery_broker.session_factory, task_id_d, 'RUNNING', timeout_s=15.0,
+        )
+
+        # Kill the entire worker process group
+        os.killpg(worker_proc.pid, signal.SIGKILL)
+        worker_proc.wait(timeout=5.0)
+
+    # Start a new worker — its reaper detects stale tasks and recovery kicks in.
+    # E and F will be picked up on the "recovery" queue after C,D are resolved.
+    with run_worker(
+        RECOVERY_INSTANCE,
+        processes=2,
+        ready_check=_make_recovery_ready_check(),
+    ):
+        status = await wait_for_workflow_completion(
+            recovery_broker.session_factory, handle.workflow_id, timeout_s=30.0,
+        )
+
+    # -- Assertions --
+
+    assert status == 'FAILED', f'Workflow should be FAILED, got {status}'
+
+    db_tasks = await get_workflow_tasks(
+        recovery_broker.session_factory, handle.workflow_id,
+    )
+    assert len(db_tasks) == 6, f'Expected 6 workflow tasks, got {len(db_tasks)}'
+
+    # A, B: preserved — completed before crash
+    assert db_tasks[0]['status'] == 'COMPLETED', (
+        f"A should be COMPLETED, got {db_tasks[0]['status']}"
+    )
+    assert db_tasks[1]['status'] == 'COMPLETED', (
+        f"B should be COMPLETED, got {db_tasks[1]['status']}"
+    )
+
+    # C, D: marked FAILED by recovery (in-flight when killed)
+    assert db_tasks[2]['status'] == 'FAILED', (
+        f"C should be FAILED, got {db_tasks[2]['status']}"
+    )
+    assert db_tasks[3]['status'] == 'FAILED', (
+        f"D should be FAILED, got {db_tasks[3]['status']}"
+    )
+
+    # E: COMPLETED — ran after recovery (allow_failed_deps=True, recovery queue)
+    assert db_tasks[4]['status'] == 'COMPLETED', (
+        f"E should be COMPLETED, got {db_tasks[4]['status']}"
+    )
+
+    # F: COMPLETED — ran after E on recovery queue (max_concurrency=1)
+    assert db_tasks[5]['status'] == 'COMPLETED', (
+        f"F should be COMPLETED, got {db_tasks[5]['status']}"
+    )
+
+    # Verify WORKER_CRASHED error code on crashed task C
+    async with recovery_broker.session_factory() as session:
+        result = await session.execute(
+            sa_text("""
+                SELECT result FROM horsies_tasks WHERE id = :id
+            """),
+            {'id': task_id_c},
+        )
+        row = result.fetchone()
+        assert row is not None and row[0] is not None, 'C task should have a result'
+        result_data = json.loads(row[0])
+        error_code = result_data.get('err', {}).get('error_code', '')
+        assert error_code == 'WORKER_CRASHED', (
+            f"C should have WORKER_CRASHED error, got {error_code}"
+        )
+
+    # Verify E and F ran on the "recovery" queue
+    async with recovery_broker.session_factory() as session:
+        result = await session.execute(
+            sa_text("""
+                SELECT wt.task_index, t.queue_name
+                FROM horsies_workflow_tasks wt
+                JOIN horsies_tasks t ON t.id = wt.task_id
+                WHERE wt.workflow_id = :wf_id AND wt.task_index IN (4, 5)
+                ORDER BY wt.task_index
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        queue_rows = result.fetchall()
+        assert len(queue_rows) == 2, f'Expected 2 queue rows for E,F, got {len(queue_rows)}'
+        assert queue_rows[0][1] == 'recovery', (
+            f"E should be on 'recovery' queue, got {queue_rows[0][1]}"
+        )
+        assert queue_rows[1][1] == 'recovery', (
+            f"F should be on 'recovery' queue, got {queue_rows[1][1]}"
+        )
