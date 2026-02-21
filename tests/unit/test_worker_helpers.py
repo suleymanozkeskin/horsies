@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from psycopg import InterfaceError, OperationalError
 
-from horsies.core.types.result import Ok
+from horsies.core.types.result import Ok, Err
 from psycopg.errors import DeadlockDetected, SerializationFailure
 
 from horsies.core.worker.worker import (
@@ -316,6 +316,24 @@ class TestWorkerStop:
 
         assert finalizer_task.cancelled()
         worker.listener.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_finalizer_err_result_is_routed_to_finalize_handler(self) -> None:
+        worker = _make_worker()
+        worker._handle_finalize_error = AsyncMock()  # type: ignore[method-assign]
+
+        async def _failing_finalize() -> Err[RuntimeError]:
+            return Err(RuntimeError('finalize result error'))
+
+        task = worker._spawn_background(
+            _failing_finalize(),
+            name='finalizer-result-err',
+            finalizer=True,
+        )
+        await task
+        await asyncio.sleep(0.01)
+
+        worker._handle_finalize_error.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

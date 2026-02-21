@@ -16,6 +16,7 @@ from typing import Any, Optional, Sequence
 import hashlib
 import sys
 from psycopg.types.json import Jsonb
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from horsies.core.app import Horsies
 from horsies.core.brokers.listener import PostgresListener
@@ -27,7 +28,7 @@ from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
 from horsies.core.logging import get_logger
 from horsies.core.worker.current import set_current_app
 from horsies.core.models.resilience import WorkerResilienceConfig
-from horsies.core.types.result import Ok, Err, is_err
+from horsies.core.types.result import Ok, Err, Result, is_err
 from horsies.core.utils.db import is_retryable_connection_error
 
 # --- Imports from sibling modules (extracted for maintainability) ---
@@ -86,6 +87,20 @@ from horsies.core.worker.sql import (  # noqa: F401
 
 logger = get_logger("worker")
 
+_FINALIZE_STAGE_PHASE1 = 'phase1_persist'
+_FINALIZE_STAGE_PHASE2 = 'phase2_workflow'
+_FINALIZE_STAGE_FUTURE = 'future'
+_FINALIZE_PHASE1_MAX_RETRIES = 3
+_FINALIZE_PHASE2_MAX_RETRIES = 5
+_FINALIZE_RETRY_BASE_DELAY_S = 0.5
+_FINALIZE_RETRY_MAX_DELAY_S = 15.0
+
+GET_TASK_STATUS_RESULT_SQL = text("""
+    SELECT status, result
+    FROM horsies_tasks
+    WHERE id = :id
+""")
+
 
 @dataclass
 class _RetryBackoff:
@@ -111,6 +126,16 @@ class _RetryBackoff:
         jitter_range = base_ms * 0.25
         delay_ms = base_ms + random.uniform(-jitter_range, jitter_range)
         return max(0.1, delay_ms / 1000.0)
+
+
+@dataclass(frozen=True)
+class _FinalizeError:
+    error_code: LibraryErrorCode | str
+    message: str
+    stage: str
+    task_id: str
+    retryable: bool = False
+    data: dict[str, Any] | None = None
 
 
 def _collect_psutil_metrics() -> tuple[float, float, float]:
@@ -154,6 +179,7 @@ class Worker:
         self._stop = asyncio.Event()
         self._service_tasks: set[asyncio.Task[Any]] = set()
         self._finalizer_tasks: set[asyncio.Task[Any]] = set()
+        self._finalize_retry_attempts: dict[tuple[str, str], int] = {}
 
     def request_stop(self) -> None:
         """Request worker to stop gracefully."""
@@ -178,6 +204,14 @@ class Worker:
             exc = t.exception()
             if exc is not None:
                 logger.error(f'Background task {t.get_name()!r} failed: {exc}')
+                return
+            if finalizer:
+                result = t.result()
+                if isinstance(result, Err):
+                    self._spawn_background(
+                        self._handle_finalize_error(result.err_value),
+                        name=f'finalize-error-{t.get_name()}',
+                    )
 
         task.add_done_callback(_on_done)
         return task
@@ -923,164 +957,475 @@ class Worker:
 
     async def _finalize_after(
         self, fut: 'asyncio.Future[tuple[bool, str, Optional[str]]]', task_id: str
-    ) -> None:
+    ) -> Result[None, _FinalizeError]:
         try:
             ok, result_json_str, failed_reason = await fut
         except asyncio.CancelledError:
             raise
         except BrokenProcessPool as exc:
             await self._handle_broken_pool(task_id, exc)
-            return
+            return Err(
+                self._make_finalize_error(
+                    task_id=task_id,
+                    stage=_FINALIZE_STAGE_FUTURE,
+                    message=f'Broken process pool during finalize: {exc}',
+                    retryable=False,
+                    data={'exception_type': type(exc).__name__},
+                )
+            )
         except Exception as exc:
-            await self._requeue_claimed_task(
+            requeued = await self._requeue_claimed_task(
                 task_id, f'Worker future failed before result: {exc}'
             )
-            return
-        now = datetime.now(timezone.utc)
-
-        # Note: Heartbeat thread in task process automatically dies when process completes
-
-        async with self.sf() as s:
-            if not ok:
-                # CLAIM_LOST: Another worker reclaimed this task - do nothing
-                # The task is not failed; it belongs to another worker now
-                match failed_reason:
-                    case (
-                        'CLAIM_LOST'
-                        | 'OWNERSHIP_UNCONFIRMED'
-                        | 'WORKFLOW_CHECK_FAILED'
-                        | 'WORKFLOW_STOPPED'
-                    ):
-                        logger.debug(
-                            f'Task {task_id} aborted with reason={failed_reason}, skipping finalization'
-                        )
-                        return
-                    case _:
-                        pass
-
-                # worker-level failure (rare): mark FAILED with reason
-                res = await s.execute(
-                    MARK_TASK_FAILED_WORKER_SQL,
-                    {
-                        'now': now,
-                        'reason': failed_reason or 'Worker failure',
-                        'id': task_id,
+            return Err(
+                self._make_finalize_error(
+                    task_id=task_id,
+                    stage=_FINALIZE_STAGE_FUTURE,
+                    message=f'Worker future failed before result: {exc}',
+                    retryable=is_retryable_connection_error(exc) and not requeued,
+                    data={
+                        'exception_type': type(exc).__name__,
+                        'requeued': requeued,
                     },
                 )
-                if res.fetchone() is None:
-                    logger.warning(
-                        f'Task {task_id} finalize aborted: status is no longer RUNNING '
-                        f'(reaper likely reclaimed). Skipping to prevent double-execution.'
-                    )
-                    return
-                # Trigger automatically sends NOTIFY on UPDATE
-                await s.commit()
-                return
+            )
+        now = datetime.now(timezone.utc)
 
-            # Parse the TaskResult we produced
-            _loads_r = loads_json(result_json_str)
-            if is_err(_loads_r):
-                logger.error(f'Task {task_id} result JSON is corrupt: {_loads_r.err_value}')
-                _err_tr: TaskResult[None, TaskError] = TaskResult(
-                    err=TaskError(
-                        error_code=LibraryErrorCode.WORKER_SERIALIZATION_ERROR,
-                        message=f'Result JSON corrupt: {_loads_r.err_value}',
-                        data={'task_id': task_id},
-                    ),
-                )
-                await s.execute(
-                    MARK_TASK_FAILED_SQL,
-                    {'now': now, 'result_json': serialize_error_payload(_err_tr), 'id': task_id},
-                )
-                await s.commit()
-                return
-            _tr_r = task_result_from_json(_loads_r.ok_value)
-            if is_err(_tr_r):
-                logger.error(f'Task {task_id} result deser failed: {_tr_r.err_value}')
-                _err_tr = TaskResult(
-                    err=TaskError(
-                        error_code=LibraryErrorCode.WORKER_SERIALIZATION_ERROR,
-                        message=f'Result deser failed: {_tr_r.err_value}',
-                        data={'task_id': task_id},
-                    ),
-                )
-                await s.execute(
-                    MARK_TASK_FAILED_SQL,
-                    {'now': now, 'result_json': serialize_error_payload(_err_tr), 'id': task_id},
-                )
-                await s.commit()
-                return
-            tr = _tr_r.ok_value
-            if tr.is_err():
-                # Check if this task should be retried
-                task_error = tr.unwrap_err()
-                match task_error.error_code if task_error else None:
-                    case 'WORKFLOW_STOPPED':
-                        logger.debug(
-                            f'Task {task_id} skipped due to workflow stop, skipping finalization'
-                        )
-                        return
-                    case _:
-                        pass
-                should_retry = await self._should_retry_task(task_id, task_error, s)
-                if should_retry:
-                    retry_ok = await self._schedule_retry(task_id, s)
-                    if not retry_ok:
+        phase1_r = await self._persist_task_terminal_state(
+            task_id=task_id,
+            now=now,
+            ok=ok,
+            result_json_str=result_json_str,
+            failed_reason=failed_reason,
+        )
+        if is_err(phase1_r):
+            return phase1_r
+        tr = phase1_r.ok_value
+        if tr is None:
+            self._clear_finalize_retry_attempts(task_id, _FINALIZE_STAGE_PHASE1)
+            return Ok(None)
+
+        # Phase 2: workflow progression + capacity wakeups in a separate transaction.
+        # If this fails, the terminal task result remains durable and workflow recovery can resume.
+        phase2_r = await self._finalize_workflow_phase(task_id, tr)
+        if is_err(phase2_r):
+            return phase2_r
+        self._clear_finalize_retry_attempts(task_id, _FINALIZE_STAGE_PHASE1)
+        self._clear_finalize_retry_attempts(task_id, _FINALIZE_STAGE_PHASE2)
+        return Ok(None)
+
+    def _make_finalize_error(
+        self,
+        *,
+        task_id: str,
+        stage: str,
+        message: str,
+        retryable: bool,
+        data: dict[str, Any] | None = None,
+        error_code: LibraryErrorCode | str = LibraryErrorCode.BROKER_ERROR,
+    ) -> _FinalizeError:
+        return _FinalizeError(
+            error_code=error_code,
+            message=message,
+            stage=stage,
+            task_id=task_id,
+            retryable=retryable,
+            data=data,
+        )
+
+    def _clear_finalize_retry_attempts(self, task_id: str, stage: str) -> None:
+        self._finalize_retry_attempts.pop((task_id, stage), None)
+
+    async def _persist_task_terminal_state(
+        self,
+        *,
+        task_id: str,
+        now: datetime,
+        ok: bool,
+        result_json_str: str,
+        failed_reason: str | None,
+    ) -> Result[TaskResult[Any, TaskError] | None, _FinalizeError]:
+        """Phase 1 of finalization: persist task terminal state/result durably."""
+        try:
+            # Note: Heartbeat thread in task process automatically dies when process completes.
+            async with self.sf() as s:
+                if not ok:
+                    # CLAIM_LOST: Another worker reclaimed this task - do nothing
+                    # The task is not failed; it belongs to another worker now
+                    match failed_reason:
+                        case (
+                            'CLAIM_LOST'
+                            | 'OWNERSHIP_UNCONFIRMED'
+                            | 'WORKFLOW_CHECK_FAILED'
+                            | 'WORKFLOW_STOPPED'
+                        ):
+                            logger.debug(
+                                f'Task {task_id} aborted with reason={failed_reason}, skipping finalization'
+                            )
+                            return Ok(None)
+                        case _:
+                            pass
+
+                    # worker-level failure (rare): mark FAILED with reason
+                    res = await s.execute(
+                        MARK_TASK_FAILED_WORKER_SQL,
+                        {
+                            'now': now,
+                            'reason': failed_reason or 'Worker failure',
+                            'id': task_id,
+                        },
+                    )
+                    if res.fetchone() is None:
                         logger.warning(
-                            f'Task {task_id} retry aborted during finalize: '
-                            f'task no longer RUNNING (reaper reclaimed).'
+                            f'Task {task_id} finalize aborted: status is no longer RUNNING '
+                            f'(reaper likely reclaimed). Skipping to prevent double-execution.'
                         )
+                        return Ok(None)
+                    # Trigger automatically sends NOTIFY on UPDATE
                     await s.commit()
-                    return
+                    return Ok(None)
 
-                # Mark as failed if no retry
-                fail_res = await s.execute(
-                    MARK_TASK_FAILED_SQL,
-                    {'now': now, 'result_json': result_json_str, 'id': task_id},
-                )
-                if fail_res.fetchone() is None:
-                    logger.warning(
-                        f'Task {task_id} finalize-fail aborted: status is no longer RUNNING '
-                        f'(reaper likely reclaimed). Skipping to prevent double-execution.'
+                # Parse the TaskResult we produced
+                _loads_r = loads_json(result_json_str)
+                if is_err(_loads_r):
+                    logger.error(f'Task {task_id} result JSON is corrupt: {_loads_r.err_value}')
+                    _err_tr: TaskResult[None, TaskError] = TaskResult(
+                        err=TaskError(
+                            error_code=LibraryErrorCode.WORKER_SERIALIZATION_ERROR,
+                            message=f'Result JSON corrupt: {_loads_r.err_value}',
+                            data={'task_id': task_id},
+                        ),
                     )
-                    return
-            else:
-                comp_res = await s.execute(
-                    MARK_TASK_COMPLETED_SQL,
-                    {'now': now, 'result_json': result_json_str, 'id': task_id},
-                )
-                if comp_res.fetchone() is None:
-                    logger.warning(
-                        f'Task {task_id} finalize-complete aborted: status is no longer RUNNING '
-                        f'(reaper likely reclaimed). Skipping to prevent double-execution.'
+                    await s.execute(
+                        MARK_TASK_FAILED_SQL,
+                        {'now': now, 'result_json': serialize_error_payload(_err_tr), 'id': task_id},
                     )
-                    return
+                    await s.commit()
+                    return Ok(None)
+                _tr_r = task_result_from_json(_loads_r.ok_value)
+                if is_err(_tr_r):
+                    logger.error(f'Task {task_id} result deser failed: {_tr_r.err_value}')
+                    _err_tr = TaskResult(
+                        err=TaskError(
+                            error_code=LibraryErrorCode.WORKER_SERIALIZATION_ERROR,
+                            message=f'Result deser failed: {_tr_r.err_value}',
+                            data={'task_id': task_id},
+                        ),
+                    )
+                    await s.execute(
+                        MARK_TASK_FAILED_SQL,
+                        {'now': now, 'result_json': serialize_error_payload(_err_tr), 'id': task_id},
+                    )
+                    await s.commit()
+                    return Ok(None)
+                tr = _tr_r.ok_value
+                if tr.is_err():
+                    # Check if this task should be retried
+                    task_error = tr.unwrap_err()
+                    match task_error.error_code if task_error else None:
+                        case 'WORKFLOW_STOPPED':
+                            logger.debug(
+                                f'Task {task_id} skipped due to workflow stop, skipping finalization'
+                            )
+                            return Ok(None)
+                        case _:
+                            pass
+                    should_retry = await self._should_retry_task(task_id, task_error, s)
+                    if should_retry:
+                        retry_ok = await self._schedule_retry(task_id, s)
+                        if not retry_ok:
+                            logger.warning(
+                                f'Task {task_id} retry aborted during finalize: '
+                                f'task no longer RUNNING (reaper reclaimed).'
+                            )
+                        await s.commit()
+                        return Ok(None)
 
-            # Handle workflow task completion (if this task is part of a workflow)
-            await self._handle_workflow_task_if_needed(s, task_id, tr)
+                    # Mark as failed if no retry
+                    fail_res = await s.execute(
+                        MARK_TASK_FAILED_SQL,
+                        {'now': now, 'result_json': result_json_str, 'id': task_id},
+                    )
+                    if fail_res.fetchone() is None:
+                        logger.warning(
+                            f'Task {task_id} finalize-fail aborted: status is no longer RUNNING '
+                            f'(reaper likely reclaimed). Skipping to prevent double-execution.'
+                        )
+                        return Ok(None)
+                else:
+                    comp_res = await s.execute(
+                        MARK_TASK_COMPLETED_SQL,
+                        {'now': now, 'result_json': result_json_str, 'id': task_id},
+                    )
+                    if comp_res.fetchone() is None:
+                        logger.warning(
+                            f'Task {task_id} finalize-complete aborted: status is no longer RUNNING '
+                            f'(reaper likely reclaimed). Skipping to prevent double-execution.'
+                        )
+                        return Ok(None)
 
-            # Proactively wake workers to re-check capacity/backlog.
-            try:
-                # Notify workers globally and on the specific queue to wake claims
-                # Fetch queue name for this task
-                resq = await s.execute(
-                    GET_TASK_QUEUE_NAME_SQL,
-                    {'id': task_id},
+                await s.commit()
+                return Ok(tr)
+        except Exception as exc:
+            return Err(
+                self._make_finalize_error(
+                    task_id=task_id,
+                    stage=_FINALIZE_STAGE_PHASE1,
+                    message='Failed to persist terminal task state',
+                    retryable=is_retryable_connection_error(exc),
+                    data={
+                        'exception_type': type(exc).__name__,
+                        'exception': str(exc)[:500],
+                        'outcome': {
+                            'ok': ok,
+                            'result_json_str': result_json_str,
+                            'failed_reason': failed_reason,
+                        },
+                    },
                 )
-                rowq = resq.fetchone()
-                qname = str(rowq[0]) if rowq and rowq[0] else 'default'
-                payload = f'capacity:{task_id}'
-                await s.execute(NOTIFY_TASK_NEW_SQL, {'c1': 'task_new', 'p': payload})
-                await s.execute(
-                    NOTIFY_TASK_QUEUE_SQL,
-                    {'c2': f'task_queue_{qname}', 'p': payload},
-                )
-            except Exception:
-                # Non-fatal if NOTIFY fails; continue
-                pass
+            )
 
-            # Trigger automatically sends NOTIFY on UPDATE; commit to flush NOTIFYs
-            await s.commit()
+    async def _finalize_workflow_phase(
+        self,
+        task_id: str,
+        tr: 'TaskResult[Any, TaskError]',
+    ) -> Result[None, _FinalizeError]:
+        """Phase 2 of finalization: workflow advancement and worker wake notifications."""
+        try:
+            async with self.sf() as s:
+                # Handle workflow task completion (if this task is part of a workflow)
+                await self._handle_workflow_task_if_needed(s, task_id, tr)
+
+                # Proactively wake workers to re-check capacity/backlog.
+                try:
+                    # Notify workers globally and on the specific queue to wake claims
+                    # Fetch queue name for this task
+                    resq = await s.execute(
+                        GET_TASK_QUEUE_NAME_SQL,
+                        {'id': task_id},
+                    )
+                    rowq = resq.fetchone()
+                    qname = str(rowq[0]) if rowq and rowq[0] else 'default'
+                    payload = f'capacity:{task_id}'
+                    await s.execute(NOTIFY_TASK_NEW_SQL, {'c1': 'task_new', 'p': payload})
+                    await s.execute(
+                        NOTIFY_TASK_QUEUE_SQL,
+                        {'c2': f'task_queue_{qname}', 'p': payload},
+                    )
+                except Exception:
+                    # Non-fatal if NOTIFY fails; workflow state is already persisted.
+                    pass
+
+                # Trigger automatically sends NOTIFY on UPDATE; commit to flush NOTIFYs
+                await s.commit()
+
+            return Ok(None)
+        except Exception as exc:
+            return Err(
+                self._make_finalize_error(
+                    task_id=task_id,
+                    stage=_FINALIZE_STAGE_PHASE2,
+                    message='Workflow finalize phase failed after task terminal state persisted',
+                    retryable=is_retryable_connection_error(exc),
+                    data={
+                        'task_id': task_id,
+                        'phase': 'finalize_phase_2',
+                        'exception_type': type(exc).__name__,
+                        'exception': str(exc)[:500],
+                    },
+                )
+            )
+
+    async def _load_persisted_task_result(
+        self, task_id: str
+    ) -> Result[TaskResult[Any, TaskError], _FinalizeError]:
+        """Load a terminal task's persisted TaskResult for phase-2 replay retries."""
+        try:
+            async with self.sf() as s:
+                res = await s.execute(GET_TASK_STATUS_RESULT_SQL, {'id': task_id})
+                row = res.fetchone()
+                if row is None:
+                    return Err(
+                        self._make_finalize_error(
+                            task_id=task_id,
+                            stage=_FINALIZE_STAGE_PHASE2,
+                            message='Cannot replay finalize phase-2: task row not found',
+                            retryable=False,
+                        )
+                    )
+                status = str(row[0]) if row[0] is not None else ''
+                raw_result = row[1]
+                if status not in ('COMPLETED', 'FAILED') or raw_result is None:
+                    return Err(
+                        self._make_finalize_error(
+                            task_id=task_id,
+                            stage=_FINALIZE_STAGE_PHASE2,
+                            message='Cannot replay finalize phase-2: terminal task result unavailable',
+                            retryable=False,
+                            data={'status': status},
+                        )
+                    )
+                loads_r = loads_json(raw_result)
+                if is_err(loads_r):
+                    return Err(
+                        self._make_finalize_error(
+                            task_id=task_id,
+                            stage=_FINALIZE_STAGE_PHASE2,
+                            message=f'Cannot replay finalize phase-2: stored result JSON corrupt: {loads_r.err_value}',
+                            retryable=False,
+                        )
+                    )
+                tr_r = task_result_from_json(loads_r.ok_value)
+                if is_err(tr_r):
+                    return Err(
+                        self._make_finalize_error(
+                            task_id=task_id,
+                            stage=_FINALIZE_STAGE_PHASE2,
+                            message=f'Cannot replay finalize phase-2: stored result deserialize failed: {tr_r.err_value}',
+                            retryable=False,
+                        )
+                    )
+                return Ok(tr_r.ok_value)
+        except Exception as exc:
+            return Err(
+                self._make_finalize_error(
+                    task_id=task_id,
+                    stage=_FINALIZE_STAGE_PHASE2,
+                    message='Cannot replay finalize phase-2: loading persisted task result failed',
+                    retryable=is_retryable_connection_error(exc),
+                    data={
+                        'exception_type': type(exc).__name__,
+                        'exception': str(exc)[:500],
+                    },
+                )
+            )
+
+    async def _handle_finalize_error(self, err: Any) -> None:
+        """Handle finalize Result errors with bounded retries for phase1/phase2."""
+        if not isinstance(err, _FinalizeError):
+            logger.error(f'Unexpected finalize error payload type: {type(err).__name__}')
+            return
+
+        stage = err.stage
+        task_id = err.task_id
+        if stage == _FINALIZE_STAGE_PHASE1:
+            max_attempts = _FINALIZE_PHASE1_MAX_RETRIES
+        elif stage == _FINALIZE_STAGE_PHASE2:
+            max_attempts = _FINALIZE_PHASE2_MAX_RETRIES
+        else:
+            logger.error(
+                f'Finalize error ({task_id}) stage={stage}: {err.message}; data={err.data}'
+            )
+            return
+
+        key = (task_id, stage)
+        attempts = self._finalize_retry_attempts.get(key, 0)
+
+        if not err.retryable:
+            logger.error(
+                f'Finalize error non-retryable ({task_id}) stage={stage}: {err.message}; data={err.data}'
+            )
+            self._clear_finalize_retry_attempts(task_id, stage)
+            return
+
+        if attempts >= max_attempts:
+            logger.critical(
+                f'Finalize retries exhausted for task {task_id} stage={stage} after {attempts} attempts: '
+                f'{err.message}; data={err.data}'
+            )
+            self._clear_finalize_retry_attempts(task_id, stage)
+            return
+
+        attempt_no = attempts + 1
+        self._finalize_retry_attempts[key] = attempt_no
+        delay = min(
+            _FINALIZE_RETRY_MAX_DELAY_S,
+            _FINALIZE_RETRY_BASE_DELAY_S * (2 ** (attempt_no - 1)),
+        )
+        logger.warning(
+            f'Finalize retry scheduled for task {task_id} stage={stage} '
+            f'({attempt_no}/{max_attempts}) in {delay:.1f}s: {err.message}'
+        )
+
+        if stage == _FINALIZE_STAGE_PHASE1:
+            self._spawn_background(
+                self._retry_finalize_phase1(err, delay),
+                name=f'finalize-retry-phase1-{task_id}',
+            )
+        else:
+            self._spawn_background(
+                self._retry_finalize_phase2(err, delay),
+                name=f'finalize-retry-phase2-{task_id}',
+            )
+
+    async def _retry_finalize_phase1(self, err: _FinalizeError, delay_s: float) -> None:
+        """Retry phase-1 terminal persistence from captured child outcome payload."""
+        await self._sleep_with_stop(delay_s)
+        if self._stop.is_set():
+            return
+
+        outcome = (err.data or {}).get('outcome')
+        if not isinstance(outcome, dict):
+            logger.error(
+                f'Finalize phase-1 retry missing outcome payload for task {err.task_id}'
+            )
+            self._clear_finalize_retry_attempts(err.task_id, _FINALIZE_STAGE_PHASE1)
+            return
+
+        ok = bool(outcome.get('ok', False))
+        result_json_str = outcome.get('result_json_str')
+        if not isinstance(result_json_str, str):
+            logger.error(
+                f'Finalize phase-1 retry missing result_json_str for task {err.task_id}'
+            )
+            self._clear_finalize_retry_attempts(err.task_id, _FINALIZE_STAGE_PHASE1)
+            return
+        failed_reason_raw = outcome.get('failed_reason')
+        failed_reason = (
+            str(failed_reason_raw) if failed_reason_raw is not None else None
+        )
+
+        phase1_r = await self._persist_task_terminal_state(
+            task_id=err.task_id,
+            now=datetime.now(timezone.utc),
+            ok=ok,
+            result_json_str=result_json_str,
+            failed_reason=failed_reason,
+        )
+        if is_err(phase1_r):
+            await self._handle_finalize_error(phase1_r.err_value)
+            return
+
+        tr = phase1_r.ok_value
+        if tr is None:
+            self._clear_finalize_retry_attempts(err.task_id, _FINALIZE_STAGE_PHASE1)
+            return
+
+        phase2_r = await self._finalize_workflow_phase(err.task_id, tr)
+        if is_err(phase2_r):
+            await self._handle_finalize_error(phase2_r.err_value)
+            return
+
+        self._clear_finalize_retry_attempts(err.task_id, _FINALIZE_STAGE_PHASE1)
+        self._clear_finalize_retry_attempts(err.task_id, _FINALIZE_STAGE_PHASE2)
+
+    async def _retry_finalize_phase2(self, err: _FinalizeError, delay_s: float) -> None:
+        """Retry phase-2 workflow advancement from persisted terminal task result."""
+        await self._sleep_with_stop(delay_s)
+        if self._stop.is_set():
+            return
+
+        load_r = await self._load_persisted_task_result(err.task_id)
+        if is_err(load_r):
+            await self._handle_finalize_error(load_r.err_value)
+            return
+
+        phase2_r = await self._finalize_workflow_phase(err.task_id, load_r.ok_value)
+        if is_err(phase2_r):
+            await self._handle_finalize_error(phase2_r.err_value)
+            return
+
+        self._clear_finalize_retry_attempts(err.task_id, _FINALIZE_STAGE_PHASE2)
 
     async def _handle_workflow_task_if_needed(
         self,

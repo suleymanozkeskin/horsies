@@ -348,13 +348,15 @@ async def test_resume_continues_workflow(broker: PostgresBroker) -> None:
         resumed = handle.resume()
         assert resumed is True, 'Workflow should be resumable'
 
-        # Verify workflow status is RUNNING
+        # Verify workflow leaves PAUSED after resume.
+        # Fast workers may complete the remaining DAG before this read, so COMPLETED
+        # is also valid here.
         wf_status = await get_workflow_status(
             broker.session_factory, handle.workflow_id
         )
         assert (
-            wf_status == 'RUNNING'
-        ), f'Workflow should be RUNNING after resume, got {wf_status}'
+            wf_status in ('RUNNING', 'COMPLETED')
+        ), f'Workflow should leave PAUSED after resume, got {wf_status}'
 
         # Wait for completion
         status = await wait_for_workflow_completion(
