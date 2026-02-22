@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections import deque
 from typing import TYPE_CHECKING, Any, TypeVar, cast
@@ -9,22 +10,21 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.codec.serde import dumps_json, loads_json, SerializationError, SerdeResult
-from horsies.core.types.result import is_err as _is_err
-
-
-def _ser_or_raise(result: SerdeResult[str], context: str) -> str:
-    """Extract a serde Result or raise with context. Used at workflow-start
-    boundaries where serialization failure means the workflow cannot be created."""
-    if _is_err(result):
-        raise SerializationError(f'Failed to serialize {context}: {result.err_value}')
-    return result.ok_value
+from horsies.core.types.result import Ok, Err, is_err as _is_err
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
     WorkflowHandle,
     SubWorkflowNode,
     validate_workflow_generic_output_match,
 )
-from horsies.core.errors import WorkflowValidationError, ErrorCode
+from horsies.core.errors import WorkflowValidationError, MultipleValidationErrors, ErrorCode
+from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.workflows.start_types import (
+    WorkflowStartError,
+    WorkflowStartErrorCode,
+    WorkflowStartResult,
+    WorkflowStartStage,
+)
 from horsies.core.workflows.sql import (
     CHECK_WORKFLOW_EXISTS_SQL,
     INSERT_WORKFLOW_SQL,
@@ -42,6 +42,19 @@ from horsies.core.workflows.sql import (
 )
 
 logger = get_logger('workflow.engine')
+
+
+def _ser_or_raise(result: SerdeResult[str], context: str) -> str:
+    """Extract a serde Result or raise with context.
+
+    Used inside the DB transaction zone of ``start_workflow_async``
+    where ``SerializationError`` is caught and converted to
+    ``Err(SERIALIZATION_FAILED)``.
+    """
+    if _is_err(result):
+        raise SerializationError(f'Failed to serialize {context}: {result.err_value}')
+    return result.ok_value
+
 
 if TYPE_CHECKING:
     from horsies.core.models.workflow import WorkflowSpec
@@ -86,9 +99,8 @@ async def start_workflow_async(
     spec: 'WorkflowSpec[OutT]',
     broker: 'PostgresBroker',
     workflow_id: str | None = None,
-) -> WorkflowHandle[OutT]:
-    """
-    Start a workflow asynchronously.
+) -> WorkflowStartResult[WorkflowHandle[OutT]]:
+    """Start a workflow asynchronously.
 
     Creates workflow and workflow_tasks records, then enqueues root tasks.
 
@@ -98,15 +110,13 @@ async def start_workflow_async(
         workflow_id: Optional custom workflow ID
 
     Returns:
-        WorkflowHandle for tracking and retrieving results
+        ``Ok(WorkflowHandle)`` on success.
+        ``Err(WorkflowStartError)`` on failure, with ``code``, ``retryable``,
+        and ``stage`` fields for programmatic handling.
 
     Notes:
         If workflow_id is provided and already exists, returns existing handle
         (idempotent operation).
-
-    Raises:
-        ValueError: If WorkflowSpec was not created via app.workflow() (missing
-                    queue/priority resolution).
     """
     # Deferred import to avoid circular dependency with engine.py
     from horsies.core.workflows.engine import (
@@ -114,227 +124,300 @@ async def start_workflow_async(
         enqueue_subworkflow_task,
     )
 
-    # Validate output type matches declared generic (E025)
-    if spec.workflow_def_cls is not None:
-        validate_workflow_generic_output_match(spec.workflow_def_cls, spec)
-
-    # Validate that WorkflowSpec was created via app.workflow()
-    # TaskNodes must have resolved queue and priority (SubWorkflowNodes don't have these)
-    for node in spec.tasks:
-        if isinstance(node, SubWorkflowNode):
-            continue  # SubWorkflowNodes don't have queue/priority
-        task = node
-        if task.queue is None:
-            raise WorkflowValidationError(
-                message='TaskNode has unresolved queue',
-                code=ErrorCode.WORKFLOW_UNRESOLVED_QUEUE,
-                notes=[f"TaskNode '{task.name}' has queue=None"],
-                help_text='use app.workflow() to create WorkflowSpec with proper validation',
-            )
-        if task.priority is None:
-            raise WorkflowValidationError(
-                message='TaskNode has unresolved priority',
-                code=ErrorCode.WORKFLOW_UNRESOLVED_PRIORITY,
-                notes=[f"TaskNode '{task.name}' has priority=None"],
-                help_text='use app.workflow() to create WorkflowSpec with proper validation',
-            )
-
     wf_id = workflow_id or str(uuid.uuid4())
 
+    # ── Zone 1: Prevalidation (never retryable) ──────────────────────
+    try:
+        # Validate output type matches declared generic (E025)
+        if spec.workflow_def_cls is not None:
+            validate_workflow_generic_output_match(spec.workflow_def_cls, spec)
+
+        # Validate that WorkflowSpec was created via app.workflow()
+        # TaskNodes must have resolved queue and priority (SubWorkflowNodes don't have these)
+        for node in spec.tasks:
+            if isinstance(node, SubWorkflowNode):
+                continue  # SubWorkflowNodes don't have queue/priority
+            task = node
+            if task.queue is None:
+                raise WorkflowValidationError(
+                    message='TaskNode has unresolved queue',
+                    code=ErrorCode.WORKFLOW_UNRESOLVED_QUEUE,
+                    notes=[f"TaskNode '{task.name}' has queue=None"],
+                    help_text='use app.workflow() to create WorkflowSpec with proper validation',
+                )
+            if task.priority is None:
+                raise WorkflowValidationError(
+                    message='TaskNode has unresolved priority',
+                    code=ErrorCode.WORKFLOW_UNRESOLVED_PRIORITY,
+                    notes=[f"TaskNode '{task.name}' has priority=None"],
+                    help_text='use app.workflow() to create WorkflowSpec with proper validation',
+                )
+    except asyncio.CancelledError:
+        raise
+    except (WorkflowValidationError, MultipleValidationErrors, ValueError) as exc:
+        return Err(WorkflowStartError(
+            code=WorkflowStartErrorCode.VALIDATION_FAILED,
+            message=str(exc),
+            retryable=False,
+            stage=WorkflowStartStage.PREVALIDATE,
+            workflow_name=spec.name,
+            workflow_id=wf_id,
+            exception=exc,
+        ))
+    except SerializationError as exc:
+        return Err(WorkflowStartError(
+            code=WorkflowStartErrorCode.SERIALIZATION_FAILED,
+            message=str(exc),
+            retryable=False,
+            stage=WorkflowStartStage.PREVALIDATE,
+            workflow_name=spec.name,
+            workflow_id=wf_id,
+            exception=exc,
+        ))
+
+    # ── Schema init ──────────────────────────────────────────────────
     from horsies.core.types.result import is_err
 
     init_result = await broker.ensure_schema_initialized()
     if is_err(init_result):
-        err = init_result.err_value
-        raise RuntimeError(f'Schema initialization failed: {err.message}') from err.exception
+        broker_err = init_result.err_value
+        return Err(WorkflowStartError(
+            code=WorkflowStartErrorCode.SCHEMA_INIT_FAILED,
+            message=f'Schema initialization failed: {broker_err.message}',
+            retryable=broker_err.retryable,
+            stage=WorkflowStartStage.ENSURE_SCHEMA,
+            workflow_name=spec.name,
+            workflow_id=wf_id,
+            exception=broker_err.exception,
+        ))
 
-    async with broker.session_factory() as session:
-        # Check if workflow already exists (idempotent start)
-        if workflow_id:
-            existing = await session.execute(
-                CHECK_WORKFLOW_EXISTS_SQL,
-                {'wf_id': wf_id},
-            )
-            if existing.fetchone():
-                logger.warning(
-                    f'Workflow {wf_id} already exists, returning existing handle'
+    # ── Zone 2: DB transaction ───────────────────────────────────────
+    try:
+        async with broker.session_factory() as session:
+            # Check if workflow already exists (idempotent start)
+            if workflow_id:
+                existing = await session.execute(
+                    CHECK_WORKFLOW_EXISTS_SQL,
+                    {'wf_id': wf_id},
                 )
-                return cast(
-                    'WorkflowHandle[OutT]',
-                    WorkflowHandle(workflow_id=wf_id, broker=broker),
-                )
-
-        # 1. Insert workflow record
-        output_index = spec.output.index if spec.output else None
-
-        # Serialize success_policy to index-based format
-        success_policy_json: dict[str, Any] | None = None
-        if spec.success_policy is not None:
-            success_policy_json = {
-                'cases': [
-                    {
-                        'required_indices': [
-                            t.index for t in case.required if t.index is not None
-                        ]
-                    }
-                    for case in spec.success_policy.cases
-                ],
-            }
-            if spec.success_policy.optional:
-                success_policy_json['optional_indices'] = [
-                    t.index for t in spec.success_policy.optional if t.index is not None
-                ]
-
-        await session.execute(
-            INSERT_WORKFLOW_SQL,
-            {
-                'id': wf_id,
-                'name': spec.name,
-                'on_error': spec.on_error.value,
-                'output_idx': output_index,
-                'success_policy': _ser_or_raise(dumps_json(success_policy_json), 'success_policy')
-                if success_policy_json
-                else None,
-                'wf_module': spec.workflow_def_module,
-                'wf_qualname': spec.workflow_def_qualname,
-            },
-        )
-
-        # 2. Insert all workflow_tasks
-        # NOTE: Serialization failures (_ser_or_raise) can raise mid-loop after
-        # prior INSERTs have executed. This is safe because commit happens after
-        # the entire loop (line ~317). An exception here rolls back the
-        # uncommitted transaction — no partial workflow state is persisted.
-        for node in spec.tasks:
-            dep_indices = [d.index for d in node.waits_for if d.index is not None]
-            args_from_indices = {
-                k: v.index for k, v in node.args_from.items() if v.index is not None
-            }
-            ctx_from_ids = (
-                [n.node_id for n in node.workflow_ctx_from if n.node_id is not None]
-                if node.workflow_ctx_from
-                else None
-            )
-
-            wt_id = str(uuid.uuid4())
-
-            if isinstance(node, SubWorkflowNode):
-                # SubWorkflowNode: no fn, queue, priority, good_until
-                guard_no_positional_args(node.name, node.args)
-                await session.execute(
-                    INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL,
-                    {
-                        'id': wt_id,
-                        'wf_id': wf_id,
-                        'idx': node.index,
-                        'node_id': node.node_id,
-                        'name': node.name,
-                        'args': _ser_or_raise(dumps_json(()), 'positional args'),  # kwargs-only: positional args not persisted
-                        'kwargs': _ser_or_raise(dumps_json(node.kwargs), f'kwargs for node {node.name}'),
-                        'queue': 'default',  # SubWorkflowNode doesn't have queue
-                        'priority': 100,  # SubWorkflowNode doesn't have priority
-                        'deps': dep_indices,
-                        'args_from': _ser_or_raise(dumps_json(args_from_indices), 'args_from')
-                        if args_from_indices
-                        else None,
-                        'ctx_from': ctx_from_ids,
-                        'allow_failed': node.allow_failed_deps,
-                        'join_type': node.join,
-                        'min_success': node.min_success,
-                        'task_options': None,
-                        'status': 'PENDING' if dep_indices else 'READY',
-                        'sub_wf_name': node.workflow_def.name,
-                        'sub_wf_retry_mode': node.retry_mode.value,
-                        'sub_wf_module': node.workflow_def.__module__,
-                        'sub_wf_qualname': node.workflow_def.__qualname__,
-                    },
-                )
-            else:
-                # TaskNode: has fn, queue, priority, good_until
-                task = node
-                guard_no_positional_args(task.name, task.args)
-
-                # Get task_options_json from the task function (set by @task decorator)
-                # and merge in TaskNode.good_until if set
-                task_options_json: str | None = getattr(
-                    task.fn, 'task_options_json', None
-                )
-                if task.good_until is not None:
-                    # Merge good_until from TaskNode into task_options
-                    base_options: dict[str, Any] = {}
-                    if task_options_json:
-                        parsed_r = loads_json(task_options_json)
-                        if _is_err(parsed_r):
-                            raise SerializationError(
-                                f'Corrupt task_options_json for node {task.name}: {parsed_r.err_value}',
-                            )
-                        if isinstance(parsed_r.ok_value, dict):
-                            base_options = parsed_r.ok_value
-                    base_options['good_until'] = task.good_until.isoformat()
-                    task_options_json = _ser_or_raise(
-                        dumps_json(base_options),
-                        f'task_options for node {task.name}',
+                if existing.fetchone():
+                    logger.warning(
+                        f'Workflow {wf_id} already exists, returning existing handle'
                     )
+                    return Ok(cast(
+                        'WorkflowHandle[OutT]',
+                        WorkflowHandle(workflow_id=wf_id, broker=broker),
+                    ))
 
-                await session.execute(
-                    INSERT_WORKFLOW_TASK_SQL,
-                    {
-                        'id': wt_id,
-                        'wf_id': wf_id,
-                        'idx': task.index,
-                        'node_id': task.node_id,
-                        'name': task.name,
-                        'args': _ser_or_raise(dumps_json(()), 'positional args'),  # kwargs-only: positional args not persisted
-                        'kwargs': _ser_or_raise(dumps_json(task.kwargs), f'kwargs for node {task.name}'),
-                        # Queue: use override, else task's declared queue, else "default"
-                        'queue': task.queue
-                        or getattr(task.fn, 'task_queue_name', None)
-                        or 'default',
-                        # Priority: use override, else default
-                        'priority': task.priority if task.priority is not None else 100,
-                        'deps': dep_indices,
-                        'args_from': _ser_or_raise(dumps_json(args_from_indices), 'args_from')
-                        if args_from_indices
-                        else None,
-                        'ctx_from': ctx_from_ids,
-                        'allow_failed': task.allow_failed_deps,
-                        'join_type': task.join,
-                        'min_success': task.min_success,
-                        'task_options': task_options_json,
-                        'status': 'PENDING' if dep_indices else 'READY',
-                    },
+            # 1. Insert workflow record
+            output_index = spec.output.index if spec.output else None
+
+            # Serialize success_policy to index-based format
+            success_policy_json: dict[str, Any] | None = None
+            if spec.success_policy is not None:
+                success_policy_json = {
+                    'cases': [
+                        {
+                            'required_indices': [
+                                t.index for t in case.required if t.index is not None
+                            ]
+                        }
+                        for case in spec.success_policy.cases
+                    ],
+                }
+                if spec.success_policy.optional:
+                    success_policy_json['optional_indices'] = [
+                        t.index for t in spec.success_policy.optional if t.index is not None
+                    ]
+
+            await session.execute(
+                INSERT_WORKFLOW_SQL,
+                {
+                    'id': wf_id,
+                    'name': spec.name,
+                    'on_error': spec.on_error.value,
+                    'output_idx': output_index,
+                    'success_policy': _ser_or_raise(dumps_json(success_policy_json), 'success_policy')
+                    if success_policy_json
+                    else None,
+                    'wf_module': spec.workflow_def_module,
+                    'wf_qualname': spec.workflow_def_qualname,
+                },
+            )
+
+            # 2. Insert all workflow_tasks
+            # NOTE: Serialization failures (_ser_or_raise) can raise mid-loop after
+            # prior INSERTs have executed. This is safe because commit happens after
+            # the entire loop. An exception here rolls back the
+            # uncommitted transaction — no partial workflow state is persisted.
+            for node in spec.tasks:
+                dep_indices = [d.index for d in node.waits_for if d.index is not None]
+                args_from_indices = {
+                    k: v.index for k, v in node.args_from.items() if v.index is not None
+                }
+                ctx_from_ids = (
+                    [n.node_id for n in node.workflow_ctx_from if n.node_id is not None]
+                    if node.workflow_ctx_from
+                    else None
                 )
 
-        # 3. Enqueue root tasks (no dependencies)
-        root_nodes = [t for t in spec.tasks if not t.waits_for]
-        for root_node in root_nodes:
-            if root_node.index is not None:
-                if isinstance(root_node, SubWorkflowNode):
-                    # Start child workflow
-                    await enqueue_subworkflow_task(
-                        session, broker, wf_id, root_node.index, {}, 0, wf_id
+                wt_id = str(uuid.uuid4())
+
+                if isinstance(node, SubWorkflowNode):
+                    # SubWorkflowNode: no fn, queue, priority, good_until
+                    guard_no_positional_args(node.name, node.args)
+                    await session.execute(
+                        INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL,
+                        {
+                            'id': wt_id,
+                            'wf_id': wf_id,
+                            'idx': node.index,
+                            'node_id': node.node_id,
+                            'name': node.name,
+                            'args': _ser_or_raise(dumps_json(()), 'positional args'),  # kwargs-only: positional args not persisted
+                            'kwargs': _ser_or_raise(dumps_json(node.kwargs), f'kwargs for node {node.name}'),
+                            'queue': 'default',  # SubWorkflowNode doesn't have queue
+                            'priority': 100,  # SubWorkflowNode doesn't have priority
+                            'deps': dep_indices,
+                            'args_from': _ser_or_raise(dumps_json(args_from_indices), 'args_from')
+                            if args_from_indices
+                            else None,
+                            'ctx_from': ctx_from_ids,
+                            'allow_failed': node.allow_failed_deps,
+                            'join_type': node.join,
+                            'min_success': node.min_success,
+                            'task_options': None,
+                            'status': 'PENDING' if dep_indices else 'READY',
+                            'sub_wf_name': node.workflow_def.name,
+                            'sub_wf_retry_mode': node.retry_mode.value,
+                            'sub_wf_module': node.workflow_def.__module__,
+                            'sub_wf_qualname': node.workflow_def.__qualname__,
+                        },
                     )
                 else:
-                    # Enqueue regular task
-                    await enqueue_workflow_task(session, wf_id, root_node.index, {}, broker)
+                    # TaskNode: has fn, queue, priority, good_until
+                    task = node
+                    guard_no_positional_args(task.name, task.args)
 
-        await session.commit()
+                    # Get task_options_json from the task function (set by @task decorator)
+                    # and merge in TaskNode.good_until if set
+                    task_options_json: str | None = getattr(
+                        task.fn, 'task_options_json', None
+                    )
+                    if task.good_until is not None:
+                        # Merge good_until from TaskNode into task_options
+                        base_options: dict[str, Any] = {}
+                        if task_options_json:
+                            parsed_r = loads_json(task_options_json)
+                            if _is_err(parsed_r):
+                                raise SerializationError(
+                                    f'Corrupt task_options_json for node {task.name}: {parsed_r.err_value}',
+                                )
+                            if isinstance(parsed_r.ok_value, dict):
+                                base_options = parsed_r.ok_value
+                        base_options['good_until'] = task.good_until.isoformat()
+                        task_options_json = _ser_or_raise(
+                            dumps_json(base_options),
+                            f'task_options for node {task.name}',
+                        )
 
-    return cast(
+                    await session.execute(
+                        INSERT_WORKFLOW_TASK_SQL,
+                        {
+                            'id': wt_id,
+                            'wf_id': wf_id,
+                            'idx': task.index,
+                            'node_id': task.node_id,
+                            'name': task.name,
+                            'args': _ser_or_raise(dumps_json(()), 'positional args'),  # kwargs-only: positional args not persisted
+                            'kwargs': _ser_or_raise(dumps_json(task.kwargs), f'kwargs for node {task.name}'),
+                            # Queue: use override, else task's declared queue, else "default"
+                            'queue': task.queue
+                            or getattr(task.fn, 'task_queue_name', None)
+                            or 'default',
+                            # Priority: use override, else default
+                            'priority': task.priority if task.priority is not None else 100,
+                            'deps': dep_indices,
+                            'args_from': _ser_or_raise(dumps_json(args_from_indices), 'args_from')
+                            if args_from_indices
+                            else None,
+                            'ctx_from': ctx_from_ids,
+                            'allow_failed': task.allow_failed_deps,
+                            'join_type': task.join,
+                            'min_success': task.min_success,
+                            'task_options': task_options_json,
+                            'status': 'PENDING' if dep_indices else 'READY',
+                        },
+                    )
+
+            # 3. Enqueue root tasks (no dependencies)
+            root_nodes = [t for t in spec.tasks if not t.waits_for]
+            for root_node in root_nodes:
+                if root_node.index is not None:
+                    if isinstance(root_node, SubWorkflowNode):
+                        # Start child workflow
+                        await enqueue_subworkflow_task(
+                            session, broker, wf_id, root_node.index, {}, 0, wf_id
+                        )
+                    else:
+                        # Enqueue regular task
+                        await enqueue_workflow_task(session, wf_id, root_node.index, {}, broker)
+
+            await session.commit()
+
+    except asyncio.CancelledError:
+        raise
+    except SerializationError as exc:
+        return Err(WorkflowStartError(
+            code=WorkflowStartErrorCode.SERIALIZATION_FAILED,
+            message=str(exc),
+            retryable=False,
+            stage=WorkflowStartStage.DB_TRANSACTION,
+            workflow_name=spec.name,
+            workflow_id=wf_id,
+            exception=exc,
+        ))
+    except ValueError as exc:
+        # guard_no_positional_args raises ValueError inside the insert loop —
+        # this is a deterministic validation error, not an infrastructure failure.
+        return Err(WorkflowStartError(
+            code=WorkflowStartErrorCode.VALIDATION_FAILED,
+            message=str(exc),
+            retryable=False,
+            stage=WorkflowStartStage.DB_TRANSACTION,
+            workflow_name=spec.name,
+            workflow_id=wf_id,
+            exception=exc,
+        ))
+    except Exception as exc:
+        return Err(WorkflowStartError(
+            code=WorkflowStartErrorCode.DB_OPERATION_FAILED,
+            message=f'{type(exc).__name__}: {exc}',
+            retryable=is_retryable_connection_error(exc),
+            stage=WorkflowStartStage.DB_TRANSACTION,
+            workflow_name=spec.name,
+            workflow_id=wf_id,
+            exception=exc,
+        ))
+
+    return Ok(cast(
         'WorkflowHandle[OutT]',
         WorkflowHandle(workflow_id=wf_id, broker=broker),
-    )
+    ))
 
 
 def start_workflow(
     spec: 'WorkflowSpec[OutT]',
     broker: 'PostgresBroker',
     workflow_id: str | None = None,
-) -> WorkflowHandle[OutT]:
-    """
-    Start a workflow synchronously.
+) -> WorkflowStartResult[WorkflowHandle[OutT]]:
+    """Start a workflow synchronously.
 
-    Sync wrapper around start_workflow_async().
+    Sync wrapper around ``start_workflow_async()``.
+
+    Inner async ``Err`` passes through unchanged.
+    Bridge infrastructure failures are returned as ``LOOP_RUNNER_FAILED``.
+    Unexpected sync-path exceptions are returned as ``INTERNAL_FAILED``.
 
     Args:
         spec: The workflow specification
@@ -342,11 +425,33 @@ def start_workflow(
         workflow_id: Optional custom workflow ID
 
     Returns:
-        WorkflowHandle for tracking and retrieving results
+        ``Ok(WorkflowHandle)`` on success, ``Err(WorkflowStartError)`` on failure.
     """
-    from horsies.core.utils.loop_runner import get_shared_runner
+    from horsies.core.utils.loop_runner import get_shared_runner, LoopRunnerError
 
-    return get_shared_runner().call(start_workflow_async, spec, broker, workflow_id)
+    wf_id = workflow_id or str(uuid.uuid4())
+    try:
+        return get_shared_runner().call(start_workflow_async, spec, broker, workflow_id)
+    except LoopRunnerError as exc:
+        return Err(WorkflowStartError(
+            code=WorkflowStartErrorCode.LOOP_RUNNER_FAILED,
+            message=f'Sync bridge failed: {type(exc).__name__}: {exc}',
+            retryable=False,
+            stage=WorkflowStartStage.SYNC_BRIDGE,
+            workflow_name=spec.name,
+            workflow_id=wf_id,
+            exception=exc,
+        ))
+    except Exception as exc:
+        return Err(WorkflowStartError(
+            code=WorkflowStartErrorCode.INTERNAL_FAILED,
+            message=f'Internal start failure: {type(exc).__name__}: {exc}',
+            retryable=False,
+            stage=WorkflowStartStage.SYNC_BRIDGE,
+            workflow_name=spec.name,
+            workflow_id=wf_id,
+            exception=exc,
+        ))
 
 
 

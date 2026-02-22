@@ -43,7 +43,8 @@ from .typing_utils import (
 
 if TYPE_CHECKING:
     from horsies.core.brokers.postgres import PostgresBroker
-    from .handle import WorkflowHandle
+    from horsies.core.models.workflow.handle import WorkflowHandle
+    from horsies.core.workflows.start_types import WorkflowStartResult
 
 
 # =============================================================================
@@ -66,7 +67,8 @@ class WorkflowSpec(Generic[OutT]):
             output=persist,
             on_error=OnError.PAUSE,
         )
-        handle = await spec.start_async()
+        result = await spec.start_async()  # WorkflowStartResult
+        handle = result.ok_value              # WorkflowHandle
     """
 
     name: str
@@ -1031,23 +1033,34 @@ class WorkflowSpec(Generic[OutT]):
 
             register_workflow_spec(self)
 
-    def start(self, workflow_id: str | None = None) -> WorkflowHandle[OutT]:
-        """
-        Start workflow execution.
+    def start(self, workflow_id: str | None = None) -> WorkflowStartResult[WorkflowHandle[OutT]]:
+        """Start workflow execution.
 
         Args:
             workflow_id: Optional custom workflow ID. Auto-generated if not provided.
 
         Returns:
-            WorkflowHandle for tracking and retrieving results.
-
-        Raises:
-            RuntimeError: If broker is not configured.
+            ``Ok(WorkflowHandle)`` on success,
+            ``Err(WorkflowStartError)`` on failure.
         """
         if self.broker is None:
-            raise RuntimeError(
-                'WorkflowSpec requires a broker. Use app.workflow() or set broker.'
+            import uuid as _uuid
+
+            from horsies.core.workflows.start_types import (
+                WorkflowStartError as _WSE,
+                WorkflowStartErrorCode as _WSEC,
+                WorkflowStartStage as _WSS,
             )
+            from horsies.core.types.result import Err as _Err
+
+            return _Err(_WSE(
+                code=_WSEC.BROKER_NOT_CONFIGURED,
+                message='WorkflowSpec requires a broker. Use app.workflow() or set broker.',
+                retryable=False,
+                stage=_WSS.PREVALIDATE,
+                workflow_name=self.name,
+                workflow_id=workflow_id or str(_uuid.uuid4()),
+            ))
 
         # Import here to avoid circular imports
         from horsies.core.workflows.engine import start_workflow
@@ -1055,24 +1068,35 @@ class WorkflowSpec(Generic[OutT]):
         return start_workflow(self, self.broker, workflow_id)
 
     async def start_async(
-        self, workflow_id: str | None = None
-    ) -> WorkflowHandle[OutT]:
-        """
-        Start workflow execution (async).
+        self, workflow_id: str | None = None,
+    ) -> WorkflowStartResult[WorkflowHandle[OutT]]:
+        """Start workflow execution (async).
 
         Args:
             workflow_id: Optional custom workflow ID. Auto-generated if not provided.
 
         Returns:
-            WorkflowHandle for tracking and retrieving results.
-
-        Raises:
-            RuntimeError: If broker is not configured.
+            ``Ok(WorkflowHandle)`` on success,
+            ``Err(WorkflowStartError)`` on failure.
         """
         if self.broker is None:
-            raise RuntimeError(
-                'WorkflowSpec requires a broker. Use app.workflow() or set broker.'
+            import uuid as _uuid
+
+            from horsies.core.workflows.start_types import (
+                WorkflowStartError as _WSE,
+                WorkflowStartErrorCode as _WSEC,
+                WorkflowStartStage as _WSS,
             )
+            from horsies.core.types.result import Err as _Err
+
+            return _Err(_WSE(
+                code=_WSEC.BROKER_NOT_CONFIGURED,
+                message='WorkflowSpec requires a broker. Use app.workflow() or set broker.',
+                retryable=False,
+                stage=_WSS.PREVALIDATE,
+                workflow_name=self.name,
+                workflow_id=workflow_id or str(_uuid.uuid4()),
+            ))
 
         # Import here to avoid circular imports
         from horsies.core.workflows.engine import start_workflow_async

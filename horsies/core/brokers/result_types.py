@@ -22,12 +22,19 @@ Where Result stops and exceptions take over (the "stop line"):
   retry on transient errors, save partial progress, track consecutive
   failures, branch on ``retryable``.
 
-* **Process boundaries** (CLI startup, scheduler startup, workflow
-  lifecycle ``start_workflow_async``) -- convert ``Err`` to an exception
-  and let the process crash.  These are fatal startup failures where no
-  further recovery is possible within the process.  This is intentional,
-  not a gap: the orchestration layer (CLI) already wraps these in retry
-  loops (``_ensure_schema_with_retry``) *before* the service starts.
+* **Process boundaries** (CLI startup, scheduler startup) -- convert
+  ``Err`` to an exception and let the process crash.  These are fatal
+  startup failures where no further recovery is possible within the
+  process.  This is intentional, not a gap: the orchestration layer
+  (CLI) already wraps these in retry loops
+  (``_ensure_schema_with_retry``) *before* the service starts.
+
+* **Workflow start** (``start_workflow_async``, ``start_workflow``) --
+  returns ``WorkflowStartResult`` (see ``start_types.py``).  Schema
+  init ``Err`` is converted to ``WorkflowStartError(SCHEMA_INIT_FAILED)``
+  preserving the ``retryable`` flag from the broker error.  Sync bridge
+  infrastructure failures map to ``LOOP_RUNNER_FAILED``; unexpected
+  sync-path exceptions map to ``INTERNAL_FAILED``.
 
 * **User-facing API** (``TaskHandle.info`` / ``info_async``) -- returns
   ``BrokerResult`` directly.  The user decides how to handle

@@ -33,12 +33,11 @@ from horsies.core.models.workflow import (
     OnError,
 )
 from horsies.core.workflows.engine import (
-    start_workflow_async,
     on_workflow_task_complete,
     resume_workflow,
 )
 
-from .conftest import make_simple_task
+from .conftest import make_simple_task, start_ok
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +123,7 @@ class TestCascadeResumeMissingCompletionCheck:
             on_error=OnError.PAUSE,
         )
 
-        handle = await start_workflow_async(parent_spec, broker)
+        handle = await start_ok(parent_spec, broker)
 
         # Get child workflow ID from parent's SubWorkflowNode (task_index=1)
         row_res = await session.execute(

@@ -20,10 +20,10 @@ from horsies.core.models.workflow import (
     WorkflowSpec,
     OnError,
 )
-from horsies.core.workflows.engine import start_workflow_async, on_workflow_task_complete
+from horsies.core.workflows.engine import on_workflow_task_complete
 from horsies.core.workflows.recovery import recover_stuck_workflows
 
-from .conftest import make_simple_task, make_failing_task, make_workflow_spec
+from .conftest import make_simple_task, make_failing_task, make_workflow_spec, start_ok
 from horsies.core.models.workflow import SuccessPolicy, SuccessCase
 
 
@@ -75,7 +75,7 @@ class TestWorkflowRecovery:
         node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         spec = make_workflow_spec(broker=broker, name='recover_ready', tasks=[node_a])
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Simulate crash: set task to READY but clear task_id
         await session.execute(
@@ -120,7 +120,7 @@ class TestWorkflowRecovery:
             broker=broker, name='recover_completed', tasks=[node_a]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Simulate: task completed but workflow not updated
         await session.execute(
@@ -170,7 +170,7 @@ class TestWorkflowRecovery:
             broker=broker, name='recover_failed', tasks=[node_a], on_error=OnError.FAIL
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Simulate: task failed but workflow not updated (error not set on workflow)
         await session.execute(
@@ -225,7 +225,7 @@ class TestWorkflowRecovery:
             on_error=OnError.FAIL,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Simulate: task failed, workflow error already set (from earlier failure handling)
         existing_error = '{"error_code": "ORIGINAL_ERROR", "message": "Original error"}'
@@ -285,7 +285,7 @@ class TestWorkflowRecovery:
             on_error=OnError.PAUSE,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Set workflow to PAUSED with pending tasks
         await session.execute(
@@ -341,7 +341,7 @@ class TestWorkflowRecovery:
             broker=broker, name='recover_idempotent', tasks=[node_a]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Simulate stuck READY task
         await session.execute(
@@ -386,7 +386,7 @@ class TestWorkflowRecovery:
         node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         spec = make_workflow_spec(broker=broker, name='recover_notify', tasks=[node_a])
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Simulate: all tasks done, workflow not updated
         await session.execute(
@@ -443,7 +443,7 @@ class TestWorkflowRecovery:
             success_policy=policy,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Simulate: both tasks terminal, A completed, B failed
         # Workflow stuck in RUNNING
@@ -500,7 +500,7 @@ class TestWorkflowRecovery:
             broker=broker, name='recover_crash', tasks=[node_a]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Simulate worker crash: tasks.status = FAILED, workflow_tasks.status = RUNNING
         # First get the task_id
@@ -573,7 +573,7 @@ class TestWorkflowRecovery:
             broker=broker, name='recover_dep', tasks=[node_a, node_b]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Get task_id for node_a
         wt_result = await session.execute(
@@ -644,7 +644,7 @@ class TestWorkflowRecovery:
             broker=broker, name='recover_idem_crash', tasks=[node_a]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Get task_id
         wt_result = await session.execute(
@@ -700,7 +700,7 @@ class TestWorkflowRecovery:
             broker=broker, name='recover_cancel', tasks=[node_a]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         wt_result = await session.execute(
             text("""
@@ -764,7 +764,7 @@ class TestWorkflowRecovery:
             broker=broker, name='recover_missing_result', tasks=[node_a]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         wt_result = await session.execute(
             text("""
@@ -832,7 +832,7 @@ class TestWorkflowRecovery:
             broker=broker, name='recover_pend_ok', tasks=[node_a, node_b],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Simulate: A completed but B stuck at PENDING (race condition)
         await session.execute(
@@ -878,7 +878,7 @@ class TestWorkflowRecovery:
             broker=broker, name='recover_pend_fail', tasks=[node_a, node_b],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Simulate: A failed but B stuck at PENDING
         await session.execute(
@@ -931,7 +931,7 @@ class TestWorkflowRecovery:
             broker=broker, name='recover_pend_allow', tasks=[node_a, node_b],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Simulate: A failed but B stuck at PENDING
         await session.execute(
@@ -984,7 +984,7 @@ class TestWorkflowRecovery:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Simulate: A completed, SubWorkflowNode stuck at READY with NULL sub_workflow_id
         await session.execute(
@@ -1040,7 +1040,7 @@ class TestWorkflowRecovery:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Simulate: A completed, SubWorkflowNode stuck at READY with NULL sub_workflow_id
         await session.execute(
@@ -1098,7 +1098,7 @@ class TestWorkflowRecovery:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Get the child workflow ID
         wt_result = await session.execute(
@@ -1179,7 +1179,7 @@ class TestWorkflowRecovery:
             broker=broker, name='recover_failed_missing', tasks=[node_a],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         wt_result = await session.execute(
             text("""
@@ -1253,7 +1253,7 @@ class TestWorkflowRecovery:
             success_policy=policy,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Simulate: A completed, B failed, workflow stuck RUNNING
         await session.execute(

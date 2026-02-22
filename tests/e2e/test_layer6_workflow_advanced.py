@@ -22,7 +22,7 @@ import pytest
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import TaskResult
 
-from tests.e2e.helpers.assertions import assert_ok, assert_err
+from tests.e2e.helpers.assertions import assert_ok, assert_err, start_ok_sync
 from tests.e2e.helpers.db import wait_for_status
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.helpers.workflow import (
@@ -91,7 +91,7 @@ async def test_quorum_ctx_gating(broker: PostgresBroker) -> None:
         # spec_quorum_ctx_gating: A(100ms), B(150ms), C(300ms) -> D
         # D has join=quorum, min_success=2, workflow_ctx_from=[C]
         # A and B complete first (satisfying quorum), but D must wait for C
-        handle = wf_tasks.spec_quorum_ctx_gating.start()
+        handle = start_ok_sync(wf_tasks.spec_quorum_ctx_gating)
 
         status = await wait_for_workflow_completion(
             broker.session_factory, handle.workflow_id, timeout_s=15.0
@@ -120,7 +120,7 @@ async def test_quorum_ctx_gating(broker: PostgresBroker) -> None:
 async def test_quorum_impossible_skips(broker: PostgresBroker) -> None:
     """T6.2b: D is SKIPPED when quorum min_success=3 is unreachable (2 of 3 deps fail)."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = wf_tasks.spec_quorum_impossible.start()
+        handle = start_ok_sync(wf_tasks.spec_quorum_impossible)
 
         status = await wait_for_workflow_completion(
             broker.session_factory, handle.workflow_id, timeout_s=15.0
@@ -141,7 +141,7 @@ async def test_quorum_impossible_skips(broker: PostgresBroker) -> None:
 async def test_join_any_all_deps_fail_skips(broker: PostgresBroker) -> None:
     """T6.2c: C is SKIPPED when join=any but all deps fail."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = wf_tasks.spec_join_any_all_fail.start()
+        handle = start_ok_sync(wf_tasks.spec_join_any_all_fail)
 
         status = await wait_for_workflow_completion(
             broker.session_factory, handle.workflow_id, timeout_s=15.0
@@ -168,7 +168,7 @@ async def test_skip_when_takes_priority(broker: PostgresBroker) -> None:
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
         # spec_skip_when_priority: A produces value, B has skip_when=True, run_when=True
         # B should be SKIPPED, C should receive UPSTREAM_SKIPPED
-        handle = wf_tasks.spec_skip_when_priority.start()
+        handle = start_ok_sync(wf_tasks.spec_skip_when_priority)
 
         status = await wait_for_workflow_completion(
             broker.session_factory, handle.workflow_id, timeout_s=15.0
@@ -215,7 +215,7 @@ async def test_run_when_false_skips(broker: PostgresBroker) -> None:
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
         # spec_run_when_false: A produces value, B has run_when=False
         # B should be SKIPPED, C should receive UPSTREAM_SKIPPED
-        handle = wf_tasks.spec_run_when_false.start()
+        handle = start_ok_sync(wf_tasks.spec_run_when_false)
 
         status = await wait_for_workflow_completion(
             broker.session_factory, handle.workflow_id, timeout_s=15.0
@@ -242,7 +242,7 @@ async def test_run_when_false_skips(broker: PostgresBroker) -> None:
 async def test_condition_exception_fails_task(broker: PostgresBroker) -> None:
     """T6.3c: Exception in run_when lambda causes task failure."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = wf_tasks.spec_condition_exception.start()
+        handle = start_ok_sync(wf_tasks.spec_condition_exception)
 
         status = await wait_for_workflow_completion(
             broker.session_factory, handle.workflow_id, timeout_s=15.0
@@ -261,7 +261,7 @@ async def test_condition_exception_fails_task(broker: PostgresBroker) -> None:
 async def test_run_when_true_executes(broker: PostgresBroker) -> None:
     """T6.3d: run_when=True allows task to execute normally."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = wf_tasks.spec_run_when_true.start()
+        handle = start_ok_sync(wf_tasks.spec_run_when_true)
 
         status = await wait_for_workflow_completion(
             broker.session_factory, handle.workflow_id, timeout_s=15.0
@@ -286,7 +286,7 @@ async def test_pause_blocks_ready_transitions(broker: PostgresBroker) -> None:
     """T6.4: Pausing workflow prevents READY tasks from being enqueued."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
         # spec_pausable: A(100ms) -> B(200ms) -> C(200ms) -> D(100ms)
-        handle = wf_tasks.spec_pausable.start()
+        handle = start_ok_sync(wf_tasks.spec_pausable)
 
         async def _ready_to_pause() -> bool:
             db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
@@ -324,7 +324,7 @@ async def test_resume_continues_workflow(broker: PostgresBroker) -> None:
     """T6.5: Resuming paused workflow allows it to complete."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
         # spec_pausable: A -> B -> C -> D
-        handle = wf_tasks.spec_pausable.start()
+        handle = start_ok_sync(wf_tasks.spec_pausable)
 
         async def _ready_to_pause() -> bool:
             db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
@@ -372,7 +372,7 @@ async def test_resume_continues_workflow(broker: PostgresBroker) -> None:
 async def test_pause_then_cancel(broker: PostgresBroker) -> None:
     """T6.4b: Paused workflow can be cancelled; remaining tasks become SKIPPED."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = wf_tasks.spec_pausable.start()
+        handle = start_ok_sync(wf_tasks.spec_pausable)
 
         async def _ready_to_pause() -> bool:
             db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
@@ -407,7 +407,7 @@ async def test_pause_then_cancel(broker: PostgresBroker) -> None:
 async def test_pause_idempotent(broker: PostgresBroker) -> None:
     """T6.4c: Second pause() on already-paused workflow returns False."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = wf_tasks.spec_pausable.start()
+        handle = start_ok_sync(wf_tasks.spec_pausable)
 
         async def _ready_to_pause() -> bool:
             db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
@@ -430,7 +430,7 @@ async def test_pause_idempotent(broker: PostgresBroker) -> None:
 async def test_resume_on_running_noop(broker: PostgresBroker) -> None:
     """T6.5b: resume() on a RUNNING workflow returns False (no-op)."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = wf_tasks.spec_pausable.start()
+        handle = start_ok_sync(wf_tasks.spec_pausable)
 
         # Wait briefly to ensure workflow is RUNNING
         async def _is_running() -> bool:
@@ -458,7 +458,7 @@ async def test_success_policy_satisfied(broker: PostgresBroker) -> None:
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
         # spec_success_policy_satisfied: A required, B optional (B fails)
         # Workflow should COMPLETE because A succeeds
-        handle = wf_tasks.spec_success_policy_satisfied.start()
+        handle = start_ok_sync(wf_tasks.spec_success_policy_satisfied)
 
         status = await wait_for_workflow_completion(
             broker.session_factory, handle.workflow_id, timeout_s=15.0
@@ -489,7 +489,7 @@ async def test_success_policy_not_met(broker: PostgresBroker) -> None:
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
         # spec_success_policy_not_met: A and B required, B fails
         # Workflow should FAIL because B is required and fails
-        handle = wf_tasks.spec_success_policy_not_met.start()
+        handle = start_ok_sync(wf_tasks.spec_success_policy_not_met)
 
         status = await wait_for_workflow_completion(
             broker.session_factory, handle.workflow_id, timeout_s=15.0
@@ -513,7 +513,7 @@ async def test_success_policy_not_met(broker: PostgresBroker) -> None:
 async def test_success_policy_not_met_error_content(broker: PostgresBroker) -> None:
     """T6.7b: handle.get() returns error with failed task's error code when policy not met."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = wf_tasks.spec_success_policy_not_met.start()
+        handle = start_ok_sync(wf_tasks.spec_success_policy_not_met)
 
         status = await wait_for_workflow_completion(
             broker.session_factory, handle.workflow_id, timeout_s=15.0
@@ -536,7 +536,7 @@ async def test_success_policy_multiple_cases(broker: PostgresBroker) -> None:
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
         # spec_success_policy_multi: case1 requires A (fails), case2 requires B (succeeds)
         # Workflow should COMPLETE because case2 is satisfied
-        handle = wf_tasks.spec_success_policy_multi.start()
+        handle = start_ok_sync(wf_tasks.spec_success_policy_multi)
 
         status = await wait_for_workflow_completion(
             broker.session_factory, handle.workflow_id, timeout_s=15.0
@@ -569,7 +569,7 @@ async def test_recovery_preserves_results(broker: PostgresBroker) -> None:
 
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
         # Start a workflow and let it complete normally
-        handle = wf_tasks.spec_linear.start()
+        handle = start_ok_sync(wf_tasks.spec_linear)
 
         status = await wait_for_workflow_completion(
             broker.session_factory, handle.workflow_id, timeout_s=15.0
@@ -618,7 +618,7 @@ async def test_recovery_preserves_failed_state(broker: PostgresBroker) -> None:
 
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
         # Start a workflow that fails (A ok → B fail → C skipped)
-        handle = wf_tasks.spec_linear_fail_mid.start()
+        handle = start_ok_sync(wf_tasks.spec_linear_fail_mid)
 
         status = await wait_for_workflow_completion(
             broker.session_factory, handle.workflow_id, timeout_s=15.0
@@ -685,7 +685,7 @@ async def test_workflow_task_retries(broker: PostgresBroker, tmp_path: Path) -> 
     )
 
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = spec_retry.start()
+        handle = start_ok_sync(spec_retry)
 
         # Allow time for retries (retry policy uses 1s base exponential)
         status = await wait_for_workflow_completion(
@@ -732,7 +732,7 @@ async def test_workflow_task_retries_exhausted(
     )
 
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = spec_retry_fail.start()
+        handle = start_ok_sync(spec_retry_fail)
 
         status = await wait_for_workflow_completion(
             broker.session_factory, handle.workflow_id, timeout_s=60.0
@@ -760,7 +760,7 @@ async def test_workflow_task_retries_exhausted(
 async def test_on_error_pause_stops_workflow(broker: PostgresBroker) -> None:
     """T6.11a: Workflow auto-pauses when task fails with on_error=PAUSE."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = wf_tasks.spec_on_error_pause.start()
+        handle = start_ok_sync(wf_tasks.spec_on_error_pause)
 
         # Wait for workflow to reach PAUSED state (not terminal)
         async def _is_paused() -> bool:
@@ -789,7 +789,7 @@ async def test_on_error_pause_stops_workflow(broker: PostgresBroker) -> None:
 async def test_on_error_pause_resume_completes(broker: PostgresBroker) -> None:
     """T6.11b: Resume after auto-pause finalizes workflow (C stays SKIPPED since B failed)."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = wf_tasks.spec_on_error_pause.start()
+        handle = start_ok_sync(wf_tasks.spec_on_error_pause)
 
         # Wait for auto-pause
         async def _is_paused() -> bool:
@@ -875,7 +875,7 @@ async def test_workflow_recovers_after_worker_crash(
         processes=2,
         ready_check=_make_recovery_ready_check(),
     ) as worker_proc:
-        handle = instance_recovery.spec_recovery_crash.start()
+        handle = start_ok_sync(instance_recovery.spec_recovery_crash)
 
         # Wait until A (idx 0) and B (idx 1) are COMPLETED in workflow_tasks
         async def _ab_completed() -> bool:

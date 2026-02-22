@@ -23,10 +23,10 @@ from horsies.core.models.workflow import (
     WorkflowStatus,
     OnError,
 )
-from horsies.core.workflows.engine import start_workflow_async, on_workflow_task_complete
+from horsies.core.workflows.engine import on_workflow_task_complete
 from horsies.core.workflows.registry import unregister_workflow_spec
 
-from .conftest import make_simple_task
+from .conftest import make_simple_task, start_ok
 
 
 # =============================================================================
@@ -306,7 +306,7 @@ class TestSubworkflowIntegration:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         await self._complete_task(
             session, broker, handle.workflow_id, 0, TaskResult(ok=4)
         )
@@ -348,7 +348,7 @@ class TestSubworkflowIntegration:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         unregister_workflow_spec(spec.name)
 
         await self._complete_task(
@@ -382,7 +382,7 @@ class TestSubworkflowIntegration:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         await self._complete_task(
             session, broker, handle.workflow_id, 0, TaskResult(ok=7)
         )
@@ -437,7 +437,7 @@ class TestSubworkflowIntegration:
             tasks=[node_child, node_post],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
         assert row is not None
@@ -473,7 +473,7 @@ class TestSubworkflowIntegration:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         child_id = await self._complete_child_workflow(
             session, broker, handle.workflow_id, 0,
@@ -529,7 +529,7 @@ class TestSubworkflowIntegration:
             on_error=OnError.PAUSE,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await self._complete_child_workflow(
             session, broker, handle.workflow_id, 0,
@@ -561,7 +561,7 @@ class TestSubworkflowIntegration:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await self._complete_child_workflow(
             session, broker, handle.workflow_id, 0, TaskResult(ok=42),
@@ -608,7 +608,7 @@ class TestSubworkflowIntegration:
             output=node_post,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Both children should be RUNNING
         row1 = await self._get_workflow_task_row(session, handle.workflow_id, 0)
@@ -657,7 +657,7 @@ class TestSubworkflowIntegration:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Check parent depth
         parent_depth = await session.execute(
@@ -695,7 +695,7 @@ class TestSubworkflowIntegration:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Get child workflow ID
         row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
@@ -736,7 +736,7 @@ class TestSubworkflowIntegration:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Remove from registry
         unregister_workflow_spec(spec.name)
@@ -796,7 +796,7 @@ class TestSubworkflowIntegration:
             output=node_post,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete child1 with failure
         await self._complete_child_workflow(
@@ -837,7 +837,7 @@ class TestSubworkflowIntegration:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete task A with failure
         await self._complete_task(
@@ -881,7 +881,7 @@ class TestSubworkflowIntegration:
             tasks=[node_child, node_post],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete child successfully (total_tasks > 0 → skip_when fires)
         await self._complete_child_workflow(
@@ -921,7 +921,7 @@ class TestSubworkflowIntegration:
             tasks=[node_child, node_post],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete child successfully
         await self._complete_child_workflow(
@@ -957,7 +957,7 @@ class TestSubworkflowIntegration:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete only task A → join='any' should trigger subworkflow start
         await self._complete_task(
@@ -998,7 +998,7 @@ class TestSubworkflowIntegration:
             output=node_post,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A → child starts
         await self._complete_task(
@@ -1053,7 +1053,7 @@ class TestSubworkflowIntegration:
             tasks=[node_child, node_post],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete child with failure
         await self._complete_child_workflow(
@@ -1108,7 +1108,7 @@ class TestSubworkflowIntegration:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete both upstream tasks
         await self._complete_task(
@@ -1142,7 +1142,7 @@ class TestSubworkflowIntegration:
             output=node_middle,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Parent depth = 0
         parent_depth_row = await session.execute(
@@ -1209,7 +1209,7 @@ class TestSubworkflowIntegration:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Detach app from broker
         original_app = broker.app
@@ -1351,7 +1351,7 @@ class TestSubworkflowRecovery:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Get child workflow ID
         row_res = await session.execute(
@@ -1417,7 +1417,7 @@ class TestSubworkflowRecovery:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete task A to make child READY
         res = await session.execute(
@@ -1464,7 +1464,7 @@ class TestSubworkflowRecovery:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Get child workflow ID
         row_res = await session.execute(

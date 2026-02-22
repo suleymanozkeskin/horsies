@@ -4,7 +4,22 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.workflow import WorkflowHandle, WorkflowSpec
+from horsies.core.types.result import is_err
+
+
+def start_ok_sync(
+    spec: WorkflowSpec[Any],
+    workflow_id: str | None = None,
+) -> WorkflowHandle[Any]:
+    """Unwrap sync start result or fail test with error details."""
+    r = spec.start(workflow_id)
+    if is_err(r):
+        pytest.fail(f'spec.start() failed: {r.err_value}')
+    return r.ok_value
 
 
 def assert_ok(

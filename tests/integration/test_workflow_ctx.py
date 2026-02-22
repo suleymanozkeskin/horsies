@@ -21,11 +21,11 @@ from horsies.core.models.workflow import (
     WorkflowMeta,
     WorkflowValidationError,
 )
-from horsies.core.workflows.engine import start_workflow_async, on_workflow_task_complete
+from horsies.core.workflows.engine import on_workflow_task_complete
 from horsies.core.worker.current import set_current_app
 from horsies.core.worker.worker import _run_task_entry, _initialize_worker_pool
 
-from .conftest import make_simple_task, make_no_ctx_task, make_workflow_spec
+from .conftest import make_simple_task, make_no_ctx_task, make_workflow_spec, start_ok
 
 
 def _is_str_keyed_dict(value: object) -> TypeGuard[dict[str, Any]]:
@@ -186,7 +186,7 @@ class TestWorkflowCtx:
             broker=broker, name='ctx_inject', tasks=[node_a, node_b]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -229,7 +229,7 @@ class TestWorkflowCtx:
             broker=broker, name='no_ctx_from', tasks=[node_a, node_b]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
@@ -260,7 +260,7 @@ class TestWorkflowCtx:
         spec = make_workflow_spec(
             broker=broker, name='meta_only', tasks=[node_a, node_b]
         )
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
@@ -301,7 +301,7 @@ class TestWorkflowCtx:
             broker=broker, name='ctx_multi', tasks=[node_a, node_b, node_c]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
         await self._complete_task(session, handle.workflow_id, 1, TaskResult(ok=20))
 
@@ -348,7 +348,7 @@ class TestWorkflowCtx:
             broker=broker, name='ctx_skipped', tasks=[node_a, node_b, node_c]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A as FAILED -> B becomes SKIPPED -> C becomes READY
         await self._complete_task(
@@ -402,7 +402,7 @@ class TestWorkflowCtx:
             broker=broker, name='ctx_failed', tasks=[node_a, node_c]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A as FAILED -> B should be ENQUEUED (allow_failed_deps)
         await self._complete_task(
@@ -472,7 +472,7 @@ class TestWorkflowCtx:
         spec = make_workflow_spec(
             broker=broker, name='ctx_worker', tasks=[node_a, node_b]
         )
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A to enqueue B
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -543,7 +543,7 @@ class TestWorkflowCtx:
         spec = make_workflow_spec(
             broker=broker, name='meta_worker', tasks=[node_a, node_b]
         )
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A to enqueue B
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -618,7 +618,7 @@ class TestWorkflowCtx:
         spec = make_workflow_spec(
             broker=broker, name='ctx_missing_id', tasks=[node_a, node_b]
         )
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
@@ -717,7 +717,7 @@ class TestWorkflowCtx:
         spec = make_workflow_spec(
             broker=broker, name='key_err', tasks=[node_a, node_b],
         )
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
@@ -756,7 +756,7 @@ class TestWorkflowCtx:
         spec = make_workflow_spec(
             broker=broker, name='has_res', tasks=[node_a, node_b],
         )
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=42))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
@@ -788,7 +788,7 @@ class TestWorkflowCtx:
         spec = make_workflow_spec(
             broker=broker, name='has_res_false', tasks=[node_a, node_b],
         )
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=1))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
@@ -828,7 +828,7 @@ class TestWorkflowCtx:
         spec = make_workflow_spec(
             broker=broker, name='nodekey', tasks=[node_a, node_b],
         )
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=77))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
@@ -865,7 +865,7 @@ class TestWorkflowCtx:
         spec = make_workflow_spec(
             broker=broker, name='empty_ctx', tasks=[node_a, node_b],
         )
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
@@ -897,7 +897,7 @@ class TestWorkflowCtx:
         spec = make_workflow_spec(
             broker=broker, name='skip_ctx', tasks=[node_a, node_b],
         )
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=5))
 
         # Fetch task B's row and manually inject __horsies_workflow_ctx__ into kwargs

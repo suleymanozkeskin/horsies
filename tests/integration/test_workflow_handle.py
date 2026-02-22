@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import text
@@ -20,9 +21,11 @@ from horsies.core.models.workflow import (
     WorkflowTaskStatus,
     OnError,
 )
-from horsies.core.workflows.engine import start_workflow_async, on_workflow_task_complete
+from horsies.core.workflows.engine import on_workflow_task_complete
+from horsies.core.worker.config import WorkerConfig
+from horsies.core.worker.worker import Worker
 
-from .conftest import make_simple_task, make_failing_task, make_workflow_spec
+from .conftest import make_simple_task, make_failing_task, make_workflow_spec, start_ok
 
 
 # =============================================================================
@@ -78,7 +81,7 @@ class TestWorkflowHandleStatus:
             broker=broker, name='status_running', tasks=[node_a, node_b],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         status = await handle.status_async()
         assert status == WorkflowStatus.RUNNING
@@ -98,7 +101,7 @@ class TestWorkflowHandleStatus:
             broker=broker, name='status_completed', tasks=[node_a],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
@@ -120,7 +123,7 @@ class TestWorkflowHandleStatus:
             broker=broker, name='status_failed', tasks=[node_a], on_error=OnError.FAIL,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await _complete_task(
             session,
@@ -147,7 +150,7 @@ class TestWorkflowHandleStatus:
             broker=broker, name='status_paused', tasks=[node_a], on_error=OnError.PAUSE,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await _complete_task(
             session,
@@ -199,7 +202,7 @@ class TestWorkflowHandleGet:
             broker=broker, name='get_completed', tasks=[node_a], output=node_a,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=100))
 
@@ -222,7 +225,7 @@ class TestWorkflowHandleGet:
             broker=broker, name='get_failed', tasks=[node_a], on_error=OnError.FAIL,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await _complete_task(
             session,
@@ -250,7 +253,7 @@ class TestWorkflowHandleGet:
             broker=broker, name='get_paused', tasks=[node_a], on_error=OnError.PAUSE,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await _complete_task(
             session,
@@ -287,7 +290,7 @@ class TestWorkflowHandleGet:
             tasks=[node_a, node_b],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Don't complete any tasks - workflow stays RUNNING
         result = await handle.get_async(timeout_ms=500)  # Short timeout
@@ -312,7 +315,7 @@ class TestWorkflowHandleGet:
             broker=broker, name='get_cancelled', tasks=[node_a, node_b],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await handle.cancel_async()
 
@@ -349,7 +352,7 @@ class TestWorkflowHandleResults:
             broker=broker, name='results_all', tasks=[node_a, node_b],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete both
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -380,7 +383,7 @@ class TestWorkflowHandleResults:
             broker=broker, name='result_for', tasks=[node_a, node_b],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
         await _complete_task(session, handle.workflow_id, 1, TaskResult(ok=20))
@@ -406,7 +409,7 @@ class TestWorkflowHandleResults:
             broker=broker, name='result_for_not_ready', tasks=[node_a],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Call result_for without completing the task
         result = await handle.result_for_async(node_a)
@@ -429,7 +432,7 @@ class TestWorkflowHandleResults:
             broker=broker, name='result_for_no_id', tasks=[node_a],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Create a bare TaskNode not assigned to any spec — node_id is None
         orphan_node: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
@@ -455,7 +458,7 @@ class TestWorkflowHandleResults:
             broker=broker, name='results_empty', tasks=[node_a, node_b],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         results = await handle.results_async()
         assert results == {}
@@ -478,7 +481,7 @@ class TestWorkflowHandleResults:
             broker=broker, name='tasks_info', tasks=[node_a, node_b],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         tasks = await handle.tasks_async()
         assert len(tasks) == 2
@@ -505,7 +508,7 @@ class TestWorkflowHandleResults:
             broker=broker, name='tasks_order', tasks=[node_a, node_b, node_c],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         tasks = await handle.tasks_async()
         assert tasks[0].index == 0
@@ -529,7 +532,7 @@ class TestWorkflowHandleResults:
             broker=broker, name='tasks_status', tasks=[node_a, node_b],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         tasks = await handle.tasks_async()
         # Root task (A) should be enqueued, dependent task (B) should be pending
@@ -555,7 +558,7 @@ class TestWorkflowHandleResults:
             broker=broker, name='tasks_fields', tasks=[node_a],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=42))
 
@@ -596,7 +599,7 @@ class TestWorkflowHandleCancel:
 
         spec = make_workflow_spec(broker=broker, name='cancel', tasks=[node_a, node_b])
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await handle.cancel_async()
 
@@ -621,7 +624,7 @@ class TestWorkflowHandleCancel:
             broker=broker, name='cancel_skip', tasks=[node_a, node_b],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # B is PENDING
         await handle.cancel_async()
@@ -645,7 +648,7 @@ class TestWorkflowHandleCancel:
             broker=broker, name='cancel_noop', tasks=[node_a],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete the workflow first
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -658,6 +661,223 @@ class TestWorkflowHandleCancel:
 
         status_after = await handle.status_async()
         assert status_after == WorkflowStatus.COMPLETED
+
+    async def test_cancel_leaves_no_pending_ready_enqueued_workflow_tasks(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """Cancel guarantees no workflow_task remains in queueable states."""
+        task_a = make_simple_task(app, 'cancel_guarantee_states_a')
+        task_b = make_simple_task(app, 'cancel_guarantee_states_b')
+
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        spec = make_workflow_spec(
+            broker=broker, name='cancel_guarantee_states', tasks=[node_a, node_b],
+        )
+
+        handle = await start_ok(spec, broker)
+        await handle.cancel_async()
+
+        rows = (
+            await session.execute(
+                text("""
+                    SELECT status FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf_id
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+        ).fetchall()
+        statuses = {row[0] for row in rows}
+        assert statuses
+        assert not statuses.intersection({'PENDING', 'READY', 'ENQUEUED'})
+
+        root_row = (
+            await session.execute(
+                text("""
+                    SELECT wt.status, t.status, t.claimed
+                    FROM horsies_workflow_tasks wt
+                    JOIN horsies_tasks t ON t.id = wt.task_id
+                    WHERE wt.workflow_id = :wf_id AND wt.task_index = 0
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+        ).fetchone()
+        assert root_row is not None
+        assert root_row[0] == 'SKIPPED'
+        assert root_row[1] == 'CANCELLED'
+        assert root_row[2] is False
+
+    async def test_cancel_marks_claimed_not_started_task_not_claimable(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """Cancel turns ENQUEUED+CLAIMED-not-started work into CANCELLED+SKIPPED."""
+        task_a = make_simple_task(app, 'cancel_guarantee_claimed_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker, name='cancel_guarantee_claimed', tasks=[node_a],
+        )
+
+        handle = await start_ok(spec, broker)
+        row = (
+            await session.execute(
+                text("""
+                    SELECT task_id FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf_id AND task_index = 0
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+        ).fetchone()
+        assert row is not None and row[0] is not None
+        task_id = row[0]
+
+        await session.execute(
+            text("""
+                UPDATE horsies_tasks
+                SET status = 'CLAIMED',
+                    claimed = TRUE,
+                    claimed_at = NOW(),
+                    claimed_by_worker_id = 'test-worker',
+                    claim_expires_at = NOW() + INTERVAL '5 minutes',
+                    updated_at = NOW()
+                WHERE id = :task_id
+            """),
+            {'task_id': task_id},
+        )
+        await session.commit()
+
+        await handle.cancel_async()
+
+        task_row = (
+            await session.execute(
+                text("""
+                    SELECT status, claimed, claimed_at, claimed_by_worker_id, claim_expires_at
+                    FROM horsies_tasks
+                    WHERE id = :task_id
+                """),
+                {'task_id': task_id},
+            )
+        ).fetchone()
+        assert task_row is not None
+        assert task_row[0] == 'CANCELLED'
+        assert task_row[1] is False
+        assert task_row[2] is None
+        assert task_row[3] is None
+        assert task_row[4] is None
+
+        wf_task_row = (
+            await session.execute(
+                text("""
+                    SELECT status FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf_id AND task_index = 0
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+        ).fetchone()
+        assert wf_task_row is not None
+        assert wf_task_row[0] == 'SKIPPED'
+
+    async def test_worker_filter_rejects_cancelled_workflow_claimed_rows(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """Claim pipeline must not dispatch rows from CANCELLED workflows."""
+        task_a = make_simple_task(app, 'cancel_guarantee_worker_filter_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker, name='cancel_guarantee_worker_filter', tasks=[node_a],
+        )
+
+        handle = await start_ok(spec, broker)
+        row = (
+            await session.execute(
+                text("""
+                    SELECT task_id FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf_id AND task_index = 0
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+        ).fetchone()
+        assert row is not None and row[0] is not None
+        task_id = row[0]
+
+        # Simulate claim/cancel race: task is CLAIMED while workflow is CANCELLED.
+        await session.execute(
+            text("""
+                UPDATE horsies_workflows
+                SET status = 'CANCELLED', updated_at = NOW()
+                WHERE id = :wf_id
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        await session.execute(
+            text("""
+                UPDATE horsies_tasks
+                SET status = 'CLAIMED',
+                    claimed = TRUE,
+                    claimed_at = NOW(),
+                    claimed_by_worker_id = 'worker-race',
+                    claim_expires_at = NOW() + INTERVAL '5 minutes',
+                    updated_at = NOW()
+                WHERE id = :task_id
+            """),
+            {'task_id': task_id},
+        )
+        await session.commit()
+
+        cfg = WorkerConfig(
+            dsn=broker.config.database_url,
+            psycopg_dsn=broker.config.database_url.replace('+asyncpg', '').replace(
+                '+psycopg', ''
+            ),
+            queues=['default'],
+        )
+        worker = Worker(
+            session_factory=broker.session_factory,
+            listener=MagicMock(),
+            cfg=cfg,
+        )
+        filtered = await worker._filter_nonrunnable_workflow_tasks(
+            [{'id': task_id}],
+        )
+        assert filtered == []
+
+        task_row = (
+            await session.execute(
+                text("""
+                    SELECT status, claimed, claim_expires_at
+                    FROM horsies_tasks
+                    WHERE id = :task_id
+                """),
+                {'task_id': task_id},
+            )
+        ).fetchone()
+        assert task_row is not None
+        assert task_row[0] == 'CANCELLED'
+        assert task_row[1] is False
+        assert task_row[2] is None
+
+        wf_task_row = (
+            await session.execute(
+                text("""
+                    SELECT status FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf_id AND task_index = 0
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+        ).fetchone()
+        assert wf_task_row is not None
+        assert wf_task_row[0] == 'SKIPPED'
 
 
 # =============================================================================
@@ -688,7 +908,7 @@ class TestWorkflowHandleOutput:
             broker=broker, name='output_explicit', tasks=[node_a, node_b], output=node_b,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete both
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -720,7 +940,7 @@ class TestWorkflowHandleOutput:
             broker=broker, name='no_output', tasks=[node_a, node_b, node_c],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete all
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -759,7 +979,7 @@ class TestWorkflowHandleOutput:
             on_error=OnError.FAIL,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A, then fail B
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -794,7 +1014,7 @@ class TestWorkflowHandleOutput:
             broker=broker, name='dup_tasks', tasks=[node_a, node_b],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete both with different values
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=100))
@@ -827,7 +1047,7 @@ class TestWorkflowHandleOutput:
             broker=broker, name='dup_terminal', tasks=[node_a, node_b],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete both
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=111))
@@ -872,7 +1092,7 @@ class TestWorkflowHandlePauseResume:
             broker=broker, name='pause_running', tasks=[node_a, node_b],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         assert await handle.status_async() == WorkflowStatus.RUNNING
 
@@ -896,7 +1116,7 @@ class TestWorkflowHandlePauseResume:
             broker=broker, name='pause_completed', tasks=[node_a],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete the workflow
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -926,7 +1146,7 @@ class TestWorkflowHandlePauseResume:
             broker=broker, name='resume_paused', tasks=[node_a, node_b],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Pause first
         paused = await handle.pause_async()
@@ -955,7 +1175,7 @@ class TestWorkflowHandlePauseResume:
             broker=broker, name='resume_running', tasks=[node_a, node_b],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         assert await handle.status_async() == WorkflowStatus.RUNNING
 
@@ -983,7 +1203,7 @@ class TestWorkflowHandlePauseResume:
             broker=broker, name='roundtrip', tasks=[node_a, node_b],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         assert await handle.status_async() == WorkflowStatus.RUNNING
 
         # Pause

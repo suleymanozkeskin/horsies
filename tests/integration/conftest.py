@@ -28,6 +28,8 @@ from horsies.core.models.workflow import (
     SuccessCase,
 )
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.workflows.engine import start_workflow_async
+from horsies.core.types.result import is_err
 
 
 # Database URL
@@ -252,6 +254,20 @@ def make_retryable_task(
 # =============================================================================
 # Workflow Spec Helper
 # =============================================================================
+
+
+async def start_ok(
+    spec: WorkflowSpec[Any],
+    broker: PostgresBroker,
+    workflow_id: str | None = None,
+) -> 'WorkflowHandle[Any]':
+    """Unwrap start result or fail test with error details."""
+    from horsies.core.models.workflow import WorkflowHandle
+
+    r = await start_workflow_async(spec, broker, workflow_id)
+    if is_err(r):
+        pytest.fail(f'start_workflow_async failed: {r.err_value}')
+    return r.ok_value
 
 
 async def complete_task(

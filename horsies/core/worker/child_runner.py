@@ -315,41 +315,75 @@ def _get_workflow_status_for_task(cursor: Cursor[Any], task_id: str) -> str | No
     return None
 
 
-def _mark_task_skipped_for_workflow_stop(
+def _handle_workflow_stop_before_start(
     cursor: Cursor[Any],
     conn: Connection[Any],
     task_id: str,
     workflow_status: str,
 ) -> Tuple[bool, str, Optional[str]]:
-    logger.info(f'Skipping task {task_id} - workflow is {workflow_status}')
-    cursor.execute(
-        """
-        UPDATE horsies_workflow_tasks
-        SET status = 'SKIPPED'
-        WHERE task_id = %s AND status IN ('ENQUEUED', 'READY')
-        """,
-        (task_id,),
+    logger.info(
+        f'Blocking task {task_id} execution before start - workflow is {workflow_status}'
     )
-    result: TaskResult[Any, TaskError] = TaskResult(
-        err=TaskError(
-            error_code='WORKFLOW_STOPPED',
-            message=f'Task skipped - workflow is {workflow_status}',
-        )
-    )
-    result_json = serialize_error_payload(result)
-    cursor.execute(
-        """
-        UPDATE horsies_tasks
-        SET status = 'COMPLETED',
-            result = %s,
-            completed_at = NOW(),
-            updated_at = NOW()
-        WHERE id = %s
-        """,
-        (result_json, task_id),
-    )
-    conn.commit()
-    return (True, result_json, f'Workflow {workflow_status}')
+    match workflow_status:
+        case 'PAUSED':
+            # Pause is resumable: put task back to claimable state.
+            cursor.execute(
+                """
+                UPDATE horsies_tasks
+                SET status = 'PENDING',
+                    claimed = FALSE,
+                    claimed_at = NULL,
+                    claimed_by_worker_id = NULL,
+                    claim_expires_at = NULL,
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND status = 'CLAIMED'
+                """,
+                (task_id,),
+            )
+            cursor.execute(
+                """
+                UPDATE horsies_workflow_tasks
+                SET status = 'READY',
+                    task_id = NULL,
+                    started_at = NULL
+                WHERE task_id = %s
+                  AND status = 'ENQUEUED'
+                """,
+                (task_id,),
+            )
+            conn.commit()
+            return (False, '', 'WORKFLOW_STOPPED')
+        case 'CANCELLED':
+            # Cancellation is terminal: mark both task and workflow_task terminal.
+            cursor.execute(
+                """
+                UPDATE horsies_workflow_tasks
+                SET status = 'SKIPPED',
+                    completed_at = NOW()
+                WHERE task_id = %s
+                  AND status IN ('ENQUEUED', 'READY')
+                """,
+                (task_id,),
+            )
+            cursor.execute(
+                """
+                UPDATE horsies_tasks
+                SET status = 'CANCELLED',
+                    claimed = FALSE,
+                    claimed_at = NULL,
+                    claimed_by_worker_id = NULL,
+                    claim_expires_at = NULL,
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND status IN ('CLAIMED', 'PENDING')
+                """,
+                (task_id,),
+            )
+            conn.commit()
+            return (False, '', 'WORKFLOW_STOPPED')
+        case _:
+            return (False, '', 'WORKFLOW_CHECK_FAILED')
 
 
 def _update_workflow_task_running_with_retry(task_id: str) -> None:
@@ -412,7 +446,7 @@ def _preflight_workflow_check(
             workflow_status = _get_workflow_status_for_task(cursor, task_id)
             match workflow_status:
                 case 'PAUSED' | 'CANCELLED':
-                    return _mark_task_skipped_for_workflow_stop(
+                    return _handle_workflow_stop_before_start(
                         cursor,
                         conn,
                         task_id,
@@ -471,7 +505,7 @@ def _confirm_ownership_and_set_running(
                 workflow_status = _get_workflow_status_for_task(cursor, task_id)
                 match workflow_status:
                     case 'PAUSED' | 'CANCELLED':
-                        return _mark_task_skipped_for_workflow_stop(
+                        return _handle_workflow_stop_before_start(
                             cursor,
                             conn,
                             task_id,

@@ -28,9 +28,9 @@ from horsies.core.models.workflow import (
     WorkflowValidationError,
 )
 from horsies.core.errors import ErrorCode
-from horsies.core.workflows.engine import start_workflow_async, on_workflow_task_complete
+from horsies.core.workflows.engine import on_workflow_task_complete
 
-from .conftest import make_simple_task
+from .conftest import make_simple_task, start_ok
 
 
 # =============================================================================
@@ -114,7 +114,7 @@ class TestKwargsOnlyWrites:
             output=node,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Verify task_args is empty, task_kwargs has the value
         result = await session.execute(
@@ -153,7 +153,7 @@ class TestKwargsOnlyWrites:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         result = await session.execute(
             text("""
@@ -232,7 +232,7 @@ class TestOldRowBackwardCompat:
             output=node,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Simulate old-format row by injecting task_args directly
         await session.execute(
@@ -333,7 +333,7 @@ class TestSubworkflowKwargsOnly:
             output=node_child,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete upstream task to trigger subworkflow start
         wt_result = await session.execute(
@@ -404,7 +404,7 @@ class TestRecoveryKwargsCompat:
             output=node,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Simulate stuck: all tasks done, workflow not finalized
         await session.execute(
@@ -455,7 +455,7 @@ class TestRecoveryKwargsCompat:
             output=node,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Simulate crash: set task to READY but clear task_id
         await session.execute(

@@ -12,9 +12,9 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.workflow import TaskNode
 from horsies.core.worker.worker import CLAIM_SQL
-from horsies.core.workflows.engine import start_workflow_async, on_workflow_task_complete
+from horsies.core.workflows.engine import on_workflow_task_complete
 
-from .conftest import make_simple_task, make_workflow_spec
+from .conftest import make_simple_task, make_workflow_spec, start_ok
 
 
 @pytest.mark.integration
@@ -127,7 +127,7 @@ class TestDAGPatterns:
             broker=broker, name='linear', tasks=[node_a, node_b, node_c]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # A is ENQUEUED, B and C are PENDING
         assert await self._get_task_status(session, handle.workflow_id, 0) == 'ENQUEUED'
@@ -176,7 +176,7 @@ class TestDAGPatterns:
             broker=broker, name='fan_out', tasks=[node_a, node_b, node_c, node_d]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # A is ENQUEUED, B, C, D are PENDING
         assert await self._get_task_status(session, handle.workflow_id, 0) == 'ENQUEUED'
@@ -214,7 +214,7 @@ class TestDAGPatterns:
             broker=broker, name='prio_ready', tasks=[node_a, node_b, node_c]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Mark root task as completed in tasks table so claim SQL won't pick it
         root_task_id = await self._get_task_id(session, handle.workflow_id, 0)
@@ -273,7 +273,7 @@ class TestDAGPatterns:
             broker=broker, name='fan_in', tasks=[node_a, node_b, node_c, node_d]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # A, B, C are ENQUEUED (roots), D is PENDING
         assert await self._get_task_status(session, handle.workflow_id, 0) == 'ENQUEUED'
@@ -317,7 +317,7 @@ class TestDAGPatterns:
             broker=broker, name='diamond', tasks=[node_a, node_b, node_c, node_d]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A -> B, C become ENQUEUED
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -351,7 +351,7 @@ class TestDAGPatterns:
 
         spec = make_workflow_spec(broker=broker, name='deep', tasks=nodes)
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete each in sequence
         for i in range(5):
@@ -387,7 +387,7 @@ class TestDAGPatterns:
             broker=broker, name='multi_root', tasks=[node_a, node_b, node_c]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Both roots ENQUEUED
         assert await self._get_task_status(session, handle.workflow_id, 0) == 'ENQUEUED'
@@ -422,7 +422,7 @@ class TestDAGPatterns:
             broker=broker, name='multi_terminal', tasks=[node_a, node_b, node_c]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -454,7 +454,7 @@ class TestDAGPatterns:
             broker=broker, name='mixed', tasks=[node_a, node_b, node_c, node_d, node_e]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # A -> B, C
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -495,7 +495,7 @@ class TestDAGPatterns:
         node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(broker=broker, name='single', tasks=[node_a])
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         assert await self._get_task_status(session, handle.workflow_id, 0) == 'ENQUEUED'
 
@@ -526,7 +526,7 @@ class TestDAGPatterns:
             tasks=[node_a, *middle_nodes, node_c],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Root ENQUEUED, all middle PENDING, sink PENDING
         assert await self._get_task_status(session, handle.workflow_id, 0) == 'ENQUEUED'
@@ -571,7 +571,7 @@ class TestDAGPatterns:
             broker=broker, name='rev_fan_in', tasks=[node_a, node_b, node_c, node_d],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete in reverse index order: C, B, A
         await self._complete_task(session, handle.workflow_id, 2, TaskResult(ok=30))
@@ -611,7 +611,7 @@ class TestDAGPatterns:
             broker=broker, name='diamond_fail', tasks=[node_a, node_b, node_c, node_d],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A -> B, C ENQUEUED
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -652,7 +652,7 @@ class TestDAGPatterns:
             broker=broker, name='root_fail', tasks=[node_a, node_b, node_c, node_d],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # A fails -> B, C, D should all become SKIPPED
         fail_result: TaskResult[int, TaskError] = TaskResult(
@@ -690,7 +690,7 @@ class TestDAGPatterns:
             tasks=[node_a, node_b, node_c, node_d, node_e],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A -> B, C ENQUEUED
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))

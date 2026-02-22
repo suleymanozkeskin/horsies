@@ -13,7 +13,7 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.workflow import TaskNode, WorkflowSpec
-from horsies.core.workflows.engine import start_workflow_async, on_workflow_task_complete
+from horsies.core.workflows.engine import on_workflow_task_complete
 from horsies.core.codec.serde import loads_json, task_result_from_json
 from horsies.core.worker.current import set_current_app
 from horsies.core.worker.worker import _run_task_entry, _initialize_worker_pool
@@ -25,6 +25,7 @@ from .conftest import (
     make_multi_args_receiver_task,
     make_failing_task,
     make_workflow_spec,
+    start_ok,
 )
 
 
@@ -136,7 +137,7 @@ class TestArgsFromInjection:
             broker=broker, name='single_args', tasks=[node_a, node_b]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A with result
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=42))
@@ -174,7 +175,7 @@ class TestArgsFromInjection:
             broker=broker, name='multi_args', tasks=[node_a, node_b, node_c]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete both roots
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=100))
@@ -208,7 +209,7 @@ class TestArgsFromInjection:
             broker=broker, name='err_result', tasks=[node_a, node_b]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A with failure
         await self._complete_task(
@@ -263,7 +264,7 @@ class TestArgsFromInjection:
             broker=broker, name='static_merged', tasks=[node_a, node_b]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=50))
@@ -303,7 +304,7 @@ class TestArgsFromInjection:
             broker=broker, name='same_dep', tasks=[node_a, node_b]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=50))
@@ -344,7 +345,7 @@ class TestArgsFromInjection:
             broker=broker, name='skipped_sentinel', tasks=[node_a, node_b, node_c]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A as FAILED
         await self._complete_task(
@@ -391,7 +392,7 @@ class TestArgsFromInjection:
             broker=broker, name='failed_error', tasks=[node_a, node_b]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A as FAILED with specific error
         await self._complete_task(
@@ -440,7 +441,7 @@ class TestArgsFromInjection:
         spec = make_workflow_spec(
             broker=broker, name='worker_args_from', tasks=[node_a, node_b]
         )
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A to enqueue B
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -508,7 +509,7 @@ class TestArgsFromInjection:
             broker=broker, name='skip_no_inject', tasks=[node_a, node_b]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A as FAILED
         await self._complete_task(
@@ -559,7 +560,7 @@ class TestArgsFromInjection:
             broker=broker, name='empty_args_from', tasks=[node_a, node_b]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -599,7 +600,7 @@ class TestArgsFromInjection:
         spec = make_workflow_spec(
             broker=broker, name='worker_err_args', tasks=[node_a, node_b]
         )
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A as FAILED to enqueue B
         await self._complete_task(
@@ -683,7 +684,7 @@ class TestArgsFromInjection:
             name='worker_skipped',
             tasks=[node_a, node_b, node_c],
         )
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A as FAILED → B becomes SKIPPED → C enqueued
         await self._complete_task(
@@ -761,7 +762,7 @@ class TestArgsFromInjection:
             broker=broker, name='partial_map', tasks=[node_a, node_b, node_c]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete both roots
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=100))

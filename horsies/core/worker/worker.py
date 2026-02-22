@@ -59,10 +59,12 @@ from horsies.core.worker.sql import (  # noqa: F401
     COUNT_RUNNING_FOR_WORKER_SQL,
     COUNT_IN_FLIGHT_FOR_WORKER_SQL,
     COUNT_RUNNING_IN_QUEUE_SQL,
-    GET_PAUSED_WORKFLOW_TASK_IDS_SQL,
+    GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL,
     UNCLAIM_PAUSED_TASKS_SQL,
     UNCLAIM_CLAIMED_TASK_SQL,
     RESET_PAUSED_WORKFLOW_TASKS_SQL,
+    CANCEL_CANCELLED_WORKFLOW_TASKS_SQL,
+    SKIP_CANCELLED_WORKFLOW_TASKS_SQL,
     MARK_TASK_FAILED_WORKER_SQL,
     MARK_TASK_FAILED_SQL,
     MARK_TASK_COMPLETED_SQL,
@@ -730,8 +732,8 @@ class Worker:
 
         rows = await self._load_rows(claimed_ids)
 
-        # PAUSE guard: filter out tasks belonging to PAUSED workflows and unclaim them
-        rows = await self._filter_paused_workflow_tasks(rows)
+        # Post-claim guard: filter out tasks for non-runnable workflow states.
+        rows = await self._filter_nonrunnable_workflow_tasks(rows)
 
         for row in rows:
             await self._dispatch_one(
@@ -739,14 +741,15 @@ class Worker:
             )
         return len(rows) > 0
 
-    async def _filter_paused_workflow_tasks(
+    async def _filter_nonrunnable_workflow_tasks(
         self, rows: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         """
-        Filter out tasks belonging to PAUSED workflows and unclaim them.
+        Filter out tasks belonging to non-runnable workflows (PAUSED/CANCELLED).
 
-        Post-claim guard: If a task belongs to a workflow that is PAUSED,
-        we unclaim it (set back to PENDING) so it can be processed on resume.
+        Post-claim guard:
+        - PAUSED workflow: unclaim task (back to PENDING), reset workflow_task to READY
+        - CANCELLED workflow: hard-cancel task + mark workflow_task SKIPPED
 
         Returns the filtered list of rows that should be dispatched.
         """
@@ -754,31 +757,52 @@ class Worker:
             return rows
 
         task_ids = [row['id'] for row in rows]
+        paused_task_ids: set[str] = set()
+        cancelled_task_ids: set[str] = set()
 
-        # Find which tasks belong to PAUSED workflows
+        # Find tasks belonging to non-runnable workflows.
         async with self.sf() as s:
             res = await s.execute(
-                GET_PAUSED_WORKFLOW_TASK_IDS_SQL,
+                GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL,
                 {'ids': task_ids},
             )
-            paused_task_ids = {row[0] for row in res.fetchall()}
+            for row in res.fetchall():
+                task_id = row[0]
+                wf_status = row[1]
+                if wf_status == 'PAUSED':
+                    paused_task_ids.add(task_id)
+                elif wf_status == 'CANCELLED':
+                    cancelled_task_ids.add(task_id)
 
             if paused_task_ids:
-                # Unclaim these tasks: set back to PENDING so they can be picked up on resume
+                # Unclaim paused-workflow tasks so they can be picked up on resume.
                 await s.execute(
                     UNCLAIM_PAUSED_TASKS_SQL,
                     {'ids': list(paused_task_ids)},
                 )
-                # Also reset workflow_tasks back to READY for consistency
-                # (they were ENQUEUED, but the task is now unclaimed)
+                # Keep workflow_task metadata consistent with unclaimed tasks.
                 await s.execute(
                     RESET_PAUSED_WORKFLOW_TASKS_SQL,
                     {'ids': list(paused_task_ids)},
                 )
+
+            if cancelled_task_ids:
+                # Cancel claimed/pending task rows so they are no longer claimable.
+                await s.execute(
+                    CANCEL_CANCELLED_WORKFLOW_TASKS_SQL,
+                    {'ids': list(cancelled_task_ids)},
+                )
+                # Ensure workflow_task rows no longer sit in enqueueable states.
+                await s.execute(
+                    SKIP_CANCELLED_WORKFLOW_TASKS_SQL,
+                    {'ids': list(cancelled_task_ids)},
+                )
+
+            if paused_task_ids or cancelled_task_ids:
                 await s.commit()
 
-        # Return only tasks not belonging to PAUSED workflows
-        return [row for row in rows if row['id'] not in paused_task_ids]
+        blocked_task_ids = paused_task_ids | cancelled_task_ids
+        return [row for row in rows if row['id'] not in blocked_task_ids]
 
     def _advisory_key_global(self) -> int:
         """Compute a stable 64-bit advisory lock key for this cluster."""

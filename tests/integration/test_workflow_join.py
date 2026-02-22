@@ -11,7 +11,6 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.workflow import TaskNode
-from horsies.core.workflows.engine import start_workflow_async
 
 from .conftest import (
     complete_task,
@@ -20,6 +19,7 @@ from .conftest import (
     make_simple_ctx_task,
     make_failing_task,
     make_workflow_spec,
+    start_ok,
 )
 
 
@@ -65,7 +65,7 @@ class TestOrJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete just task A
         await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
@@ -99,7 +99,7 @@ class TestOrJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete both tasks with failures
         await complete_task(
@@ -144,7 +144,7 @@ class TestOrJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A with failure
         await complete_task(
@@ -193,7 +193,7 @@ class TestOrJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A only (join condition satisfied)
         await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
@@ -234,7 +234,7 @@ class TestOrJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
 
         status_agg = await get_task_status(session, handle.workflow_id, 1)
@@ -264,7 +264,7 @@ class TestOrJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         await complete_task(
             session,
             handle.workflow_id,
@@ -307,7 +307,7 @@ class TestOrJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # A fails → B should be SKIPPED → C should be SKIPPED (cascade)
         await complete_task(
@@ -347,7 +347,7 @@ class TestOrJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # A succeeds → aggregator ENQUEUED
         await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
@@ -384,7 +384,7 @@ class TestOrJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete last dep (index 2) first
         await complete_task(session, handle.workflow_id, 2, TaskResult(ok=6))
@@ -419,7 +419,7 @@ class TestOrJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # A succeeds (join met) and B fails (ctx dep terminal)
         await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
@@ -468,7 +468,7 @@ class TestOrJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # A fails → B gets SKIPPED (cascade), then C succeeds
         await complete_task(
@@ -532,7 +532,7 @@ class TestQuorumJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A and B
         await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
@@ -570,7 +570,7 @@ class TestQuorumJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A and B with failures
         await complete_task(
@@ -618,7 +618,7 @@ class TestQuorumJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A with failure
         await complete_task(
@@ -675,7 +675,7 @@ class TestQuorumJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A only (quorum satisfied)
         await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
@@ -719,7 +719,7 @@ class TestQuorumJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A and B → still PENDING (need 3)
         await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
@@ -760,7 +760,7 @@ class TestQuorumJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # First success → ENQUEUED immediately
         await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
@@ -803,7 +803,7 @@ class TestQuorumJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # A and B fail → D SKIPPED (max_possible=1 < min_success=2) → E SKIPPED
         await complete_task(
@@ -853,7 +853,7 @@ class TestQuorumJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # A succeeds (quorum met) and B fails (ctx dep terminal)
         await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
@@ -896,7 +896,7 @@ class TestQuorumJoin:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # A succeeds → completed=1, still PENDING (need 2)
         await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))

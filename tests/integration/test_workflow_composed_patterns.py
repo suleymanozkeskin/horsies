@@ -23,7 +23,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.serde import loads_json
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.workflow import TaskNode, WorkflowContext, SuccessPolicy, SuccessCase, OnError
-from horsies.core.workflows.engine import start_workflow_async, on_workflow_task_complete
+from horsies.core.workflows.engine import on_workflow_task_complete
 
 from .conftest import (
     make_simple_task,
@@ -31,6 +31,7 @@ from .conftest import (
     make_failing_task,
     make_recovery_task,
     make_workflow_spec,
+    start_ok,
 )
 
 
@@ -172,7 +173,7 @@ class TestComposedPatterns:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A → B, C ENQUEUED
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -224,7 +225,7 @@ class TestComposedPatterns:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A → B, C ENQUEUED
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -288,7 +289,7 @@ class TestComposedPatterns:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A → B, C ENQUEUED
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -356,7 +357,7 @@ class TestComposedPatterns:
             success_policy=policy,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A → B, C, D ENQUEUED
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -434,7 +435,7 @@ class TestComposedPatterns:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A → B ENQUEUED, C SKIPPED (skip_when=True)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -497,7 +498,7 @@ class TestComposedPatterns:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A → B ENQUEUED, C SKIPPED
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -552,7 +553,7 @@ class TestComposedPatterns:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A → B, C, D, E all ENQUEUED
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -616,7 +617,7 @@ class TestComposedPatterns:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A → B, C ENQUEUED
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -694,7 +695,7 @@ class TestComposedPatterns:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A → B, C ENQUEUED
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -769,7 +770,7 @@ class TestComposedPatterns:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A → B ENQUEUED, C SKIPPED, D ENQUEUED
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -838,7 +839,7 @@ class TestComposedPatterns:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # A fails → B ENQUEUED (allow_failed_deps=True)
         await self._complete_task(
@@ -906,7 +907,7 @@ class TestComposedPatterns:
             success_policy=policy,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A → B, C ENQUEUED
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -997,7 +998,7 @@ class TestComposedPatterns:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A → B SKIPPED, C SKIPPED
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -1059,7 +1060,7 @@ class TestComposedPatterns:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A → B, C ENQUEUED
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -1117,7 +1118,7 @@ class TestComposedPatterns:
             success_policy=policy,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Both A and B are ENQUEUED (independent roots)
         assert await self._get_task_status(session, handle.workflow_id, 0) == 'ENQUEUED'

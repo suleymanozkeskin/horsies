@@ -43,6 +43,12 @@ from .core.models.workflow import (
     WORKFLOW_TASK_TERMINAL_STATES,
 )
 from .core.workflows.engine import start_workflow, start_workflow_async
+from .core.workflows.start_types import (
+    WorkflowStartError,
+    WorkflowStartErrorCode,
+    WorkflowStartResult,
+    WorkflowStartStage,
+)
 from .core.models.schedule import (
     Weekday,
     IntervalSchedule,
@@ -111,6 +117,10 @@ __all__ = [
     'WORKFLOW_TASK_TERMINAL_STATES',
     'start_workflow',
     'start_workflow_async',
+    'WorkflowStartError',
+    'WorkflowStartErrorCode',
+    'WorkflowStartResult',
+    'WorkflowStartStage',
     # Scheduling
     'Weekday',
     'IntervalSchedule',

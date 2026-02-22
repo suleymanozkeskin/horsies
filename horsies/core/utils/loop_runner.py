@@ -8,6 +8,10 @@ from typing import Any, Awaitable, Callable
 from horsies.core.logging import get_logger
 
 
+class LoopRunnerError(RuntimeError):
+    """Infrastructure failure in the sync->async bridge."""
+
+
 class LoopRunner:
     """Run async callables from sync code on a dedicated event loop thread."""
 
@@ -21,7 +25,12 @@ class LoopRunner:
 
     def start(self) -> None:
         if not self._started:
-            self._thread.start()
+            try:
+                self._thread.start()
+            except Exception as exc:
+                raise LoopRunnerError(
+                    f'Failed to start loop runner thread: {type(exc).__name__}: {exc}',
+                ) from exc
             self._started = True
 
     def stop(self) -> None:
@@ -39,9 +48,14 @@ class LoopRunner:
         self.logger.debug(
             f'Calling {coro_fn.__name__} with args: {args} and kwargs: {kwargs}'
         )
-        fut: Future[Any] = asyncio.run_coroutine_threadsafe(
-            coro_fn(*args, **kwargs), self._loop
-        )
+        try:
+            fut: Future[Any] = asyncio.run_coroutine_threadsafe(
+                coro_fn(*args, **kwargs), self._loop
+            )
+        except Exception as exc:
+            raise LoopRunnerError(
+                f'Failed to schedule coroutine on loop runner: {type(exc).__name__}: {exc}',
+            ) from exc
         return fut.result()  # propagate exceptions
 
 

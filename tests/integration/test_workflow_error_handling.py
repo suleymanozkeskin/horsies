@@ -20,12 +20,14 @@ from horsies.core.models.workflow import (
     WorkflowDefinition,
 )
 from horsies.core.errors import WorkflowValidationError
+from horsies.core.types.result import is_err
 from horsies.core.workflows.engine import (
     start_workflow_async,
     on_workflow_task_complete,
     enqueue_workflow_task,
     enqueue_subworkflow_task,
 )
+from horsies.core.workflows.start_types import WorkflowStartErrorCode, WorkflowStartStage
 from horsies.core.codec.serde import loads_json
 
 from .conftest import (
@@ -34,6 +36,7 @@ from .conftest import (
     make_recovery_task,
     make_args_receiver_task,
     make_workflow_spec,
+    start_ok,
 )
 from horsies.core.models.workflow import SuccessPolicy, SuccessCase
 
@@ -146,7 +149,7 @@ class TestOnErrorFail:
             on_error=OnError.FAIL,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
         await _complete_task(session, handle.workflow_id, 1, TaskResult(ok=4))
@@ -182,7 +185,7 @@ class TestOnErrorFail:
             on_error=OnError.FAIL,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A
         await _complete_task(
@@ -228,7 +231,7 @@ class TestOnErrorFail:
             on_error=OnError.FAIL,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A
         await _complete_task(
@@ -283,7 +286,7 @@ class TestOnErrorFail:
             on_error=OnError.FAIL,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A
         await _complete_task(
@@ -320,7 +323,7 @@ class TestOnErrorFail:
             on_error=OnError.FAIL,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A
         await _complete_task(
@@ -354,7 +357,7 @@ class TestOnErrorFail:
             on_error=OnError.FAIL,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A
         await _complete_task(
@@ -389,7 +392,7 @@ class TestOnErrorFail:
             on_error=OnError.FAIL,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A -> B gets SKIPPED -> DAG is resolved
         await _complete_task(
@@ -416,7 +419,7 @@ class TestOnErrorFail:
             broker=broker, name='taskerror', tasks=[node_a], on_error=OnError.FAIL
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A with specific error
         await _complete_task(
@@ -462,7 +465,7 @@ class TestOnErrorFail:
             on_error=OnError.FAIL,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A with FIRST_ERROR
         await _complete_task(
@@ -519,7 +522,7 @@ class TestOnErrorFail:
             output=node_b,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A
         await _complete_task(
@@ -569,7 +572,7 @@ class TestOnErrorFail:
             on_error=OnError.FAIL,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A
         await _complete_task(
@@ -623,7 +626,7 @@ class TestOnErrorPause:
             on_error=OnError.PAUSE,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A
         await _complete_task(
@@ -650,7 +653,7 @@ class TestOnErrorPause:
             broker=broker, name='pause_error', tasks=[node_a], on_error=OnError.PAUSE
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await _complete_task(
             session,
@@ -698,7 +701,7 @@ class TestOnErrorPause:
             on_error=OnError.PAUSE,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A
         await _complete_task(
@@ -733,7 +736,7 @@ class TestOnErrorPause:
             on_error=OnError.PAUSE,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A
         await _complete_task(
@@ -768,7 +771,7 @@ class TestOnErrorPause:
             on_error=OnError.PAUSE,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # A and B are both ENQUEUED (roots)
         assert await _get_task_status(session, handle.workflow_id, 0) == 'ENQUEUED'
@@ -811,7 +814,7 @@ class TestOnErrorPause:
             on_error=OnError.PAUSE,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Both A and B are ENQUEUED
         assert await _get_task_status(session, handle.workflow_id, 0) == 'ENQUEUED'
@@ -852,7 +855,7 @@ class TestOnErrorPause:
             on_error=OnError.PAUSE,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A with FIRST_ERROR -> workflow PAUSED
         await _complete_task(
@@ -904,7 +907,7 @@ class TestOnErrorPause:
             on_error=OnError.PAUSE,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Manually set workflow to PAUSED
         await session.execute(
@@ -955,7 +958,7 @@ class TestOnErrorPause:
             on_error=OnError.PAUSE,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Manually set B to READY (bypassing the normal flow)
         await session.execute(
@@ -1039,7 +1042,7 @@ class TestResume:
             on_error=OnError.PAUSE,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A -> PAUSE
         await _complete_task(
@@ -1111,7 +1114,7 @@ class TestEnqueuedFailureConversion:
             tasks=[node_a, node_b],
             on_error=OnError.FAIL,
         )
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await session.execute(
             text("""
@@ -1183,7 +1186,7 @@ class TestEnqueuedFailureConversion:
             tasks=[node_a, node_sub],
             on_error=OnError.FAIL,
         )
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await session.execute(
             text("""
@@ -1250,7 +1253,7 @@ class TestEnqueuedFailureConversion:
             on_error=OnError.PAUSE,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Manually set workflow to PAUSED
         await session.execute(
@@ -1307,7 +1310,7 @@ class TestEnqueuedFailureConversion:
             on_error=OnError.PAUSE,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Workflow is RUNNING
         assert await _get_workflow_status(session, handle.workflow_id) == 'RUNNING'
@@ -1336,7 +1339,7 @@ class TestEnqueuedFailureConversion:
             on_error=OnError.PAUSE,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A -> workflow COMPLETED
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -1370,7 +1373,7 @@ class TestEnqueuedFailureConversion:
             on_error=OnError.FAIL,  # FAIL policy: goes to FAILED, not PAUSED
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A -> workflow FAILED (single task, on_error=FAIL)
         await _complete_task(
@@ -1413,7 +1416,7 @@ class TestEnqueuedFailureConversion:
             on_error=OnError.PAUSE,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A -> PAUSED
         await _complete_task(
@@ -1468,7 +1471,7 @@ class TestEnqueuedFailureConversion:
             on_error=OnError.PAUSE,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A -> PAUSED
         await _complete_task(
@@ -1539,7 +1542,7 @@ class TestAllowFailedDeps:
             broker=broker, name='afd_err', tasks=[node_a, node_b], on_error=OnError.FAIL
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A
         await _complete_task(
@@ -1594,7 +1597,7 @@ class TestAllowFailedDeps:
             output=node_b,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A
         await _complete_task(
@@ -1645,7 +1648,7 @@ class TestAllowFailedDeps:
             on_error=OnError.FAIL,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A
         await _complete_task(
@@ -1697,7 +1700,7 @@ class TestAllowFailedDeps:
             on_error=OnError.FAIL,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # A fails, B succeeds
         await _complete_task(
@@ -1738,7 +1741,7 @@ class TestAllowFailedDeps:
             on_error=OnError.FAIL,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A
         await _complete_task(
@@ -1801,7 +1804,7 @@ class TestAllowFailedDeps:
             on_error=OnError.FAIL,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A
         await _complete_task(
@@ -1836,7 +1839,7 @@ class TestValidationGuards:
         self,
         setup: _SetupTuple,
     ) -> None:
-        """WorkflowSpec without resolved queue fails at start_workflow_async()."""
+        """WorkflowSpec without resolved queue returns Err(VALIDATION_FAILED)."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'unresolved_queue')
 
@@ -1847,17 +1850,17 @@ class TestValidationGuards:
 
         spec = WorkflowSpec(name='unresolved', tasks=[node_a], broker=broker)
 
-        # start_workflow_async should reject this
-        with pytest.raises(
-            WorkflowValidationError, match='TaskNode has unresolved queue'
-        ):
-            await start_workflow_async(spec, broker)
+        r = await start_workflow_async(spec, broker)
+        assert is_err(r)
+        assert r.err_value.code == WorkflowStartErrorCode.VALIDATION_FAILED
+        assert 'unresolved queue' in r.err_value.message
+        assert r.err_value.retryable is False
 
     async def test_direct_workflow_spec_fails_without_priority(
         self,
         setup: _SetupTuple,
     ) -> None:
-        """WorkflowSpec without resolved priority fails at start_workflow_async()."""
+        """WorkflowSpec without resolved priority returns Err(VALIDATION_FAILED)."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'unresolved_priority')
 
@@ -1870,11 +1873,11 @@ class TestValidationGuards:
 
         spec = WorkflowSpec(name='unresolved_prio', tasks=[node_a], broker=broker)
 
-        # start_workflow_async should reject this
-        with pytest.raises(
-            WorkflowValidationError, match='TaskNode has unresolved priority'
-        ):
-            await start_workflow_async(spec, broker)
+        r = await start_workflow_async(spec, broker)
+        assert is_err(r)
+        assert r.err_value.code == WorkflowStartErrorCode.VALIDATION_FAILED
+        assert 'unresolved priority' in r.err_value.message
+        assert r.err_value.retryable is False
 
 
 @pytest.mark.integration
@@ -1913,7 +1916,7 @@ class TestSuccessPolicy:
             tasks=[node_a, node_b],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A successfully
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
@@ -1951,7 +1954,7 @@ class TestSuccessPolicy:
             success_policy=policy,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A successfully
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
@@ -1992,7 +1995,7 @@ class TestSuccessPolicy:
             success_policy=policy,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A -> B gets SKIPPED
         await _complete_task(
@@ -2032,7 +2035,7 @@ class TestSuccessPolicy:
             success_policy=policy,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A successfully
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
@@ -2080,7 +2083,7 @@ class TestSuccessPolicy:
             success_policy=policy,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A
         await _complete_task(
@@ -2120,7 +2123,7 @@ class TestSuccessPolicy:
             success_policy=policy,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Fail A -> B gets SKIPPED
         await _complete_task(
@@ -2141,3 +2144,277 @@ class TestSuccessPolicy:
         # A failed first, but B (required) was SKIPPED not FAILED
         # So we get the sentinel error
         assert error_data['error_code'] == 'WORKFLOW_SUCCESS_CASE_NOT_MET'
+
+
+# =============================================================================
+# WorkflowStartResult error-path regression tests
+# =============================================================================
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio(loop_scope='function')
+class TestWorkflowStartErrors:
+    """Regression tests for WorkflowStartResult error paths."""
+
+    @pytest_asyncio.fixture
+    async def setup(
+        self,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> _SetupTuple:
+        """Clean tables and return fixtures."""
+        await session.execute(
+            text('TRUNCATE horsies_workflow_tasks, horsies_workflows, horsies_tasks CASCADE'),
+        )
+        await session.commit()
+        return session, broker, app
+
+    async def test_start_broker_not_configured(self) -> None:
+        """WorkflowSpec.start_async without broker returns Err(BROKER_NOT_CONFIGURED)."""
+        task_fn = lambda value: None  # noqa: E731
+        task_fn.task_queue_name = 'default'  # type: ignore[attr-defined]
+        node = TaskNode(fn=task_fn, kwargs={'value': 1})
+        node.queue = 'default'
+        node.priority = 100
+        spec = WorkflowSpec(name='no_broker', tasks=[node])
+
+        r = await spec.start_async()
+        assert is_err(r)
+        assert r.err_value.code == WorkflowStartErrorCode.BROKER_NOT_CONFIGURED
+        assert r.err_value.retryable is False
+        assert r.err_value.stage == WorkflowStartStage.PREVALIDATE
+        assert r.err_value.workflow_name == 'no_broker'
+        assert r.err_value.workflow_id  # always populated
+
+    async def test_start_unresolved_queue(
+        self,
+        setup: _SetupTuple,
+    ) -> None:
+        """Unresolved queue returns Err(VALIDATION_FAILED)."""
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'val_q')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = WorkflowSpec(name='val_q_wf', tasks=[node_a], broker=broker)
+
+        r = await start_workflow_async(spec, broker)
+        assert is_err(r)
+        assert r.err_value.code == WorkflowStartErrorCode.VALIDATION_FAILED
+        assert r.err_value.stage == WorkflowStartStage.PREVALIDATE
+        assert 'unresolved queue' in r.err_value.message
+        assert r.err_value.retryable is False
+        assert r.err_value.workflow_name == 'val_q_wf'
+        assert r.err_value.workflow_id  # always populated
+
+    async def test_start_unresolved_priority(
+        self,
+        setup: _SetupTuple,
+    ) -> None:
+        """Unresolved priority returns Err(VALIDATION_FAILED)."""
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'val_p')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a.queue = 'default'
+        spec = WorkflowSpec(name='val_p_wf', tasks=[node_a], broker=broker)
+
+        r = await start_workflow_async(spec, broker)
+        assert is_err(r)
+        assert r.err_value.code == WorkflowStartErrorCode.VALIDATION_FAILED
+        assert r.err_value.stage == WorkflowStartStage.PREVALIDATE
+        assert 'unresolved priority' in r.err_value.message
+        assert r.err_value.retryable is False
+
+    async def test_start_schema_init_failure(
+        self,
+        setup: _SetupTuple,
+    ) -> None:
+        """Schema init failure returns Err(SCHEMA_INIT_FAILED)."""
+        from unittest.mock import AsyncMock, patch
+
+        from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
+        from horsies.core.types.result import Err as ResultErr
+
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'schema_fail')
+
+        spec = make_workflow_spec('schema_fail_wf', [TaskNode(fn=task_a, kwargs={'value': 1})], broker)
+
+        mock_err = ResultErr(BrokerOperationError(
+            code=BrokerErrorCode.SCHEMA_INIT_FAILED,
+            message='connection refused',
+            retryable=True,
+            exception=ConnectionError('refused'),
+        ))
+
+        with patch.object(broker, 'ensure_schema_initialized', new_callable=AsyncMock, return_value=mock_err):
+            r = await start_workflow_async(spec, broker)
+
+        assert is_err(r)
+        assert r.err_value.code == WorkflowStartErrorCode.SCHEMA_INIT_FAILED
+        assert r.err_value.stage == WorkflowStartStage.ENSURE_SCHEMA
+        assert r.err_value.retryable is True
+        assert 'connection refused' in r.err_value.message
+        assert r.err_value.workflow_id  # always populated
+
+    async def test_start_db_transient_error(
+        self,
+        setup: _SetupTuple,
+    ) -> None:
+        """DB transient error returns Err(DB_OPERATION_FAILED, retryable=True)."""
+        from unittest.mock import AsyncMock, patch
+
+        from sqlalchemy.exc import OperationalError
+
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'db_err')
+
+        spec = make_workflow_spec('db_err_wf', [TaskNode(fn=task_a, kwargs={'value': 1})], broker)
+
+        # Mock session_factory to raise a retryable error
+        original_factory = broker.session_factory
+
+        class _FailingFactory:
+            async def __aenter__(self) -> Any:
+                raise OperationalError('connection refused', params=None, orig=Exception())
+
+            async def __aexit__(self, *args: Any) -> None:
+                pass
+
+        with patch.object(broker, 'session_factory', return_value=_FailingFactory()):
+            r = await start_workflow_async(spec, broker)
+
+        assert is_err(r)
+        assert r.err_value.code == WorkflowStartErrorCode.DB_OPERATION_FAILED
+        assert r.err_value.stage == WorkflowStartStage.DB_TRANSACTION
+        assert r.err_value.retryable is True
+        assert r.err_value.workflow_id  # always populated
+
+    async def test_start_rollback_integrity(
+        self,
+        setup: _SetupTuple,
+    ) -> None:
+        """Mid-insert failure leaves no workflow rows persisted."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'rollback_test')
+
+        spec = make_workflow_spec(
+            'rollback_wf',
+            [TaskNode(fn=task_a, kwargs={'value': 1})],
+            broker,
+        )
+
+        # Induce failure after workflow INSERT but before commit
+        original_factory = broker.session_factory
+
+        def _failing_session_factory() -> Any:
+            ctx = original_factory()
+            call_count = 0
+
+            class _Ctx:
+                async def __aenter__(self_inner) -> Any:
+                    sess = await ctx.__aenter__()
+                    original_execute = sess.execute
+
+                    async def patched_execute(*a: Any, **kw: Any) -> Any:
+                        nonlocal call_count
+                        call_count += 1
+                        # Let first execute (workflow INSERT) succeed,
+                        # fail on second (workflow_task INSERT)
+                        if call_count >= 2:
+                            raise RuntimeError('Induced mid-insert failure')
+                        return await original_execute(*a, **kw)
+
+                    sess.execute = patched_execute  # type: ignore[method-assign]
+                    return sess
+
+                async def __aexit__(self_inner, *args: Any) -> None:
+                    await ctx.__aexit__(*args)
+
+            return _Ctx()
+
+        with patch.object(broker, 'session_factory', side_effect=_failing_session_factory):
+            r = await start_workflow_async(spec, broker)
+
+        assert is_err(r)
+        assert r.err_value.code == WorkflowStartErrorCode.DB_OPERATION_FAILED
+        assert r.err_value.stage == WorkflowStartStage.DB_TRANSACTION
+
+        # Verify no rows persisted
+        wf_check = await session.execute(
+            text("SELECT count(*) FROM horsies_workflows WHERE name = 'rollback_wf'"),
+        )
+        assert wf_check.scalar() == 0
+
+    async def test_start_sync_loop_runner_failed(
+        self,
+        setup: _SetupTuple,
+    ) -> None:
+        """Sync bridge failure returns Err(LOOP_RUNNER_FAILED)."""
+        from unittest.mock import patch, MagicMock
+
+        from horsies.core.workflows.engine import start_workflow
+        from horsies.core.utils.loop_runner import LoopRunnerError
+
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'sync_fail')
+
+        spec = make_workflow_spec(
+            'sync_fail_wf',
+            [TaskNode(fn=task_a, kwargs={'value': 1})],
+            broker,
+        )
+
+        # Mock get_shared_runner to raise an infrastructure error
+        mock_runner = MagicMock()
+        mock_runner.call.side_effect = LoopRunnerError('No running event loop')
+
+        with patch(
+            'horsies.core.utils.loop_runner.get_shared_runner',
+            return_value=mock_runner,
+        ):
+            r = start_workflow(spec, broker)
+
+        assert is_err(r)
+        assert r.err_value.code == WorkflowStartErrorCode.LOOP_RUNNER_FAILED
+        assert r.err_value.stage == WorkflowStartStage.SYNC_BRIDGE
+        assert r.err_value.retryable is False
+        assert r.err_value.workflow_name == 'sync_fail_wf'
+        assert r.err_value.workflow_id  # always populated
+        assert 'No running event loop' in r.err_value.message
+
+    async def test_start_sync_internal_failed(
+        self,
+        setup: _SetupTuple,
+    ) -> None:
+        """Unexpected sync-path exception returns Err(INTERNAL_FAILED)."""
+        from unittest.mock import patch, MagicMock
+
+        from horsies.core.workflows.engine import start_workflow
+
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'sync_internal_fail')
+
+        spec = make_workflow_spec(
+            'sync_internal_fail_wf',
+            [TaskNode(fn=task_a, kwargs={'value': 1})],
+            broker,
+        )
+
+        mock_runner = MagicMock()
+        mock_runner.call.side_effect = RuntimeError('Unexpected runner call failure')
+
+        with patch(
+            'horsies.core.utils.loop_runner.get_shared_runner',
+            return_value=mock_runner,
+        ):
+            r = start_workflow(spec, broker)
+
+        assert is_err(r)
+        assert r.err_value.code == WorkflowStartErrorCode.INTERNAL_FAILED
+        assert r.err_value.stage == WorkflowStartStage.SYNC_BRIDGE
+        assert r.err_value.retryable is False
+        assert r.err_value.workflow_name == 'sync_internal_fail_wf'
+        assert r.err_value.workflow_id  # always populated
+        assert 'Unexpected runner call failure' in r.err_value.message

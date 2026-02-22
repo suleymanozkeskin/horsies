@@ -75,10 +75,47 @@ CANCEL_WORKFLOW_SQL = text("""
     WHERE id = :wf_id AND status IN ('PENDING', 'RUNNING', 'PAUSED')
 """)
 
+SYNC_RUNNING_ENQUEUED_WORKFLOW_TASKS_ON_CANCEL_SQL = text("""
+    UPDATE horsies_workflow_tasks wt
+    SET status = 'RUNNING',
+        started_at = COALESCE(wt.started_at, NOW())
+    FROM horsies_tasks t
+    WHERE wt.workflow_id = :wf_id
+      AND wt.task_id = t.id
+      AND wt.status = 'ENQUEUED'
+      AND t.status = 'RUNNING'
+""")
+
+MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL = text("""
+    UPDATE horsies_tasks t
+    SET status = 'CANCELLED',
+        claimed = FALSE,
+        claimed_at = NULL,
+        claimed_by_worker_id = NULL,
+        claim_expires_at = NULL,
+        updated_at = NOW()
+    FROM horsies_workflow_tasks wt
+    WHERE wt.workflow_id = :wf_id
+      AND wt.task_id = t.id
+      AND wt.status = 'ENQUEUED'
+      AND t.status IN ('PENDING', 'CLAIMED')
+""")
+
 SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL = text("""
     UPDATE horsies_workflow_tasks
     SET status = 'SKIPPED'
     WHERE workflow_id = :wf_id AND status IN ('PENDING', 'READY')
+""")
+
+SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL = text("""
+    UPDATE horsies_workflow_tasks wt
+    SET status = 'SKIPPED',
+        completed_at = NOW()
+    FROM horsies_tasks t
+    WHERE wt.workflow_id = :wf_id
+      AND wt.task_id = t.id
+      AND wt.status = 'ENQUEUED'
+      AND t.status = 'CANCELLED'
 """)
 
 
@@ -486,9 +523,29 @@ class WorkflowHandle(Generic[OutT]):
                 {'wf_id': self.workflow_id},
             )
 
+            # If a task has already started but workflow_task still says ENQUEUED,
+            # normalize it to RUNNING so cancellation doesn't leave stale ENQUEUED rows.
+            await session.execute(
+                SYNC_RUNNING_ENQUEUED_WORKFLOW_TASKS_ON_CANCEL_SQL,
+                {'wf_id': self.workflow_id},
+            )
+
+            # Cancel ENQUEUED tasks that have not started execution yet.
+            # This guarantees they are no longer claimable by workers.
+            await session.execute(
+                MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL,
+                {'wf_id': self.workflow_id},
+            )
+
             # Skip pending/ready tasks
             await session.execute(
                 SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL,
+                {'wf_id': self.workflow_id},
+            )
+
+            # Skip ENQUEUED workflow tasks whose backing task was cancelled above.
+            await session.execute(
+                SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL,
                 {'wf_id': self.workflow_id},
             )
 

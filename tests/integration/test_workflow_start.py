@@ -20,7 +20,7 @@ from horsies.core.models.workflow import (
     OnError,
 )
 from horsies.core.task_decorator import from_node
-from horsies.core.workflows.engine import start_workflow_async, on_workflow_task_complete
+from horsies.core.workflows.engine import on_workflow_task_complete
 
 from .conftest import (
     make_simple_task,
@@ -29,6 +29,7 @@ from .conftest import (
     make_args_receiver_task,
     make_retryable_task,
     make_ctx_receiver_task,
+    start_ok,
 )
 
 
@@ -60,7 +61,7 @@ class TestWorkflowStart:
         node_a = TaskNode(fn=simple_task, kwargs={'value': 5})
         spec = make_workflow_spec(broker=broker, name='test_wf', tasks=[node_a])
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Check workflow record
         result = await session.execute(
@@ -87,7 +88,7 @@ class TestWorkflowStart:
             broker=broker, name='multi_task', tasks=[node_a, node_b]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Check workflow_tasks count
         result = await session.execute(
@@ -108,7 +109,7 @@ class TestWorkflowStart:
         node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         spec = make_workflow_spec(broker=broker, name='root_test', tasks=[node_a])
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         result = await session.execute(
             text("""
@@ -142,7 +143,7 @@ class TestWorkflowStart:
             broker=broker, name='pending_test', tasks=[node_a, node_b]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Child task should be PENDING
         result = await session.execute(
@@ -168,7 +169,7 @@ class TestWorkflowStart:
         spec = make_workflow_spec(broker=broker, name='custom_id', tasks=[node_a])
 
         custom_id = 'my-custom-workflow-id-123'
-        handle = await start_workflow_async(spec, broker, workflow_id=custom_id)
+        handle = await start_ok(spec, broker, custom_id)
 
         assert handle.workflow_id == custom_id
 
@@ -194,7 +195,7 @@ class TestWorkflowStart:
         spec_fail = make_workflow_spec(
             broker=broker, name='fail_policy', tasks=[node_a], on_error=OnError.FAIL
         )
-        handle_fail = await start_workflow_async(spec_fail, broker)
+        handle_fail = await start_ok(spec_fail, broker)
 
         result = await session.execute(
             text('SELECT on_error FROM horsies_workflows WHERE id = :wf_id'),
@@ -210,7 +211,7 @@ class TestWorkflowStart:
         spec_pause = make_workflow_spec(
             broker=broker, name='pause_policy', tasks=[node_b], on_error=OnError.PAUSE
         )
-        handle_pause = await start_workflow_async(spec_pause, broker)
+        handle_pause = await start_ok(spec_pause, broker)
 
         result = await session.execute(
             text('SELECT on_error FROM horsies_workflows WHERE id = :wf_id'),
@@ -236,7 +237,7 @@ class TestWorkflowStart:
             broker=broker, name='with_output', tasks=[node_a, node_b], output=node_b
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         result = await session.execute(
             text('SELECT output_task_index FROM horsies_workflows WHERE id = :wf_id'),
@@ -264,7 +265,7 @@ class TestWorkflowStart:
             broker=broker, name='deps_test', tasks=[node_a, node_b, node_c]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         result = await session.execute(
             text("""
@@ -299,7 +300,7 @@ class TestWorkflowStart:
             broker=broker, name='args_from_test', tasks=[node_a, node_b]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         result = await session.execute(
             text("""
@@ -333,7 +334,7 @@ class TestWorkflowStart:
             broker=broker, name='ctx_from_test', tasks=[node_a, node_b]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         result = await session.execute(
             text("""
@@ -367,7 +368,7 @@ class TestWorkflowStart:
             broker=broker, name='allow_failed_test', tasks=[node_a, node_b]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Check node_a (default False)
         result_a = await session.execute(
@@ -406,7 +407,7 @@ class TestWorkflowStart:
             broker=broker, name='retry_policy_test', tasks=[node_a]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # 1. Check that task_options is stored in workflow_tasks
         wt_result = await session.execute(
@@ -451,7 +452,7 @@ class TestWorkflowStart:
             broker=broker, name='retry_non_root', tasks=[node_a, node_b]
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A to enqueue B
         res = await session.execute(
@@ -495,7 +496,7 @@ class TestWorkflowStart:
         )
 
         custom_id = 'idempotent-test-id'
-        handle_1 = await start_workflow_async(spec, broker, workflow_id=custom_id)
+        handle_1 = await start_ok(spec, broker, custom_id)
 
         # Second call with same ID — must reuse existing workflow
         task_b = make_simple_task(app, 'idempotent_b')
@@ -503,7 +504,7 @@ class TestWorkflowStart:
         spec_2 = make_workflow_spec(
             broker=broker, name='idempotent_wf_2', tasks=[node_b],
         )
-        handle_2 = await start_workflow_async(spec_2, broker, workflow_id=custom_id)
+        handle_2 = await start_ok(spec_2, broker, custom_id)
 
         assert handle_1.workflow_id == handle_2.workflow_id
 
@@ -534,7 +535,7 @@ class TestWorkflowStart:
             broker=broker, name='no_output_wf', tasks=[node_a],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         result = await session.execute(
             text('SELECT output_task_index FROM horsies_workflows WHERE id = :wf_id'),
@@ -558,7 +559,7 @@ class TestWorkflowStart:
             broker=broker, name='good_until_wf', tasks=[node_a],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         result = await session.execute(
             text("""
@@ -591,7 +592,7 @@ class TestWorkflowStart:
             broker=broker, name='multi_root_wf', tasks=[node_a, node_b, node_c],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         result = await session.execute(
             text("""
@@ -646,7 +647,7 @@ class TestNodeBuilder:
             output=node_a,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Verify workflow was created
         result = await session.execute(
@@ -700,7 +701,7 @@ class TestNodeBuilder:
             tasks=[root, child],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Verify root is READY/ENQUEUED, child is PENDING
         root_result = await session.execute(
@@ -749,7 +750,7 @@ class TestNodeBuilder:
             tasks=[node_a],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Verify allow_failed_deps was persisted
         result = await session.execute(
@@ -794,7 +795,7 @@ class TestNodeBuilder:
             tasks=[root, child],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         result = await session.execute(
             text("""
@@ -835,7 +836,7 @@ class TestNodeBuilder:
             tasks=[src, recv],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         result = await session.execute(
             text("""
@@ -873,7 +874,7 @@ class TestNodeBuilder:
             tasks=[node],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         result = await session.execute(
             text("""
@@ -914,7 +915,7 @@ class TestNodeBuilder:
             tasks=[prod, cons],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Verify args_from stored correctly
         result = await session.execute(
@@ -963,7 +964,7 @@ class TestNodeBuilder:
             tasks=[prod, cons],
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         result = await session.execute(
             text("""

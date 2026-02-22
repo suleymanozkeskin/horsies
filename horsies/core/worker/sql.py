@@ -93,13 +93,13 @@ COUNT_RUNNING_IN_QUEUE_SQL = text("""
       AND queue_name = :q
 """)
 
-GET_PAUSED_WORKFLOW_TASK_IDS_SQL = text("""
-    SELECT t.id
+GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL = text("""
+    SELECT t.id, w.status
     FROM horsies_tasks t
     JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
     JOIN horsies_workflows w ON w.id = wt.workflow_id
     WHERE t.id = ANY(:ids)
-      AND w.status = 'PAUSED'
+      AND w.status IN ('PAUSED', 'CANCELLED')
 """)
 
 UNCLAIM_PAUSED_TASKS_SQL = text("""
@@ -129,6 +129,26 @@ RESET_PAUSED_WORKFLOW_TASKS_SQL = text("""
     UPDATE horsies_workflow_tasks
     SET status = 'READY', task_id = NULL, started_at = NULL
     WHERE task_id = ANY(:ids)
+""")
+
+CANCEL_CANCELLED_WORKFLOW_TASKS_SQL = text("""
+    UPDATE horsies_tasks
+    SET status = 'CANCELLED',
+        claimed = FALSE,
+        claimed_at = NULL,
+        claimed_by_worker_id = NULL,
+        claim_expires_at = NULL,
+        updated_at = NOW()
+    WHERE id = ANY(:ids)
+      AND status IN ('CLAIMED', 'PENDING')
+""")
+
+SKIP_CANCELLED_WORKFLOW_TASKS_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET status = 'SKIPPED',
+        completed_at = NOW()
+    WHERE task_id = ANY(:ids)
+      AND status IN ('PENDING', 'READY', 'ENQUEUED')
 """)
 
 MARK_TASK_FAILED_WORKER_SQL = text("""

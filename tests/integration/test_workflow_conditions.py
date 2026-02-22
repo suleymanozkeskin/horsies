@@ -15,9 +15,9 @@ from horsies.core.codec.serde import loads_json, task_result_from_json
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.workflow import TaskNode, WorkflowContext
 from horsies.core.task_decorator import TaskFunction
-from horsies.core.workflows.engine import start_workflow_async, on_workflow_task_complete
+from horsies.core.workflows.engine import on_workflow_task_complete
 
-from .conftest import make_simple_task, make_workflow_spec
+from .conftest import make_simple_task, make_workflow_spec, start_ok
 
 
 @pytest.mark.integration
@@ -154,7 +154,7 @@ class TestRunWhenSkipWhen:
         )
 
         # Start workflow
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete task A (5 * 2 = 10, which is > 5)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -197,7 +197,7 @@ class TestRunWhenSkipWhen:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete task A (2 * 2 = 4, which is <= 10)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=4))
@@ -236,7 +236,7 @@ class TestRunWhenSkipWhen:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete task A (5 * 2 = 10, which is >= 5)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
@@ -279,7 +279,7 @@ class TestRunWhenSkipWhen:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete task A (1 * 2 = 2, which is < 5)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
@@ -321,7 +321,7 @@ class TestRunWhenSkipWhen:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
@@ -357,7 +357,7 @@ class TestRunWhenSkipWhen:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
@@ -404,7 +404,7 @@ class TestRunWhenSkipWhen:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete A and B so conditions evaluate
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
@@ -452,7 +452,7 @@ class TestRunWhenSkipWhen:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
         # skip_when raised -> FAILED
@@ -497,7 +497,7 @@ class TestRunWhenSkipWhen:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
         # skip_when=False → check run_when → run_when=False → SKIPPED
@@ -536,7 +536,7 @@ class TestRunWhenSkipWhen:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
         # skip_when=False → check run_when → run_when=True → ENQUEUED
@@ -585,7 +585,7 @@ class TestRunWhenSkipWhen:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
         # B is SKIPPED by condition
@@ -635,7 +635,7 @@ class TestRunWhenSkipWhen:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
         # B is SKIPPED by condition
@@ -679,7 +679,7 @@ class TestRunWhenSkipWhen:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
         # B is SKIPPED by condition
@@ -726,7 +726,7 @@ class TestRunWhenSkipWhen:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         # Complete task A with failure
         await self._complete_task(
@@ -779,7 +779,7 @@ class TestRunWhenSkipWhen:
             broker=broker,
         )
 
-        handle = await start_workflow_async(spec, broker)
+        handle = await start_ok(spec, broker)
 
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
         await self._complete_task(session, handle.workflow_id, 1, TaskResult(ok=4))
