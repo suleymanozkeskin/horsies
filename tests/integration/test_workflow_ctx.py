@@ -499,9 +499,7 @@ class TestWorkflowCtx:
         await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
-        database_url = broker.config.database_url.replace('+asyncpg', '').replace(
-            '+psycopg', ''
-        )
+        database_url = broker.listener.database_url
         _initialize_worker_pool(database_url)
         ok, result_json, worker_failure = _run_task_entry(
             task_name=task_name,
@@ -570,9 +568,7 @@ class TestWorkflowCtx:
         await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
-        database_url = broker.config.database_url.replace('+asyncpg', '').replace(
-            '+psycopg', ''
-        )
+        database_url = broker.listener.database_url
         _initialize_worker_pool(database_url)
         ok, result_json, worker_failure = _run_task_entry(
             task_name=task_name,
@@ -644,9 +640,7 @@ class TestWorkflowCtx:
         await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
-        database_url = broker.config.database_url.replace('+asyncpg', '').replace(
-            '+psycopg', ''
-        )
+        database_url = broker.listener.database_url
         _initialize_worker_pool(database_url)
         ok, result_json, worker_failure = _run_task_entry(
             task_name=task_name,
@@ -933,9 +927,7 @@ class TestWorkflowCtx:
         await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
-        database_url = broker.config.database_url.replace('+asyncpg', '').replace(
-            '+psycopg', ''
-        )
+        database_url = broker.listener.database_url
         _initialize_worker_pool(database_url)
         ok, result_json, worker_failure = _run_task_entry(
             task_name=task_name,

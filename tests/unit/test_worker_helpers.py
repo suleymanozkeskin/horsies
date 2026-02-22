@@ -13,14 +13,18 @@ from psycopg import InterfaceError, OperationalError
 from horsies.core.types.result import Ok, Err
 from psycopg.errors import DeadlockDetected, SerializationFailure
 
+from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 from horsies.core.worker.worker import (
     Worker,
     WorkerConfig,
+    CLAIM_SQL,
     DELETE_EXPIRED_HEARTBEATS_SQL,
     DELETE_EXPIRED_TASKS_SQL,
     DELETE_EXPIRED_WORKER_STATES_SQL,
     DELETE_EXPIRED_WORKFLOWS_SQL,
     DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
+    INSERT_CLAIMER_HEARTBEAT_SQL,
+    RENEW_CLAIM_LEASE_SQL,
     _build_sys_path_roots,
     _dedupe_paths,
     _derive_sys_path_roots_from_file,
@@ -236,11 +240,20 @@ class TestAdvisoryKeyGlobal:
 
 @pytest.mark.unit
 class TestComputeClaimExpiresAt:
-    """Tests for Worker._compute_claim_expires_at: None vs datetime."""
+    """Tests for Worker._compute_claim_expires_at: always returns datetime."""
 
-    def test_hard_cap_returns_none(self) -> None:
+    def test_hard_cap_returns_default_lease(self) -> None:
+        """Hard-cap mode (claim_lease_ms=None) uses DEFAULT_CLAIM_LEASE_MS."""
         w = _make_worker(claim_lease_ms=None)
-        assert w._compute_claim_expires_at() is None
+        before = datetime.now(timezone.utc)
+        result = w._compute_claim_expires_at()
+        after = datetime.now(timezone.utc)
+
+        default_ms = DEFAULT_CLAIM_LEASE_MS
+        expected_low = before + timedelta(milliseconds=default_ms)
+        expected_high = after + timedelta(milliseconds=default_ms)
+        assert isinstance(result, datetime)
+        assert expected_low <= result <= expected_high
 
     def test_soft_cap_returns_datetime_close_to_now_plus_lease(self) -> None:
         lease_ms = 5000
@@ -249,9 +262,20 @@ class TestComputeClaimExpiresAt:
         result = w._compute_claim_expires_at()
         after = datetime.now(timezone.utc)
 
-        assert result is not None
         expected_low = before + timedelta(milliseconds=lease_ms)
         expected_high = after + timedelta(milliseconds=lease_ms)
+        assert isinstance(result, datetime)
+        assert expected_low <= result <= expected_high
+
+    def test_explicit_override_in_hard_cap_mode(self) -> None:
+        """User can set claim_lease_ms in hard-cap mode to override default."""
+        w = _make_worker(claim_lease_ms=10_000)
+        before = datetime.now(timezone.utc)
+        result = w._compute_claim_expires_at()
+        after = datetime.now(timezone.utc)
+
+        expected_low = before + timedelta(milliseconds=10_000)
+        expected_high = after + timedelta(milliseconds=10_000)
         assert expected_low <= result <= expected_high
 
 
@@ -466,3 +490,120 @@ class TestReaperHeartbeatRetention:
         assert recover_mock.await_count >= 1
         assert len(created_brokers) == 1
         created_brokers[0].close_async.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# 9. Claim pipeline: RETURNING payload + lease hardening
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestClaimBatchLockedReturnsPayload:
+    """_claim_batch_locked returns dispatch-ready row dicts from RETURNING."""
+
+    @pytest.mark.asyncio
+    async def test_claim_returns_row_dicts(self) -> None:
+        """CLAIM_SQL RETURNING provides id, task_name, args, kwargs as dicts."""
+        worker = _make_worker()
+
+        fake_rows = [
+            ('task-1', 'my_app.add', '[]', '{}'),
+            ('task-2', 'my_app.mul', '[1, 2]', '{"x": 3}'),
+        ]
+
+        fake_result = MagicMock()
+        fake_result.keys.return_value = ['id', 'task_name', 'args', 'kwargs']
+        fake_result.fetchall.return_value = fake_rows
+
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=fake_result)
+
+        rows = await worker._claim_batch_locked(session, 'default', 5)
+
+        assert len(rows) == 2
+        assert rows[0] == {
+            'id': 'task-1',
+            'task_name': 'my_app.add',
+            'args': '[]',
+            'kwargs': '{}',
+        }
+        assert rows[1] == {
+            'id': 'task-2',
+            'task_name': 'my_app.mul',
+            'args': '[1, 2]',
+            'kwargs': '{"x": 3}',
+        }
+
+    @pytest.mark.asyncio
+    async def test_claim_returns_empty_when_nothing_available(self) -> None:
+        worker = _make_worker()
+
+        fake_result = MagicMock()
+        fake_result.keys.return_value = ['id', 'task_name', 'args', 'kwargs']
+        fake_result.fetchall.return_value = []
+
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=fake_result)
+
+        rows = await worker._claim_batch_locked(session, 'default', 5)
+        assert rows == []
+
+    @pytest.mark.asyncio
+    async def test_claim_passes_claim_expires_at(self) -> None:
+        """claim_expires_at is always a datetime (never None)."""
+        worker = _make_worker(claim_lease_ms=None)
+
+        fake_result = MagicMock()
+        fake_result.keys.return_value = ['id', 'task_name', 'args', 'kwargs']
+        fake_result.fetchall.return_value = []
+
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=fake_result)
+
+        await worker._claim_batch_locked(session, 'default', 1)
+
+        call_args = session.execute.call_args
+        params = call_args[0][1]
+        assert isinstance(params['claim_expires_at'], datetime)
+
+
+@pytest.mark.unit
+class TestClaimerHeartbeatRenewsLease:
+    """Claimer heartbeat loop renews claim_expires_at alongside heartbeats."""
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_loop_executes_lease_renewal(self) -> None:
+        worker = _make_worker()
+        worker.cfg.recovery_config = RecoveryConfig(
+            claimer_heartbeat_interval_ms=1_000,
+        )
+
+        executed_stmts: list[Any] = []
+
+        async def _execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+            executed_stmts.append(stmt)
+            # Stop after first full cycle (heartbeat + renewal)
+            if len(executed_stmts) >= 2:
+                worker._stop.set()
+            return MagicMock(rowcount=0)
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(side_effect=_execute)
+        session.commit = AsyncMock()
+        worker.sf = MagicMock(return_value=session)
+
+        await worker._claimer_heartbeat_loop()
+
+        assert INSERT_CLAIMER_HEARTBEAT_SQL in executed_stmts
+        assert RENEW_CLAIM_LEASE_SQL in executed_stmts
+
+        # Verify renewal params contain a datetime (not None)
+        renewal_calls = [
+            c for c in session.execute.call_args_list
+            if c[0][0] is RENEW_CLAIM_LEASE_SQL
+        ]
+        assert len(renewal_calls) >= 1
+        renewal_params = renewal_calls[0][0][1]
+        assert isinstance(renewal_params['new_expires_at'], datetime)

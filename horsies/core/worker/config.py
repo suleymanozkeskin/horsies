@@ -45,6 +45,7 @@ class WorkerConfig:
     # Prefetch buffer: 0 = hard cap mode (count RUNNING + CLAIMED), >0 = soft cap with lease
     prefetch_buffer: int = 0
     # Claim lease duration in ms. Required when prefetch_buffer > 0.
+    # When None, the worker applies a 60s default internally for crash-recovery safety.
     claim_lease_ms: Optional[int] = None
     # Recovery configuration from AppConfig
     recovery_config: Optional['RecoveryConfig'] = (

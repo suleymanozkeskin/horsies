@@ -397,8 +397,11 @@ async def test_softcap_db_ledger_race_single_execution(
             timeout_s=10.0,
         )
 
-        # claim_lease_ms=500 in SOFTCAP_INSTANCE, so 1.2s guarantees expiry before worker B starts
-        await asyncio.sleep(1.2)
+        # claim_lease_ms=2000 in SOFTCAP_INSTANCE. Worker A's claimer heartbeat
+        # renews the lease continuously, so the lease stays fresh despite the short
+        # duration. This sleep is a scheduling delay — not a guarantee of expiry.
+        # Worker A eventually processes the task when the blocker finishes.
+        await asyncio.sleep(2.5)
 
         with run_worker(
             SOFTCAP_INSTANCE,
@@ -1026,15 +1029,14 @@ async def test_concurrent_enqueue_during_processing(
 def test_softcap_lease_no_double_execution(
     softcap_broker: PostgresBroker,
 ) -> None:
-    """L2.14: Under soft cap with aggressive lease expiry, no task body executes twice.
+    """L2.14: Under soft cap with short lease + active heartbeat renewal, no task body executes twice.
 
     Strategy: 2 workers x 1 process each. prefetch_buffer=2 lets each worker
-    claim up to 3 tasks (1 running + 2 prefetched). claim_lease_ms=500 means
-    prefetched claims expire while waiting in the process pool queue (each task
-    takes 800ms). The other worker's claim loop reclaims the expired claims.
-    When the first worker's pool finally picks up the expired claim,
-    _confirm_ownership_and_set_running detects CLAIM_LOST and aborts — no
-    double execution.
+    claim up to 3 tasks (1 running + 2 prefetched). claim_lease_ms=2000 is short,
+    but the claimer heartbeat loop (claimer_heartbeat_interval_ms=1_000) renews
+    leases every 1s, so prefetched claims never actually expire during normal
+    operation. The test validates that no double execution occurs — all tasks
+    complete normally because each owner keeps its leases alive via renewal.
     """
     num_workers = 2
     num_tasks = 6
@@ -1051,7 +1053,7 @@ def test_softcap_lease_no_double_execution(
             ):
                 tokens = [f'softcap_task_{i}' for i in range(num_tasks)]
                 handles = [
-                    instance_softcap.slow_idempotent_task.send(token, 800)
+                    instance_softcap.slow_idempotent_task.send(token, 1500)
                     for token in tokens
                 ]
                 results = [h.get(timeout_ms=60_000) for h in handles]
@@ -1221,8 +1223,11 @@ async def test_softcap_owner_transition_after_worker_crash(
                     timeout_s=10.0,
                 )
 
-                # claim_lease_ms=500 in SOFTCAP_INSTANCE; wait to guarantee expiry.
-                await asyncio.sleep(1.2)
+                # Wait before killing worker A. After SIGKILL stops the heartbeat
+                # renewal thread, the lease (claim_lease_ms=2000) expires naturally
+                # within ~2s of the last renewal. The sleep itself does not guarantee
+                # expiry — the kill does.
+                await asyncio.sleep(2.5)
 
                 os.killpg(worker_a_proc.pid, signal.SIGKILL)
                 worker_a_proc.wait(timeout=5.0)

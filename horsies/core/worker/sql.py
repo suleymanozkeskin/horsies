@@ -6,8 +6,8 @@ from sqlalchemy import text
 
 
 # ---------- Claim SQL (priority + sent_at) ----------
-# Supports both hard cap mode (claim_expires_at = NULL) and soft cap mode with lease.
-# In soft cap mode, also reclaims tasks with expired claim leases.
+# All claimed tasks receive a bounded lease via claim_expires_at.
+# Expired leases are reclaimable by any worker (crash recovery + soft-cap prefetch).
 
 CLAIM_SQL = text("""
 WITH next AS (
@@ -17,7 +17,7 @@ WITH next AS (
     AND (
       -- Fresh pending tasks
       status = 'PENDING'
-      -- OR expired claims (soft cap mode: lease expired, reclaim for this worker)
+      -- OR expired claims (lease expired, reclaimable by any worker)
       OR (status = 'CLAIMED' AND claim_expires_at IS NOT NULL AND claim_expires_at < now())
     )
     AND sent_at <= now()
@@ -36,14 +36,7 @@ SET status = 'CLAIMED',
     updated_at = now()
 FROM next
 WHERE t.id = next.id
-RETURNING t.id;
-""")
-
-# Fetch rows for a list of ids (to get func_path/args/etc.)
-LOAD_ROWS_SQL = text("""
-SELECT id, task_name, args, kwargs, retry_count, max_retries, task_options
-FROM horsies_tasks
-WHERE id = ANY(:ids)
+RETURNING t.id, t.task_name, t.args, t.kwargs;
 """)
 
 
@@ -53,12 +46,23 @@ CLAIM_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
 """)
 
+# Effective in-flight counts: expired CLAIMED tasks are excluded because they
+# are reclaimable and must not consume cap budget.  The predicate for an
+# "active" claim is: claim_expires_at IS NULL OR claim_expires_at > now().
+
 COUNT_GLOBAL_IN_FLIGHT_SQL = text("""
-    SELECT COUNT(*) FROM horsies_tasks WHERE status IN ('RUNNING', 'CLAIMED')
+    SELECT COUNT(*) FROM horsies_tasks
+    WHERE status = 'RUNNING'
+       OR (status = 'CLAIMED'
+           AND (claim_expires_at IS NULL OR claim_expires_at > now()))
 """)
 
 COUNT_QUEUE_IN_FLIGHT_HARD_SQL = text("""
-    SELECT COUNT(*) FROM horsies_tasks WHERE status IN ('RUNNING', 'CLAIMED') AND queue_name = :q
+    SELECT COUNT(*) FROM horsies_tasks
+    WHERE queue_name = :q
+      AND (status = 'RUNNING'
+           OR (status = 'CLAIMED'
+               AND (claim_expires_at IS NULL OR claim_expires_at > now())))
 """)
 
 COUNT_QUEUE_IN_FLIGHT_SOFT_SQL = text("""
@@ -70,6 +74,7 @@ COUNT_CLAIMED_FOR_WORKER_SQL = text("""
     FROM horsies_tasks
     WHERE claimed_by_worker_id = CAST(:wid AS VARCHAR)
       AND status = 'CLAIMED'
+      AND (claim_expires_at IS NULL OR claim_expires_at > now())
 """)
 
 COUNT_RUNNING_FOR_WORKER_SQL = text("""
@@ -83,7 +88,9 @@ COUNT_IN_FLIGHT_FOR_WORKER_SQL = text("""
     SELECT COUNT(*)
     FROM horsies_tasks
     WHERE claimed_by_worker_id = CAST(:wid AS VARCHAR)
-      AND status IN ('RUNNING', 'CLAIMED')
+      AND (status = 'RUNNING'
+           OR (status = 'CLAIMED'
+               AND (claim_expires_at IS NULL OR claim_expires_at > now())))
 """)
 
 COUNT_RUNNING_IN_QUEUE_SQL = text("""
@@ -108,6 +115,7 @@ UNCLAIM_PAUSED_TASKS_SQL = text("""
         claimed = FALSE,
         claimed_at = NULL,
         claimed_by_worker_id = NULL,
+        claim_expires_at = NULL,
         updated_at = NOW()
     WHERE id = ANY(:ids)
 """)
@@ -229,6 +237,14 @@ INSERT_CLAIMER_HEARTBEAT_SQL = text("""
     SELECT id, CAST(:wid AS VARCHAR), 'claimer', NOW(), :host, :pid
     FROM horsies_tasks
     WHERE status = 'CLAIMED' AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
+""")
+
+RENEW_CLAIM_LEASE_SQL = text("""
+    UPDATE horsies_tasks
+    SET claim_expires_at = :new_expires_at,
+        updated_at = NOW()
+    WHERE status = 'CLAIMED'
+      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
 """)
 
 INSERT_WORKER_STATE_SQL = text("""

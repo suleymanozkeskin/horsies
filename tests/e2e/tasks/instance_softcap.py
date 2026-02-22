@@ -15,7 +15,9 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
+from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.utils.url import to_psycopg_url
 
 DB_URL = os.environ.get(
     'HORSES_E2E_DB_URL',
@@ -25,12 +27,15 @@ DB_URL = os.environ.get(
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
     prefetch_buffer=2,
-    claim_lease_ms=500,
+    claim_lease_ms=2_000,
     broker=PostgresConfig(
         database_url=DB_URL,
         pool_size=5,
         max_overflow=5,
     ),
+    # Short heartbeat to satisfy lease >= 2x heartbeat validation.
+    # claim_lease_ms=2000 >= 2 * claimer_heartbeat_interval_ms=1000.
+    recovery=RecoveryConfig(claimer_heartbeat_interval_ms=1_000),
 )
 
 app = Horsies(config)
@@ -111,7 +116,7 @@ def db_ledger_task(token: str) -> TaskResult[str, TaskError]:
     """Record task-body entry in DB and enforce a single winner via unique token."""
     import psycopg
 
-    db_url = DB_URL.replace('postgresql+psycopg://', 'postgresql://', 1)
+    db_url = to_psycopg_url(DB_URL)
     worker_pid = os.getpid()
     worker_identity = f'{socket.gethostname()}:{worker_pid}'
 

@@ -1,4 +1,4 @@
-"""Unit tests for horsies.core.utils.url.mask_database_url."""
+"""Unit tests for horsies.core.utils.url helpers."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from horsies.core.utils.url import mask_database_url
+from horsies.core.utils.url import mask_database_url, to_psycopg_url
 
 
 @pytest.mark.unit
@@ -71,3 +71,29 @@ class TestMaskDatabaseUrl:
         assert masked.startswith('pg://admin:***@')
         assert 'db.example.com:5432/production' in masked
         assert 'topsecret' not in masked
+
+
+@pytest.mark.unit
+class TestToPsycopgUrl:
+    """Tests for SQLAlchemy URL normalization to psycopg URLs."""
+
+    def test_converts_postgresql_psycopg_scheme(self) -> None:
+        url = 'postgresql+psycopg://user:pass@localhost:5432/mydb?sslmode=require'
+        assert to_psycopg_url(url) == 'postgresql://user:pass@localhost:5432/mydb?sslmode=require'
+
+    def test_converts_postgresql_asyncpg_scheme(self) -> None:
+        url = 'postgresql+asyncpg://user:pass@localhost:5432/mydb'
+        assert to_psycopg_url(url) == 'postgresql://user:pass@localhost:5432/mydb'
+
+    def test_leaves_already_normalized_url_unchanged(self) -> None:
+        url = 'postgresql://user:pass@localhost/db'
+        assert to_psycopg_url(url) == url
+
+    def test_leaves_non_postgres_url_unchanged(self) -> None:
+        url = 'sqlite:///tmp/test.db'
+        assert to_psycopg_url(url) == url
+
+    def test_fallback_rewrite_when_urlparse_fails(self) -> None:
+        url = 'postgresql+psycopg://u:p@h/db'
+        with patch('horsies.core.utils.url.urlparse', side_effect=Exception('parse failed')):
+            assert to_psycopg_url(url) == 'postgresql://u:p@h/db'

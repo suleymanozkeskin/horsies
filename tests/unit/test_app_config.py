@@ -16,6 +16,7 @@ from horsies.core.errors import (
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
+from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.schedule import (
     DailySchedule,
     HourlySchedule,
@@ -37,6 +38,10 @@ BROKER = PostgresConfig(
     pool_size=5,
     max_overflow=5,
 )
+
+# Recovery config with short heartbeat for tests using small claim_lease_ms values.
+# Satisfies the lease >= 2x heartbeat constraint (min_lease = 2000ms).
+SHORT_HB_RECOVERY = RecoveryConfig(claimer_heartbeat_interval_ms=1_000)
 
 
 @pytest.mark.unit
@@ -84,6 +89,7 @@ class TestPrefetchBufferValidation:
             broker=BROKER,
             prefetch_buffer=4,
             claim_lease_ms=5000,
+            recovery=SHORT_HB_RECOVERY,
         )
         assert config.prefetch_buffer == 4
         assert config.claim_lease_ms == 5000
@@ -103,19 +109,16 @@ class TestClaimLeaseMsValidation:
         )
         assert config.claim_lease_ms is None
 
-    def test_claim_lease_ms_with_no_prefetch_raises(self) -> None:
-        """claim_lease_ms must be None when prefetch_buffer=0."""
-        with pytest.raises(
-            ConfigurationError,
-            match='claim_lease_ms incompatible with hard cap mode',
-        ) as exc_info:
-            AppConfig(
-                queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
-                prefetch_buffer=0,
-                claim_lease_ms=5000,
-            )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+    def test_claim_lease_ms_with_no_prefetch_accepted(self) -> None:
+        """claim_lease_ms is allowed in hard-cap mode (overrides default 60s lease)."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+            prefetch_buffer=0,
+            claim_lease_ms=5000,
+            recovery=SHORT_HB_RECOVERY,
+        )
+        assert config.claim_lease_ms == 5000
 
     def test_claim_lease_ms_zero_raises(self) -> None:
         """claim_lease_ms=0 should raise ConfigurationError."""
@@ -150,6 +153,7 @@ class TestClaimLeaseMsValidation:
             broker=BROKER,
             prefetch_buffer=4,
             claim_lease_ms=5000,
+            recovery=SHORT_HB_RECOVERY,
         )
         assert config.claim_lease_ms == 5000
 
@@ -180,6 +184,7 @@ class TestClusterWideCapPrefetchConflict:
                 cluster_wide_cap=50,
                 prefetch_buffer=4,
                 claim_lease_ms=5000,
+                recovery=SHORT_HB_RECOVERY,
             )
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CLUSTER_CAP
 
@@ -191,6 +196,7 @@ class TestClusterWideCapPrefetchConflict:
             cluster_wide_cap=None,
             prefetch_buffer=4,
             claim_lease_ms=5000,
+            recovery=SHORT_HB_RECOVERY,
         )
         assert config.cluster_wide_cap is None
         assert config.prefetch_buffer == 4
@@ -631,6 +637,7 @@ class TestFormatForLoggingExtended:
             broker=BROKER,
             prefetch_buffer=4,
             claim_lease_ms=30_000,
+            recovery=RecoveryConfig(claimer_heartbeat_interval_ms=10_000),
         )
         formatted = config._format_for_logging()
         assert 'claim_lease_ms: 30000ms' in formatted

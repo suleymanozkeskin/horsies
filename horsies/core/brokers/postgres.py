@@ -28,6 +28,7 @@ from horsies.core.codec.serde import (
 from horsies.core.models.tasks import TaskInfo
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.utils.loop_runner import LoopRunner
+from horsies.core.utils.url import to_psycopg_url
 from horsies.core.logging import get_logger
 
 if TYPE_CHECKING:
@@ -438,9 +439,7 @@ class PostgresBroker:
             self.async_engine, expire_on_commit=False
         )
 
-        psycopg_url = self.config.database_url.replace('+asyncpg', '').replace(
-            '+psycopg', ''
-        )
+        psycopg_url = to_psycopg_url(self.config.database_url)
         self.listener = PostgresListener(psycopg_url)
 
         self._initialized = False

@@ -837,9 +837,7 @@ class TestWorkflowHandleCancel:
 
         cfg = WorkerConfig(
             dsn=broker.config.database_url,
-            psycopg_dsn=broker.config.database_url.replace('+asyncpg', '').replace(
-                '+psycopg', ''
-            ),
+            psycopg_dsn=broker.listener.database_url,
             queues=['default'],
         )
         worker = Worker(

@@ -17,6 +17,7 @@ from horsies.core.errors import (
     ValidationReport,
     raise_collected,
 )
+from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 from horsies.core.utils.url import mask_database_url
 import logging
 import os
@@ -33,7 +34,9 @@ class AppConfig(BaseModel):
     # Prefetch buffer: 0 = hard cap mode (count RUNNING + CLAIMED), >0 = soft cap with lease
     prefetch_buffer: int = 0
     # Claim lease duration in ms. Required when prefetch_buffer > 0.
-    # Prefetched claims expire after this duration and can be reclaimed by other workers.
+    # All claims are lease-bounded for crash-recovery safety.
+    # When None, the worker uses a 60s default internally.
+    # Explicit values override the default in both hard-cap and soft-cap modes.
     claim_lease_ms: Optional[int] = None
     recovery: RecoveryConfig = Field(default_factory=RecoveryConfig)
     resilience: WorkerResilienceConfig = Field(
@@ -132,17 +135,38 @@ class AppConfig(BaseModel):
                 )
             )
 
-        # Forbid claim_lease_ms in hard cap mode
-        if self.prefetch_buffer == 0 and self.claim_lease_ms is not None:
+        # Note: claim_lease_ms is allowed in hard cap mode (prefetch_buffer=0).
+        # When set, it overrides the default 60s lease used for crash-recovery safety.
+        # When not set (None), the worker applies a 60s default internally.
+
+        # Validate claim lease vs claimer heartbeat interval.
+        # Lease must be >= 2x heartbeat to survive a full heartbeat cycle
+        # without premature expiry causing churn.
+        # Skip if claim_lease_ms is already invalid (zero/negative) — that error
+        # is reported above and the lease value is meaningless for this check.
+        effective_lease_ms = (
+            self.claim_lease_ms
+            if self.claim_lease_ms is not None
+            else DEFAULT_CLAIM_LEASE_MS
+        )
+        lease_value_valid = self.claim_lease_ms is None or self.claim_lease_ms > 0
+        min_lease = self.recovery.claimer_heartbeat_interval_ms * 2
+        if lease_value_valid and effective_lease_ms < min_lease:
+            source = (
+                f'claim_lease_ms={self.claim_lease_ms}'
+                if self.claim_lease_ms is not None
+                else f'default lease={DEFAULT_CLAIM_LEASE_MS}ms'
+            )
             report.add(
                 ConfigurationError(
-                    message='claim_lease_ms incompatible with hard cap mode',
+                    message='claim lease too short relative to claimer heartbeat',
                     code=ErrorCode.CONFIG_INVALID_PREFETCH,
                     notes=[
-                        'prefetch_buffer=0 (hard cap mode)',
-                        f'but claim_lease_ms={self.claim_lease_ms} was set',
+                        f'effective lease: {effective_lease_ms}ms ({source})',
+                        f'claimer_heartbeat_interval_ms: {self.recovery.claimer_heartbeat_interval_ms}ms',
+                        f'minimum lease: {min_lease}ms (2x heartbeat)',
                     ],
-                    help_text='remove claim_lease_ms or set prefetch_buffer > 0',
+                    help_text=f'set claim_lease_ms >= {min_lease}',
                 )
             )
 

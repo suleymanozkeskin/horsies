@@ -35,6 +35,7 @@ from horsies.core.utils.imports import (
     import_file_path,
     setup_sys_path_from_cwd,
 )
+from horsies.core.utils.url import to_psycopg_url
 
 
 async def _ensure_schema_with_retry(
@@ -401,7 +402,7 @@ def worker_command(args: argparse.Namespace) -> None:
 
     worker_config = WorkerConfig(
         dsn=postgres_config.database_url,
-        psycopg_dsn=postgres_config.database_url,
+        psycopg_dsn=to_psycopg_url(postgres_config.database_url),
         queues=queues,
         processes=processes,
         app_locator=app_locator,

@@ -12,7 +12,7 @@ from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from importlib import import_module
-from typing import Any, Optional, Sequence
+from typing import Any, Optional
 import hashlib
 import sys
 from psycopg.types.json import Jsonb
@@ -29,7 +29,9 @@ from horsies.core.logging import get_logger
 from horsies.core.worker.current import set_current_app
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.types.result import Ok, Err, Result, is_err
+from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.utils.url import to_psycopg_url
 
 # --- Imports from sibling modules (extracted for maintainability) ---
 from horsies.core.worker.config import WorkerConfig  # noqa: F401
@@ -50,7 +52,6 @@ from horsies.core.worker.child_runner import (  # noqa: F401
 )
 from horsies.core.worker.sql import (  # noqa: F401
     CLAIM_SQL,
-    LOAD_ROWS_SQL,
     CLAIM_ADVISORY_LOCK_SQL,
     COUNT_GLOBAL_IN_FLIGHT_SQL,
     COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
@@ -77,6 +78,7 @@ from horsies.core.worker.sql import (  # noqa: F401
     SCHEDULE_TASK_RETRY_SQL,
     NOTIFY_DELAYED_SQL,
     INSERT_CLAIMER_HEARTBEAT_SQL,
+    RENEW_CLAIM_LEASE_SQL,
     INSERT_WORKER_STATE_SQL,
     DELETE_EXPIRED_HEARTBEATS_SQL,
     DELETE_EXPIRED_WORKER_STATES_SQL,
@@ -219,9 +221,7 @@ class Worker:
         return task
 
     def _create_executor(self) -> ProcessPoolExecutor:
-        child_database_url = self.cfg.dsn.replace('+asyncpg', '').replace(
-            '+psycopg', ''
-        )
+        child_database_url = to_psycopg_url(self.cfg.dsn)
         return ProcessPoolExecutor(
             max_workers=self.cfg.processes,
             initializer=_child_initializer,
@@ -611,8 +611,8 @@ class Worker:
             return False
 
         # Cluster-wide, lock-guarded claim to avoid races. One short transaction.
-        # Use local capacity + small prefetch to size claims fairly across workers.
-        claimed_ids: list[str] = []
+        # CLAIM_SQL RETURNING provides dispatch payload directly (no separate load query).
+        claimed_rows: list[dict[str, Any]] = []
 
         # Queue order: if custom priorities provided, sort by priority; otherwise keep given order
         if self.cfg.queue_priorities:
@@ -719,27 +719,25 @@ class Worker:
                 if to_claim <= 0:
                     continue
 
-                ids = await self._claim_batch_locked(s, qname, to_claim)
-                if not ids:
+                batch_rows = await self._claim_batch_locked(s, qname, to_claim)
+                if not batch_rows:
                     continue
-                claimed_ids.extend(ids)
-                total_remaining -= len(ids)
+                claimed_rows.extend(batch_rows)
+                total_remaining -= len(batch_rows)
 
             await s.commit()
 
-        if not claimed_ids:
+        if not claimed_rows:
             return False
 
-        rows = await self._load_rows(claimed_ids)
-
         # Post-claim guard: filter out tasks for non-runnable workflow states.
-        rows = await self._filter_nonrunnable_workflow_tasks(rows)
+        claimed_rows = await self._filter_nonrunnable_workflow_tasks(claimed_rows)
 
-        for row in rows:
+        for row in claimed_rows:
             await self._dispatch_one(
-                row['id'], row['task_name'], row['args'], row['kwargs']
+                row['id'], row['task_name'], row['args'], row['kwargs'],
             )
-        return len(rows) > 0
+        return len(claimed_rows) > 0
 
     async def _filter_nonrunnable_workflow_tasks(
         self, rows: list[dict[str, Any]]
@@ -814,18 +812,27 @@ class Worker:
 
     # Stale detection is handled via heartbeat policy for RUNNING tasks.
 
-    def _compute_claim_expires_at(self) -> Optional[datetime]:
-        """Compute claim expiration timestamp for soft cap mode, or None for hard cap mode."""
-        if self.cfg.claim_lease_ms is None:
-            return None
-        return datetime.now(timezone.utc) + timedelta(
-            milliseconds=self.cfg.claim_lease_ms
+    def _compute_claim_expires_at(self) -> datetime:
+        """Compute claim lease expiration. Always bounded (never None).
+
+        Uses explicit claim_lease_ms when configured (soft-cap or user override),
+        otherwise falls back to DEFAULT_CLAIM_LEASE_MS for crash-recovery safety.
+        """
+        lease_ms = (
+            self.cfg.claim_lease_ms
+            if self.cfg.claim_lease_ms is not None
+            else DEFAULT_CLAIM_LEASE_MS
         )
+        return datetime.now(timezone.utc) + timedelta(milliseconds=lease_ms)
 
     async def _claim_batch_locked(
-        self, s: AsyncSession, queue: str, limit: int
-    ) -> list[str]:
-        """Claim up to limit tasks for a given queue within an open transaction/lock."""
+        self, s: AsyncSession, queue: str, limit: int,
+    ) -> list[dict[str, Any]]:
+        """Claim up to *limit* tasks and return dispatch-ready row dicts.
+
+        CLAIM_SQL RETURNING provides id/task_name/args/kwargs atomically,
+        eliminating the previous claim-commit → separate-load gap.
+        """
         res = await s.execute(
             CLAIM_SQL,
             {
@@ -835,7 +842,8 @@ class Worker:
                 'claim_expires_at': self._compute_claim_expires_at(),
             },
         )
-        return [r[0] for r in res.fetchall()]
+        cols = res.keys()
+        return [dict(zip(cols, row)) for row in res.fetchall()]
 
     async def _count_claimed_for_worker(self) -> int:
         """Count only CLAIMED tasks for this worker (not yet RUNNING)."""
@@ -876,30 +884,6 @@ class Worker:
             )
             row = res.fetchone()
             return int(row[0]) if row else 0
-
-    async def _claim_batch(self, queue: str, limit: int) -> list[str]:
-        async with self.sf() as s:
-            res = await s.execute(
-                CLAIM_SQL,
-                {
-                    'queue': queue,
-                    'lim': limit,
-                    'worker_id': self.worker_instance_id,
-                    'claim_expires_at': self._compute_claim_expires_at(),
-                },
-            )
-            ids = [r[0] for r in res.fetchall()]
-            # Make the CLAIMED state visible and release the row locks
-            await s.commit()
-            return ids
-
-    async def _load_rows(self, ids: Sequence[str]) -> list[dict[str, Any]]:
-        if not ids:
-            return []
-        async with self.sf() as s:
-            res = await s.execute(LOAD_ROWS_SQL, {'ids': list(ids)})
-            cols = res.keys()
-            return [dict(zip(cols, row)) for row in res.fetchall()]
 
     async def _requeue_claimed_task(self, task_id: str, reason: str) -> bool:
         async with self.sf() as s:
@@ -948,7 +932,7 @@ class Worker:
             )
 
         # Pass task_id and database_url to task process for self-heartbeat
-        database_url = self.cfg.dsn.replace('+asyncpg', '').replace('+psycopg', '')
+        database_url = to_psycopg_url(self.cfg.dsn)
         try:
             fut = loop.run_in_executor(
                 self._executor,
@@ -1676,6 +1660,15 @@ class Worker:
                                 'wid': self.worker_instance_id,
                                 'host': socket.gethostname(),
                                 'pid': os.getpid(),
+                            },
+                        )
+                        # Extend claim lease for all CLAIMED tasks owned by this worker.
+                        # Prevents premature lease expiry while tasks wait in the pool queue.
+                        await s.execute(
+                            RENEW_CLAIM_LEASE_SQL,
+                            {
+                                'wid': self.worker_instance_id,
+                                'new_expires_at': self._compute_claim_expires_at(),
                             },
                         )
                         await s.commit()
