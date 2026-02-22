@@ -161,8 +161,11 @@ class OrderProcessingWorkflow(WorkflowDefinition[NotificationResult]):
 spec = OrderProcessingWorkflow.build(app)
 reveal_type(spec)  # WorkflowSpec
 
-handle = spec.start()
-reveal_type(handle)  # WorkflowHandle
+result = spec.start()
+reveal_type(result)  # WorkflowStartResult[WorkflowHandle[NotificationResult]]
+
+handle = result.ok_value
+reveal_type(handle)  # WorkflowHandle[NotificationResult]
 
 handle.get(timeout_ms=30000)  # Wait for completion
 
@@ -257,8 +260,9 @@ def start_order_processing(order: Order) -> None:
     )
     reveal_type(spec)  # WorkflowSpec
 
-    handle = spec.start()
-    reveal_type(handle)  # WorkflowHandle
+    result = spec.start()
+    handle = result.ok_value
+    reveal_type(handle)  # WorkflowHandle[NotificationResult]
 
     handle.get(timeout_ms=30000)
 

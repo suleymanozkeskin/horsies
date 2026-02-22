@@ -187,8 +187,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .on_error -> OnError (FAIL or PAUSE)
 - .output -> TaskNode | SubWorkflowNode | None
 - .success_policy -> SuccessPolicy | None
-- .start(workflow_id=None) -> WorkflowHandle
-- .start_async(workflow_id=None) -> WorkflowHandle
+- .start(workflow_id=None) -> WorkflowStartResult[WorkflowHandle[T]]
+- .start_async(workflow_id=None) -> WorkflowStartResult[WorkflowHandle[T]]
 - Validates DAG on construction (cycles, deps, args_from, node_ids, etc.)
 
 ### WorkflowHandle
@@ -278,9 +278,21 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - E030: function returns WorkflowSpec but lacks @app.workflow_builder
 
 ### start_workflow / start_workflow_async
-- start_workflow(spec, broker, workflow_id=None) -> WorkflowHandle
-- start_workflow_async(spec, broker, workflow_id=None) -> WorkflowHandle
+- start_workflow(spec, broker, workflow_id=None) -> WorkflowStartResult[WorkflowHandle[T]]
+- start_workflow_async(spec, broker, workflow_id=None) -> WorkflowStartResult[WorkflowHandle[T]]
 - Standalone functions (alternative to spec.start())
+- Returns Ok(WorkflowHandle) on success, Err(WorkflowStartError) on failure
+
+### WorkflowStartResult[T] (workflow start Result type)
+- spec.start() / start_async() / start_workflow() / start_workflow_async() return WorkflowStartResult[WorkflowHandle[T]]
+- WorkflowStartResult[T] = Result[T, WorkflowStartError]
+- Ok(WorkflowHandle): workflow created and root tasks enqueued
+- Err(WorkflowStartError): start failed with categorized error
+- WorkflowStartError fields: code (WorkflowStartErrorCode), message (str), retryable (bool), stage (WorkflowStartStage), workflow_name (str), workflow_id (str), exception (BaseException | None), details (dict | None)
+- WorkflowStartErrorCode: BROKER_NOT_CONFIGURED, VALIDATION_FAILED, SERIALIZATION_FAILED, SCHEMA_INIT_FAILED, DB_OPERATION_FAILED, LOOP_RUNNER_FAILED, INTERNAL_FAILED
+- WorkflowStartStage: PREVALIDATE, ENSURE_SCHEMA, DB_TRANSACTION, SYNC_BRIDGE
+- retryable=True: transient (DB connection blip), retryable=False: permanent (validation, config error)
+- Use is_ok(result) / is_err(result) type guards, or result.ok_value to extract handle
 
 ### ExceptionMapper
 - Type: dict[type[BaseException], str]

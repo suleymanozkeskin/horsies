@@ -257,7 +257,8 @@ When a task fails with `on_error="pause"`:
 A paused workflow can be resumed via `WorkflowHandle.resume()` or `WorkflowHandle.resume_async()`.
 
 ```python
-handle = await spec.start_async()
+start_result = await spec.start_async()
+handle = start_result.ok_value
 
 # ... workflow pauses due to task failure ...
 
@@ -711,7 +712,8 @@ fetch_a = TaskNode(fn=fetch_data, kwargs={'url': "url_a"})  # index 0
 fetch_b = TaskNode(fn=fetch_data, kwargs={'url': "url_b"})  # index 1
 
 spec = WorkflowSpec(name="parallel_fetch", tasks=[fetch_a, fetch_b], broker=broker)
-handle = await spec.start_async()
+start_result = await spec.start_async()
+handle = start_result.ok_value
 
 # Wait for workflow completion first
 await handle.get_async(timeout_ms=30000)
@@ -946,7 +948,8 @@ node_b: TaskNode[str] = TaskNode(
 
 ```python
 # Fire-and-forget: start workflow without waiting
-handle = spec.start()
+start_result = spec.start()
+handle = start_result.ok_value
 
 # Immediately call result_for() - task likely hasn't completed yet
 result = handle.result_for(node)  # Returns RESULT_NOT_READY error
@@ -955,7 +958,8 @@ result = handle.result_for(node)  # Returns RESULT_NOT_READY error
 **Do this instead:**
 
 ```python
-handle = spec.start()
+start_result = spec.start()
+handle = start_result.ok_value
 
 # Option 1: Wait for workflow completion first
 handle.get(timeout_ms=30000)

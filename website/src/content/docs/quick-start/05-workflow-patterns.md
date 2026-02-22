@@ -75,7 +75,8 @@ def start_order_workflow(
     )
     reveal_type(workflow)  # WorkflowSpec
 
-    handle = workflow.start()
+    start_result = workflow.start()
+    handle = start_result.ok_value
     reveal_type(handle)  # WorkflowHandle
 
     # Wait for workflow completion
@@ -128,7 +129,8 @@ def sync_all_warehouses_task() -> TaskResult[dict[str, int], TaskError]:
     )
     reveal_type(workflow)  # WorkflowSpec
 
-    handle = workflow.start()
+    start_result = workflow.start()
+    handle = start_result.ok_value
     reveal_type(handle)  # WorkflowHandle
 
     # Wait for workflow completion before accessing result_for()
@@ -211,7 +213,7 @@ def fulfillment_workflow(order: Order) -> None:
     )
     reveal_type(workflow)  # WorkflowSpec
 
-    workflow.start()  # Fire-and-forget
+    workflow.start()  # Fire-and-forget (Result discarded)
 ```
 
 ## Fire-and-Forget Pattern
@@ -249,7 +251,8 @@ def trigger_shipment_tracking(shipment_id: str) -> bool:
     reveal_type(workflow)  # WorkflowSpec
 
     # Start and return immediately
-    handle = workflow.start()
+    start_result = workflow.start()
+    handle = start_result.ok_value
     reveal_type(handle)  # WorkflowHandle
 
     return True  # Workflow runs in background
@@ -297,7 +300,8 @@ def process_returns_task() -> TaskResult[dict[str, str], TaskError]:
     )
     reveal_type(workflow)  # WorkflowSpec
 
-    handle = workflow.start()
+    start_result = workflow.start()
+    handle = start_result.ok_value
     reveal_type(handle)  # WorkflowHandle
 
     # Wait for workflow completion before accessing result_for()

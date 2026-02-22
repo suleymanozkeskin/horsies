@@ -85,7 +85,8 @@ For type-safe node construction with static arguments, see [Typed Node Builder](
 ```python
 # Build and start
 spec = DataPipeline.build(app)
-handle = await spec.start_async()
+start_result = await spec.start_async()
+handle = start_result.ok_value
 
 # Wait for completion
 result = await handle.get()  # TaskResult[bool, TaskError]
@@ -109,7 +110,8 @@ spec = app.workflow(
     tasks=[node_a, node_b],
     output=node_b,
 )
-handle = await spec.start_async()
+start_result = await spec.start_async()
+handle = start_result.ok_value
 ```
 
 **Warning**: Inline workflows are not portable for `run_when`/`skip_when` or subworkflows.
@@ -1011,7 +1013,8 @@ class MultiSourcePipeline(WorkflowDefinition[AggregatedReport]):
 
 async def run_pipeline():
     spec = MultiSourcePipeline.build(app)
-    handle = await spec.start_async()
+    start_result = await spec.start_async()
+    handle = start_result.ok_value
 
     result = await handle.get()
 
