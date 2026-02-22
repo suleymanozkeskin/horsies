@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 import uuid
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
@@ -20,7 +23,9 @@ from horsies.core.models.workflow import (
     WorkflowStatus,
     WorkflowTaskStatus,
     OnError,
+    HandleErrorCode,
 )
+from horsies.core.types.result import is_ok, is_err
 from horsies.core.workflows.engine import on_workflow_task_complete
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
@@ -39,18 +44,32 @@ async def _complete_task(
     task_index: int,
     result: TaskResult[Any, TaskError],
 ) -> None:
-    """Simulate task completion by looking up the task_id and calling the engine."""
-    res = await session.execute(
-        text("""
-            SELECT task_id FROM horsies_workflow_tasks
-            WHERE workflow_id = :wf_id AND task_index = :idx
-        """),
-        {'wf_id': workflow_id, 'idx': task_index},
-    )
-    row = res.fetchone()
-    if row and row[0]:
-        await on_workflow_task_complete(session, row[0], result)
-        await session.commit()
+    """Simulate task completion by looking up the task_id and calling the engine.
+
+    Polls for task_id with a short timeout to handle the case where a
+    predecessor's completion has just enqueued this task (setting task_id)
+    but the commit hasn't been visible yet.
+    """
+    deadline = time.monotonic() + 2.0
+    while True:
+        res = await session.execute(
+            text("""
+                SELECT task_id FROM horsies_workflow_tasks
+                WHERE workflow_id = :wf_id AND task_index = :idx
+            """),
+            {'wf_id': workflow_id, 'idx': task_index},
+        )
+        row = res.fetchone()
+        if row and row[0]:
+            await on_workflow_task_complete(session, row[0], result)
+            await session.commit()
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f'Task {task_index} in workflow {workflow_id} has no task_id '
+                f'after 2s (row={row}). Task was never enqueued.',
+            )
+        await asyncio.sleep(0.05)
 
 
 # =============================================================================
@@ -83,8 +102,9 @@ class TestWorkflowHandleStatus:
 
         handle = await start_ok(spec, broker)
 
-        status = await handle.status_async()
-        assert status == WorkflowStatus.RUNNING
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.RUNNING
 
     async def test_status_completed(
         self,
@@ -105,8 +125,9 @@ class TestWorkflowHandleStatus:
 
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
-        status = await handle.status_async()
-        assert status == WorkflowStatus.COMPLETED
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.COMPLETED
 
     async def test_status_failed(
         self,
@@ -132,8 +153,9 @@ class TestWorkflowHandleStatus:
             TaskResult(err=TaskError(error_code='FAIL', message='Test')),
         )
 
-        status = await handle.status_async()
-        assert status == WorkflowStatus.FAILED
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.FAILED
 
     async def test_status_paused(
         self,
@@ -159,22 +181,25 @@ class TestWorkflowHandleStatus:
             TaskResult(err=TaskError(error_code='FAIL', message='Test')),
         )
 
-        status = await handle.status_async()
-        assert status == WorkflowStatus.PAUSED
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.PAUSED
 
-    async def test_status_nonexistent_raises_value_error(
+    async def test_status_nonexistent_returns_not_found(
         self,
         clean_workflow_tables: None,
         broker: PostgresBroker,
     ) -> None:
-        """status_async() raises ValueError for nonexistent workflow_id."""
+        """status_async() returns Err(WORKFLOW_NOT_FOUND) for nonexistent workflow_id."""
         handle = WorkflowHandle(
             workflow_id=str(uuid.uuid4()),
             broker=broker,
         )
 
-        with pytest.raises(ValueError, match='not found'):
-            await handle.status_async()
+        status_r = await handle.status_async()
+        assert is_err(status_r)
+        assert status_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert status_r.err_value.retryable is False
 
 
 # =============================================================================
@@ -317,11 +342,27 @@ class TestWorkflowHandleGet:
 
         handle = await start_ok(spec, broker)
 
-        await handle.cancel_async()
+        cancel_r = await handle.cancel_async()
+        assert is_ok(cancel_r)
 
         result = await handle.get_async(timeout_ms=1000)
         assert result.is_err()
         assert result.unwrap_err().error_code == 'WORKFLOW_CANCELLED'
+
+    async def test_get_nonexistent_workflow_returns_not_found(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+    ) -> None:
+        """get_async() returns TaskResult(err=WORKFLOW_NOT_FOUND) for nonexistent workflow."""
+        handle = WorkflowHandle(
+            workflow_id=str(uuid.uuid4()),
+            broker=broker,
+        )
+
+        result = await handle.get_async(timeout_ms=500)
+        assert result.is_err()
+        assert result.unwrap_err().error_code == LibraryErrorCode.WORKFLOW_NOT_FOUND
 
 
 # =============================================================================
@@ -358,7 +399,9 @@ class TestWorkflowHandleResults:
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
         await _complete_task(session, handle.workflow_id, 1, TaskResult(ok=20))
 
-        results = await handle.results_async()
+        results_r = await handle.results_async()
+        assert is_ok(results_r)
+        results = results_r.ok_value
         # Keys are node_id values (workflow_name:task_index by default)
         assert 'results_all:0' in results
         assert 'results_all:1' in results
@@ -460,8 +503,9 @@ class TestWorkflowHandleResults:
 
         handle = await start_ok(spec, broker)
 
-        results = await handle.results_async()
-        assert results == {}
+        results_r = await handle.results_async()
+        assert is_ok(results_r)
+        assert results_r.ok_value == {}
 
     async def test_tasks_returns_info(
         self,
@@ -483,7 +527,9 @@ class TestWorkflowHandleResults:
 
         handle = await start_ok(spec, broker)
 
-        tasks = await handle.tasks_async()
+        tasks_r = await handle.tasks_async()
+        assert is_ok(tasks_r)
+        tasks = tasks_r.ok_value
         assert len(tasks) == 2
         assert tasks[0].name == 'tasks_info_a'
         assert tasks[1].name == 'tasks_info_b'
@@ -510,7 +556,9 @@ class TestWorkflowHandleResults:
 
         handle = await start_ok(spec, broker)
 
-        tasks = await handle.tasks_async()
+        tasks_r = await handle.tasks_async()
+        assert is_ok(tasks_r)
+        tasks = tasks_r.ok_value
         assert tasks[0].index == 0
         assert tasks[1].index == 1
         assert tasks[2].index == 2
@@ -534,7 +582,9 @@ class TestWorkflowHandleResults:
 
         handle = await start_ok(spec, broker)
 
-        tasks = await handle.tasks_async()
+        tasks_r = await handle.tasks_async()
+        assert is_ok(tasks_r)
+        tasks = tasks_r.ok_value
         # Root task (A) should be enqueued, dependent task (B) should be pending
         assert tasks[0].status == WorkflowTaskStatus.ENQUEUED
         assert tasks[1].status == WorkflowTaskStatus.PENDING
@@ -562,7 +612,9 @@ class TestWorkflowHandleResults:
 
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=42))
 
-        tasks = await handle.tasks_async()
+        tasks_r = await handle.tasks_async()
+        assert is_ok(tasks_r)
+        tasks = tasks_r.ok_value
         assert len(tasks) == 1
 
         task_info = tasks[0]
@@ -601,10 +653,12 @@ class TestWorkflowHandleCancel:
 
         handle = await start_ok(spec, broker)
 
-        await handle.cancel_async()
+        cancel_r = await handle.cancel_async()
+        assert is_ok(cancel_r)
 
-        status = await handle.status_async()
-        assert status == WorkflowStatus.CANCELLED
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.CANCELLED
 
     async def test_cancel_skips_pending(
         self,
@@ -627,11 +681,13 @@ class TestWorkflowHandleCancel:
         handle = await start_ok(spec, broker)
 
         # B is PENDING
-        await handle.cancel_async()
+        cancel_r = await handle.cancel_async()
+        assert is_ok(cancel_r)
 
-        tasks = await handle.tasks_async()
+        tasks_r = await handle.tasks_async()
+        assert is_ok(tasks_r)
         # B should be SKIPPED
-        assert tasks[1].status == WorkflowTaskStatus.SKIPPED
+        assert tasks_r.ok_value[1].status == WorkflowTaskStatus.SKIPPED
 
     async def test_cancel_completed_is_noop(
         self,
@@ -653,14 +709,17 @@ class TestWorkflowHandleCancel:
         # Complete the workflow first
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
-        status_before = await handle.status_async()
-        assert status_before == WorkflowStatus.COMPLETED
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.COMPLETED
 
         # Cancel on already-completed should not change status
-        await handle.cancel_async()
+        cancel_r = await handle.cancel_async()
+        assert is_ok(cancel_r)
 
-        status_after = await handle.status_async()
-        assert status_after == WorkflowStatus.COMPLETED
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.COMPLETED
 
     async def test_cancel_leaves_no_pending_ready_enqueued_workflow_tasks(
         self,
@@ -680,7 +739,8 @@ class TestWorkflowHandleCancel:
         )
 
         handle = await start_ok(spec, broker)
-        await handle.cancel_async()
+        cancel_r = await handle.cancel_async()
+        assert is_ok(cancel_r)
 
         rows = (
             await session.execute(
@@ -753,7 +813,8 @@ class TestWorkflowHandleCancel:
         )
         await session.commit()
 
-        await handle.cancel_async()
+        cancel_r = await handle.cancel_async()
+        assert is_ok(cancel_r)
 
         task_row = (
             await session.execute(
@@ -783,6 +844,23 @@ class TestWorkflowHandleCancel:
         ).fetchone()
         assert wf_task_row is not None
         assert wf_task_row[0] == 'SKIPPED'
+
+    async def test_cancel_nonexistent_returns_not_found(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+    ) -> None:
+        """cancel_async() returns Err(WORKFLOW_NOT_FOUND) for nonexistent workflow."""
+        handle = WorkflowHandle(
+            workflow_id=str(uuid.uuid4()),
+            broker=broker,
+        )
+
+        cancel_r = await handle.cancel_async()
+        assert is_err(cancel_r)
+        assert cancel_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert cancel_r.err_value.retryable is False
+        assert cancel_r.err_value.operation == 'cancel'
 
     async def test_worker_filter_rejects_cancelled_workflow_claimed_rows(
         self,
@@ -1018,7 +1096,9 @@ class TestWorkflowHandleOutput:
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=100))
         await _complete_task(session, handle.workflow_id, 1, TaskResult(ok=200))
 
-        results = await handle.results_async()
+        results_r = await handle.results_async()
+        assert is_ok(results_r)
+        results = results_r.ok_value
 
         # Both results preserved with unique keys (node_id = workflow_name:task_index)
         assert len(results) == 2
@@ -1079,7 +1159,7 @@ class TestWorkflowHandlePauseResume:
         broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """pause_async() on a RUNNING workflow returns True and sets PAUSED."""
+        """pause_async() on a RUNNING workflow returns Ok(True) and sets PAUSED."""
         task_a = make_simple_task(app, 'pause_run_a')
         task_b = make_simple_task(app, 'pause_run_b')
 
@@ -1092,12 +1172,17 @@ class TestWorkflowHandlePauseResume:
 
         handle = await start_ok(spec, broker)
 
-        assert await handle.status_async() == WorkflowStatus.RUNNING
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.RUNNING
 
-        paused = await handle.pause_async()
-        assert paused is True
+        pause_r = await handle.pause_async()
+        assert is_ok(pause_r)
+        assert pause_r.ok_value is True
 
-        assert await handle.status_async() == WorkflowStatus.PAUSED
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.PAUSED
 
     async def test_pause_non_running_returns_false(
         self,
@@ -1106,7 +1191,7 @@ class TestWorkflowHandlePauseResume:
         broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """pause_async() on a COMPLETED workflow returns False (no-op)."""
+        """pause_async() on a COMPLETED workflow returns Ok(False) (no-op)."""
         task_a = make_simple_task(app, 'pause_completed_a')
 
         node_a = TaskNode(fn=task_a, kwargs={'value': 1})
@@ -1118,13 +1203,18 @@ class TestWorkflowHandlePauseResume:
 
         # Complete the workflow
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
-        assert await handle.status_async() == WorkflowStatus.COMPLETED
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.COMPLETED
 
-        paused = await handle.pause_async()
-        assert paused is False
+        pause_r = await handle.pause_async()
+        assert is_ok(pause_r)
+        assert pause_r.ok_value is False
 
         # Status unchanged
-        assert await handle.status_async() == WorkflowStatus.COMPLETED
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.COMPLETED
 
     async def test_resume_paused_returns_true(
         self,
@@ -1133,7 +1223,7 @@ class TestWorkflowHandlePauseResume:
         broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """resume_async() on a PAUSED workflow returns True and sets RUNNING."""
+        """resume_async() on a PAUSED workflow returns Ok(True) and sets RUNNING."""
         task_a = make_simple_task(app, 'resume_paused_a')
         task_b = make_simple_task(app, 'resume_paused_b')
 
@@ -1147,13 +1237,17 @@ class TestWorkflowHandlePauseResume:
         handle = await start_ok(spec, broker)
 
         # Pause first
-        paused = await handle.pause_async()
-        assert paused is True
+        pause_r = await handle.pause_async()
+        assert is_ok(pause_r)
+        assert pause_r.ok_value is True
 
-        resumed = await handle.resume_async()
-        assert resumed is True
+        resume_r = await handle.resume_async()
+        assert is_ok(resume_r)
+        assert resume_r.ok_value is True
 
-        assert await handle.status_async() == WorkflowStatus.RUNNING
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.RUNNING
 
     async def test_resume_non_paused_returns_false(
         self,
@@ -1162,7 +1256,7 @@ class TestWorkflowHandlePauseResume:
         broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """resume_async() on a RUNNING workflow returns False (no-op)."""
+        """resume_async() on a RUNNING workflow returns Ok(False) (no-op)."""
         task_a = make_simple_task(app, 'resume_running_a')
         task_b = make_simple_task(app, 'resume_running_b')
 
@@ -1175,13 +1269,52 @@ class TestWorkflowHandlePauseResume:
 
         handle = await start_ok(spec, broker)
 
-        assert await handle.status_async() == WorkflowStatus.RUNNING
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.RUNNING
 
-        resumed = await handle.resume_async()
-        assert resumed is False
+        resume_r = await handle.resume_async()
+        assert is_ok(resume_r)
+        assert resume_r.ok_value is False
 
         # Status unchanged
-        assert await handle.status_async() == WorkflowStatus.RUNNING
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.RUNNING
+
+    async def test_pause_nonexistent_returns_not_found(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+    ) -> None:
+        """pause_async() returns Err(WORKFLOW_NOT_FOUND) for nonexistent workflow."""
+        handle = WorkflowHandle(
+            workflow_id=str(uuid.uuid4()),
+            broker=broker,
+        )
+
+        pause_r = await handle.pause_async()
+        assert is_err(pause_r)
+        assert pause_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert pause_r.err_value.retryable is False
+        assert pause_r.err_value.operation == 'pause'
+
+    async def test_resume_nonexistent_returns_not_found(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+    ) -> None:
+        """resume_async() returns Err(WORKFLOW_NOT_FOUND) for nonexistent workflow."""
+        handle = WorkflowHandle(
+            workflow_id=str(uuid.uuid4()),
+            broker=broker,
+        )
+
+        resume_r = await handle.resume_async()
+        assert is_err(resume_r)
+        assert resume_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert resume_r.err_value.retryable is False
+        assert resume_r.err_value.operation == 'resume'
 
     async def test_pause_resume_round_trip(
         self,
@@ -1202,22 +1335,206 @@ class TestWorkflowHandlePauseResume:
         )
 
         handle = await start_ok(spec, broker)
-        assert await handle.status_async() == WorkflowStatus.RUNNING
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.RUNNING
 
         # Pause
-        assert await handle.pause_async() is True
-        assert await handle.status_async() == WorkflowStatus.PAUSED
+        pause_r = await handle.pause_async()
+        assert is_ok(pause_r)
+        assert pause_r.ok_value is True
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.PAUSED
 
         # Resume
-        assert await handle.resume_async() is True
-        assert await handle.status_async() == WorkflowStatus.RUNNING
+        resume_r = await handle.resume_async()
+        assert is_ok(resume_r)
+        assert resume_r.ok_value is True
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.RUNNING
 
         # Complete both tasks
         await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
         await _complete_task(session, handle.workflow_id, 1, TaskResult(ok=20))
 
-        assert await handle.status_async() == WorkflowStatus.COMPLETED
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.COMPLETED
 
-        results = await handle.results_async()
+        results_r = await handle.results_async()
+        assert is_ok(results_r)
+        results = results_r.ok_value
         assert results['roundtrip:0'].unwrap() == 10
         assert results['roundtrip:1'].unwrap() == 20
+
+
+# =============================================================================
+# TestWorkflowHandleInfraErrors
+# =============================================================================
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio(loop_scope='function')
+class TestWorkflowHandleInfraErrors:
+    """Tests for infrastructure error handling in WorkflowHandle methods."""
+
+    async def test_status_db_error_returns_err_db_operation_failed(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """status_async() returns Err(DB_OPERATION_FAILED) on DB failure."""
+        task_a = make_simple_task(app, 'status_db_err_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker, name='status_db_err', tasks=[node_a],
+        )
+        handle = await start_ok(spec, broker)
+
+        # Patch session.execute to raise OperationalError
+        mock_session = AsyncMock()
+        mock_session.execute.side_effect = OperationalError(
+            'connection lost', {}, Exception('test'),
+        )
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(broker, 'session_factory', return_value=mock_ctx):
+            status_r = await handle.status_async()
+
+        assert is_err(status_r)
+        assert status_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
+        assert status_r.err_value.operation == 'status'
+        assert status_r.err_value.retryable is True
+
+    async def test_get_db_error_returns_taskresult_broker_error(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """get_async() returns TaskResult(err=BROKER_ERROR) when status_async fails."""
+        task_a = make_simple_task(app, 'get_db_err_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker, name='get_db_err', tasks=[node_a],
+        )
+        handle = await start_ok(spec, broker)
+
+        # Patch session to raise on execute
+        mock_session = AsyncMock()
+        mock_session.execute.side_effect = OperationalError(
+            'connection lost', {}, Exception('test'),
+        )
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(broker, 'session_factory', return_value=mock_ctx):
+            result = await handle.get_async(timeout_ms=500)
+
+        assert result.is_err()
+        assert result.unwrap_err().error_code == LibraryErrorCode.BROKER_ERROR
+
+    async def test_cancel_db_error_returns_err_db_operation_failed(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """cancel_async() returns Err(DB_OPERATION_FAILED) on DB failure."""
+        task_a = make_simple_task(app, 'cancel_db_err_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker, name='cancel_db_err', tasks=[node_a],
+        )
+        handle = await start_ok(spec, broker)
+
+        mock_session = AsyncMock()
+        mock_session.execute.side_effect = OperationalError(
+            'connection lost', {}, Exception('test'),
+        )
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(broker, 'session_factory', return_value=mock_ctx):
+            cancel_r = await handle.cancel_async()
+
+        assert is_err(cancel_r)
+        assert cancel_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
+        assert cancel_r.err_value.operation == 'cancel'
+
+    async def test_results_db_error_returns_err_db_operation_failed(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """results_async() returns Err(DB_OPERATION_FAILED) on DB failure."""
+        task_a = make_simple_task(app, 'results_db_err_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker, name='results_db_err', tasks=[node_a],
+        )
+        handle = await start_ok(spec, broker)
+
+        mock_session = AsyncMock()
+        mock_session.execute.side_effect = OperationalError(
+            'connection lost', {}, Exception('test'),
+        )
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(broker, 'session_factory', return_value=mock_ctx):
+            results_r = await handle.results_async()
+
+        assert is_err(results_r)
+        assert results_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
+        assert results_r.err_value.operation == 'results'
+
+    async def test_handle_methods_do_not_leak_db_exceptions(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+    ) -> None:
+        """No handle method leaks exceptions (except result_for with None node_id)."""
+        handle = WorkflowHandle(
+            workflow_id=str(uuid.uuid4()),
+            broker=broker,
+        )
+
+        # All wrap-strategy methods return HandleResult (not raise)
+        status_r = await handle.status_async()
+        assert is_err(status_r)
+        assert status_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+
+        cancel_r = await handle.cancel_async()
+        assert is_err(cancel_r)
+        assert cancel_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+
+        pause_r = await handle.pause_async()
+        assert is_err(pause_r)
+        assert pause_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+
+        resume_r = await handle.resume_async()
+        assert is_err(resume_r)
+        assert resume_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+
+        results_r = await handle.results_async()
+        assert is_ok(results_r)
+        assert results_r.ok_value == {}
+
+        tasks_r = await handle.tasks_async()
+        assert is_ok(tasks_r)
+        assert tasks_r.ok_value == []
+
+        # Fold-strategy: get returns typed error
+        get_r = await handle.get_async(timeout_ms=500)
+        assert get_r.is_err()
+        assert get_r.unwrap_err().error_code == LibraryErrorCode.WORKFLOW_NOT_FOUND

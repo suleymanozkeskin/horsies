@@ -41,6 +41,9 @@ from .core.models.workflow import (
     WorkflowHandleMissingIdError,
     WORKFLOW_TERMINAL_STATES,
     WORKFLOW_TASK_TERMINAL_STATES,
+    HandleErrorCode,
+    HandleOperationError,
+    HandleResult,
 )
 from .core.workflows.engine import start_workflow, start_workflow_async
 from .core.workflows.start_types import (
@@ -115,6 +118,9 @@ __all__ = [
     'WorkflowHandleMissingIdError',
     'WORKFLOW_TERMINAL_STATES',
     'WORKFLOW_TASK_TERMINAL_STATES',
+    'HandleErrorCode',
+    'HandleOperationError',
+    'HandleResult',
     'start_workflow',
     'start_workflow_async',
     'WorkflowStartError',

@@ -67,6 +67,11 @@ from horsies.core.models.workflow.handle import (
     WorkflowTaskInfo,
     WorkflowHandle,
 )
+from horsies.core.models.workflow.handle_types import (
+    HandleErrorCode,
+    HandleOperationError,
+    HandleResult,
+)
 from horsies.core.models.workflow.spec import WorkflowSpec
 from horsies.core.models.workflow.definition import (
     WorkflowDefinitionMeta,
@@ -133,6 +138,10 @@ __all__ = [
     'SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL',
     'WorkflowTaskInfo',
     'WorkflowHandle',
+    # handle types
+    'HandleErrorCode',
+    'HandleOperationError',
+    'HandleResult',
     # spec
     'WorkflowSpec',
     # definition

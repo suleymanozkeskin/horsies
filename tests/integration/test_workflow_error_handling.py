@@ -20,7 +20,7 @@ from horsies.core.models.workflow import (
     WorkflowDefinition,
 )
 from horsies.core.errors import WorkflowValidationError
-from horsies.core.types.result import is_err
+from horsies.core.types.result import is_err, is_ok
 from horsies.core.workflows.engine import (
     start_workflow_async,
     on_workflow_task_complete,
@@ -1060,7 +1060,9 @@ class TestResume:
         assert await _get_task_status(session, handle.workflow_id, 2) == 'PENDING'
 
         # Resume workflow
-        resumed = await handle.resume_async()
+        resume_r = await handle.resume_async()
+        assert is_ok(resume_r)
+        resumed = resume_r.ok_value
         assert resumed is True
 
         # Expire session cache to see changes from resume (committed in different session)
@@ -1275,7 +1277,9 @@ class TestEnqueuedFailureConversion:
         assert await _get_task_status(session, handle.workflow_id, 1) == 'READY'
 
         # Resume workflow
-        resumed = await handle.resume_async()
+        resume_r = await handle.resume_async()
+        assert is_ok(resume_r)
+        resumed = resume_r.ok_value
         assert resumed is True
 
         # B should now be ENQUEUED
@@ -1316,7 +1320,9 @@ class TestEnqueuedFailureConversion:
         assert await _get_workflow_status(session, handle.workflow_id) == 'RUNNING'
 
         # Resume should be no-op (returns False)
-        resumed = await handle.resume_async()
+        resume_r = await handle.resume_async()
+        assert is_ok(resume_r)
+        resumed = resume_r.ok_value
         assert resumed is False
 
         # Status unchanged
@@ -1348,7 +1354,9 @@ class TestEnqueuedFailureConversion:
         )
 
         # Resume should be no-op
-        resumed = await handle.resume_async()
+        resume_r = await handle.resume_async()
+        assert is_ok(resume_r)
+        resumed = resume_r.ok_value
         assert resumed is False
 
         # Status unchanged
@@ -1385,7 +1393,9 @@ class TestEnqueuedFailureConversion:
         assert await _get_workflow_status(session, handle.workflow_id) == 'FAILED'
 
         # Resume should be no-op on terminal FAILED state
-        resumed = await handle.resume_async()
+        resume_r = await handle.resume_async()
+        assert is_ok(resume_r)
+        resumed = resume_r.ok_value
         assert resumed is False
 
         # Status unchanged
@@ -1428,7 +1438,9 @@ class TestEnqueuedFailureConversion:
         assert await _get_workflow_status(session, handle.workflow_id) == 'PAUSED'
 
         # Resume -> B is still PENDING, resume evaluates it -> B gets SKIPPED
-        resumed = await handle.resume_async()
+        resume_r = await handle.resume_async()
+        assert is_ok(resume_r)
+        resumed = resume_r.ok_value
         assert resumed is True
 
         session.expire_all()
@@ -1486,7 +1498,9 @@ class TestEnqueuedFailureConversion:
         await _complete_task(session, handle.workflow_id, 1, TaskResult(ok=42))
 
         # Resume workflow
-        resumed = await handle.resume_async()
+        resume_r = await handle.resume_async()
+        assert is_ok(resume_r)
+        resumed = resume_r.ok_value
         assert resumed is True
 
         session.expire_all()

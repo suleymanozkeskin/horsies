@@ -33,6 +33,7 @@ from horsies.core.models.workflow import TaskNode
 
 from horsies.core.models.tasks import TaskError, TaskResult
 
+from horsies.core.types.result import is_ok
 from tests.e2e.helpers.assertions import assert_err, assert_ok, start_ok_sync
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.helpers.workflow import (
@@ -813,7 +814,8 @@ async def test_workflow_cancellation(broker: PostgresBroker) -> None:
         assert a_done, 'Task A did not complete before cancel'
 
         # Cancel the workflow while B (1000ms) is running or pending
-        handle.cancel()
+        cancel_r = handle.cancel()
+        assert is_ok(cancel_r), 'cancel should succeed'
 
         status = await wait_for_workflow_completion(
             broker.session_factory, handle.workflow_id, timeout_s=15.0,

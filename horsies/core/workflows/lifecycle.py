@@ -460,7 +460,7 @@ def start_workflow(
 async def pause_workflow(
     broker: 'PostgresBroker',
     workflow_id: str,
-) -> bool:
+) -> bool | None:
     """
     Pause a running workflow.
 
@@ -479,7 +479,8 @@ async def pause_workflow(
         workflow_id: The workflow ID to pause
 
     Returns:
-        True if workflow was paused, False if not RUNNING (no-op)
+        True if workflow was paused, False if not RUNNING (no-op),
+        None if workflow does not exist.
     """
     async with broker.session_factory() as session:
         result = await session.execute(
@@ -488,6 +489,12 @@ async def pause_workflow(
         )
         row = result.fetchone()
         if row is None:
+            exists = await session.execute(
+                CHECK_WORKFLOW_EXISTS_SQL,
+                {'wf_id': workflow_id},
+            )
+            if exists.fetchone() is None:
+                return None
             return False
 
         # Cascade pause to running child workflows (iterative BFS)
@@ -547,7 +554,7 @@ async def cascade_pause_to_children(
 def pause_workflow_sync(
     broker: 'PostgresBroker',
     workflow_id: str,
-) -> bool:
+) -> bool | None:
     """
     Pause a running workflow synchronously.
 
@@ -558,7 +565,8 @@ def pause_workflow_sync(
         workflow_id: The workflow ID to pause
 
     Returns:
-        True if workflow was paused, False if not RUNNING (no-op)
+        True if workflow was paused, False if not RUNNING (no-op),
+        None if workflow does not exist.
     """
     from horsies.core.utils.loop_runner import get_shared_runner
 
@@ -572,7 +580,7 @@ def pause_workflow_sync(
 async def resume_workflow(
     broker: 'PostgresBroker',
     workflow_id: str,
-) -> bool:
+) -> bool | None:
     """
     Resume a paused workflow.
 
@@ -586,7 +594,8 @@ async def resume_workflow(
         workflow_id: The workflow ID to resume
 
     Returns:
-        True if workflow was resumed, False if not PAUSED (no-op)
+        True if workflow was resumed, False if not PAUSED (no-op),
+        None if workflow does not exist.
     """
     # Deferred imports to avoid circular dependency with engine.py
     from horsies.core.workflows.engine import (
@@ -605,7 +614,12 @@ async def resume_workflow(
         )
         row = result.fetchone()
         if row is None:
-            # Not PAUSED, no-op
+            exists = await session.execute(
+                CHECK_WORKFLOW_EXISTS_SQL,
+                {'wf_id': workflow_id},
+            )
+            if exists.fetchone() is None:
+                return None
             return False
 
         depth = row[1] or 0
@@ -758,7 +772,7 @@ async def cascade_resume_to_children(
 def resume_workflow_sync(
     broker: 'PostgresBroker',
     workflow_id: str,
-) -> bool:
+) -> bool | None:
     """
     Resume a paused workflow synchronously.
 
@@ -769,7 +783,8 @@ def resume_workflow_sync(
         workflow_id: The workflow ID to resume
 
     Returns:
-        True if workflow was resumed, False if not PAUSED (no-op)
+        True if workflow was resumed, False if not PAUSED (no-op),
+        None if workflow does not exist.
     """
     from horsies.core.utils.loop_runner import get_shared_runner
 

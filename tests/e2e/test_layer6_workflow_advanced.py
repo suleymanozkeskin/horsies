@@ -22,6 +22,7 @@ import pytest
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import TaskResult
 
+from horsies.core.types.result import is_ok
 from tests.e2e.helpers.assertions import assert_ok, assert_err, start_ok_sync
 from tests.e2e.helpers.db import wait_for_status
 from tests.e2e.helpers.worker import run_worker
@@ -299,7 +300,9 @@ async def test_pause_blocks_ready_transitions(broker: PostgresBroker) -> None:
         assert ready_to_pause, 'Workflow did not reach expected pause point in time'
 
         # Pause the workflow
-        paused = handle.pause()
+        pause_r = handle.pause()
+        assert is_ok(pause_r), f'pause should succeed: {pause_r}'
+        paused = pause_r.ok_value
         assert paused is True, 'Workflow should be pausable'
 
         # Verify workflow is PAUSED
@@ -335,7 +338,9 @@ async def test_resume_continues_workflow(broker: PostgresBroker) -> None:
         ready_to_pause = await _wait_until(_ready_to_pause, timeout_s=5.0)
         assert ready_to_pause, 'Workflow did not reach expected pause point in time'
 
-        paused = handle.pause()
+        pause_r = handle.pause()
+        assert is_ok(pause_r), f'pause should succeed: {pause_r}'
+        paused = pause_r.ok_value
         assert paused is True
 
         # Verify PAUSED
@@ -345,7 +350,9 @@ async def test_resume_continues_workflow(broker: PostgresBroker) -> None:
         assert wf_status == 'PAUSED'
 
         # Resume the workflow
-        resumed = handle.resume()
+        resume_r = handle.resume()
+        assert is_ok(resume_r), f'resume should succeed: {resume_r}'
+        resumed = resume_r.ok_value
         assert resumed is True, 'Workflow should be resumable'
 
         # Verify workflow leaves PAUSED after resume.
@@ -383,13 +390,16 @@ async def test_pause_then_cancel(broker: PostgresBroker) -> None:
         ready_to_pause = await _wait_until(_ready_to_pause, timeout_s=5.0)
         assert ready_to_pause, 'Workflow did not reach expected pause point in time'
 
-        paused = handle.pause()
+        pause_r = handle.pause()
+        assert is_ok(pause_r), f'pause should succeed: {pause_r}'
+        paused = pause_r.ok_value
         assert paused is True
 
         wf_status = await get_workflow_status(broker.session_factory, handle.workflow_id)
         assert wf_status == 'PAUSED'
 
-        handle.cancel()
+        cancel_r = handle.cancel()
+        assert is_ok(cancel_r), f'cancel should succeed: {cancel_r}'
 
         status = await wait_for_workflow_completion(
             broker.session_factory, handle.workflow_id, timeout_s=15.0
@@ -418,10 +428,14 @@ async def test_pause_idempotent(broker: PostgresBroker) -> None:
         ready_to_pause = await _wait_until(_ready_to_pause, timeout_s=5.0)
         assert ready_to_pause, 'Workflow did not reach expected pause point in time'
 
-        first_pause = handle.pause()
+        first_pause_r = handle.pause()
+        assert is_ok(first_pause_r), f'first pause should succeed: {first_pause_r}'
+        first_pause = first_pause_r.ok_value
         assert first_pause is True
 
-        second_pause = handle.pause()
+        second_pause_r = handle.pause()
+        assert is_ok(second_pause_r), f'second pause should succeed: {second_pause_r}'
+        second_pause = second_pause_r.ok_value
         assert second_pause is False, 'Second pause() should return False (already paused)'
 
 
@@ -442,7 +456,9 @@ async def test_resume_on_running_noop(broker: PostgresBroker) -> None:
         is_running = await _wait_until(_is_running, timeout_s=5.0)
         assert is_running, 'Workflow should be RUNNING'
 
-        resumed = handle.resume()
+        resume_r = handle.resume()
+        assert is_ok(resume_r), f'resume should succeed: {resume_r}'
+        resumed = resume_r.ok_value
         assert resumed is False, 'resume() on RUNNING workflow should return False'
 
 
@@ -802,7 +818,9 @@ async def test_on_error_pause_resume_completes(broker: PostgresBroker) -> None:
         assert paused, 'Workflow should auto-pause after task failure'
 
         # Resume the workflow
-        resumed = handle.resume()
+        resume_r = handle.resume()
+        assert is_ok(resume_r), f'resume should succeed: {resume_r}'
+        resumed = resume_r.ok_value
         assert resumed is True, 'Workflow should be resumable after auto-pause'
 
         # Wait for terminal state
