@@ -31,7 +31,37 @@ from .context import WorkflowHandleMissingIdError
 from .handle_types import HandleErrorCode, HandleOperationError, HandleResult
 from .nodes import NodeKey
 
+if TYPE_CHECKING:
+    from horsies.core.workflows.lifecycle_types import (
+        LifecycleOperationError,
+    )
+
 logger = get_logger('workflow.handle')
+
+
+def _lifecycle_err_to_handle_err(
+    err: 'LifecycleOperationError',
+    operation: str,
+    workflow_id: str,
+) -> HandleOperationError:
+    """Map a lifecycle-layer error to a handle-layer error."""
+    from horsies.core.workflows.lifecycle_types import LifecycleErrorCode
+
+    code_map: dict[LifecycleErrorCode, HandleErrorCode] = {
+        LifecycleErrorCode.WORKFLOW_NOT_FOUND: HandleErrorCode.WORKFLOW_NOT_FOUND,
+        LifecycleErrorCode.DB_OPERATION_FAILED: HandleErrorCode.DB_OPERATION_FAILED,
+        LifecycleErrorCode.LOOP_RUNNER_FAILED: HandleErrorCode.LOOP_RUNNER_FAILED,
+        LifecycleErrorCode.INTERNAL_FAILED: HandleErrorCode.INTERNAL_FAILED,
+    }
+    return HandleOperationError(
+        code=code_map.get(err.code, HandleErrorCode.INTERNAL_FAILED),
+        message=err.message,
+        retryable=err.retryable,
+        operation=operation,
+        stage=err.stage,
+        workflow_id=workflow_id,
+        exception=err.exception,
+    )
 
 _T = TypeVar('_T')
 
@@ -787,8 +817,7 @@ class WorkflowHandle(Generic[OutT]):
         return self._sync_call(self.pause_async, 'pause')
 
     async def pause_async(self) -> HandleResult[bool]:
-        """
-        Async version of pause().
+        """Async version of pause().
 
         Returns:
             Ok(True) if workflow was paused, Ok(False) if not RUNNING (no-op).
@@ -796,28 +825,12 @@ class WorkflowHandle(Generic[OutT]):
         """
         from horsies.core.workflows.engine import pause_workflow
 
-        try:
-            paused = await pause_workflow(self.broker, self.workflow_id)
-            if paused is None:
-                return Err(HandleOperationError(
-                    code=HandleErrorCode.WORKFLOW_NOT_FOUND,
-                    message=f'Workflow {self.workflow_id} not found',
-                    retryable=False,
-                    operation='pause',
-                    stage='existence_check',
-                    workflow_id=self.workflow_id,
-                ))
-            return Ok(paused)
-        except SQLAlchemyError as exc:
-            return Err(HandleOperationError(
-                code=HandleErrorCode.DB_OPERATION_FAILED,
-                message=f'Pause failed for workflow {self.workflow_id}: {exc}',
-                retryable=is_retryable_connection_error(exc),
-                operation='pause',
-                stage='query',
-                workflow_id=self.workflow_id,
-                exception=exc,
-            ))
+        result = await pause_workflow(self.broker, self.workflow_id)
+        match result:
+            case Ok(value):
+                return Ok(value)
+            case Err(err):
+                return Err(_lifecycle_err_to_handle_err(err, 'pause', self.workflow_id))
 
     # ─── resume ──────────────────────────────────────────────────────
 
@@ -835,8 +848,7 @@ class WorkflowHandle(Generic[OutT]):
         return self._sync_call(self.resume_async, 'resume')
 
     async def resume_async(self) -> HandleResult[bool]:
-        """
-        Async version of resume().
+        """Async version of resume().
 
         Returns:
             Ok(True) if workflow was resumed, Ok(False) if not PAUSED (no-op).
@@ -844,25 +856,9 @@ class WorkflowHandle(Generic[OutT]):
         """
         from horsies.core.workflows.engine import resume_workflow
 
-        try:
-            resumed = await resume_workflow(self.broker, self.workflow_id)
-            if resumed is None:
-                return Err(HandleOperationError(
-                    code=HandleErrorCode.WORKFLOW_NOT_FOUND,
-                    message=f'Workflow {self.workflow_id} not found',
-                    retryable=False,
-                    operation='resume',
-                    stage='existence_check',
-                    workflow_id=self.workflow_id,
-                ))
-            return Ok(resumed)
-        except SQLAlchemyError as exc:
-            return Err(HandleOperationError(
-                code=HandleErrorCode.DB_OPERATION_FAILED,
-                message=f'Resume failed for workflow {self.workflow_id}: {exc}',
-                retryable=is_retryable_connection_error(exc),
-                operation='resume',
-                stage='query',
-                workflow_id=self.workflow_id,
-                exception=exc,
-            ))
+        result = await resume_workflow(self.broker, self.workflow_id)
+        match result:
+            case Ok(value):
+                return Ok(value)
+            case Err(err):
+                return Err(_lifecycle_err_to_handle_err(err, 'resume', self.workflow_id))

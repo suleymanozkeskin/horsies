@@ -32,6 +32,7 @@ from horsies.core.models.workflow import (
     WorkflowDefinition,
     OnError,
 )
+from horsies.core.types.result import Ok
 from horsies.core.workflows.engine import (
     on_workflow_task_complete,
     resume_workflow,
@@ -198,8 +199,9 @@ class TestCascadeResumeMissingCompletionCheck:
         assert parent_status == 'PAUSED', f'Expected parent PAUSED, got {parent_status}'
 
         # 3. Resume parent -> should cascade to child
-        resumed = await resume_workflow(broker, handle.workflow_id)
-        assert resumed is True
+        resume_result = await resume_workflow(broker, handle.workflow_id)
+        assert isinstance(resume_result, Ok), f'Expected Ok, got {resume_result}'
+        assert resume_result.ok_value is True
 
         session.expire_all()
 

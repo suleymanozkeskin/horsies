@@ -7,6 +7,7 @@ import uuid
 from collections import deque
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.codec.serde import dumps_json, loads_json, SerializationError, SerdeResult
@@ -19,6 +20,11 @@ from horsies.core.models.workflow import (
 )
 from horsies.core.errors import WorkflowValidationError, MultipleValidationErrors, ErrorCode
 from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.workflows.lifecycle_types import (
+    LifecycleErrorCode,
+    LifecycleOperationError,
+    LifecycleResult,
+)
 from horsies.core.workflows.start_types import (
     WorkflowStartError,
     WorkflowStartErrorCode,
@@ -460,9 +466,8 @@ def start_workflow(
 async def pause_workflow(
     broker: 'PostgresBroker',
     workflow_id: str,
-) -> bool | None:
-    """
-    Pause a running workflow.
+) -> LifecycleResult[bool]:
+    """Pause a running workflow.
 
     Transitions workflow from RUNNING to PAUSED state. Already-running tasks
     will continue to completion, but:
@@ -475,39 +480,69 @@ async def pause_workflow(
     Use resume_workflow() to continue execution.
 
     Args:
-        broker: PostgreSQL broker for database operations
-        workflow_id: The workflow ID to pause
+        broker: PostgreSQL broker for database operations.
+        workflow_id: The workflow ID to pause.
 
     Returns:
-        True if workflow was paused, False if not RUNNING (no-op),
-        None if workflow does not exist.
+        ``Ok(True)`` if workflow was paused.
+        ``Ok(False)`` if workflow exists but is not RUNNING (no-op).
+        ``Err(WORKFLOW_NOT_FOUND)`` if workflow does not exist.
+        ``Err(DB_OPERATION_FAILED)`` on infrastructure failure.
     """
-    async with broker.session_factory() as session:
-        result = await session.execute(
-            PAUSE_WORKFLOW_SQL,
-            {'wf_id': workflow_id},
-        )
-        row = result.fetchone()
-        if row is None:
-            exists = await session.execute(
-                CHECK_WORKFLOW_EXISTS_SQL,
+    try:
+        async with broker.session_factory() as session:
+            result = await session.execute(
+                PAUSE_WORKFLOW_SQL,
                 {'wf_id': workflow_id},
             )
-            if exists.fetchone() is None:
-                return None
-            return False
+            row = result.fetchone()
+            if row is None:
+                exists = await session.execute(
+                    CHECK_WORKFLOW_EXISTS_SQL,
+                    {'wf_id': workflow_id},
+                )
+                if exists.fetchone() is None:
+                    return Err(LifecycleOperationError(
+                        code=LifecycleErrorCode.WORKFLOW_NOT_FOUND,
+                        message=f'Workflow {workflow_id} not found',
+                        retryable=False,
+                        operation='pause',
+                        stage='existence_check',
+                        workflow_id=workflow_id,
+                    ))
+                return Ok(False)
 
-        # Cascade pause to running child workflows (iterative BFS)
-        await cascade_pause_to_children(session, workflow_id)
+            # Cascade pause to running child workflows (iterative BFS)
+            await cascade_pause_to_children(session, workflow_id)
 
-        # Notify clients of pause (so get() returns immediately with WORKFLOW_PAUSED)
-        await session.execute(
-            NOTIFY_WORKFLOW_DONE_SQL,
-            {'wf_id': workflow_id},
-        )
+            # Notify clients of pause (so get() returns immediately with WORKFLOW_PAUSED)
+            await session.execute(
+                NOTIFY_WORKFLOW_DONE_SQL,
+                {'wf_id': workflow_id},
+            )
 
-        await session.commit()
-        return True
+            await session.commit()
+            return Ok(True)
+    except SQLAlchemyError as exc:
+        return Err(LifecycleOperationError(
+            code=LifecycleErrorCode.DB_OPERATION_FAILED,
+            message=f'Pause failed for workflow {workflow_id}: {type(exc).__name__}: {exc}',
+            retryable=is_retryable_connection_error(exc),
+            operation='pause',
+            stage='state_transition',
+            workflow_id=workflow_id,
+            exception=exc,
+        ))
+    except Exception as exc:
+        return Err(LifecycleOperationError(
+            code=LifecycleErrorCode.INTERNAL_FAILED,
+            message=f'Pause failed for workflow {workflow_id}: {type(exc).__name__}: {exc}',
+            retryable=False,
+            operation='pause',
+            stage='state_transition',
+            workflow_id=workflow_id,
+            exception=exc,
+        ))
 
 
 
@@ -554,23 +589,48 @@ async def cascade_pause_to_children(
 def pause_workflow_sync(
     broker: 'PostgresBroker',
     workflow_id: str,
-) -> bool | None:
-    """
-    Pause a running workflow synchronously.
+) -> LifecycleResult[bool]:
+    """Pause a running workflow synchronously.
 
-    Sync wrapper around pause_workflow().
+    Sync wrapper around ``pause_workflow()``.
+
+    Inner async ``Err`` passes through unchanged.
+    Bridge infrastructure failures are returned as ``LOOP_RUNNER_FAILED``.
+    Unexpected sync-path exceptions are returned as ``INTERNAL_FAILED``.
 
     Args:
-        broker: PostgreSQL broker for database operations
-        workflow_id: The workflow ID to pause
+        broker: PostgreSQL broker for database operations.
+        workflow_id: The workflow ID to pause.
 
     Returns:
-        True if workflow was paused, False if not RUNNING (no-op),
-        None if workflow does not exist.
+        ``Ok(True)`` if workflow was paused.
+        ``Ok(False)`` if workflow exists but is not RUNNING (no-op).
+        ``Err(...)`` on failure — see ``LifecycleErrorCode``.
     """
-    from horsies.core.utils.loop_runner import get_shared_runner
+    from horsies.core.utils.loop_runner import get_shared_runner, LoopRunnerError
 
-    return get_shared_runner().call(pause_workflow, broker, workflow_id)
+    try:
+        return get_shared_runner().call(pause_workflow, broker, workflow_id)
+    except LoopRunnerError as exc:
+        return Err(LifecycleOperationError(
+            code=LifecycleErrorCode.LOOP_RUNNER_FAILED,
+            message=f'Sync bridge failed: {type(exc).__name__}: {exc}',
+            retryable=False,
+            operation='pause',
+            stage='sync_bridge',
+            workflow_id=workflow_id,
+            exception=exc,
+        ))
+    except Exception as exc:
+        return Err(LifecycleOperationError(
+            code=LifecycleErrorCode.INTERNAL_FAILED,
+            message=f'Internal pause failure: {type(exc).__name__}: {exc}',
+            retryable=False,
+            operation='pause',
+            stage='sync_bridge',
+            workflow_id=workflow_id,
+            exception=exc,
+        ))
 
 
 
@@ -580,9 +640,8 @@ def pause_workflow_sync(
 async def resume_workflow(
     broker: 'PostgresBroker',
     workflow_id: str,
-) -> bool | None:
-    """
-    Resume a paused workflow.
+) -> LifecycleResult[bool]:
+    """Resume a paused workflow.
 
     Re-evaluates all PENDING tasks (marks READY if deps are terminal) and
     enqueues all READY tasks. Only works if workflow is currently PAUSED.
@@ -590,12 +649,14 @@ async def resume_workflow(
     Also cascades resume to all paused child workflows (iteratively, not recursively).
 
     Args:
-        broker: PostgreSQL broker for database operations
-        workflow_id: The workflow ID to resume
+        broker: PostgreSQL broker for database operations.
+        workflow_id: The workflow ID to resume.
 
     Returns:
-        True if workflow was resumed, False if not PAUSED (no-op),
-        None if workflow does not exist.
+        ``Ok(True)`` if workflow was resumed.
+        ``Ok(False)`` if workflow exists but is not PAUSED (no-op).
+        ``Err(WORKFLOW_NOT_FOUND)`` if workflow does not exist.
+        ``Err(DB_OPERATION_FAILED)`` on infrastructure failure.
     """
     # Deferred imports to avoid circular dependency with engine.py
     from horsies.core.workflows.engine import (
@@ -606,80 +667,108 @@ async def resume_workflow(
         check_workflow_completion,
     )
 
-    async with broker.session_factory() as session:
-        # 1. Transition PAUSED → RUNNING (only if currently PAUSED)
-        result = await session.execute(
-            RESUME_WORKFLOW_SQL,
-            {'wf_id': workflow_id},
-        )
-        row = result.fetchone()
-        if row is None:
-            exists = await session.execute(
-                CHECK_WORKFLOW_EXISTS_SQL,
+    try:
+        async with broker.session_factory() as session:
+            # 1. Transition PAUSED → RUNNING (only if currently PAUSED)
+            result = await session.execute(
+                RESUME_WORKFLOW_SQL,
                 {'wf_id': workflow_id},
             )
-            if exists.fetchone() is None:
-                return None
-            return False
-
-        depth = row[1] or 0
-        root_wf_id = row[2] or workflow_id
-
-        # 2. Find all PENDING tasks and try to make them READY
-        pending_result = await session.execute(
-            GET_PENDING_WORKFLOW_TASKS_SQL,
-            {'wf_id': workflow_id},
-        )
-        pending_indices = [r[0] for r in pending_result.fetchall()]
-
-        for task_index in pending_indices:
-            await try_make_ready_and_enqueue(
-                session, broker, workflow_id, task_index, depth, root_wf_id
-            )
-
-        # 3. Find all READY tasks and enqueue them
-        # (These may be tasks that were READY at pause time, or tasks that
-        # couldn't be enqueued during step 2 due to failed deps check)
-        ready_result = await session.execute(
-            GET_READY_WORKFLOW_TASKS_SQL,
-            {'wf_id': workflow_id},
-        )
-        ready_tasks = ready_result.fetchall()
-
-        for task_index, dependencies, is_subworkflow in ready_tasks:
-            # Fetch dependency results for this task
-            dep_indices: list[int] = (
-                cast(list[int], dependencies) if isinstance(dependencies, list) else []
-            )
-            dep_results = await get_dependency_results(
-                session, workflow_id, dep_indices
-            )
-
-            if is_subworkflow:
-                await enqueue_subworkflow_task(
-                    session,
-                    broker,
-                    workflow_id,
-                    task_index,
-                    dep_results,
-                    depth,
-                    root_wf_id,
+            row = result.fetchone()
+            if row is None:
+                exists = await session.execute(
+                    CHECK_WORKFLOW_EXISTS_SQL,
+                    {'wf_id': workflow_id},
                 )
-            else:
-                await enqueue_workflow_task(
-                    session, workflow_id, task_index, dep_results, broker
+                if exists.fetchone() is None:
+                    return Err(LifecycleOperationError(
+                        code=LifecycleErrorCode.WORKFLOW_NOT_FOUND,
+                        message=f'Workflow {workflow_id} not found',
+                        retryable=False,
+                        operation='resume',
+                        stage='existence_check',
+                        workflow_id=workflow_id,
+                    ))
+                return Ok(False)
+
+            depth = row[1] or 0
+            root_wf_id = row[2] or workflow_id
+
+            # 2. Find all PENDING tasks and try to make them READY
+            pending_result = await session.execute(
+                GET_PENDING_WORKFLOW_TASKS_SQL,
+                {'wf_id': workflow_id},
+            )
+            pending_indices = [r[0] for r in pending_result.fetchall()]
+
+            for task_index in pending_indices:
+                await try_make_ready_and_enqueue(
+                    session, broker, workflow_id, task_index, depth, root_wf_id,
                 )
 
-        # 4. Cascade resume to paused child workflows
-        await cascade_resume_to_children(session, broker, workflow_id)
+            # 3. Find all READY tasks and enqueue them
+            # (These may be tasks that were READY at pause time, or tasks that
+            # couldn't be enqueued during step 2 due to failed deps check)
+            ready_result = await session.execute(
+                GET_READY_WORKFLOW_TASKS_SQL,
+                {'wf_id': workflow_id},
+            )
+            ready_tasks = ready_result.fetchall()
 
-        # 5. Re-check completion after resume processing.
-        # Resume may transition pending tasks directly to SKIPPED/terminal without
-        # any subsequent task completion callback to trigger finalization.
-        await check_workflow_completion(session, workflow_id, broker)
+            for task_index, dependencies, is_subworkflow in ready_tasks:
+                # Fetch dependency results for this task
+                dep_indices: list[int] = (
+                    cast(list[int], dependencies) if isinstance(dependencies, list) else []
+                )
+                dep_results = await get_dependency_results(
+                    session, workflow_id, dep_indices,
+                )
 
-        await session.commit()
-        return True
+                if is_subworkflow:
+                    await enqueue_subworkflow_task(
+                        session,
+                        broker,
+                        workflow_id,
+                        task_index,
+                        dep_results,
+                        depth,
+                        root_wf_id,
+                    )
+                else:
+                    await enqueue_workflow_task(
+                        session, workflow_id, task_index, dep_results, broker,
+                    )
+
+            # 4. Cascade resume to paused child workflows
+            await cascade_resume_to_children(session, broker, workflow_id)
+
+            # 5. Re-check completion after resume processing.
+            # Resume may transition pending tasks directly to SKIPPED/terminal without
+            # any subsequent task completion callback to trigger finalization.
+            await check_workflow_completion(session, workflow_id, broker)
+
+            await session.commit()
+            return Ok(True)
+    except SQLAlchemyError as exc:
+        return Err(LifecycleOperationError(
+            code=LifecycleErrorCode.DB_OPERATION_FAILED,
+            message=f'Resume failed for workflow {workflow_id}: {type(exc).__name__}: {exc}',
+            retryable=is_retryable_connection_error(exc),
+            operation='resume',
+            stage='state_transition',
+            workflow_id=workflow_id,
+            exception=exc,
+        ))
+    except Exception as exc:
+        return Err(LifecycleOperationError(
+            code=LifecycleErrorCode.INTERNAL_FAILED,
+            message=f'Resume failed for workflow {workflow_id}: {type(exc).__name__}: {exc}',
+            retryable=False,
+            operation='resume',
+            stage='state_transition',
+            workflow_id=workflow_id,
+            exception=exc,
+        ))
 
 
 
@@ -772,20 +861,45 @@ async def cascade_resume_to_children(
 def resume_workflow_sync(
     broker: 'PostgresBroker',
     workflow_id: str,
-) -> bool | None:
-    """
-    Resume a paused workflow synchronously.
+) -> LifecycleResult[bool]:
+    """Resume a paused workflow synchronously.
 
-    Sync wrapper around resume_workflow().
+    Sync wrapper around ``resume_workflow()``.
+
+    Inner async ``Err`` passes through unchanged.
+    Bridge infrastructure failures are returned as ``LOOP_RUNNER_FAILED``.
+    Unexpected sync-path exceptions are returned as ``INTERNAL_FAILED``.
 
     Args:
-        broker: PostgreSQL broker for database operations
-        workflow_id: The workflow ID to resume
+        broker: PostgreSQL broker for database operations.
+        workflow_id: The workflow ID to resume.
 
     Returns:
-        True if workflow was resumed, False if not PAUSED (no-op),
-        None if workflow does not exist.
+        ``Ok(True)`` if workflow was resumed.
+        ``Ok(False)`` if workflow exists but is not PAUSED (no-op).
+        ``Err(...)`` on failure — see ``LifecycleErrorCode``.
     """
-    from horsies.core.utils.loop_runner import get_shared_runner
+    from horsies.core.utils.loop_runner import get_shared_runner, LoopRunnerError
 
-    return get_shared_runner().call(resume_workflow, broker, workflow_id)
+    try:
+        return get_shared_runner().call(resume_workflow, broker, workflow_id)
+    except LoopRunnerError as exc:
+        return Err(LifecycleOperationError(
+            code=LifecycleErrorCode.LOOP_RUNNER_FAILED,
+            message=f'Sync bridge failed: {type(exc).__name__}: {exc}',
+            retryable=False,
+            operation='resume',
+            stage='sync_bridge',
+            workflow_id=workflow_id,
+            exception=exc,
+        ))
+    except Exception as exc:
+        return Err(LifecycleOperationError(
+            code=LifecycleErrorCode.INTERNAL_FAILED,
+            message=f'Internal resume failure: {type(exc).__name__}: {exc}',
+            retryable=False,
+            operation='resume',
+            stage='sync_bridge',
+            workflow_id=workflow_id,
+            exception=exc,
+        ))
