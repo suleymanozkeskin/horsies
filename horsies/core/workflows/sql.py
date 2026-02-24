@@ -171,6 +171,8 @@ UPDATE_WORKFLOW_TASK_RESULT_SQL = text("""
     UPDATE horsies_workflow_tasks
     SET status = :status, result = :result, completed_at = NOW()
     WHERE workflow_id = :wf_id AND task_index = :idx
+      AND NOT (status = ANY(:terminal_states))
+    RETURNING task_index
 """)
 GET_WORKFLOW_STATUS_SQL = text(
     """SELECT status FROM horsies_workflows WHERE id = :wf_id"""

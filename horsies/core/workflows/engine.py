@@ -802,17 +802,25 @@ async def on_workflow_task_complete(
     if lock_result.fetchone() is None:
         return
 
-    # 2. Update workflow_task status and store result
+    # 2. Update workflow_task status and store result (CAS: skip if already terminal)
     new_status = 'COMPLETED' if result.is_ok() else 'FAILED'
-    await session.execute(
+    update_result = await session.execute(
         UPDATE_WORKFLOW_TASK_RESULT_SQL,
         {
             'status': new_status,
             'result': _ser(dumps_json(result), 'task completion result', fallback='null'),
             'wf_id': workflow_id,
             'idx': task_index,
+            'terminal_states': WF_TASK_TERMINAL_VALUES,
         },
     )
+    if update_result.fetchone() is None:
+        logger.debug(
+            'Workflow task already terminal, skipping progression: '
+            'workflow=%s task_index=%s task_id=%s',
+            workflow_id, task_index, task_id,
+        )
+        return
 
     # 3. Handle failure based on on_error policy
     if result.is_err():
