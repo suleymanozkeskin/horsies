@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
+from horsies.core.defaults import MAX_CLAIM_RENEW_AGE_MS
+
 if TYPE_CHECKING:
     from horsies.core.models.recovery import RecoveryConfig
     from horsies.core.models.resilience import WorkerResilienceConfig
@@ -54,5 +56,9 @@ class WorkerConfig:
     resilience_config: Optional['WorkerResilienceConfig'] = (
         None  # WorkerResilienceConfig, allow override
     )
+    # Maximum CLAIMED age (ms) for heartbeat lease renewal. Tasks claimed
+    # longer ago than this stop getting their lease renewed, so they expire
+    # naturally and become reclaimable by another worker.
+    max_claim_renew_age_ms: int = MAX_CLAIM_RENEW_AGE_MS
     # Log level for worker processes (default: INFO)
     loglevel: int = 20  # logging.INFO

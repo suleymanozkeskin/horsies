@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -14,6 +15,8 @@ from horsies.core.types.result import Ok, Err
 from psycopg.errors import DeadlockDetected, SerializationFailure
 
 from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
+import logging
+
 from horsies.core.worker.worker import (
     Worker,
     WorkerConfig,
@@ -25,10 +28,13 @@ from horsies.core.worker.worker import (
     DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
     INSERT_CLAIMER_HEARTBEAT_SQL,
     RENEW_CLAIM_LEASE_SQL,
+    UNCLAIM_CLAIMED_TASK_SQL,
     _build_sys_path_roots,
     _dedupe_paths,
     _derive_sys_path_roots_from_file,
+    _FinalizeError,
     _is_retryable_db_error,
+    _RequeueOutcome,
 )
 from horsies.core.models.recovery import RecoveryConfig
 
@@ -607,3 +613,373 @@ class TestClaimerHeartbeatRenewsLease:
         assert len(renewal_calls) >= 1
         renewal_params = renewal_calls[0][0][1]
         assert isinstance(renewal_params['new_expires_at'], datetime)
+
+
+# ---------------------------------------------------------------------------
+# 10. _requeue_claimed_task: typed _RequeueOutcome paths
+# ---------------------------------------------------------------------------
+
+
+def _make_session_mock(
+    *,
+    rowcount: int = 0,
+    execute_side_effect: Exception | None = None,
+) -> AsyncMock:
+    """Build an AsyncMock session context for _requeue_claimed_task tests."""
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.commit = AsyncMock()
+
+    result_mock = MagicMock(rowcount=rowcount)
+    if execute_side_effect is not None:
+        session.execute = AsyncMock(side_effect=execute_side_effect)
+    else:
+        session.execute = AsyncMock(return_value=result_mock)
+
+    return session
+
+
+@pytest.mark.unit
+class TestRequeueClaimedTask:
+    """Tests for _requeue_claimed_task: all three _RequeueOutcome paths."""
+
+    @pytest.mark.asyncio
+    async def test_requeue_success_returns_requeued(self) -> None:
+        """When DB UPDATE matches a row, outcome is REQUEUED."""
+        worker = _make_worker()
+        session = _make_session_mock(rowcount=1)
+        worker.sf = MagicMock(return_value=session)
+
+        outcome = await worker._requeue_claimed_task('task-1', 'test reason')
+
+        assert outcome is _RequeueOutcome.REQUEUED
+        session.execute.assert_awaited_once()
+        call_args = session.execute.call_args[0]
+        assert call_args[0] is UNCLAIM_CLAIMED_TASK_SQL
+        assert call_args[1]['id'] == 'task-1'
+        assert call_args[1]['wid'] == worker.worker_instance_id
+        session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_requeue_guard_fail_returns_not_owner(self) -> None:
+        """When DB UPDATE matches zero rows, outcome is NOT_OWNER_OR_NOT_CLAIMED."""
+        worker = _make_worker()
+        session = _make_session_mock(rowcount=0)
+        worker.sf = MagicMock(return_value=session)
+
+        outcome = await worker._requeue_claimed_task('task-2', 'owner mismatch')
+
+        assert outcome is _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
+        session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_requeue_db_error_returns_db_error(self) -> None:
+        """When session.execute raises, outcome is DB_ERROR — exception does NOT propagate."""
+        worker = _make_worker()
+        session = _make_session_mock(execute_side_effect=OperationalError('connection lost'))
+        worker.sf = MagicMock(return_value=session)
+
+        outcome = await worker._requeue_claimed_task('task-3', 'db failure')
+
+        assert outcome is _RequeueOutcome.DB_ERROR
+        # No exception escaped — the method returned cleanly
+
+    @pytest.mark.asyncio
+    async def test_requeue_db_error_does_not_commit(self) -> None:
+        """On DB error, commit must not be called (exception fires before commit)."""
+        worker = _make_worker()
+        session = _make_session_mock(execute_side_effect=RuntimeError('boom'))
+        worker.sf = MagicMock(return_value=session)
+
+        await worker._requeue_claimed_task('task-4', 'no commit expected')
+
+        session.commit.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# 11. _finalize_after call site D: _RequeueOutcome integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestFinalizeAfterRequeueOutcome:
+    """Tests for the except-Exception branch in _finalize_after that uses
+    _requeue_claimed_task and builds _FinalizeError with requeue_outcome."""
+
+    @pytest.mark.asyncio
+    async def test_future_transient_error_requeue_success_not_retryable(self) -> None:
+        """Transient connection error + REQUEUED → retryable=False.
+
+        The task is safely back in the queue, so finalize should NOT retry.
+        """
+        worker = _make_worker()
+
+        # Make requeue return REQUEUED
+        session = _make_session_mock(rowcount=1)
+        worker.sf = MagicMock(return_value=session)
+
+        # Future that raises a retryable connection error
+        fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
+        fut.set_exception(OperationalError('connection reset'))
+
+        result = await worker._finalize_after(fut, 'task-10')
+
+        assert isinstance(result, Err)
+        err: _FinalizeError = result.err_value
+        assert err.retryable is False
+        assert err.data is not None
+        assert err.data['requeue_outcome'] == 'REQUEUED'
+
+    @pytest.mark.asyncio
+    async def test_future_transient_error_requeue_db_error_retryable(self) -> None:
+        """Transient connection error + DB_ERROR → retryable=True.
+
+        The task is NOT safely requeued, so finalize should retry.
+        """
+        worker = _make_worker()
+
+        # Make requeue return DB_ERROR
+        session = _make_session_mock(execute_side_effect=OperationalError('requeue failed'))
+        worker.sf = MagicMock(return_value=session)
+
+        fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
+        fut.set_exception(OperationalError('original connection error'))
+
+        result = await worker._finalize_after(fut, 'task-11')
+
+        assert isinstance(result, Err)
+        err: _FinalizeError = result.err_value
+        assert err.retryable is True
+        assert err.data is not None
+        assert err.data['requeue_outcome'] == 'DB_ERROR'
+
+    @pytest.mark.asyncio
+    async def test_future_transient_error_requeue_not_owner_retryable(self) -> None:
+        """Transient connection error + NOT_OWNER_OR_NOT_CLAIMED → retryable=True.
+
+        The task was not requeued (guard failed), so finalize should retry.
+        """
+        worker = _make_worker()
+
+        session = _make_session_mock(rowcount=0)
+        worker.sf = MagicMock(return_value=session)
+
+        fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
+        fut.set_exception(OperationalError('transient'))
+
+        result = await worker._finalize_after(fut, 'task-12')
+
+        assert isinstance(result, Err)
+        err: _FinalizeError = result.err_value
+        assert err.retryable is True
+        assert err.data is not None
+        assert err.data['requeue_outcome'] == 'NOT_OWNER_OR_NOT_CLAIMED'
+
+    @pytest.mark.asyncio
+    async def test_future_non_retryable_error_always_not_retryable(self) -> None:
+        """Non-retryable future exception → retryable=False regardless of requeue outcome."""
+        worker = _make_worker()
+
+        session = _make_session_mock(rowcount=0)
+        worker.sf = MagicMock(return_value=session)
+
+        fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
+        fut.set_exception(ValueError('bad data'))
+
+        result = await worker._finalize_after(fut, 'task-13')
+
+        assert isinstance(result, Err)
+        err: _FinalizeError = result.err_value
+        assert err.retryable is False
+        assert err.data is not None
+        assert err.data['requeue_outcome'] == 'NOT_OWNER_OR_NOT_CLAIMED'
+
+
+# ---------------------------------------------------------------------------
+# 12. _handle_broken_pool / _dispatch_one: requeue DB error containment
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestRequeueDbErrorContainment:
+    """Fire-and-forget call sites must not propagate DB errors and must log CRITICAL."""
+
+    @pytest.mark.asyncio
+    async def test_handle_broken_pool_db_error_logs_critical(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """_handle_broken_pool logs CRITICAL on DB_ERROR and still restarts executor."""
+        worker = _make_worker()
+
+        session = _make_session_mock(execute_side_effect=OperationalError('db down'))
+        worker.sf = MagicMock(return_value=session)
+        worker._restart_executor = AsyncMock()  # type: ignore[method-assign]
+
+        _logger = logging.getLogger('horsies.worker')
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
+                await worker._handle_broken_pool('task-20', BrokenProcessPool('pool died'))
+        finally:
+            _logger.propagate = False
+
+        worker._restart_executor.assert_awaited_once()
+        critical_messages = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+        assert len(critical_messages) == 1
+        assert 'task-20' in critical_messages[0].message
+        assert 'DB_ERROR' in critical_messages[0].message
+
+    @pytest.mark.asyncio
+    async def test_dispatch_one_executor_unavailable_db_error_logs_critical(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """_dispatch_one (executor unavailable path) logs CRITICAL on DB_ERROR."""
+        worker = _make_worker()
+        worker._executor = None
+
+        # _restart_executor keeps executor as None (simulating restart failure)
+        worker._restart_executor = AsyncMock()  # type: ignore[method-assign]
+
+        session = _make_session_mock(execute_side_effect=OperationalError('db down'))
+        worker.sf = MagicMock(return_value=session)
+
+        _logger = logging.getLogger('horsies.worker')
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
+                await worker._dispatch_one('task-21', 'my_app.add', '[]', '{}')
+        finally:
+            _logger.propagate = False
+
+        critical_messages = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+        assert len(critical_messages) == 1
+        assert 'task-21' in critical_messages[0].message
+        assert 'DB_ERROR' in critical_messages[0].message
+
+    @pytest.mark.asyncio
+    async def test_dispatch_one_submit_exception_db_error_logs_critical(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """_dispatch_one (run_in_executor exception path) logs CRITICAL on DB_ERROR."""
+        worker = _make_worker()
+        worker._executor = MagicMock()
+
+        # Make run_in_executor raise a non-BrokenProcessPool exception synchronously
+        loop = asyncio.get_running_loop()
+        original_run = loop.run_in_executor
+
+        def _patched_run(executor: Any, fn: Any, *args: Any) -> Any:
+            raise RuntimeError('submit failed')
+
+        loop.run_in_executor = _patched_run  # type: ignore[assignment]
+
+        session = _make_session_mock(execute_side_effect=OperationalError('db down'))
+        worker.sf = MagicMock(return_value=session)
+
+        _logger = logging.getLogger('horsies.worker')
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
+                await worker._dispatch_one('task-22', 'my_app.add', '[]', '{}')
+        finally:
+            _logger.propagate = False
+            loop.run_in_executor = original_run  # type: ignore[assignment]
+
+        critical_messages = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+        assert len(critical_messages) == 1
+        assert 'task-22' in critical_messages[0].message
+        assert 'DB_ERROR' in critical_messages[0].message
+
+    @pytest.mark.asyncio
+    async def test_handle_broken_pool_requeue_success_no_critical(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """No CRITICAL log when requeue succeeds in _handle_broken_pool."""
+        worker = _make_worker()
+
+        session = _make_session_mock(rowcount=1)
+        worker.sf = MagicMock(return_value=session)
+        worker._restart_executor = AsyncMock()  # type: ignore[method-assign]
+
+        _logger = logging.getLogger('horsies.worker')
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
+                await worker._handle_broken_pool('task-23', BrokenProcessPool('pool died'))
+        finally:
+            _logger.propagate = False
+
+        critical_messages = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+        assert len(critical_messages) == 0
+
+
+# ---------------------------------------------------------------------------
+# 13. Lease renewal SQL: age guard predicate
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestLeaseRenewalAgeGuard:
+    """RENEW_CLAIM_LEASE_SQL must filter by claimed_at age to prevent
+    indefinite renewal of orphaned CLAIMED tasks."""
+
+    def test_renew_sql_contains_age_guard_predicate(self) -> None:
+        """SQL must include claimed_at guard referencing max_claim_age_ms param."""
+        from horsies.core.worker.sql import RENEW_CLAIM_LEASE_SQL
+
+        sql_text = RENEW_CLAIM_LEASE_SQL.text
+        normalised = ' '.join(sql_text.split())
+        assert ':max_claim_age_ms' in normalised
+        assert 'claimed_at' in normalised
+        assert "INTERVAL '1 millisecond'" in normalised
+
+    def test_renew_sql_still_scoped_to_owner(self) -> None:
+        """Age guard does not replace the owner scope — both must be present."""
+        from horsies.core.worker.sql import RENEW_CLAIM_LEASE_SQL
+
+        sql_text = RENEW_CLAIM_LEASE_SQL.text
+        assert ':wid' in sql_text
+        assert "status = 'CLAIMED'" in sql_text
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_loop_passes_max_claim_age_ms(self) -> None:
+        """Heartbeat loop must pass max_claim_renew_age_ms to RENEW_CLAIM_LEASE_SQL."""
+        worker = _make_worker()
+        worker.cfg.recovery_config = RecoveryConfig(
+            claimer_heartbeat_interval_ms=1_000,
+        )
+        worker.cfg.max_claim_renew_age_ms = 180_000
+
+        executed_stmts: list[Any] = []
+        executed_params: list[Any] = []
+
+        async def _execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+            executed_stmts.append(stmt)
+            if args:
+                executed_params.append(args[0])
+            # Stop after first full cycle
+            if len(executed_stmts) >= 2:
+                worker._stop.set()
+            return MagicMock(rowcount=0)
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(side_effect=_execute)
+        session.commit = AsyncMock()
+        worker.sf = MagicMock(return_value=session)
+
+        await worker._claimer_heartbeat_loop()
+
+        assert RENEW_CLAIM_LEASE_SQL in executed_stmts
+
+        # Find the RENEW_CLAIM_LEASE_SQL call params
+        renewal_calls = [
+            c for c in session.execute.call_args_list
+            if c[0][0] is RENEW_CLAIM_LEASE_SQL
+        ]
+        assert len(renewal_calls) >= 1
+        renewal_params = renewal_calls[0][0][1]
+        assert 'max_claim_age_ms' in renewal_params
+        assert renewal_params['max_claim_age_ms'] == 180_000

@@ -31,13 +31,18 @@ from tests.e2e.tasks import queues_custom
 from tests.e2e.tasks import instance_cluster_cap
 from tests.e2e.tasks import instance_recovery
 from tests.e2e.tasks import instance_softcap
+from tests.e2e.tasks import instance_requeue_guard
 
+
+import subprocess
+import time
 
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
 CUSTOM_INSTANCE = 'tests.e2e.tasks.instance_custom:app'
 CLUSTER_CAP_INSTANCE = 'tests.e2e.tasks.instance_cluster_cap:app'
 RECOVERY_INSTANCE = 'tests.e2e.tasks.instance_recovery:app'
 SOFTCAP_INSTANCE = 'tests.e2e.tasks.instance_softcap:app'
+REQUEUE_GUARD_INSTANCE = 'tests.e2e.tasks.instance_requeue_guard:app'
 
 
 class _HealthcheckTask(Protocol):
@@ -1275,3 +1280,193 @@ async def test_softcap_owner_transition_after_worker_crash(
             )
         finally:
             os.environ.pop('E2E_IDEMPOTENT_LOG_DIR', None)
+
+
+# ---------------------------------------------------------------------------
+# L2.18 – Requeue DB_ERROR + age-guard recovery
+# ---------------------------------------------------------------------------
+
+def _repo_root() -> str:
+    """Return the project repo root for PYTHONPATH."""
+    return os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    )
+
+
+def _start_fault_injected_worker() -> subprocess.Popen[str]:
+    """Start a worker subprocess with INJECT_REQUEUE_DB_ERROR=1.
+
+    Every task claimed by this worker will fail dispatch and then fail
+    requeue, leaving the task orphaned in CLAIMED status.  The heartbeat
+    loop stays alive so the claim lease keeps getting renewed — until
+    the SQL age guard (max_claim_renew_age_ms) kicks in and stops renewal.
+    """
+    env = os.environ.copy()
+    env['PYTHONPATH'] = _repo_root()
+    env['INJECT_REQUEUE_DB_ERROR'] = '1'
+
+    return subprocess.Popen(
+        [
+            'uv', 'run', 'horsies', 'worker',
+            REQUEUE_GUARD_INSTANCE,
+            '--processes=1',
+            '--loglevel=warning',
+        ],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+
+
+def _start_normal_worker() -> subprocess.Popen[str]:
+    """Start a normal (non-injected) worker for the requeue-guard instance."""
+    env = os.environ.copy()
+    env['PYTHONPATH'] = _repo_root()
+
+    return subprocess.Popen(
+        [
+            'uv', 'run', 'horsies', 'worker',
+            REQUEUE_GUARD_INSTANCE,
+            '--processes=1',
+            '--loglevel=warning',
+        ],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+
+
+def _kill_requeue_worker(proc: subprocess.Popen[str]) -> None:
+    """Terminate a worker process group, escalating to SIGKILL."""
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        proc.wait(timeout=2.0)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_requeue_db_error_age_guard_recovery(
+    requeue_guard_broker: PostgresBroker,
+) -> None:
+    """L2.18: Stuck CLAIMED task recovered via age-guard lease expiry.
+
+    Scenario:
+      1. Enqueue task.
+      2. Start Worker A (fault-injected): claims task, dispatch fails,
+         requeue returns DB_ERROR → task stays CLAIMED.
+      3. Age guard (max_claim_renew_age_ms=5s) stops lease renewal.
+      4. Start Worker B (normal): reclaims the now-expired task and completes it.
+      5. Assert: task is COMPLETED, owner changed, correct result.
+    """
+    from tests.e2e.helpers.worker import kill_stale_workers
+    kill_stale_workers()
+
+    token = 'requeue_guard_token_l218'
+
+    with tempfile.TemporaryDirectory() as log_dir:
+        os.environ['E2E_REQUEUE_GUARD_LOG_DIR'] = log_dir
+
+        # 1. Enqueue task
+        handle = instance_requeue_guard.requeue_guard_task.send(token)
+        task_id = handle.task_id
+
+        worker_a: subprocess.Popen[str] | None = None
+        worker_b: subprocess.Popen[str] | None = None
+
+        try:
+            # 2. Start fault-injected Worker A
+            worker_a = _start_fault_injected_worker()
+
+            # Wait for task to be CLAIMED by Worker A
+            await wait_for_status(
+                requeue_guard_broker.session_factory, task_id, 'CLAIMED', timeout_s=20.0,
+            )
+
+            # Record Worker A's id
+            async with requeue_guard_broker.session_factory() as session:
+                task = await session.get(TaskModel, task_id)
+                assert task is not None
+                worker_a_id = task.claimed_by_worker_id
+                assert worker_a_id is not None, 'Task should be claimed by Worker A'
+
+            # 3. Wait for age guard to stop lease renewal.
+            #    max_claim_renew_age_ms=5s, claim_lease_ms=2s → after ~5s the
+            #    lease stops being renewed, then after another 2s it expires.
+            #    Give it 12s total headroom.
+            await asyncio.sleep(12)
+
+            # 4. Start normal Worker B — it should reclaim the expired task
+            worker_b = _start_normal_worker()
+
+            # Wait for completion
+            await wait_for_status(
+                requeue_guard_broker.session_factory, task_id, 'COMPLETED', timeout_s=30.0,
+            )
+
+            # 5. Assert results
+            async with requeue_guard_broker.session_factory() as session:
+                task = await session.get(TaskModel, task_id)
+                assert task is not None
+                assert task.status == TaskStatus.COMPLETED, (
+                    f'Expected COMPLETED, got {task.status}'
+                )
+                assert task.claimed_by_worker_id is not None, (
+                    'Completed task should retain final owner id'
+                )
+                assert task.claimed_by_worker_id != worker_a_id, (
+                    f'Expected owner transition from Worker A ({worker_a_id}), '
+                    f'still owned by same worker'
+                )
+
+                assert task.result is not None, 'COMPLETED task should have a result'
+                result_data: dict[str, Any] = json.loads(task.result)
+                assert result_data.get('ok') == f'done:{token}', (
+                    f'Unexpected completion payload: {result_data}'
+                )
+
+            # 6. Assert single execution via marker file
+            token_file = Path(log_dir) / token
+            assert token_file.exists(), f'Token file {token} not created'
+            all_files = list(Path(log_dir).iterdir())
+            assert len(all_files) == 1, (
+                f'Expected exactly 1 execution marker, found {len(all_files)}: '
+                f'{[f.name for f in all_files]}'
+            )
+            executions = [line for line in token_file.read_text(encoding='utf-8').splitlines() if line]
+            assert len(executions) == 1, (
+                f'Expected exactly 1 execution record, found {len(executions)}: {executions}'
+            )
+
+            # 7. Verify Worker A output contains evidence of DB_ERROR injection
+            if worker_a is not None:
+                _kill_requeue_worker(worker_a)
+                stdout_text = worker_a.stdout.read() if worker_a.stdout else ''
+                stderr_text = worker_a.stderr.read() if worker_a.stderr else ''
+                combined = stdout_text + stderr_text
+                assert 'DB_ERROR' in combined or 'INJECTED' in combined, (
+                    f'Worker A output should contain evidence of fault injection.\n'
+                    f'stdout: {stdout_text[:500]}\nstderr: {stderr_text[:500]}'
+                )
+
+        finally:
+            if worker_a is not None:
+                _kill_requeue_worker(worker_a)
+            if worker_b is not None:
+                _kill_requeue_worker(worker_b)
+            os.environ.pop('E2E_REQUEUE_GUARD_LOG_DIR', None)
+            kill_stale_workers()

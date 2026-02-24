@@ -413,6 +413,7 @@ def worker_command(args: argparse.Namespace) -> None:
         cluster_wide_cap=app.config.cluster_wide_cap,
         prefetch_buffer=app.config.prefetch_buffer,
         claim_lease_ms=app.config.claim_lease_ms,
+        max_claim_renew_age_ms=app.config.max_claim_renew_age_ms,
         max_claim_batch=args.max_claim_batch,
         max_claim_per_worker=args.max_claim_per_worker,
         recovery_config=app.config.recovery,

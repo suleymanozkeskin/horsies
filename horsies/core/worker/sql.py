@@ -245,6 +245,7 @@ RENEW_CLAIM_LEASE_SQL = text("""
         updated_at = NOW()
     WHERE status = 'CLAIMED'
       AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
+      AND claimed_at >= NOW() - :max_claim_age_ms * INTERVAL '1 millisecond'
 """)
 
 INSERT_WORKER_STATE_SQL = text("""

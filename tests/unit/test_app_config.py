@@ -159,6 +159,94 @@ class TestClaimLeaseMsValidation:
 
 
 @pytest.mark.unit
+class TestMaxClaimRenewAgeMsValidation:
+    """Tests for max_claim_renew_age_ms configuration validation."""
+
+    def test_default_value_is_valid(self) -> None:
+        """Default max_claim_renew_age_ms (180_000) should be accepted."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+        )
+        assert config.max_claim_renew_age_ms == 180_000
+
+    def test_zero_raises(self) -> None:
+        """max_claim_renew_age_ms=0 should raise ConfigurationError."""
+        with pytest.raises(
+            ConfigurationError, match='max_claim_renew_age_ms must be positive',
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                max_claim_renew_age_ms=0,
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+
+    def test_negative_raises(self) -> None:
+        """max_claim_renew_age_ms < 0 should raise ConfigurationError."""
+        with pytest.raises(
+            ConfigurationError, match='max_claim_renew_age_ms must be positive',
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                max_claim_renew_age_ms=-1000,
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+
+    def test_less_than_effective_lease_raises(self) -> None:
+        """max_claim_renew_age_ms < effective lease should raise ConfigurationError."""
+        with pytest.raises(
+            ConfigurationError, match='max_claim_renew_age_ms must be >= effective claim lease',
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                claim_lease_ms=10_000,
+                max_claim_renew_age_ms=5_000,
+                recovery=RecoveryConfig(claimer_heartbeat_interval_ms=2_000),
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+
+    def test_equal_to_effective_lease_is_valid(self) -> None:
+        """max_claim_renew_age_ms == effective lease is the minimum valid value."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+            claim_lease_ms=5_000,
+            max_claim_renew_age_ms=5_000,
+            recovery=SHORT_HB_RECOVERY,
+        )
+        assert config.max_claim_renew_age_ms == 5_000
+
+    def test_greater_than_effective_lease_is_valid(self) -> None:
+        """max_claim_renew_age_ms > effective lease should be accepted."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+            claim_lease_ms=5_000,
+            max_claim_renew_age_ms=60_000,
+            recovery=SHORT_HB_RECOVERY,
+        )
+        assert config.max_claim_renew_age_ms == 60_000
+
+    def test_uses_default_lease_when_claim_lease_ms_none(self) -> None:
+        """When claim_lease_ms is None, effective lease is DEFAULT_CLAIM_LEASE_MS (60s).
+
+        max_claim_renew_age_ms must be >= 60_000 in that case.
+        """
+        with pytest.raises(
+            ConfigurationError, match='max_claim_renew_age_ms must be >= effective claim lease',
+        ):
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                claim_lease_ms=None,
+                max_claim_renew_age_ms=30_000,
+            )
+
+
+@pytest.mark.unit
 class TestClusterWideCapPrefetchConflict:
     """Tests for cluster_wide_cap and prefetch_buffer conflict validation."""
 

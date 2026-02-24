@@ -10,6 +10,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
+from enum import Enum
 from datetime import datetime, timezone, timedelta
 from importlib import import_module
 from typing import Any, Optional
@@ -140,6 +141,12 @@ class _FinalizeError:
     task_id: str
     retryable: bool = False
     data: dict[str, Any] | None = None
+
+
+class _RequeueOutcome(str, Enum):
+    REQUEUED = 'REQUEUED'
+    NOT_OWNER_OR_NOT_CLAIMED = 'NOT_OWNER_OR_NOT_CLAIMED'
+    DB_ERROR = 'DB_ERROR'
 
 
 def _collect_psutil_metrics() -> tuple[float, float, float]:
@@ -885,26 +892,43 @@ class Worker:
             row = res.fetchone()
             return int(row[0]) if row else 0
 
-    async def _requeue_claimed_task(self, task_id: str, reason: str) -> bool:
-        async with self.sf() as s:
-            res = await s.execute(
-                UNCLAIM_CLAIMED_TASK_SQL,
-                {'id': task_id, 'wid': self.worker_instance_id},
+    async def _requeue_claimed_task(self, task_id: str, reason: str) -> _RequeueOutcome:
+        try:
+            async with self.sf() as s:
+                res = await s.execute(
+                    UNCLAIM_CLAIMED_TASK_SQL,
+                    {'id': task_id, 'wid': self.worker_instance_id},
+                )
+                await s.commit()
+                rowcount = getattr(res, 'rowcount', 0) or 0
+                requeued = rowcount > 0
+        except Exception as exc:
+            logger.error(
+                'DB error while requeueing task %s (%s): %s',
+                task_id, reason, exc,
             )
-            await s.commit()
-            rowcount = getattr(res, 'rowcount', 0) or 0
-            requeued = rowcount > 0
+            return _RequeueOutcome.DB_ERROR
 
         if requeued:
-            logger.warning(f'Requeued CLAIMED task {task_id}: {reason}')
+            logger.warning('Requeued CLAIMED task %s: %s', task_id, reason)
+            return _RequeueOutcome.REQUEUED
         else:
             logger.warning(
-                f'Failed to requeue task {task_id} (not CLAIMED or owner mismatch): {reason}'
+                'Failed to requeue task %s (not CLAIMED or owner mismatch): %s',
+                task_id, reason,
             )
-        return requeued
+            return _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
 
     async def _handle_broken_pool(self, task_id: str, exc: BaseException) -> None:
-        await self._requeue_claimed_task(task_id, f'Broken process pool: {exc}')
+        outcome = await self._requeue_claimed_task(
+            task_id, f'Broken process pool: {exc}',
+        )
+        if outcome is _RequeueOutcome.DB_ERROR:
+            logger.critical(
+                'Requeue DB_ERROR: task %s may remain orphaned CLAIMED '
+                '(worker=%s, reason=broken pool: %s)',
+                task_id, self.worker_instance_id, exc,
+            )
         await self._restart_executor(f'Broken process pool: {exc}')
 
     async def _dispatch_one(
@@ -918,9 +942,15 @@ class Worker:
         if self._executor is None:
             await self._restart_executor('Executor missing before dispatch')
             if self._executor is None:
-                await self._requeue_claimed_task(
-                    task_id, 'Executor unavailable after restart attempt'
+                outcome = await self._requeue_claimed_task(
+                    task_id, 'Executor unavailable after restart attempt',
                 )
+                if outcome is _RequeueOutcome.DB_ERROR:
+                    logger.critical(
+                        'Requeue DB_ERROR: task %s may remain orphaned CLAIMED '
+                        '(worker=%s, reason=executor unavailable)',
+                        task_id, self.worker_instance_id,
+                    )
                 return
         loop = asyncio.get_running_loop()
 
@@ -949,9 +979,15 @@ class Worker:
             await self._handle_broken_pool(task_id, exc)
             return
         except Exception as exc:
-            await self._requeue_claimed_task(
-                task_id, f'Failed to dispatch task to executor: {exc}'
+            outcome = await self._requeue_claimed_task(
+                task_id, f'Failed to dispatch task to executor: {exc}',
             )
+            if outcome is _RequeueOutcome.DB_ERROR:
+                logger.critical(
+                    'Requeue DB_ERROR: task %s may remain orphaned CLAIMED '
+                    '(worker=%s, reason=dispatch failed: %s)',
+                    task_id, self.worker_instance_id, exc,
+                )
             return
 
         # When done, record the outcome
@@ -982,7 +1018,7 @@ class Worker:
                 )
             )
         except Exception as exc:
-            requeued = await self._requeue_claimed_task(
+            requeue_outcome = await self._requeue_claimed_task(
                 task_id, f'Worker future failed before result: {exc}'
             )
             return Err(
@@ -990,10 +1026,11 @@ class Worker:
                     task_id=task_id,
                     stage=_FINALIZE_STAGE_FUTURE,
                     message=f'Worker future failed before result: {exc}',
-                    retryable=is_retryable_connection_error(exc) and not requeued,
+                    retryable=is_retryable_connection_error(exc)
+                        and requeue_outcome != _RequeueOutcome.REQUEUED,
                     data={
                         'exception_type': type(exc).__name__,
-                        'requeued': requeued,
+                        'requeue_outcome': requeue_outcome.value,
                     },
                 )
             )
@@ -1662,13 +1699,16 @@ class Worker:
                                 'pid': os.getpid(),
                             },
                         )
-                        # Extend claim lease for all CLAIMED tasks owned by this worker.
-                        # Prevents premature lease expiry while tasks wait in the pool queue.
+                        # Extend claim lease for CLAIMED tasks owned by this worker,
+                        # but only if claimed_at is recent enough. Tasks claimed longer
+                        # ago than max_claim_renew_age_ms are left to expire, preventing
+                        # indefinite renewal of orphaned claims.
                         await s.execute(
                             RENEW_CLAIM_LEASE_SQL,
                             {
                                 'wid': self.worker_instance_id,
                                 'new_expires_at': self._compute_claim_expires_at(),
+                                'max_claim_age_ms': self.cfg.max_claim_renew_age_ms,
                             },
                         )
                         await s.commit()

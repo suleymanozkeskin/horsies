@@ -17,7 +17,7 @@ from horsies.core.errors import (
     ValidationReport,
     raise_collected,
 )
-from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
+from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS, MAX_CLAIM_RENEW_AGE_MS
 from horsies.core.utils.url import mask_database_url
 import logging
 import os
@@ -38,6 +38,10 @@ class AppConfig(BaseModel):
     # When None, the worker uses a 60s default internally.
     # Explicit values override the default in both hard-cap and soft-cap modes.
     claim_lease_ms: Optional[int] = None
+    # Maximum age (ms) of a CLAIMED task that heartbeat will renew.
+    # Older claims are left to expire, preventing indefinite renewal of
+    # orphaned CLAIMED tasks after dispatch failure + requeue DB error.
+    max_claim_renew_age_ms: int = MAX_CLAIM_RENEW_AGE_MS
     recovery: RecoveryConfig = Field(default_factory=RecoveryConfig)
     resilience: WorkerResilienceConfig = Field(
         default_factory=WorkerResilienceConfig
@@ -167,6 +171,30 @@ class AppConfig(BaseModel):
                         f'minimum lease: {min_lease}ms (2x heartbeat)',
                     ],
                     help_text=f'set claim_lease_ms >= {min_lease}',
+                )
+            )
+
+        # Validate max_claim_renew_age_ms
+        if self.max_claim_renew_age_ms <= 0:
+            report.add(
+                ConfigurationError(
+                    message='max_claim_renew_age_ms must be positive',
+                    code=ErrorCode.CONFIG_INVALID_PREFETCH,
+                    notes=[f'got max_claim_renew_age_ms={self.max_claim_renew_age_ms}'],
+                    help_text='use a positive integer in milliseconds (e.g., 180000 for 3 minutes)',
+                )
+            )
+        elif self.max_claim_renew_age_ms < effective_lease_ms:
+            report.add(
+                ConfigurationError(
+                    message='max_claim_renew_age_ms must be >= effective claim lease',
+                    code=ErrorCode.CONFIG_INVALID_PREFETCH,
+                    notes=[
+                        f'max_claim_renew_age_ms={self.max_claim_renew_age_ms}ms',
+                        f'effective lease={effective_lease_ms}ms',
+                        'age guard would expire renewal before the first lease completes',
+                    ],
+                    help_text=f'set max_claim_renew_age_ms >= {effective_lease_ms}',
                 )
             )
 
