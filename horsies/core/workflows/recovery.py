@@ -29,7 +29,7 @@ logger = get_logger('workflow.recovery')
 
 
 GET_PENDING_WITH_TERMINAL_DEPS_SQL = text("""
-    SELECT wt.workflow_id, wt.task_index, wt.dependencies, wt.allow_failed_deps
+    SELECT wt.workflow_id, wt.task_index, w.depth, w.root_workflow_id
     FROM horsies_workflow_tasks wt
     JOIN horsies_workflows w ON w.id = wt.workflow_id
     WHERE wt.status = 'PENDING'
@@ -42,24 +42,6 @@ GET_PENDING_WITH_TERMINAL_DEPS_SQL = text("""
       )
 """)
 
-COUNT_FAILED_DEPS_SQL = text("""
-    SELECT COUNT(*) FROM horsies_workflow_tasks
-    WHERE workflow_id = :wf_id
-      AND task_index = ANY(:deps)
-      AND status IN ('FAILED', 'SKIPPED')
-""")
-
-SKIP_PENDING_TASK_SQL = text("""
-    UPDATE horsies_workflow_tasks
-    SET status = 'SKIPPED'
-    WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'PENDING'
-""")
-
-MARK_PENDING_READY_SQL = text("""
-    UPDATE horsies_workflow_tasks
-    SET status = 'READY'
-    WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'PENDING'
-""")
 
 GET_READY_NOT_ENQUEUED_SQL = text("""
     SELECT wt.workflow_id, wt.task_index, wt.dependencies
@@ -163,11 +145,14 @@ async def recover_stuck_workflows(
     """
     recovered = 0
 
-    from horsies.core.workflows.engine import get_dependency_results
+    from horsies.core.workflows.engine import get_dependency_results, try_make_ready_and_enqueue
 
     # Case 0: PENDING tasks with all dependencies terminal (race condition during parallel completion)
     # This happens when multiple dependencies complete concurrently and the PENDING→READY
-    # transition is missed due to timing
+    # transition is missed due to timing.
+    # Delegates to try_make_ready_and_enqueue which handles all readiness logic:
+    # join types (all/any/quorum), ctx_from gates, run_when/skip_when conditions,
+    # allow_failed_deps, subworkflow routing, and dependent cascade.
     pending_ready = await session.execute(
         GET_PENDING_WITH_TERMINAL_DEPS_SQL,
         {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES},
@@ -176,51 +161,17 @@ async def recover_stuck_workflows(
     for row in pending_ready.fetchall():
         workflow_id = row[0]
         task_index = row[1]
-        raw_deps = row[2]
-        allow_failed_deps = row[3] if row[3] is not None else False
-        dependencies: list[int] = (
-            cast(list[int], raw_deps) if isinstance(raw_deps, list) else []
+        depth = row[2] or 0
+        root_wf_id = row[3] or workflow_id
+
+        await try_make_ready_and_enqueue(
+            session, broker, workflow_id, task_index, depth, root_wf_id,
         )
-
-        # Check if any dependency failed/skipped
-        failed_check = await session.execute(
-            COUNT_FAILED_DEPS_SQL,
-            {'wf_id': workflow_id, 'deps': dependencies},
+        logger.info(
+            f'Recovery evaluated stuck PENDING task: '
+            f'workflow={workflow_id}, task_index={task_index}'
         )
-        failed_count = failed_check.scalar() or 0
-
-        if failed_count > 0 and not allow_failed_deps:
-            # Skip this task (propagate failure)
-            await session.execute(
-                SKIP_PENDING_TASK_SQL,
-                {'wf_id': workflow_id, 'idx': task_index},
-            )
-            logger.info(
-                f'Recovered stuck PENDING task (skipped due to failed deps): '
-                f'workflow={workflow_id}, task_index={task_index}'
-            )
-            recovered += 1
-        else:
-            # Mark READY and enqueue
-            await session.execute(
-                MARK_PENDING_READY_SQL,
-                {'wf_id': workflow_id, 'idx': task_index},
-            )
-            dep_results: dict[
-                int, 'TaskResult[Any, TaskError]'
-            ] = await get_dependency_results(session, workflow_id, dependencies)
-
-            from horsies.core.workflows.engine import enqueue_workflow_task
-
-            task_id = await enqueue_workflow_task(
-                session, workflow_id, task_index, dep_results, broker
-            )
-            if task_id:
-                logger.info(
-                    f'Recovered stuck PENDING task: workflow={workflow_id}, '
-                    f'task_index={task_index}, new_task_id={task_id}'
-                )
-                recovered += 1
+        recovered += 1
 
     # Case 1: READY tasks not enqueued (task_id is NULL but status is READY)
     # This happens if worker crashed after marking READY but before creating task
