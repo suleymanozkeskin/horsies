@@ -60,6 +60,7 @@ class BrokerErrorCode(str, Enum):
     CLOSE_FAILED = 'CLOSE_FAILED'
     LISTENER_START_FAILED = 'LISTENER_START_FAILED'
     LISTENER_SUBSCRIBE_FAILED = 'LISTENER_SUBSCRIBE_FAILED'
+    NO_BROKER = 'NO_BROKER'
 
 
 @dataclass(slots=True, frozen=True)

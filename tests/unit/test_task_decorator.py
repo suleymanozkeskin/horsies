@@ -371,20 +371,30 @@ class TestTaskHandleGetAsync:
 class TestTaskHandleInfo:
     """Tests for TaskHandle.info and info_async."""
 
-    def test_info_without_broker_mode_raises(self) -> None:
-        """info() without broker mode raises RuntimeError."""
+    def test_info_without_broker_mode_returns_no_broker_error(self) -> None:
+        """info() without broker mode returns Err(NO_BROKER)."""
         handle: TaskHandle[int] = TaskHandle('t-1', broker_mode=False)
 
-        with pytest.raises(RuntimeError, match='requires a broker-backed'):
-            handle.info()
+        result = handle.info()
+
+        assert result.is_err()
+        err = result.err_value
+        assert err.code == BrokerErrorCode.NO_BROKER
+        assert 'requires a broker-backed' in err.message
+        assert err.retryable is False
 
     @pytest.mark.asyncio
-    async def test_info_async_without_broker_mode_raises(self) -> None:
-        """info_async() without broker mode raises RuntimeError."""
+    async def test_info_async_without_broker_mode_returns_no_broker_error(self) -> None:
+        """info_async() without broker mode returns Err(NO_BROKER)."""
         handle: TaskHandle[int] = TaskHandle('t-2', broker_mode=False)
 
-        with pytest.raises(RuntimeError, match='requires a broker-backed'):
-            await handle.info_async()
+        result = await handle.info_async()
+
+        assert result.is_err()
+        err = result.err_value
+        assert err.code == BrokerErrorCode.NO_BROKER
+        assert 'requires a broker-backed' in err.message
+        assert err.retryable is False
 
     def test_info_with_broker_delegates(self) -> None:
         """info() with broker mode delegates to broker.get_task_info."""

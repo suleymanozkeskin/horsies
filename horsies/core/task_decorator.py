@@ -23,8 +23,8 @@ from datetime import datetime, timedelta, timezone
 from pydantic import TypeAdapter, ValidationError
 from horsies.core.codec.serde import serialize_task_options
 
-from horsies.core.types.result import is_err
-from horsies.core.brokers.result_types import BrokerResult
+from horsies.core.types.result import is_err, Err
+from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError, BrokerResult
 
 if TYPE_CHECKING:
     from horsies.core.app import Horsies
@@ -308,13 +308,17 @@ class TaskHandle(Generic[T]):
         """Fetch metadata for this task from the broker.
 
         Returns Ok(TaskInfo) if found, Ok(None) if not found,
-        Err(BrokerOperationError) on infrastructure failure.
+        Err(BrokerOperationError) on infrastructure or precondition failure.
         """
         if not self._broker_mode or not self._app:
-            raise RuntimeError(
-                'TaskHandle.info() requires a broker-backed task handle '
-                '(use .send() or .send_async())'
-            )
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.NO_BROKER,
+                message=(
+                    'TaskHandle.info() requires a broker-backed task handle '
+                    '(use .send() or .send_async())'
+                ),
+                retryable=False,
+            ))
 
         broker = self._app.get_broker()
         return broker.get_task_info(
@@ -332,13 +336,17 @@ class TaskHandle(Generic[T]):
         """Async version of info().
 
         Returns Ok(TaskInfo) if found, Ok(None) if not found,
-        Err(BrokerOperationError) on infrastructure failure.
+        Err(BrokerOperationError) on infrastructure or precondition failure.
         """
         if not self._broker_mode or not self._app:
-            raise RuntimeError(
-                'TaskHandle.info_async() requires a broker-backed task handle '
-                '(use .send() or .send_async())'
-            )
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.NO_BROKER,
+                message=(
+                    'TaskHandle.info_async() requires a broker-backed task handle '
+                    '(use .send() or .send_async())'
+                ),
+                retryable=False,
+            ))
 
         broker = self._app.get_broker()
         return await broker.get_task_info_async(
