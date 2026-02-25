@@ -644,14 +644,15 @@ class PostgresListener:
                     'Skipping listener close from non-owner loop: owner loop already closed'
                 )
                 return
+            close_coro = self._close_impl()
             try:
-                fut = asyncio.run_coroutine_threadsafe(
-                    self._close_impl(), owner_loop
-                )
+                fut = asyncio.run_coroutine_threadsafe(close_coro, owner_loop)
             except RuntimeError:
+                close_coro.close()
                 logger.warning(
-                    'Skipping listener close from non-owner loop: owner loop not running'
+                    'Owner loop not running during cross-loop close; falling back to local best-effort cleanup'
                 )
+                await self._close_impl()
                 return
             await asyncio.wrap_future(fut)
             return
@@ -666,13 +667,13 @@ class PostgresListener:
         """
         if self._health_check_task:
             self._health_check_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            with contextlib.suppress(asyncio.CancelledError, RuntimeError):
                 await self._health_check_task
             self._health_check_task = None
 
         if self._dispatcher_task:
             self._dispatcher_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            with contextlib.suppress(asyncio.CancelledError, RuntimeError):
                 await self._dispatcher_task
             self._dispatcher_task = None
 

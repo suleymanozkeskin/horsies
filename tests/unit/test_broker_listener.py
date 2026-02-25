@@ -937,6 +937,41 @@ class TestClose:
 
         mock_threadsafe.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_cross_loop_close_handoff_failure_falls_back_to_local_cleanup(self) -> None:
+        """If handoff scheduling fails, close() should close handed coroutine and cleanup locally."""
+        listener = _make_listener()
+        owner_loop = MagicMock()
+        owner_loop.is_closed.return_value = False
+        listener._owner_loop = owner_loop
+        disp_conn = _make_mock_conn()
+        cmd_conn = _make_mock_conn()
+        listener._dispatcher_conn = disp_conn
+        listener._command_conn = cmd_conn
+        listener._listen_channels.add('task_done')
+        listener._subs['task_done'].add(asyncio.Queue())
+
+        captured_coro: dict[str, Any] = {}
+
+        def _fail_handoff(
+            coro: Any, _loop: asyncio.AbstractEventLoop
+        ) -> concurrent.futures.Future[None]:
+            captured_coro['coro'] = coro
+            raise RuntimeError('owner loop not running')
+
+        with patch('asyncio.run_coroutine_threadsafe', side_effect=_fail_handoff):
+            await listener.close()
+
+        handed_coro = captured_coro['coro']
+        assert handed_coro.cr_frame is None
+        disp_conn.close.assert_awaited_once()
+        cmd_conn.close.assert_awaited_once()
+        assert listener._dispatcher_conn is None
+        assert listener._command_conn is None
+        assert listener._owner_loop is None
+        assert len(listener._listen_channels) == 0
+        assert len(listener._subs) == 0
+
 
 # ---------------------------------------------------------------------------
 # TestListenerResultSurface

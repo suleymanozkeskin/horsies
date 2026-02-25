@@ -838,8 +838,7 @@ class PostgresBroker:
                 # Clean up subscription. If this was the last local waiter,
                 # listener.unsubscribe() also drops server-side LISTEN state.
                 if q is not None:
-                    with contextlib.suppress(RuntimeError):
-                        await self.listener.unsubscribe('task_done', q)
+                    await self._unsubscribe_task_done_safely(q)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -852,6 +851,25 @@ class PostgresBroker:
                     exception=exc,
                 )
             )
+
+    async def _unsubscribe_task_done_safely(self, q: asyncio.Queue[Any]) -> None:
+        """Ensure task_done unsubscribe completes even under repeated cancellation."""
+        unsubscribe_task = asyncio.create_task(self.listener.unsubscribe('task_done', q))
+        cancelled_during_cleanup = False
+        while not unsubscribe_task.done():
+            try:
+                await asyncio.shield(unsubscribe_task)
+            except asyncio.CancelledError:
+                cancelled_during_cleanup = True
+                continue
+
+        # Preserve existing semantics: cross-loop RuntimeError on unsubscribe is non-fatal.
+        with contextlib.suppress(RuntimeError):
+            await unsubscribe_task
+
+        # Propagate cancellation only after cleanup has completed.
+        if cancelled_during_cleanup:
+            raise asyncio.CancelledError
 
     async def close_async(self) -> BrokerResult[None]:
         """Close listener/engine and stop sync loop runner if it was started."""
@@ -1080,7 +1098,21 @@ class PostgresBroker:
         Returns:
             TaskResult - success, task error, retrieval error, or broker error
         """
-        return self._loop_runner.call(self.get_result_async, task_id, timeout_ms)
+        from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
+
+        try:
+            return self._loop_runner.call(self.get_result_async, task_id, timeout_ms)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return TaskResult(
+                err=TaskError(
+                    error_code=LibraryErrorCode.BROKER_ERROR,
+                    message='Broker error while retrieving task result',
+                    data={'task_id': task_id, 'timeout_ms': timeout_ms},
+                    exception=exc,
+                )
+            )
 
     async def get_task_info_async(
         self,

@@ -416,6 +416,51 @@ class TestGetResultAsync:
         broker.listener.listen.assert_awaited_once_with('task_done')
         broker.listener.unsubscribe.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_cancellation_still_completes_unsubscribe_cleanup(self) -> None:
+        """Second cancellation during finally should not interrupt unsubscribe cleanup."""
+        broker = _make_broker()
+        q: asyncio.Queue[Any] = asyncio.Queue()
+        broker.listener.listen = AsyncMock(return_value=Ok(q))
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.get = AsyncMock(return_value=_make_task_row(status=TaskStatus.RUNNING))
+        broker.session_factory = MagicMock(return_value=session)
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def _unsubscribe(_channel: str, _queue: object) -> None:
+            started.set()
+            await release.wait()
+            finished.set()
+
+        broker.listener.unsubscribe = AsyncMock(side_effect=_unsubscribe)
+
+        task = asyncio.create_task(broker.get_result_async('task-123', timeout_ms=60_000))
+
+        for _ in range(50):
+            if broker.listener.listen.await_count > 0:
+                break
+            await asyncio.sleep(0)
+
+        task.cancel()  # Enter finally path
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        task.cancel()  # Cancel while unsubscribe is in progress
+        await asyncio.sleep(0)
+
+        assert finished.is_set() is False
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert finished.is_set() is True
+        broker.listener.unsubscribe.assert_awaited_once_with('task_done', q)
+
 
 # ---------------------------------------------------------------------------
 # TestMonitoringQueries
@@ -697,6 +742,21 @@ class TestSyncFacades:
         call_args = broker._loop_runner.call.call_args
         coro_fn = call_args[0][0]
         assert getattr(coro_fn, '__name__', None) == 'get_result_async'
+
+    def test_get_result_loop_runner_exception_returns_broker_error_result(self) -> None:
+        """Infrastructure failure in sync get_result() should fold into BROKER_ERROR TaskResult."""
+        broker = _make_broker()
+        broker._loop_runner = MagicMock()
+        broker._loop_runner.call = MagicMock(side_effect=RuntimeError('loop dead'))
+
+        result = broker.get_result('task-id', timeout_ms=5000)
+
+        assert result.is_err()
+        err = result.unwrap_err()
+        assert err.error_code == LibraryErrorCode.BROKER_ERROR
+        assert err.exception is not None
+        assert isinstance(err.exception, RuntimeError)
+        assert 'Broker error while retrieving task result' in err.message
 
     def test_get_task_info_delegates_to_loop_runner(self) -> None:
         """get_task_info() should call _loop_runner.call with get_task_info_async."""
