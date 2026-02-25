@@ -106,24 +106,6 @@ GET_TERMINAL_WORKFLOW_CANDIDATES_SQL = text("""
     GROUP BY w.id, w.error, w.success_policy
 """)
 
-MARK_WORKFLOW_COMPLETED_SQL = text("""
-    UPDATE horsies_workflows
-    SET status = 'COMPLETED', result = :result, completed_at = NOW(), updated_at = NOW()
-    WHERE id = :wf_id AND status = 'RUNNING'
-""")
-
-MARK_WORKFLOW_FAILED_SQL = text("""
-    UPDATE horsies_workflows
-    SET status = 'FAILED', result = :result, error = :error,
-        completed_at = NOW(), updated_at = NOW()
-    WHERE id = :wf_id AND status = 'RUNNING'
-""")
-
-NOTIFY_WORKFLOW_DONE_SQL = text("""
-    SELECT pg_notify('workflow_done', :wf_id)
-""")
-
-
 async def recover_stuck_workflows(
     session: 'AsyncSession',
     broker: 'PostgresBroker | None' = None,
@@ -351,50 +333,12 @@ async def recover_stuck_workflows(
 
     for row in terminal_candidates.fetchall():
         workflow_id = row[0]
-        existing_error = row[1]
-        success_policy_data = row[2]
-        failed_count = row[3] or 0
+        # Delegate to the canonical completion path so recovery inherits locking,
+        # parent propagation, and finalization semantics from engine.py.
+        from horsies.core.workflows.engine import check_workflow_completion
 
-        # Compute final result
-        from horsies.core.workflows.engine import (
-            get_workflow_final_result,
-            evaluate_workflow_success,
-            get_workflow_failure_error,
-        )
-
-        final_result = await get_workflow_final_result(session, workflow_id)
-
-        # Evaluate success using success_policy (or default behavior)
-        has_error = existing_error is not None
-        workflow_succeeded = await evaluate_workflow_success(
-            session, workflow_id, success_policy_data, has_error, failed_count
-        )
-
-        if workflow_succeeded:
-            await session.execute(
-                MARK_WORKFLOW_COMPLETED_SQL,
-                {'wf_id': workflow_id, 'result': final_result},
-            )
-            logger.info(f'Recovered stuck COMPLETED workflow: {workflow_id}')
-        else:
-            # Compute error if not already set
-            error_payload = existing_error
-            if error_payload is None:
-                error_payload = await get_workflow_failure_error(
-                    session, workflow_id, success_policy_data
-                )
-
-            await session.execute(
-                MARK_WORKFLOW_FAILED_SQL,
-                {'wf_id': workflow_id, 'result': final_result, 'error': error_payload},
-            )
-            logger.info(f'Recovered stuck FAILED workflow: {workflow_id}')
-
-        # Send NOTIFY for workflow completion
-        await session.execute(
-            NOTIFY_WORKFLOW_DONE_SQL,
-            {'wf_id': workflow_id},
-        )
+        await check_workflow_completion(session, workflow_id, broker)
+        logger.info(f'Recovered terminal workflow via completion check: {workflow_id}')
         recovered += 1
 
     return recovered
