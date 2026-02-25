@@ -572,6 +572,56 @@ class TestInitializeSchedules:
         state_manager.get_all_states.assert_awaited_once()
         state_manager.delete_state.assert_awaited_once_with('removed')
 
+    @pytest.mark.asyncio
+    async def test_one_bad_schedule_does_not_block_others(self) -> None:
+        """If calculate_next_run fails for one schedule, the rest still initialize."""
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(
+                    name='good_first',
+                    task_name='my_task',
+                    pattern=IntervalSchedule(seconds=10),
+                ),
+                TaskSchedule(
+                    name='bad',
+                    task_name='my_task',
+                    pattern=IntervalSchedule(seconds=10),
+                ),
+                TaskSchedule(
+                    name='good_last',
+                    task_name='my_task',
+                    pattern=IntervalSchedule(seconds=10),
+                ),
+            ],
+        )
+        app = _make_app(schedule_config=config)
+        scheduler = Scheduler(app)
+
+        state_manager = MagicMock()
+        state_manager.get_all_states = AsyncMock(return_value=[])
+        state_manager.delete_state = AsyncMock()
+        state_manager.get_state = AsyncMock(return_value=None)
+
+        call_count = 0
+
+        async def _init_side_effect(
+            name: str, next_run: datetime, config_hash: str, **kwargs: object,
+        ) -> None:
+            nonlocal call_count
+            call_count += 1
+            if name == 'bad':
+                raise RuntimeError('simulated calculator failure')
+
+        state_manager.initialize_state = AsyncMock(side_effect=_init_side_effect)
+        scheduler.state_manager = state_manager
+
+        # Should not raise — bad schedule is isolated
+        await scheduler._initialize_schedules()
+
+        # Both good schedules initialized; bad one attempted but failed
+        assert call_count == 3
+        assert state_manager.initialize_state.await_count == 3
+
 
 # =============================================================================
 # _check_schedule transactional session usage

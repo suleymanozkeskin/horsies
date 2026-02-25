@@ -171,49 +171,68 @@ class Scheduler:
         except Exception as e:
             logger.warning(f'Failed to prune stale schedule state rows: {e}')
 
+        failed_schedules: list[str] = []
         for schedule in self.schedule_config.schedules:
             if not schedule.enabled:
                 logger.debug(f'Skipping disabled schedule: {schedule.name}')
                 continue
 
-            # Compute current config hash
-            config_hash = self._compute_config_hash(schedule)
-
-            # Check if state already exists
-            state = await self.state_manager.get_state(schedule.name)
-
-            if state is None:
-                # Initialize new schedule
-                next_run = calculate_next_run(schedule.pattern, now, schedule.timezone)
-                await self.state_manager.initialize_state(
-                    schedule.name, next_run, config_hash
+            try:
+                await self._initialize_single_schedule(schedule, now)
+            except Exception as e:
+                logger.error(
+                    f"Failed to initialize schedule '{schedule.name}': {e}",
+                    exc_info=True,
                 )
-                logger.info(
-                    f"Initialized new schedule '{schedule.name}', next_run={next_run}"
-                )
-            else:
-                # Check if config has changed
-                if state.config_hash != config_hash:
-                    logger.warning(
-                        f"Schedule '{schedule.name}' configuration changed "
-                        f'(pattern or timezone), recalculating next_run_at'
-                    )
-                    # Recalculate next_run_at from current time
-                    next_run = calculate_next_run(
-                        schedule.pattern, now, schedule.timezone
-                    )
-                    await self.state_manager.update_next_run(
-                        schedule.name, next_run, config_hash
-                    )
-                    logger.info(
-                        f"Updated schedule '{schedule.name}' due to config change, "
-                        f'new next_run={next_run}'
-                    )
-                else:
-                    logger.debug(
-                        f"Schedule '{schedule.name}' already initialized, "
-                        f'next_run={state.next_run_at}'
-                    )
+                failed_schedules.append(schedule.name)
+
+        if failed_schedules:
+            logger.error(
+                f'{len(failed_schedules)} schedule(s) failed to initialize: '
+                f'{failed_schedules}; remaining schedules will proceed',
+            )
+
+    async def _initialize_single_schedule(
+        self, schedule: TaskSchedule, now: datetime,
+    ) -> None:
+        """Initialize or update state for a single schedule.
+
+        Raises on failure so the caller can isolate per-schedule errors.
+        """
+        if not self.state_manager:
+            raise RuntimeError('State manager not initialized')
+
+        config_hash = self._compute_config_hash(schedule)
+        state = await self.state_manager.get_state(schedule.name)
+
+        if state is None:
+            next_run = calculate_next_run(schedule.pattern, now, schedule.timezone)
+            await self.state_manager.initialize_state(
+                schedule.name, next_run, config_hash,
+            )
+            logger.info(
+                f"Initialized new schedule '{schedule.name}', next_run={next_run}",
+            )
+        elif state.config_hash != config_hash:
+            logger.warning(
+                f"Schedule '{schedule.name}' configuration changed "
+                f'(pattern or timezone), recalculating next_run_at',
+            )
+            next_run = calculate_next_run(
+                schedule.pattern, now, schedule.timezone,
+            )
+            await self.state_manager.update_next_run(
+                schedule.name, next_run, config_hash,
+            )
+            logger.info(
+                f"Updated schedule '{schedule.name}' due to config change, "
+                f'new next_run={next_run}',
+            )
+        else:
+            logger.debug(
+                f"Schedule '{schedule.name}' already initialized, "
+                f'next_run={state.next_run_at}',
+            )
 
     async def _check_and_run_schedules(self) -> None:
         """Check all schedules and execute those that are due."""
