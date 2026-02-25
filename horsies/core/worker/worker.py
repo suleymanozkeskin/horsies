@@ -86,6 +86,8 @@ from horsies.core.worker.sql import (  # noqa: F401
     DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
     DELETE_EXPIRED_WORKFLOWS_SQL,
     DELETE_EXPIRED_TASKS_SQL,
+    WORKFLOW_TERMINAL_VALUES,
+    TASK_TERMINAL_VALUES,
     _RETENTION_CLEANUP_INTERVAL_S,
     _FINALIZER_DRAIN_TIMEOUT_S,
 )
@@ -1981,20 +1983,26 @@ class Worker:
                                     deleted_worker_states = int(ws_result.rowcount or 0)
 
                                 if recovery_cfg.terminal_record_retention_hours is not None:
-                                    params = {
-                                        'retention_hours': recovery_cfg.terminal_record_retention_hours
+                                    wf_params = {
+                                        'retention_hours': recovery_cfg.terminal_record_retention_hours,
+                                        'wf_terminal_states': WORKFLOW_TERMINAL_VALUES,
+                                    }
+                                    task_params = {
+                                        'retention_hours': recovery_cfg.terminal_record_retention_hours,
+                                        'wf_terminal_states': WORKFLOW_TERMINAL_VALUES,
+                                        'task_terminal_states': TASK_TERMINAL_VALUES,
                                     }
                                     wt_result = await s.execute(
                                         DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
-                                        params,
+                                        wf_params,
                                     )
                                     wf_result = await s.execute(
                                         DELETE_EXPIRED_WORKFLOWS_SQL,
-                                        params,
+                                        wf_params,
                                     )
                                     task_result = await s.execute(
                                         DELETE_EXPIRED_TASKS_SQL,
-                                        params,
+                                        task_params,
                                     )
                                     deleted_workflow_tasks = int(wt_result.rowcount or 0)
                                     deleted_workflows = int(wf_result.rowcount or 0)

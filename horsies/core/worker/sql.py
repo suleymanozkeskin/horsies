@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from sqlalchemy import text
 
+from horsies.core.models.workflow import WORKFLOW_TERMINAL_STATES
+from horsies.core.types.status import TASK_TERMINAL_STATES
+
+WORKFLOW_TERMINAL_VALUES: list[str] = [s.value for s in WORKFLOW_TERMINAL_STATES]
+TASK_TERMINAL_VALUES: list[str] = [s.value for s in TASK_TERMINAL_STATES]
+
 
 # ---------- Claim SQL (priority + sent_at) ----------
 # All claimed tasks receive a bounded lease via claim_expires_at.
@@ -278,26 +284,26 @@ DELETE_EXPIRED_WORKFLOW_TASKS_SQL = text("""
     DELETE FROM horsies_workflow_tasks wt
     USING horsies_workflows w
     WHERE wt.workflow_id = w.id
-      AND w.status IN ('COMPLETED', 'FAILED', 'CANCELLED')
+      AND w.status = ANY(:wf_terminal_states)
       AND COALESCE(w.completed_at, w.updated_at, w.created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
 """)
 
 DELETE_EXPIRED_WORKFLOWS_SQL = text("""
     DELETE FROM horsies_workflows
-    WHERE status IN ('COMPLETED', 'FAILED', 'CANCELLED')
+    WHERE status = ANY(:wf_terminal_states)
       AND COALESCE(completed_at, updated_at, created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
 """)
 
 DELETE_EXPIRED_TASKS_SQL = text("""
     DELETE FROM horsies_tasks t
-    WHERE t.status IN ('COMPLETED', 'FAILED', 'CANCELLED')
+    WHERE t.status = ANY(:task_terminal_states)
       AND COALESCE(t.completed_at, t.failed_at, t.updated_at, t.created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
       AND NOT EXISTS (
           SELECT 1
           FROM horsies_workflow_tasks wt
           JOIN horsies_workflows w ON w.id = wt.workflow_id
           WHERE wt.task_id = t.id
-            AND w.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
+            AND NOT (w.status = ANY(:wf_terminal_states))
       )
 """)
 
