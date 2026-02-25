@@ -1431,12 +1431,20 @@ async def check_workflow_completion(
     session: AsyncSession,
     workflow_id: str,
     broker: 'PostgresBroker | None' = None,
+    preserve_existing_error: bool = False,
 ) -> None:
     """
     Check if all workflow tasks are complete and update workflow status.
     Handles cases where workflow may already be FAILED but DAG is still resolving.
 
     If success_policy is set, evaluates success cases instead of "any failure → FAILED".
+
+    Args:
+        session: Active DB session.
+        workflow_id: Workflow id to finalize.
+        broker: Optional broker for parent propagation hooks.
+        preserve_existing_error: When True and workflow.error is already set,
+            keep existing error payload instead of recomputing from failed tasks.
     """
     # Serialize completion checks per workflow to avoid races when multiple
     # tasks finish concurrently in separate transactions.
@@ -1500,9 +1508,15 @@ async def check_workflow_completion(
     else:
         # Recompute failure error from terminal task results for deterministic
         # final error selection (e.g., first failed task by task_index).
-        error_json: str | None = await get_workflow_failure_error(
-            session, workflow_id, success_policy_data
-        )
+        error_json: str | None
+        if preserve_existing_error and has_error:
+            # MARK_WORKFLOW_FAILED_SQL uses COALESCE(:error, error), so passing
+            # None preserves an already-set error payload.
+            error_json = None
+        else:
+            error_json = await get_workflow_failure_error(
+                session, workflow_id, success_policy_data
+            )
 
         await session.execute(
             MARK_WORKFLOW_FAILED_SQL,

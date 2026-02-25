@@ -59,4 +59,6 @@ class TestWorkflowRecoveryDelegation:
             recovered = await recovery.recover_stuck_workflows(session, broker)
 
         assert recovered == 1
-        mock_check_completion.assert_awaited_once_with(session, 'wf-1', broker)
+        mock_check_completion.assert_awaited_once_with(
+            session, 'wf-1', broker, preserve_existing_error=True
+        )

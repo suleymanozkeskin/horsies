@@ -74,7 +74,7 @@ GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL = text("""
     FROM horsies_workflows child
     JOIN horsies_workflows parent ON parent.id = child.parent_workflow_id
     JOIN horsies_workflow_tasks wt ON wt.workflow_id = parent.id AND wt.task_index = child.parent_task_index
-    WHERE child.status IN ('COMPLETED', 'FAILED')
+    WHERE child.status IN ('COMPLETED', 'FAILED', 'CANCELLED')
       AND wt.status = 'RUNNING'
       AND parent.status = 'RUNNING'
 """)
@@ -337,7 +337,12 @@ async def recover_stuck_workflows(
         # parent propagation, and finalization semantics from engine.py.
         from horsies.core.workflows.engine import check_workflow_completion
 
-        await check_workflow_completion(session, workflow_id, broker)
+        await check_workflow_completion(
+            session,
+            workflow_id,
+            broker,
+            preserve_existing_error=True,
+        )
         logger.info(f'Recovered terminal workflow via completion check: {workflow_id}')
         recovered += 1
 

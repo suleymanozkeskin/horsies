@@ -1164,6 +1164,66 @@ class TestWorkflowRecovery:
         )
         assert parent_row.fetchone()[0] == 'COMPLETED'
 
+    async def test_recover_child_cancelled_parent_not_updated(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """Case 1.6: Child workflow CANCELLED but parent node still RUNNING."""
+        session, broker, app = setup
+
+        node_child: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=RecoveryChildWorkflow,
+        )
+
+        spec = app.workflow(
+            name='recover_child_cancelled',
+            tasks=[node_child],
+            output=node_child,
+        )
+
+        handle = await start_ok(spec, broker)
+
+        # Get the child workflow ID
+        wt_result = await session.execute(
+            text("""
+                SELECT sub_workflow_id FROM horsies_workflow_tasks
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        child_id = wt_result.fetchone()[0]
+        assert child_id is not None
+
+        # Simulate a missed callback: child is terminal CANCELLED
+        # while parent node is still RUNNING.
+        await session.execute(
+            text("""
+                UPDATE horsies_workflows
+                SET status = 'CANCELLED',
+                    completed_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = :child_id
+            """),
+            {'child_id': child_id},
+        )
+        await session.commit()
+
+        # Recovery should detect the cancelled child and update the parent node.
+        recovered = await recover_stuck_workflows(session, broker)
+        await session.commit()
+
+        assert recovered >= 1
+
+        # Parent node should now be FAILED (non-COMPLETED child status maps to failure).
+        parent_row = await session.execute(
+            text("""
+                SELECT status FROM horsies_workflow_tasks
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        assert parent_row.fetchone()[0] == 'FAILED'
+
     # ── Case 1.7: FAILED task with missing result ──
 
     async def test_recover_failed_task_missing_result(
