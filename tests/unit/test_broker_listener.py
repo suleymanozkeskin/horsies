@@ -224,36 +224,6 @@ class TestEnsureDispatcherConnection:
         assert result is new_conn
 
 
-@pytest.mark.unit
-class TestEnsureCommandConnection:
-    """Tests for _ensure_command_connection."""
-
-    @pytest.mark.asyncio
-    async def test_returns_existing_conn_when_alive(self) -> None:
-        """Should return existing connection when it's alive."""
-        listener = _make_listener()
-        mock_conn = _make_mock_conn(closed=False)
-        listener._command_conn = mock_conn
-        # Also set dispatcher conn to avoid it reconnecting
-        listener._dispatcher_conn = _make_mock_conn(closed=False)
-
-        result = await listener._ensure_command_connection()
-
-        assert result is mock_conn
-
-    @pytest.mark.asyncio
-    async def test_reconnects_when_conn_is_none(self) -> None:
-        """Should call _ensure_connections when command conn is None."""
-        listener = _make_listener()
-        listener._command_conn = None
-        new_conn = _make_mock_conn()
-
-        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=new_conn):
-            result = await listener._ensure_command_connection()
-
-        assert result is new_conn
-
-
 # ---------------------------------------------------------------------------
 # TestCloseConnections
 # ---------------------------------------------------------------------------

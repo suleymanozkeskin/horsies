@@ -242,21 +242,6 @@ class PostgresListener:
         assert self._dispatcher_conn is not None
         return self._dispatcher_conn
 
-    async def _ensure_command_connection(self) -> AsyncConnection:
-        """Ensure command connection is available.
-
-        Unwraps the Result from _ensure_connections, re-raising the original
-        exception on Err so internal callers (health monitor) see the expected
-        exception types.
-        """
-        if self._command_conn is None or self._command_conn.closed:
-            conn_r = await self._ensure_connections()
-            if is_err(conn_r):
-                err = conn_r.err_value
-                raise err.exception or RuntimeError(err.message)
-        assert self._command_conn is not None
-        return self._command_conn
-
     async def _close_connections(self) -> None:
         """Close raw connections and reset to None for reconnection."""
         for conn in (self._dispatcher_conn, self._command_conn):
