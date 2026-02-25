@@ -842,6 +842,9 @@ class TestListenerResultSurface:
         assert result.is_ok()
         assert result.ok_value is None
 
+        # Teardown: cancel the health_monitor task spawned by start().
+        await listener.close()
+
     @pytest.mark.asyncio
     async def test_start_returns_err_on_connect_failure(self) -> None:
         """start() should return Err with LISTENER_START_FAILED on connection error."""

@@ -17,14 +17,23 @@ class LoopRunner:
 
     def __init__(self) -> None:
         self.logger = get_logger('loop_runner')
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(
-            target=self._loop.run_forever, name='horsies-loop', daemon=True
-        )
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
         self._started = False
+
+    def _ensure_loop(self) -> asyncio.AbstractEventLoop:
+        """Create the event loop and thread on first use."""
+        if self._loop is None:
+            self._loop = asyncio.new_event_loop()
+            self._thread = threading.Thread(
+                target=self._loop.run_forever, name='horsies-loop', daemon=True,
+            )
+        return self._loop
 
     def start(self) -> None:
         if not self._started:
+            self._ensure_loop()
+            assert self._thread is not None
             try:
                 self._thread.start()
             except Exception as exc:
@@ -34,9 +43,13 @@ class LoopRunner:
             self._started = True
 
     def stop(self) -> None:
-        if self._started:
+        if self._started and self._loop is not None:
             self._loop.call_soon_threadsafe(self._loop.stop)
-            self._thread.join(timeout=2)
+            if self._thread is not None:
+                self._thread.join(timeout=2)
+            self._loop.close()
+            self._loop = None
+            self._thread = None
             self._started = False
 
     def call(
@@ -45,12 +58,14 @@ class LoopRunner:
         """Run an async function and block until it completes, from sync code."""
         if not self._started:
             self.start()
+        loop = self._loop
+        assert loop is not None, 'Event loop not available after start()'
         self.logger.debug(
             f'Calling {coro_fn.__name__} with args: {args} and kwargs: {kwargs}'
         )
         try:
             fut: Future[Any] = asyncio.run_coroutine_threadsafe(
-                coro_fn(*args, **kwargs), self._loop
+                coro_fn(*args, **kwargs), loop,
             )
         except Exception as exc:
             raise LoopRunnerError(
