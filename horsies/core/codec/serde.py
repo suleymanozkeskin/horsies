@@ -60,14 +60,19 @@ def _exception_to_json(ex: BaseException) -> Dict[str, Json]:
     }
 
 
-def _task_error_to_json(err: TaskError) -> Dict[str, Json]:
+def _task_error_to_json(err: TaskError) -> SerdeResult[Dict[str, Json]]:
     """Convert a TaskError to a JSON-serializable dictionary.
 
     Handles the exception field manually to avoid pydantic trying to
     serialize BaseException subclasses.
     """
     ex = err.exception
-    data = err.model_dump(mode='json', exclude={'exception'})
+    try:
+        data = err.model_dump(mode='json', exclude={'exception'})
+    except Exception as exc:
+        return Err(SerializationError(
+            f'Failed to serialize TaskError: {exc}',
+        ))
 
     if isinstance(ex, BaseException):
         ex_json: Optional[Dict[str, Json]] = _exception_to_json(ex)
@@ -80,7 +85,7 @@ def _task_error_to_json(err: TaskError) -> Dict[str, Json]:
     if ex_json is not None:
         data['exception'] = ex_json
 
-    return {'__task_error__': True, **data}
+    return Ok({'__task_error__': True, **data})
 
 
 def _is_task_result(value: Any) -> TypeGuard[TaskResult[Any, TaskError]]:
@@ -176,7 +181,10 @@ def to_jsonable(value: Any) -> SerdeResult[Json]:
         err_json: Optional[Dict[str, Json]] = None
         if value.err is not None:
             if isinstance(value.err, TaskError):
-                err_json = _task_error_to_json(value.err)
+                task_err_result = _task_error_to_json(value.err)
+                if is_err(task_err_result):
+                    return task_err_result
+                err_json = task_err_result.ok_value
             elif isinstance(value.err, BaseModel):
                 err_json = value.err.model_dump()  # if someone used a model for error
             else:
@@ -185,7 +193,7 @@ def to_jsonable(value: Any) -> SerdeResult[Json]:
 
     # TaskError (standalone)
     if isinstance(value, TaskError):
-        return Ok(_task_error_to_json(value))
+        return _task_error_to_json(value)
 
     # Pydantic BaseModel
     if isinstance(value, BaseModel):
