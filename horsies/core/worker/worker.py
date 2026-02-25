@@ -334,7 +334,10 @@ class Worker:
 
         # Create the process pool AFTER successful preload so initializer runs in children only
         self._executor = self._create_executor()
-        await self.listener.start()
+        start_r = await self.listener.start()
+        if is_err(start_r):
+            err = start_r.err_value
+            raise err.exception or RuntimeError(err.message)
         # Surface concurrency configuration clearly for operators
         max_claimed_effective = (
             self.cfg.max_claim_per_worker
@@ -355,7 +358,11 @@ class Worker:
 
         # Subscribe to each queue channel (and a global) in one batch
         all_channels = [f'task_queue_{q}' for q in self.cfg.queues] + ['task_new']
-        all_queues = await self.listener.listen_many(all_channels)
+        listen_r = await self.listener.listen_many(all_channels)
+        if is_err(listen_r):
+            err = listen_r.err_value
+            raise err.exception or RuntimeError(err.message)
+        all_queues = listen_r.ok_value
         self._queues = all_queues[:-1]
         self._global = all_queues[-1]
         logger.info(f'Subscribed to queues: {self.cfg.queues} + global')

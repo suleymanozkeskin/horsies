@@ -13,9 +13,10 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 import pytest
-from psycopg import Notify
+from psycopg import Notify, OperationalError
 
 from horsies.core.brokers.listener import PostgresListener
+from horsies.core.brokers.result_types import BrokerErrorCode
 
 
 # ---------------------------------------------------------------------------
@@ -134,8 +135,9 @@ class TestEnsureConnections:
         mock_conn = _make_mock_conn()
 
         with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=mock_conn):
-            await listener._ensure_connections()
+            result = await listener._ensure_connections()
 
+        assert result.is_ok()
         assert listener._dispatcher_conn is mock_conn
 
     @pytest.mark.asyncio
@@ -145,8 +147,9 @@ class TestEnsureConnections:
         mock_conn = _make_mock_conn()
 
         with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=mock_conn):
-            await listener._ensure_connections()
+            result = await listener._ensure_connections()
 
+        assert result.is_ok()
         assert listener._command_conn is mock_conn
 
     @pytest.mark.asyncio
@@ -157,8 +160,9 @@ class TestEnsureConnections:
         mock_conn = _make_mock_conn()
 
         with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=mock_conn):
-            await listener._ensure_connections()
+            result = await listener._ensure_connections()
 
+        assert result.is_ok()
         # Both dispatcher and command conn should have _start_listening called
         # Each conn gets LISTEN for 'task_done' = 2 calls total
         assert mock_conn.execute.await_count == 2
@@ -510,8 +514,10 @@ class TestListen:
         with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=mock_conn):
             # Patch create_task to capture the dispatcher creation
             with patch.object(asyncio, 'create_task', side_effect=_close_and_return_mock) as mock_create_task:
-                q = await listener.listen('task_done')
+                result = await listener.listen('task_done')
 
+        assert result.is_ok()
+        q = result.ok_value
         assert isinstance(q, asyncio.Queue)
         assert 'task_done' in listener._listen_channels
         assert q in listener._subs['task_done']
@@ -530,8 +536,10 @@ class TestListen:
         listener._subs['task_done'] = {asyncio.Queue()}
 
         with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=mock_conn):
-            q = await listener.listen('task_done')
+            result = await listener.listen('task_done')
 
+        assert result.is_ok()
+        q = result.ok_value
         # Should have 2 queues now
         assert len(listener._subs['task_done']) == 2
         assert q in listener._subs['task_done']
@@ -561,8 +569,9 @@ class TestListen:
             patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=mock_conn),
             patch.object(asyncio, 'create_task', side_effect=_close_and_return_mock) as mock_create_task,
         ):
-            await listener.listen('new_channel')
+            result = await listener.listen('new_channel')
 
+        assert result.is_ok()
         assert old_dispatcher.cancelled()
         mock_create_task.assert_called()
 
@@ -808,3 +817,334 @@ class TestClose:
             await listener.close()
 
         mock_threadsafe.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestListenerResultSurface
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestListenerResultSurface:
+    """Tests for BrokerResult return types on listener public methods."""
+
+    # -- start() --
+
+    @pytest.mark.asyncio
+    async def test_start_returns_ok_on_success(self) -> None:
+        """start() should return Ok(None) when connections succeed."""
+        listener = _make_listener()
+        mock_conn = _make_mock_conn()
+
+        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=mock_conn):
+            result = await listener.start()
+
+        assert result.is_ok()
+        assert result.ok_value is None
+
+    @pytest.mark.asyncio
+    async def test_start_returns_err_on_connect_failure(self) -> None:
+        """start() should return Err with LISTENER_START_FAILED on connection error."""
+        listener = _make_listener()
+
+        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, side_effect=OperationalError('conn refused')):
+            result = await listener.start()
+
+        assert result.is_err()
+        err = result.err_value
+        assert err.code == BrokerErrorCode.LISTENER_START_FAILED
+        assert err.retryable is True
+        assert 'conn refused' in err.message
+
+    @pytest.mark.asyncio
+    async def test_start_err_preserves_original_exception(self) -> None:
+        """Err payload should carry the original exception for caller inspection."""
+        listener = _make_listener()
+        original = OperationalError('conn refused')
+
+        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, side_effect=original):
+            result = await listener.start()
+
+        assert result.is_err()
+        assert result.err_value.exception is original
+
+    @pytest.mark.asyncio
+    async def test_start_propagates_non_operational_error(self) -> None:
+        """Non-operational errors (e.g. ValueError) must propagate, not be wrapped as Err."""
+        listener = _make_listener()
+
+        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, side_effect=ValueError('bad config')):
+            with pytest.raises(ValueError, match='bad config'):
+                await listener.start()
+
+    # -- listen() --
+
+    @pytest.mark.asyncio
+    async def test_listen_returns_ok_with_queue(self) -> None:
+        """listen() should return Ok(Queue) on success."""
+        listener = _make_listener()
+        mock_conn = _make_mock_conn()
+
+        def _close_and_return_mock(coro: Any, **_kwargs: Any) -> MagicMock:
+            coro.close()
+            return MagicMock()
+
+        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=mock_conn):
+            with patch.object(asyncio, 'create_task', side_effect=_close_and_return_mock):
+                result = await listener.listen('task_done')
+
+        assert result.is_ok()
+        assert isinstance(result.ok_value, asyncio.Queue)
+
+    @pytest.mark.asyncio
+    async def test_listen_returns_err_on_connect_failure(self) -> None:
+        """listen() should return Err with LISTENER_SUBSCRIBE_FAILED on connection error."""
+        listener = _make_listener()
+
+        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, side_effect=OperationalError('refused')):
+            result = await listener.listen('task_done')
+
+        assert result.is_err()
+        err = result.err_value
+        assert err.code == BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED
+        assert err.retryable is True
+        assert 'task_done' in err.message
+
+    @pytest.mark.asyncio
+    async def test_listen_cross_loop_still_raises_runtime_error(self) -> None:
+        """RuntimeError from _bind_or_validate_loop is NOT wrapped in Result."""
+        listener = _make_listener()
+        listener._owner_loop = object()  # force mismatch
+
+        with pytest.raises(RuntimeError, match='different event loop'):
+            await listener.listen('task_done')
+
+    @pytest.mark.asyncio
+    async def test_listen_returns_err_when_listen_sql_fails(self) -> None:
+        """listen() should return Err when the LISTEN SQL command fails."""
+        listener = _make_listener()
+        # Pre-set connections so _ensure_connections is a no-op
+        mock_conn = _make_mock_conn()
+        listener._dispatcher_conn = mock_conn
+        listener._command_conn = mock_conn
+
+        # Make the LISTEN execute call fail
+        mock_conn.execute = AsyncMock(side_effect=OperationalError('LISTEN failed'))
+
+        result = await listener.listen('task_done')
+
+        assert result.is_err()
+        assert result.err_value.code == BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED
+
+    # -- listen_many() --
+
+    @pytest.mark.asyncio
+    async def test_listen_many_returns_ok_with_queues(self) -> None:
+        """listen_many() should return Ok(list[Queue]) on success."""
+        listener = _make_listener()
+        mock_conn = _make_mock_conn()
+
+        def _close_and_return_mock(coro: Any, **_kwargs: Any) -> MagicMock:
+            coro.close()
+            return MagicMock()
+
+        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=mock_conn):
+            with patch.object(asyncio, 'create_task', side_effect=_close_and_return_mock):
+                result = await listener.listen_many(['ch1', 'ch2'])
+
+        assert result.is_ok()
+        queues = result.ok_value
+        assert len(queues) == 2
+        assert all(isinstance(q, asyncio.Queue) for q in queues)
+
+    @pytest.mark.asyncio
+    async def test_listen_many_returns_err_on_connect_failure(self) -> None:
+        """listen_many() should return Err with LISTENER_SUBSCRIBE_FAILED on connection error."""
+        listener = _make_listener()
+
+        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, side_effect=OperationalError('refused')):
+            result = await listener.listen_many(['ch1'])
+
+        assert result.is_err()
+        err = result.err_value
+        assert err.code == BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED
+        assert err.retryable is True
+
+    # -- narrowed catch: programming bugs propagate, not silently wrapped --
+
+    @pytest.mark.asyncio
+    async def test_listen_propagates_programming_error_not_wrapped(self) -> None:
+        """Non-operational exceptions in listen() must propagate, not silently become Err."""
+        listener = _make_listener()
+        mock_conn = _make_mock_conn()
+        listener._dispatcher_conn = mock_conn
+        listener._command_conn = mock_conn
+
+        # TypeError is a programming bug, not an infrastructure error
+        mock_conn.execute = AsyncMock(side_effect=TypeError('mock bug'))
+
+        with pytest.raises(TypeError, match='mock bug'):
+            await listener.listen('task_done')
+
+    @pytest.mark.asyncio
+    async def test_listen_many_propagates_programming_error_not_wrapped(self) -> None:
+        """Non-operational exceptions in listen_many() must propagate, not silently become Err."""
+        listener = _make_listener()
+        mock_conn = _make_mock_conn()
+        listener._dispatcher_conn = mock_conn
+        listener._command_conn = mock_conn
+
+        mock_conn.execute = AsyncMock(side_effect=AttributeError('mock bug'))
+
+        with pytest.raises(AttributeError, match='mock bug'):
+            await listener.listen_many(['ch1'])
+
+    @pytest.mark.asyncio
+    async def test_ensure_connections_propagates_programming_error_not_wrapped(self) -> None:
+        """Non-operational exceptions in _ensure_connections() must propagate,
+        not silently become Err (which would degrade callers to polling)."""
+        listener = _make_listener()
+
+        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock) as mock_connect:
+            mock_connect.side_effect = TypeError('mock programming bug')
+
+            with pytest.raises(TypeError, match='mock programming bug'):
+                await listener._ensure_connections()
+
+
+# ---------------------------------------------------------------------------
+# TestCallerUnwrapContract
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestCallerUnwrapContract:
+    """Verify that higher-level callers fail-fast and preserve error semantics
+    when the listener returns Err.
+
+    These test the contract between listener and its callers, not the full
+    broker/worker logic.
+    """
+
+    @pytest.mark.asyncio
+    async def test_broker_ensure_initialized_raises_on_listener_start_err(self) -> None:
+        """_ensure_initialized should raise when listener.start() returns Err,
+        and ensure_schema_initialized wraps it as SCHEMA_INIT_FAILED."""
+        from horsies.core.brokers.result_types import BrokerOperationError
+        from horsies.core.types.result import Err as Err_, is_err as is_err_
+        from horsies.core.models.broker import PostgresConfig
+        from horsies.core.brokers.postgres import PostgresBroker
+
+        original_exc = OperationalError('listener conn refused')
+
+        with (
+            patch('horsies.core.brokers.postgres.create_async_engine') as mock_engine,
+            patch('horsies.core.brokers.postgres.async_sessionmaker'),
+            patch('horsies.core.brokers.postgres.PostgresListener') as mock_listener_cls,
+        ):
+            mock_engine.return_value = MagicMock()
+            mock_engine.return_value.dispose = AsyncMock()
+            mock_engine.return_value.begin = MagicMock()
+
+            # begin() as async context manager for schema init
+            mock_conn_ctx = AsyncMock()
+            mock_conn_ctx.run_sync = AsyncMock()
+            mock_conn_ctx.execute = AsyncMock()
+            mock_begin_ctx = MagicMock()
+            mock_begin_ctx.__aenter__ = AsyncMock(return_value=mock_conn_ctx)
+            mock_begin_ctx.__aexit__ = AsyncMock(return_value=None)
+            mock_engine.return_value.begin.return_value = mock_begin_ctx
+
+            mock_listener = AsyncMock()
+            mock_listener.start.return_value = Err_(BrokerOperationError(
+                code=BrokerErrorCode.LISTENER_START_FAILED,
+                message='Failed to establish listener connections: listener conn refused',
+                retryable=True,
+                exception=original_exc,
+            ))
+            mock_listener_cls.return_value = mock_listener
+
+            config = PostgresConfig(database_url='postgresql+psycopg://u:p@localhost/db')
+            broker = PostgresBroker(config)
+
+            result = await broker.ensure_schema_initialized()
+
+        assert is_err_(result)
+        assert result.err_value.code == BrokerErrorCode.SCHEMA_INIT_FAILED
+        assert 'listener conn refused' in result.err_value.message
+
+    @pytest.mark.asyncio
+    async def test_worker_start_raises_on_listener_start_err(self) -> None:
+        """Worker.start() should raise the original exception when listener.start()
+        returns Err, preserving retryability for _start_with_resilience."""
+        from horsies.core.brokers.result_types import BrokerOperationError
+        from horsies.core.types.result import Err as Err_
+
+        original_exc = OperationalError('listener conn refused')
+        mock_listener = AsyncMock()
+        mock_listener.start.return_value = Err_(BrokerOperationError(
+            code=BrokerErrorCode.LISTENER_START_FAILED,
+            message='Failed to establish listener connections',
+            retryable=True,
+            exception=original_exc,
+        ))
+
+        from horsies.core.worker.worker import Worker
+        from horsies.core.worker.config import WorkerConfig
+
+        cfg = WorkerConfig(
+            dsn='postgresql+psycopg://localhost/test',
+            psycopg_dsn='postgresql://localhost/test',
+            queues=['default'],
+        )
+
+        worker = Worker.__new__(Worker)
+        worker.cfg = cfg
+        worker.listener = mock_listener
+        worker._stop = asyncio.Event()
+        worker._executor = None
+        worker._service_tasks = set()
+        worker._finalizer_tasks = set()
+        worker._create_executor = MagicMock(return_value=MagicMock())
+        worker._preload_modules_main = MagicMock()
+
+        with pytest.raises(OperationalError, match='listener conn refused'):
+            await worker.start()
+
+    @pytest.mark.asyncio
+    async def test_worker_start_raises_on_listener_listen_many_err(self) -> None:
+        """Worker.start() should raise when listener.listen_many() returns Err."""
+        from horsies.core.brokers.result_types import BrokerOperationError
+        from horsies.core.types.result import Err as Err_, Ok as Ok_
+
+        original_exc = OperationalError('subscribe failed')
+        mock_listener = AsyncMock()
+        mock_listener.start.return_value = Ok_(None)
+        mock_listener.listen_many.return_value = Err_(BrokerOperationError(
+            code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
+            message='Failed to subscribe to channels',
+            retryable=True,
+            exception=original_exc,
+        ))
+
+        from horsies.core.worker.worker import Worker
+        from horsies.core.worker.config import WorkerConfig
+
+        cfg = WorkerConfig(
+            dsn='postgresql+psycopg://localhost/test',
+            psycopg_dsn='postgresql://localhost/test',
+            queues=['default'],
+        )
+
+        worker = Worker.__new__(Worker)
+        worker.cfg = cfg
+        worker.listener = mock_listener
+        worker._stop = asyncio.Event()
+        worker._executor = None
+        worker._service_tasks = set()
+        worker._finalizer_tasks = set()
+        worker._create_executor = MagicMock(return_value=MagicMock())
+        worker._preload_modules_main = MagicMock()
+
+        with pytest.raises(OperationalError, match='subscribe failed'):
+            await worker.start()

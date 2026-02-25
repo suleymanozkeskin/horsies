@@ -25,6 +25,17 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.brokers.listener import PostgresListener
+
+
+async def _listen_unwrap(
+    listener: PostgresListener,
+    channel: str,
+) -> asyncio.Queue[Notify]:
+    """Call listener.listen() and unwrap, failing the test on Err."""
+    result = await listener.listen(channel)
+    assert result.is_ok(), f'listener.listen({channel!r}) failed: {result.err_value}'
+    return result.ok_value
 
 
 async def _wait_until(
@@ -55,7 +66,7 @@ class TestTaskDoneFanout:
 
         queues: list[asyncio.Queue[Notify]] = []
         for _ in range(N):
-            q = await broker.listener.listen('task_done')
+            q = await _listen_unwrap(broker.listener, 'task_done')
             queues.append(q)
 
         try:
@@ -85,7 +96,7 @@ class TestTaskDoneFanout:
         # Subscribe N raw queues — no consumer reads from them
         queues: list[asyncio.Queue[Notify]] = []
         for _ in range(N):
-            q = await broker.listener.listen('task_done')
+            q = await _listen_unwrap(broker.listener, 'task_done')
             queues.append(q)
 
         # Enqueue one task so the UPDATE trigger has a row to fire on
@@ -143,7 +154,7 @@ class TestTaskDoneFanout:
 
         queues: list[asyncio.Queue[Notify]] = []
         for _ in range(N):
-            q = await broker.listener.listen('task_done')
+            q = await _listen_unwrap(broker.listener, 'task_done')
             queues.append(q)
 
         task_id = (await broker.enqueue_async(
@@ -221,7 +232,7 @@ class TestTaskDoneFanout:
         # Subscribe N queues — none will be consumed
         queues: list[asyncio.Queue[Notify]] = []
         for _ in range(N_SUBSCRIBERS):
-            q = await broker.listener.listen('task_done')
+            q = await _listen_unwrap(broker.listener, 'task_done')
             queues.append(q)
 
         # Measure baseline: memory of the empty queues
@@ -319,7 +330,7 @@ class TestTaskDoneFanout:
         for n in (10, 50, 200):
             queues: list[asyncio.Queue[Notify]] = []
             for _ in range(n):
-                q = await broker.listener.listen('task_done')
+                q = await _listen_unwrap(broker.listener, 'task_done')
                 queues.append(q)
 
             # Enqueue M tasks
@@ -403,7 +414,7 @@ class TestFanoutBoundary:
         """NOTIFY with 0 subscribers does not break later delivery on that channel."""
         # Ensure task_done channel has active LISTEN but no subscriber queues.
         # listen() then immediately unsubscribe to set up the LISTEN without subs.
-        q = await broker.listener.listen('task_done')
+        q = await _listen_unwrap(broker.listener, 'task_done')
         await broker.listener.unsubscribe('task_done', q)
 
         # Fire a completion with zero subscribers; should be a safe no-op.
@@ -426,7 +437,7 @@ class TestFanoutBoundary:
         await session.commit()
 
         # Verify delivery still works by subscribing and firing a new completion.
-        probe_q = await broker.listener.listen('task_done')
+        probe_q = await _listen_unwrap(broker.listener, 'task_done')
         try:
             task_id_2 = (await broker.enqueue_async(
                 task_name='e2e_simple',
@@ -457,7 +468,7 @@ class TestFanoutBoundary:
         session: AsyncSession,
     ) -> None:
         """Degenerate case: 1 subscriber, 1 NOTIFY, queue receives exactly 1 item."""
-        q = await broker.listener.listen('task_done')
+        q = await _listen_unwrap(broker.listener, 'task_done')
         try:
             task_id = (await broker.enqueue_async(
                 task_name='e2e_simple',
@@ -502,7 +513,7 @@ class TestFanoutBoundary:
         N = 10
         queues: list[asyncio.Queue[Notify]] = []
         for _ in range(N):
-            q = await broker.listener.listen('task_done')
+            q = await _listen_unwrap(broker.listener, 'task_done')
             queues.append(q)
 
         removed = queues[:N // 2]
@@ -599,7 +610,7 @@ class TestFanoutBoundary:
         broker: PostgresBroker,
     ) -> None:
         """Calling unsubscribe() twice with the same queue does not raise."""
-        q = await broker.listener.listen('task_done')
+        q = await _listen_unwrap(broker.listener, 'task_done')
 
         # First unsubscribe — removes the queue
         await broker.listener.unsubscribe('task_done', q)
@@ -635,13 +646,13 @@ class TestFanoutErrorPaths:
         unlisten() removes the local subscription and channel can be cleanly re-listened.
         """
         channel = 'test_unlisten_channel'
-        q = await broker.listener.listen(channel)
+        q = await _listen_unwrap(broker.listener, channel)
 
         try:
             await broker.listener.unlisten(channel, q)
 
             # Re-listen and verify notifications flow again.
-            q2 = await broker.listener.listen(channel)
+            q2 = await _listen_unwrap(broker.listener, channel)
             try:
                 await session.execute(
                     text("SELECT pg_notify(:channel, 'ping')"),
@@ -668,7 +679,7 @@ class TestFanoutErrorPaths:
         1 item after multiple notifications fire.
         """
         bounded_q: asyncio.Queue[Notify] = asyncio.Queue(maxsize=1)
-        control_q = await broker.listener.listen('task_done')
+        control_q = await _listen_unwrap(broker.listener, 'task_done')
 
         # Manually insert the bounded queue into _subs.
         # This is intentional: listen() always returns unbounded queues.
@@ -729,7 +740,7 @@ class TestFanoutContracts:
         session: AsyncSession,
     ) -> None:
         """The Notify.payload on subscriber queues contains the completed task_id."""
-        q = await broker.listener.listen('task_done')
+        q = await _listen_unwrap(broker.listener, 'task_done')
         try:
             task_id = (await broker.enqueue_async(
                 task_name='e2e_simple',
@@ -769,8 +780,8 @@ class TestFanoutContracts:
         session: AsyncSession,
     ) -> None:
         """NOTIFY on task_done must NOT deliver to task_new subscribers."""
-        q_done = await broker.listener.listen('task_done')
-        q_new = await broker.listener.listen('task_new')
+        q_done = await _listen_unwrap(broker.listener, 'task_done')
+        q_new = await _listen_unwrap(broker.listener, 'task_new')
 
         try:
             task_id = (await broker.enqueue_async(
@@ -823,7 +834,7 @@ class TestFanoutContracts:
         N = 3
         queues: list[asyncio.Queue[Notify]] = []
         for _ in range(N):
-            q = await broker.listener.listen('task_done')
+            q = await _listen_unwrap(broker.listener, 'task_done')
             queues.append(q)
 
         try:

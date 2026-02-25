@@ -83,8 +83,11 @@ class TestDispatcherReconnect:
 
         try:
             # -- Arrange --
-            await listener.start()
-            queue = await listener.listen(CHANNEL)
+            start_r = await listener.start()
+            assert start_r.is_ok(), f'Listener start failed: {start_r.err_value}'
+            listen_r = await listener.listen(CHANNEL)
+            assert listen_r.is_ok(), f'Listen failed: {listen_r.err_value}'
+            queue = listen_r.ok_value
 
             helper_conn = await psycopg.AsyncConnection.connect(
                 DB_URL,

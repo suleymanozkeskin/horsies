@@ -561,7 +561,10 @@ class PostgresBroker:
 
         await self._create_triggers()
         await self._create_workflow_schema()
-        await self.listener.start()
+        start_r = await self.listener.start()
+        if is_err(start_r):
+            err = start_r.err_value
+            raise err.exception or RuntimeError(err.message)
         self._initialized = True
 
     async def ensure_schema_initialized(self) -> BrokerResult[None]:
@@ -725,16 +728,25 @@ class PostgresBroker:
                     )
 
             # Listen for task completion notifications when listener loop ownership permits.
-            # Cross-loop access (e.g., sync LoopRunner + async test loop sharing one broker)
-            # falls back to pure DB polling.
+            # Cross-loop RuntimeError (programming error) or infrastructure Err both
+            # fall back to pure DB polling.
             q = None
             try:
-                q = await self.listener.listen('task_done')
+                listen_r = await self.listener.listen('task_done')
             except RuntimeError as e:
                 self.logger.debug(
                     'Listener unavailable on current event loop; falling back to polling for task_done: %s',
                     e,
                 )
+            else:
+                match listen_r:
+                    case Ok(queue):
+                        q = queue
+                    case Err(listen_err):
+                        self.logger.debug(
+                            'Listener subscribe failed; falling back to polling for task_done: %s',
+                            listen_err.message,
+                        )
             try:
                 poll_interval = 5.0 if q is not None else 0.2
 

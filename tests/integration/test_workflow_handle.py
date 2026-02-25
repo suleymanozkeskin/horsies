@@ -1538,3 +1538,146 @@ class TestWorkflowHandleInfraErrors:
         get_r = await handle.get_async(timeout_ms=500)
         assert get_r.is_err()
         assert get_r.unwrap_err().error_code == LibraryErrorCode.WORKFLOW_NOT_FOUND
+
+
+# =============================================================================
+# TestListenerFallbackContract
+# =============================================================================
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio(loop_scope='function')
+class TestListenerFallbackContract:
+    """Verify the listener-failure → polling-fallback contract at integration level.
+
+    Tests prove that:
+    - Operational listener failures (Err) silently degrade to DB polling.
+    - Programming errors (TypeError) propagate immediately (handle) or are
+      wrapped as BROKER_ERROR (broker), never silently swallowed into polling.
+    """
+
+    # -- WorkflowHandle.get_async --
+
+    async def test_handle_get_async_polls_on_listener_err(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """Operational listener Err triggers polling fallback; get_async still returns Ok."""
+        from horsies.core.brokers.result_types import (
+            BrokerErrorCode,
+            BrokerOperationError,
+        )
+        from horsies.core.types.result import Err as Err_
+
+        task_a = make_simple_task(app, 'listen_fallback_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 50})
+        spec = make_workflow_spec(
+            broker=broker, name='listen_fallback', tasks=[node_a], output=node_a,
+        )
+        handle = await start_ok(spec, broker)
+
+        await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=100))
+
+        listen_err = Err_(BrokerOperationError(
+            code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
+            message='forced test failure',
+            retryable=True,
+        ))
+        with patch.object(
+            broker.listener, 'listen', new=AsyncMock(return_value=listen_err),
+        ):
+            result = await handle.get_async(timeout_ms=5000)
+
+        assert result.is_ok(), f'Expected Ok, got {result}'
+        assert result.unwrap() == 100
+
+    async def test_handle_get_async_propagates_programming_error(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """Programming error from listener.listen must propagate, not degrade to polling."""
+        task_a = make_simple_task(app, 'listen_prog_err_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker, name='listen_prog_err', tasks=[node_a], output=node_a,
+        )
+        handle = await start_ok(spec, broker)
+
+        with patch.object(
+            broker.listener, 'listen', new=AsyncMock(side_effect=TypeError('test bug')),
+        ):
+            with pytest.raises(TypeError, match='test bug'):
+                await handle.get_async(timeout_ms=1000)
+
+    # -- PostgresBroker.get_result_async --
+
+    async def test_broker_get_result_polls_on_listener_err(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+    ) -> None:
+        """Operational listener Err triggers polling fallback; get_result_async still returns Ok."""
+        from horsies.core.brokers.result_types import (
+            BrokerErrorCode,
+            BrokerOperationError,
+        )
+        from horsies.core.types.result import Err as Err_
+
+        enqueue_r = await broker.enqueue_async('dummy_task', (), {}, 'default')
+        assert enqueue_r.is_ok()
+        task_id = enqueue_r.ok_value
+
+        # Complete the task directly in DB
+        result_json = '{"__task_result__":true,"ok":42,"err":null}'
+        await session.execute(
+            text("""
+                UPDATE horsies_tasks
+                SET status = 'COMPLETED',
+                    result = :result_json,
+                    completed_at = now()
+                WHERE id = :tid
+            """),
+            {'tid': task_id, 'result_json': result_json},
+        )
+        await session.commit()
+
+        listen_err = Err_(BrokerOperationError(
+            code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
+            message='forced test failure',
+            retryable=True,
+        ))
+        with patch.object(
+            broker.listener, 'listen', new=AsyncMock(return_value=listen_err),
+        ):
+            result = await broker.get_result_async(task_id, timeout_ms=5000)
+
+        assert result.is_ok(), f'Expected Ok, got {result}'
+        assert result.unwrap() == 42
+
+    async def test_broker_get_result_wraps_programming_error_as_broker_error(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+    ) -> None:
+        """Programming error from listener.listen is caught by outer safety net
+        and returned as TaskResult(err=BROKER_ERROR) with original exception."""
+        enqueue_r = await broker.enqueue_async('dummy_task', (), {}, 'default')
+        assert enqueue_r.is_ok()
+        task_id = enqueue_r.ok_value
+
+        with patch.object(
+            broker.listener, 'listen', new=AsyncMock(side_effect=TypeError('test bug')),
+        ):
+            result = await broker.get_result_async(task_id, timeout_ms=1000)
+
+        assert result.is_err()
+        err = result.unwrap_err()
+        assert err.error_code == LibraryErrorCode.BROKER_ERROR
+        assert isinstance(err.exception, TypeError)
+        assert 'test bug' in str(err.exception)

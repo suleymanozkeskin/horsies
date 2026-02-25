@@ -324,14 +324,24 @@ class WorkflowHandle(Generic[OutT]):
         start = time.monotonic()
         timeout_sec = timeout_ms / 1000 if timeout_ms else None
 
-        # Subscribe to workflow_done once before the loop
+        # Subscribe to workflow_done once before the loop.
+        # Cross-loop RuntimeError (programming error) or infrastructure Err
+        # both fall back to sleep-based polling.
         q: asyncio.Queue[Any] | None = None
         try:
-            q = await self.broker.listener.listen('workflow_done')
+            listen_r = await self.broker.listener.listen('workflow_done')
         except RuntimeError:
-            # Cross-loop access (sync handle.get() via LoopRunner) —
-            # fall back to sleep-based polling.
+            # Cross-loop access (sync handle.get() via LoopRunner).
             pass
+        else:
+            match listen_r:
+                case Ok(queue):
+                    q = queue
+                case Err(listen_err):
+                    logger.debug(
+                        'Listener subscribe failed for workflow_done; falling back to polling: %s',
+                        listen_err.message,
+                    )
 
         try:
             while True:

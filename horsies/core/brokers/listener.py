@@ -27,9 +27,13 @@ from typing import DefaultDict, Optional, Sequence, Set
 from asyncio import Task, Queue  # precise type for Pylance/mypy
 
 import psycopg
-from psycopg import AsyncConnection, OperationalError, Notify
+from psycopg import AsyncConnection, InterfaceError, OperationalError, Notify
 from psycopg import sql
+
+from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError, BrokerResult
 from horsies.core.logging import get_logger
+from horsies.core.types.result import Ok, Err, is_err
+from horsies.core.utils.db import is_retryable_connection_error
 
 logger = get_logger('listener')
 
@@ -55,10 +59,12 @@ class PostgresListener:
     Usage:
     ------
     listener = PostgresListener(database_url)
-    await listener.start()
+    start_r = await listener.start()       # BrokerResult[None]
+    assert start_r.is_ok()
 
-    # Subscribe: returns a queue that receives notifications for this channel
-    queue = await listener.listen("task_done")
+    # Subscribe: returns BrokerResult[Queue[Notify]]
+    listen_r = await listener.listen("task_done")
+    queue = listen_r.ok_value
 
     # Wait for notifications (blocks until one arrives)
     notification = await queue.get()
@@ -139,19 +145,25 @@ class PostgresListener:
             return True
         return False
 
-    async def start(self) -> None:
-        """
-        Establish the notification connections (autocommit) and start the
-        dispatcher task. Safe to call multiple times.
+    async def start(self) -> BrokerResult[None]:
+        """Establish notification connections (autocommit) and start health monitor.
+
+        Safe to call multiple times.
+
+        Returns Ok(None) on success, Err(BrokerOperationError) on connection failure.
+        Raises RuntimeError if called from a non-owner event loop (programming error).
         """
         self._bind_or_validate_loop()
-        await self._ensure_connections()
+        conn_r = await self._ensure_connections()
+        if is_err(conn_r):
+            return conn_r
         # Defer starting the dispatcher until at least one channel is LISTENed.
         if self._health_check_task is None:
             # Start proactive health monitoring
             self._health_check_task = asyncio.create_task(
                 self._health_monitor(), name='pg-listener-health'
             )
+        return Ok(None)
 
     async def _start_listening(self, conn: AsyncConnection) -> None:
         """
@@ -160,40 +172,68 @@ class PostgresListener:
         for channel in self._listen_channels:
             await conn.execute(sql.SQL('LISTEN {}').format(sql.Identifier(channel)))
 
-    async def _ensure_connections(self) -> None:
-        """
-        Ensure we have live AsyncConnections in autocommit mode.
-        On reconnection, re-issue LISTEN for any previously tracked channels.
-        """
-        # Ensure dispatcher connection (for conn.notifies() consumption)
-        if self._dispatcher_conn is None or self._dispatcher_conn.closed:
-            self._dispatcher_conn = await psycopg.AsyncConnection.connect(
-                self.database_url,
-                autocommit=True,
-            )
-            await self._start_listening(self._dispatcher_conn)
-            # Register file descriptor for activity monitoring
-            self._register_fd_monitoring()
+    async def _ensure_connections(self) -> BrokerResult[None]:
+        """Ensure we have live AsyncConnections in autocommit mode.
 
-        # Ensure command connection (for LISTEN/UNLISTEN commands)
-        if self._command_conn is None or self._command_conn.closed:
-            self._command_conn = await psycopg.AsyncConnection.connect(
-                self.database_url,
-                autocommit=True,
-            )
-            await self._start_listening(self._command_conn)
+        On reconnection, re-issue LISTEN for any previously tracked channels.
+
+        Returns Ok(None) on success, Err(BrokerOperationError) on failure.
+        """
+        try:
+            # Ensure dispatcher connection (for conn.notifies() consumption)
+            if self._dispatcher_conn is None or self._dispatcher_conn.closed:
+                self._dispatcher_conn = await psycopg.AsyncConnection.connect(
+                    self.database_url,
+                    autocommit=True,
+                )
+                await self._start_listening(self._dispatcher_conn)
+                # Register file descriptor for activity monitoring
+                self._register_fd_monitoring()
+
+            # Ensure command connection (for LISTEN/UNLISTEN commands)
+            if self._command_conn is None or self._command_conn.closed:
+                self._command_conn = await psycopg.AsyncConnection.connect(
+                    self.database_url,
+                    autocommit=True,
+                )
+                await self._start_listening(self._command_conn)
+
+            return Ok(None)
+        except (OperationalError, InterfaceError, OSError) as exc:
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.LISTENER_START_FAILED,
+                message=f'Failed to establish listener connections: {exc}',
+                retryable=is_retryable_connection_error(exc),
+                exception=exc,
+            ))
 
     async def _ensure_dispatcher_connection(self) -> AsyncConnection:
-        """Ensure dispatcher connection is available."""
+        """Ensure dispatcher connection is available.
+
+        Unwraps the Result from _ensure_connections, re-raising the original
+        exception on Err so the dispatcher loop's existing exception handling
+        (OperationalError catch + reconnect) continues to work.
+        """
         if self._dispatcher_conn is None or self._dispatcher_conn.closed:
-            await self._ensure_connections()
+            conn_r = await self._ensure_connections()
+            if is_err(conn_r):
+                err = conn_r.err_value
+                raise err.exception or RuntimeError(err.message)
         assert self._dispatcher_conn is not None
         return self._dispatcher_conn
 
     async def _ensure_command_connection(self) -> AsyncConnection:
-        """Ensure command connection is available."""
+        """Ensure command connection is available.
+
+        Unwraps the Result from _ensure_connections, re-raising the original
+        exception on Err so internal callers (health monitor) see the expected
+        exception types.
+        """
         if self._command_conn is None or self._command_conn.closed:
-            await self._ensure_connections()
+            conn_r = await self._ensure_connections()
+            if is_err(conn_r):
+                err = conn_r.err_value
+                raise err.exception or RuntimeError(err.message)
         assert self._command_conn is not None
         return self._command_conn
 
@@ -335,9 +375,8 @@ class PostgresListener:
                 await asyncio.sleep(0.5)
                 continue
 
-    async def listen(self, channel_name: str) -> Queue[Notify]:
-        """
-        Subscribe to a PostgreSQL notification channel.
+    async def listen(self, channel_name: str) -> BrokerResult[Queue[Notify]]:
+        """Subscribe to a PostgreSQL notification channel.
 
         Creates a new asyncio queue for this subscriber and issues LISTEN command
         to PostgreSQL (only once per channel, regardless of subscriber count).
@@ -349,15 +388,13 @@ class PostgresListener:
 
         Returns
         -------
-        asyncio.Queue[Notify]
-            Queue that will receive Notify objects for this channel.
-            Each subscriber gets their own independent queue.
+        BrokerResult[Queue[Notify]]
+            Ok(queue) on success, Err(BrokerOperationError) on connection or SQL failure.
 
-        Example
-        -------
-        queue = await listener.listen("task_done")
-        notification = await queue.get()  # Blocks until notification arrives
-        task_id = notification.payload    # Extract payload data
+        Raises
+        ------
+        RuntimeError
+            If called from a non-owner event loop (programming error, not wrapped).
 
         Notes
         -----
@@ -366,84 +403,114 @@ class PostgresListener:
         - Dispatcher automatically starts after first subscription
         """
         self._bind_or_validate_loop()
-        await self._ensure_connections()
+        conn_r = await self._ensure_connections()
+        if is_err(conn_r):
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
+                message=f'Failed to subscribe to {channel_name!r}: {conn_r.err_value.message}',
+                retryable=conn_r.err_value.retryable,
+                exception=conn_r.err_value.exception,
+            ))
 
-        async with self._lock:
-            # LISTEN on the server if this is the first subscriber for the channel.
-            if channel_name not in self._listen_channels:
-                # Ensure connections exist
-                await self._ensure_connections()
+        try:
+            async with self._lock:
+                # LISTEN on the server if this is the first subscriber for the channel.
+                if channel_name not in self._listen_channels:
+                    # Stop dispatcher temporarily to safely modify dispatcher connection state
+                    if self._dispatcher_task is not None:
+                        self._dispatcher_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await self._dispatcher_task
+                        self._dispatcher_task = None
 
-                # Stop dispatcher temporarily to safely modify dispatcher connection state
-                if self._dispatcher_task is not None:
-                    self._dispatcher_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await self._dispatcher_task
-                    self._dispatcher_task = None
-
-                # Issue LISTEN on the dispatcher connection (the one consuming notifies)
-                disp_conn = await self._ensure_dispatcher_connection()
-                await disp_conn.execute(
-                    sql.SQL('LISTEN {}').format(sql.Identifier(channel_name))
-                )
-                self._listen_channels.add(channel_name)
-
-                # Restart dispatcher after updating the LISTEN set
-                if self._dispatcher_task is None:
-                    self._dispatcher_task = asyncio.create_task(
-                        self._dispatcher(), name='pg-listener-dispatcher'
+                    # Issue LISTEN on the dispatcher connection (the one consuming notifies)
+                    disp_conn = await self._ensure_dispatcher_connection()
+                    await disp_conn.execute(
+                        sql.SQL('LISTEN {}').format(sql.Identifier(channel_name))
                     )
+                    self._listen_channels.add(channel_name)
 
-            # Create a fresh bounded queue for this subscriber.
-            q: Queue[Notify] = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_MAXSIZE)
-            self._subs[channel_name].add(q)
-            return q
+                    # Restart dispatcher after updating the LISTEN set
+                    if self._dispatcher_task is None:
+                        self._dispatcher_task = asyncio.create_task(
+                            self._dispatcher(), name='pg-listener-dispatcher'
+                        )
+
+                # Create a fresh bounded queue for this subscriber.
+                q: Queue[Notify] = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_MAXSIZE)
+                self._subs[channel_name].add(q)
+                return Ok(q)
+        except (OperationalError, InterfaceError, OSError) as exc:
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
+                message=f'Failed to subscribe to {channel_name!r}: {exc}',
+                retryable=is_retryable_connection_error(exc),
+                exception=exc,
+            ))
 
     async def listen_many(
         self, channel_names: Sequence[str],
-    ) -> list[Queue[Notify]]:
+    ) -> BrokerResult[list[Queue[Notify]]]:
         """Subscribe to multiple channels in a single lock acquisition.
 
         More efficient than calling listen() in a loop because the
         dispatcher is stopped/restarted at most once.
 
-        Returns queues in the same order as *channel_names*.
+        Returns Ok(queues) in the same order as *channel_names*,
+        or Err(BrokerOperationError) on connection or SQL failure.
+
+        Raises RuntimeError if called from a non-owner event loop.
         """
         self._bind_or_validate_loop()
-        await self._ensure_connections()
+        conn_r = await self._ensure_connections()
+        if is_err(conn_r):
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
+                message=f'Failed to subscribe to channels: {conn_r.err_value.message}',
+                retryable=conn_r.err_value.retryable,
+                exception=conn_r.err_value.exception,
+            ))
 
-        async with self._lock:
-            new_channels = [
-                ch for ch in channel_names if ch not in self._listen_channels
-            ]
+        try:
+            async with self._lock:
+                new_channels = [
+                    ch for ch in channel_names if ch not in self._listen_channels
+                ]
 
-            if new_channels:
-                # Stop dispatcher once for all new channels
-                if self._dispatcher_task is not None:
-                    self._dispatcher_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await self._dispatcher_task
-                    self._dispatcher_task = None
+                if new_channels:
+                    # Stop dispatcher once for all new channels
+                    if self._dispatcher_task is not None:
+                        self._dispatcher_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await self._dispatcher_task
+                        self._dispatcher_task = None
 
-                disp_conn = await self._ensure_dispatcher_connection()
-                for ch in new_channels:
-                    await disp_conn.execute(
-                        sql.SQL('LISTEN {}').format(sql.Identifier(ch))
+                    disp_conn = await self._ensure_dispatcher_connection()
+                    for ch in new_channels:
+                        await disp_conn.execute(
+                            sql.SQL('LISTEN {}').format(sql.Identifier(ch))
+                        )
+                        self._listen_channels.add(ch)
+
+                    # Restart dispatcher
+                    self._dispatcher_task = asyncio.create_task(
+                        self._dispatcher(), name='pg-listener-dispatcher',
                     )
-                    self._listen_channels.add(ch)
 
-                # Restart dispatcher
-                self._dispatcher_task = asyncio.create_task(
-                    self._dispatcher(), name='pg-listener-dispatcher',
-                )
-
-            # Create bounded queues for all requested channels
-            queues: list[Queue[Notify]] = []
-            for ch in channel_names:
-                q: Queue[Notify] = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_MAXSIZE)
-                self._subs[ch].add(q)
-                queues.append(q)
-            return queues
+                # Create bounded queues for all requested channels
+                queues: list[Queue[Notify]] = []
+                for ch in channel_names:
+                    q: Queue[Notify] = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_MAXSIZE)
+                    self._subs[ch].add(q)
+                    queues.append(q)
+                return Ok(queues)
+        except (OperationalError, InterfaceError, OSError) as exc:
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
+                message=f'Failed to subscribe to channels: {exc}',
+                retryable=is_retryable_connection_error(exc),
+                exception=exc,
+            ))
 
     async def unlisten(
         self, channel_name: str, q: Optional[Queue[Notify]] = None
