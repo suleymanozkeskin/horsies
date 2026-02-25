@@ -49,7 +49,6 @@ from horsies.core.models.workflow.context import (
     SubWorkflowSummary,
     WorkflowMeta,
     WorkflowContextMissingIdError,
-    WorkflowHandleMissingIdError,
     WorkflowContext,
 )
 from horsies.core.models.workflow.handle import (
@@ -122,7 +121,6 @@ __all__ = [
     'SubWorkflowSummary',
     'WorkflowMeta',
     'WorkflowContextMissingIdError',
-    'WorkflowHandleMissingIdError',
     'WorkflowContext',
     # handle
     'GET_WORKFLOW_STATUS_SQL',

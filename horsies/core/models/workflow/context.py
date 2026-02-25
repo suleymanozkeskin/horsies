@@ -140,10 +140,6 @@ class WorkflowContextMissingIdError(RuntimeError):
     """Raised when TaskNode node_id is missing for WorkflowContext.result_for()."""
 
 
-class WorkflowHandleMissingIdError(RuntimeError):
-    """Raised when TaskNode node_id is missing for WorkflowHandle.result_for()."""
-
-
 # =============================================================================
 # WorkflowContext (type-safe result access via result_for)
 # =============================================================================

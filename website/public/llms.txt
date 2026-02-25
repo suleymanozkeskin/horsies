@@ -465,9 +465,6 @@ making web request, local will cost you less tokens and greater knowledgebase at
 #### WorkflowContextMissingIdError (RuntimeError)
 - Raised when TaskNode/NodeKey has no node_id for WorkflowContext.result_for()
 
-#### WorkflowHandleMissingIdError (RuntimeError)
-- Raised when TaskNode/NodeKey has no node_id for WorkflowHandle.result_for()
-
 ### Serialization
 - Supported: primitives, dict, list, Pydantic BaseModel, dataclass, datetime, date, time
 - Pydantic models: model_dump(mode="json") -> model_validate() round-trip

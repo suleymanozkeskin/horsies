@@ -19,7 +19,6 @@ from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
 from horsies.core.models.workflow import (
     TaskNode,
     WorkflowHandle,
-    WorkflowHandleMissingIdError,
     WorkflowStatus,
     WorkflowTaskStatus,
     OnError,
@@ -460,13 +459,13 @@ class TestWorkflowHandleResults:
         assert result.is_err()
         assert result.unwrap_err().error_code == LibraryErrorCode.RESULT_NOT_READY
 
-    async def test_result_for_missing_node_id_raises(
+    async def test_result_for_missing_node_id_returns_error(
         self,
         clean_workflow_tables: None,
         broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """result_for_async() raises WorkflowHandleMissingIdError when node_id is None."""
+        """result_for_async() returns WORKFLOW_CTX_MISSING_ID when node_id is None."""
         task_a = make_simple_task(app, 'result_for_no_id_a')
 
         node_a = TaskNode(fn=task_a, kwargs={'value': 1})
@@ -481,8 +480,10 @@ class TestWorkflowHandleResults:
         orphan_node: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         assert orphan_node.node_id is None
 
-        with pytest.raises(WorkflowHandleMissingIdError):
-            await handle.result_for_async(orphan_node)
+        result = await handle.result_for_async(orphan_node)
+        assert result.is_err()
+        assert result.unwrap_err().error_code == LibraryErrorCode.WORKFLOW_CTX_MISSING_ID
+        assert 'node_id is not set' in (result.unwrap_err().message or '')
 
     async def test_results_empty_when_no_tasks_completed(
         self,

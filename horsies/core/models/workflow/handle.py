@@ -27,7 +27,6 @@ from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
 from horsies.core.types.result import Ok, Err, is_err
 
 from .enums import OkT, OutT, WorkflowStatus, WorkflowTaskStatus
-from .context import WorkflowHandleMissingIdError
 from .handle_types import HandleErrorCode, HandleOperationError, HandleResult
 from .nodes import NodeKey
 
@@ -556,9 +555,8 @@ class WorkflowHandle(Generic[OutT]):
             - If task completed: returns the task's result (success or error)
             - If task not completed: returns TaskResult with
               error_code=LibraryErrorCode.RESULT_NOT_READY
-
-        Raises:
-            WorkflowHandleMissingIdError: If node has no node_id assigned.
+            - If node has no node_id: returns TaskResult with
+              error_code=LibraryErrorCode.WORKFLOW_CTX_MISSING_ID
 
         Example:
             result = handle.result_for(node)
@@ -579,9 +577,17 @@ class WorkflowHandle(Generic[OutT]):
             node_id = node.node_id
 
         if node_id is None:
-            raise WorkflowHandleMissingIdError(
-                'TaskNode node_id is not set. Ensure WorkflowSpec assigns node_id '
-                'or provide an explicit node_id.'
+            return cast(
+                'TaskResult[OkT, TaskError]',
+                TaskResult(
+                    err=TaskError(
+                        error_code=LibraryErrorCode.WORKFLOW_CTX_MISSING_ID,
+                        message=(
+                            'TaskNode node_id is not set. Ensure WorkflowSpec assigns '
+                            'node_id or provide an explicit node_id.'
+                        ),
+                    ),
+                ),
             )
 
         try:
