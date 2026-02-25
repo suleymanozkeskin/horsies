@@ -42,8 +42,8 @@ def fetch_docs(*, output_dir: str = DEFAULT_OUTPUT_DIR) -> int:
             count = _fetch_via_sparse_checkout(output_path)
             _print_status(f'Done. {count} files written to {output_dir}/')
             return count
-        except DocsFetchError:
-            _print_status('Git sparse checkout failed, falling back to tarball...')
+        except DocsFetchError as exc:
+            _print_status(f'Git sparse checkout failed ({exc}), falling back to tarball...')
 
     _print_status('Fetching docs via tarball download...')
     count = _fetch_via_tarball(output_path)
@@ -140,15 +140,13 @@ def _fetch_via_tarball(output_dir: Path) -> int:
         try:
             with tarfile.open(tarball_path, 'r:gz') as tf:
                 members = tf.getnames()
-                if not members:
-                    raise DocsFetchError('tarball is empty')
-
-                # Detect root prefix (e.g. "horsies-main/")
-                prefix = members[0].split('/')[0]
-
+                prefix = members[0].split('/')[0] if members else ''
                 tf.extractall(path=tmp, filter='data')
         except tarfile.TarError as exc:
             raise DocsFetchError(f'corrupt tarball: {exc}') from exc
+
+        if not members:
+            raise DocsFetchError('tarball is empty')
 
         docs_src = tmp / prefix / DOCS_REPO_PATH
         llms_src = tmp / prefix / LLMS_REPO_PATH
@@ -166,15 +164,22 @@ def _assemble_output(
             f'docs source directory not found: {docs_src}',
         )
 
-    # Clean existing output for idempotent update
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
+    # Atomic-ish swap: copy into a temp sibling first so that a copytree
+    # failure does not destroy the existing output_dir.
+    tmp_output = output_dir.with_name(output_dir.name + '.tmp')
+    if tmp_output.exists():
+        shutil.rmtree(tmp_output)
 
-    shutil.copytree(docs_src, output_dir)
+    shutil.copytree(docs_src, tmp_output)
 
     # Copy llms.txt if it exists (not fatal if missing)
     if llms_src.is_file():
-        shutil.copy2(llms_src, output_dir / 'llms.txt')
+        shutil.copy2(llms_src, tmp_output / 'llms.txt')
+
+    # Swap: remove old, rename new
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    tmp_output.rename(output_dir)
 
     file_count = sum(1 for _ in output_dir.rglob('*') if _.is_file())
     if file_count == 0:
