@@ -179,6 +179,8 @@ class PostgresListener:
 
         Returns Ok(None) on success, Err(BrokerOperationError) on failure.
         """
+        created_dispatcher = False
+        created_command = False
         try:
             # Ensure dispatcher connection (for conn.notifies() consumption)
             if self._dispatcher_conn is None or self._dispatcher_conn.closed:
@@ -186,6 +188,7 @@ class PostgresListener:
                     self.database_url,
                     autocommit=True,
                 )
+                created_dispatcher = True
                 await self._start_listening(self._dispatcher_conn)
                 # Register file descriptor for activity monitoring
                 self._register_fd_monitoring()
@@ -196,10 +199,27 @@ class PostgresListener:
                     self.database_url,
                     autocommit=True,
                 )
+                created_command = True
                 await self._start_listening(self._command_conn)
 
             return Ok(None)
         except (OperationalError, InterfaceError, OSError) as exc:
+            # Roll back partial setup in this call to avoid leaked half-initialized state.
+            if created_command:
+                if self._command_conn is not None and not self._command_conn.closed:
+                    with contextlib.suppress(
+                        OperationalError, InterfaceError, RuntimeError, OSError
+                    ):
+                        await self._command_conn.close()
+                self._command_conn = None
+            if created_dispatcher:
+                self._unregister_fd_monitoring()
+                if self._dispatcher_conn is not None and not self._dispatcher_conn.closed:
+                    with contextlib.suppress(
+                        OperationalError, InterfaceError, RuntimeError, OSError
+                    ):
+                        await self._dispatcher_conn.close()
+                self._dispatcher_conn = None
             return Err(BrokerOperationError(
                 code=BrokerErrorCode.LISTENER_START_FAILED,
                 message=f'Failed to establish listener connections: {exc}',
@@ -243,10 +263,29 @@ class PostgresListener:
             if conn is not None and not conn.closed:
                 try:
                     await conn.close()
-                except (OperationalError, RuntimeError, OSError):
-                    pass  # Connection already dead, broken, or socket error
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass  # Best-effort close; keep tearing down remaining connections.
         self._dispatcher_conn = None
         self._command_conn = None
+
+    async def _pause_dispatcher(self) -> bool:
+        """Cancel and await dispatcher task, returning whether one was running."""
+        if self._dispatcher_task is None:
+            return False
+        self._dispatcher_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._dispatcher_task
+        self._dispatcher_task = None
+        return True
+
+    def _start_dispatcher_if_needed(self) -> None:
+        """Create dispatcher task only when absent."""
+        if self._dispatcher_task is None:
+            self._dispatcher_task = asyncio.create_task(
+                self._dispatcher(), name='pg-listener-dispatcher'
+            )
 
     def _register_fd_monitoring(self) -> None:
         """
@@ -416,25 +455,23 @@ class PostgresListener:
             async with self._lock:
                 # LISTEN on the server if this is the first subscriber for the channel.
                 if channel_name not in self._listen_channels:
-                    # Stop dispatcher temporarily to safely modify dispatcher connection state
-                    if self._dispatcher_task is not None:
-                        self._dispatcher_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await self._dispatcher_task
-                        self._dispatcher_task = None
+                    # Stop dispatcher temporarily to safely modify connection listen state.
+                    dispatcher_was_running = await self._pause_dispatcher()
 
-                    # Issue LISTEN on the dispatcher connection (the one consuming notifies)
-                    disp_conn = await self._ensure_dispatcher_connection()
-                    await disp_conn.execute(
-                        sql.SQL('LISTEN {}').format(sql.Identifier(channel_name))
-                    )
-                    self._listen_channels.add(channel_name)
-
-                    # Restart dispatcher after updating the LISTEN set
-                    if self._dispatcher_task is None:
-                        self._dispatcher_task = asyncio.create_task(
-                            self._dispatcher(), name='pg-listener-dispatcher'
+                    try:
+                        # Issue LISTEN on the dispatcher connection (the one consuming notifies)
+                        disp_conn = await self._ensure_dispatcher_connection()
+                        await disp_conn.execute(
+                            sql.SQL('LISTEN {}').format(sql.Identifier(channel_name))
                         )
+                        self._listen_channels.add(channel_name)
+                    finally:
+                        # If we stopped a running dispatcher, always revive it (even on LISTEN error).
+                        if dispatcher_was_running:
+                            self._start_dispatcher_if_needed()
+
+                    # First subscription path: no prior dispatcher existed.
+                    self._start_dispatcher_if_needed()
 
                 # Create a fresh bounded queue for this subscriber.
                 q: Queue[Notify] = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_MAXSIZE)
@@ -478,24 +515,23 @@ class PostgresListener:
                 ]
 
                 if new_channels:
-                    # Stop dispatcher once for all new channels
-                    if self._dispatcher_task is not None:
-                        self._dispatcher_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await self._dispatcher_task
-                        self._dispatcher_task = None
+                    # Stop dispatcher once for all new channels.
+                    dispatcher_was_running = await self._pause_dispatcher()
 
-                    disp_conn = await self._ensure_dispatcher_connection()
-                    for ch in new_channels:
-                        await disp_conn.execute(
-                            sql.SQL('LISTEN {}').format(sql.Identifier(ch))
-                        )
-                        self._listen_channels.add(ch)
+                    try:
+                        disp_conn = await self._ensure_dispatcher_connection()
+                        for ch in new_channels:
+                            await disp_conn.execute(
+                                sql.SQL('LISTEN {}').format(sql.Identifier(ch))
+                            )
+                            self._listen_channels.add(ch)
+                    finally:
+                        # If dispatcher was already running, revive it on both success/failure.
+                        if dispatcher_was_running:
+                            self._start_dispatcher_if_needed()
 
-                    # Restart dispatcher
-                    self._dispatcher_task = asyncio.create_task(
-                        self._dispatcher(), name='pg-listener-dispatcher',
-                    )
+                    # First-subscription path: no prior dispatcher existed.
+                    self._start_dispatcher_if_needed()
 
                 # Create bounded queues for all requested channels
                 queues: list[Queue[Notify]] = []
@@ -628,14 +664,7 @@ class PostgresListener:
             self._dispatcher_task = None
 
         self._unregister_fd_monitoring()
-
-        if self._dispatcher_conn and not self._dispatcher_conn.closed:
-            await self._dispatcher_conn.close()
-            self._dispatcher_conn = None
-
-        if self._command_conn and not self._command_conn.closed:
-            await self._command_conn.close()
-            self._command_conn = None
+        await self._close_connections()
 
         # Release local bookkeeping to avoid process-lifetime growth.
         self._subs.clear()

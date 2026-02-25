@@ -167,6 +167,29 @@ class TestEnsureConnections:
         # Each conn gets LISTEN for 'task_done' = 2 calls total
         assert mock_conn.execute.await_count == 2
 
+    @pytest.mark.asyncio
+    async def test_rolls_back_dispatcher_when_command_connect_fails(self) -> None:
+        """If command connection fails, dispatcher setup from this call should be rolled back."""
+        listener = _make_listener()
+        dispatcher_conn = _make_mock_conn()
+
+        with (
+            patch(
+                'psycopg.AsyncConnection.connect',
+                new_callable=AsyncMock,
+                side_effect=[dispatcher_conn, OperationalError('command down')],
+            ),
+            patch.object(listener, '_unregister_fd_monitoring') as mock_unregister,
+        ):
+            result = await listener._ensure_connections()
+
+        assert result.is_err()
+        assert result.err_value.code == BrokerErrorCode.LISTENER_START_FAILED
+        dispatcher_conn.close.assert_awaited_once()
+        mock_unregister.assert_called_once()
+        assert listener._dispatcher_conn is None
+        assert listener._command_conn is None
+
 
 # ---------------------------------------------------------------------------
 # TestEnsureDispatcherConnection / TestEnsureCommandConnection
@@ -282,6 +305,22 @@ class TestCloseConnections:
         await listener._close_connections()
 
         assert listener._dispatcher_conn is None
+
+    @pytest.mark.asyncio
+    async def test_continues_when_first_close_raises_unexpected_error(self) -> None:
+        """Even unexpected close errors on dispatcher should not skip command close."""
+        listener = _make_listener()
+        disp_conn = _make_mock_conn()
+        cmd_conn = _make_mock_conn()
+        disp_conn.close = AsyncMock(side_effect=ValueError('unexpected'))
+        listener._dispatcher_conn = disp_conn
+        listener._command_conn = cmd_conn
+
+        await listener._close_connections()
+
+        cmd_conn.close.assert_awaited_once()
+        assert listener._dispatcher_conn is None
+        assert listener._command_conn is None
 
 
 # ---------------------------------------------------------------------------
@@ -574,6 +613,33 @@ class TestListen:
         assert result.is_ok()
         assert old_dispatcher.cancelled()
         mock_create_task.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_new_channel_restart_still_happens_when_listen_fails(self) -> None:
+        """LISTEN failure should not leave a previously running dispatcher stopped."""
+        listener = _make_listener()
+        mock_conn = _make_mock_conn()
+        listener._dispatcher_conn = mock_conn
+        listener._command_conn = mock_conn
+        mock_conn.execute = AsyncMock(side_effect=OperationalError('LISTEN failed'))
+
+        async def _noop() -> None:
+            await asyncio.sleep(999)
+
+        old_dispatcher = asyncio.create_task(_noop())
+        listener._dispatcher_task = old_dispatcher
+
+        def _close_and_return_mock(coro: Any, **_kwargs: Any) -> MagicMock:
+            coro.close()
+            return MagicMock()
+
+        with patch.object(asyncio, 'create_task', side_effect=_close_and_return_mock) as mock_create_task:
+            result = await listener.listen('new_channel')
+
+        assert result.is_err()
+        assert old_dispatcher.cancelled()
+        mock_create_task.assert_called_once()
+        assert 'new_channel' not in listener._listen_channels
 
 
 # ---------------------------------------------------------------------------
@@ -1003,6 +1069,33 @@ class TestListenerResultSurface:
             await listener.listen_many(['ch1'])
 
     @pytest.mark.asyncio
+    async def test_listen_many_restarts_dispatcher_when_listen_fails_mid_update(self) -> None:
+        """A failing LISTEN in listen_many() should revive a previously running dispatcher."""
+        listener = _make_listener()
+        mock_conn = _make_mock_conn()
+        listener._dispatcher_conn = mock_conn
+        listener._command_conn = mock_conn
+        mock_conn.execute = AsyncMock(side_effect=OperationalError('LISTEN failed'))
+
+        async def _noop() -> None:
+            await asyncio.sleep(999)
+
+        old_dispatcher = asyncio.create_task(_noop())
+        listener._dispatcher_task = old_dispatcher
+
+        def _close_and_return_mock(coro: Any, **_kwargs: Any) -> MagicMock:
+            coro.close()
+            return MagicMock()
+
+        with patch.object(asyncio, 'create_task', side_effect=_close_and_return_mock) as mock_create_task:
+            result = await listener.listen_many(['ch1', 'ch2'])
+
+        assert result.is_err()
+        assert old_dispatcher.cancelled()
+        mock_create_task.assert_called_once()
+        assert 'ch1' not in listener._listen_channels
+
+    @pytest.mark.asyncio
     async def test_ensure_connections_propagates_programming_error_not_wrapped(self) -> None:
         """Non-operational exceptions in _ensure_connections() must propagate,
         not silently become Err (which would degrade callers to polling)."""
@@ -1079,7 +1172,7 @@ class TestCallerUnwrapContract:
     @pytest.mark.asyncio
     async def test_worker_start_raises_on_listener_start_err(self) -> None:
         """Worker.start() should raise the original exception when listener.start()
-        returns Err, preserving retryability for _start_with_resilience."""
+        returns Err, preserving retryability for _start_with_resilience_config."""
         from horsies.core.brokers.result_types import BrokerOperationError
         from horsies.core.types.result import Err as Err_
 
@@ -1113,6 +1206,8 @@ class TestCallerUnwrapContract:
 
         with pytest.raises(OperationalError, match='listener conn refused'):
             await worker.start()
+        worker._create_executor.assert_not_called()
+        mock_listener.close.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_worker_start_raises_on_listener_listen_many_err(self) -> None:
@@ -1151,3 +1246,5 @@ class TestCallerUnwrapContract:
 
         with pytest.raises(OperationalError, match='subscribe failed'):
             await worker.start()
+        worker._create_executor.assert_not_called()
+        mock_listener.close.assert_awaited_once()

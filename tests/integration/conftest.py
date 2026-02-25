@@ -28,6 +28,7 @@ from horsies.core.models.workflow import (
     SuccessCase,
 )
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.worker.child_pool import _cleanup_worker_pool
 from horsies.core.workflows.engine import start_workflow_async
 from horsies.core.types.result import is_err
 
@@ -83,6 +84,13 @@ def app(app_config: AppConfig, broker: PostgresBroker) -> Horsies:
     horsies_app._broker = broker
     broker.app = horsies_app
     return horsies_app
+
+
+@pytest.fixture(scope='session', autouse=True)
+def cleanup_worker_pool_at_teardown() -> Generator[None, None, None]:
+    """Close the per-process ConnectionPool created by _initialize_worker_pool()."""
+    yield
+    _cleanup_worker_pool()
 
 
 @pytest_asyncio.fixture

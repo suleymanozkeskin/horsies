@@ -8,6 +8,7 @@ error handling, and delegation patterns.
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -905,6 +906,56 @@ class TestCloseAsync:
         assert result.ok_value is None
         assert call_order == ['listener_close', 'engine_dispose']
 
+    @pytest.mark.asyncio
+    async def test_close_async_stops_loop_runner_when_started_externally(self) -> None:
+        """close_async should stop LoopRunner if sync APIs had started it."""
+        broker = _make_broker()
+        broker._loop_runner = MagicMock()
+        broker._loop_runner._started = True
+        broker._loop_runner._thread = object()
+        broker._loop_runner.stop = MagicMock()
+
+        result = await broker.close_async()
+
+        assert is_ok(result)
+        broker._loop_runner.stop.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_close_async_does_not_stop_loop_runner_from_its_own_thread(self) -> None:
+        """close_async must not self-stop when running on loop-runner thread."""
+        broker = _make_broker()
+        broker._loop_runner = MagicMock()
+        broker._loop_runner._started = True
+        broker._loop_runner._thread = threading.current_thread()
+        broker._loop_runner.stop = MagicMock()
+
+        result = await broker.close_async()
+
+        assert is_ok(result)
+        broker._loop_runner.stop.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_close_async_stops_real_loop_runner_thread(self) -> None:
+        """Regression: close_async should stop a real LoopRunner started by sync APIs."""
+        broker = _make_broker()
+        runner = broker._loop_runner
+        assert runner._started is False
+
+        runner.start()
+        assert runner._started is True
+        assert runner._thread is not None and runner._thread.is_alive()
+
+        try:
+            result = await broker.close_async()
+            assert is_ok(result)
+            assert runner._started is False
+            assert runner._loop is None
+            assert runner._thread is None
+        finally:
+            # Safety net for test isolation in case assertions fail mid-test.
+            if runner._started:
+                runner.stop()
+
 
 @pytest.mark.unit
 class TestClose:
@@ -1035,5 +1086,3 @@ class TestCloseAsyncErrorPaths:
         err = result.err_value
         assert err.code == BrokerErrorCode.CLOSE_FAILED
         assert err.exception is not None
-
-

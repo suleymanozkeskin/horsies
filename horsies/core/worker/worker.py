@@ -310,7 +310,7 @@ class Worker:
         )
         await self._sleep_with_stop(delay)
 
-    async def _start_with_resilience(self) -> None:
+    async def _start_with_resilience_config(self) -> None:
         backoff = self._make_retry_backoff()
         while not self._stop.is_set():
             try:
@@ -332,53 +332,59 @@ class Worker:
         # Preload the app and task modules in the main process to fail fast
         self._preload_modules_main()
 
-        # Create the process pool AFTER successful preload so initializer runs in children only
-        self._executor = self._create_executor()
-        start_r = await self.listener.start()
-        if is_err(start_r):
-            err = start_r.err_value
-            raise err.exception or RuntimeError(err.message)
-        # Surface concurrency configuration clearly for operators
-        max_claimed_effective = (
-            self.cfg.max_claim_per_worker
-            if self.cfg.max_claim_per_worker > 0
-            else self.cfg.processes
-        )
-        logger.info(
-            'Concurrency config: processes=%s, cluster_wide_cap=%s, max_claim_per_worker=%s, max_claim_batch=%s',
-            self.cfg.processes,
-            (
-                self.cfg.cluster_wide_cap
-                if self.cfg.cluster_wide_cap is not None
-                else 'unlimited'
-            ),
-            max_claimed_effective,
-            self.cfg.max_claim_batch,
-        )
+        try:
+            start_r = await self.listener.start()
+            if is_err(start_r):
+                err = start_r.err_value
+                raise err.exception or RuntimeError(err.message)
+            # Surface concurrency configuration clearly for operators
+            max_claimed_effective = (
+                self.cfg.max_claim_per_worker
+                if self.cfg.max_claim_per_worker > 0
+                else self.cfg.processes
+            )
+            logger.info(
+                'Concurrency config: processes=%s, cluster_wide_cap=%s, max_claim_per_worker=%s, max_claim_batch=%s',
+                self.cfg.processes,
+                (
+                    self.cfg.cluster_wide_cap
+                    if self.cfg.cluster_wide_cap is not None
+                    else 'unlimited'
+                ),
+                max_claimed_effective,
+                self.cfg.max_claim_batch,
+            )
 
-        # Subscribe to each queue channel (and a global) in one batch
-        all_channels = [f'task_queue_{q}' for q in self.cfg.queues] + ['task_new']
-        listen_r = await self.listener.listen_many(all_channels)
-        if is_err(listen_r):
-            err = listen_r.err_value
-            raise err.exception or RuntimeError(err.message)
-        all_queues = listen_r.ok_value
-        self._queues = all_queues[:-1]
-        self._global = all_queues[-1]
-        logger.info(f'Subscribed to queues: {self.cfg.queues} + global')
-        # Start claimer heartbeat loop (CLAIMED coverage)
-        self._spawn_background(
-            self._claimer_heartbeat_loop(), name='claimer-heartbeat',
-        )
-        # Start worker state heartbeat loop for monitoring
-        self._spawn_background(
-            self._worker_state_heartbeat_loop(), name='worker-state-heartbeat',
-        )
-        logger.info('Worker state heartbeat loop started for monitoring')
-        # Start reaper loop for automatic stale task handling
-        if self.cfg.recovery_config:
-            self._spawn_background(self._reaper_loop(), name='reaper')
-            logger.info('Reaper loop started for automatic stale task recovery')
+            # Subscribe to each queue channel (and a global) in one batch.
+            all_channels = [f'task_queue_{q}' for q in self.cfg.queues] + ['task_new']
+            listen_r = await self.listener.listen_many(all_channels)
+            if is_err(listen_r):
+                err = listen_r.err_value
+                raise err.exception or RuntimeError(err.message)
+            all_queues = listen_r.ok_value
+            self._queues = all_queues[:-1]
+            self._global = all_queues[-1]
+            logger.info(f'Subscribed to queues: {self.cfg.queues} + global')
+
+            # Create the process pool only after listener startup/subscription succeeds.
+            self._executor = self._create_executor()
+
+            # Start claimer heartbeat loop (CLAIMED coverage)
+            self._spawn_background(
+                self._claimer_heartbeat_loop(), name='claimer-heartbeat',
+            )
+            # Start worker state heartbeat loop for monitoring
+            self._spawn_background(
+                self._worker_state_heartbeat_loop(), name='worker-state-heartbeat',
+            )
+            logger.info('Worker state heartbeat loop started for monitoring')
+            # Start reaper loop for automatic stale task handling
+            if self.cfg.recovery_config:
+                self._spawn_background(self._reaper_loop(), name='reaper')
+                logger.info('Reaper loop started for automatic stale task recovery')
+        except Exception:
+            await self._cleanup_after_failed_start()
+            raise
 
     async def stop(
         self,
@@ -506,7 +512,7 @@ class Worker:
 
     async def run_forever(self) -> None:
         """Main orchestrator loop."""
-        await self._start_with_resilience()
+        await self._start_with_resilience_config()
         if self._stop.is_set():
             return
         logger.info('Worker started')

@@ -605,20 +605,36 @@ class Horsies:
         return errors
 
     def _check_broker_connectivity(self) -> list[HorsiesError]:
-        """Check broker connectivity via SELECT 1."""
+        """Check broker connectivity via SELECT 1 using an isolated engine.
+
+        Uses a short-lived async engine/session to avoid mutating the app's
+        long-lived broker/session pool inside an ephemeral asyncio.run loop.
+        """
         import asyncio
 
         from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
         HEALTH_CHECK_SQL = text("""SELECT 1""")
 
         errors: list[HorsiesError] = []
         try:
-            broker = self.get_broker()
+            engine_cfg = self.config.broker.model_dump(
+                exclude={'database_url'}, exclude_none=True
+            )
+            health_engine = create_async_engine(
+                self.config.broker.database_url, **engine_cfg
+            )
+            health_session_factory = async_sessionmaker(
+                health_engine, expire_on_commit=False
+            )
 
             async def _test_connection() -> None:
-                async with broker.session_factory() as session:
-                    await session.execute(HEALTH_CHECK_SQL)
+                try:
+                    async with health_session_factory() as session:
+                        await session.execute(HEALTH_CHECK_SQL)
+                finally:
+                    await health_engine.dispose()
 
             asyncio.run(_test_connection())
         except HorsiesError as exc:

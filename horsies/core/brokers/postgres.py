@@ -1,6 +1,6 @@
 # app/core/brokers/postgres.py
 from __future__ import annotations
-import uuid, asyncio, hashlib, contextlib
+import uuid, asyncio, hashlib, contextlib, threading
 from typing import Any, Optional, TYPE_CHECKING
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
@@ -854,7 +854,7 @@ class PostgresBroker:
             )
 
     async def close_async(self) -> BrokerResult[None]:
-        """Close listener and engine, attempting both even if one fails."""
+        """Close listener/engine and stop sync loop runner if it was started."""
         errors: list[BaseException] = []
         try:
             await self.listener.close()
@@ -864,6 +864,18 @@ class PostgresBroker:
             await self.async_engine.dispose()
         except Exception as exc:
             errors.append(exc)
+        # If sync APIs started the LoopRunner, close_async should also tear it down
+        # when called from any thread except the loop-runner thread itself.
+        loop_thread = self._loop_runner._thread
+        if (
+            self._loop_runner._started
+            and loop_thread is not None
+            and threading.current_thread() is not loop_thread
+        ):
+            try:
+                self._loop_runner.stop()
+            except Exception as exc:
+                errors.append(exc)
         if errors:
             return _broker_err(
                 BrokerErrorCode.CLOSE_FAILED,

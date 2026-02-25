@@ -21,17 +21,10 @@ from horsies.core.models.schedule import (
 )
 
 from tests.e2e.helpers.worker import run_worker, run_scheduler
-from tests.e2e.tasks import instance_scheduler
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCHEDULER_INSTANCE = 'tests.e2e.tasks.instance_scheduler:app'
-
-
-@pytest.fixture
-def scheduler_broker() -> PostgresBroker:
-    """Broker instance for scheduler tests."""
-    return instance_scheduler.broker
 
 
 # =============================================================================

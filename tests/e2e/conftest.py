@@ -20,6 +20,8 @@ from tests.e2e.tasks import instance_cluster_cap
 from tests.e2e.tasks import instance_recovery
 from tests.e2e.tasks import instance_softcap
 from tests.e2e.tasks import instance_requeue_guard
+from tests.e2e.tasks import instance_scheduler
+from tests.e2e.tasks import instance_retry_precedence
 
 
 DB_URL = os.environ.get(
@@ -96,6 +98,30 @@ async def softcap_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def requeue_guard_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker for requeue-guard age-guard e2e tests."""
     brk = instance_requeue_guard.broker
+    await brk.ensure_schema_initialized()
+    yield brk
+    try:
+        await brk.close_async()
+    except RuntimeError:
+        pass
+
+
+@pytest_asyncio.fixture(scope='session', loop_scope='session')
+async def scheduler_broker() -> AsyncGenerator[PostgresBroker, None]:
+    """Broker instance for scheduler e2e tests."""
+    brk = instance_scheduler.broker
+    await brk.ensure_schema_initialized()
+    yield brk
+    try:
+        await brk.close_async()
+    except RuntimeError:
+        pass
+
+
+@pytest_asyncio.fixture(scope='session', loop_scope='session')
+async def retry_precedence_broker() -> AsyncGenerator[PostgresBroker, None]:
+    """Broker instance for retry-precedence e2e tests."""
+    brk = instance_retry_precedence.broker
     await brk.ensure_schema_initialized()
     yield brk
     try:

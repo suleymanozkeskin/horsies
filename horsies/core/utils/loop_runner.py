@@ -2,6 +2,7 @@
 from __future__ import annotations
 import asyncio
 import atexit
+import contextlib
 import threading
 from concurrent.futures import Future
 from typing import Any, Awaitable, Callable
@@ -63,11 +64,16 @@ class LoopRunner:
         self.logger.debug(
             f'Calling {coro_fn.__name__} with args: {args} and kwargs: {kwargs}'
         )
+        coro: Awaitable[Any] | None = None
         try:
-            fut: Future[Any] = asyncio.run_coroutine_threadsafe(
-                coro_fn(*args, **kwargs), loop,
-            )
+            coro = coro_fn(*args, **kwargs)
+            fut: Future[Any] = asyncio.run_coroutine_threadsafe(coro, loop)
         except Exception as exc:
+            # If scheduling fails, close the created coroutine to avoid
+            # "coroutine was never awaited" RuntimeWarnings.
+            if asyncio.iscoroutine(coro):
+                with contextlib.suppress(RuntimeError):
+                    coro.close()
             raise LoopRunnerError(
                 f'Failed to schedule coroutine on loop runner: {type(exc).__name__}: {exc}',
             ) from exc

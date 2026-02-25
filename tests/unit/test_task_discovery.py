@@ -461,6 +461,76 @@ class TestCheckTaskImportsErrorClassification:
 
 
 @pytest.mark.unit
+class TestLiveBrokerConnectivityCheck:
+    """Tests for app.check(live=True) broker connectivity behavior."""
+
+    def test_live_check_uses_isolated_engine_not_app_broker(self) -> None:
+        """Live connectivity check should not initialize or touch app._broker."""
+        app = _make_app()
+
+        mock_engine = mock.MagicMock()
+        mock_engine.dispose = mock.AsyncMock()
+        mock_session = mock.AsyncMock()
+        mock_session.__aenter__ = mock.AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = mock.AsyncMock(return_value=None)
+        mock_session.execute = mock.AsyncMock(return_value=None)
+        mock_session_factory = mock.MagicMock(return_value=mock_session)
+
+        with (
+            mock.patch(
+                'sqlalchemy.ext.asyncio.create_async_engine',
+                return_value=mock_engine,
+            ),
+            mock.patch(
+                'sqlalchemy.ext.asyncio.async_sessionmaker',
+                return_value=mock_session_factory,
+            ),
+            mock.patch.object(
+                app, 'get_broker', side_effect=AssertionError('must not call get_broker')
+            ),
+        ):
+            errors = app.check(live=True)
+
+        assert errors == []
+        assert app._broker is None
+        mock_session.execute.assert_awaited_once()
+        mock_engine.dispose.assert_awaited_once()
+
+    def test_live_check_reports_connectivity_error_without_touching_broker(self) -> None:
+        """Connectivity failures map to BROKER_INVALID_URL and still dispose engine."""
+        app = _make_app()
+
+        mock_engine = mock.MagicMock()
+        mock_engine.dispose = mock.AsyncMock()
+        mock_session = mock.AsyncMock()
+        mock_session.__aenter__ = mock.AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = mock.AsyncMock(return_value=None)
+        mock_session.execute = mock.AsyncMock(side_effect=RuntimeError('db down'))
+        mock_session_factory = mock.MagicMock(return_value=mock_session)
+
+        with (
+            mock.patch(
+                'sqlalchemy.ext.asyncio.create_async_engine',
+                return_value=mock_engine,
+            ),
+            mock.patch(
+                'sqlalchemy.ext.asyncio.async_sessionmaker',
+                return_value=mock_session_factory,
+            ),
+            mock.patch.object(
+                app, 'get_broker', side_effect=AssertionError('must not call get_broker')
+            ),
+        ):
+            errors = app.check(live=True)
+
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.BROKER_INVALID_URL
+        assert 'db down' in (errors[0].notes[0] if errors[0].notes else '')
+        assert app._broker is None
+        mock_engine.dispose.assert_awaited_once()
+
+
+@pytest.mark.unit
 class TestDiscoverAppErrorClassification:
     """Tests for discover_app() error code classification.
 
