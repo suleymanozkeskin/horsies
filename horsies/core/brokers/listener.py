@@ -319,6 +319,11 @@ class PostgresListener:
             finally:
                 self._fd_registered = False
 
+    async def _handle_health_disconnect(self) -> None:
+        """Reset listener connections after health monitor detects a dead connection."""
+        self._unregister_fd_monitoring()
+        await self._close_connections()
+
     async def _health_monitor(self) -> None:
         """
         Proactive health monitoring using psycopg3 recommended pattern:
@@ -339,9 +344,7 @@ class PostgresListener:
                             await self._command_conn.execute('SELECT 1')
                         except OperationalError:
                             # Connection is dead, trigger reconnection
-                            self._unregister_fd_monitoring()
-                            self._command_conn = None
-                            self._dispatcher_conn = None
+                            await self._handle_health_disconnect()
                             continue
 
                 except asyncio.TimeoutError:
@@ -351,9 +354,7 @@ class PostgresListener:
                             await self._command_conn.execute('SELECT 1')
                         except OperationalError:
                             # Connection is dead, trigger reconnection
-                            self._unregister_fd_monitoring()
-                            self._command_conn = None
-                            self._dispatcher_conn = None
+                            await self._handle_health_disconnect()
                             continue
 
             except asyncio.CancelledError:
@@ -624,6 +625,18 @@ class PostgresListener:
         to avoid cross-loop task/connection misuse during teardown.
         """
         current_loop = asyncio.get_running_loop()
+        if (
+            self._owner_loop is None
+            and self._dispatcher_conn is None
+            and self._command_conn is None
+            and self._health_check_task is None
+            and self._dispatcher_task is None
+            and not self._fd_registered
+            and not self._subs
+            and not self._listen_channels
+        ):
+            # Already fully closed and detached; preserve loop-agnostic state.
+            return
         if self._owner_loop is not None and self._owner_loop is not current_loop:
             owner_loop = self._owner_loop
             if owner_loop.is_closed():

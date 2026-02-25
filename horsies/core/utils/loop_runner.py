@@ -21,37 +21,59 @@ class LoopRunner:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._started = False
+        self._closed = False
+        self._state_lock = threading.RLock()
 
     def _ensure_loop(self) -> asyncio.AbstractEventLoop:
         """Create the event loop and thread on first use."""
-        if self._loop is None:
-            self._loop = asyncio.new_event_loop()
-            self._thread = threading.Thread(
-                target=self._loop.run_forever, name='horsies-loop', daemon=True,
-            )
-        return self._loop
+        with self._state_lock:
+            if self._closed:
+                raise LoopRunnerError(
+                    'Loop runner has been stopped and cannot be restarted'
+                )
+            if self._loop is None:
+                self._loop = asyncio.new_event_loop()
+                self._thread = threading.Thread(
+                    target=self._loop.run_forever, name='horsies-loop', daemon=True,
+                )
+            return self._loop
 
     def start(self) -> None:
-        if not self._started:
+        with self._state_lock:
+            if self._closed:
+                raise LoopRunnerError(
+                    'Loop runner has been stopped and cannot be restarted'
+                )
+            if self._started:
+                return
             self._ensure_loop()
             assert self._thread is not None
             try:
                 self._thread.start()
             except Exception as exc:
+                self._loop = None
+                self._thread = None
                 raise LoopRunnerError(
                     f'Failed to start loop runner thread: {type(exc).__name__}: {exc}',
                 ) from exc
             self._started = True
 
     def stop(self) -> None:
-        if self._started and self._loop is not None:
-            self._loop.call_soon_threadsafe(self._loop.stop)
-            if self._thread is not None:
-                self._thread.join(timeout=2)
-            self._loop.close()
-            self._loop = None
-            self._thread = None
-            self._started = False
+        with self._state_lock:
+            if self._started and self._loop is not None:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+                if self._thread is not None:
+                    self._thread.join(timeout=2)
+                    if self._thread.is_alive():
+                        self.logger.warning(
+                            'Loop runner thread did not stop within timeout; leaving loop open'
+                        )
+                        return
+                self._loop.close()
+                self._loop = None
+                self._thread = None
+                self._started = False
+            self._closed = True
 
     def call(
         self, coro_fn: Callable[..., Awaitable[Any]], *args: Any, **kwargs: Any
@@ -59,8 +81,10 @@ class LoopRunner:
         """Run an async function and block until it completes, from sync code."""
         if not self._started:
             self.start()
-        loop = self._loop
-        assert loop is not None, 'Event loop not available after start()'
+        with self._state_lock:
+            loop = self._loop
+            if self._closed or not self._started or loop is None:
+                raise LoopRunnerError('Loop runner is not running')
         self.logger.debug(
             f'Calling {coro_fn.__name__} with args: {args} and kwargs: {kwargs}'
         )

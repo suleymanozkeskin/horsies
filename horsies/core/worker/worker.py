@@ -1821,14 +1821,13 @@ class Worker:
         failing operation is disabled for the process lifetime to avoid spamming
         logs every check_interval_ms forever.
         """
-        from horsies.core.brokers.postgres import PostgresBroker
-
         if not self.cfg.recovery_config:
             return
 
         recovery_cfg = self.cfg.recovery_config
         check_interval_ms = recovery_cfg.check_interval_ms
         temp_broker = None
+        owns_temp_broker = False
         next_retention_cleanup_at = time.monotonic()
 
         # Per-operation consecutive permanent failure counters.
@@ -1846,12 +1845,26 @@ class Worker:
         )
 
         try:
-            from horsies.core.models.broker import PostgresConfig
-
-            temp_broker_config = PostgresConfig(database_url=self.cfg.dsn)
-            temp_broker = PostgresBroker(temp_broker_config)
+            # Prefer the app-owned broker to avoid creating redundant engines/listeners.
             if self._app is not None:
-                temp_broker.app = self._app
+                try:
+                    temp_broker = self._app.get_broker()
+                except Exception as app_broker_err:
+                    logger.warning(
+                        'Reaper could not reuse app broker; falling back to temporary broker: %s',
+                        app_broker_err,
+                    )
+                    temp_broker = None
+
+            if temp_broker is None:
+                from horsies.core.brokers.postgres import PostgresBroker
+                from horsies.core.models.broker import PostgresConfig
+
+                temp_broker_config = PostgresConfig(database_url=self.cfg.dsn)
+                temp_broker = PostgresBroker(temp_broker_config)
+                owns_temp_broker = True
+                if self._app is not None:
+                    temp_broker.app = self._app
 
             while not self._stop.is_set():
                 try:
@@ -2029,7 +2042,7 @@ class Worker:
             logger.info('Reaper loop cancelled')
             return
         finally:
-            if temp_broker is not None:
+            if owns_temp_broker and temp_broker is not None:
                 close_result = await temp_broker.close_async()
                 if is_err(close_result):
                     logger.error(

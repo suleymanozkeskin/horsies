@@ -413,7 +413,27 @@ class WorkflowHandle(Generic[OutT]):
                     await asyncio.sleep(min(wait_time, 1.0))
         finally:
             if q is not None:
-                await self.broker.listener.unsubscribe('workflow_done', q)
+                await self._unsubscribe_workflow_done_safely(q)
+
+    async def _unsubscribe_workflow_done_safely(self, q: asyncio.Queue[Any]) -> None:
+        """Ensure unsubscribe cleanup completes even under repeated cancellation."""
+        unsubscribe_task = asyncio.create_task(
+            self.broker.listener.unsubscribe('workflow_done', q)
+        )
+        cancelled_during_cleanup = False
+        while not unsubscribe_task.done():
+            try:
+                await asyncio.shield(unsubscribe_task)
+            except asyncio.CancelledError:
+                cancelled_during_cleanup = True
+                continue
+
+        # Propagate unsubscribe failures (if any).
+        await unsubscribe_task
+
+        # Propagate cancellation only after cleanup has completed.
+        if cancelled_during_cleanup:
+            raise asyncio.CancelledError
 
     async def _drain_queue_for_workflow(self, q: Any) -> None:
         """Drain notifications until one matches this workflow."""

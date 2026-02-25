@@ -429,6 +429,59 @@ class TestReaperHeartbeatRetention:
         created_brokers[0].close_async.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_reaper_reuses_app_broker_when_available(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When app broker exists, reaper should reuse it and not construct/close temp broker."""
+        worker = _make_worker()
+        worker.cfg.recovery_config = RecoveryConfig(
+            auto_requeue_stale_claimed=False,
+            auto_fail_stale_running=False,
+            check_interval_ms=1_000,
+            heartbeat_retention_hours=12,
+            worker_state_retention_hours=None,
+            terminal_record_retention_hours=None,
+        )
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.commit = AsyncMock()
+
+        async def _execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+            if stmt is DELETE_EXPIRED_HEARTBEATS_SQL:
+                worker._stop.set()
+                return MagicMock(rowcount=2)
+            return MagicMock(rowcount=0)
+
+        session.execute = AsyncMock(side_effect=_execute)
+
+        app_broker = MagicMock()
+        app_broker.session_factory = MagicMock(return_value=session)
+        app_broker.close_async = AsyncMock(return_value=Ok(None))
+        app = MagicMock()
+        app.get_broker.return_value = app_broker
+        worker._app = app
+
+        class _UnexpectedBroker:
+            def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+                raise AssertionError('Reaper should reuse app broker, not create temp broker')
+
+        recover_mock = AsyncMock(return_value=0)
+        monkeypatch.setattr(
+            'horsies.core.brokers.postgres.PostgresBroker', _UnexpectedBroker
+        )
+        monkeypatch.setattr(
+            'horsies.core.workflows.recovery.recover_stuck_workflows', recover_mock
+        )
+
+        await worker._reaper_loop()
+
+        app.get_broker.assert_called_once()
+        recover_mock.assert_awaited()
+        app_broker.close_async.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_reaper_prunes_worker_state_and_terminal_rows(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

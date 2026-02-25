@@ -767,6 +767,27 @@ class TestCreateTaskWrapperSendAsync:
         assert result.err.error_code == LibraryErrorCode.UNHANDLED_EXCEPTION
 
     @pytest.mark.asyncio
+    async def test_send_async_enqueue_raises_returns_error_handle(self) -> None:
+        """Async enqueue infrastructure exception returns error handle (not raise)."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        broker.enqueue_async = AsyncMock(side_effect=RuntimeError('loop dead'))
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        handle = await wrapper.send_async(1)
+
+        result = handle.get()
+        assert result.is_err()
+        assert result.err is not None
+        assert result.err.error_code == LibraryErrorCode.UNHANDLED_EXCEPTION
+        assert isinstance(result.err.exception, RuntimeError)
+        assert 'Failed to enqueue task good_fn: loop dead' in result.err.message
+
+    @pytest.mark.asyncio
     async def test_send_async_queue_validation_failure(self) -> None:
         """Queue validation error in send_async returns error handle."""
         def good_fn(x: int) -> TaskResult[int, TaskError]:

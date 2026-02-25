@@ -427,6 +427,48 @@ class TestFdMonitoring:
 
 
 # ---------------------------------------------------------------------------
+# TestHealthMonitor
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestHealthMonitor:
+    """Tests for _health_monitor disconnect handling."""
+
+    @pytest.mark.asyncio
+    async def test_operational_error_closes_connections_before_reset(self) -> None:
+        """Detected dead connection should trigger best-effort close/reset."""
+        listener = _make_listener()
+        disp_conn = _make_mock_conn()
+        cmd_conn = _make_mock_conn()
+        cmd_conn.execute = AsyncMock(side_effect=OperationalError('dead'))
+        listener._dispatcher_conn = disp_conn
+        listener._command_conn = cmd_conn
+        listener._fd_registered = True
+        listener._fd_activity.set()
+
+        with patch.object(listener, '_unregister_fd_monitoring') as mock_unregister:
+            task = asyncio.create_task(listener._health_monitor())
+            try:
+                for _ in range(50):
+                    if listener._dispatcher_conn is None and listener._command_conn is None:
+                        break
+                    await asyncio.sleep(0)
+                else:
+                    pytest.fail('health monitor did not reset connections in time')
+            finally:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+        mock_unregister.assert_called_once()
+        disp_conn.close.assert_awaited_once()
+        cmd_conn.close.assert_awaited_once()
+        assert listener._dispatcher_conn is None
+        assert listener._command_conn is None
+
+
+# ---------------------------------------------------------------------------
 # TestDispatcher
 # ---------------------------------------------------------------------------
 
@@ -831,6 +873,17 @@ class TestClose:
 
         # Should not raise
         await listener.close()
+
+    @pytest.mark.asyncio
+    async def test_already_closed_close_does_not_rebind_owner_loop(self) -> None:
+        """close() on fully closed listener should not bind loop ownership again."""
+        listener = _make_listener()
+
+        with patch.object(listener, '_bind_or_validate_loop') as mock_bind:
+            await listener.close()
+
+        mock_bind.assert_not_called()
+        assert listener._owner_loop is None
 
     @pytest.mark.asyncio
     async def test_unregisters_fd_monitoring(self) -> None:

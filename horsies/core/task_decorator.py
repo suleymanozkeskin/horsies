@@ -818,15 +818,21 @@ def create_task_wrapper(
             )
         good_until = task_options.good_until if task_options else None
 
-        result = await broker.enqueue_async(
-            task_name,
-            args,
-            kwargs,
-            validated,
-            priority=priority,
-            good_until=good_until,
-            task_options=_pre_serialized_options,
-        )
+        try:
+            result = await broker.enqueue_async(
+                task_name,
+                args,
+                kwargs,
+                validated,
+                priority=priority,
+                good_until=good_until,
+                task_options=_pre_serialized_options,
+            )
+        except Exception as e:
+            return _immediate_error_handle(
+                e,
+                f'Failed to enqueue task {fn.__name__}: {e}',
+            )
         if is_err(result):
             err = result.err_value
             return _immediate_error_handle(
