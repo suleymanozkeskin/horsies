@@ -7,6 +7,7 @@ resolve_exception_error_code() → TaskError → _should_retry_task().
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -31,23 +32,41 @@ def _make_row(
     retry_count: int,
     max_retries: int,
     task_options: str | None,
+    *,
+    good_until: datetime | None = None,
+    db_now: datetime | None = None,
 ) -> SimpleNamespace:
     """Build a fake DB row matching GET_TASK_RETRY_INFO_SQL columns."""
+    if db_now is None:
+        db_now = datetime.now(timezone.utc)
     return SimpleNamespace(
         retry_count=retry_count,
         max_retries=max_retries,
         task_options=task_options,
+        good_until=good_until,
+        db_now=db_now,
     )
 
 
 def _task_options_json(
     auto_retry_for: list[str],
+    *,
+    intervals: list[int] | None = None,
+    backoff_strategy: str | None = None,
+    jitter: bool | None = None,
 ) -> str:
     """Build a valid task_options JSON with retry_policy.auto_retry_for."""
+    retry_policy: dict[str, object] = {
+        "auto_retry_for": auto_retry_for,
+    }
+    if intervals is not None:
+        retry_policy["intervals"] = intervals
+    if backoff_strategy is not None:
+        retry_policy["backoff_strategy"] = backoff_strategy
+    if jitter is not None:
+        retry_policy["jitter"] = jitter
     return json.dumps({
-        "retry_policy": {
-            "auto_retry_for": auto_retry_for,
-        },
+        "retry_policy": retry_policy,
     })
 
 
@@ -244,6 +263,221 @@ class TestShouldRetryTask:
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 
         assert result is True
+
+    @pytest.mark.asyncio
+    async def test_good_until_already_expired_blocks_retry(self) -> None:
+        """Already-expired good_until blocks retry even when code matches."""
+        db_now = datetime.now(timezone.utc)
+        row = _make_row(
+            retry_count=0,
+            max_retries=3,
+            task_options=_task_options_json(["RATE_LIMITED"]),
+            good_until=db_now - timedelta(seconds=10),
+            db_now=db_now,
+        )
+        session = _mock_session(row)
+        error = TaskError(error_code="RATE_LIMITED")
+
+        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_good_until_none_does_not_affect_retry(self) -> None:
+        """None good_until keeps existing retry eligibility behavior."""
+        row = _make_row(
+            retry_count=0,
+            max_retries=3,
+            task_options=_task_options_json(["RATE_LIMITED"]),
+            good_until=None,
+        )
+        session = _mock_session(row)
+        error = TaskError(error_code="RATE_LIMITED")
+
+        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_good_until_in_future_allows_retry(self) -> None:
+        """Future good_until allows retry to proceed to scheduling step."""
+        db_now = datetime.now(timezone.utc)
+        row = _make_row(
+            retry_count=0,
+            max_retries=3,
+            task_options=_task_options_json(["RATE_LIMITED"]),
+            good_until=db_now + timedelta(seconds=120),
+            db_now=db_now,
+        )
+        session = _mock_session(row)
+        error = TaskError(error_code="RATE_LIMITED")
+
+        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
+
+        assert result is True
+
+
+@pytest.mark.unit
+class TestScheduleRetryExpiry:
+    """Tests for Worker._schedule_retry() good_until-aware outcomes."""
+
+    @staticmethod
+    def _make_schedule_session(
+        config_row: SimpleNamespace,
+        update_row: SimpleNamespace | None,
+        *,
+        postcheck_row: SimpleNamespace | None = None,
+    ) -> AsyncMock:
+        config_result = MagicMock()
+        config_result.fetchone.return_value = config_row
+        update_result = MagicMock()
+        update_result.fetchone.return_value = update_row
+        postcheck_result = MagicMock()
+        postcheck_result.fetchone.return_value = postcheck_row
+
+        session = AsyncMock()
+        if update_row is None:
+            session.execute = AsyncMock(
+                side_effect=[config_result, update_result, postcheck_result]
+            )
+        else:
+            session.execute = AsyncMock(side_effect=[config_result, update_result])
+        return session
+
+    @pytest.mark.asyncio
+    async def test_returns_expired_when_next_retry_exceeds_good_until(self) -> None:
+        db_now = datetime.now(timezone.utc)
+        config_row = SimpleNamespace(
+            retry_count=0,
+            task_options=_task_options_json(
+                ["TRANSIENT"], intervals=[60], backoff_strategy="fixed", jitter=False
+            ),
+            good_until=db_now + timedelta(seconds=5),
+            db_now=db_now,
+        )
+        session = self._make_schedule_session(config_row, SimpleNamespace(id="task-1"))
+
+        worker = MagicMock(spec=Worker)
+        worker._calculate_retry_delay.return_value = 60.0
+        worker._get_task_queue_name = AsyncMock(return_value="default")
+        worker._spawn_background = MagicMock()
+        worker._schedule_delayed_notification = MagicMock(return_value=AsyncMock())
+
+        outcome = await Worker._schedule_retry(worker, "task-1", session)
+
+        assert outcome == 'expired'
+        assert session.execute.await_count == 1
+        worker._spawn_background.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_returns_scheduled_when_within_good_until(self) -> None:
+        db_now = datetime.now(timezone.utc)
+        config_row = SimpleNamespace(
+            retry_count=0,
+            task_options=_task_options_json(
+                ["TRANSIENT"], intervals=[5], backoff_strategy="fixed", jitter=False
+            ),
+            good_until=db_now + timedelta(seconds=120),
+            db_now=db_now,
+        )
+        session = self._make_schedule_session(config_row, SimpleNamespace(id="task-1"))
+
+        worker = MagicMock(spec=Worker)
+        worker._calculate_retry_delay.return_value = 5.0
+        worker._get_task_queue_name = AsyncMock(return_value="default")
+        worker._spawn_background = MagicMock()
+        worker._schedule_delayed_notification = MagicMock(return_value=AsyncMock())
+
+        outcome = await Worker._schedule_retry(worker, "task-1", session)
+
+        assert outcome == 'scheduled'
+        assert session.execute.await_count == 2
+        worker._spawn_background.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_returns_scheduled_when_good_until_none(self) -> None:
+        db_now = datetime.now(timezone.utc)
+        config_row = SimpleNamespace(
+            retry_count=0,
+            task_options=_task_options_json(
+                ["TRANSIENT"], intervals=[5], backoff_strategy="fixed", jitter=False
+            ),
+            good_until=None,
+            db_now=db_now,
+        )
+        session = self._make_schedule_session(config_row, SimpleNamespace(id="task-1"))
+
+        worker = MagicMock(spec=Worker)
+        worker._calculate_retry_delay.return_value = 5.0
+        worker._get_task_queue_name = AsyncMock(return_value="default")
+        worker._spawn_background = MagicMock()
+        worker._schedule_delayed_notification = MagicMock(return_value=AsyncMock())
+
+        outcome = await Worker._schedule_retry(worker, "task-1", session)
+
+        assert outcome == 'scheduled'
+        assert session.execute.await_count == 2
+        worker._spawn_background.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_returns_reaper_reclaimed_when_update_returns_none(self) -> None:
+        db_now = datetime.now(timezone.utc)
+        config_row = SimpleNamespace(
+            retry_count=0,
+            task_options=_task_options_json(
+                ["TRANSIENT"], intervals=[5], backoff_strategy="fixed", jitter=False
+            ),
+            good_until=None,
+            db_now=db_now,
+        )
+        session = self._make_schedule_session(
+            config_row,
+            update_row=None,
+            postcheck_row=SimpleNamespace(status='FAILED', good_until=None),
+        )
+
+        worker = MagicMock(spec=Worker)
+        worker._calculate_retry_delay.return_value = 5.0
+        worker._get_task_queue_name = AsyncMock(return_value="default")
+        worker._spawn_background = MagicMock()
+        worker._schedule_delayed_notification = MagicMock(return_value=AsyncMock())
+
+        outcome = await Worker._schedule_retry(worker, "task-1", session)
+
+        assert outcome == 'reaper_reclaimed'
+        assert session.execute.await_count == 3
+        worker._spawn_background.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_returns_expired_when_update_guard_rejects_due_to_good_until(self) -> None:
+        db_now = datetime.now(timezone.utc)
+        initial_good_until = db_now + timedelta(seconds=60)
+        postcheck_good_until = db_now + timedelta(seconds=4)
+        config_row = SimpleNamespace(
+            retry_count=0,
+            task_options=_task_options_json(
+                ["TRANSIENT"], intervals=[5], backoff_strategy="fixed", jitter=False
+            ),
+            good_until=initial_good_until,
+            db_now=db_now,
+        )
+        session = self._make_schedule_session(
+            config_row,
+            update_row=None,
+            postcheck_row=SimpleNamespace(status='RUNNING', good_until=postcheck_good_until),
+        )
+
+        worker = MagicMock(spec=Worker)
+        worker._calculate_retry_delay.return_value = 5.0
+        worker._get_task_queue_name = AsyncMock(return_value="default")
+        worker._spawn_background = MagicMock()
+        worker._schedule_delayed_notification = MagicMock(return_value=AsyncMock())
+
+        outcome = await Worker._schedule_retry(worker, "task-1", session)
+
+        assert outcome == 'expired'
+        assert session.execute.await_count == 3
+        worker._spawn_background.assert_not_called()
 
 
 @pytest.mark.unit

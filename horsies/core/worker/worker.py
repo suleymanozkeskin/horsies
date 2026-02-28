@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import Enum
 from datetime import datetime, timezone, timedelta
 from importlib import import_module
-from typing import Any, Optional
+from typing import Any, Optional, Literal
 import hashlib
 import sys
 from psycopg.types.json import Jsonb
@@ -76,6 +76,7 @@ from horsies.core.worker.sql import (  # noqa: F401
     CHECK_WORKFLOW_TASK_EXISTS_SQL,
     GET_TASK_RETRY_INFO_SQL,
     GET_TASK_RETRY_CONFIG_SQL,
+    GET_TASK_RETRY_POSTCHECK_SQL,
     SCHEDULE_TASK_RETRY_SQL,
     NOTIFY_DELAYED_SQL,
     INSERT_CLAIMER_HEARTBEAT_SQL,
@@ -1192,14 +1193,23 @@ class Worker:
                             pass
                     should_retry = await self._should_retry_task(task_id, task_error, s)
                     if should_retry:
-                        retry_ok = await self._schedule_retry(task_id, s)
-                        if not retry_ok:
-                            logger.warning(
-                                f'Task {task_id} retry aborted during finalize: '
-                                f'task no longer RUNNING (reaper reclaimed).'
-                            )
-                        await s.commit()
-                        return Ok(None)
+                        match await self._schedule_retry(task_id, s):
+                            case 'scheduled':
+                                await s.commit()
+                                return Ok(None)
+                            case 'reaper_reclaimed':
+                                logger.warning(
+                                    f'Task {task_id} retry aborted during finalize: '
+                                    f'task no longer RUNNING (reaper reclaimed).'
+                                )
+                                await s.commit()
+                                return Ok(None)
+                            case 'expired':
+                                logger.info(
+                                    f'Task {task_id} retry skipped: good_until exceeded, '
+                                    f'falling through to mark as failed.'
+                                )
+                                # Fall through to mark task FAILED with original error.
 
                     # Mark as failed if no retry
                     fail_res = await s.execute(
@@ -1560,15 +1570,32 @@ class Worker:
             else error.error_code
         )
         if code and code in auto_retry_for:
+            good_until = row.good_until
+            if good_until is not None:
+                db_now = row.db_now
+                if good_until.tzinfo is None:
+                    good_until = good_until.replace(tzinfo=timezone.utc)
+                if db_now.tzinfo is None:
+                    db_now = db_now.replace(tzinfo=timezone.utc)
+                if good_until <= db_now:
+                    logger.info(
+                        'Task %s retry skipped: good_until (%s) already passed',
+                        task_id, good_until,
+                    )
+                    return False
             return True
 
         return False
 
-    async def _schedule_retry(self, task_id: str, session: AsyncSession) -> bool:
+    async def _schedule_retry(
+        self, task_id: str, session: AsyncSession
+    ) -> Literal['scheduled', 'reaper_reclaimed', 'expired']:
         """Schedule a task for retry by updating its status and next retry time.
 
-        Returns True if the retry was scheduled, False if the task was already
-        reclaimed by the reaper (status no longer RUNNING).
+        Returns:
+        - 'scheduled' when retry was persisted
+        - 'reaper_reclaimed' when task is no longer RUNNING
+        - 'expired' when retry would land at/after good_until
         """
         # Get current retry configuration
         result = await session.execute(
@@ -1578,7 +1605,7 @@ class Worker:
         row = result.fetchone()
 
         if not row:
-            return False
+            return 'reaper_reclaimed'
 
         retry_count = (row.retry_count or 0) + 1
 
@@ -1600,7 +1627,22 @@ class Worker:
 
         # Calculate retry delay
         delay_seconds = self._calculate_retry_delay(retry_count, retry_policy_data)
-        next_retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+        db_now = row.db_now
+        if db_now.tzinfo is None:
+            db_now = db_now.replace(tzinfo=timezone.utc)
+        next_retry_at = db_now + timedelta(seconds=delay_seconds)
+
+        # Do not schedule retries that will be unclaimable due to expiry.
+        good_until = row.good_until
+        if good_until is not None:
+            if good_until.tzinfo is None:
+                good_until = good_until.replace(tzinfo=timezone.utc)
+            if next_retry_at >= good_until:
+                logger.info(
+                    'Task %s retry expired: next_retry_at (%s) would exceed good_until (%s)',
+                    task_id, next_retry_at, good_until,
+                )
+                return 'expired'
 
         # Update task for retry — guarded by AND status = 'RUNNING'
         res = await session.execute(
@@ -1608,11 +1650,37 @@ class Worker:
             {'id': task_id, 'retry_count': retry_count, 'next_retry_at': next_retry_at},
         )
         if res.fetchone() is None:
+            # Distinguish expiry guard rejections from true reaper reclaim races.
+            postcheck = await session.execute(
+                GET_TASK_RETRY_POSTCHECK_SQL,
+                {'id': task_id},
+            )
+            postcheck_row = postcheck.fetchone()
+            if postcheck_row is not None:
+                status_value = postcheck_row.status
+                is_running = (
+                    status_value == 'RUNNING'
+                    or getattr(status_value, 'value', None) == 'RUNNING'
+                )
+                if is_running:
+                    post_good_until = postcheck_row.good_until
+                    if post_good_until is not None:
+                        if post_good_until.tzinfo is None:
+                            post_good_until = post_good_until.replace(
+                                tzinfo=timezone.utc
+                            )
+                        if next_retry_at >= post_good_until:
+                            logger.info(
+                                'Task %s retry expired at SQL guard: next_retry_at (%s) '
+                                'would exceed good_until (%s)',
+                                task_id, next_retry_at, post_good_until,
+                            )
+                            return 'expired'
             logger.warning(
                 f'Task {task_id} retry aborted: status is no longer RUNNING '
                 f'(reaper likely reclaimed). Skipping to prevent double-execution.'
             )
-            return False
+            return 'reaper_reclaimed'
 
         # Schedule a delayed notification using asyncio for the task's actual queue
         queue_name = await self._get_task_queue_name(task_id)
@@ -1626,7 +1694,7 @@ class Worker:
         logger.info(
             f'Scheduled task {task_id} for retry #{retry_count} at {next_retry_at}'
         )
-        return True
+        return 'scheduled'
 
     def _calculate_retry_delay(
         self, retry_attempt: int, retry_policy_data: dict[str, Any]

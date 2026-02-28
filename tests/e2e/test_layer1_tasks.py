@@ -629,6 +629,92 @@ async def test_good_until_already_past(broker: PostgresBroker) -> None:
             assert task.status == TaskStatus.PENDING  # Dead on arrival
 
 
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_retry_blocked_by_good_until_expiry(broker: PostgresBroker) -> None:
+    """L1.6.4: Retry is skipped and task fails when next retry would exceed good_until."""
+    good_until = datetime.now(timezone.utc) + timedelta(seconds=10)
+    task_options = json.dumps({
+        'retry_policy': {
+            'max_retries': 3,
+            'intervals': [60],
+            'backoff_strategy': 'fixed',
+            'jitter': False,
+            'auto_retry_for': ['TRANSIENT'],
+        },
+        'good_until': good_until.isoformat(),
+    })
+    task_id = broker.enqueue(
+        task_name='e2e_retry_exhausted',
+        args=(),
+        kwargs={},
+        queue_name='default',
+        good_until=good_until,
+        task_options=task_options,
+    ).unwrap()
+
+    with run_worker(
+        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+    ):
+        result = broker.get_result(task_id, timeout_ms=15000)
+        assert_err(result, expected_code='TRANSIENT')
+
+        async with broker.session_factory() as session:
+            task = await session.get(TaskModel, task_id)
+            assert task is not None
+            assert task.status == TaskStatus.FAILED
+            assert task.retry_count == 0
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_retry_succeeds_within_good_until(broker: PostgresBroker) -> None:
+    """L1.6.5: Retry proceeds and succeeds when all retries fit within good_until."""
+    with tempfile.NamedTemporaryFile(delete=False, mode='w') as tmp:
+        tmp.write('0')
+        state_path = tmp.name
+
+    good_until = datetime.now(timezone.utc) + timedelta(seconds=30)
+    task_options = json.dumps({
+        'retry_policy': {
+            'max_retries': 3,
+            'intervals': [1, 1, 1],
+            'backoff_strategy': 'fixed',
+            'jitter': False,
+            'auto_retry_for': ['TRANSIENT'],
+        },
+        'good_until': good_until.isoformat(),
+    })
+    os.environ['E2E_RETRY_SUCCESS_PATH'] = state_path
+    try:
+        task_id = broker.enqueue(
+            task_name='e2e_retry_success',
+            args=(),
+            kwargs={},
+            queue_name='default',
+            good_until=good_until,
+            task_options=task_options,
+        ).unwrap()
+
+        with run_worker(
+            DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        ):
+            result = broker.get_result(task_id, timeout_ms=20000)
+            assert_ok(result, expected_value='succeeded_on_attempt_3')
+
+            async with broker.session_factory() as session:
+                task = await session.get(TaskModel, task_id)
+                assert task is not None
+                assert task.status == TaskStatus.COMPLETED
+                assert task.retry_count == 2
+    finally:
+        try:
+            os.unlink(state_path)
+        except FileNotFoundError:
+            pass
+        os.environ.pop('E2E_RETRY_SUCCESS_PATH', None)
+
+
 # =============================================================================
 # L1.7 Error Scenarios
 # =============================================================================

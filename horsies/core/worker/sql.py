@@ -215,11 +215,21 @@ CHECK_WORKFLOW_TASK_EXISTS_SQL = text("""
 """)
 
 GET_TASK_RETRY_INFO_SQL = text("""
-    SELECT retry_count, max_retries, task_options FROM horsies_tasks WHERE id = :id
+    SELECT retry_count, max_retries, task_options, good_until, clock_timestamp() AS db_now
+    FROM horsies_tasks
+    WHERE id = :id
 """)
 
 GET_TASK_RETRY_CONFIG_SQL = text("""
-    SELECT retry_count, task_options FROM horsies_tasks WHERE id = :id
+    SELECT retry_count, task_options, good_until, clock_timestamp() AS db_now
+    FROM horsies_tasks
+    WHERE id = :id
+""")
+
+GET_TASK_RETRY_POSTCHECK_SQL = text("""
+    SELECT status, good_until
+    FROM horsies_tasks
+    WHERE id = :id
 """)
 
 SCHEDULE_TASK_RETRY_SQL = text("""
@@ -231,6 +241,7 @@ SCHEDULE_TASK_RETRY_SQL = text("""
         updated_at = now()
     WHERE id = :id
       AND status = 'RUNNING'
+      AND (good_until IS NULL OR :next_retry_at < good_until)
     RETURNING id
 """)
 

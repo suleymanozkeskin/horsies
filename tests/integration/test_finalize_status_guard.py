@@ -8,14 +8,17 @@ and asserts the UPDATE is a no-op (RETURNING yields no row).
 
 from __future__ import annotations
 
+import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.worker.worker import (
+    GET_TASK_RETRY_CONFIG_SQL,
+    GET_TASK_RETRY_INFO_SQL,
     MARK_TASK_COMPLETED_SQL,
     MARK_TASK_FAILED_SQL,
     MARK_TASK_FAILED_WORKER_SQL,
@@ -44,6 +47,53 @@ async def _insert_running_task(session: AsyncSession) -> str:
                  3, NOW())
         """),
         {'id': task_id},
+    )
+    await session.flush()
+    return task_id
+
+
+async def _insert_running_task_with_retry(
+    session: AsyncSession,
+    *,
+    good_until: datetime,
+    retry_count: int = 0,
+    max_retries: int = 3,
+    intervals: list[int] | None = None,
+) -> str:
+    """Insert RUNNING task row with retry policy metadata."""
+    if intervals is None:
+        intervals = [1, 1, 1]
+
+    task_id = str(uuid.uuid4())
+    task_options = json.dumps({
+        'retry_policy': {
+            'max_retries': max_retries,
+            'intervals': intervals,
+            'backoff_strategy': 'fixed',
+            'jitter': False,
+            'auto_retry_for': ['TRANSIENT'],
+        },
+        'good_until': good_until.isoformat(),
+    })
+
+    await session.execute(
+        text("""
+            INSERT INTO horsies_tasks
+                (id, task_name, queue_name, priority, args, kwargs, status, sent_at,
+                 created_at, updated_at, claimed, retry_count, max_retries, started_at,
+                 good_until, task_options)
+            VALUES
+                (:id, 'guard_test_retry', 'default', 100, '[]', '{}', 'RUNNING', NOW(),
+                 NOW(), NOW(), FALSE, :retry_count, :max_retries, NOW(),
+                 :good_until, :task_options)
+        """),
+        {
+            'id': task_id,
+            'retry_count': retry_count,
+            'max_retries': max_retries,
+            'good_until': good_until,
+            'task_options': task_options,
+        },
     )
     await session.flush()
     return task_id
@@ -303,3 +353,60 @@ async def test_reaper_then_retry_race_sequence(
 
     # T=3: Task must remain FAILED
     assert await _get_task_status(session, task_id) == 'FAILED'
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_retry_info_sql_returns_good_until_and_db_now(
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """GET_TASK_RETRY_INFO_SQL should include good_until and db_now."""
+    expected_good_until = datetime.now(timezone.utc) + timedelta(seconds=60)
+    task_id = await _insert_running_task_with_retry(
+        session, good_until=expected_good_until
+    )
+
+    row = (
+        await session.execute(GET_TASK_RETRY_INFO_SQL, {'id': task_id})
+    ).fetchone()
+    assert row is not None
+
+    good_until = row.good_until
+    db_now = row.db_now
+    assert good_until is not None
+    assert db_now is not None
+    if good_until.tzinfo is None:
+        good_until = good_until.replace(tzinfo=timezone.utc)
+    if db_now.tzinfo is None:
+        db_now = db_now.replace(tzinfo=timezone.utc)
+    assert abs((good_until - expected_good_until).total_seconds()) < 2.0
+    assert abs((datetime.now(timezone.utc) - db_now).total_seconds()) < 10.0
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_retry_config_sql_returns_good_until_and_db_now(
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """GET_TASK_RETRY_CONFIG_SQL should include good_until and db_now."""
+    past_good_until = datetime.now(timezone.utc) - timedelta(seconds=10)
+    task_id = await _insert_running_task_with_retry(
+        session,
+        good_until=past_good_until,
+        intervals=[60],
+    )
+
+    row = (
+        await session.execute(GET_TASK_RETRY_CONFIG_SQL, {'id': task_id})
+    ).fetchone()
+    assert row is not None
+
+    good_until = row.good_until
+    db_now = row.db_now
+    assert good_until is not None
+    assert db_now is not None
+    if good_until.tzinfo is None:
+        good_until = good_until.replace(tzinfo=timezone.utc)
+    if db_now.tzinfo is None:
+        db_now = db_now.replace(tzinfo=timezone.utc)
+    assert good_until < db_now
