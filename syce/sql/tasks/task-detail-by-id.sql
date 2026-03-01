@@ -15,6 +15,7 @@ SELECT
     worker_pid,
     claimed_by_worker_id,
     sent_at,
+    enqueued_at,
     claimed_at,
     started_at,
     completed_at,

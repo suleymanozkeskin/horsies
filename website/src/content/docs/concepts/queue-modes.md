@@ -83,7 +83,7 @@ Workers claim tasks in priority order:
 
 1. All priority=1 queues checked first
 2. Then priority=2, priority=3, etc.
-3. Within same priority, FIFO by `sent_at`
+3. Within same priority, FIFO by `enqueued_at`
 
 This means "critical" tasks (priority=1) are always processed before "low" tasks (priority=100) when both are pending.
 

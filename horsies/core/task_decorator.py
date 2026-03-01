@@ -19,7 +19,7 @@ from typing import (
 from abc import abstractmethod
 from collections.abc import Mapping
 from types import MappingProxyType
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pydantic import TypeAdapter, ValidationError
 from horsies.core.codec.serde import serialize_task_options
 
@@ -760,6 +760,7 @@ def create_task_wrapper(
         try:
             broker = app.get_broker()
             good_until = task_options.good_until if task_options else None
+            sent_at = datetime.now(timezone.utc)
 
             result = broker.enqueue(
                 task_name,
@@ -768,6 +769,7 @@ def create_task_wrapper(
                 validated_queue_name,
                 priority=priority,
                 good_until=good_until,
+                sent_at=sent_at,
                 task_options=_pre_serialized_options,
             )
         except Exception as e:
@@ -825,6 +827,7 @@ def create_task_wrapper(
                 f'Failed to get broker for {fn.__name__}: {e}',
             )
         good_until = task_options.good_until if task_options else None
+        sent_at = datetime.now(timezone.utc)
 
         try:
             result = await broker.enqueue_async(
@@ -834,6 +837,7 @@ def create_task_wrapper(
                 validated,
                 priority=priority,
                 good_until=good_until,
+                sent_at=sent_at,
                 task_options=_pre_serialized_options,
             )
         except Exception as e:
@@ -889,7 +893,7 @@ def create_task_wrapper(
         try:
             broker = app.get_broker()
             good_until = task_options.good_until if task_options else None
-            sent_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+            sent_at = datetime.now(timezone.utc)
 
             result = broker.enqueue(
                 task_name,
@@ -899,6 +903,7 @@ def create_task_wrapper(
                 priority=priority,
                 good_until=good_until,
                 sent_at=sent_at,
+                enqueue_delay_seconds=delay,
                 task_options=_pre_serialized_options,
             )
         except Exception as e:

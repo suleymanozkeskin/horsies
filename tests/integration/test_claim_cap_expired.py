@@ -276,13 +276,13 @@ class TestReclaimUnderCap:
         await session.execute(
             text("""
                 UPDATE horsies_tasks
-                SET sent_at = NOW() - INTERVAL '30 minutes'
+                SET enqueued_at = NOW() - INTERVAL '30 minutes'
                 WHERE id = :task_id
             """),
             {'task_id': pending_task_id},
         )
 
-        # Seed second task as expired CLAIMED (dead owner), later sent_at than pending.
+        # Seed second task as expired CLAIMED (dead owner), later enqueued_at than pending.
         expired_task_id = await _seed_task(session)
         await session.execute(
             text("""
@@ -292,7 +292,7 @@ class TestReclaimUnderCap:
                     claimed_at = NOW() - INTERVAL '10 minutes',
                     claimed_by_worker_id = 'dead-worker',
                     claim_expires_at = NOW() - INTERVAL '5 minutes',
-                    sent_at = NOW() - INTERVAL '20 minutes',
+                    enqueued_at = NOW() - INTERVAL '20 minutes',
                     updated_at = NOW()
                 WHERE id = :task_id
             """),

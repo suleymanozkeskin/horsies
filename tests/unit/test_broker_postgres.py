@@ -79,6 +79,7 @@ def _make_task_row(**overrides: Any) -> MagicMock:
         'result': None,
         'failed_reason': None,
         'sent_at': datetime.now(timezone.utc),
+        'enqueued_at': datetime.now(timezone.utc),
         'claimed_at': None,
         'started_at': None,
         'completed_at': None,
@@ -541,8 +542,8 @@ class TestMonitoringQueries:
     async def test_get_expired_tasks_returns_list_of_dicts(self) -> None:
         """get_expired_tasks should return Ok(dicts) keyed by column names."""
         broker = _make_broker()
-        columns = ['id', 'task_name', 'queue_name', 'priority', 'sent_at', 'good_until', 'expired_for']
-        rows = [('task-1', 'slow_task', 'default', 100, None, None, '00:05:00')]
+        columns = ['id', 'task_name', 'queue_name', 'priority', 'sent_at', 'enqueued_at', 'good_until', 'expired_for']
+        rows = [('task-1', 'slow_task', 'default', 100, None, None, None, '00:05:00')]
         self._setup_session_with_rows(broker, columns, rows)
 
         result = await broker.get_expired_tasks()
@@ -816,12 +817,12 @@ class TestGetTaskInfoAsync:
         """Basic task (no optional includes) should return Ok(TaskInfo) with base fields."""
         broker = _make_broker()
         now = datetime.now(timezone.utc)
-        # 16 base columns: id, task_name, status, queue_name, priority,
-        # retry_count, max_retries, next_retry_at, sent_at, claimed_at,
+        # 17 base columns: id, task_name, status, queue_name, priority,
+        # retry_count, max_retries, next_retry_at, sent_at, enqueued_at, claimed_at,
         # started_at, completed_at, failed_at, worker_hostname, worker_pid, worker_process_name
         row = (
             'task-abc', 'compute', 'RUNNING', 'default', 100,
-            1, 3, None, now, None,
+            1, 3, None, now, now, None,
             now, None, None, 'host-1', 9999, 'worker-0',
         )
         self._setup_task_info_session(broker, row=row)
@@ -849,10 +850,10 @@ class TestGetTaskInfoAsync:
         broker = _make_broker()
         now = datetime.now(timezone.utc)
         result_json = '{"__task_result__":true,"ok":"hello","err":null}'
-        # 16 base + 1 result column
+        # 17 base + 1 result column
         row = (
             'task-abc', 'compute', 'COMPLETED', 'default', 100,
-            0, 0, None, now, None,
+            0, 0, None, now, now, None,
             now, now, None, 'host-1', 9999, 'worker-0',
             result_json,
         )
@@ -872,10 +873,10 @@ class TestGetTaskInfoAsync:
         """include_failed_reason=True should add failed_reason to Ok(TaskInfo)."""
         broker = _make_broker()
         now = datetime.now(timezone.utc)
-        # 16 base + 1 failed_reason column
+        # 17 base + 1 failed_reason column
         row = (
             'task-abc', 'compute', 'FAILED', 'default', 100,
-            0, 0, None, now, None,
+            0, 0, None, now, now, None,
             now, None, now, 'host-1', 9999, 'worker-0',
             'Worker crashed unexpectedly',
         )
@@ -893,10 +894,10 @@ class TestGetTaskInfoAsync:
         """include_result=True with NULL result in DB should return Ok(TaskInfo) with result=None."""
         broker = _make_broker()
         now = datetime.now(timezone.utc)
-        # 16 base + 1 result column (None)
+        # 17 base + 1 result column (None)
         row = (
             'task-abc', 'compute', 'RUNNING', 'default', 100,
-            0, 0, None, now, None,
+            0, 0, None, now, now, None,
             now, None, None, None, None, None,
             None,
         )
@@ -915,10 +916,10 @@ class TestGetTaskInfoAsync:
         broker = _make_broker()
         now = datetime.now(timezone.utc)
         result_json = '{"__task_result__":true,"ok":null,"err":{"__task_error__":true,"error_code":"TASK_EXCEPTION","message":"fail","data":null}}'
-        # 16 base + 1 result + 1 failed_reason
+        # 17 base + 1 result + 1 failed_reason
         row = (
             'task-abc', 'compute', 'FAILED', 'default', 100,
-            0, 0, None, now, None,
+            0, 0, None, now, now, None,
             now, None, now, 'host-1', 9999, 'worker-0',
             result_json, 'Something broke',
         )

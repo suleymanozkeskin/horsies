@@ -20,7 +20,8 @@ Primary task storage table.
 | `status` | ENUM | PENDING/CLAIMED/RUNNING/COMPLETED/FAILED/CANCELLED/REQUEUED |
 
 These values correspond to `TaskStatus` in the API (see Task Lifecycle for terminal states).
-| `sent_at` | TIMESTAMP | When task was enqueued |
+| `sent_at` | TIMESTAMP | Immutable call-site timestamp (when `.send()`/`.schedule()` was called) |
+| `enqueued_at` | TIMESTAMP | Mutable dispatch timestamp (when task becomes claimable; updated on retry) |
 | `claimed_at` | TIMESTAMP | When worker claimed task |
 | `started_at` | TIMESTAMP | When execution started |
 | `completed_at` | TIMESTAMP | When task completed |

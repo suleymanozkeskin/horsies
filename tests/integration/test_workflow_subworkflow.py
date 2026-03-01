@@ -319,7 +319,7 @@ class TestSubworkflowIntegration:
 
         child_row = await session.execute(
             text(
-                'SELECT parent_workflow_id, parent_task_index FROM horsies_workflows WHERE id = :cid'
+                'SELECT parent_workflow_id, parent_task_index, sent_at FROM horsies_workflows WHERE id = :cid'
             ),
             {'cid': child_id},
         )
@@ -327,6 +327,7 @@ class TestSubworkflowIntegration:
         assert child_info is not None
         assert child_info[0] == handle.workflow_id
         assert child_info[1] == 1
+        assert child_info[2] is not None
 
     async def test_subworkflow_registry_fallback(
         self,

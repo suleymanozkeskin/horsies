@@ -9,6 +9,7 @@ SELECT
     w.success_policy,
     w.result,
     w.error,
+    w.sent_at,
     w.created_at,
     w.started_at,
     w.completed_at,

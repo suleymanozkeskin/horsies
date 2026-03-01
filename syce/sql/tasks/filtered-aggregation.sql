@@ -6,7 +6,7 @@ WITH base AS (
     claimed_by_worker_id,
     status::text AS status,
     id,
-    sent_at,
+    enqueued_at,
     started_at
   FROM horsies_tasks
   WHERE status::text = ANY($1)
@@ -22,7 +22,7 @@ agg AS (
     COUNT(*) FILTER (WHERE status = 'COMPLETED')    AS completed_count,
     COUNT(*) FILTER (WHERE status = 'FAILED')       AS failed_count,
     -- Collect task IDs for all filtered statuses (not just claimed/running)
-    ARRAY_AGG(id ORDER BY sent_at) AS task_ids
+    ARRAY_AGG(id ORDER BY enqueued_at) AS task_ids
   FROM base
   GROUP BY ROLLUP (claimed_by_worker_id)
 )

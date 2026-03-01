@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import String, Text, Integer, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import String, Text, Integer, DateTime, ForeignKey, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -89,6 +89,11 @@ class WorkflowModel(Base):
     # Timestamps
     # -------------------------------------------------------------------------
 
+    sent_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text('NOW()'),
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc)
     )

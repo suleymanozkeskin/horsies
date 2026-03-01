@@ -76,9 +76,9 @@ WITH next AS (
   SELECT id FROM tasks
   WHERE queue_name = :queue
     AND status = 'PENDING'
-    AND sent_at <= now()
+    AND enqueued_at <= now()
     AND (good_until IS NULL OR good_until > now())
-  ORDER BY priority ASC, sent_at ASC
+  ORDER BY priority ASC, enqueued_at ASC
   FOR UPDATE SKIP LOCKED
   LIMIT :limit
 )

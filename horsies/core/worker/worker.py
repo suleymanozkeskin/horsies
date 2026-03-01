@@ -169,7 +169,7 @@ class Worker:
     """
     Async master that:
       - Subscribes to queue channels
-      - Claims tasks (priority + sent_at) with SKIP LOCKED
+      - Claims tasks (priority + enqueued_at) with SKIP LOCKED
       - Executes in a process pool
       - On completion, writes result/failed, COMMITs, and NOTIFY task_done
     """

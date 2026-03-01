@@ -20,6 +20,7 @@ pub struct TaskDetail {
     pub worker_pid: Option<i32>,
     pub claimed_by_worker_id: Option<String>,
     pub sent_at: Option<DateTime<Utc>>,
+    pub enqueued_at: DateTime<Utc>,
     pub claimed_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,

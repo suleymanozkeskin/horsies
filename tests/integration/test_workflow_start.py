@@ -21,6 +21,7 @@ from horsies.core.models.workflow import (
 )
 from horsies.core.task_decorator import from_node
 from horsies.core.workflows.engine import on_workflow_task_complete
+from horsies.core.types.result import is_err
 
 from .conftest import (
     make_simple_task,
@@ -97,6 +98,36 @@ class TestWorkflowStart:
         )
         count = result.scalar()
         assert count == 2
+
+    async def test_start_sets_workflow_sent_at_from_python_call_site(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """Workflow sent_at tracks Python call-site start time."""
+        session, broker, app = setup
+        simple_task = make_simple_task(app, 'sent_at_task')
+
+        node_a = TaskNode(fn=simple_task, kwargs={'value': 5})
+        spec = make_workflow_spec(broker=broker, name='sent_at_wf', tasks=[node_a])
+
+        before_start = datetime.now(timezone.utc)
+        start_result = await spec.start_async()
+        after_start = datetime.now(timezone.utc)
+
+        assert not is_err(start_result)
+        handle = start_result.ok_value
+
+        result = await session.execute(
+            text('SELECT sent_at, created_at FROM horsies_workflows WHERE id = :wf_id'),
+            {'wf_id': handle.workflow_id},
+        )
+        row = result.fetchone()
+        assert row is not None
+
+        sent_at, created_at = row
+        assert sent_at is not None
+        assert created_at is not None
+        assert before_start <= sent_at <= after_start
 
     async def test_root_tasks_start_ready(
         self,

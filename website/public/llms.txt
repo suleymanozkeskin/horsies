@@ -130,7 +130,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .task_id -> str, .task_name -> str, .status -> TaskStatus
 - .queue_name -> str, .priority -> int
 - .retry_count -> int, .max_retries -> int, .next_retry_at -> datetime | None
-- .sent_at/claimed_at/started_at/completed_at/failed_at -> datetime | None
+- .sent_at/enqueued_at/claimed_at/started_at/completed_at/failed_at -> datetime | None
 - .worker_hostname/worker_pid/worker_process_name -> str | int | None
 - .result -> TaskResult[Any, TaskError] | None (opt-in via include_result)
 - .failed_reason -> str | None (opt-in via include_failed_reason)

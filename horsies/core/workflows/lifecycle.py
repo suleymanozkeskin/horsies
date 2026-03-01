@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import datetime, timezone
 from collections import deque
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
@@ -105,6 +106,7 @@ async def start_workflow_async(
     spec: 'WorkflowSpec[OutT]',
     broker: 'PostgresBroker',
     workflow_id: str | None = None,
+    sent_at: datetime | None = None,
 ) -> WorkflowStartResult[WorkflowHandle[OutT]]:
     """Start a workflow asynchronously.
 
@@ -114,6 +116,7 @@ async def start_workflow_async(
         spec: The workflow specification
         broker: PostgreSQL broker for database operations
         workflow_id: Optional custom workflow ID
+        sent_at: Optional workflow call-site timestamp from Python.
 
     Returns:
         ``Ok(WorkflowHandle)`` on success.
@@ -131,6 +134,7 @@ async def start_workflow_async(
     )
 
     wf_id = workflow_id or str(uuid.uuid4())
+    workflow_sent_at = sent_at or datetime.now(timezone.utc)
 
     # ── Zone 1: Prevalidation (never retryable) ──────────────────────
     try:
@@ -248,6 +252,7 @@ async def start_workflow_async(
                     else None,
                     'wf_module': spec.workflow_def_module,
                     'wf_qualname': spec.workflow_def_qualname,
+                    'sent_at': workflow_sent_at,
                 },
             )
 
@@ -416,6 +421,7 @@ def start_workflow(
     spec: 'WorkflowSpec[OutT]',
     broker: 'PostgresBroker',
     workflow_id: str | None = None,
+    sent_at: datetime | None = None,
 ) -> WorkflowStartResult[WorkflowHandle[OutT]]:
     """Start a workflow synchronously.
 
@@ -429,6 +435,7 @@ def start_workflow(
         spec: The workflow specification
         broker: PostgreSQL broker for database operations
         workflow_id: Optional custom workflow ID
+        sent_at: Optional workflow call-site timestamp from Python.
 
     Returns:
         ``Ok(WorkflowHandle)`` on success, ``Err(WorkflowStartError)`` on failure.
@@ -436,8 +443,15 @@ def start_workflow(
     from horsies.core.utils.loop_runner import get_shared_runner, LoopRunnerError
 
     wf_id = workflow_id or str(uuid.uuid4())
+    workflow_sent_at = sent_at or datetime.now(timezone.utc)
     try:
-        return get_shared_runner().call(start_workflow_async, spec, broker, workflow_id)
+        return get_shared_runner().call(
+            start_workflow_async,
+            spec,
+            broker,
+            wf_id,
+            workflow_sent_at,
+        )
     except LoopRunnerError as exc:
         return Err(WorkflowStartError(
             code=WorkflowStartErrorCode.LOOP_RUNNER_FAILED,

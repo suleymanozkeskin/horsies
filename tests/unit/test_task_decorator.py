@@ -855,9 +855,10 @@ class TestCreateTaskWrapperSchedule:
 
         assert handle.task_id == 'sched-1'
         assert handle._broker_mode is True
-        # Verify enqueue was called with a sent_at argument
+        # Verify enqueue was called with sent_at (call-site time) and enqueue_delay_seconds
         call_kwargs = broker.enqueue.call_args
         assert call_kwargs.kwargs.get('sent_at') is not None
+        assert call_kwargs.kwargs.get('enqueue_delay_seconds') == 60
 
     def test_schedule_broker_exception_returns_error_handle(self) -> None:
         """Broker Err result during schedule returns error handle."""

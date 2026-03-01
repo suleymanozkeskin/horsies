@@ -13,11 +13,11 @@ INSERT_WORKFLOW_SQL = text("""
     INSERT INTO horsies_workflows (id, name, status, on_error, output_task_index,
                              success_policy, workflow_def_module, workflow_def_qualname,
                              depth, root_workflow_id,
-                             created_at, started_at, updated_at)
+                             sent_at, created_at, started_at, updated_at)
     VALUES (:id, :name, 'RUNNING', :on_error, :output_idx,
             :success_policy, :wf_module, :wf_qualname,
             0, :id,
-            NOW(), NOW(), NOW())
+            :sent_at, NOW(), NOW(), NOW())
 """)
 INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL = text("""
     INSERT INTO horsies_workflow_tasks
@@ -104,10 +104,10 @@ ENQUEUE_WORKFLOW_TASK_SQL = text("""
 """)
 INSERT_TASK_FOR_WORKFLOW_SQL = text("""
     INSERT INTO horsies_tasks (id, task_name, queue_name, priority, args, kwargs, status,
-                       sent_at, created_at, updated_at, claimed, retry_count, max_retries,
+                       sent_at, enqueued_at, created_at, updated_at, claimed, retry_count, max_retries,
                        task_options, good_until)
     VALUES (:id, :name, :queue, :priority, :args, :kwargs, 'PENDING',
-            NOW(), NOW(), NOW(), FALSE, 0, :max_retries, :task_options, :good_until)
+            :sent_at, NOW(), NOW(), NOW(), FALSE, 0, :max_retries, :task_options, :good_until)
 """)
 LINK_WORKFLOW_TASK_SQL = text("""
     UPDATE horsies_workflow_tasks SET task_id = :tid WHERE workflow_id = :wf_id AND task_index = :idx
@@ -139,11 +139,11 @@ INSERT_CHILD_WORKFLOW_SQL = text("""
     (id, name, status, on_error, output_task_index, success_policy,
      workflow_def_module, workflow_def_qualname,
      parent_workflow_id, parent_task_index, depth, root_workflow_id,
-     created_at, started_at, updated_at)
+     sent_at, created_at, started_at, updated_at)
     VALUES (:id, :name, 'RUNNING', :on_error, :output_idx, :success_policy,
             :wf_module, :wf_qualname,
             :parent_wf_id, :parent_idx, :depth, :root_wf_id,
-            NOW(), NOW(), NOW())
+            :sent_at, NOW(), NOW(), NOW())
 """)
 LINK_SUB_WORKFLOW_SQL = text("""
     UPDATE horsies_workflow_tasks

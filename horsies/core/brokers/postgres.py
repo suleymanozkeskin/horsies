@@ -187,6 +187,24 @@ ADD_SUB_WORKFLOW_QUALNAME_COLUMN_SQL = text("""
     ADD COLUMN IF NOT EXISTS sub_workflow_qualname VARCHAR(512);
 """)
 
+ADD_WORKFLOW_SENT_AT_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflows
+    ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
+""")
+BACKFILL_WORKFLOW_SENT_AT_SQL = text("""
+    UPDATE horsies_workflows
+    SET sent_at = COALESCE(created_at, NOW())
+    WHERE sent_at IS NULL;
+""")
+SET_WORKFLOW_SENT_AT_NOT_NULL_SQL = text("""
+    ALTER TABLE horsies_workflows
+    ALTER COLUMN sent_at SET NOT NULL;
+""")
+SET_WORKFLOW_SENT_AT_DEFAULT_SQL = text("""
+    ALTER TABLE horsies_workflows
+    ALTER COLUMN sent_at SET DEFAULT NOW();
+""")
+
 SET_TASK_COLUMN_DEFAULTS_SQL = text("""
     ALTER TABLE horsies_tasks
     ALTER COLUMN claimed SET DEFAULT FALSE,
@@ -195,6 +213,28 @@ SET_TASK_COLUMN_DEFAULTS_SQL = text("""
     ALTER COLUMN priority SET DEFAULT 100,
     ALTER COLUMN created_at SET DEFAULT NOW(),
     ALTER COLUMN updated_at SET DEFAULT NOW();
+""")
+
+# Migration: add enqueued_at column and backfill from sent_at for existing rows.
+# Column is added WITHOUT a default so existing rows stay NULL, allowing the
+# backfill to copy historical sent_at values.  The default and NOT NULL
+# constraint are applied after backfill.
+ADD_ENQUEUED_AT_COLUMN_SQL = text("""
+    ALTER TABLE horsies_tasks
+    ADD COLUMN IF NOT EXISTS enqueued_at TIMESTAMPTZ;
+""")
+BACKFILL_ENQUEUED_AT_SQL = text("""
+    UPDATE horsies_tasks
+    SET enqueued_at = COALESCE(sent_at, NOW())
+    WHERE enqueued_at IS NULL;
+""")
+SET_ENQUEUED_AT_NOT_NULL_SQL = text("""
+    ALTER TABLE horsies_tasks
+    ALTER COLUMN enqueued_at SET NOT NULL;
+""")
+SET_ENQUEUED_AT_DEFAULT_SQL = text("""
+    ALTER TABLE horsies_tasks
+    ALTER COLUMN enqueued_at SET DEFAULT NOW();
 """)
 
 CREATE_HEARTBEATS_TASK_ROLE_SENT_INDEX_SQL = text("""
@@ -347,6 +387,7 @@ GET_EXPIRED_TASKS_SQL = text("""
         queue_name,
         priority,
         sent_at,
+        enqueued_at,
         good_until,
         NOW() - good_until as expired_for
     FROM horsies_tasks
@@ -559,6 +600,22 @@ class PostgresBroker:
             await conn.execute(SET_TASK_COLUMN_DEFAULTS_SQL)
             await conn.execute(CREATE_HEARTBEATS_TASK_ROLE_SENT_INDEX_SQL)
 
+            # Migration: add enqueued_at column, backfill from sent_at,
+            # and enforce NOT NULL for existing databases.
+            await conn.execute(ADD_ENQUEUED_AT_COLUMN_SQL)
+            await conn.execute(BACKFILL_ENQUEUED_AT_SQL)
+            await conn.execute(SET_ENQUEUED_AT_NOT_NULL_SQL)
+            await conn.execute(SET_ENQUEUED_AT_DEFAULT_SQL)
+
+            # Migration: add workflow sent_at column (immutable workflow start
+            # call-site timestamp), backfill existing rows, and enforce NOT NULL.
+            # Keep this in the advisory-locked schema transaction to avoid DDL
+            # lock races with concurrent workflow writes.
+            await conn.execute(ADD_WORKFLOW_SENT_AT_COLUMN_SQL)
+            await conn.execute(BACKFILL_WORKFLOW_SENT_AT_SQL)
+            await conn.execute(SET_WORKFLOW_SENT_AT_NOT_NULL_SQL)
+            await conn.execute(SET_WORKFLOW_SENT_AT_DEFAULT_SQL)
+
         await self._create_triggers()
         await self._create_workflow_schema()
         start_r = await self.listener.start()
@@ -597,15 +654,23 @@ class PostgresBroker:
         *,
         priority: int = 100,
         sent_at: Optional[datetime] = None,
+        enqueued_at: Optional[datetime] = None,
+        enqueue_delay_seconds: Optional[int] = None,
         good_until: Optional[datetime] = None,
         task_options: Optional[str] = None,
     ) -> BrokerResult[str]:
+        if enqueued_at is not None and enqueue_delay_seconds is not None:
+            return _broker_err(
+                BrokerErrorCode.ENQUEUE_FAILED,
+                'Cannot specify both enqueued_at and enqueue_delay_seconds',
+                ValueError('Cannot specify both enqueued_at and enqueue_delay_seconds'),
+            )
         try:
             await self._ensure_initialized()
 
             task_id = str(uuid.uuid4())
             now = datetime.now(timezone.utc)
-            sent = sent_at or now
+            call_site_sent_at = sent_at or now
 
             # Parse retry configuration from task_options.
             # task_options is always produced by serialize_task_options() — malformed JSON
@@ -635,24 +700,63 @@ class PostgresBroker:
                     return _broker_err(BrokerErrorCode.ENQUEUE_FAILED, f'Failed to serialize kwargs: {kwargs_r.err_value}', kwargs_r.err_value)
                 kwargs_json = kwargs_r.ok_value
 
-            async with self.session_factory() as session:
-                task = TaskModel(
-                    id=task_id,
-                    task_name=task_name,
-                    queue_name=queue_name,
-                    priority=priority,
-                    args=args_json,
-                    kwargs=kwargs_json,
-                    status=TaskStatus.PENDING,
-                    sent_at=sent,
-                    good_until=good_until,
-                    max_retries=max_retries,
-                    task_options=task_options,
-                    created_at=now,
-                    updated_at=now,
-                )
-                session.add(task)
-                await session.commit()
+            # Determine enqueued_at: explicit value > delay-based > DB NOW() default.
+            # When enqueue_delay_seconds is set, we use a raw INSERT so the DB
+            # computes NOW() + interval entirely on DB clock.
+            if enqueue_delay_seconds is not None:
+                async with self.session_factory() as session:
+                    await session.execute(
+                        text("""
+                            INSERT INTO horsies_tasks (
+                                id, task_name, queue_name, priority, args, kwargs,
+                                status, sent_at, enqueued_at, good_until, max_retries,
+                                task_options, created_at, updated_at
+                            ) VALUES (
+                                :id, :task_name, :queue_name, :priority, :args, :kwargs,
+                                'PENDING', :sent_at,
+                                NOW() + CAST(:delay || ' seconds' AS INTERVAL),
+                                :good_until, :max_retries,
+                                :task_options, NOW(), NOW()
+                            )
+                        """),
+                        {
+                            'id': task_id,
+                            'task_name': task_name,
+                            'queue_name': queue_name,
+                            'priority': priority,
+                            'args': args_json,
+                            'kwargs': kwargs_json,
+                            'sent_at': call_site_sent_at,
+                            'delay': str(enqueue_delay_seconds),
+                            'good_until': good_until,
+                            'max_retries': max_retries,
+                            'task_options': task_options,
+                        },
+                    )
+                    await session.commit()
+            else:
+                async with self.session_factory() as session:
+                    task = TaskModel(
+                        id=task_id,
+                        task_name=task_name,
+                        queue_name=queue_name,
+                        priority=priority,
+                        args=args_json,
+                        kwargs=kwargs_json,
+                        status=TaskStatus.PENDING,
+                        sent_at=call_site_sent_at,
+                        good_until=good_until,
+                        max_retries=max_retries,
+                        task_options=task_options,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    # enqueued_at: only set when caller provides an explicit value.
+                    # Otherwise omit so server_default=NOW() uses DB clock.
+                    if enqueued_at is not None:
+                        task.enqueued_at = enqueued_at
+                    session.add(task)
+                    await session.commit()
 
             # PostgreSQL trigger automatically sends task_new + task_queue_{queue_name} notifications
             return Ok(task_id)
@@ -1062,6 +1166,8 @@ class PostgresBroker:
         *,
         priority: int = 100,
         sent_at: Optional[datetime] = None,
+        enqueued_at: Optional[datetime] = None,
+        enqueue_delay_seconds: Optional[int] = None,
         good_until: Optional[datetime] = None,
         task_options: Optional[str] = None,
     ) -> BrokerResult[str]:
@@ -1075,6 +1181,8 @@ class PostgresBroker:
                 queue_name,
                 priority=priority,
                 sent_at=sent_at,
+                enqueued_at=enqueued_at,
+                enqueue_delay_seconds=enqueue_delay_seconds,
                 good_until=good_until,
                 task_options=task_options,
             )
@@ -1140,6 +1248,7 @@ class PostgresBroker:
                     'max_retries',
                     'next_retry_at',
                     'sent_at',
+                    'enqueued_at',
                     'claimed_at',
                     'started_at',
                     'completed_at',
@@ -1187,6 +1296,8 @@ class PostgresBroker:
                 idx += 1
                 sent_at = row[idx]
                 idx += 1
+                enqueued_at = row[idx]
+                idx += 1
                 claimed_at = row[idx]
                 idx += 1
                 started_at = row[idx]
@@ -1227,6 +1338,7 @@ class PostgresBroker:
                     max_retries=max_retries,
                     next_retry_at=next_retry_at,
                     sent_at=sent_at,
+                    enqueued_at=enqueued_at,
                     claimed_at=claimed_at,
                     started_at=started_at,
                     completed_at=completed_at,

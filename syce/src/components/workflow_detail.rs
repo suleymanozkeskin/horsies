@@ -560,7 +560,15 @@ impl<'a> WorkflowDetailPanel<'a> {
         )])));
 
         lines.push(DetailLine::new(Line::from(vec![
-            Span::styled("  Created:    ", Style::default().fg(theme.muted)),
+            Span::styled("  Sent:       ", Style::default().fg(theme.muted)),
+            Span::styled(
+                self.workflow.sent_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                Style::default().fg(theme.text),
+            ),
+        ])));
+
+        lines.push(DetailLine::new(Line::from(vec![
+            Span::styled("  Created(DB):", Style::default().fg(theme.muted)),
             Span::styled(
                 self.workflow.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
                 Style::default().fg(theme.text),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -240,6 +241,7 @@ async def enqueue_workflow_task(
 
     # Create actual task in tasks table
     task_id = str(uuid.uuid4())
+    sent_at = datetime.now(timezone.utc)
     await session.execute(
         INSERT_TASK_FOR_WORKFLOW_SQL,
         {
@@ -252,6 +254,7 @@ async def enqueue_workflow_task(
             # passing them through preserves backward compatibility.
             'args': row[2],  # task_args (already JSON string)
             'kwargs': kwargs_json,
+            'sent_at': sent_at,
             'max_retries': max_retries,
             'task_options': task_options_str,
             'good_until': good_until_str,
@@ -532,6 +535,7 @@ async def enqueue_subworkflow_task(
             ]
 
     child_output_index = child_spec.output.index if child_spec.output else None
+    child_sent_at = datetime.now(timezone.utc)
 
     await session.execute(
         INSERT_CHILD_WORKFLOW_SQL,
@@ -549,6 +553,7 @@ async def enqueue_subworkflow_task(
             'parent_idx': task_index,
             'depth': parent_depth + 1,
             'root_wf_id': root_workflow_id,
+            'sent_at': child_sent_at,
         },
     )
 

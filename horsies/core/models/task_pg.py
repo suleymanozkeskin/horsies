@@ -37,7 +37,8 @@ class TaskModel(Base):
     - args: str # task arguments, serialized as json
     - kwargs: str # task keyword arguments, serialized as json
     - status: TaskStatus # PENDING, CLAIMED, RUNNING, COMPLETED, FAILED
-    - sent_at: datetime # when .send() was called on task
+    - sent_at: datetime # immutable call-site timestamp (when .send()/.schedule()/.start() was called)
+    - enqueued_at: datetime # mutable dispatch timestamp (when task becomes eligible for claiming)
     - claimed_at: datetime # when task was claimed by a worker
     - started_at: datetime # when task actually started running in the worker's process
     - completed_at: datetime # when task was completed, set by the process
@@ -83,7 +84,10 @@ class TaskModel(Base):
     # Timestamps
     sent_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
-    )  # when .send() was called on task
+    )  # immutable call-site timestamp (Python clock); never mutated after insert
+    enqueued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text('NOW()'),
+    )  # mutable dispatch/eligibility timestamp; updated on retry
     claimed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )  # when the task was claimed by a worker

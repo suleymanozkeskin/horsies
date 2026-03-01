@@ -38,6 +38,7 @@ pub struct WorkflowRow {
     pub success_policy: Option<JsonValue>,
     pub result: Option<String>,
     pub error: Option<String>,
+    pub sent_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,

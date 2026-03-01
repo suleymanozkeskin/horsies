@@ -128,7 +128,8 @@ Each task records timing information:
 
 | Field | Set When |
 |-------|----------|
-| `sent_at` | Task enqueued (or scheduled `sent_at` for delayed tasks) |
+| `sent_at` | Immutable call-site timestamp — when `.send()` or `.schedule()` was called |
+| `enqueued_at` | When task becomes eligible for claiming (updated on retry) |
 | `claimed_at` | Worker claims task |
 | `started_at` | Execution begins in child process |
 | `completed_at` | Successful completion |

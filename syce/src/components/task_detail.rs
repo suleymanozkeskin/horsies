@@ -234,6 +234,10 @@ impl<'a> TaskDetailPanel<'a> {
             Span::styled(Self::format_timestamp(&self.task.sent_at), Style::default().fg(theme.text)),
         ])));
         lines.push(DetailLine::new(Line::from(vec![
+            Span::styled("  Enqueued:   ", Style::default().fg(theme.muted)),
+            Span::styled(self.task.enqueued_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(), Style::default().fg(theme.text)),
+        ])));
+        lines.push(DetailLine::new(Line::from(vec![
             Span::styled("  Claimed:    ", Style::default().fg(theme.muted)),
             Span::styled(Self::format_timestamp(&self.task.claimed_at), Style::default().fg(theme.text)),
         ])));

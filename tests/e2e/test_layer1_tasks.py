@@ -265,36 +265,41 @@ async def test_exponential_backoff_intervals(broker: PostgresBroker) -> None:
     ):
         handle = retry_tasks.exponential_task.send()
 
-        # Capture original sent_at before worker processes the task
+        # Capture original enqueued_at before worker processes the task
         async with broker.session_factory() as session:
             task = await session.get(TaskModel, handle.task_id)
-            assert task is not None and task.sent_at is not None
-            sent_at_snapshots: dict[int, datetime] = {0: task.sent_at}
+            assert task is not None and task.enqueued_at is not None
+            original_sent_at = task.sent_at
+            enqueued_at_snapshots: dict[int, datetime] = {0: task.enqueued_at}
 
         # Poll until retry_count reaches 2
         deadline = time.time() + 15.0
         while time.time() < deadline:
             async with broker.session_factory() as session:
                 task = await session.get(TaskModel, handle.task_id)
-                if task is not None and task.sent_at is not None:
+                if task is not None and task.enqueued_at is not None:
                     rc = task.retry_count
-                    if rc not in sent_at_snapshots:
-                        sent_at_snapshots[rc] = task.sent_at
+                    if rc not in enqueued_at_snapshots:
+                        enqueued_at_snapshots[rc] = task.enqueued_at
                     if rc >= 2:
+                        # sent_at must remain immutable across retries
+                        assert task.sent_at == original_sent_at, (
+                            f'sent_at changed on retry: {task.sent_at} != {original_sent_at}'
+                        )
                         break
             await asyncio.sleep(0.15)
         else:
             raise AssertionError(
-                f'retry_count did not reach 2; snapshots: {sent_at_snapshots}'
+                f'retry_count did not reach 2; snapshots: {enqueued_at_snapshots}'
             )
 
-        # sent_at is updated to next_retry_at on each retry
+        # enqueued_at is updated to next_retry_at on each retry
         # base=1 exponential: delay_1 ≈ 1s (2^0), delay_2 ≈ 2s (2^1)
-        assert {0, 1, 2}.issubset(sent_at_snapshots), (
-            f'Missing retry counts; got: {sorted(sent_at_snapshots)}'
+        assert {0, 1, 2}.issubset(enqueued_at_snapshots), (
+            f'Missing retry counts; got: {sorted(enqueued_at_snapshots)}'
         )
-        interval_1 = (sent_at_snapshots[1] - sent_at_snapshots[0]).total_seconds()
-        interval_2 = (sent_at_snapshots[2] - sent_at_snapshots[1]).total_seconds()
+        interval_1 = (enqueued_at_snapshots[1] - enqueued_at_snapshots[0]).total_seconds()
+        interval_2 = (enqueued_at_snapshots[2] - enqueued_at_snapshots[1]).total_seconds()
         assert interval_2 > interval_1, (
             f'Expected increasing intervals for exponential backoff: '
             f'interval_1={interval_1:.2f}s, interval_2={interval_2:.2f}s'
@@ -488,15 +493,15 @@ async def test_priority_ordering(custom_broker: PostgresBroker) -> None:
     """L1.5.4: High priority (lower number) tasks are claimed before low priority."""
     # Submit both tasks BEFORE starting worker to ensure fair priority ordering
     # Low priority (100) submitted first
-    # Use explicit sent_at ordering to avoid timing sleeps.
-    sent_base = datetime.now(timezone.utc)
+    # Use explicit enqueued_at ordering to avoid timing sleeps.
+    enqueue_base = datetime.now(timezone.utc)
     task_id_low = custom_broker.enqueue(
         task_name='e2e_low',
         args=(),
         kwargs={},
         queue_name='low',
         priority=100,
-        sent_at=sent_base,
+        enqueued_at=enqueue_base,
     ).unwrap()
     # High priority (1) submitted second
     task_id_high = custom_broker.enqueue(
@@ -505,7 +510,7 @@ async def test_priority_ordering(custom_broker: PostgresBroker) -> None:
         kwargs={},
         queue_name='high',
         priority=1,
-        sent_at=sent_base + timedelta(milliseconds=50),
+        enqueued_at=enqueue_base + timedelta(milliseconds=50),
     ).unwrap()
 
     # Now start worker - should claim high priority first despite later submission

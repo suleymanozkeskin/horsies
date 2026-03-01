@@ -7,7 +7,7 @@ tags: [workers, concurrency, claiming, limits]
 
 ## Alpha Operational Notes
 
-- **Priority ordering:** Within the same priority, FIFO ordering uses `sent_at`. When many tasks share the same timestamp, ordering can appear non-deterministic.
+- **Priority ordering:** Within the same priority, FIFO ordering uses `enqueued_at`. When many tasks share the same timestamp, ordering can appear non-deterministic.
 - **Soft-cap bursts:** With `prefetch_buffer > 0`, the system counts only RUNNING tasks. Short-lived bursts above the nominal cap can occur during claim/dispatch.
 - **Claim leases:** In soft-cap mode, claims can expire and be reclaimed. Workers must verify ownership before running user code.
 - **Workflow conditions:** `run_when`/`skip_when` are evaluated only if the workflow module is imported in the worker process.
@@ -183,7 +183,7 @@ horsies worker myapp.instance:app --max-claim-per-worker=10
 SELECT id FROM tasks
 WHERE queue_name = :queue
   AND status = 'PENDING'
-ORDER BY priority ASC, sent_at ASC
+ORDER BY priority ASC, enqueued_at ASC
 FOR UPDATE SKIP LOCKED
 LIMIT :limit
 ```
@@ -192,7 +192,7 @@ Key behaviors:
 
 1. **SKIP LOCKED**: Don't wait for locked rows, skip them
 2. **Priority first**: Lower number = higher priority
-3. **FIFO within priority**: Earlier `sent_at` wins
+3. **FIFO within priority**: Earlier `enqueued_at` wins
 4. **Limit**: Respects batch size limits
 
 ## Concurrency Calculation

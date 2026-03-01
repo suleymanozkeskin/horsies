@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import inspect
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
@@ -1064,8 +1065,8 @@ class WorkflowSpec(Generic[OutT]):
 
         # Import here to avoid circular imports
         from horsies.core.workflows.engine import start_workflow
-
-        return start_workflow(self, self.broker, workflow_id)
+        workflow_sent_at = datetime.now(timezone.utc)
+        return start_workflow(self, self.broker, workflow_id, workflow_sent_at)
 
     async def start_async(
         self, workflow_id: str | None = None,
@@ -1100,5 +1101,5 @@ class WorkflowSpec(Generic[OutT]):
 
         # Import here to avoid circular imports
         from horsies.core.workflows.engine import start_workflow_async
-
-        return await start_workflow_async(self, self.broker, workflow_id)
+        workflow_sent_at = datetime.now(timezone.utc)
+        return await start_workflow_async(self, self.broker, workflow_id, workflow_sent_at)

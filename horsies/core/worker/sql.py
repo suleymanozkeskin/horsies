@@ -11,7 +11,7 @@ WORKFLOW_TERMINAL_VALUES: list[str] = [s.value for s in WORKFLOW_TERMINAL_STATES
 TASK_TERMINAL_VALUES: list[str] = [s.value for s in TASK_TERMINAL_STATES]
 
 
-# ---------- Claim SQL (priority + sent_at) ----------
+# ---------- Claim SQL (priority + enqueued_at) ----------
 # All claimed tasks receive a bounded lease via claim_expires_at.
 # Expired leases are reclaimable by any worker (crash recovery + soft-cap prefetch).
 
@@ -26,10 +26,10 @@ WITH next AS (
       -- OR expired claims (lease expired, reclaimable by any worker)
       OR (status = 'CLAIMED' AND claim_expires_at IS NOT NULL AND claim_expires_at < now())
     )
-    AND sent_at <= now()
+    AND enqueued_at <= now()
     AND (next_retry_at IS NULL OR next_retry_at <= now())
     AND (good_until IS NULL OR good_until > now())
-  ORDER BY priority ASC, sent_at ASC, id ASC
+  ORDER BY priority ASC, enqueued_at ASC, id ASC
   FOR UPDATE SKIP LOCKED
   LIMIT :lim
 )
@@ -237,7 +237,7 @@ SCHEDULE_TASK_RETRY_SQL = text("""
     SET status = 'PENDING',
         retry_count = :retry_count,
         next_retry_at = :next_retry_at,
-        sent_at = :next_retry_at,
+        enqueued_at = :next_retry_at,
         updated_at = now()
     WHERE id = :id
       AND status = 'RUNNING'

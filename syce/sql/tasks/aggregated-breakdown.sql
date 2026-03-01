@@ -14,7 +14,7 @@ WITH base AS (
     claimed_by_worker_id,
     status::text AS status,
     id,
-    sent_at,
+    enqueued_at,
     started_at
   FROM horsies_tasks
 ),
@@ -25,10 +25,10 @@ agg AS (
     COUNT(*)                                        AS total_count,
     COUNT(*) FILTER (WHERE status = 'PENDING')      AS pending_count,
     COUNT(*) FILTER (WHERE status = 'CLAIMED')      AS claimed_count,
-    ARRAY_AGG(id ORDER BY sent_at)
+    ARRAY_AGG(id ORDER BY enqueued_at)
       FILTER (WHERE status = 'CLAIMED')             AS claimed_task_ids,
     COUNT(*) FILTER (WHERE status = 'RUNNING')      AS running_count,
-    ARRAY_AGG(id ORDER BY started_at NULLS LAST, sent_at)
+    ARRAY_AGG(id ORDER BY started_at NULLS LAST, enqueued_at)
       FILTER (WHERE status = 'RUNNING')             AS running_task_ids,
     COUNT(*) FILTER (WHERE status = 'COMPLETED')    AS completed_count,
     COUNT(*) FILTER (WHERE status = 'FAILED')       AS failed_count
