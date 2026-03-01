@@ -68,6 +68,12 @@ from .core.types.status import TaskStatus, TASK_TERMINAL_STATES
 from .core.errors import ErrorCode, ValidationReport, MultipleValidationErrors
 from .core.exception_mapper import ExceptionMapper
 from .core.task_decorator import from_node, TaskHandle
+from .core.models.task_send_types import (
+    TaskSendErrorCode,
+    TaskSendPayload,
+    TaskSendError,
+    TaskSendResult,
+)
 from .core.brokers.result_types import (
     BrokerErrorCode,
     BrokerOperationError,
@@ -144,6 +150,11 @@ __all__ = [
     'TaskHandle',
     # Node injection
     'from_node',
+    # Task send types
+    'TaskSendErrorCode',
+    'TaskSendPayload',
+    'TaskSendError',
+    'TaskSendResult',
     # Broker result types
     'BrokerErrorCode',
     'BrokerOperationError',

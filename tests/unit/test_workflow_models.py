@@ -8,7 +8,9 @@ from dataclasses import dataclass
 import pytest
 
 from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.task_send_types import TaskSendError, TaskSendResult
 from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, from_node
+from horsies.core.types.result import Ok
 from horsies.core.models.workflow import (
     NODE_ID_PATTERN,
     NodeKey,
@@ -46,14 +48,23 @@ class MockTaskWrapper(TaskFunction[Any, Any]):
     def __call__(self, *args: Any, **kwargs: Any) -> TaskResult[Any, TaskError]:
         return TaskResult(ok=None)
 
-    def send(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        return TaskHandle('mock')
+    def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
-    async def send_async(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        return TaskHandle('mock')
+    async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        return TaskHandle('mock')
+    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
     def node(
         self,
@@ -103,14 +114,23 @@ class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
     ) -> TaskResult[Any, TaskError]:
         return TaskResult(ok=None)
 
-    def send(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        return TaskHandle('mock')
+    def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
-    async def send_async(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        return TaskHandle('mock')
+    async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        return TaskHandle('mock')
+    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
     def node(
         self,
@@ -160,14 +180,23 @@ class MockTaskWrapperWithParams(TaskFunction[Any, Any]):
     ) -> TaskResult[Any, TaskError]:
         return TaskResult(ok=None)
 
-    def send(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        return TaskHandle('mock')
+    def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
-    async def send_async(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        return TaskHandle('mock')
+    async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        return TaskHandle('mock')
+    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
     def node(
         self,
@@ -213,14 +242,23 @@ class MockTaskWrapperWithKwargs(TaskFunction[Any, Any]):
         _ = kwargs
         return TaskResult(ok=None)
 
-    def send(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        return TaskHandle('mock')
+    def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
-    async def send_async(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        return TaskHandle('mock')
+    async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        return TaskHandle('mock')
+    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
     def node(
         self,
@@ -269,14 +307,23 @@ class MockTaskWrapperWithRequiredMeta(TaskFunction[Any, Any]):
         _ = workflow_meta
         return TaskResult(ok=None)
 
-    def send(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        return TaskHandle('mock')
+    def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
-    async def send_async(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        return TaskHandle('mock')
+    async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        return TaskHandle('mock')
+    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
     def node(
         self,
@@ -323,21 +370,23 @@ class MockTaskWrapperInt(TaskFunction[Any, int]):
         _ = kwargs
         return TaskResult(ok=1)
 
-    def send(self, *args: Any, **kwargs: Any) -> TaskHandle[int]:
-        _ = args
-        _ = kwargs
-        return TaskHandle('mock')
+    def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[int]]:
+        return Ok(TaskHandle('mock'))
 
-    async def send_async(self, *args: Any, **kwargs: Any) -> TaskHandle[int]:
-        _ = args
-        _ = kwargs
-        return TaskHandle('mock')
+    async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[int]]:
+        return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskHandle[int]:
-        _ = delay
-        _ = args
-        _ = kwargs
-        return TaskHandle('mock')
+    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[int]]:
+        return Ok(TaskHandle('mock'))
+
+    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[int]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[int]]:
+        return Ok(TaskHandle('mock'))
+
+    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[int]]:
+        return Ok(TaskHandle('mock'))
 
     def node(
         self,
@@ -389,21 +438,23 @@ class MockTaskWrapperWithStringResultParam(TaskFunction[Any, Any]):
         _ = flag
         return TaskResult(ok=None)
 
-    def send(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        _ = args
-        _ = kwargs
-        return TaskHandle('mock')
+    def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
-    async def send_async(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        _ = args
-        _ = kwargs
-        return TaskHandle('mock')
+    async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        _ = delay
-        _ = args
-        _ = kwargs
-        return TaskHandle('mock')
+    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
     def node(
         self,
@@ -455,21 +506,23 @@ class MockTaskWrapperWithRawParam(TaskFunction[Any, Any]):
         _ = flag
         return TaskResult(ok=None)
 
-    def send(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        _ = args
-        _ = kwargs
-        return TaskHandle('mock')
+    def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
-    async def send_async(self, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        _ = args
-        _ = kwargs
-        return TaskHandle('mock')
+    async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskHandle[Any]:
-        _ = delay
-        _ = args
-        _ = kwargs
-        return TaskHandle('mock')
+    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
 
     def node(
         self,

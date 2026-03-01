@@ -82,6 +82,32 @@ Errors from task lifecycle management.
 | ---- | ----------- | ----------- |
 | `SEND_SUPPRESSED` | Task send was suppressed due to prevent import side effects | No |
 
+### Send Errors (TaskSendResult)
+
+Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.send_async()`, and `.schedule()`. These are separate from `TaskResult` -- they indicate that enqueuing the task itself failed, not that task execution failed.
+
+#### TaskSendError
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `code` | `TaskSendErrorCode` | Failure category |
+| `message` | `str` | Human-readable description |
+| `retryable` | `bool` | Whether the caller can retry with the same payload |
+| `task_id` | `str \| None` | Generated task ID (`None` for `SEND_SUPPRESSED`, `VALIDATION_FAILED`) |
+| `payload` | `TaskSendPayload \| None` | Serialized envelope for idempotent retry |
+| `exception` | `BaseException \| None` | The original cause, if any |
+
+#### TaskSendErrorCode
+
+| Code | Description | Retryable |
+| ---- | ----------- | --------- |
+| `SEND_SUPPRESSED` | Send suppressed during worker import/discovery to prevent side effects | No |
+| `VALIDATION_FAILED` | Argument serialization or validation failed before enqueue | No |
+| `ENQUEUE_FAILED` | Broker/database failure during enqueue (transient) | Yes |
+| `PAYLOAD_MISMATCH` | Retry payload SHA does not match -- payload was altered between send and retry | No |
+
+`ENQUEUE_FAILED` errors carry a `TaskSendPayload` with an `enqueue_sha` field. Pass the error to `.retry_send(error)` or `.retry_send_async(error)` to replay the exact payload. The SHA guarantees same-payload idempotency.
+
 #### Workflow Errors
 
 Errors specific to workflow execution.

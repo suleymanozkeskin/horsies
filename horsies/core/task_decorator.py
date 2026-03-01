@@ -1,8 +1,11 @@
 # app/core/task_decorator.py
 from __future__ import annotations
 import asyncio
+import time
+import uuid
 from typing import (
     Callable,
+    Final,
     get_origin,
     get_type_hints,
     get_args,
@@ -21,10 +24,22 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from datetime import datetime, timezone
 from pydantic import TypeAdapter, ValidationError
-from horsies.core.codec.serde import serialize_task_options
+from horsies.core.codec.serde import (
+    serialize_task_options,
+    args_to_json,
+    kwargs_to_json,
+)
+from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.utils.fingerprint import enqueue_fingerprint
 
-from horsies.core.types.result import is_err, Err
+from horsies.core.types.result import is_err, Ok, Err
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError, BrokerResult
+from horsies.core.models.task_send_types import (
+    TaskSendErrorCode,
+    TaskSendPayload,
+    TaskSendError,
+    TaskSendResult,
+)
 
 if TYPE_CHECKING:
     from horsies.core.app import Horsies
@@ -54,6 +69,12 @@ from horsies.core.errors import (
 P = ParamSpec('P')
 T = TypeVar('T')
 E = TypeVar('E')
+
+# Internal retry constants for resend_on_transient_err.
+# 1 initial attempt + _SEND_RETRY_COUNT retries = 4 total broker calls.
+_SEND_RETRY_COUNT: Final[int] = 3
+_SEND_RETRY_INITIAL_MS: Final[int] = 200
+_SEND_RETRY_MAX_MS: Final[int] = 2000
 
 
 class FromNodeMarker:
@@ -516,14 +537,14 @@ class TaskFunction(Protocol[P, T]):
         self,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> 'TaskHandle[T]': ...
+    ) -> TaskSendResult['TaskHandle[T]']: ...
 
     @abstractmethod
     async def send_async(
         self,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> 'TaskHandle[T]': ...
+    ) -> TaskSendResult['TaskHandle[T]']: ...
 
     @abstractmethod
     def schedule(
@@ -531,7 +552,25 @@ class TaskFunction(Protocol[P, T]):
         delay: int,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> 'TaskHandle[T]': ...
+    ) -> TaskSendResult['TaskHandle[T]']: ...
+
+    @abstractmethod
+    def retry_send(
+        self,
+        error: TaskSendError,
+    ) -> TaskSendResult['TaskHandle[T]']: ...
+
+    @abstractmethod
+    async def retry_send_async(
+        self,
+        error: TaskSendError,
+    ) -> TaskSendResult['TaskHandle[T]']: ...
+
+    @abstractmethod
+    def retry_schedule(
+        self,
+        error: TaskSendError,
+    ) -> TaskSendResult['TaskHandle[T]']: ...
 
     @abstractmethod
     def node(
@@ -609,27 +648,6 @@ def create_task_wrapper(
     ok_type, err_type = type_args
     ok_type_adapter: TypeAdapter[Any] = TypeAdapter(ok_type)
     err_type_adapter: TypeAdapter[Any] = TypeAdapter(err_type)
-
-    def _immediate_error_handle(
-        exception: BaseException,
-        message: str,
-    ) -> TaskHandle[T]:
-        """Create a handle that already contains an error TaskResult."""
-        handle: TaskHandle[T] = TaskHandle('<error>', app, broker_mode=False)
-        handle.set_immediate_result(
-            TaskResult(
-                err=TaskError(
-                    exception=exception,
-                    error_code=LibraryErrorCode.UNHANDLED_EXCEPTION,
-                    message=message,
-                    data={
-                        'task_name': task_name,
-                        'exception_type': type(exception).__name__,
-                    },
-                )
-            )
-        )
-        return handle
 
     # Create a wrapper function that preserves the exact signature
     def wrapped_function(
@@ -719,206 +737,479 @@ def create_task_wrapper(
                 f'Failed to serialize task_options for {task_name}: {_opts_result.err_value}',
             )
         _pre_serialized_options = _opts_result.ok_value
-    def send(
-        *args: P.args,
-        **kwargs: P.kwargs,
-    ) -> TaskHandle[T]:
-        """Execute task asynchronously via app's broker."""
-        # Prevent import side-effects: if the worker is importing modules for
-        # discovery, suppress enqueuing and return an immediate error result.
-        if app.are_sends_suppressed():
+    # ---- Broker-to-TaskSendError mapping ----
+
+    def _map_broker_err(
+        broker_err: BrokerOperationError,
+        task_id: str,
+        payload: TaskSendPayload,
+    ) -> Err[TaskSendError]:
+        """Map a BrokerOperationError to a TaskSendError."""
+        # Detect SHA mismatch → PAYLOAD_MISMATCH
+        if broker_err.code == BrokerErrorCode.PAYLOAD_MISMATCH:
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.PAYLOAD_MISMATCH,
+                message=broker_err.message,
+                retryable=False,
+                task_id=task_id,
+                payload=payload,
+                exception=broker_err.exception,
+            ))
+        return Err(TaskSendError(
+            code=TaskSendErrorCode.ENQUEUE_FAILED,
+            message=broker_err.message,
+            retryable=broker_err.retryable,
+            task_id=task_id,
+            payload=payload,
+            exception=broker_err.exception,
+        ))
+
+    # ---- Core send/schedule helpers ----
+
+    def _do_send(
+        task_id: str,
+        payload: TaskSendPayload,
+    ) -> TaskSendResult[TaskHandle[T]]:
+        """Core sync send logic. Used by send() and retry_send()."""
+        try:
+            broker = app.get_broker()
+        except Exception as exc:
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.ENQUEUE_FAILED,
+                message=f'Failed to get broker for {task_name}: {exc}',
+                retryable=False,
+                task_id=task_id,
+                payload=payload,
+                exception=exc,
+            ))
+
+        last_err: TaskSendError | None = None
+        max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_err else 0)
+
+        for attempt in range(max_attempts):
+            if attempt > 0 and last_err is not None:
+                delay_ms = min(
+                    _SEND_RETRY_INITIAL_MS * (2 ** (attempt - 1)),
+                    _SEND_RETRY_MAX_MS,
+                )
+                time.sleep(delay_ms / 1000.0)
+
             try:
-                app.logger.warning(
-                    'Send suppressed for %s during module import/discovery; no task enqueued',
+                result = broker.enqueue(
                     task_name,
+                    payload.queue_name,
+                    task_id=task_id,
+                    enqueue_sha=payload.enqueue_sha,
+                    args_json=payload.args_json,
+                    kwargs_json=payload.kwargs_json,
+                    priority=payload.priority,
+                    good_until=payload.good_until,
+                    sent_at=payload.sent_at,
+                    task_options=payload.task_options,
                 )
-            except Exception:
-                pass
-            suppressed_handle: TaskHandle[T] = TaskHandle('<suppressed>')
-            suppressed_handle.set_immediate_result(
-                TaskResult(
-                    err=TaskError(
-                        error_code=LibraryErrorCode.SEND_SUPPRESSED,
-                        message='Task send suppressed during module import/discovery',
-                        data={'task_name': task_name},
-                    )
+            except Exception as exc:
+                last_err = TaskSendError(
+                    code=TaskSendErrorCode.ENQUEUE_FAILED,
+                    message=f'Failed to enqueue task {task_name}: {exc}',
+                    retryable=is_retryable_connection_error(exc),
+                    task_id=task_id,
+                    payload=payload,
+                    exception=exc,
                 )
-            )
-            return suppressed_handle
-        # VALIDATION AT EXECUTION TIME
-        # Re-validate queue_name to catch any configuration changes
+                if last_err.retryable and attempt < max_attempts - 1:
+                    continue
+                return Err(last_err)
+
+            if is_err(result):
+                mapped = _map_broker_err(result.err_value, task_id, payload)
+                send_err = mapped.err_value
+                if send_err.retryable and attempt < max_attempts - 1:
+                    last_err = send_err
+                    continue
+                return mapped
+
+            return Ok(TaskHandle(result.ok_value, app, broker_mode=True))
+
+        # Exhausted all attempts
+        if last_err is not None:
+            return Err(last_err)
+        # Should not reach here, but satisfy type checker
+        return Err(TaskSendError(
+            code=TaskSendErrorCode.ENQUEUE_FAILED,
+            message=f'Failed to enqueue task {task_name}: exhausted retry attempts',
+            retryable=False,
+            task_id=task_id,
+            payload=payload,
+        ))
+
+    async def _do_send_async(
+        task_id: str,
+        payload: TaskSendPayload,
+    ) -> TaskSendResult[TaskHandle[T]]:
+        """Core async send logic. Used by send_async() and retry_send_async()."""
+        try:
+            broker = app.get_broker()
+        except Exception as exc:
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.ENQUEUE_FAILED,
+                message=f'Failed to get broker for {task_name}: {exc}',
+                retryable=False,
+                task_id=task_id,
+                payload=payload,
+                exception=exc,
+            ))
+
+        last_err: TaskSendError | None = None
+        max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_err else 0)
+
+        for attempt in range(max_attempts):
+            if attempt > 0 and last_err is not None:
+                delay_ms = min(
+                    _SEND_RETRY_INITIAL_MS * (2 ** (attempt - 1)),
+                    _SEND_RETRY_MAX_MS,
+                )
+                await asyncio.sleep(delay_ms / 1000.0)
+
+            try:
+                result = await broker.enqueue_async(
+                    task_name,
+                    payload.queue_name,
+                    task_id=task_id,
+                    enqueue_sha=payload.enqueue_sha,
+                    args_json=payload.args_json,
+                    kwargs_json=payload.kwargs_json,
+                    priority=payload.priority,
+                    good_until=payload.good_until,
+                    sent_at=payload.sent_at,
+                    task_options=payload.task_options,
+                )
+            except Exception as exc:
+                last_err = TaskSendError(
+                    code=TaskSendErrorCode.ENQUEUE_FAILED,
+                    message=f'Failed to enqueue task {task_name}: {exc}',
+                    retryable=is_retryable_connection_error(exc),
+                    task_id=task_id,
+                    payload=payload,
+                    exception=exc,
+                )
+                if last_err.retryable and attempt < max_attempts - 1:
+                    continue
+                return Err(last_err)
+
+            if is_err(result):
+                mapped = _map_broker_err(result.err_value, task_id, payload)
+                send_err = mapped.err_value
+                if send_err.retryable and attempt < max_attempts - 1:
+                    last_err = send_err
+                    continue
+                return mapped
+
+            return Ok(TaskHandle(result.ok_value, app, broker_mode=True))
+
+        # Exhausted all attempts
+        if last_err is not None:
+            return Err(last_err)
+        return Err(TaskSendError(
+            code=TaskSendErrorCode.ENQUEUE_FAILED,
+            message=f'Failed to enqueue task {task_name}: exhausted retry attempts',
+            retryable=False,
+            task_id=task_id,
+            payload=payload,
+        ))
+
+    def _do_schedule(
+        task_id: str,
+        payload: TaskSendPayload,
+    ) -> TaskSendResult[TaskHandle[T]]:
+        """Core sync schedule logic. Used by schedule() and retry_schedule()."""
+        try:
+            broker = app.get_broker()
+        except Exception as exc:
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.ENQUEUE_FAILED,
+                message=f'Failed to get broker for {task_name}: {exc}',
+                retryable=False,
+                task_id=task_id,
+                payload=payload,
+                exception=exc,
+            ))
+
+        last_err: TaskSendError | None = None
+        max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_err else 0)
+
+        for attempt in range(max_attempts):
+            if attempt > 0 and last_err is not None:
+                delay_ms = min(
+                    _SEND_RETRY_INITIAL_MS * (2 ** (attempt - 1)),
+                    _SEND_RETRY_MAX_MS,
+                )
+                time.sleep(delay_ms / 1000.0)
+
+            try:
+                result = broker.enqueue(
+                    task_name,
+                    payload.queue_name,
+                    task_id=task_id,
+                    enqueue_sha=payload.enqueue_sha,
+                    args_json=payload.args_json,
+                    kwargs_json=payload.kwargs_json,
+                    priority=payload.priority,
+                    good_until=payload.good_until,
+                    sent_at=payload.sent_at,
+                    enqueue_delay_seconds=payload.enqueue_delay_seconds,
+                    task_options=payload.task_options,
+                )
+            except Exception as exc:
+                last_err = TaskSendError(
+                    code=TaskSendErrorCode.ENQUEUE_FAILED,
+                    message=f'Failed to schedule task {task_name}: {exc}',
+                    retryable=is_retryable_connection_error(exc),
+                    task_id=task_id,
+                    payload=payload,
+                    exception=exc,
+                )
+                if last_err.retryable and attempt < max_attempts - 1:
+                    continue
+                return Err(last_err)
+
+            if is_err(result):
+                mapped = _map_broker_err(result.err_value, task_id, payload)
+                send_err = mapped.err_value
+                if send_err.retryable and attempt < max_attempts - 1:
+                    last_err = send_err
+                    continue
+                return mapped
+
+            return Ok(TaskHandle(result.ok_value, app, broker_mode=True))
+
+        if last_err is not None:
+            return Err(last_err)
+        return Err(TaskSendError(
+            code=TaskSendErrorCode.ENQUEUE_FAILED,
+            message=f'Failed to schedule task {task_name}: exhausted retry attempts',
+            retryable=False,
+            task_id=task_id,
+            payload=payload,
+        ))
+
+    # ---- Pre-send preparation ----
+
+    def _prepare_send(
+        args: tuple[Any, ...],
+        kwargs_dict: dict[str, Any],
+        enqueue_delay_seconds: int | None = None,
+    ) -> TaskSendResult[tuple[str, TaskSendPayload]]:
+        """Validate, serialize, and build a (task_id, TaskSendPayload) tuple.
+
+        Returns Err(TaskSendError) on validation or serialization failure.
+        """
         queue_name = task_options.queue_name if task_options else None
         try:
             validated_queue_name = app.validate_queue_name(queue_name)
             priority = effective_priority(app, validated_queue_name)
-        except BaseException as e:
-            return _immediate_error_handle(
-                e,
-                f'Task execution error for {fn.__name__}: {e}',
-            )
+        except BaseException as exc:
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.VALIDATION_FAILED,
+                message=f'Queue validation failed for {task_name}: {exc}',
+                retryable=False,
+                exception=exc,
+            ))
 
-        try:
-            broker = app.get_broker()
-            good_until = task_options.good_until if task_options else None
-            sent_at = datetime.now(timezone.utc)
+        task_id = str(uuid.uuid4())
+        sent_at = datetime.now(timezone.utc)
+        good_until = task_options.good_until if task_options else None
 
-            result = broker.enqueue(
-                task_name,
-                args,
-                kwargs,
-                validated_queue_name,
-                priority=priority,
-                good_until=good_until,
-                sent_at=sent_at,
-                task_options=_pre_serialized_options,
-            )
-        except Exception as e:
-            # LoopRunner infrastructure failure (thread death, etc.)
-            return _immediate_error_handle(
-                e,
-                f'Failed to enqueue task {fn.__name__}: {e}',
-            )
-        if is_err(result):
-            err = result.err_value
-            return _immediate_error_handle(
-                err.exception or RuntimeError(err.message),
-                f'Failed to enqueue task {fn.__name__}: {err.message}',
-            )
-        return TaskHandle(result.ok_value, app, broker_mode=True)
+        # Serialize args
+        args_json: str | None = None
+        if args:
+            args_r = args_to_json(args)
+            if is_err(args_r):
+                return Err(TaskSendError(
+                    code=TaskSendErrorCode.VALIDATION_FAILED,
+                    message=f'Failed to serialize args for {task_name}: {args_r.err_value}',
+                    retryable=False,
+                    task_id=task_id,
+                    exception=args_r.err_value if isinstance(args_r.err_value, BaseException) else None,
+                ))
+
+            args_json = args_r.ok_value
+
+        # Serialize kwargs
+        kwargs_json: str | None = None
+        if kwargs_dict:
+            kwargs_r = kwargs_to_json(kwargs_dict)
+            if is_err(kwargs_r):
+                return Err(TaskSendError(
+                    code=TaskSendErrorCode.VALIDATION_FAILED,
+                    message=f'Failed to serialize kwargs for {task_name}: {kwargs_r.err_value}',
+                    retryable=False,
+                    task_id=task_id,
+                    exception=kwargs_r.err_value if isinstance(kwargs_r.err_value, BaseException) else None,
+                ))
+            kwargs_json = kwargs_r.ok_value
+
+        sha = enqueue_fingerprint(
+            task_name=task_name,
+            queue_name=validated_queue_name,
+            priority=priority,
+            args_json=args_json,
+            kwargs_json=kwargs_json,
+            sent_at=sent_at,
+            good_until=good_until,
+            enqueue_delay_seconds=enqueue_delay_seconds,
+            task_options=_pre_serialized_options,
+        )
+
+        payload = TaskSendPayload(
+            task_name=task_name,
+            queue_name=validated_queue_name,
+            priority=priority,
+            args_json=args_json,
+            kwargs_json=kwargs_json,
+            sent_at=sent_at,
+            good_until=good_until,
+            enqueue_delay_seconds=enqueue_delay_seconds,
+            task_options=_pre_serialized_options,
+            enqueue_sha=sha,
+        )
+        return Ok((task_id, payload))
+
+    # ---- Public send methods ----
+
+    def send(
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> TaskSendResult[TaskHandle[T]]:
+        """Execute task asynchronously via app's broker."""
+        if app.are_sends_suppressed():
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.SEND_SUPPRESSED,
+                message=f'Task send suppressed for {task_name} during module import/discovery',
+                retryable=False,
+            ))
+
+        prep = _prepare_send(args, kwargs)
+        if is_err(prep):
+            return prep
+        task_id, payload = prep.ok_value
+        return _do_send(task_id, payload)
 
     async def send_async(
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> TaskHandle[T]:
+    ) -> TaskSendResult[TaskHandle[T]]:
         """Async variant for frameworks like FastAPI."""
         if app.are_sends_suppressed():
-            try:
-                app.logger.warning(
-                    'Send (async) suppressed for %s during module import/discovery; no task enqueued',
-                    task_name,
-                )
-            except Exception:
-                pass
-            suppressed_handle: TaskHandle[T] = TaskHandle('<suppressed>')
-            suppressed_handle.set_immediate_result(
-                TaskResult(
-                    err=TaskError(
-                        error_code=LibraryErrorCode.SEND_SUPPRESSED,
-                        message='Task send suppressed during module import/discovery',
-                        data={'task_name': task_name},
-                    )
-                )
-            )
-            return suppressed_handle
-        queue_name = task_options.queue_name if task_options else None
-        try:
-            validated = app.validate_queue_name(queue_name)
-            priority = effective_priority(app, validated)
-        except BaseException as e:
-            return _immediate_error_handle(
-                e,
-                f'Task execution error for {fn.__name__}: {e}',
-            )
-        try:
-            broker = app.get_broker()
-        except Exception as e:
-            return _immediate_error_handle(
-                e,
-                f'Failed to get broker for {fn.__name__}: {e}',
-            )
-        good_until = task_options.good_until if task_options else None
-        sent_at = datetime.now(timezone.utc)
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.SEND_SUPPRESSED,
+                message=f'Task send (async) suppressed for {task_name} during module import/discovery',
+                retryable=False,
+            ))
 
-        try:
-            result = await broker.enqueue_async(
-                task_name,
-                args,
-                kwargs,
-                validated,
-                priority=priority,
-                good_until=good_until,
-                sent_at=sent_at,
-                task_options=_pre_serialized_options,
-            )
-        except Exception as e:
-            return _immediate_error_handle(
-                e,
-                f'Failed to enqueue task {fn.__name__}: {e}',
-            )
-        if is_err(result):
-            err = result.err_value
-            return _immediate_error_handle(
-                err.exception or RuntimeError(err.message),
-                f'Failed to enqueue task {fn.__name__}: {err.message}',
-            )
-        return TaskHandle(result.ok_value, app, broker_mode=True)
+        prep = _prepare_send(args, kwargs)
+        if is_err(prep):
+            return prep
+        task_id, payload = prep.ok_value
+        return await _do_send_async(task_id, payload)
 
     def schedule(
         delay: int,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> TaskHandle[T]:
+    ) -> TaskSendResult[TaskHandle[T]]:
         """Execute task asynchronously after a delay."""
         if app.are_sends_suppressed():
-            try:
-                app.logger.warning(
-                    'Schedule suppressed for %s during module import/discovery; no task enqueued',
-                    task_name,
-                )
-            except Exception:
-                pass
-            suppressed_handle: TaskHandle[T] = TaskHandle('<suppressed>')
-            suppressed_handle.set_immediate_result(
-                TaskResult(
-                    err=TaskError(
-                        error_code=LibraryErrorCode.SEND_SUPPRESSED,
-                        message='Task schedule suppressed during module import/discovery',
-                        data={'task_name': task_name},
-                    )
-                )
-            )
-            return suppressed_handle
-        # VALIDATION AT EXECUTION TIME
-        # Re-validate queue_name to catch any configuration changes
-        queue_name = task_options.queue_name if task_options else None
-        try:
-            validated_queue_name = app.validate_queue_name(queue_name)
-            priority = effective_priority(app, validated_queue_name)
-        except BaseException as e:
-            return _immediate_error_handle(
-                e,
-                f'Task execution error for {fn.__name__}: {e}',
-            )
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.SEND_SUPPRESSED,
+                message=f'Task schedule suppressed for {task_name} during module import/discovery',
+                retryable=False,
+            ))
 
-        try:
-            broker = app.get_broker()
-            good_until = task_options.good_until if task_options else None
-            sent_at = datetime.now(timezone.utc)
+        prep = _prepare_send(args, kwargs, enqueue_delay_seconds=delay)
+        if is_err(prep):
+            return prep
+        task_id, payload = prep.ok_value
+        return _do_schedule(task_id, payload)
 
-            result = broker.enqueue(
-                task_name,
-                args,
-                kwargs,
-                validated_queue_name,
-                priority=priority,
-                good_until=good_until,
-                sent_at=sent_at,
-                enqueue_delay_seconds=delay,
-                task_options=_pre_serialized_options,
-            )
-        except Exception as e:
-            # LoopRunner infrastructure failure
-            return _immediate_error_handle(
-                e,
-                f'Failed to schedule task {fn.__name__}: {e}',
-            )
-        if is_err(result):
-            err = result.err_value
-            return _immediate_error_handle(
-                err.exception or RuntimeError(err.message),
-                f'Failed to schedule task {fn.__name__}: {err.message}',
-            )
-        return TaskHandle(result.ok_value, app, broker_mode=True)
+    # ---- Retry methods ----
+
+    def _validate_retry(
+        error: TaskSendError,
+        *,
+        require_delay: bool = False,
+        reject_delay: bool = False,
+    ) -> TaskSendResult[tuple[str, TaskSendPayload]]:
+        """Validate a TaskSendError for retry eligibility.
+
+        Returns Ok((task_id, payload)) or Err(TaskSendError(VALIDATION_FAILED)).
+        """
+        if error.code != TaskSendErrorCode.ENQUEUE_FAILED:
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.VALIDATION_FAILED,
+                message=f'retry is only valid for ENQUEUE_FAILED errors, got {error.code!r}',
+                retryable=False,
+            ))
+        if error.payload is None or error.task_id is None:
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.VALIDATION_FAILED,
+                message='cannot retry: no payload or task_id on error',
+                retryable=False,
+            ))
+        if error.payload.task_name != task_name:
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.VALIDATION_FAILED,
+                message=(
+                    f'cross-task retry: error is for {error.payload.task_name!r} '
+                    f'but this task is {task_name!r}'
+                ),
+                retryable=False,
+            ))
+        if require_delay and error.payload.enqueue_delay_seconds is None:
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.VALIDATION_FAILED,
+                message='cannot retry schedule: missing enqueue_delay_seconds',
+                retryable=False,
+            ))
+        if reject_delay and error.payload.enqueue_delay_seconds is not None:
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.VALIDATION_FAILED,
+                message=(
+                    'cannot retry scheduled task via retry_send — '
+                    'use retry_schedule instead'
+                ),
+                retryable=False,
+            ))
+        return Ok((error.task_id, error.payload))
+
+    def retry_send(
+        error: TaskSendError,
+    ) -> TaskSendResult[TaskHandle[T]]:
+        """Retry a failed send using the stored payload."""
+        v = _validate_retry(error, reject_delay=True)
+        if is_err(v):
+            return v
+        task_id, payload = v.ok_value
+        return _do_send(task_id, payload)
+
+    async def retry_send_async(
+        error: TaskSendError,
+    ) -> TaskSendResult[TaskHandle[T]]:
+        """Retry a failed async send using the stored payload."""
+        v = _validate_retry(error, reject_delay=True)
+        if is_err(v):
+            return v
+        task_id, payload = v.ok_value
+        return await _do_send_async(task_id, payload)
+
+    def retry_schedule(
+        error: TaskSendError,
+    ) -> TaskSendResult[TaskHandle[T]]:
+        """Retry a failed schedule using the stored payload."""
+        v = _validate_retry(error, require_delay=True)
+        if is_err(v):
+            return v
+        task_id, payload = v.ok_value
+        return _do_schedule(task_id, payload)
 
     class TaskFunctionImpl:
         def __init__(self) -> None:
@@ -953,14 +1244,14 @@ def create_task_wrapper(
             self,
             *args: P.args,
             **kwargs: P.kwargs,
-        ) -> TaskHandle[T]:
+        ) -> TaskSendResult[TaskHandle[T]]:
             return send(*args, **kwargs)
 
         async def send_async(
             self,
             *args: P.args,
             **kwargs: P.kwargs,
-        ) -> TaskHandle[T]:
+        ) -> TaskSendResult[TaskHandle[T]]:
             return await send_async(*args, **kwargs)
 
         def schedule(
@@ -968,8 +1259,26 @@ def create_task_wrapper(
             delay: int,
             *args: P.args,
             **kwargs: P.kwargs,
-        ) -> TaskHandle[T]:
+        ) -> TaskSendResult[TaskHandle[T]]:
             return schedule(delay, *args, **kwargs)
+
+        def retry_send(
+            self,
+            error: TaskSendError,
+        ) -> TaskSendResult[TaskHandle[T]]:
+            return retry_send(error)
+
+        async def retry_send_async(
+            self,
+            error: TaskSendError,
+        ) -> TaskSendResult[TaskHandle[T]]:
+            return await retry_send_async(error)
+
+        def retry_schedule(
+            self,
+            error: TaskSendError,
+        ) -> TaskSendResult[TaskHandle[T]]:
+            return retry_schedule(error)
 
         def node(
             self,

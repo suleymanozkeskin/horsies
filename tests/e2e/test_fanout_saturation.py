@@ -18,6 +18,7 @@ import sys
 import time
 from collections.abc import Callable
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from psycopg import Notify
@@ -102,9 +103,10 @@ class TestTaskDoneFanout:
         # Enqueue one task so the UPDATE trigger has a row to fire on
         task_id = (await broker.enqueue_async(
             task_name='e2e_simple',
-            args=(0,),
-            kwargs={},
+            args_json='[0]',
             queue_name='default',
+            task_id=str(uuid4()),
+            enqueue_sha='test-sha',
         )).unwrap()
 
         # Complete it via direct SQL (fires NOTIFY task_done, <task_id>)
@@ -159,9 +161,10 @@ class TestTaskDoneFanout:
 
         task_id = (await broker.enqueue_async(
             task_name='e2e_simple',
-            args=(0,),
-            kwargs={},
+            args_json='[0]',
             queue_name='default',
+            task_id=str(uuid4()),
+            enqueue_sha='test-sha',
         )).unwrap()
 
         # Patch put_nowait on every queue to count deliveries
@@ -245,9 +248,10 @@ class TestTaskDoneFanout:
         for i in range(M_COMPLETIONS):
             tid = (await broker.enqueue_async(
                 task_name='e2e_simple',
-                args=(i,),
-                kwargs={},
+                args_json=f'[{i}]',
                 queue_name='default',
+                task_id=str(uuid4()),
+                enqueue_sha='test-sha',
             )).unwrap()
             task_ids.append(tid)
 
@@ -338,9 +342,10 @@ class TestTaskDoneFanout:
             for i in range(M):
                 tid = (await broker.enqueue_async(
                     task_name='e2e_simple',
-                    args=(i,),
-                    kwargs={},
+                    args_json=f'[{i}]',
                     queue_name='default',
+                    task_id=str(uuid4()),
+                    enqueue_sha='test-sha',
                 )).unwrap()
                 task_ids.append(tid)
 
@@ -420,9 +425,10 @@ class TestFanoutBoundary:
         # Fire a completion with zero subscribers; should be a safe no-op.
         task_id = (await broker.enqueue_async(
             task_name='e2e_simple',
-            args=(0,),
-            kwargs={},
+            args_json='[0]',
             queue_name='default',
+            task_id=str(uuid4()),
+            enqueue_sha='test-sha',
         )).unwrap()
         await session.execute(
             text("""
@@ -441,9 +447,10 @@ class TestFanoutBoundary:
         try:
             task_id_2 = (await broker.enqueue_async(
                 task_name='e2e_simple',
-                args=(1,),
-                kwargs={},
+                args_json='[1]',
                 queue_name='default',
+                task_id=str(uuid4()),
+                enqueue_sha='test-sha',
             )).unwrap()
             await session.execute(
                 text("""
@@ -472,9 +479,10 @@ class TestFanoutBoundary:
         try:
             task_id = (await broker.enqueue_async(
                 task_name='e2e_simple',
-                args=(0,),
-                kwargs={},
+                args_json='[0]',
                 queue_name='default',
+                task_id=str(uuid4()),
+                enqueue_sha='test-sha',
             )).unwrap()
             await session.execute(
                 text("""
@@ -523,17 +531,19 @@ class TestFanoutBoundary:
         for i in range(20):
             tid = (await broker.enqueue_async(
                 task_name='e2e_simple',
-                args=(i,),
-                kwargs={},
+                args_json=f'[{i}]',
                 queue_name='default',
+                task_id=str(uuid4()),
+                enqueue_sha='test-sha',
             )).unwrap()
             pre_ids.append(tid)
 
         post_id = (await broker.enqueue_async(
             task_name='e2e_simple',
-            args=(99,),
-            kwargs={},
+            args_json='[99]',
             queue_name='default',
+            task_id=str(uuid4()),
+            enqueue_sha='test-sha',
         )).unwrap()
 
         async def _complete_inflight(ids: list[str]) -> None:
@@ -692,9 +702,10 @@ class TestFanoutErrorPaths:
             for i in range(3):
                 tid = (await broker.enqueue_async(
                     task_name='e2e_simple',
-                    args=(i,),
-                    kwargs={},
+                    args_json=f'[{i}]',
                     queue_name='default',
+                    task_id=str(uuid4()),
+                    enqueue_sha='test-sha',
                 )).unwrap()
                 task_ids.append(tid)
 
@@ -744,9 +755,10 @@ class TestFanoutContracts:
         try:
             task_id = (await broker.enqueue_async(
                 task_name='e2e_simple',
-                args=(0,),
-                kwargs={},
+                args_json='[0]',
                 queue_name='default',
+                task_id=str(uuid4()),
+                enqueue_sha='test-sha',
             )).unwrap()
             await session.execute(
                 text("""
@@ -786,9 +798,10 @@ class TestFanoutContracts:
         try:
             task_id = (await broker.enqueue_async(
                 task_name='e2e_simple',
-                args=(0,),
-                kwargs={},
+                args_json='[0]',
                 queue_name='default',
+                task_id=str(uuid4()),
+                enqueue_sha='test-sha',
             )).unwrap()
 
             # Drain any task_new notifications from the enqueue itself
@@ -840,9 +853,10 @@ class TestFanoutContracts:
         try:
             task_id = (await broker.enqueue_async(
                 task_name='e2e_simple',
-                args=(0,),
-                kwargs={},
+                args_json='[0]',
                 queue_name='default',
+                task_id=str(uuid4()),
+                enqueue_sha='test-sha',
             )).unwrap()
             await session.execute(
                 text("""

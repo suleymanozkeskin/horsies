@@ -9,12 +9,15 @@ import signal
 import tempfile
 from pathlib import Path
 from typing import Protocol, Any
+from uuid import uuid4
 
 import pytest
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.task_pg import TaskModel
+from horsies.core.models.task_send_types import TaskSendResult
 from horsies.core.task_decorator import TaskHandle
+from horsies.core.types.result import is_err
 from horsies.core.types.status import TaskStatus
 from sqlalchemy import text
 
@@ -24,6 +27,7 @@ from tests.e2e.helpers.db import (
     wait_for_any_status,
     wait_for_status,
 )
+from tests.e2e.helpers.assertions import unwrap_send
 from tests.e2e.helpers.worker import run_worker, run_workers
 from tests.e2e.tasks import basic as basic_tasks
 from tests.e2e.tasks import retry as retry_tasks
@@ -46,7 +50,7 @@ REQUEUE_GUARD_INSTANCE = 'tests.e2e.tasks.instance_requeue_guard:app'
 
 
 class _HealthcheckTask(Protocol):
-    def send(self) -> TaskHandle[str]: ...
+    def send(self) -> TaskSendResult[TaskHandle[str]]: ...
 
 
 def _make_ready_check(task_func: _HealthcheckTask):
@@ -56,7 +60,10 @@ def _make_ready_check(task_func: _HealthcheckTask):
     def _check() -> bool:
         nonlocal handle
         if handle is None:
-            handle = task_func.send()
+            r = task_func.send()
+            if is_err(r):
+                return False
+            handle = r.ok_value
         result = handle.get(timeout_ms=2000)
         return result.is_ok()
 
@@ -145,9 +152,10 @@ async def test_multi_worker_distribution(broker: PostgresBroker) -> None:
         task_ids = [
             broker.enqueue(
                 task_name='e2e_slow',
-                args=(task_duration_ms,),
-                kwargs={},
                 queue_name='default',
+                task_id=str(uuid4()),
+                enqueue_sha='test-sha',
+                args_json=json.dumps([task_duration_ms]),
             ).unwrap()
             for _ in range(num_tasks)
         ]
@@ -207,9 +215,10 @@ async def test_cluster_wide_cap(cluster_cap_broker: PostgresBroker) -> None:
         task_ids = [
             cluster_cap_broker.enqueue(
                 task_name='e2e_cluster_cap_slow',
-                args=(task_duration_ms,),
-                kwargs={},
                 queue_name='default',
+                task_id=str(uuid4()),
+                enqueue_sha='test-sha',
+                args_json=json.dumps([task_duration_ms]),
             ).unwrap()
             for _ in range(num_tasks)
         ]
@@ -269,9 +278,10 @@ async def test_per_queue_concurrency_cap(custom_broker: PostgresBroker) -> None:
         task_ids = [
             custom_broker.enqueue(
                 task_name='e2e_custom_slow',
-                args=(task_duration_ms,),
-                kwargs={},
                 queue_name=queue_name,
+                task_id=str(uuid4()),
+                enqueue_sha='test-sha',
+                args_json=json.dumps([task_duration_ms]),
             ).unwrap()
             for _ in range(num_tasks)
         ]
@@ -331,7 +341,7 @@ def test_multi_worker_no_double_execution() -> None:
             ):
                 # Use unique tokens for each task
                 tokens = [f'multiworker_task_{i}' for i in range(num_tasks)]
-                handles = [basic_tasks.idempotent_task.send(token) for token in tokens]
+                handles = [unwrap_send(basic_tasks.idempotent_task.send(token)) for token in tokens]
                 results = [h.get(timeout_ms=30000) for h in handles]
 
                 # All tasks should succeed (no DOUBLE_EXECUTION errors)
@@ -378,9 +388,10 @@ async def test_softcap_db_ledger_race_single_execution(
     ):
         blocker_task_id = softcap_broker.enqueue(
             task_name='e2e_softcap_blocker',
-            args=(blocker_duration_ms,),
-            kwargs={},
             queue_name='default',
+            task_id=str(uuid4()),
+            enqueue_sha='test-sha',
+            args_json=json.dumps([blocker_duration_ms]),
         ).unwrap()
         await wait_for_status(
             softcap_broker.session_factory,
@@ -391,9 +402,10 @@ async def test_softcap_db_ledger_race_single_execution(
 
         ledger_task_id = softcap_broker.enqueue(
             task_name='e2e_softcap_db_ledger',
-            args=(token,),
-            kwargs={},
             queue_name='default',
+            task_id=str(uuid4()),
+            enqueue_sha='test-sha',
+            args_json=json.dumps([token]),
         ).unwrap()
 
         await _wait_for_claimed_owner(
@@ -484,9 +496,10 @@ async def test_stale_running_marked_failed_on_crash(
         # Enqueue a long-running task
         task_id = recovery_broker.enqueue(
             task_name='e2e_recovery_slow',
-            args=(task_duration_ms,),
-            kwargs={},
             queue_name='default',
+            task_id=str(uuid4()),
+            enqueue_sha='test-sha',
+            args_json=json.dumps([task_duration_ms]),
         ).unwrap()
 
         # Wait until task reaches RUNNING
@@ -545,9 +558,9 @@ async def test_stale_claimed_requeued_and_completed(
     # Enqueue a simple task
     task_id = recovery_broker.enqueue(
         task_name='e2e_recovery_healthcheck',
-        args=(),
-        kwargs={},
         queue_name='default',
+        task_id=str(uuid4()),
+        enqueue_sha='test-sha',
     ).unwrap()
 
     # Manually set the row to CLAIMED with a stale timestamp, simulating a
@@ -616,9 +629,9 @@ async def test_cluster_cap_not_leaked_on_failure(
         fail_ids = [
             cluster_cap_broker.enqueue(
                 task_name='e2e_cluster_cap_fail',
-                args=(),
-                kwargs={},
                 queue_name='default',
+                task_id=str(uuid4()),
+                enqueue_sha='test-sha',
             ).unwrap()
             for _ in range(num_failing)
         ]
@@ -641,9 +654,10 @@ async def test_cluster_cap_not_leaked_on_failure(
         slow_ids = [
             cluster_cap_broker.enqueue(
                 task_name='e2e_cluster_cap_slow',
-                args=(task_duration_ms,),
-                kwargs={},
                 queue_name='default',
+                task_id=str(uuid4()),
+                enqueue_sha='test-sha',
+                args_json=json.dumps([task_duration_ms]),
             ).unwrap()
             for _ in range(num_slow)
         ]
@@ -682,7 +696,7 @@ async def test_retry_works_across_multiple_workers(broker: PostgresBroker) -> No
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         # Use .send() so retry policy (task_options) is persisted in DB
-        handles = [retry_tasks.retry_exhausted_task.send() for _ in range(num_tasks)]
+        handles = [unwrap_send(retry_tasks.retry_exhausted_task.send()) for _ in range(num_tasks)]
         task_ids = [h.task_id for h in handles]
 
         # Wait for all to reach terminal state (3 retries x 1s + execution time)
@@ -738,18 +752,20 @@ async def test_per_queue_caps_independent_across_queues(
         high_ids = [
             custom_broker.enqueue(
                 task_name='e2e_custom_slow',
-                args=(task_duration_ms,),
-                kwargs={},
                 queue_name='high',
+                task_id=str(uuid4()),
+                enqueue_sha='test-sha',
+                args_json=json.dumps([task_duration_ms]),
             ).unwrap()
             for _ in range(num_tasks_per_queue)
         ]
         normal_ids = [
             custom_broker.enqueue(
                 task_name='e2e_custom_slow',
-                args=(task_duration_ms,),
-                kwargs={},
                 queue_name='normal',
+                task_id=str(uuid4()),
+                enqueue_sha='test-sha',
+                args_json=json.dumps([task_duration_ms]),
             ).unwrap()
             for _ in range(num_tasks_per_queue)
         ]
@@ -816,9 +832,10 @@ async def test_queue_priority_ordering(custom_broker: PostgresBroker) -> None:
     low_ids = [
         custom_broker.enqueue(
             task_name='e2e_custom_slow',
-            args=(task_duration_ms,),
-            kwargs={},
             queue_name='low',
+            task_id=str(uuid4()),
+            enqueue_sha='test-sha',
+            args_json=json.dumps([task_duration_ms]),
         ).unwrap()
         for _ in range(num_tasks_per_queue)
     ]
@@ -827,9 +844,10 @@ async def test_queue_priority_ordering(custom_broker: PostgresBroker) -> None:
     high_ids = [
         custom_broker.enqueue(
             task_name='e2e_custom_slow',
-            args=(task_duration_ms,),
-            kwargs={},
             queue_name='high',
+            task_id=str(uuid4()),
+            enqueue_sha='test-sha',
+            args_json=json.dumps([task_duration_ms]),
         ).unwrap()
         for _ in range(num_tasks_per_queue)
     ]
@@ -900,9 +918,10 @@ async def test_single_worker_crash_remaining_continue(
         task_ids = [
             broker.enqueue(
                 task_name='e2e_slow',
-                args=(task_duration_ms,),
-                kwargs={},
                 queue_name='default',
+                task_id=str(uuid4()),
+                enqueue_sha='test-sha',
+                args_json=json.dumps([task_duration_ms]),
             ).unwrap()
             for _ in range(num_tasks)
         ]
@@ -982,9 +1001,10 @@ async def test_concurrent_enqueue_during_processing(
         batch1_ids = [
             broker.enqueue(
                 task_name='e2e_slow',
-                args=(task_duration_ms,),
-                kwargs={},
                 queue_name='default',
+                task_id=str(uuid4()),
+                enqueue_sha='test-sha',
+                args_json=json.dumps([task_duration_ms]),
             ).unwrap()
             for _ in range(batch_size)
         ]
@@ -1001,9 +1021,10 @@ async def test_concurrent_enqueue_during_processing(
         batch2_ids = [
             broker.enqueue(
                 task_name='e2e_slow',
-                args=(task_duration_ms,),
-                kwargs={},
                 queue_name='default',
+                task_id=str(uuid4()),
+                enqueue_sha='test-sha',
+                args_json=json.dumps([task_duration_ms]),
             ).unwrap()
             for _ in range(batch_size)
         ]
@@ -1058,7 +1079,7 @@ def test_softcap_lease_no_double_execution(
             ):
                 tokens = [f'softcap_task_{i}' for i in range(num_tasks)]
                 handles = [
-                    instance_softcap.slow_idempotent_task.send(token, 1500)
+                    unwrap_send(instance_softcap.slow_idempotent_task.send(token, 1500))
                     for token in tokens
                 ]
                 results = [h.get(timeout_ms=60_000) for h in handles]
@@ -1109,9 +1130,10 @@ async def test_softcap_expired_claim_requeued(
             # Enqueue 1 softcap idempotent task (short duration — speed not needed here)
             task_id = softcap_broker.enqueue(
                 task_name='e2e_softcap_slow_idempotent',
-                args=(token, 100),
-                kwargs={},
                 queue_name='default',
+                task_id=str(uuid4()),
+                enqueue_sha='test-sha',
+                args_json=json.dumps([token, 100]),
             ).unwrap()
 
             # Manually set to CLAIMED with an already-expired lease and a dead worker
@@ -1204,9 +1226,10 @@ async def test_softcap_owner_transition_after_worker_crash(
             ) as worker_a_proc:
                 blocker_task_id = softcap_broker.enqueue(
                     task_name='e2e_softcap_blocker',
-                    args=(blocker_duration_ms,),
-                    kwargs={},
                     queue_name='default',
+                    task_id=str(uuid4()),
+                    enqueue_sha='test-sha',
+                    args_json=json.dumps([blocker_duration_ms]),
                 ).unwrap()
                 await wait_for_status(
                     softcap_broker.session_factory,
@@ -1217,9 +1240,10 @@ async def test_softcap_owner_transition_after_worker_crash(
 
                 task_id = softcap_broker.enqueue(
                     task_name='e2e_softcap_slow_idempotent',
-                    args=(token, 100),
-                    kwargs={},
                     queue_name='default',
+                    task_id=str(uuid4()),
+                    enqueue_sha='test-sha',
+                    args_json=json.dumps([token, 100]),
                 ).unwrap()
 
                 first_owner = await _wait_for_claimed_owner(
@@ -1382,7 +1406,7 @@ async def test_requeue_db_error_age_guard_recovery(
         os.environ['E2E_REQUEUE_GUARD_LOG_DIR'] = log_dir
 
         # 1. Enqueue task
-        handle = instance_requeue_guard.requeue_guard_task.send(token)
+        handle = unwrap_send(instance_requeue_guard.requeue_guard_task.send(token))
         task_id = handle.task_id
 
         worker_a: subprocess.Popen[str] | None = None

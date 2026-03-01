@@ -14,7 +14,7 @@ from typing import (
     Union,
     overload,
 )
-from pydantic import BaseModel, ConfigDict, model_validator, Field
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator, Field
 from pydantic.types import PositiveInt
 from enum import Enum
 
@@ -384,6 +384,17 @@ class TaskOptions(BaseModel):
     queue_name: Optional[str] = None
     good_until: Optional[datetime.datetime] = None
     retry_policy: Optional[RetryPolicy] = None
+
+    @field_validator('good_until')
+    @classmethod
+    def reject_naive_good_until(cls, v: datetime.datetime | None) -> datetime.datetime | None:
+        """Reject naive datetimes — they are ambiguous and break fingerprinting."""
+        if v is not None and v.tzinfo is None:
+            raise ValueError(
+                'good_until must be timezone-aware (got naive datetime). '
+                'Use e.g. datetime.now(timezone.utc) or a tz-aware value.',
+            )
+        return v
 
 
 # Rebuild SubWorkflowError to resolve forward reference to SubWorkflowSummary

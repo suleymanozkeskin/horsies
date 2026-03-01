@@ -16,8 +16,10 @@ from horsies.core.errors import ConfigurationError, RegistryError, ErrorCode
 from horsies.core.scheduler.state import ScheduleStateManager
 from horsies.core.scheduler.calculator import calculate_next_run, should_run_now
 from horsies.core.logging import get_logger
-from horsies.core.brokers.result_types import BrokerResult
-from horsies.core.types.result import is_err
+from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError, BrokerResult
+from horsies.core.codec.serde import args_to_json, kwargs_to_json
+from horsies.core.utils.fingerprint import enqueue_fingerprint, schedule_slot_task_id
+from horsies.core.types.result import Err, is_err
 from horsies.core.worker.worker import import_by_path
 
 logger = get_logger('scheduler')
@@ -369,7 +371,7 @@ class Scheduler:
                     last_task_id = ''
                     caught_up: list[datetime] = []
                     for due_time in due_runs:
-                        result = await self._enqueue_scheduled_task(schedule)
+                        result = await self._enqueue_scheduled_task(schedule, slot_time=due_time)
                         if is_err(result):
                             err = result.err_value
                             level = 'transient' if err.retryable else 'permanent'
@@ -411,7 +413,11 @@ class Scheduler:
 
                 else:
                     # Normal execution: single run
-                    result = await self._enqueue_scheduled_task(schedule)
+                    # slot_time = state.next_run_at for deterministic task_id.
+                    # Fallback to check_time only if next_run_at is somehow None
+                    # (should not happen since should_run_now already checked it).
+                    slot_time = state.next_run_at if state.next_run_at is not None else check_time
+                    result = await self._enqueue_scheduled_task(schedule, slot_time=slot_time)
                     if is_err(result):
                         err = result.err_value
                         if err.retryable:
@@ -602,8 +608,15 @@ class Scheduler:
     async def _enqueue_scheduled_task(
         self,
         schedule: TaskSchedule,
+        *,
+        slot_time: datetime,
     ) -> BrokerResult[str]:
         """Enqueue a scheduled task via the broker.
+
+        Uses a deterministic task_id derived from the schedule name and slot_time.
+        sent_at is set to slot_time (the logical schedule slot), not wall clock.
+        This ensures crash-and-retry produces the same task_id + same SHA,
+        making the INSERT idempotent via ON CONFLICT DO NOTHING.
 
         Returns Ok(task_id) on success, Err(BrokerOperationError) on broker failure.
         Raises ValueError/RuntimeError for programming errors (missing task, bad queue).
@@ -623,10 +636,55 @@ class Scheduler:
 
         priority = effective_priority(self.app, validated_queue_name)
 
-        return await self.broker.enqueue_async(
+        task_id = schedule_slot_task_id(schedule.name, slot_time)
+
+        # Pre-serialize args/kwargs
+        args_json: str | None = None
+        if schedule.args:
+            args_r = args_to_json(schedule.args)
+            if is_err(args_r):
+                return Err(BrokerOperationError(
+                    code=BrokerErrorCode.ENQUEUE_FAILED,
+                    message=f"Failed to serialize args for schedule '{schedule.name}': {args_r.err_value}",
+                    retryable=False,
+                    exception=args_r.err_value if isinstance(args_r.err_value, BaseException) else None,
+                ))
+            args_json = args_r.ok_value
+
+        kwargs_json: str | None = None
+        if schedule.kwargs:
+            kwargs_r = kwargs_to_json(schedule.kwargs)
+            if is_err(kwargs_r):
+                return Err(BrokerOperationError(
+                    code=BrokerErrorCode.ENQUEUE_FAILED,
+                    message=f"Failed to serialize kwargs for schedule '{schedule.name}': {kwargs_r.err_value}",
+                    retryable=False,
+                    exception=kwargs_r.err_value if isinstance(kwargs_r.err_value, BaseException) else None,
+                ))
+            kwargs_json = kwargs_r.ok_value
+
+        # Deterministic sent_at — same slot produces same SHA across ticks.
+        sent_at = slot_time
+
+        enqueue_sha = enqueue_fingerprint(
             task_name=schedule.task_name,
-            args=schedule.args,
-            kwargs=schedule.kwargs,
             queue_name=validated_queue_name,
             priority=priority,
+            args_json=args_json,
+            kwargs_json=kwargs_json,
+            sent_at=sent_at,
+            good_until=None,
+            enqueue_delay_seconds=None,
+            task_options=None,
+        )
+
+        return await self.broker.enqueue_async(
+            task_name=schedule.task_name,
+            queue_name=validated_queue_name,
+            task_id=task_id,
+            enqueue_sha=enqueue_sha,
+            args_json=args_json,
+            kwargs_json=kwargs_json,
+            priority=priority,
+            sent_at=sent_at,
         )

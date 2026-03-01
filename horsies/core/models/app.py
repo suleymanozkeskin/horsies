@@ -53,6 +53,7 @@ class AppConfig(BaseModel):
         default_factory=lambda: ExceptionMapper(),
     )
     default_unhandled_error_code: str = 'UNHANDLED_EXCEPTION'
+    resend_on_transient_err: bool = False
 
     @model_validator(mode='after')
     def validate_queue_configuration(self):
@@ -323,6 +324,9 @@ class AppConfig(BaseModel):
         lines.append(
             f'    notify_poll_interval_ms: {self.resilience.notify_poll_interval_ms}ms'
         )
+
+        # Send retry
+        lines.append(f'  resend_on_transient_err: {self.resend_on_transient_err}')
 
         # Exception mapper
         if self.exception_mapper:

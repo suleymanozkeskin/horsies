@@ -4,7 +4,8 @@ import uuid, asyncio, hashlib, contextlib, threading
 from typing import Any, Optional, TYPE_CHECKING
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from sqlalchemy import text
+from sqlalchemy import text, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.brokers.result_types import (
     BrokerErrorCode,
@@ -20,8 +21,6 @@ from horsies.core.models.workflow_pg import (
 from horsies.core.types.status import TaskStatus
 from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.codec.serde import (
-    args_to_json,
-    kwargs_to_json,
     loads_json,
     task_result_from_json,
 )
@@ -235,6 +234,13 @@ SET_ENQUEUED_AT_NOT_NULL_SQL = text("""
 SET_ENQUEUED_AT_DEFAULT_SQL = text("""
     ALTER TABLE horsies_tasks
     ALTER COLUMN enqueued_at SET DEFAULT NOW();
+""")
+
+# Migration: add enqueue_sha column for idempotent enqueue verification.
+# Existing rows stay NULL; new inserts always set it.
+ADD_ENQUEUE_SHA_COLUMN_SQL = text("""
+    ALTER TABLE horsies_tasks
+    ADD COLUMN IF NOT EXISTS enqueue_sha VARCHAR(64);
 """)
 
 CREATE_HEARTBEATS_TASK_ROLE_SENT_INDEX_SQL = text("""
@@ -607,6 +613,10 @@ class PostgresBroker:
             await conn.execute(SET_ENQUEUED_AT_NOT_NULL_SQL)
             await conn.execute(SET_ENQUEUED_AT_DEFAULT_SQL)
 
+            # Migration: add enqueue_sha column for idempotent enqueue verification.
+            # Existing rows stay NULL; new inserts always set it.
+            await conn.execute(ADD_ENQUEUE_SHA_COLUMN_SQL)
+
             # Migration: add workflow sent_at column (immutable workflow start
             # call-site timestamp), backfill existing rows, and enforce NOT NULL.
             # Keep this in the advisory-locked schema transaction to avoid DDL
@@ -648,10 +658,12 @@ class PostgresBroker:
     async def enqueue_async(
         self,
         task_name: str,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
         queue_name: str = 'default',
         *,
+        task_id: str,
+        enqueue_sha: str,
+        args_json: str | None = None,
+        kwargs_json: str | None = None,
         priority: int = 100,
         sent_at: Optional[datetime] = None,
         enqueued_at: Optional[datetime] = None,
@@ -687,9 +699,7 @@ class PostgresBroker:
         try:
             await self._ensure_initialized()
 
-            task_id = str(uuid.uuid4())
-            now = datetime.now(timezone.utc)
-            call_site_sent_at = sent_at or now
+            call_site_sent_at = sent_at or datetime.now(timezone.utc)
 
             # Parse retry configuration from task_options.
             # task_options is always produced by serialize_task_options() — malformed JSON
@@ -705,86 +715,134 @@ class PostgresBroker:
                     if isinstance(retry_policy, dict):
                         max_retries = retry_policy.get('max_retries', 3)
 
-            args_json: str | None = None
-            if args:
-                args_r = args_to_json(args)
-                if is_err(args_r):
-                    return _broker_err(BrokerErrorCode.ENQUEUE_FAILED, f'Failed to serialize args: {args_r.err_value}', args_r.err_value)
-                args_json = args_r.ok_value
-
-            kwargs_json: str | None = None
-            if kwargs:
-                kwargs_r = kwargs_to_json(kwargs)
-                if is_err(kwargs_r):
-                    return _broker_err(BrokerErrorCode.ENQUEUE_FAILED, f'Failed to serialize kwargs: {kwargs_r.err_value}', kwargs_r.err_value)
-                kwargs_json = kwargs_r.ok_value
-
-            # Determine enqueued_at: explicit value > delay-based > DB NOW() default.
-            # When enqueue_delay_seconds is set, we use a raw INSERT so the DB
-            # computes NOW() + interval entirely on DB clock.
+            # Determine enqueued_at value for the INSERT.
+            # enqueue_delay_seconds: DB-side NOW() + interval.
+            # explicit enqueued_at: caller-provided value.
+            # default: DB-side NOW() via text('NOW()').
             if enqueue_delay_seconds is not None:
-                async with self.session_factory() as session:
-                    await session.execute(
-                        text("""
-                            INSERT INTO horsies_tasks (
-                                id, task_name, queue_name, priority, args, kwargs,
-                                status, sent_at, enqueued_at, good_until, max_retries,
-                                task_options, created_at, updated_at
-                            ) VALUES (
-                                :id, :task_name, :queue_name, :priority, :args, :kwargs,
-                                'PENDING', :sent_at,
-                                NOW() + CAST(:delay || ' seconds' AS INTERVAL),
-                                :good_until, :max_retries,
-                                :task_options, NOW(), NOW()
-                            )
-                        """),
-                        {
-                            'id': task_id,
-                            'task_name': task_name,
-                            'queue_name': queue_name,
-                            'priority': priority,
-                            'args': args_json,
-                            'kwargs': kwargs_json,
-                            'sent_at': call_site_sent_at,
-                            'delay': str(enqueue_delay_seconds),
-                            'good_until': good_until,
-                            'max_retries': max_retries,
-                            'task_options': task_options,
-                        },
-                    )
-                    await session.commit()
+                enqueued_at_value = text(
+                    "NOW() + CAST(:delay || ' seconds' AS INTERVAL)",
+                ).bindparams(delay=str(enqueue_delay_seconds))
+            elif enqueued_at is not None:
+                enqueued_at_value = enqueued_at
             else:
-                async with self.session_factory() as session:
-                    task = TaskModel(
-                        id=task_id,
-                        task_name=task_name,
-                        queue_name=queue_name,
-                        priority=priority,
-                        args=args_json,
-                        kwargs=kwargs_json,
-                        status=TaskStatus.PENDING,
-                        sent_at=call_site_sent_at,
-                        good_until=good_until,
-                        max_retries=max_retries,
-                        task_options=task_options,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                    # enqueued_at: only set when caller provides an explicit value.
-                    # Otherwise omit so server_default=NOW() uses DB clock.
-                    if enqueued_at is not None:
-                        task.enqueued_at = enqueued_at
-                    session.add(task)
-                    await session.commit()
+                enqueued_at_value = text('NOW()')
 
-            # PostgreSQL trigger automatically sends task_new + task_queue_{queue_name} notifications
-            return Ok(task_id)
+            # Single SQLAlchemy Core INSERT ... ON CONFLICT DO NOTHING ... RETURNING id.
+            # Replaces both the ORM session.add() and raw SQL paths.
+            stmt = (
+                pg_insert(TaskModel)
+                .values(
+                    id=task_id,
+                    task_name=task_name,
+                    queue_name=queue_name,
+                    priority=priority,
+                    args=args_json,
+                    kwargs=kwargs_json,
+                    status=TaskStatus.PENDING,
+                    sent_at=call_site_sent_at,
+                    enqueued_at=enqueued_at_value,
+                    good_until=good_until,
+                    max_retries=max_retries,
+                    task_options=task_options,
+                    enqueue_sha=enqueue_sha,
+                    created_at=text('NOW()'),
+                    updated_at=text('NOW()'),
+                )
+                .on_conflict_do_nothing(index_elements=['id'])
+                .returning(TaskModel.id)
+            )
+
+            async with self.session_factory() as session:
+                result = await session.execute(stmt)
+                row = result.fetchone()
+                await session.commit()
+
+            if row is not None:
+                # Row inserted — fresh enqueue succeeded.
+                return Ok(task_id)
+
+            # Conflict: task_id already exists. Verify payload identity via stored SHA.
+            return await self._verify_enqueue_conflict(task_id, enqueue_sha, task_name)
+
         except Exception as exc:
             return _broker_err(
                 BrokerErrorCode.ENQUEUE_FAILED,
                 f'Failed to enqueue task {task_name}: {exc}',
                 exc,
             )
+
+    async def _verify_enqueue_conflict(
+        self,
+        task_id: str,
+        enqueue_sha: str,
+        task_name: str,
+    ) -> BrokerResult[str]:
+        """Verify a conflicting task_id has the same payload.
+
+        Called when INSERT ... ON CONFLICT DO NOTHING returns no row.
+        """
+        logger = get_logger('broker')
+        try:
+            async with self.session_factory() as session:
+                row = (
+                    await session.execute(
+                        select(TaskModel.enqueue_sha).where(TaskModel.id == task_id),
+                    )
+                ).fetchone()
+        except Exception as exc:
+            # SELECT failed — task exists (conflict proves it) but we cannot
+            # confirm payload identity. Retryable so auto-retry or manual
+            # retry can reattempt when DB recovers.
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.ENQUEUE_FAILED,
+                message=(
+                    f'task_id {task_id} conflict detected but verification '
+                    f'query failed for {task_name}: {exc}'
+                ),
+                retryable=True,
+                exception=exc,
+            ))
+
+        if row is None:
+            # Task existed and was already cleaned up (completed and purged).
+            # The original send succeeded and the work was done.
+            logger.warning(
+                'enqueue conflict for task_id=%s (%s) but row no longer exists — '
+                'original send succeeded and task was purged',
+                task_id,
+                task_name,
+            )
+            return Ok(task_id)
+
+        existing_sha: str | None = row[0]
+
+        if existing_sha is None:
+            # Pre-migration row without enqueue_sha — cannot verify payload identity.
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.ENQUEUE_FAILED,
+                message=(
+                    f'task_id {task_id} exists but has no enqueue_sha — '
+                    f'cannot verify payload identity for {task_name}'
+                ),
+                retryable=False,
+                exception=None,
+            ))
+
+        if existing_sha == enqueue_sha:
+            # Idempotent success — same payload already enqueued.
+            return Ok(task_id)
+
+        # Different payload with same task_id — always a bug.
+        return Err(BrokerOperationError(
+            code=BrokerErrorCode.PAYLOAD_MISMATCH,
+            message=(
+                f'task_id {task_id} already exists with different payload '
+                f'for {task_name} (sha mismatch)'
+            ),
+            retryable=False,
+            exception=None,
+        ))
 
     async def get_result_async(
         self, task_id: str, timeout_ms: Optional[int] = None
@@ -1179,10 +1237,12 @@ class PostgresBroker:
     def enqueue(
         self,
         task_name: str,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
         queue_name: str = 'default',
         *,
+        task_id: str,
+        enqueue_sha: str,
+        args_json: str | None = None,
+        kwargs_json: str | None = None,
         priority: int = 100,
         sent_at: Optional[datetime] = None,
         enqueued_at: Optional[datetime] = None,
@@ -1195,9 +1255,11 @@ class PostgresBroker:
             return self._loop_runner.call(
                 self.enqueue_async,
                 task_name,
-                args,
-                kwargs,
                 queue_name,
+                task_id=task_id,
+                enqueue_sha=enqueue_sha,
+                args_json=args_json,
+                kwargs_json=kwargs_json,
                 priority=priority,
                 sent_at=sent_at,
                 enqueued_at=enqueued_at,

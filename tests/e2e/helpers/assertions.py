@@ -7,8 +7,10 @@ from typing import Any
 import pytest
 
 from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.task_send_types import TaskSendResult
 from horsies.core.models.workflow import WorkflowHandle, WorkflowSpec
-from horsies.core.types.result import is_err
+from horsies.core.task_decorator import TaskHandle
+from horsies.core.types.result import is_err, is_ok
 
 
 def start_ok_sync(
@@ -20,6 +22,13 @@ def start_ok_sync(
     if is_err(r):
         pytest.fail(f'spec.start() failed: {r.err_value}')
     return r.ok_value
+
+
+def unwrap_send(result: TaskSendResult[TaskHandle[Any]]) -> TaskHandle[Any]:
+    """Unwrap a send result, failing the test on error."""
+    if is_err(result):
+        pytest.fail(f'send failed: {result.err_value}')
+    return result.ok_value
 
 
 def assert_ok(

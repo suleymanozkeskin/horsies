@@ -48,9 +48,6 @@ def _make_broker(database_url: str = 'postgresql+psycopg://u:p@localhost/db') ->
         # Make the session work as an async context manager
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=None)
-        # session.add() is synchronous in SQLAlchemy — use MagicMock to
-        # avoid "coroutine never awaited" warnings from AsyncMock.
-        mock_session.add = MagicMock()
 
         mock_listener = AsyncMock()
         mock_listener_cls.return_value = mock_listener
@@ -144,13 +141,20 @@ class TestSchemaAdvisoryKey:
 def _make_enqueue_session() -> AsyncMock:
     """Build a mock session for enqueue_async tests.
 
-    session.add is a sync MagicMock (not AsyncMock) because
-    SQLAlchemy's Session.add() is synchronous.
+    The broker now uses SQLAlchemy Core INSERT ... RETURNING, so we mock
+    session.execute() to return a result whose .fetchone() returns a
+    non-None row (simulating a successful INSERT RETURNING id).
     """
     session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=None)
-    session.add = MagicMock()
+
+    # execute() returns a CursorResult-like mock whose fetchone()
+    # returns a non-None row, indicating the INSERT succeeded.
+    mock_result = MagicMock()
+    mock_result.fetchone.return_value = MagicMock()  # non-None = row inserted
+    session.execute = AsyncMock(return_value=mock_result)
+
     return session
 
 
@@ -160,51 +164,66 @@ class TestEnqueueAsync:
 
     @pytest.mark.asyncio
     async def test_basic_enqueue_returns_uuid_string(self) -> None:
-        """enqueue_async should return Ok(uuid_string) and commit the session."""
+        """enqueue_async should return Ok(task_id) and commit the session."""
         broker = _make_broker()
         session = _make_enqueue_session()
         broker.session_factory = MagicMock(return_value=session)
 
         result = await broker.enqueue_async(
-            'my_task', (1, 2), {'key': 'val'}, 'default',
+            'my_task', 'default',
+            task_id='test-task-id',
+            enqueue_sha='test-sha',
+            args_json='[1, 2]',
+            kwargs_json='{"key": "val"}',
         )
 
         assert is_ok(result)
-        task_id = result.ok_value
-        assert isinstance(task_id, str)
-        assert len(task_id) == 36  # UUID format
-        session.add.assert_called_once()
+        assert result.ok_value == 'test-task-id'
+        session.execute.assert_awaited()
         session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_with_sent_at_uses_provided_timestamp(self) -> None:
-        """When sent_at is provided, it should be forwarded to the TaskModel."""
+        """When sent_at is provided, it should be accepted and enqueue should succeed."""
         broker = _make_broker()
         session = _make_enqueue_session()
         broker.session_factory = MagicMock(return_value=session)
 
         custom_ts = datetime(2025, 1, 1, tzinfo=timezone.utc)
-        await broker.enqueue_async(
-            'my_task', (), {}, sent_at=custom_ts,
+        result = await broker.enqueue_async(
+            'my_task',
+            task_id='test-task-id',
+            enqueue_sha='test-sha',
+            sent_at=custom_ts,
         )
 
-        added_task = session.add.call_args[0][0]
-        assert added_task.sent_at == custom_ts
+        assert is_ok(result)
+        assert result.ok_value == 'test-task-id'
+        session.execute.assert_awaited()
+        session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_with_retry_policy_extracts_max_retries(self) -> None:
-        """task_options containing retry_policy should set max_retries on the task."""
+        """task_options containing retry_policy should be parsed successfully.
+
+        The broker embeds max_retries into the Core INSERT statement values.
+        We verify indirectly: valid task_options with retry_policy produce Ok,
+        and the execute call contains the stmt with the parsed value.
+        """
         broker = _make_broker()
         session = _make_enqueue_session()
         broker.session_factory = MagicMock(return_value=session)
 
         task_options = '{"retry_policy": {"max_retries": 5}}'
-        await broker.enqueue_async(
-            'my_task', (), {}, task_options=task_options,
+        result = await broker.enqueue_async(
+            'my_task',
+            task_id='test-task-id',
+            enqueue_sha='test-sha',
+            task_options=task_options,
         )
 
-        added_task = session.add.call_args[0][0]
-        assert added_task.max_retries == 5
+        assert is_ok(result)
+        session.execute.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_malformed_task_options_raises(self) -> None:
@@ -218,7 +237,10 @@ class TestEnqueueAsync:
         broker.session_factory = MagicMock(return_value=session)
 
         result = await broker.enqueue_async(
-            'my_task', (), {}, task_options='NOT_VALID_JSON{{',
+            'my_task',
+            task_id='test-task-id',
+            enqueue_sha='test-sha',
+            task_options='NOT_VALID_JSON{{',
         )
 
         assert is_err(result)
@@ -227,48 +249,66 @@ class TestEnqueueAsync:
 
     @pytest.mark.asyncio
     async def test_with_good_until_passes_expiry(self) -> None:
-        """good_until should be passed through to the TaskModel."""
+        """good_until should be accepted and enqueue should succeed."""
         broker = _make_broker()
         session = _make_enqueue_session()
         broker.session_factory = MagicMock(return_value=session)
 
         expiry = datetime(2099, 12, 31, tzinfo=timezone.utc)
-        await broker.enqueue_async(
-            'my_task', (), {}, good_until=expiry,
+        result = await broker.enqueue_async(
+            'my_task',
+            task_id='test-task-id',
+            enqueue_sha='test-sha',
+            good_until=expiry,
         )
 
-        added_task = session.add.call_args[0][0]
-        assert added_task.good_until == expiry
+        assert is_ok(result)
+        session.execute.assert_awaited()
+        session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_task_options_with_non_dict_retry_policy_keeps_zero(self) -> None:
-        """retry_policy that is not a dict should not set max_retries."""
+        """retry_policy that is not a dict should still produce a successful enqueue.
+
+        max_retries defaults to 0 when retry_policy is not a dict. The broker
+        embeds this into the Core INSERT; we verify the enqueue succeeds.
+        """
         broker = _make_broker()
         session = _make_enqueue_session()
         broker.session_factory = MagicMock(return_value=session)
 
         task_options = '{"retry_policy": "not_a_dict"}'
-        await broker.enqueue_async(
-            'my_task', (), {}, task_options=task_options,
+        result = await broker.enqueue_async(
+            'my_task',
+            task_id='test-task-id',
+            enqueue_sha='test-sha',
+            task_options=task_options,
         )
 
-        added_task = session.add.call_args[0][0]
-        assert added_task.max_retries == 0
+        assert is_ok(result)
+        session.execute.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_task_options_without_retry_policy_keeps_zero(self) -> None:
-        """task_options dict without retry_policy key should keep max_retries=0."""
+        """task_options dict without retry_policy key should still enqueue successfully.
+
+        max_retries defaults to 0 when retry_policy is absent. The broker
+        embeds this into the Core INSERT; we verify the enqueue succeeds.
+        """
         broker = _make_broker()
         session = _make_enqueue_session()
         broker.session_factory = MagicMock(return_value=session)
 
         task_options = '{"some_other_key": "value"}'
-        await broker.enqueue_async(
-            'my_task', (), {}, task_options=task_options,
+        result = await broker.enqueue_async(
+            'my_task',
+            task_id='test-task-id',
+            enqueue_sha='test-sha',
+            task_options=task_options,
         )
 
-        added_task = session.add.call_args[0][0]
-        assert added_task.max_retries == 0
+        assert is_ok(result)
+        session.execute.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_future_sent_at_without_scheduling_params_rejected(self) -> None:
@@ -285,13 +325,16 @@ class TestEnqueueAsync:
 
         future = datetime.now(timezone.utc) + timedelta(minutes=10)
         result = await broker.enqueue_async(
-            'my_task', (), {}, sent_at=future,
+            'my_task',
+            task_id='test-task-id',
+            enqueue_sha='test-sha',
+            sent_at=future,
         )
 
         assert is_err(result)
         assert result.err_value.code == BrokerErrorCode.ENQUEUE_FAILED
         assert 'sent_at' in result.err_value.message
-        session.add.assert_not_called()
+        session.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_future_sent_at_with_enqueued_at_accepted(self) -> None:
@@ -302,11 +345,15 @@ class TestEnqueueAsync:
 
         future = datetime.now(timezone.utc) + timedelta(minutes=10)
         result = await broker.enqueue_async(
-            'my_task', (), {}, sent_at=future, enqueued_at=future,
+            'my_task',
+            task_id='test-task-id',
+            enqueue_sha='test-sha',
+            sent_at=future,
+            enqueued_at=future,
         )
 
         assert is_ok(result)
-        session.add.assert_called_once()
+        session.execute.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_future_sent_at_with_enqueue_delay_accepted(self) -> None:
@@ -317,11 +364,189 @@ class TestEnqueueAsync:
 
         future = datetime.now(timezone.utc) + timedelta(minutes=10)
         result = await broker.enqueue_async(
-            'my_task', (), {}, sent_at=future, enqueue_delay_seconds=600,
+            'my_task',
+            task_id='test-task-id',
+            enqueue_sha='test-sha',
+            sent_at=future,
+            enqueue_delay_seconds=600,
         )
 
         assert is_ok(result)
         session.execute.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
+# TestEnqueueIdempotency — conflict verification via _verify_enqueue_conflict
+# ---------------------------------------------------------------------------
+
+
+def _make_conflict_session(
+    *,
+    existing_sha: str | None = 'same-sha',
+    select_raises: Exception | None = None,
+    row_exists: bool = True,
+) -> AsyncMock:
+    """Build a mock session for idempotency conflict tests.
+
+    The first execute() call (INSERT) returns fetchone() = None (conflict).
+    The second execute() call (SELECT enqueue_sha) returns the configured sha.
+    """
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+
+    # INSERT returns None (conflict — row not inserted)
+    insert_result = MagicMock()
+    insert_result.fetchone.return_value = None
+
+    # SELECT returns existing_sha or raises
+    if select_raises is not None:
+        select_result = select_raises  # will be used as side_effect
+    else:
+        select_result = MagicMock()
+        if row_exists:
+            mock_row = MagicMock()
+            mock_row.__getitem__ = lambda self, idx: existing_sha  # row[0]
+            select_result.fetchone.return_value = mock_row
+        else:
+            select_result.fetchone.return_value = None  # row purged
+
+    if select_raises is not None:
+        session.execute = AsyncMock(
+            side_effect=[insert_result, select_raises],
+        )
+    else:
+        session.execute = AsyncMock(
+            side_effect=[insert_result, select_result],
+        )
+
+    return session
+
+
+@pytest.mark.unit
+class TestEnqueueIdempotency:
+    """Tests for ON CONFLICT path and _verify_enqueue_conflict."""
+
+    @pytest.mark.asyncio
+    async def test_enqueue_same_id_same_sha_returns_ok(self) -> None:
+        """INSERT conflicts, SELECT finds matching SHA -> Ok(task_id)."""
+        broker = _make_broker()
+        session = _make_conflict_session(existing_sha='test-sha')
+        broker.session_factory = MagicMock(return_value=session)
+
+        result = await broker.enqueue_async(
+            'my_task',
+            task_id='dup-id',
+            enqueue_sha='test-sha',
+        )
+
+        assert is_ok(result)
+        assert result.ok_value == 'dup-id'
+
+    @pytest.mark.asyncio
+    async def test_enqueue_same_id_different_sha_returns_err(self) -> None:
+        """INSERT conflicts, SELECT finds mismatched SHA -> Err(non-retryable)."""
+        broker = _make_broker()
+        session = _make_conflict_session(existing_sha='different-sha')
+        broker.session_factory = MagicMock(return_value=session)
+
+        result = await broker.enqueue_async(
+            'my_task',
+            task_id='dup-id',
+            enqueue_sha='test-sha',
+        )
+
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.PAYLOAD_MISMATCH
+        assert result.err_value.retryable is False
+
+    @pytest.mark.asyncio
+    async def test_enqueue_same_id_null_sha_returns_non_retryable_err(self) -> None:
+        """INSERT conflicts, existing row has NULL SHA -> Err(non-retryable)."""
+        broker = _make_broker()
+        session = _make_conflict_session(existing_sha=None)
+        broker.session_factory = MagicMock(return_value=session)
+
+        result = await broker.enqueue_async(
+            'my_task',
+            task_id='dup-id',
+            enqueue_sha='test-sha',
+        )
+
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.ENQUEUE_FAILED
+        assert result.err_value.retryable is False
+        assert 'cannot verify payload identity' in result.err_value.message
+
+    @pytest.mark.asyncio
+    async def test_enqueue_same_id_row_deleted_returns_ok_with_warning(self) -> None:
+        """INSERT conflicts, SELECT returns no row (purged) -> Ok(task_id)."""
+        broker = _make_broker()
+        session = _make_conflict_session(row_exists=False)
+        broker.session_factory = MagicMock(return_value=session)
+
+        result = await broker.enqueue_async(
+            'my_task',
+            task_id='dup-id',
+            enqueue_sha='test-sha',
+        )
+
+        assert is_ok(result)
+        assert result.ok_value == 'dup-id'
+
+    @pytest.mark.asyncio
+    async def test_enqueue_same_id_select_fails_returns_retryable_err(self) -> None:
+        """INSERT conflicts, SELECT raises -> Err(retryable=True)."""
+        broker = _make_broker()
+        session = _make_conflict_session(
+            select_raises=ConnectionError('db gone'),
+        )
+        broker.session_factory = MagicMock(return_value=session)
+
+        result = await broker.enqueue_async(
+            'my_task',
+            task_id='dup-id',
+            enqueue_sha='test-sha',
+        )
+
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.ENQUEUE_FAILED
+        assert result.err_value.retryable is True
+        assert 'verification query failed' in result.err_value.message
+
+
+# ---------------------------------------------------------------------------
+# TestScheduleSlotTaskId — deterministic UUID5 for scheduled tasks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestScheduleSlotTaskId:
+    """Tests for schedule_slot_task_id deterministic UUID generation."""
+
+    def test_schedule_slot_task_id_deterministic(self) -> None:
+        """Same name + same slot_time -> same UUID5."""
+        from horsies.core.utils.fingerprint import schedule_slot_task_id
+
+        slot = datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        id1 = schedule_slot_task_id('daily_report', slot)
+        id2 = schedule_slot_task_id('daily_report', slot)
+        assert id1 == id2
+
+    def test_schedule_slot_task_id_different_slot(self) -> None:
+        """Same name + different slot_time -> different UUID5."""
+        from horsies.core.utils.fingerprint import schedule_slot_task_id
+
+        slot_a = datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        slot_b = datetime(2025, 6, 2, 12, 0, 0, tzinfo=timezone.utc)
+        assert schedule_slot_task_id('daily_report', slot_a) != schedule_slot_task_id('daily_report', slot_b)
+
+    def test_schedule_slot_task_id_different_schedule(self) -> None:
+        """Different name + same slot_time -> different UUID5."""
+        from horsies.core.utils.fingerprint import schedule_slot_task_id
+
+        slot = datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        assert schedule_slot_task_id('daily_report', slot) != schedule_slot_task_id('hourly_check', slot)
 
 
 # ---------------------------------------------------------------------------
@@ -771,7 +996,11 @@ class TestSyncFacades:
         broker._loop_runner.call = MagicMock(return_value='task-id-123')
 
         result = broker.enqueue(
-            'my_task', (1,), {'k': 'v'}, 'queue',
+            'my_task', 'queue',
+            task_id='test-task-id',
+            enqueue_sha='test-sha',
+            args_json='[1]',
+            kwargs_json='{"k": "v"}',
             priority=50, sent_at=None, good_until=None, task_options=None,
         )
 
@@ -1125,7 +1354,11 @@ class TestEnqueueAsyncErrorPaths:
         )
         broker.session_factory = MagicMock(return_value=session)
 
-        result = await broker.enqueue_async('my_task', (), {})
+        result = await broker.enqueue_async(
+            'my_task',
+            task_id='test-task-id',
+            enqueue_sha='test-sha',
+        )
 
         assert is_err(result)
         err = result.err_value

@@ -23,7 +23,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import TaskResult
 
 from horsies.core.types.result import is_ok
-from tests.e2e.helpers.assertions import assert_ok, assert_err, start_ok_sync
+from tests.e2e.helpers.assertions import assert_ok, assert_err, start_ok_sync, unwrap_send
 from tests.e2e.helpers.db import wait_for_status
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.helpers.workflow import (
@@ -57,7 +57,7 @@ def _make_ready_check() -> Callable[[], bool]:
     def _check() -> bool:
         nonlocal handle
         if handle is None:
-            handle = healthcheck.send()
+            handle = unwrap_send(healthcheck.send())
         result = handle.get(timeout_ms=2000)
         return result.is_ok()
 
@@ -853,7 +853,7 @@ def _make_recovery_ready_check() -> Callable[[], bool]:
     def _check() -> bool:
         nonlocal handle
         if handle is None:
-            handle = instance_recovery.healthcheck.send()
+            handle = unwrap_send(instance_recovery.healthcheck.send())
         result = handle.get(timeout_ms=2000)
         return result.is_ok()
 

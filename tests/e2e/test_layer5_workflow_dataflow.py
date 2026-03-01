@@ -19,7 +19,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 
 from horsies.core.models.tasks import TaskResult
 
-from tests.e2e.helpers.assertions import assert_err, assert_ok, start_ok_sync
+from tests.e2e.helpers.assertions import assert_err, assert_ok, start_ok_sync, unwrap_send
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.helpers.workflow import (
     get_workflow_tasks,
@@ -51,7 +51,7 @@ def _make_ready_check() -> Callable[[], bool]:
     def _check() -> bool:
         nonlocal handle
         if handle is None:
-            handle = healthcheck.send()
+            handle = unwrap_send(healthcheck.send())
         result = handle.get(timeout_ms=2000)
         return result.is_ok()
 

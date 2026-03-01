@@ -39,6 +39,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - schedule: ScheduleConfig | None
 - exception_mapper: ExceptionMapper (global {ExceptionClass: "ERROR_CODE"})
 - default_unhandled_error_code: str (default "UNHANDLED_EXCEPTION")
+- resend_on_transient_err: bool (default False, auto-retry transient ENQUEUE_FAILED before returning error)
 
 ### PostgresConfig
 - database_url: str (must start with "postgresql+psycopg://")
@@ -77,7 +78,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Broker: BROKER_ERROR
 - Worker: WORKER_RESOLUTION_ERROR, WORKER_SERIALIZATION_ERROR
 - Validation: RETURN_TYPE_MISMATCH, PYDANTIC_HYDRATION_ERROR
-- Lifecycle: SEND_SUPPRESSED
+- Lifecycle: SEND_SUPPRESSED (also in TaskSendErrorCode; .send() returns Err(TaskSendError(SEND_SUPPRESSED)))
 - Workflow: UPSTREAM_SKIPPED, WORKFLOW_CTX_MISSING_ID, WORKFLOW_SUCCESS_CASE_NOT_MET
 
 ### SubWorkflowError (extends TaskError)
@@ -113,9 +114,12 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### TaskFunction[P, T] (decorated task)
 - .__call__(*args, **kwargs) -> TaskResult[T, TaskError] (sync direct call)
-- .send(*args, **kwargs) -> TaskHandle[T] (enqueue for background execution)
-- .send_async(*args, **kwargs) -> TaskHandle[T] (async enqueue)
-- .schedule(delay_seconds, *args, **kwargs) -> TaskHandle[T] (delayed enqueue)
+- .send(*args, **kwargs) -> TaskSendResult[TaskHandle[T]] (enqueue for background execution)
+- .send_async(*args, **kwargs) -> TaskSendResult[TaskHandle[T]] (async enqueue)
+- .schedule(delay_seconds, *args, **kwargs) -> TaskSendResult[TaskHandle[T]] (delayed enqueue)
+- .retry_send(error: TaskSendError) -> TaskSendResult[TaskHandle[T]] (retry failed send with stored payload)
+- .retry_send_async(error: TaskSendError) -> TaskSendResult[TaskHandle[T]] (async retry)
+- .retry_schedule(error: TaskSendError) -> TaskSendResult[TaskHandle[T]] (retry failed schedule with stored payload)
 - .node(**workflow_opts) -> NodeFactory[P, T] (typed workflow node builder)
 - .task_name -> str
 
@@ -125,6 +129,35 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .get_async(timeout_ms=None) -> TaskResult[T, TaskError] (async blocking)
 - .info(include_result=False, include_failed_reason=False) -> BrokerResult[TaskInfo | None]
 - .info_async(include_result=False, include_failed_reason=False) -> BrokerResult[TaskInfo | None]
+
+### TaskSendResult[T] (send/schedule Result type)
+- type TaskSendResult[T] = Result[T, TaskSendError]
+- .send() / .send_async() / .schedule() return TaskSendResult[TaskHandle[T]]
+- Ok(TaskHandle): task enqueued successfully
+- Err(TaskSendError): enqueue failed with categorized error
+- Use is_ok(result) / is_err(result) type guards, or result.unwrap() to extract handle
+- .retry_send(error) / .retry_send_async(error) / .retry_schedule(error): replay stored payload
+
+### TaskSendError
+- code: TaskSendErrorCode
+- message: str (human-readable description)
+- retryable: bool (True only for ENQUEUE_FAILED)
+- task_id: str | None (None for SEND_SUPPRESSED, VALIDATION_FAILED)
+- payload: TaskSendPayload | None (serialized envelope for idempotent retry)
+- exception: BaseException | None (original cause)
+
+### TaskSendErrorCode (enum)
+- SEND_SUPPRESSED: send suppressed during worker import/discovery
+- VALIDATION_FAILED: argument serialization or validation failed
+- ENQUEUE_FAILED: broker/database failure during enqueue (transient, retryable)
+- PAYLOAD_MISMATCH: retry payload SHA does not match (payload altered)
+
+### TaskSendPayload (frozen dataclass)
+- task_name: str, queue_name: str, priority: int
+- args_json: str | None, kwargs_json: str | None
+- sent_at: datetime, good_until: datetime | None
+- enqueue_delay_seconds: int | None, task_options: str | None
+- enqueue_sha: str (SHA-256 hex digest for same-payload guarantee)
 
 ### TaskInfo
 - .task_id -> str, .task_name -> str, .status -> TaskStatus
@@ -575,9 +608,9 @@ Horsies, AppConfig, PostgresConfig, database_url, broker -> /horsies/configurati
 PostgresConfig, pool_size, max_overflow, connection -> /horsies/configuration/broker-config/
 RecoveryConfig, stale, requeue, crash recovery -> /horsies/configuration/recovery-config/
 @app.task, decorator, task definition, define task -> /horsies/tasks/defining-tasks/
-send, send_async, enqueue, dispatch, produce -> /horsies/tasks/sending-tasks/
+send, send_async, enqueue, dispatch, produce, TaskSendResult, TaskSendError, retry_send -> /horsies/tasks/sending-tasks/
 TaskResult, is_ok, is_err, unwrap, ok_value, err_value -> /horsies/tasks/error-handling/
-LibraryErrorCode, TaskError, error codes, UNHANDLED_EXCEPTION -> /horsies/tasks/errors/
+LibraryErrorCode, TaskError, TaskSendErrorCode, error codes, UNHANDLED_EXCEPTION -> /horsies/tasks/errors/
 TaskHandle, get, get_async, timeout, result -> /horsies/tasks/retrieving-results/
 RetryPolicy, retry, backoff, exponential, fixed, auto_retry_for -> /horsies/tasks/retry-policy/
 PENDING, CLAIMED, RUNNING, COMPLETED, FAILED, task status -> /horsies/concepts/task-lifecycle/
@@ -599,7 +632,7 @@ WorkflowMeta, workflow_meta, metadata injection -> /horsies/concepts/workflows/w
 WorkflowDefinition, class-based workflow, build, build_with -> /horsies/concepts/workflows/subworkflows/
 ExceptionMapper, exception_mapper, error code mapping -> /horsies/tasks/error-handling/
 good_until, task expiry, deadline -> /horsies/tasks/defining-tasks/
-schedule, delay, TaskFunction.schedule -> /horsies/tasks/sending-tasks/
+schedule, delay, TaskFunction.schedule, resend_on_transient_err -> /horsies/tasks/sending-tasks/
 worker, process pool, claim, execute -> /horsies/workers/worker-architecture/
 concurrency, max_concurrency, cluster_wide_cap, prefetch -> /horsies/workers/concurrency/
 heartbeat, crash, stale, worker recovery -> /horsies/workers/heartbeats-recovery/

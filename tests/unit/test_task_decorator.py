@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -11,7 +12,7 @@ import pytest
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
 from horsies.core.errors import ConfigurationError, ErrorCode, TaskDefinitionError
 from horsies.core.exception_mapper import ExceptionMapper
-from horsies.core.models.tasks import LibraryErrorCode, TaskError, TaskResult
+from horsies.core.models.tasks import LibraryErrorCode, TaskError, TaskOptions, TaskResult
 from horsies.core.models.workflow import WorkflowContextMissingIdError
 from horsies.core.task_decorator import (
     FromNodeMarker,
@@ -21,7 +22,12 @@ from horsies.core.task_decorator import (
     effective_priority,
     from_node,
 )
-from horsies.core.types.result import Err, Ok
+from horsies.core.models.task_send_types import (
+    TaskSendError,
+    TaskSendErrorCode,
+    TaskSendPayload,
+)
+from horsies.core.types.result import Err, Ok, is_ok, is_err
 
 
 # =============================================================================
@@ -36,6 +42,7 @@ def _make_app(
     suppress_sends: bool = False,
     exception_mapper: ExceptionMapper | None = None,
     default_unhandled_error_code: str = 'UNHANDLED_EXCEPTION',
+    resend_on_transient_err: bool = False,
 ) -> MagicMock:
     """Build a minimal mock Horsies app for unit tests."""
     app = MagicMock()
@@ -43,6 +50,7 @@ def _make_app(
     app.config.custom_queues = custom_queues
     app.config.exception_mapper = exception_mapper or {}
     app.config.default_unhandled_error_code = default_unhandled_error_code
+    app.config.resend_on_transient_err = resend_on_transient_err
     app.are_sends_suppressed.return_value = suppress_sends
     app.validate_queue_name.return_value = 'default'
     return app
@@ -637,22 +645,23 @@ class TestCreateTaskWrapperSend:
     """Tests for wrapper.send() method."""
 
     def test_send_suppressed_returns_send_suppressed(self) -> None:
-        """When sends are suppressed, returns SEND_SUPPRESSED handle."""
+        """When sends are suppressed, returns Err(SEND_SUPPRESSED)."""
         def good_fn(x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app(suppress_sends=True)
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        handle = wrapper.send(1)
+        result = wrapper.send(1)
 
-        result = handle.get()
-        assert result.is_err()
-        assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.SEND_SUPPRESSED
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.SEND_SUPPRESSED
+        assert result.err_value.retryable is False
+        assert result.err_value.task_id is None
+        assert result.err_value.payload is None
 
-    def test_send_queue_validation_failure_returns_error_handle(self) -> None:
-        """Queue validation error returns an error handle."""
+    def test_send_queue_validation_failure_returns_validation_error(self) -> None:
+        """Queue validation error returns Err(VALIDATION_FAILED)."""
         def good_fn(x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
@@ -663,15 +672,14 @@ class TestCreateTaskWrapperSend:
         )
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        handle = wrapper.send(1)
+        result = wrapper.send(1)
 
-        result = handle.get()
-        assert result.is_err()
-        assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.UNHANDLED_EXCEPTION
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert result.err_value.retryable is False
 
-    def test_send_success_returns_broker_mode_handle(self) -> None:
-        """Successful send returns a TaskHandle with broker_mode=True."""
+    def test_send_success_returns_ok_with_handle(self) -> None:
+        """Successful send returns Ok(TaskHandle) with broker_mode=True."""
         def good_fn(x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
@@ -681,13 +689,15 @@ class TestCreateTaskWrapperSend:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        handle = wrapper.send(1)
+        result = wrapper.send(1)
 
+        assert is_ok(result)
+        handle = result.ok_value
         assert handle.task_id == 'task-abc'
         assert handle._broker_mode is True
 
-    def test_send_broker_exception_returns_error_handle(self) -> None:
-        """Broker Err result during enqueue returns error handle."""
+    def test_send_broker_failure_returns_enqueue_error_with_payload(self) -> None:
+        """Broker Err result during enqueue returns Err(ENQUEUE_FAILED) with payload."""
         def good_fn(x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
@@ -702,12 +712,15 @@ class TestCreateTaskWrapperSend:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        handle = wrapper.send(1)
+        result = wrapper.send(1)
 
-        result = handle.get()
-        assert result.is_err()
-        assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.UNHANDLED_EXCEPTION
+        assert is_err(result)
+        err = result.err_value
+        assert err.code == TaskSendErrorCode.ENQUEUE_FAILED
+        assert err.retryable is True
+        assert err.task_id is not None
+        assert err.payload is not None
+        assert err.payload.task_name == 'test.good_fn'
 
 
 # =============================================================================
@@ -721,23 +734,21 @@ class TestCreateTaskWrapperSendAsync:
 
     @pytest.mark.asyncio
     async def test_send_async_suppressed(self) -> None:
-        """When sends suppressed, send_async returns SEND_SUPPRESSED handle."""
+        """When sends suppressed, send_async returns Err(SEND_SUPPRESSED)."""
         def good_fn(x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app(suppress_sends=True)
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        handle = await wrapper.send_async(1)
+        result = await wrapper.send_async(1)
 
-        result = handle.get()
-        assert result.is_err()
-        assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.SEND_SUPPRESSED
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.SEND_SUPPRESSED
 
     @pytest.mark.asyncio
     async def test_send_async_success(self) -> None:
-        """Successful async send returns broker-mode handle."""
+        """Successful async send returns Ok(TaskHandle) with broker_mode=True."""
         def good_fn(x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
@@ -747,14 +758,16 @@ class TestCreateTaskWrapperSendAsync:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        handle = await wrapper.send_async(1)
+        result = await wrapper.send_async(1)
 
+        assert is_ok(result)
+        handle = result.ok_value
         assert handle.task_id == 'task-xyz'
         assert handle._broker_mode is True
 
     @pytest.mark.asyncio
-    async def test_send_async_broker_exception(self) -> None:
-        """Broker Err result during async enqueue returns error handle."""
+    async def test_send_async_broker_failure_returns_enqueue_error(self) -> None:
+        """Broker Err result during async enqueue returns Err(ENQUEUE_FAILED)."""
         def good_fn(x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
@@ -769,16 +782,15 @@ class TestCreateTaskWrapperSendAsync:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        handle = await wrapper.send_async(1)
+        result = await wrapper.send_async(1)
 
-        result = handle.get()
-        assert result.is_err()
-        assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.UNHANDLED_EXCEPTION
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.ENQUEUE_FAILED
+        assert result.err_value.retryable is False
 
     @pytest.mark.asyncio
-    async def test_send_async_enqueue_raises_returns_error_handle(self) -> None:
-        """Async enqueue infrastructure exception returns error handle (not raise)."""
+    async def test_send_async_enqueue_raises_returns_enqueue_error(self) -> None:
+        """Async enqueue non-connection exception returns non-retryable Err(ENQUEUE_FAILED)."""
         def good_fn(x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
@@ -788,18 +800,17 @@ class TestCreateTaskWrapperSendAsync:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        handle = await wrapper.send_async(1)
+        result = await wrapper.send_async(1)
 
-        result = handle.get()
-        assert result.is_err()
-        assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.UNHANDLED_EXCEPTION
-        assert isinstance(result.err.exception, RuntimeError)
-        assert 'Failed to enqueue task good_fn: loop dead' in result.err.message
+        assert is_err(result)
+        err = result.err_value
+        assert err.code == TaskSendErrorCode.ENQUEUE_FAILED
+        assert err.retryable is False
+        assert isinstance(err.exception, RuntimeError)
 
     @pytest.mark.asyncio
     async def test_send_async_queue_validation_failure(self) -> None:
-        """Queue validation error in send_async returns error handle."""
+        """Queue validation error in send_async returns Err(VALIDATION_FAILED)."""
         def good_fn(x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
@@ -810,10 +821,10 @@ class TestCreateTaskWrapperSendAsync:
         )
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        handle = await wrapper.send_async(1)
+        result = await wrapper.send_async(1)
 
-        result = handle.get()
-        assert result.is_err()
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
 
 
 # =============================================================================
@@ -826,19 +837,17 @@ class TestCreateTaskWrapperSchedule:
     """Tests for wrapper.schedule() method."""
 
     def test_schedule_suppressed_returns_send_suppressed(self) -> None:
-        """When sends suppressed, schedule() returns SEND_SUPPRESSED handle."""
+        """When sends suppressed, schedule() returns SEND_SUPPRESSED error."""
         def good_fn(x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app(suppress_sends=True)
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        handle = wrapper.schedule(60, 1)
+        result = wrapper.schedule(60, 1)
 
-        result = handle.get()
-        assert result.is_err()
-        assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.SEND_SUPPRESSED
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.SEND_SUPPRESSED
 
     def test_schedule_success(self) -> None:
         """Successful schedule returns broker-mode handle with delay."""
@@ -851,17 +860,19 @@ class TestCreateTaskWrapperSchedule:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        handle = wrapper.schedule(60, 1)
+        result = wrapper.schedule(60, 1)
 
+        assert is_ok(result)
+        handle = result.ok_value
         assert handle.task_id == 'sched-1'
         assert handle._broker_mode is True
-        # Verify enqueue was called with sent_at (call-site time) and enqueue_delay_seconds
+        # Verify enqueue was called with sent_at and enqueue_delay_seconds
         call_kwargs = broker.enqueue.call_args
         assert call_kwargs.kwargs.get('sent_at') is not None
         assert call_kwargs.kwargs.get('enqueue_delay_seconds') == 60
 
-    def test_schedule_broker_exception_returns_error_handle(self) -> None:
-        """Broker Err result during schedule returns error handle."""
+    def test_schedule_broker_exception_returns_enqueue_failed(self) -> None:
+        """Broker Err result during schedule returns ENQUEUE_FAILED."""
         def good_fn(x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
@@ -876,13 +887,13 @@ class TestCreateTaskWrapperSchedule:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        handle = wrapper.schedule(60, 1)
+        result = wrapper.schedule(60, 1)
 
-        result = handle.get()
-        assert result.is_err()
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.ENQUEUE_FAILED
 
     def test_schedule_queue_validation_failure(self) -> None:
-        """Queue validation error in schedule returns error handle."""
+        """Queue validation error in schedule returns VALIDATION_FAILED."""
         def good_fn(x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
@@ -893,10 +904,470 @@ class TestCreateTaskWrapperSchedule:
         )
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        handle = wrapper.schedule(60, 1)
+        result = wrapper.schedule(60, 1)
 
-        result = handle.get()
-        assert result.is_err()
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+
+
+# =============================================================================
+# create_task_wrapper — retry_send / retry_send_async / retry_schedule
+# =============================================================================
+
+
+def _make_enqueue_failed_error(
+    *,
+    task_name: str = 'test.good_fn',
+    task_id: str = 'retry-id-1',
+    enqueue_delay_seconds: int | None = None,
+) -> TaskSendError:
+    """Build an ENQUEUE_FAILED error with full payload for retry tests."""
+    from datetime import datetime, timezone
+    payload = TaskSendPayload(
+        task_name=task_name,
+        queue_name='default',
+        priority=100,
+        args_json='[1]',
+        kwargs_json=None,
+        sent_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        good_until=None,
+        enqueue_delay_seconds=enqueue_delay_seconds,
+        task_options=None,
+        enqueue_sha='abc123',
+    )
+    return TaskSendError(
+        code=TaskSendErrorCode.ENQUEUE_FAILED,
+        message='db gone',
+        retryable=True,
+        task_id=task_id,
+        payload=payload,
+        exception=ConnectionError('db gone'),
+    )
+
+
+@pytest.mark.unit
+class TestRetrySend:
+    """Tests for retry_send / retry_send_async / retry_schedule."""
+
+    def test_retry_send_reuses_task_id_and_payload(self) -> None:
+        """retry_send passes the same task_id, enqueue_sha, and args_json to broker."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        broker.enqueue.return_value = Ok('retry-id-1')
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        error = _make_enqueue_failed_error()
+        result = wrapper.retry_send(error)
+
+        assert is_ok(result)
+        call_kwargs = broker.enqueue.call_args.kwargs
+        assert call_kwargs['task_id'] == 'retry-id-1'
+        assert call_kwargs['enqueue_sha'] == 'abc123'
+        assert call_kwargs['args_json'] == '[1]'
+        assert call_kwargs['kwargs_json'] is None
+
+    @pytest.mark.asyncio
+    async def test_retry_send_async_reuses_task_id_and_payload(self) -> None:
+        """retry_send_async passes the same task_id and payload to broker."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        broker.enqueue_async = AsyncMock(return_value=Ok('retry-id-1'))
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        error = _make_enqueue_failed_error()
+        result = await wrapper.retry_send_async(error)
+
+        assert is_ok(result)
+        call_kwargs = broker.enqueue_async.call_args.kwargs
+        assert call_kwargs['task_id'] == 'retry-id-1'
+        assert call_kwargs['enqueue_sha'] == 'abc123'
+
+    def test_retry_send_only_accepts_enqueue_failed(self) -> None:
+        """retry_send rejects non-ENQUEUE_FAILED codes with VALIDATION_FAILED."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        error = TaskSendError(
+            code=TaskSendErrorCode.PAYLOAD_MISMATCH,
+            message='sha mismatch',
+            retryable=False,
+        )
+        result = wrapper.retry_send(error)
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert 'only valid for ENQUEUE_FAILED' in result.err_value.message
+
+    def test_retry_send_rejects_send_suppressed(self) -> None:
+        """retry_send rejects SEND_SUPPRESSED errors."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        error = TaskSendError(
+            code=TaskSendErrorCode.SEND_SUPPRESSED,
+            message='suppressed',
+            retryable=False,
+        )
+        result = wrapper.retry_send(error)
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+
+    def test_retry_send_no_payload_returns_validation_error(self) -> None:
+        """retry_send without payload on error returns VALIDATION_FAILED."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        error = TaskSendError(
+            code=TaskSendErrorCode.ENQUEUE_FAILED,
+            message='db gone',
+            retryable=True,
+            task_id='retry-id-1',
+            payload=None,
+        )
+        result = wrapper.retry_send(error)
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert 'no payload or task_id' in result.err_value.message
+
+    def test_retry_send_no_task_id_returns_validation_error(self) -> None:
+        """retry_send without task_id on error returns VALIDATION_FAILED."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        error = TaskSendError(
+            code=TaskSendErrorCode.ENQUEUE_FAILED,
+            message='db gone',
+            retryable=True,
+            task_id=None,
+            payload=_make_enqueue_failed_error().payload,
+        )
+        result = wrapper.retry_send(error)
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+
+    def test_retry_send_cross_task_returns_validation_error(self) -> None:
+        """retry_send rejects errors from a different task."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        error = _make_enqueue_failed_error(task_name='other.task')
+        result = wrapper.retry_send(error)
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert 'cross-task retry' in result.err_value.message
+
+    def test_retry_schedule_reuses_task_id_and_delay(self) -> None:
+        """retry_schedule passes same task_id and enqueue_delay_seconds."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        broker.enqueue.return_value = Ok('retry-id-1')
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        error = _make_enqueue_failed_error(enqueue_delay_seconds=60)
+        result = wrapper.retry_schedule(error)
+
+        assert is_ok(result)
+        call_kwargs = broker.enqueue.call_args.kwargs
+        assert call_kwargs['task_id'] == 'retry-id-1'
+        assert call_kwargs['enqueue_delay_seconds'] == 60
+
+    def test_retry_schedule_without_delay_returns_validation_error(self) -> None:
+        """retry_schedule rejects errors with no enqueue_delay_seconds."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        error = _make_enqueue_failed_error(enqueue_delay_seconds=None)
+        result = wrapper.retry_schedule(error)
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert 'missing enqueue_delay_seconds' in result.err_value.message
+
+    def test_retry_send_rejects_scheduled_payload(self) -> None:
+        """retry_send rejects errors with enqueue_delay_seconds (use retry_schedule instead)."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        error = _make_enqueue_failed_error(enqueue_delay_seconds=60)
+        result = wrapper.retry_send(error)
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert 'use retry_schedule instead' in result.err_value.message
+
+    @pytest.mark.asyncio
+    async def test_retry_send_async_rejects_scheduled_payload(self) -> None:
+        """retry_send_async rejects errors with enqueue_delay_seconds."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        error = _make_enqueue_failed_error(enqueue_delay_seconds=60)
+        result = await wrapper.retry_send_async(error)
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert 'use retry_schedule instead' in result.err_value.message
+
+
+# =============================================================================
+# create_task_wrapper — auto-retry (resend_on_transient_err)
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestAutoRetry:
+    """Tests for auto-retry behavior when resend_on_transient_err=True."""
+
+    def test_send_with_resend_on_transient_err_retries_transient_failure(self) -> None:
+        """Broker returns retryable Err twice then Ok on 3rd — total 3 calls."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app(resend_on_transient_err=True)
+        broker = MagicMock()
+        transient_err = Err(BrokerOperationError(
+            code=BrokerErrorCode.ENQUEUE_FAILED,
+            message='db gone',
+            retryable=True,
+            exception=ConnectionError('db gone'),
+        ))
+        broker.enqueue.side_effect = [transient_err, transient_err, Ok('task-ok')]
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.send(1)
+
+        assert is_ok(result)
+        assert result.ok_value.task_id == 'task-ok'
+        assert broker.enqueue.call_count == 3  # 1 initial + 2 retries
+
+    def test_send_with_resend_on_transient_err_gives_up_after_max_retries(self) -> None:
+        """Broker always returns retryable Err — gives up after 4 total calls."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app(resend_on_transient_err=True)
+        broker = MagicMock()
+        transient_err = Err(BrokerOperationError(
+            code=BrokerErrorCode.ENQUEUE_FAILED,
+            message='db gone',
+            retryable=True,
+            exception=ConnectionError('db gone'),
+        ))
+        broker.enqueue.return_value = transient_err
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.send(1)
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.ENQUEUE_FAILED
+        assert broker.enqueue.call_count == 4  # 1 initial + 3 retries
+
+    def test_send_with_resend_on_transient_err_false_no_retry(self) -> None:
+        """With flag off, broker retryable Err is returned immediately (1 call)."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app(resend_on_transient_err=False)
+        broker = MagicMock()
+        broker.enqueue.return_value = Err(BrokerOperationError(
+            code=BrokerErrorCode.ENQUEUE_FAILED,
+            message='db gone',
+            retryable=True,
+            exception=ConnectionError('db gone'),
+        ))
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.send(1)
+
+        assert is_err(result)
+        assert broker.enqueue.call_count == 1
+
+    def test_send_with_resend_on_transient_err_non_retryable_no_retry(self) -> None:
+        """Non-retryable Err is never retried, even with flag on."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app(resend_on_transient_err=True)
+        broker = MagicMock()
+        broker.enqueue.return_value = Err(BrokerOperationError(
+            code=BrokerErrorCode.PAYLOAD_MISMATCH,
+            message='different payload',
+            retryable=False,
+        ))
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.send(1)
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.PAYLOAD_MISMATCH
+        assert broker.enqueue.call_count == 1
+
+    def test_exception_from_broker_classified_as_retryable_for_connection_error(self) -> None:
+        """OperationalError raised by broker is classified retryable and retried."""
+        from psycopg import OperationalError
+
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app(resend_on_transient_err=True)
+        broker = MagicMock()
+        broker.enqueue.side_effect = [
+            OperationalError('connection reset'),
+            Ok('task-ok'),
+        ]
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.send(1)
+
+        assert is_ok(result)
+        assert broker.enqueue.call_count == 2  # 1 failed + 1 retry
+
+    def test_exception_from_broker_not_retried_for_programmer_error(self) -> None:
+        """TypeError raised by broker is classified non-retryable — no retry."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app(resend_on_transient_err=True)
+        broker = MagicMock()
+        broker.enqueue.side_effect = TypeError('missing required argument')
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.send(1)
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.ENQUEUE_FAILED
+        assert not result.err_value.retryable
+        assert broker.enqueue.call_count == 1  # no retry
+
+
+# =============================================================================
+# PAYLOAD_MISMATCH classification (regression: must be code-based, not string-based)
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestPayloadMismatchClassification:
+    """Ensure PAYLOAD_MISMATCH is classified by BrokerErrorCode, not message text."""
+
+    def test_mismatch_classified_by_code_not_message(self) -> None:
+        """Broker PAYLOAD_MISMATCH code maps to TaskSendErrorCode.PAYLOAD_MISMATCH
+        regardless of message wording."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        # Message intentionally omits 'sha mismatch' — old string-matching would miss it.
+        broker.enqueue.return_value = Err(BrokerOperationError(
+            code=BrokerErrorCode.PAYLOAD_MISMATCH,
+            message='duplicate task_id with conflicting payload',
+            retryable=False,
+        ))
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.send(1)
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.PAYLOAD_MISMATCH
+        assert not result.err_value.retryable
+
+    def test_enqueue_failed_not_promoted_to_mismatch(self) -> None:
+        """Broker ENQUEUE_FAILED with 'sha mismatch' in message stays ENQUEUE_FAILED
+        (code governs classification, not message content)."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        # Message contains 'sha mismatch' but code is ENQUEUE_FAILED — must NOT
+        # be promoted to PAYLOAD_MISMATCH.
+        broker.enqueue.return_value = Err(BrokerOperationError(
+            code=BrokerErrorCode.ENQUEUE_FAILED,
+            message='unexpected sha mismatch in log',
+            retryable=True,
+        ))
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.send(1)
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.ENQUEUE_FAILED
+        assert result.err_value.retryable
+
+
+# =============================================================================
+# TaskOptions.good_until timezone validation (regression: naive dt must not reach fingerprinting)
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestTaskOptionsGoodUntilTimezone:
+    """Ensure TaskOptions rejects naive datetimes at construction time."""
+
+    def test_naive_good_until_raises_validation_error(self) -> None:
+        """Naive datetime is rejected by pydantic field_validator."""
+        naive = datetime(2025, 6, 1, 12, 0, 0)
+        with pytest.raises(Exception, match='timezone-aware'):
+            TaskOptions(task_name='test.task', good_until=naive)
+
+    def test_aware_good_until_accepted(self) -> None:
+        """Timezone-aware datetime passes validation."""
+        aware = datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        opts = TaskOptions(task_name='test.task', good_until=aware)
+        assert opts.good_until == aware
+
+    def test_none_good_until_accepted(self) -> None:
+        """None is the default and passes validation."""
+        opts = TaskOptions(task_name='test.task')
+        assert opts.good_until is None
 
 
 # =============================================================================

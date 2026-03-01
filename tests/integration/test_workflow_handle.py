@@ -1630,7 +1630,7 @@ class TestListenerFallbackContract:
         )
         from horsies.core.types.result import Err as Err_
 
-        enqueue_r = await broker.enqueue_async('dummy_task', (), {}, 'default')
+        enqueue_r = await broker.enqueue_async('dummy_task', 'default', task_id=str(uuid.uuid4()), enqueue_sha='test-sha')
         assert enqueue_r.is_ok()
         task_id = enqueue_r.ok_value
 
@@ -1668,7 +1668,7 @@ class TestListenerFallbackContract:
     ) -> None:
         """Programming error from listener.listen is caught by outer safety net
         and returned as TaskResult(err=BROKER_ERROR) with original exception."""
-        enqueue_r = await broker.enqueue_async('dummy_task', (), {}, 'default')
+        enqueue_r = await broker.enqueue_async('dummy_task', 'default', task_id=str(uuid.uuid4()), enqueue_sha='test-sha')
         assert enqueue_r.is_ok()
         task_id = enqueue_r.ok_value
 

@@ -21,10 +21,11 @@ from horsies.core.models.tasks import LibraryErrorCode, TaskResult, TaskError
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.errors import ConfigurationError
-from horsies.core.types.result import is_ok
+from horsies.core.types.result import is_ok, is_err
+from horsies.core.models.task_send_types import TaskSendResult, TaskSendErrorCode
 from sqlalchemy import text
 
-from tests.e2e.helpers.assertions import assert_ok, assert_err
+from tests.e2e.helpers.assertions import assert_ok, assert_err, unwrap_send
 from tests.e2e.helpers.db import poll_max_during
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
@@ -41,7 +42,7 @@ CUSTOM_INSTANCE = 'tests.e2e.tasks.instance_custom:app'
 
 
 class _HealthcheckTask(Protocol):
-    def send(self) -> TaskHandle[str]: ...
+    def send(self) -> TaskSendResult[TaskHandle[str]]: ...
 
 
 def _make_ready_check(task_func: _HealthcheckTask):
@@ -50,7 +51,10 @@ def _make_ready_check(task_func: _HealthcheckTask):
     def _check() -> bool:
         nonlocal handle
         if handle is None:
-            handle = task_func.send()
+            r = task_func.send()
+            if is_err(r):
+                return False
+            handle = r.ok_value
         result = handle.get(timeout_ms=2000)
         return result.is_ok()
 
@@ -62,7 +66,7 @@ def test_simple_task_lifecycle() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = basic_tasks.simple_task.send(5)
+        handle = unwrap_send(basic_tasks.simple_task.send(5))
         result = handle.get(timeout_ms=5000)
         assert_ok(result, expected_value=10)
 
@@ -73,7 +77,7 @@ async def test_status_transitions(broker: PostgresBroker) -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = basic_tasks.simple_task.send(5)
+        handle = unwrap_send(basic_tasks.simple_task.send(5))
         result = handle.get(timeout_ms=5000)
         assert_ok(result)
 
@@ -91,7 +95,7 @@ def test_primitive_args() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        result = basic_tasks.primitives_task.send(42, 3.14, 'hello', True, None).get(
+        result = unwrap_send(basic_tasks.primitives_task.send(42, 3.14, 'hello', True, None)).get(
             timeout_ms=5000
         )
         assert_ok(result, {'i': 42, 'f': 3.14, 's': 'hello', 'b': True, 'n': None})
@@ -102,7 +106,7 @@ def test_collection_args() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        result = basic_tasks.collections_task.send([1, 2, 3], {'a': 1}, (4, 5)).get(
+        result = unwrap_send(basic_tasks.collections_task.send([1, 2, 3], {'a': 1}, (4, 5))).get(
             timeout_ms=5000
         )
         assert_ok(result)
@@ -118,7 +122,7 @@ def test_pydantic_model_args() -> None:
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
         user = basic_tasks.UserInput(name='Alice', age=30)
-        result = basic_tasks.pydantic_task.send(user).get(timeout_ms=5000)
+        result = unwrap_send(basic_tasks.pydantic_task.send(user)).get(timeout_ms=5000)
         assert_ok(result, 'Alice is 30')
 
 
@@ -127,7 +131,7 @@ def test_dataclass_args() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        result = basic_tasks.dataclass_task.send(basic_tasks.DataInput(x=10, y=20)).get(
+        result = unwrap_send(basic_tasks.dataclass_task.send(basic_tasks.DataInput(x=10, y=20))).get(
             timeout_ms=5000
         )
         assert_ok(result, 30)
@@ -138,13 +142,13 @@ def test_kwargs_with_defaults() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        r1 = basic_tasks.kwargs_task.send(5).get(timeout_ms=5000)
+        r1 = unwrap_send(basic_tasks.kwargs_task.send(5)).get(timeout_ms=5000)
         assert_ok(r1, '5_default')
 
-        r2 = basic_tasks.kwargs_task.send(5, optional='custom').get(timeout_ms=5000)
+        r2 = unwrap_send(basic_tasks.kwargs_task.send(5, optional='custom')).get(timeout_ms=5000)
         assert_ok(r2, '5_custom')
 
-        r3 = basic_tasks.kwargs_task.send(5, optional='x', multiplier=10).get(
+        r3 = unwrap_send(basic_tasks.kwargs_task.send(5, optional='x', multiplier=10)).get(
             timeout_ms=5000
         )
         assert_ok(r3, '50_x')
@@ -155,7 +159,7 @@ def test_explicit_error_result() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        result = basic_tasks.error_task.send().get(timeout_ms=5000)
+        result = unwrap_send(basic_tasks.error_task.send()).get(timeout_ms=5000)
         assert_err(result, expected_code='DELIBERATE_ERROR')
         assert result.err is not None
         assert result.err.message == 'This is intentional'
@@ -167,7 +171,7 @@ def test_exception_becomes_error() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        result = basic_tasks.exception_task.send().get(timeout_ms=5000)
+        result = unwrap_send(basic_tasks.exception_task.send()).get(timeout_ms=5000)
         assert result.is_err()
         assert result.err is not None
         assert result.err.error_code == LibraryErrorCode.UNHANDLED_EXCEPTION
@@ -180,7 +184,7 @@ def test_return_type_mismatch() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        result = basic_tasks.type_mismatch_task.send().get(timeout_ms=5000)
+        result = unwrap_send(basic_tasks.type_mismatch_task.send()).get(timeout_ms=5000)
         assert result.is_err()
         assert result.err is not None
         assert result.err.error_code == LibraryErrorCode.RETURN_TYPE_MISMATCH
@@ -191,7 +195,7 @@ def test_complex_result_serialization() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        result = basic_tasks.complex_result_task.send().get(timeout_ms=5000)
+        result = unwrap_send(basic_tasks.complex_result_task.send()).get(timeout_ms=5000)
         assert_ok(result)
         output = result.unwrap()
         assert output.value == 42
@@ -204,7 +208,7 @@ async def test_retry_exhausted(broker: PostgresBroker) -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = retry_tasks.retry_exhausted_task.send()
+        handle = unwrap_send(retry_tasks.retry_exhausted_task.send())
         result = handle.get(timeout_ms=15000)
         assert_err(result, expected_code='TRANSIENT')
 
@@ -226,7 +230,7 @@ def test_retry_eventual_success() -> None:
         with run_worker(
             DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
         ):
-            result = retry_tasks.retry_success_task.send().get(timeout_ms=15000)
+            result = unwrap_send(retry_tasks.retry_success_task.send()).get(timeout_ms=15000)
             assert_ok(result, 'succeeded_on_attempt_3')
     finally:
         try:
@@ -242,7 +246,7 @@ async def test_exponential_backoff_state(broker: PostgresBroker) -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = retry_tasks.exponential_task.send()
+        handle = unwrap_send(retry_tasks.exponential_task.send())
 
         # Wait for at least one retry to be scheduled
         deadline = time.time() + 5.0
@@ -263,7 +267,7 @@ async def test_exponential_backoff_intervals(broker: PostgresBroker) -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = retry_tasks.exponential_task.send()
+        handle = unwrap_send(retry_tasks.exponential_task.send())
 
         # Capture original enqueued_at before worker processes the task
         async with broker.session_factory() as session:
@@ -312,7 +316,7 @@ async def test_auto_retry_by_error_code(broker: PostgresBroker) -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = retry_tasks.retry_error_code_task.send()
+        handle = unwrap_send(retry_tasks.retry_error_code_task.send())
         result = handle.get(timeout_ms=10000)
         assert result.is_err()
 
@@ -328,7 +332,7 @@ async def test_auto_retry_by_mapped_exception(broker: PostgresBroker) -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = retry_tasks.retry_mapped_exception_task.send()
+        handle = unwrap_send(retry_tasks.retry_mapped_exception_task.send())
         result = handle.get(timeout_ms=10000)
         assert result.is_err()
 
@@ -344,7 +348,7 @@ async def test_no_retry_for_non_matching(broker: PostgresBroker) -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = basic_tasks.no_retry_task.send()
+        handle = unwrap_send(basic_tasks.no_retry_task.send())
         result = handle.get(timeout_ms=5000)
         assert_err(result, expected_code='PERMANENT')
 
@@ -363,7 +367,7 @@ async def test_retry_precedence_task_mapper_wins_over_global_no_retry(
         RETRY_PRECEDENCE_INSTANCE,
         ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
     ):
-        handle = instance_retry_precedence.task_mapper_wins_no_retry_task.send()
+        handle = unwrap_send(instance_retry_precedence.task_mapper_wins_no_retry_task.send())
         result = handle.get(timeout_ms=10000)
         assert result.is_err()
         assert result.err is not None
@@ -385,7 +389,7 @@ async def test_retry_precedence_task_mapper_wins_and_retries(
         RETRY_PRECEDENCE_INSTANCE,
         ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
     ):
-        handle = instance_retry_precedence.task_mapper_wins_retry_task.send()
+        handle = unwrap_send(instance_retry_precedence.task_mapper_wins_retry_task.send())
         result = handle.get(timeout_ms=10000)
         assert result.is_err()
         assert result.err is not None
@@ -407,7 +411,7 @@ async def test_retry_precedence_global_mapper_triggers_retry(
         RETRY_PRECEDENCE_INSTANCE,
         ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
     ):
-        handle = instance_retry_precedence.global_mapper_retry_task.send()
+        handle = unwrap_send(instance_retry_precedence.global_mapper_retry_task.send())
         result = handle.get(timeout_ms=10000)
         assert result.is_err()
         assert result.err is not None
@@ -429,7 +433,7 @@ async def test_retry_precedence_exception_name_collision_no_retry(
         RETRY_PRECEDENCE_INSTANCE,
         ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
     ):
-        handle = instance_retry_precedence.exception_name_collision_task.send()
+        handle = unwrap_send(instance_retry_precedence.exception_name_collision_task.send())
         result = handle.get(timeout_ms=10000)
         assert result.is_err()
         assert result.err is not None
@@ -457,9 +461,9 @@ def test_custom_mode_queue_routing() -> None:
     with run_worker(
         CUSTOM_INSTANCE, ready_check=_make_ready_check(queues_custom.high_task)
     ):
-        result_high = queues_custom.high_task.send().get(timeout_ms=5000)
-        result_normal = queues_custom.normal_task.send().get(timeout_ms=5000)
-        result_low = queues_custom.low_task.send().get(timeout_ms=5000)
+        result_high = unwrap_send(queues_custom.high_task.send()).get(timeout_ms=5000)
+        result_normal = unwrap_send(queues_custom.normal_task.send()).get(timeout_ms=5000)
+        result_low = unwrap_send(queues_custom.low_task.send()).get(timeout_ms=5000)
 
         assert_ok(result_high, 'high')
         assert_ok(result_normal, 'normal')
@@ -472,7 +476,7 @@ async def test_custom_mode_queue_names_stored(custom_broker: PostgresBroker) -> 
     with run_worker(
         CUSTOM_INSTANCE, ready_check=_make_ready_check(queues_custom.high_task)
     ):
-        handle = queues_custom.high_task.send()
+        handle = unwrap_send(queues_custom.high_task.send())
         result = handle.get(timeout_ms=5000)
         assert_ok(result, 'high')
 
@@ -497,18 +501,18 @@ async def test_priority_ordering(custom_broker: PostgresBroker) -> None:
     enqueue_base = datetime.now(timezone.utc)
     task_id_low = custom_broker.enqueue(
         task_name='e2e_low',
-        args=(),
-        kwargs={},
         queue_name='low',
+        task_id=str(uuid4()),
+        enqueue_sha='test-sha',
         priority=100,
         enqueued_at=enqueue_base,
     ).unwrap()
     # High priority (1) submitted second
     task_id_high = custom_broker.enqueue(
         task_name='e2e_high',
-        args=(),
-        kwargs={},
         queue_name='high',
+        task_id=str(uuid4()),
+        enqueue_sha='test-sha',
         priority=1,
         enqueued_at=enqueue_base + timedelta(milliseconds=50),
     ).unwrap()
@@ -561,9 +565,10 @@ async def test_task_expires_before_claim(broker: PostgresBroker) -> None:
     expiry = datetime.now(timezone.utc) + timedelta(milliseconds=500)
     task_id = broker.enqueue(
         task_name='e2e_simple',
-        args=(5,),
-        kwargs={},
+        args_json='[5]',
         queue_name='default',
+        task_id=str(uuid4()),
+        enqueue_sha='test-sha',
         good_until=expiry,
     ).unwrap()
 
@@ -592,9 +597,10 @@ async def test_task_completes_before_expiry(broker: PostgresBroker) -> None:
     expiry = datetime.now(timezone.utc) + timedelta(seconds=60)
     task_id = broker.enqueue(
         task_name='e2e_simple',
-        args=(5,),
-        kwargs={},
+        args_json='[5]',
         queue_name='default',
+        task_id=str(uuid4()),
+        enqueue_sha='test-sha',
         good_until=expiry,
     ).unwrap()
 
@@ -617,9 +623,10 @@ async def test_good_until_already_past(broker: PostgresBroker) -> None:
     past = datetime.now(timezone.utc) - timedelta(seconds=10)
     task_id = broker.enqueue(
         task_name='e2e_simple',
-        args=(5,),
-        kwargs={},
+        args_json='[5]',
         queue_name='default',
+        task_id=str(uuid4()),
+        enqueue_sha='test-sha',
         good_until=past,
     ).unwrap()
 
@@ -651,9 +658,9 @@ async def test_retry_blocked_by_good_until_expiry(broker: PostgresBroker) -> Non
     })
     task_id = broker.enqueue(
         task_name='e2e_retry_exhausted',
-        args=(),
-        kwargs={},
         queue_name='default',
+        task_id=str(uuid4()),
+        enqueue_sha='test-sha',
         good_until=good_until,
         task_options=task_options,
     ).unwrap()
@@ -694,9 +701,9 @@ async def test_retry_succeeds_within_good_until(broker: PostgresBroker) -> None:
     try:
         task_id = broker.enqueue(
             task_name='e2e_retry_success',
-            args=(),
-            kwargs={},
             queue_name='default',
+            task_id=str(uuid4()),
+            enqueue_sha='test-sha',
             good_until=good_until,
             task_options=task_options,
         ).unwrap()
@@ -730,9 +737,9 @@ def test_worker_resolution_error(broker: PostgresBroker) -> None:
     """L1.7.1: Unknown task_name returns WORKER_RESOLUTION_ERROR."""
     task_id = broker.enqueue(
         task_name='nonexistent_task_xyz',
-        args=(),
-        kwargs={},
         queue_name='default',
+        task_id=str(uuid4()),
+        enqueue_sha='test-sha',
     ).unwrap()
 
     with run_worker(
@@ -748,7 +755,7 @@ def test_unserializable_result() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        result = basic_tasks.unserializable_result_task.send().get(timeout_ms=5000)
+        result = unwrap_send(basic_tasks.unserializable_result_task.send()).get(timeout_ms=5000)
         assert_err(result, expected_code=LibraryErrorCode.WORKER_SERIALIZATION_ERROR)
 
 
@@ -766,9 +773,10 @@ def test_wait_timeout(broker: PostgresBroker) -> None:
     # Submit task but DON'T start worker
     task_id = broker.enqueue(
         task_name='e2e_simple',
-        args=(5,),
-        kwargs={},
+        args_json='[5]',
         queue_name='default',
+        task_id=str(uuid4()),
+        enqueue_sha='test-sha',
     ).unwrap()
 
     # Wait with very short timeout - task never completes
@@ -782,7 +790,7 @@ def test_return_none_from_task() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        result = basic_tasks.return_none_task.send().get(timeout_ms=5000)
+        result = unwrap_send(basic_tasks.return_none_task.send()).get(timeout_ms=5000)
         assert_err(result, expected_code=LibraryErrorCode.TASK_EXCEPTION)
         assert result.err is not None
         assert 'None' in (result.err.message or '')
@@ -794,7 +802,7 @@ def test_library_error_code_in_user_task() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        result = basic_tasks.error_code_task.send().get(timeout_ms=5000)
+        result = unwrap_send(basic_tasks.error_code_task.send()).get(timeout_ms=5000)
         assert_err(result, expected_code=LibraryErrorCode.TASK_EXCEPTION)
         assert result.err is not None
         assert result.err.message == 'boom'
@@ -866,9 +874,10 @@ async def test_task_cancelled(broker: PostgresBroker) -> None:
     """L1.7.9: Cancelled task returns TASK_CANCELLED from get_result."""
     task_id = broker.enqueue(
         task_name='e2e_simple',
-        args=(5,),
-        kwargs={},
+        args_json='[5]',
         queue_name='default',
+        task_id=str(uuid4()),
+        enqueue_sha='test-sha',
     ).unwrap()
 
     # Cancel directly in DB (no cancel API exists)
@@ -905,7 +914,7 @@ async def test_multiple_tasks_concurrent(broker: PostgresBroker) -> None:
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handles = [
-            basic_tasks.slow_task.send(task_duration_ms) for _ in range(num_tasks)
+            unwrap_send(basic_tasks.slow_task.send(task_duration_ms)) for _ in range(num_tasks)
         ]
 
         # Observe runtime concurrency directly from DB instead of wall-clock timing.
@@ -946,7 +955,7 @@ def test_skip_locked_prevents_double_claim() -> None:
                     # Use unique tokens for each task
                     tokens = [f'task_{i}' for i in range(20)]
                     handles = [
-                        basic_tasks.idempotent_task.send(token) for token in tokens
+                        unwrap_send(basic_tasks.idempotent_task.send(token)) for token in tokens
                     ]
                     results = [h.get(timeout_ms=15000) for h in handles]
 
@@ -978,7 +987,7 @@ async def test_max_claim_batch(broker: PostgresBroker) -> None:
     ):
         # Submit slow tasks
         handles = [
-            basic_tasks.slow_task.send(task_duration_ms) for _ in range(num_tasks)
+            unwrap_send(basic_tasks.slow_task.send(task_duration_ms)) for _ in range(num_tasks)
         ]
 
         # Poll DB while tasks are running to check CLAIMED count
@@ -1027,7 +1036,7 @@ def test_task_handle_info() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = basic_tasks.simple_task.send(5)
+        handle = unwrap_send(basic_tasks.simple_task.send(5))
         result = handle.get(timeout_ms=5000)
         assert_ok(result)
 
@@ -1050,7 +1059,7 @@ async def test_task_handle_info_async() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = basic_tasks.simple_task.send(5)
+        handle = unwrap_send(basic_tasks.simple_task.send(5))
         result = handle.get(timeout_ms=5000)
         assert_ok(result)
 
@@ -1075,13 +1084,11 @@ def test_send_suppressed() -> None:
     """L1.10.1: Task send during suppression returns SEND_SUPPRESSED."""
     os.environ['TASKLIB_SUPPRESS_SENDS'] = '1'
     try:
-        handle = basic_tasks.simple_task.send(5)
-        assert handle.task_id == '<suppressed>'
-        result = handle.get(timeout_ms=1000)
-        assert_err(result, expected_code=LibraryErrorCode.SEND_SUPPRESSED)
-        assert result.err is not None
-        assert result.err.data is not None
-        assert result.err.data['task_name'] == 'e2e_simple'
+        send_result = basic_tasks.simple_task.send(5)
+        assert is_err(send_result)
+        err = send_result.err_value
+        assert err.code == TaskSendErrorCode.SEND_SUPPRESSED
+        assert err.retryable is False
     finally:
         os.environ.pop('TASKLIB_SUPPRESS_SENDS', None)
 
