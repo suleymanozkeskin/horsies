@@ -63,7 +63,7 @@ CREATE_TASK_NOTIFY_FUNCTION_SQL = text("""
             PERFORM pg_notify('task_queue_' || NEW.queue_name, NEW.id);  -- Queue-specific notification
         ELSIF TG_OP = 'UPDATE' AND OLD.status != NEW.status THEN
             -- Task completion notifications: wake up result waiters
-            IF NEW.status IN ('COMPLETED', 'FAILED') THEN
+            IF NEW.status IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN
                 PERFORM pg_notify('task_done', NEW.id);  -- Send task_id as payload
             END IF;
         END IF;
