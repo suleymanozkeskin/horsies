@@ -175,7 +175,7 @@ spec = app.workflow(
     output=save,
     on_error=OnError.FAIL,
 )
-handle = spec.start()
+handle = spec.start().unwrap()
 handle.get(timeout_ms=30000)
 ```
 
@@ -186,19 +186,26 @@ This pattern only runs when the downstream task actually executes. With `join="a
 Prefer explicit returns over raising exceptions:
 
 ```python
-from horsies import LibraryErrorCode
+from horsies import LibraryErrorCode, Ok, Err
 from instance import my_task
 
 def process_task() -> str | None:
-    handle = my_task.send(10, 20)
+    match my_task.send(10, 20):
+        case Err(send_err):
+            print(f"Send failed: {send_err.code} - {send_err.message}")
+            return None
+        case Ok(handle):
+            pass
+
     result = handle.get(timeout_ms=5000)
 
     if result.is_err():
-        error = result.err
+        error = result.err_value
         match error.error_code:
             case LibraryErrorCode.WAIT_TIMEOUT:
                 # Task may still be running
                 # check status again using task id if you need absolute decisions
+                return None
             case LibraryErrorCode.TASK_NOT_FOUND:
                 return None
             case _:
@@ -206,7 +213,7 @@ def process_task() -> str | None:
                 handle_error(error)
                 return None
 
-    return result.ok
+    return result.ok_value
 ```
 
 ### Centralized Error Handler
@@ -220,11 +227,11 @@ Create a handler that **returns actions**, not just logs.
 ```python
 # Wrong - exceptions break control flow
 if result.is_err():
-    raise RuntimeError(f"Task failed: {result.err.error_code}")
+    raise RuntimeError(f"Task failed: {result.err_value.error_code}")
 
 # Correct - explicit return and handling
 if result.is_err():
-    handle_error(result.err)
+    handle_error(result.err_value)
     return None
 ```
 
@@ -233,13 +240,13 @@ if result.is_err():
 ```python
 # Wrong - logs but continues as if nothing happened
 if result.is_err():
-    print(result.err.message)
+    print(result.err_value.message)
 # Code continues...
 
 # Correct - handle and return explicitly
 if result.is_err():
-    handle_error(result.err)
-    return result.err.error_code
+    handle_error(result.err_value)
+    return result.err_value.error_code
 ```
 
 **Don't manually retry errors that should be auto-retried.**

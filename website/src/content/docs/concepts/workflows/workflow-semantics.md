@@ -967,7 +967,7 @@ result = handle.result_for(node)  # `RESULT_NOT_READY` is still possible dependi
 
 # Option 2: Check if result is ready
 result = handle.result_for(node)
-if result.is_err() and result.err.error_code == LibraryErrorCode.RESULT_NOT_READY:
+if result.is_err() and result.err_value.error_code == LibraryErrorCode.RESULT_NOT_READY:
     # Handle not-ready case: poll, wait, or skip, decide for your use case
     do_something()
 ```

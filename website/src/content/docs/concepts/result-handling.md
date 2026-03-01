@@ -33,16 +33,19 @@ def divide(a: int, b: int) -> TaskResult[float, TaskError]:
 ## Checking Results
 
 ```python
-handle = divide.send(10, 2)
-result = handle.get()
+from horsies import Ok, Err
 
-if result.is_ok():
-    print(f"Result: {result.ok}")
-    # or use result.unwrap() which raises if err
-else:
-    error = result.err
-    print(f"Error: {error.error_code} - {error.message}")
-    # or use result.unwrap_err() which raises if ok
+match divide.send(10, 2):
+    case Ok(handle):
+        result = handle.get()
+
+        if result.is_ok():
+            print(f"Result: {result.ok_value}")
+        else:
+            error = result.err_value
+            print(f"Error: {error.error_code} - {error.message}")
+    case Err(send_err):
+        print(f"Send failed: {send_err.code} - {send_err.message}")
 ```
 
 ## TaskError Structure

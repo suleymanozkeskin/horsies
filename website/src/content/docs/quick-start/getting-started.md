@@ -69,7 +69,7 @@ Create `producer.py`:
 from instance import app, add_numbers, process_data
 
 # Send and wait for result
-handle = add_numbers.send(5, 3)
+handle = add_numbers.send(5, 3).unwrap()
 result = handle.get()
 
 if result.is_err():
@@ -79,7 +79,7 @@ else:
 
 
 # Send with blocking timeout
-handle = process_data.send({"key": "value"})
+handle = process_data.send({"key": "value"}).unwrap()
 result = handle.get(timeout_ms=5000)
 ```
 
@@ -99,9 +99,9 @@ For async frameworks (FastAPI, etc.):
 from instance import add_numbers
 
 async def my_endpoint():
-    handle = await add_numbers.send_async(10, 20)
+    handle = (await add_numbers.send_async(10, 20)).unwrap()
     result = await handle.get_async(timeout_ms=10000)
-    return {"result": result.ok if result.is_ok() else None}
+    return {"result": result.ok_value if result.is_ok() else None}
 ```
 
 These async APIs are producer-side I/O helpers; task execution still happens in worker processes.
