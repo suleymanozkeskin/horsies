@@ -2,7 +2,7 @@
 from __future__ import annotations
 import uuid, asyncio, hashlib, contextlib, threading
 from typing import Any, Optional, TYPE_CHECKING
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy import text
 from horsies.core.brokers.listener import PostgresListener
@@ -664,6 +664,25 @@ class PostgresBroker:
                 BrokerErrorCode.ENQUEUE_FAILED,
                 'Cannot specify both enqueued_at and enqueue_delay_seconds',
                 ValueError('Cannot specify both enqueued_at and enqueue_delay_seconds'),
+            )
+        # Guard: sent_at is an immutable call-site timestamp, not a scheduling
+        # mechanism.  A future sent_at without an explicit enqueued_at or
+        # enqueue_delay_seconds is almost certainly legacy ETA usage that would
+        # silently run immediately (enqueued_at defaults to NOW()).
+        # 5-second tolerance absorbs trivial clock drift.
+        _SENT_AT_FUTURE_TOLERANCE = timedelta(seconds=5)
+        if (
+            sent_at is not None
+            and sent_at > datetime.now(timezone.utc) + _SENT_AT_FUTURE_TOLERANCE
+            and enqueued_at is None
+            and enqueue_delay_seconds is None
+        ):
+            return _broker_err(
+                BrokerErrorCode.ENQUEUE_FAILED,
+                'sent_at is in the future without enqueued_at or enqueue_delay_seconds; '
+                'sent_at is a call-site timestamp, use enqueued_at or '
+                'enqueue_delay_seconds to schedule deferred execution',
+                ValueError('future sent_at without explicit scheduling parameter'),
             )
         try:
             await self._ensure_initialized()

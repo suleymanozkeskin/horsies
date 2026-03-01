@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -269,6 +269,59 @@ class TestEnqueueAsync:
 
         added_task = session.add.call_args[0][0]
         assert added_task.max_retries == 0
+
+    @pytest.mark.asyncio
+    async def test_future_sent_at_without_scheduling_params_rejected(self) -> None:
+        """Future sent_at without enqueued_at or enqueue_delay_seconds must error.
+
+        sent_at is an immutable call-site timestamp, not a scheduling mechanism.
+        Passing a future value without explicit scheduling params is ambiguous
+        (legacy ETA pattern) and would silently run immediately since
+        enqueued_at defaults to NOW().
+        """
+        broker = _make_broker()
+        session = _make_enqueue_session()
+        broker.session_factory = MagicMock(return_value=session)
+
+        future = datetime.now(timezone.utc) + timedelta(minutes=10)
+        result = await broker.enqueue_async(
+            'my_task', (), {}, sent_at=future,
+        )
+
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.ENQUEUE_FAILED
+        assert 'sent_at' in result.err_value.message
+        session.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_future_sent_at_with_enqueued_at_accepted(self) -> None:
+        """Future sent_at is allowed when enqueued_at is explicitly provided."""
+        broker = _make_broker()
+        session = _make_enqueue_session()
+        broker.session_factory = MagicMock(return_value=session)
+
+        future = datetime.now(timezone.utc) + timedelta(minutes=10)
+        result = await broker.enqueue_async(
+            'my_task', (), {}, sent_at=future, enqueued_at=future,
+        )
+
+        assert is_ok(result)
+        session.add.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_future_sent_at_with_enqueue_delay_accepted(self) -> None:
+        """Future sent_at is allowed when enqueue_delay_seconds is provided."""
+        broker = _make_broker()
+        session = _make_enqueue_session()
+        broker.session_factory = MagicMock(return_value=session)
+
+        future = datetime.now(timezone.utc) + timedelta(minutes=10)
+        result = await broker.enqueue_async(
+            'my_task', (), {}, sent_at=future, enqueue_delay_seconds=600,
+        )
+
+        assert is_ok(result)
+        session.execute.assert_awaited()
 
 
 # ---------------------------------------------------------------------------
