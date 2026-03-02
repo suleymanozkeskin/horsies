@@ -1138,11 +1138,11 @@ async def _evaluate_conditions(
     2. Else if run_when returns False → skip
     3. Otherwise → proceed
     """
-    from horsies.core.workflows.registry import get_task_node
+    from horsies.core.workflows.registry import get_node
     from horsies.core.models.workflow import WorkflowContext
 
     wf_def: type[WorkflowDefinition[Any]] | None = None
-    node = get_task_node(workflow_name, task_index)
+    node = get_node(workflow_name, task_index)
     if node is None:
         # Try to load workflow definition by import path (Option B.1)
         def_result = await session.execute(
@@ -1175,7 +1175,7 @@ async def _evaluate_conditions(
     else:
         ctx_from_ids = []
         for dep_index in dependencies:
-            dep_node = get_task_node(workflow_name, dep_index)
+            dep_node = get_node(workflow_name, dep_index)
             if dep_node is None:
                 if 'wf_def' in locals() and wf_def is not None:
                     dep_node = _node_from_workflow_def(wf_def, dep_index)
