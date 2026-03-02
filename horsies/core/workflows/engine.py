@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, TypeVar, cast
@@ -1141,7 +1142,7 @@ async def _evaluate_conditions(
     from horsies.core.workflows.registry import get_node
     from horsies.core.models.workflow import WorkflowContext
 
-    wf_def: type[WorkflowDefinition[Any]] | None = None
+    resolved_nodes: dict[int, AnyNode] | None = None
     node = get_node(workflow_name, task_index)
     if node is None:
         # Try to load workflow definition by import path (Option B.1)
@@ -1153,7 +1154,8 @@ async def _evaluate_conditions(
         if def_row and def_row[0] and def_row[1]:
             wf_def = _load_workflow_def_from_path(def_row[0], def_row[1])
             if wf_def is not None:
-                node = _node_from_workflow_def(wf_def, task_index)
+                resolved_nodes = _resolve_workflow_def_nodes(wf_def)
+                node = resolved_nodes.get(task_index)
         if node is None:
             # Node not registered (workflow module not imported in this process)
             # Proceed without condition evaluation
@@ -1176,9 +1178,8 @@ async def _evaluate_conditions(
         ctx_from_ids = []
         for dep_index in dependencies:
             dep_node = get_node(workflow_name, dep_index)
-            if dep_node is None:
-                if 'wf_def' in locals() and wf_def is not None:
-                    dep_node = _node_from_workflow_def(wf_def, dep_index)
+            if dep_node is None and resolved_nodes is not None:
+                dep_node = resolved_nodes.get(dep_index)
             if dep_node and dep_node.node_id is not None:
                 ctx_from_ids.append(dep_node.node_id)
 
@@ -1976,28 +1977,36 @@ def _load_workflow_def_from_path(
     return None
 
 
-def _node_from_workflow_def(
+def _resolve_workflow_def_nodes(
     workflow_def: type[WorkflowDefinition[Any]],
-    task_index: int,
-) -> 'AnyNode | None':
-    """
-    Reconstruct a node by index from a WorkflowDefinition class.
+) -> dict[int, AnyNode]:
+    """Stamp all nodes from a WorkflowDefinition, return index->node mapping.
 
-    Assigns indices and node_ids in definition order to mirror WorkflowSpec.
+    Creates shallow copies — never mutates class-level originals.
+    Remaps workflow_ctx_from on each copy to point at stamped copies.
     """
     nodes = workflow_def.get_workflow_nodes()
     if not nodes:
-        return None
+        return {}
 
-    nodes_typed: list[tuple[str, AnyNode]] = nodes
-    for idx, (attr_name, node) in enumerate(nodes_typed):
-        if node.index is None:
-            node.index = idx
-        if node.node_id is None:
-            node.node_id = attr_name
-        if idx == task_index:
-            return node
-    return None
+    old_to_copy: dict[int, AnyNode] = {}
+    by_index: dict[int, AnyNode] = {}
+    for idx, (attr_name, node) in enumerate(nodes):
+        node_copy = copy.copy(node)
+        if node_copy.index is None:
+            node_copy.index = idx
+        if node_copy.node_id is None:
+            node_copy.node_id = attr_name
+        old_to_copy[id(node)] = node_copy
+        by_index[idx] = node_copy
+
+    for node_copy in old_to_copy.values():
+        if node_copy.workflow_ctx_from is not None:
+            node_copy.workflow_ctx_from = [
+                old_to_copy.get(id(n), n) for n in node_copy.workflow_ctx_from
+            ]
+
+    return by_index
 
 # --- Backward-compat barrel re-exports from lifecycle.py ---
 from horsies.core.workflows import lifecycle as _lifecycle  # noqa: E402
