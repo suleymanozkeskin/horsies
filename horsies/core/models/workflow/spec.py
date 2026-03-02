@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import copy as copy_module
 import inspect
-from collections.abc import Sequence
+from collections.abc import Mapping as MappingABC, Sequence
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -17,6 +17,7 @@ from typing import (
     cast,
 )
 
+from horsies.core.codec.serde import dumps_json, loads_json, rehydrate_value
 from horsies.core.errors import (
     ErrorCode,
     SourceLocation,
@@ -24,6 +25,7 @@ from horsies.core.errors import (
     WorkflowValidationError,
     raise_collected,
 )
+from horsies.core.types.result import is_err
 
 from .enums import OutT, OnError, SubWorkflowRetryMode
 from .nodes import (
@@ -204,6 +206,7 @@ class WorkflowSpec(Generic[OutT]):
 
         # Only if all validation passed: conditions, propagation, registration.
         self._validate_conditions()
+        self._snapshot_kwargs_values()
 
         # Propagate to originals so condition lambdas that capture the
         # original node objects can read node_id at runtime via
@@ -314,6 +317,66 @@ class WorkflowSpec(Generic[OutT]):
 
         return originals
 
+    def _snapshot_kwargs_values(self) -> None:
+        """Snapshot kwargs values via serde round-trip for deep by-value isolation.
+
+        Runs after structural validators so validation-specific errors (for
+        example raw from_node markers) preserve their current semantics/codes.
+        Any serde failures are surfaced as workflow validation errors here,
+        before start/dispatch.
+        """
+        report = ValidationReport('workflow')
+        snapshotted_by_index: list[tuple[int, dict[str, Any]]] = []
+
+        for i, node in enumerate(self.tasks):
+            snapshotted: dict[str, Any] = {}
+            for key, value in node.kwargs.items():
+                dumped = dumps_json(value)
+                if is_err(dumped):
+                    report.add(WorkflowValidationError(
+                        message='TaskNode/SubWorkflowNode kwargs value is not serializable',
+                        code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+                        notes=[
+                            f"node '{node.name}' kwargs['{key}'] failed serialization",
+                            f'serde error: {dumped.err_value}',
+                        ],
+                        help_text='use JSON-serializable kwargs values (or importable dataclass/BaseModel types)',
+                    ))
+                    continue
+
+                loaded = loads_json(dumped.ok_value)
+                if is_err(loaded):
+                    report.add(WorkflowValidationError(
+                        message='TaskNode/SubWorkflowNode kwargs value failed JSON parse after serialization',
+                        code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+                        notes=[
+                            f"node '{node.name}' kwargs['{key}'] serialized but failed parse",
+                            f'serde error: {loaded.err_value}',
+                        ],
+                    ))
+                    continue
+
+                rehydrated = rehydrate_value(loaded.ok_value)
+                if is_err(rehydrated):
+                    report.add(WorkflowValidationError(
+                        message='TaskNode/SubWorkflowNode kwargs value failed rehydration after serialization',
+                        code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+                        notes=[
+                            f"node '{node.name}' kwargs['{key}'] failed rehydration",
+                            f'serde error: {rehydrated.err_value}',
+                        ],
+                    ))
+                    continue
+
+                snapshotted[key] = rehydrated.ok_value
+
+            snapshotted_by_index.append((i, snapshotted))
+
+        raise_collected(report)
+
+        for i, snapshotted in snapshotted_by_index:
+            self.tasks[i].kwargs = snapshotted
+
     def _freeze_graph(self) -> None:
         """Freeze all nodes and containers in-place after validation.
 
@@ -323,7 +386,10 @@ class WorkflowSpec(Generic[OutT]):
         construction step that sets it).
         """
         for node in self.tasks:
-            object.__setattr__(node, 'kwargs', MappingProxyType(dict(node.kwargs)))
+            frozen_kwargs = {
+                k: self._deep_freeze_value(v) for k, v in node.kwargs.items()
+            }
+            object.__setattr__(node, 'kwargs', MappingProxyType(frozen_kwargs))
             object.__setattr__(node, 'waits_for', tuple(node.waits_for))
             object.__setattr__(node, 'args_from', MappingProxyType(dict(node.args_from)))
             if node.workflow_ctx_from is not None:
@@ -348,6 +414,29 @@ class WorkflowSpec(Generic[OutT]):
 
         object.__setattr__(self, 'tasks', tuple(self.tasks))
         object.__setattr__(self, '_frozen', True)
+
+    @classmethod
+    def _deep_freeze_value(cls, value: Any) -> Any:
+        """Recursively freeze container values used inside kwargs snapshots."""
+        if isinstance(value, MappingABC):
+            mapping = cast('MappingABC[Any, Any]', value)
+            frozen: dict[Any, Any] = {}
+            for k, v in mapping.items():
+                frozen[k] = cls._deep_freeze_value(v)
+            return MappingProxyType(frozen)
+        if isinstance(value, list):
+            values = cast('list[Any]', value)
+            return tuple(cls._deep_freeze_value(v) for v in values)
+        if isinstance(value, tuple):
+            values = cast('tuple[Any, ...]', value)
+            return tuple(cls._deep_freeze_value(v) for v in values)
+        if isinstance(value, set):
+            values = cast('set[Any]', value)
+            return frozenset(cls._deep_freeze_value(v) for v in values)
+        if isinstance(value, frozenset):
+            values = cast('frozenset[Any]', value)
+            return frozenset(cls._deep_freeze_value(v) for v in values)
+        return value
 
     def _assign_indices(self) -> None:
         """Assign index to each TaskNode based on list position."""

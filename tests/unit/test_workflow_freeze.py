@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from horsies.core.errors import ErrorCode, WorkflowValidationError
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.task_send_types import TaskSendError, TaskSendResult
 from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory
@@ -106,6 +107,11 @@ class MockFnWithCtx(TaskFunction[Any, Any]):
 fn_a = MockFn(task_name='task_a')
 fn_b = MockFn(task_name='task_b')
 fn_c = MockFnWithCtx(task_name='task_c')
+
+
+@dataclass
+class SnapshotPayload:
+    items: list[int]
 
 
 def _make_spec(
@@ -365,19 +371,59 @@ class TestPreConstructionMutability:
 
 
 # ===========================================================================
-# Shallow kwargs freeze (nested values shared)
+# kwargs snapshot + deep container freeze
 # ===========================================================================
 
 
-class TestShallowKwargsFreeze:
-    """Nested mutable values in kwargs are shared by reference (documented)."""
+class TestKwargsSnapshotAndFreeze:
+    """kwargs values are snapshotted by serde and containers are recursively frozen."""
 
-    def test_nested_mutable_value_is_shared(self) -> None:
+    def test_nested_mutable_value_is_snapshotted_and_frozen(self) -> None:
         inner_list: list[int] = [1, 2, 3]
-        a = TaskNode(fn=fn_a, kwargs={'data': inner_list})
+        a = TaskNode(fn=fn_a, kwargs={'data': {'nums': inner_list}})
         spec = WorkflowSpec(name='wf', tasks=[a])
-        # The list itself is the same object (shallow freeze)
-        assert spec.tasks[0].kwargs['data'] is inner_list
+
+        data = spec.tasks[0].kwargs['data']
+        assert isinstance(data, MappingProxyType)
+        nums = data['nums']
+        assert isinstance(nums, tuple)
+        assert nums == (1, 2, 3)
+        assert nums is not inner_list
+
+        # Mutating caller object no longer affects spec snapshot
+        inner_list.append(99)
+        assert spec.tasks[0].kwargs['data']['nums'] == (1, 2, 3)
+
+    def test_dataclass_payload_is_isolated_from_caller(self) -> None:
+        payload = SnapshotPayload(items=[1, 2, 3])
+        a = TaskNode(fn=fn_a, kwargs={'payload': payload})
+        spec = WorkflowSpec(name='wf', tasks=[a])
+
+        snap_payload = spec.tasks[0].kwargs['payload']
+        assert isinstance(snap_payload, SnapshotPayload)
+        assert snap_payload is not payload
+        assert snap_payload.items == [1, 2, 3]
+
+        payload.items.append(42)
+        assert snap_payload.items == [1, 2, 3]
+
+    def test_non_serializable_kwargs_value_fails_construction(self) -> None:
+        a = TaskNode(fn=fn_a, kwargs={'bad': object()})
+        with pytest.raises(WorkflowValidationError) as exc:
+            WorkflowSpec(name='wf_bad', tasks=[a])
+        assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+
+    def test_nan_kwargs_value_fails_construction(self) -> None:
+        a = TaskNode(fn=fn_a, kwargs={'bad_float': float('nan')})
+        with pytest.raises(WorkflowValidationError) as exc:
+            WorkflowSpec(name='wf_nan', tasks=[a])
+        assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+
+    def test_colliding_mapping_keys_fail_construction(self) -> None:
+        a = TaskNode(fn=fn_a, kwargs={'bad_map': {1: 'a', '1': 'b'}})
+        with pytest.raises(WorkflowValidationError) as exc:
+            WorkflowSpec(name='wf_key_collision', tasks=[a])
+        assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
 
 # ===========================================================================

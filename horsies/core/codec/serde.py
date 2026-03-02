@@ -232,11 +232,19 @@ def to_jsonable(value: Any) -> SerdeResult[Json]:
     if isinstance(value, Mapping):
         mapping = cast(Mapping[object, object], value)
         result_dict: Dict[str, Json] = {}
+        original_keys: Dict[str, object] = {}
         for key, item in mapping.items():
+            str_key = str(key)
+            if str_key in result_dict:
+                return Err(SerializationError(
+                    f"Mapping key collision: {key!r} and {original_keys[str_key]!r} "
+                    f"both resolve to '{str_key}' after stringification",
+                ))
             item_result = to_jsonable(item)
             if is_err(item_result):
                 return item_result
-            result_dict[str(key)] = item_result.ok_value
+            original_keys[str_key] = key
+            result_dict[str_key] = item_result.ok_value
         return Ok(result_dict)
 
     # Sequence (list-like, excluding str/bytes)
