@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import (
@@ -70,7 +70,7 @@ class TaskNode(Generic[OkT_co]):
     Internal compatibility slot for positional args.
     Workflow nodes are kwargs-only; this field is not accepted in constructors.
     """
-    kwargs: dict[str, Any] = field(default_factory=lambda: {})
+    kwargs: Mapping[str, Any] = field(default_factory=lambda: {})
     waits_for: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] = field(
         default_factory=lambda: [],
     )
@@ -79,7 +79,7 @@ class TaskNode(Generic[OkT_co]):
     - The node with the dependencies will wait for all dependencies to be terminal (COMPLETED/FAILED/SKIPPED)
     """
 
-    args_from: dict[str, TaskNode[Any] | SubWorkflowNode[Any]] = field(
+    args_from: Mapping[str, TaskNode[Any] | SubWorkflowNode[Any]] = field(
         default_factory=lambda: {},
     )
     """
@@ -171,11 +171,26 @@ class TaskNode(Generic[OkT_co]):
     Cleared automatically when node_id is set externally via __setattr__.
     """
 
+    _frozen: bool = field(default=False, init=False, repr=False, compare=False)
+    """Set by WorkflowSpec._freeze_graph() to make this node immutable."""
+
     def __setattr__(self, name: str, value: Any) -> None:
-        """Clear _node_id_auto_derived when node_id is set externally."""
+        """Frozen guard + clear _node_id_auto_derived when node_id is set."""
+        if getattr(self, '_frozen', False):
+            raise AttributeError(
+                f"Cannot set '{name}' on frozen {type(self).__name__}. "
+                f"Nodes are immutable after WorkflowSpec construction.",
+            )
         if name == 'node_id':
             object.__setattr__(self, '_node_id_auto_derived', False)
         object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if getattr(self, '_frozen', False):
+            raise AttributeError(
+                f"Cannot delete '{name}' on frozen {type(self).__name__}.",
+            )
+        object.__delattr__(self, name)
 
     @property
     def name(self) -> str:
@@ -232,7 +247,7 @@ class SubWorkflowNode(Generic[OkT_co]):
     Workflow nodes are kwargs-only; this field is not accepted in constructors.
     """
 
-    kwargs: dict[str, Any] = field(default_factory=lambda: {})
+    kwargs: Mapping[str, Any] = field(default_factory=lambda: {})
     """
     - Keyword arguments passed to workflow_def.build_with(app, **kwargs)
     - Use with args_from to inject upstream results as parameters
@@ -247,7 +262,7 @@ class SubWorkflowNode(Generic[OkT_co]):
     - Same semantics as TaskNode.waits_for
     """
 
-    args_from: dict[str, TaskNode[Any] | SubWorkflowNode[Any]] = field(
+    args_from: Mapping[str, TaskNode[Any] | SubWorkflowNode[Any]] = field(
         default_factory=lambda: {},
     )
     """
@@ -326,11 +341,26 @@ class SubWorkflowNode(Generic[OkT_co]):
     Cleared automatically when node_id is set externally via __setattr__.
     """
 
+    _frozen: bool = field(default=False, init=False, repr=False, compare=False)
+    """Set by WorkflowSpec._freeze_graph() to make this node immutable."""
+
     def __setattr__(self, name: str, value: Any) -> None:
-        """Clear _node_id_auto_derived when node_id is set externally."""
+        """Frozen guard + clear _node_id_auto_derived when node_id is set."""
+        if getattr(self, '_frozen', False):
+            raise AttributeError(
+                f"Cannot set '{name}' on frozen {type(self).__name__}. "
+                f"Nodes are immutable after WorkflowSpec construction.",
+            )
         if name == 'node_id':
             object.__setattr__(self, '_node_id_auto_derived', False)
         object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if getattr(self, '_frozen', False):
+            raise AttributeError(
+                f"Cannot delete '{name}' on frozen {type(self).__name__}.",
+            )
+        object.__delattr__(self, name)
 
     @property
     def name(self) -> str:
@@ -373,10 +403,28 @@ class SuccessCase:
         ])
     """
 
-    required: list[TaskNode[Any]]
+    required: Sequence[TaskNode[Any]]
     """
     - All tasks in this list must be COMPLETED for the case to be satisfied
     """
+
+    _frozen: bool = field(default=False, init=False, repr=False, compare=False)
+    """Set by WorkflowSpec._freeze_graph() to make this case immutable."""
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if getattr(self, '_frozen', False):
+            raise AttributeError(
+                f"Cannot set '{name}' on frozen {type(self).__name__}. "
+                f"Immutable after WorkflowSpec construction.",
+            )
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if getattr(self, '_frozen', False):
+            raise AttributeError(
+                f"Cannot delete '{name}' on frozen {type(self).__name__}.",
+            )
+        object.__delattr__(self, name)
 
 
 @dataclass
@@ -396,17 +444,35 @@ class SuccessPolicy:
         )
     """
 
-    cases: list[SuccessCase]
+    cases: Sequence[SuccessCase]
     """
     - List of success scenarios
     - Workflow succeeds if ANY case is fully satisfied (all required COMPLETED)
     """
 
-    optional: list[TaskNode[Any]] | None = None
+    optional: Sequence[TaskNode[Any]] | None = None
     """
     - Tasks that may fail without affecting success evaluation
     - These failures don't block success cases from being satisfied
     """
+
+    _frozen: bool = field(default=False, init=False, repr=False, compare=False)
+    """Set by WorkflowSpec._freeze_graph() to make this policy immutable."""
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if getattr(self, '_frozen', False):
+            raise AttributeError(
+                f"Cannot set '{name}' on frozen {type(self).__name__}. "
+                f"Immutable after WorkflowSpec construction.",
+            )
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if getattr(self, '_frozen', False):
+            raise AttributeError(
+                f"Cannot delete '{name}' on frozen {type(self).__name__}.",
+            )
+        object.__delattr__(self, name)
 
 
 WorkflowTerminalResults = dict[str, 'TaskResult[Any, TaskError] | None']

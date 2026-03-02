@@ -1993,6 +1993,8 @@ def _resolve_workflow_def_nodes(
     by_index: dict[int, AnyNode] = {}
     for idx, (attr_name, node) in enumerate(nodes):
         node_copy = copy.copy(node)
+        # Ensure copy is mutable (source may be frozen from a prior spec).
+        object.__setattr__(node_copy, '_frozen', False)
         if node_copy.index is None:
             node_copy.index = idx
         if node_copy.node_id is None:

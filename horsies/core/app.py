@@ -822,6 +822,10 @@ class Horsies:
         on_error: OnError,
         output: TaskNode[OutT] | SubWorkflowNode[OutT],
         success_policy: SuccessPolicy | None = None,
+        *,
+        workflow_def_module: str | None = None,
+        workflow_def_qualname: str | None = None,
+        workflow_def_cls: type[Any] | None = None,
     ) -> WorkflowSpec[OutT]: ...
 
     @overload
@@ -833,6 +837,9 @@ class Horsies:
         *,
         output: TaskNode[OutT] | SubWorkflowNode[OutT],
         success_policy: SuccessPolicy | None = None,
+        workflow_def_module: str | None = None,
+        workflow_def_qualname: str | None = None,
+        workflow_def_cls: type[Any] | None = None,
     ) -> WorkflowSpec[OutT]: ...
 
     @overload
@@ -843,6 +850,10 @@ class Horsies:
         on_error: OnError = OnError.FAIL,
         output: None = None,
         success_policy: SuccessPolicy | None = None,
+        *,
+        workflow_def_module: str | None = None,
+        workflow_def_qualname: str | None = None,
+        workflow_def_cls: type[Any] | None = None,
     ) -> WorkflowSpec[WorkflowTerminalResults]: ...
 
     def workflow(
@@ -852,6 +863,10 @@ class Horsies:
         on_error: OnError = OnError.FAIL,
         output: TaskNode[OutT] | SubWorkflowNode[OutT] | None = None,
         success_policy: SuccessPolicy | None = None,
+        *,
+        workflow_def_module: str | None = None,
+        workflow_def_qualname: str | None = None,
+        workflow_def_cls: type[Any] | None = None,
     ) -> WorkflowSpec[OutT] | WorkflowSpec[WorkflowTerminalResults]:
         """
         Create a validated WorkflowSpec with proper queue and priority resolution.
@@ -937,6 +952,9 @@ class Horsies:
             output=output,
             success_policy=success_policy,
             broker=self.get_broker(),
+            workflow_def_module=workflow_def_module,
+            workflow_def_qualname=workflow_def_qualname,
+            workflow_def_cls=workflow_def_cls,
         )
         if output is None:
             return cast('WorkflowSpec[WorkflowTerminalResults]', spec)

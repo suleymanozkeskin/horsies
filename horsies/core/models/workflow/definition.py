@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -20,6 +21,11 @@ from .typing_utils import validate_workflow_generic_output_match
 
 if TYPE_CHECKING:
     from horsies.core.app import Horsies
+
+
+_workflow_def_context: ContextVar[tuple[str, str, type[Any]] | None] = ContextVar(
+    '_workflow_def_context', default=None,
+)
 
 
 # =============================================================================
@@ -96,10 +102,20 @@ class WorkflowDefinitionMeta(type):
             *bw_args: Any,
             **bw_params: Any,
         ) -> WorkflowSpec[Any]:
-            spec = original_fn(klass, app, *bw_args, **bw_params)
-            spec.workflow_def_module = klass.__module__
-            spec.workflow_def_qualname = klass.__qualname__
-            spec.workflow_def_cls = klass
+            token = _workflow_def_context.set(
+                (klass.__module__, klass.__qualname__, klass),
+            )
+            try:
+                spec = original_fn(klass, app, *bw_args, **bw_params)
+            finally:
+                _workflow_def_context.reset(token)
+            # Ensure metadata even for cached/prebuilt specs whose __post_init__
+            # ran before the ContextVar was set. Stamp unconditionally so a
+            # shared cached spec reused by different WorkflowDefinition classes
+            # cannot retain stale metadata from an earlier class.
+            object.__setattr__(spec, 'workflow_def_module', klass.__module__)
+            object.__setattr__(spec, 'workflow_def_qualname', klass.__qualname__)
+            object.__setattr__(spec, 'workflow_def_cls', klass)
             validate_workflow_generic_output_match(klass, spec)
             return spec
 
@@ -217,6 +233,9 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
                 output=output,
                 on_error=on_error,
                 success_policy=success_policy,
+                workflow_def_module=cls.__module__,
+                workflow_def_qualname=cls.__qualname__,
+                workflow_def_cls=cls,
             )
         else:
             spec = cast(
@@ -226,11 +245,11 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
                     tasks=tasks,
                     on_error=on_error,
                     success_policy=success_policy,
+                    workflow_def_module=cls.__module__,
+                    workflow_def_qualname=cls.__qualname__,
+                    workflow_def_cls=cls,
                 ),
             )
-        spec.workflow_def_module = cls.__module__
-        spec.workflow_def_qualname = cls.__qualname__
-        spec.workflow_def_cls = cls
         validate_workflow_generic_output_match(cls, spec)
         return spec
 

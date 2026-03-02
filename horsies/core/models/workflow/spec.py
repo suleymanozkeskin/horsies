@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import copy as copy_module
 import inspect
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -81,7 +83,7 @@ class WorkflowSpec(Generic[OutT]):
     node_ids, the name is passed through slugify() to ensure validity.
     """
 
-    tasks: list[TaskNode[Any] | SubWorkflowNode[Any]]
+    tasks: Sequence[TaskNode[Any] | SubWorkflowNode[Any]]
     """
     - All nodes in the DAG (order determines index assignment)
     - Root nodes (empty waits_for) start immediately
@@ -127,6 +129,24 @@ class WorkflowSpec(Generic[OutT]):
     - Database broker for start()/start_async()
     - Set automatically by app.workflow()
     """
+
+    _frozen: bool = field(default=False, init=False, repr=False, compare=False)
+    """Set after successful construction to make the spec immutable."""
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if getattr(self, '_frozen', False):
+            raise AttributeError(
+                f"Cannot set '{name}' on frozen {type(self).__name__}. "
+                f"WorkflowSpec is immutable after construction.",
+            )
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if getattr(self, '_frozen', False):
+            raise AttributeError(
+                f"Cannot delete '{name}' on frozen {type(self).__name__}.",
+            )
+        object.__delattr__(self, name)
 
     def __post_init__(self) -> None:
         """Validate DAG structure on construction.
@@ -190,10 +210,17 @@ class WorkflowSpec(Generic[OutT]):
         # ctx.result_for(original_node). This is a current architectural
         # coupling, not a desired contract. Phase 2 removes this.
         # Gated behind validation: invalid specs must not mutate caller nodes.
+        # Skip frozen originals — they already carry valid stamps from a
+        # prior spec construction (e.g. tasks=list(old_spec.tasks)).
         for orig, copy in zip(originals, self.tasks):
+            if getattr(orig, '_frozen', False):
+                continue
             orig.index = copy.index
             orig.node_id = copy.node_id
             orig._node_id_auto_derived = copy._node_id_auto_derived
+
+        # Phase B: freeze copies in-place (after back-propagation).
+        self._freeze_graph()
 
         self._register_for_conditions()
 
@@ -218,11 +245,18 @@ class WorkflowSpec(Generic[OutT]):
 
         for node in self.tasks:
             node_copy = copy_module.copy(node)
+            src_is_frozen = bool(getattr(node, '_frozen', False))
+            # Ensure copy is mutable (source may be frozen from a prior spec).
+            object.__setattr__(node_copy, '_frozen', False)
             node_copy.index = None
             node_copy.kwargs = dict(node_copy.kwargs)
             # Only reset node_id when it was auto-derived by a previous spec.
             # User-provided and attribute-name-derived node_ids are preserved.
-            if node_copy._node_id_auto_derived:
+            #
+            # For frozen-source reuse (tasks=list(old_spec.tasks)), preserve
+            # auto-derived node_id as-is so condition closures that captured
+            # earlier node objects still resolve via ctx.result_for(...).
+            if node_copy._node_id_auto_derived and not src_is_frozen:
                 node_copy.node_id = None
                 node_copy._node_id_auto_derived = False
             old_to_new[id(node)] = node_copy
@@ -267,7 +301,53 @@ class WorkflowSpec(Generic[OutT]):
                 optional=new_optional,
             )
 
+        # Read ContextVar for workflow_def_* if not explicitly provided.
+        # Covers build_with() returning WorkflowSpec(...) directly.
+        if self.workflow_def_module is None:
+            from .definition import _workflow_def_context  # noqa: F811
+            ctx = _workflow_def_context.get()
+            if ctx is not None:
+                module, qualname, wf_cls = ctx
+                object.__setattr__(self, 'workflow_def_module', module)
+                object.__setattr__(self, 'workflow_def_qualname', qualname)
+                object.__setattr__(self, 'workflow_def_cls', wf_cls)
+
         return originals
+
+    def _freeze_graph(self) -> None:
+        """Freeze all nodes and containers in-place after validation.
+
+        Converts mutable containers to immutable forms and sets _frozen
+        on each node, success-policy object, and self. Uses
+        object.__setattr__ to bypass the frozen guard (this IS the
+        construction step that sets it).
+        """
+        for node in self.tasks:
+            object.__setattr__(node, 'kwargs', MappingProxyType(dict(node.kwargs)))
+            object.__setattr__(node, 'waits_for', tuple(node.waits_for))
+            object.__setattr__(node, 'args_from', MappingProxyType(dict(node.args_from)))
+            if node.workflow_ctx_from is not None:
+                object.__setattr__(
+                    node, 'workflow_ctx_from', tuple(node.workflow_ctx_from),
+                )
+            object.__setattr__(node, '_frozen', True)
+
+        if self.success_policy is not None:
+            for case in self.success_policy.cases:
+                object.__setattr__(case, 'required', tuple(case.required))
+                object.__setattr__(case, '_frozen', True)
+            object.__setattr__(
+                self.success_policy, 'cases', tuple(self.success_policy.cases),
+            )
+            if self.success_policy.optional is not None:
+                object.__setattr__(
+                    self.success_policy, 'optional',
+                    tuple(self.success_policy.optional),
+                )
+            object.__setattr__(self.success_policy, '_frozen', True)
+
+        object.__setattr__(self, 'tasks', tuple(self.tasks))
+        object.__setattr__(self, '_frozen', True)
 
     def _assign_indices(self) -> None:
         """Assign index to each TaskNode based on list position."""
