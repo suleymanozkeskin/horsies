@@ -47,10 +47,15 @@ class WorkflowDefinitionMeta(type):
         if name == 'WorkflowDefinition':
             return cls
 
-        # Collect TaskNode and SubWorkflowNode instances in definition order
+        # Collect TaskNode and SubWorkflowNode instances in definition order.
+        # Stamp node_id = attr_name on unstamped nodes so that condition
+        # closures captured at module level always see a valid node_id —
+        # even in fresh worker processes where build() is never called.
         nodes: list[tuple[str, TaskNode[Any] | SubWorkflowNode[Any]]] = []
         for attr_name, attr_value in namespace.items():
             if isinstance(attr_value, (TaskNode, SubWorkflowNode)):
+                if attr_value.node_id is None:
+                    attr_value.node_id = attr_name
                 nodes.append((attr_name, cast(AnyNode, attr_value)))
 
         # Store the collected nodes on the class

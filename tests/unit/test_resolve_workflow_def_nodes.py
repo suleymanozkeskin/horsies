@@ -98,10 +98,11 @@ fn_ctx = MockFnWithCtx(task_name='task_ctx')
 
 
 def _fresh_workflow_class() -> type[WorkflowDefinition[Any]]:
-    """Create a fresh WorkflowDefinition subclass with unstamped nodes.
+    """Create a fresh WorkflowDefinition subclass with fresh nodes.
 
     Returns a new class each call so tests are isolated from each other
-    and from any prior build() calls.
+    and from any prior build() calls. The metaclass stamps node_id from
+    attribute names at class definition time; index remains None.
     """
 
     class FreshWorkflow(WorkflowDefinition[int]):
@@ -129,31 +130,38 @@ class TestResolveWorkflowDefNodes:
         assert result[1].index == 1
 
     def test_class_level_nodes_not_mutated(self) -> None:
-        """Class-level node attributes remain None after resolve.
+        """Class-level node attributes unchanged after resolve.
 
         BUG 3 regression: the old _node_from_workflow_def wrote index and
-        node_id directly onto class-level node objects.
+        node_id directly onto class-level node objects. The resolver must
+        never change the pre-resolve state (metaclass may have stamped
+        node_id, but index stays None).
         """
         wf_cls = _fresh_workflow_class()
 
-        # Capture originals before calling resolve
+        # Capture originals and their pre-resolve state
         nodes = wf_cls.get_workflow_nodes()
         assert nodes is not None
         original_fetch = nodes[0][1]
         original_process = nodes[1][1]
 
+        fetch_index_before = original_fetch.index
+        fetch_node_id_before = original_fetch.node_id
+        process_index_before = original_process.index
+        process_node_id_before = original_process.node_id
+
         _resolve_workflow_def_nodes(wf_cls)
 
-        assert original_fetch.index is None, (
+        assert original_fetch.index == fetch_index_before, (
             'Class-level fetch.index mutated by _resolve_workflow_def_nodes'
         )
-        assert original_fetch.node_id is None, (
+        assert original_fetch.node_id == fetch_node_id_before, (
             'Class-level fetch.node_id mutated by _resolve_workflow_def_nodes'
         )
-        assert original_process.index is None, (
+        assert original_process.index == process_index_before, (
             'Class-level process.index mutated by _resolve_workflow_def_nodes'
         )
-        assert original_process.node_id is None, (
+        assert original_process.node_id == process_node_id_before, (
             'Class-level process.node_id mutated by _resolve_workflow_def_nodes'
         )
 
@@ -175,6 +183,9 @@ class TestResolveWorkflowDefNodes:
         assert nodes is not None
         original_fetch = nodes[0][1]
 
+        fetch_index_before = original_fetch.index
+        fetch_node_id_before = original_fetch.node_id
+
         result1 = _resolve_workflow_def_nodes(wf_cls)
         result2 = _resolve_workflow_def_nodes(wf_cls)
 
@@ -182,9 +193,9 @@ class TestResolveWorkflowDefNodes:
         assert result1[0] is not result2[0]
         assert result1[1] is not result2[1]
 
-        # Class-level still untouched
-        assert original_fetch.index is None
-        assert original_fetch.node_id is None
+        # Class-level unchanged from pre-resolve state
+        assert original_fetch.index == fetch_index_before
+        assert original_fetch.node_id == fetch_node_id_before
 
     def test_callables_shared_not_copied(self) -> None:
         """fn references are shared by the copy, not duplicated."""

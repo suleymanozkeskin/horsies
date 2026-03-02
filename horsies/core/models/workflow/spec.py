@@ -140,15 +140,6 @@ class WorkflowSpec(Generic[OutT]):
         # Gate 1: node_id assignment — if any ID errors, skip remaining validation
         node_id_errors = self._collect_node_id_errors()
 
-        # Propagate to originals so condition lambdas that capture the
-        # original node objects can read node_id at runtime via
-        # ctx.result_for(original_node). This is a current architectural
-        # coupling, not a desired contract. Phase 2 removes this.
-        for orig, copy in zip(originals, self.tasks):
-            orig.index = copy.index
-            orig.node_id = copy.node_id
-            orig._node_id_auto_derived = copy._node_id_auto_derived
-
         if node_id_errors:
             report = ValidationReport('workflow')
             for error in node_id_errors:
@@ -191,8 +182,19 @@ class WorkflowSpec(Generic[OutT]):
 
         raise_collected(report)
 
-        # Only if clean: conditions + registration
+        # Only if all validation passed: conditions, propagation, registration.
         self._validate_conditions()
+
+        # Propagate to originals so condition lambdas that capture the
+        # original node objects can read node_id at runtime via
+        # ctx.result_for(original_node). This is a current architectural
+        # coupling, not a desired contract. Phase 2 removes this.
+        # Gated behind validation: invalid specs must not mutate caller nodes.
+        for orig, copy in zip(originals, self.tasks):
+            orig.index = copy.index
+            orig.node_id = copy.node_id
+            orig._node_id_auto_derived = copy._node_id_auto_derived
+
         self._register_for_conditions()
 
     def _isolate_inputs(self) -> list[TaskNode[Any] | SubWorkflowNode[Any]]:

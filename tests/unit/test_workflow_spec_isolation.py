@@ -336,3 +336,100 @@ class TestSpecIsolation:
         assert spec.tasks[1].fn is fn_ctx
         assert spec.tasks[1].run_when is my_run_when
         assert spec.tasks[1].skip_when is my_skip_when
+
+    # ------------------------------------------------------------------
+    # Failed spec does not mutate originals
+    # ------------------------------------------------------------------
+
+    def test_failed_spec_does_not_mutate_originals(self) -> None:
+        """A WorkflowSpec that fails validation must not back-propagate to originals.
+
+        Regression: back-propagation ran before validation, so even invalid
+        specs mutated the caller's node objects with index/node_id values.
+        """
+        a = TaskNode(fn=fn_a)
+        orphan = TaskNode(fn=fn_b)
+
+        assert a.node_id is None
+        assert a.index is None
+
+        with pytest.raises((WorkflowValidationError, MultipleValidationErrors)):
+            WorkflowSpec(name='wf', tasks=[a], output=orphan)
+
+        # Originals must be untouched after a failed spec
+        assert a.node_id is None
+        assert a.index is None
+
+
+# =============================================================================
+# Metaclass stamping (WorkflowDefinitionMeta)
+# =============================================================================
+
+
+_meta_node_a: TaskNode[int] = TaskNode(fn=fn_a)
+_meta_node_b: TaskNode[int] = TaskNode(fn=fn_ctx, waits_for=[_meta_node_a])
+_meta_node_explicit: TaskNode[int] = TaskNode(fn=fn_a, node_id='custom-id')
+
+
+class _MetaStampWorkflow(WorkflowDefinition[int]):
+    """Test workflow defined purely for metaclass stamp verification."""
+
+    name = 'meta_stamp_test'
+
+    step_a = _meta_node_a
+    step_b = _meta_node_b
+    step_explicit = _meta_node_explicit
+
+
+# Closure captures the module-level node — the fresh-worker scenario
+def _meta_closure_condition(ctx: WorkflowContext) -> bool:
+    result = ctx.result_for(_meta_node_a)
+    return result.is_ok()
+
+
+@pytest.mark.unit
+class TestMetaclassStamping:
+    """WorkflowDefinitionMeta.__new__ stamps node_id at class-definition time."""
+
+    def test_metaclass_stamps_node_id_at_class_definition(self) -> None:
+        """Class-level nodes get node_id == attr_name from the metaclass.
+
+        No build() call is needed — the stamp happens at class definition time.
+        This is the fix for the fresh-worker closure bug: condition closures
+        always see a valid node_id on the captured original.
+        """
+        assert _meta_node_a.node_id == 'step_a'
+        assert _meta_node_b.node_id == 'step_b'
+
+        # _node_id_auto_derived is False because __setattr__ clears it
+        assert _meta_node_a._node_id_auto_derived is False
+        assert _meta_node_b._node_id_auto_derived is False
+
+    def test_metaclass_does_not_overwrite_explicit_node_id(self) -> None:
+        """User-provided node_id is preserved by the metaclass."""
+        assert _meta_node_explicit.node_id == 'custom-id'
+
+    def test_closure_works_without_build(self) -> None:
+        """Condition closure resolves ctx.result_for(original_node) without build().
+
+        This is the core regression test for the fresh-worker scenario:
+        the metaclass stamps node_id at import time, so closures captured
+        at module level always have a valid node_id for lookup.
+        """
+        from horsies.core.models.tasks import TaskResult, TaskError
+
+        # Build a WorkflowContext keyed by the metaclass-stamped node_id
+        node_id = _meta_node_a.node_id
+        assert node_id is not None
+
+        expected_result = TaskResult[int, TaskError](ok=42)
+        ctx = WorkflowContext(
+            workflow_id='test-wf-id',
+            task_index=1,
+            task_name='task_ctx',
+            results_by_id={node_id: expected_result},
+        )
+
+        # The closure captures _meta_node_a (module-level original).
+        # Because the metaclass stamped node_id='step_a', this resolves.
+        assert _meta_closure_condition(ctx) is True
