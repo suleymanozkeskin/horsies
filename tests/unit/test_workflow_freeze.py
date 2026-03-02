@@ -485,12 +485,11 @@ class TestFrozenNodeReuse:
 # ===========================================================================
 
 
-class TestCachedSpecMetadata:
-    """build_with() returning a cached/prebuilt spec must still get metadata."""
+class TestCachedSpecRejection:
+    """build_with() returning a cached/prebuilt spec must be rejected."""
 
-    def test_cached_spec_gets_workflow_def_metadata(self) -> None:
-        """Prebuilt spec returned from build_with() has metadata set."""
-        # Prebuilt spec — constructed without ContextVar
+    def test_cached_spec_rejected(self) -> None:
+        """Prebuilt spec returned from build_with() raises WorkflowValidationError."""
         prebuilt = WorkflowSpec(name='cached', tasks=[TaskNode(fn=fn_a)])
         assert prebuilt.workflow_def_module is None
 
@@ -503,23 +502,11 @@ class TestCachedSpecMetadata:
                 _ = params
                 return prebuilt  # returns cached spec
 
-        # Simulate what the metaclass wrapper does
-        from horsies.core.models.workflow.definition import _workflow_def_context
-        token = _workflow_def_context.set(
-            (CachedWorkflow.__module__, CachedWorkflow.__qualname__, CachedWorkflow),
-        )
-        try:
-            # Call the wrapped build_with
-            spec = CachedWorkflow.build_with(None)  # type: ignore[arg-type]
-        finally:
-            _workflow_def_context.reset(token)
+        with pytest.raises(WorkflowValidationError, match='not constructed during this call'):
+            CachedWorkflow.build_with(None)  # type: ignore[arg-type]
 
-        assert spec.workflow_def_module == CachedWorkflow.__module__
-        assert spec.workflow_def_qualname == CachedWorkflow.__qualname__
-        assert spec.workflow_def_cls is CachedWorkflow
-
-    def test_shared_cached_spec_metadata_updates_per_workflow_class(self) -> None:
-        """Shared cached spec must not keep stale metadata from prior class."""
+    def test_shared_cached_spec_rejected_for_both_classes(self) -> None:
+        """Shared cached spec is rejected regardless of which class returns it."""
         shared = WorkflowSpec(name='shared', tasks=[TaskNode(fn=fn_a)])
 
         class WorkflowA(WorkflowDefinition[Any]):
@@ -540,10 +527,8 @@ class TestCachedSpecMetadata:
                 _ = app, params
                 return shared
 
-        spec_a = WorkflowA.build_with(None)  # type: ignore[arg-type]
-        assert spec_a.workflow_def_cls is WorkflowA
+        with pytest.raises(WorkflowValidationError, match='not constructed during this call'):
+            WorkflowA.build_with(None)  # type: ignore[arg-type]
 
-        spec_b = WorkflowB.build_with(None)  # type: ignore[arg-type]
-        assert spec_b.workflow_def_module == WorkflowB.__module__
-        assert spec_b.workflow_def_qualname == WorkflowB.__qualname__
-        assert spec_b.workflow_def_cls is WorkflowB
+        with pytest.raises(WorkflowValidationError, match='not constructed during this call'):
+            WorkflowB.build_with(None)  # type: ignore[arg-type]

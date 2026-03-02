@@ -109,13 +109,19 @@ class WorkflowDefinitionMeta(type):
                 spec = original_fn(klass, app, *bw_args, **bw_params)
             finally:
                 _workflow_def_context.reset(token)
-            # Ensure metadata even for cached/prebuilt specs whose __post_init__
-            # ran before the ContextVar was set. Stamp unconditionally so a
-            # shared cached spec reused by different WorkflowDefinition classes
-            # cannot retain stale metadata from an earlier class.
-            object.__setattr__(spec, 'workflow_def_module', klass.__module__)
-            object.__setattr__(spec, 'workflow_def_qualname', klass.__qualname__)
-            object.__setattr__(spec, 'workflow_def_cls', klass)
+            # Reject cached/prebuilt specs whose metadata doesn't match this
+            # call. A fresh spec constructed during this call will have picked
+            # up metadata via explicit params (build path) or ContextVar
+            # (direct WorkflowSpec(...) path). Stale or missing metadata means
+            # the spec was built outside this call.
+            if spec.workflow_def_cls is not klass:
+                raise WorkflowValidationError(
+                    f"build_with() for '{klass.__qualname__}' returned a spec "
+                    f"not constructed during this call (workflow_def_cls="
+                    f"{spec.workflow_def_cls!r}, expected {klass!r}). "
+                    f"build_with() must return a fresh WorkflowSpec per call — "
+                    f"cached or prebuilt spec reuse is not supported.",
+                )
             validate_workflow_generic_output_match(klass, spec)
             return spec
 
