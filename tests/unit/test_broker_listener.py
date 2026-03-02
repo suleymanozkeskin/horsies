@@ -43,6 +43,26 @@ def _make_mock_conn(closed: bool = False, fileno: int = 5) -> MagicMock:
     return conn
 
 
+class _BusyCommandConnection:
+    """Simulate psycopg command connection single-flight behavior."""
+
+    def __init__(self, started: asyncio.Event, release: asyncio.Event) -> None:
+        self.closed: bool = False
+        self._started = started
+        self._release = release
+        self._in_progress = False
+
+    async def execute(self, _query: Any, *_args: Any, **_kwargs: Any) -> None:
+        if self._in_progress:
+            raise OperationalError(
+                'sending query failed: another command is already in progress',
+            )
+        self._in_progress = True
+        self._started.set()
+        await self._release.wait()
+        self._in_progress = False
+
+
 # ---------------------------------------------------------------------------
 # TestPostgresListenerInit
 # ---------------------------------------------------------------------------
@@ -779,6 +799,35 @@ class TestUnsubscribe:
         await listener.unsubscribe('ch', None)
 
         assert len(listener._subs['ch']) == 1
+
+    @pytest.mark.asyncio
+    async def test_serializes_unsubscribe_with_health_check_probe(self) -> None:
+        """unsubscribe should wait for in-flight health query, not raise race errors."""
+        listener = _make_listener()
+        started = asyncio.Event()
+        release = asyncio.Event()
+        listener._command_conn = _BusyCommandConnection(started, release)  # type: ignore[assignment]
+
+        channel = 'task_done'
+        queue: asyncio.Queue[Notify] = asyncio.Queue()
+        listener._subs[channel] = {queue}
+        listener._listen_channels.add(channel)
+
+        health_task = asyncio.create_task(listener._health_monitor())
+        listener._fd_activity.set()
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+
+        unsubscribe_task = asyncio.create_task(listener.unsubscribe(channel, queue))
+        await asyncio.sleep(0)
+        assert not unsubscribe_task.done()
+
+        release.set()
+        await asyncio.wait_for(unsubscribe_task, timeout=1.0)
+        assert channel not in listener._listen_channels
+
+        health_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await health_task
 
 
 # ---------------------------------------------------------------------------

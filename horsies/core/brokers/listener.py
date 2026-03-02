@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections import defaultdict
-from typing import DefaultDict, Optional, Sequence, Set
+from typing import Any, DefaultDict, Optional, Sequence, Set
 from asyncio import Task, Queue  # precise type for Pylance/mypy
 
 import psycopg
@@ -112,6 +112,8 @@ class PostgresListener:
 
         # A lock used to serialize LISTEN/UNLISTEN and subscription book-keeping.
         self._lock = asyncio.Lock()
+        # A lock used to serialize command-connection SQL execution.
+        self._command_lock = asyncio.Lock()
 
         # Event-loop ownership: listener state (lock/tasks/connections) is loop-affine.
         self._owner_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -195,12 +197,14 @@ class PostgresListener:
 
             # Ensure command connection (for LISTEN/UNLISTEN commands)
             if self._command_conn is None or self._command_conn.closed:
-                self._command_conn = await psycopg.AsyncConnection.connect(
-                    self.database_url,
-                    autocommit=True,
-                )
-                created_command = True
-                await self._start_listening(self._command_conn)
+                async with self._command_lock:
+                    if self._command_conn is None or self._command_conn.closed:
+                        self._command_conn = await psycopg.AsyncConnection.connect(
+                            self.database_url,
+                            autocommit=True,
+                        )
+                        created_command = True
+                        await self._start_listening(self._command_conn)
 
             return Ok(None)
         except (OperationalError, InterfaceError, OSError) as exc:
@@ -226,6 +230,16 @@ class PostgresListener:
                 retryable=is_retryable_connection_error(exc),
                 exception=exc,
             ))
+
+    async def _execute_on_command_conn(
+        self,
+        statement: Any,
+    ) -> None:
+        """Execute SQL on command connection with strict single-query concurrency."""
+        async with self._command_lock:
+            if self._command_conn is None or self._command_conn.closed:
+                return
+            await self._command_conn.execute(statement)
 
     async def _ensure_dispatcher_connection(self) -> AsyncConnection:
         """Ensure dispatcher connection is available.
@@ -326,8 +340,8 @@ class PostgresListener:
                     # Activity detected - verify connection health
                     if self._command_conn and not self._command_conn.closed:
                         try:
-                            await self._command_conn.execute('SELECT 1')
-                        except OperationalError:
+                            await self._execute_on_command_conn('SELECT 1')
+                        except (OperationalError, InterfaceError):
                             # Connection is dead, trigger reconnection
                             await self._handle_health_disconnect()
                             continue
@@ -336,8 +350,8 @@ class PostgresListener:
                     # No activity for 60 seconds - perform health check
                     if self._command_conn and not self._command_conn.closed:
                         try:
-                            await self._command_conn.execute('SELECT 1')
-                        except OperationalError:
+                            await self._execute_on_command_conn('SELECT 1')
+                        except (OperationalError, InterfaceError):
                             # Connection is dead, trigger reconnection
                             await self._handle_health_disconnect()
                             continue
@@ -562,7 +576,7 @@ class PostgresListener:
             if no_local_subs and channel_name in self._listen_channels:
                 # Only UNLISTEN via the command connection to avoid racing dispatcher notifies iterator
                 if self._command_conn and not self._command_conn.closed:
-                    await self._command_conn.execute(
+                    await self._execute_on_command_conn(
                         sql.SQL('UNLISTEN {}').format(sql.Identifier(channel_name))
                     )
 
@@ -596,7 +610,7 @@ class PostgresListener:
             no_local_subs = self._remove_local_subscription(channel_name, q)
             if no_local_subs and channel_name in self._listen_channels:
                 if self._command_conn and not self._command_conn.closed:
-                    await self._command_conn.execute(
+                    await self._execute_on_command_conn(
                         sql.SQL('UNLISTEN {}').format(sql.Identifier(channel_name))
                     )
                 self._listen_channels.discard(channel_name)
