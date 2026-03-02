@@ -161,6 +161,22 @@ class TaskNode(Generic[OkT_co]):
     Must match pattern: [A-Za-z0-9_\\-:.]+
     """
 
+    _node_id_auto_derived: bool = field(
+        default=False, init=False, repr=False, compare=False,
+    )
+    """
+    Internal flag: True when node_id was auto-derived by _collect_node_id_errors.
+    Used by _isolate_inputs to distinguish stale auto-derived values from
+    user-provided explicit node_ids on node reuse across specs.
+    Cleared automatically when node_id is set externally via __setattr__.
+    """
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Clear _node_id_auto_derived when node_id is set externally."""
+        if name == 'node_id':
+            object.__setattr__(self, '_node_id_auto_derived', False)
+        object.__setattr__(self, name, value)
+
     @property
     def name(self) -> str:
         """Get the task name from the wrapped function."""
@@ -299,6 +315,22 @@ class SubWorkflowNode(Generic[OkT_co]):
     Must be unique within the workflow.
     Must match pattern: [A-Za-z0-9_\\-:.]+
     """
+
+    _node_id_auto_derived: bool = field(
+        default=False, init=False, repr=False, compare=False,
+    )
+    """
+    Internal flag: True when node_id was auto-derived by _collect_node_id_errors.
+    Used by _isolate_inputs to distinguish stale auto-derived values from
+    user-provided explicit node_ids on node reuse across specs.
+    Cleared automatically when node_id is set externally via __setattr__.
+    """
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Clear _node_id_auto_derived when node_id is set externally."""
+        if name == 'node_id':
+            object.__setattr__(self, '_node_id_auto_derived', False)
+        object.__setattr__(self, name, value)
 
     @property
     def name(self) -> str:

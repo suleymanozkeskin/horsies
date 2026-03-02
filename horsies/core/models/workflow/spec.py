@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import copy as copy_module
 import inspect
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -26,6 +27,7 @@ from .enums import OutT, OnError, SubWorkflowRetryMode
 from .nodes import (
     TaskNode,
     SubWorkflowNode,
+    SuccessCase,
     SuccessPolicy,
 )
 from .typing_utils import (
@@ -132,10 +134,21 @@ class WorkflowSpec(Generic[OutT]):
         Phase-gated: node_id errors gate the rest (downstream needs valid IDs).
         All other validations run and collect errors together.
         """
+        originals = self._isolate_inputs()
         self._assign_indices()
 
         # Gate 1: node_id assignment — if any ID errors, skip remaining validation
         node_id_errors = self._collect_node_id_errors()
+
+        # Propagate to originals so condition lambdas that capture the
+        # original node objects can read node_id at runtime via
+        # ctx.result_for(original_node). This is a current architectural
+        # coupling, not a desired contract. Phase 2 removes this.
+        for orig, copy in zip(originals, self.tasks):
+            orig.index = copy.index
+            orig.node_id = copy.node_id
+            orig._node_id_auto_derived = copy._node_id_auto_derived
+
         if node_id_errors:
             report = ValidationReport('workflow')
             for error in node_id_errors:
@@ -182,6 +195,78 @@ class WorkflowSpec(Generic[OutT]):
         self._validate_conditions()
         self._register_for_conditions()
 
+    def _isolate_inputs(self) -> list[TaskNode[Any] | SubWorkflowNode[Any]]:
+        """Copy input node graph so each spec has independent nodes.
+
+        Uses copy.copy() for shallow copies — callables (fn, run_when,
+        skip_when) and class refs (workflow_def) are shared, not copied.
+        index is always reset. node_id is only reset when _node_id_auto_derived
+        is True (stale auto-derived value from a previous spec). User-provided
+        and attribute-name-derived node_ids are preserved.
+        kwargs dict is cloned so the spec's copy is independent.
+        Cross-references are remapped so the copied graph is self-consistent.
+        Refs pointing outside the task list are preserved as-is for validator detection.
+
+        Returns the original task list (for propagation of stamps back to
+        originals — needed for condition lambda runtime coupling).
+        """
+        originals = list(self.tasks)
+        old_to_new: dict[int, TaskNode[Any] | SubWorkflowNode[Any]] = {}
+        copied_tasks: list[TaskNode[Any] | SubWorkflowNode[Any]] = []
+
+        for node in self.tasks:
+            node_copy = copy_module.copy(node)
+            node_copy.index = None
+            node_copy.kwargs = dict(node_copy.kwargs)
+            # Only reset node_id when it was auto-derived by a previous spec.
+            # User-provided and attribute-name-derived node_ids are preserved.
+            if node_copy._node_id_auto_derived:
+                node_copy.node_id = None
+                node_copy._node_id_auto_derived = False
+            old_to_new[id(node)] = node_copy
+            copied_tasks.append(node_copy)
+
+        for node_copy in copied_tasks:
+            node_copy.waits_for = [
+                old_to_new.get(id(ref), ref) for ref in node_copy.waits_for
+            ]
+            node_copy.args_from = {
+                k: old_to_new.get(id(v), v)
+                for k, v in node_copy.args_from.items()
+            }
+            if node_copy.workflow_ctx_from is not None:
+                node_copy.workflow_ctx_from = [
+                    old_to_new.get(id(ref), ref)
+                    for ref in node_copy.workflow_ctx_from
+                ]
+
+        self.tasks = copied_tasks
+
+        if self.output is not None:
+            self.output = old_to_new.get(id(self.output), self.output)
+
+        if self.success_policy is not None:
+            new_cases: list[SuccessCase] = []
+            for case in self.success_policy.cases:
+                new_cases.append(SuccessCase(
+                    required=[
+                        cast('TaskNode[Any]', old_to_new.get(id(t), t))
+                        for t in case.required
+                    ],
+                ))
+            new_optional: list[TaskNode[Any]] | None = None
+            if self.success_policy.optional is not None:
+                new_optional = [
+                    cast('TaskNode[Any]', old_to_new.get(id(t), t))
+                    for t in self.success_policy.optional
+                ]
+            self.success_policy = SuccessPolicy(
+                cases=new_cases,
+                optional=new_optional,
+            )
+
+        return originals
+
     def _assign_indices(self) -> None:
         """Assign index to each TaskNode based on list position."""
         for i, task in enumerate(self.tasks):
@@ -214,6 +299,7 @@ class WorkflowSpec(Generic[OutT]):
                     )
                     continue
                 task.node_id = f'{slugify(self.name)}:{task.index}'
+                task._node_id_auto_derived = True
 
             node_id = task.node_id
             if node_id is None or not node_id.strip():
