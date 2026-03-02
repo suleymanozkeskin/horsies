@@ -532,3 +532,37 @@ class TestCachedSpecRejection:
 
         with pytest.raises(WorkflowValidationError, match='not constructed during this call'):
             WorkflowB.build_with(None)  # type: ignore[arg-type]
+
+    def test_same_class_cached_spec_rejected(self) -> None:
+        """Same-class cached spec is rejected via construction token mismatch."""
+        cached: list[WorkflowSpec[Any]] = []
+
+        class _MockApp:
+            def workflow(self, name: str, tasks: list[Any], **kwargs: Any) -> WorkflowSpec[Any]:
+                return WorkflowSpec(name=name, tasks=tasks, **kwargs)
+            def get_broker(self) -> None:
+                return None
+
+        class SelfCachingWorkflow(WorkflowDefinition[Any]):
+            name = 'self_caching'
+            fetch = TaskNode(fn=fn_a)
+
+            @classmethod
+            def build_with(cls, app: Any, **params: Any) -> WorkflowSpec[Any]:
+                _ = params
+                if cached:
+                    return cached[0]  # return spec from previous call
+                spec = cls.build(app)
+                cached.append(spec)
+                return spec
+
+        mock_app = _MockApp()
+
+        # First call: fresh spec, should succeed
+        SelfCachingWorkflow.build_with(mock_app)  # type: ignore[arg-type]
+
+        # Second call: returns cached spec from first call — must be rejected
+        with pytest.raises(  # type: ignore[call-overload]
+            WorkflowValidationError, match='not constructed during this call',
+        ):
+            SelfCachingWorkflow.build_with(mock_app)  # type: ignore[arg-type]

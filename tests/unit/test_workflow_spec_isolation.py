@@ -433,3 +433,75 @@ class TestMetaclassStamping:
         # The closure captures _meta_node_a (module-level original).
         # Because the metaclass stamped node_id='step_a', this resolves.
         assert _meta_closure_condition(ctx) is True
+
+
+# =============================================================================
+# Copy-on-build: build() must not mutate class-level nodes
+# =============================================================================
+
+
+class _MockApp:
+    """Minimal app mock that exercises queue/priority enrichment."""
+
+    def workflow(
+        self,
+        name: str,
+        tasks: list[Any],
+        **kwargs: Any,
+    ) -> WorkflowSpec[Any]:
+        # Simulate the enrichment app.workflow() does (app.py:939,943)
+        for node in tasks:
+            if isinstance(node, TaskNode):
+                if node.queue is None:
+                    node.queue = 'default'
+                if node.priority is None:
+                    node.priority = 5
+        return WorkflowSpec(name=name, tasks=tasks, **kwargs)
+
+    def get_broker(self) -> None:
+        return None
+
+
+@pytest.mark.unit
+class TestCopyOnBuild:
+    """build() must copy class-level nodes before passing to app.workflow()."""
+
+    def test_class_level_nodes_not_enriched_by_build(self) -> None:
+        """Queue/priority enrichment in app.workflow() must not reach class-level nodes."""
+
+        class MyWorkflow(WorkflowDefinition[Any]):
+            name = 'copy_on_build_test'
+            fetch = TaskNode(fn=fn_a)
+            process = TaskNode(fn=fn_b, waits_for=[fetch])
+
+        # Snapshot pre-build state
+        assert MyWorkflow.fetch.queue is None
+        assert MyWorkflow.fetch.priority is None
+        assert MyWorkflow.process.queue is None
+        assert MyWorkflow.process.priority is None
+
+        mock_app = _MockApp()
+        _spec = MyWorkflow.build_with(mock_app)  # type: ignore[arg-type]
+
+        # Class-level nodes must be untouched
+        assert MyWorkflow.fetch.queue is None
+        assert MyWorkflow.fetch.priority is None
+        assert MyWorkflow.process.queue is None
+        assert MyWorkflow.process.priority is None
+
+    def test_build_twice_produces_independent_specs(self) -> None:
+        """Two build() calls must not share node identity."""
+
+        class MyWorkflow(WorkflowDefinition[Any]):
+            name = 'double_build_test'
+            step = TaskNode(fn=fn_a)
+
+        mock_app = _MockApp()
+        spec_1 = MyWorkflow.build_with(mock_app)  # type: ignore[arg-type]
+        spec_2 = MyWorkflow.build_with(mock_app)  # type: ignore[arg-type]
+
+        # Spec nodes are independent copies
+        assert spec_1.tasks[0] is not spec_2.tasks[0]
+        # Neither is the class-level original
+        assert spec_1.tasks[0] is not MyWorkflow.step
+        assert spec_2.tasks[0] is not MyWorkflow.step

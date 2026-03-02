@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy as copy_module
+import uuid as uuid_module
 from contextvars import ContextVar
 from typing import (
     TYPE_CHECKING,
@@ -15,7 +17,7 @@ from typing import (
 from horsies.core.errors import WorkflowValidationError
 
 from .enums import OkT_co, OnError
-from .nodes import TaskNode, SubWorkflowNode, AnyNode, SuccessPolicy
+from .nodes import TaskNode, SubWorkflowNode, AnyNode, SuccessPolicy, SuccessCase
 from .spec import WorkflowSpec
 from .typing_utils import validate_workflow_generic_output_match
 
@@ -25,6 +27,10 @@ if TYPE_CHECKING:
 
 _workflow_def_context: ContextVar[tuple[str, str, type[Any]] | None] = ContextVar(
     '_workflow_def_context', default=None,
+)
+
+_build_call_token: ContextVar[str | None] = ContextVar(
+    '_build_call_token', default=None,
 )
 
 
@@ -102,23 +108,25 @@ class WorkflowDefinitionMeta(type):
             *bw_args: Any,
             **bw_params: Any,
         ) -> WorkflowSpec[Any]:
-            token = _workflow_def_context.set(
+            call_token = str(uuid_module.uuid4())
+            ctx_token = _workflow_def_context.set(
                 (klass.__module__, klass.__qualname__, klass),
             )
+            call_token_reset = _build_call_token.set(call_token)
             try:
                 spec = original_fn(klass, app, *bw_args, **bw_params)
             finally:
-                _workflow_def_context.reset(token)
-            # Reject cached/prebuilt specs whose metadata doesn't match this
-            # call. A fresh spec constructed during this call will have picked
-            # up metadata via explicit params (build path) or ContextVar
-            # (direct WorkflowSpec(...) path). Stale or missing metadata means
-            # the spec was built outside this call.
-            if spec.workflow_def_cls is not klass:
+                _workflow_def_context.reset(ctx_token)
+                _build_call_token.reset(call_token_reset)
+            # Reject specs not constructed during THIS call. A fresh spec
+            # picks up the call_token via ContextVar in __post_init__.
+            # Cached/prebuilt specs (including same-class reuse) will have
+            # a stale or missing token.
+            spec_token: str | None = getattr(spec, '_build_call_token', None)
+            if spec_token != call_token:
                 raise WorkflowValidationError(
                     f"build_with() for '{klass.__qualname__}' returned a spec "
-                    f"not constructed during this call (workflow_def_cls="
-                    f"{spec.workflow_def_cls!r}, expected {klass!r}). "
+                    f"not constructed during this call. "
                     f"build_with() must return a fresh WorkflowSpec per call — "
                     f"cached or prebuilt spec reuse is not supported.",
                 )
@@ -209,24 +217,70 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
                 f"WorkflowDefinition '{cls.__name__}' has no TaskNode attributes"
             )
 
-        # Assign node_id from attribute name (if not already set)
+        # Copy-on-build: shallow-copy class-level nodes so app.workflow()
+        # enrichment (queue/priority) never mutates class-level originals.
+        old_to_new: dict[int, TaskNode[Any] | SubWorkflowNode[Any]] = {}
+        tasks: list[TaskNode[Any] | SubWorkflowNode[Any]] = []
         for attr_name, node in nodes:
-            if node.node_id is None:
-                node.node_id = attr_name
+            node_copy = copy_module.copy(node)
+            if node_copy.node_id is None:
+                node_copy.node_id = attr_name
+            old_to_new[id(node)] = node_copy
+            tasks.append(node_copy)
 
-        # Extract task list (preserving definition order)
-        tasks = [node for _, node in nodes]
+        # Remap cross-references to point at copies, not class-level originals.
+        for node_copy in tasks:
+            node_copy.waits_for = [
+                old_to_new.get(id(ref), ref) for ref in node_copy.waits_for
+            ]
+            node_copy.args_from = {
+                k: old_to_new.get(id(v), v)
+                for k, v in node_copy.args_from.items()
+            }
+            if node_copy.workflow_ctx_from is not None:
+                node_copy.workflow_ctx_from = [
+                    old_to_new.get(id(ref), ref)
+                    for ref in node_copy.workflow_ctx_from
+                ]
 
-        # Get Meta configuration
+        # Get Meta configuration, remapping output/success_policy refs to copies.
         output: TaskNode[OkT_co] | SubWorkflowNode[OkT_co] | None = None
         on_error: OnError = OnError.FAIL
         success_policy: SuccessPolicy | None = None
 
         meta: type[Any] | None = getattr(cls, 'Meta', None)
         if meta is not None:
-            output = getattr(meta, 'output', None)
+            raw_output: TaskNode[Any] | SubWorkflowNode[Any] | None = getattr(
+                meta, 'output', None,
+            )
+            if raw_output is not None:
+                output = cast(
+                    'TaskNode[OkT_co] | SubWorkflowNode[OkT_co]',
+                    old_to_new.get(id(raw_output), raw_output),
+                )
             on_error = getattr(meta, 'on_error', OnError.FAIL)
-            success_policy = getattr(meta, 'success_policy', None)
+            raw_policy: SuccessPolicy | None = getattr(
+                meta, 'success_policy', None,
+            )
+            if raw_policy is not None:
+                new_cases: list[SuccessCase] = []
+                for case in raw_policy.cases:
+                    new_cases.append(SuccessCase(
+                        required=[
+                            cast('TaskNode[Any]', old_to_new.get(id(t), t))
+                            for t in case.required
+                        ],
+                    ))
+                new_optional: list[TaskNode[Any]] | None = None
+                if raw_policy.optional is not None:
+                    new_optional = [
+                        cast('TaskNode[Any]', old_to_new.get(id(t), t))
+                        for t in raw_policy.optional
+                    ]
+                success_policy = SuccessPolicy(
+                    cases=new_cases,
+                    optional=new_optional,
+                )
 
         # Build WorkflowSpec — split paths for correct type inference.
         # When output is set, overload resolves WorkflowSpec[OkT_co] directly.

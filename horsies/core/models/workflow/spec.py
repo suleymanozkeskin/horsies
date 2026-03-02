@@ -135,6 +135,9 @@ class WorkflowSpec(Generic[OutT]):
     _frozen: bool = field(default=False, init=False, repr=False, compare=False)
     """Set after successful construction to make the spec immutable."""
 
+    _build_call_token: str | None = field(default=None, init=False, repr=False, compare=False)
+    """Unique token set during build_with() to enforce fresh-spec-per-call."""
+
     def __setattr__(self, name: str, value: Any) -> None:
         if getattr(self, '_frozen', False):
             raise AttributeError(
@@ -314,6 +317,12 @@ class WorkflowSpec(Generic[OutT]):
                 object.__setattr__(self, 'workflow_def_module', module)
                 object.__setattr__(self, 'workflow_def_qualname', qualname)
                 object.__setattr__(self, 'workflow_def_cls', wf_cls)
+
+        # Read construction token for fresh-spec-per-call enforcement.
+        from .definition import _build_call_token  # noqa: F811
+        token_val = _build_call_token.get()
+        if token_val is not None:
+            object.__setattr__(self, '_build_call_token', token_val)
 
         return originals
 
