@@ -2334,3 +2334,166 @@ class TestReaperMatchArms:
             _logger.propagate = False
 
         assert 'closing reaper broker' in caplog.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# 18. _preload_modules_main — import orchestration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestPreloadModulesMain:
+    """Tests for Worker._preload_modules_main."""
+
+    _LOGGER_NAME = 'horsies.worker'
+
+    def _patch_preload(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
+        """Patch all external dependencies of _preload_modules_main.
+
+        Returns a dict of mocks keyed by name.
+        """
+        mock_app = MagicMock()
+        mock_app.get_discovered_task_modules.return_value = ['discovered.module']
+        mock_app.list_tasks.return_value = ['task_a', 'task_b']
+
+        mocks = {
+            'locate_app': MagicMock(return_value=mock_app),
+            'set_current_app': MagicMock(),
+            'import_by_path': MagicMock(),
+            'import_module': MagicMock(),
+            'build_sys_path_roots': MagicMock(return_value=['/fake/root']),
+            'app': mock_app,
+        }
+
+        monkeypatch.setattr(
+            'horsies.core.worker.worker._locate_app', mocks['locate_app'],
+        )
+        monkeypatch.setattr(
+            'horsies.core.worker.worker.set_current_app', mocks['set_current_app'],
+        )
+        monkeypatch.setattr(
+            'horsies.core.worker.worker.import_by_path', mocks['import_by_path'],
+        )
+        monkeypatch.setattr(
+            'horsies.core.worker.worker.import_module', mocks['import_module'],
+        )
+        monkeypatch.setattr(
+            'horsies.core.worker.worker._build_sys_path_roots', mocks['build_sys_path_roots'],
+        )
+        return mocks
+
+    # --- U-5a: locates app, sets current_app and self._app ---
+
+    def test_locates_app_and_sets_current(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Calls _locate_app, set_current_app, and assigns self._app."""
+        worker = _make_worker()
+        mocks = self._patch_preload(monkeypatch)
+
+        worker._preload_modules_main()
+
+        mocks['locate_app'].assert_called_once_with(worker.cfg.app_locator)
+        mocks['set_current_app'].assert_called_once_with(mocks['app'])
+        assert worker._app is mocks['app']
+
+    # --- U-5b: suppress_sends(True) before imports, False after ---
+
+    def test_suppress_sends_bracket(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """suppress_sends(True) called before imports, suppress_sends(False) after."""
+        worker = _make_worker()
+        mocks = self._patch_preload(monkeypatch)
+        call_order: list[str] = []
+        mocks['app'].suppress_sends.side_effect = lambda v: call_order.append(
+            f'suppress({v})',
+        )
+        mocks['import_module'].side_effect = lambda m: call_order.append(
+            f'import({m})',
+        )
+
+        worker._preload_modules_main()
+
+        assert call_order[0] == 'suppress(True)'
+        assert call_order[-1] == 'suppress(False)'
+        # Imports happen between suppress(True) and suppress(False)
+        import_calls = [c for c in call_order if c.startswith('import(')]
+        assert len(import_calls) > 0
+
+    # --- U-5c: .py paths via import_by_path, dotted via import_module ---
+
+    def test_py_file_uses_import_by_path_dotted_uses_import_module(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """.py paths routed to import_by_path, dotted names to import_module."""
+        worker = _make_worker()
+        worker.cfg.imports = ['tasks/my_tasks.py', 'myapp.tasks']
+        mocks = self._patch_preload(monkeypatch)
+        # Disable discovered modules to isolate cfg.imports
+        mocks['app'].get_discovered_task_modules.return_value = []
+
+        worker._preload_modules_main()
+
+        # import_by_path called for the .py file
+        mocks['import_by_path'].assert_called_once()
+        path_arg = mocks['import_by_path'].call_args[0][0]
+        assert path_arg.endswith('my_tasks.py')
+
+        # import_module called for the dotted name
+        mocks['import_module'].assert_called_once_with('myapp.tasks')
+
+    # --- U-5d: includes app.get_discovered_task_modules() ---
+
+    def test_includes_discovered_task_modules(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Discovered modules from app are included in imports."""
+        worker = _make_worker()
+        worker.cfg.imports = []
+        mocks = self._patch_preload(monkeypatch)
+        mocks['app'].get_discovered_task_modules.return_value = ['auto.discovered']
+
+        worker._preload_modules_main()
+
+        mocks['import_module'].assert_called_once_with('auto.discovered')
+
+    # --- U-5e: import error → logged + re-raised ---
+
+    def test_import_error_logged_and_reraised(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Import error is logged and re-raised to abort startup."""
+        worker = _make_worker()
+        worker.cfg.imports = ['bad.module']
+        mocks = self._patch_preload(monkeypatch)
+        mocks['app'].get_discovered_task_modules.return_value = []
+        mocks['import_module'].side_effect = ImportError('no such module')
+
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+                with pytest.raises(ImportError, match='no such module'):
+                    worker._preload_modules_main()
+        finally:
+            _logger.propagate = False
+
+        assert 'failed during preload' in caplog.text.lower()
+
+    # --- U-5f: suppress_sends exception → swallowed ---
+
+    def test_suppress_sends_exception_swallowed(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Exception in suppress_sends is swallowed (non-fatal)."""
+        worker = _make_worker()
+        mocks = self._patch_preload(monkeypatch)
+        mocks['app'].suppress_sends.side_effect = RuntimeError('suppress broken')
+
+        # Should not raise
+        worker._preload_modules_main()
+
+        mocks['locate_app'].assert_called_once()
