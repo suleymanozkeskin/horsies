@@ -1916,3 +1916,421 @@ class TestStartWithResilienceConfig:
 
         worker.start.assert_awaited_once()
         worker._handle_retryable_start_error.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 17. Reaper loop — uncovered match arms
+# ---------------------------------------------------------------------------
+
+from horsies.core.brokers.result_types import BrokerOperationError, BrokerErrorCode
+
+
+def _make_reaper_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    auto_requeue: bool = False,
+    auto_fail: bool = False,
+    requeue_results: list[Any] | None = None,
+    mark_failed_results: list[Any] | None = None,
+    broker_close_result: Any = None,
+) -> Worker:
+    """Build a worker + fake broker for reaper loop tests.
+
+    Results lists are consumed in order. The worker is stopped after
+    the last result is consumed for the active operation.
+    """
+    worker = _make_worker()
+    worker.cfg.recovery_config = RecoveryConfig(
+        auto_requeue_stale_claimed=auto_requeue,
+        auto_fail_stale_running=auto_fail,
+        check_interval_ms=1_000,
+        heartbeat_retention_hours=None,
+        worker_state_retention_hours=None,
+        terminal_record_retention_hours=None,
+    )
+
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.commit = AsyncMock()
+    session.execute = AsyncMock(return_value=MagicMock(rowcount=0))
+
+    _requeue_results = list(requeue_results or [Ok(0)])
+    _requeue_idx = 0
+
+    async def _requeue_side_effect(**kwargs: Any) -> Any:
+        nonlocal _requeue_idx
+        idx = min(_requeue_idx, len(_requeue_results) - 1)
+        _requeue_idx += 1
+        result = _requeue_results[idx]
+        if _requeue_idx >= len(_requeue_results):
+            worker._stop.set()
+        return result
+
+    _mark_results = list(mark_failed_results or [Ok(0)])
+    _mark_idx = 0
+
+    async def _mark_failed_side_effect(**kwargs: Any) -> Any:
+        nonlocal _mark_idx
+        idx = min(_mark_idx, len(_mark_results) - 1)
+        _mark_idx += 1
+        result = _mark_results[idx]
+        if _mark_idx >= len(_mark_results):
+            worker._stop.set()
+        return result
+
+    close_rv = broker_close_result if broker_close_result is not None else Ok(None)
+
+    class _FakeBroker:
+        def __init__(self, config: Any) -> None:
+            self.session_factory = MagicMock(return_value=session)
+            self.close_async = AsyncMock(return_value=close_rv)
+            self.requeue_stale_claimed = _requeue_side_effect
+            self.mark_stale_tasks_as_failed = _mark_failed_side_effect
+            self.app: Any = None
+
+    monkeypatch.setattr(
+        'horsies.core.brokers.postgres.PostgresBroker', _FakeBroker,
+    )
+    monkeypatch.setattr(
+        'horsies.core.workflows.recovery.recover_stuck_workflows',
+        AsyncMock(return_value=0),
+    )
+
+    return worker
+
+
+def _broker_err(*, retryable: bool = False, message: str = 'test error') -> Err[BrokerOperationError]:
+    return Err(BrokerOperationError(
+        code=BrokerErrorCode.CLEANUP_FAILED,
+        message=message,
+        retryable=retryable,
+    ))
+
+
+@pytest.mark.unit
+class TestReaperMatchArms:
+    """Tests for reaper loop match arms: requeue/mark_failed Ok/transient/permanent paths."""
+
+    _LOGGER_NAME = 'horsies.worker'
+
+    # --- U-6a: requeue Ok(>0) → resets counter, logs ---
+
+    @pytest.mark.asyncio
+    async def test_requeue_ok_resets_counter_and_logs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Ok(n>0) from requeue resets permanent failure counter and logs info."""
+        worker = _make_reaper_worker(
+            monkeypatch,
+            auto_requeue=True,
+            requeue_results=[Ok(5)],
+        )
+
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.INFO, logger=self._LOGGER_NAME):
+                await worker._reaper_loop()
+        finally:
+            _logger.propagate = False
+
+        assert 'requeued 5 stale' in caplog.text.lower()
+
+    # --- U-6b: requeue transient Err → resets counter ---
+
+    @pytest.mark.asyncio
+    async def test_requeue_transient_err_resets_counter(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Transient Err from requeue resets permanent failure counter."""
+        worker = _make_reaper_worker(
+            monkeypatch,
+            auto_requeue=True,
+            requeue_results=[_broker_err(retryable=True, message='transient db')],
+        )
+
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
+                await worker._reaper_loop()
+        finally:
+            _logger.propagate = False
+
+        assert 'transient' in caplog.text.lower()
+
+    # --- U-6c: requeue permanent Err 3x → disables ---
+
+    @pytest.mark.asyncio
+    async def test_requeue_permanent_err_3x_disables(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """3 consecutive permanent errors disables requeue operation."""
+        perm = _broker_err(retryable=False, message='schema drift')
+        worker = _make_reaper_worker(
+            monkeypatch,
+            auto_requeue=True,
+            requeue_results=[perm, perm, perm],
+        )
+
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+                await worker._reaper_loop()
+        finally:
+            _logger.propagate = False
+
+        assert 'disabled' in caplog.text.lower()
+        critical_records = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+        assert len(critical_records) >= 1
+
+    # --- U-6d: mark_stale_tasks_as_failed: same three arms ---
+
+    @pytest.mark.asyncio
+    async def test_mark_failed_ok_logs_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Ok(n>0) from mark_stale_tasks_as_failed logs warning."""
+        worker = _make_reaper_worker(
+            monkeypatch,
+            auto_fail=True,
+            mark_failed_results=[Ok(3)],
+        )
+
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
+                await worker._reaper_loop()
+        finally:
+            _logger.propagate = False
+
+        assert 'marked 3 stale running' in caplog.text.lower()
+
+    @pytest.mark.asyncio
+    async def test_mark_failed_transient_err_resets_counter(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Transient Err from mark_stale_tasks_as_failed resets counter."""
+        worker = _make_reaper_worker(
+            monkeypatch,
+            auto_fail=True,
+            mark_failed_results=[_broker_err(retryable=True, message='transient mark')],
+        )
+
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
+                await worker._reaper_loop()
+        finally:
+            _logger.propagate = False
+
+        assert 'transient' in caplog.text.lower()
+
+    @pytest.mark.asyncio
+    async def test_mark_failed_permanent_err_3x_disables(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """3 consecutive permanent errors disables mark_failed operation."""
+        perm = _broker_err(retryable=False, message='perm mark')
+        worker = _make_reaper_worker(
+            monkeypatch,
+            auto_fail=True,
+            mark_failed_results=[perm, perm, perm],
+        )
+
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+                await worker._reaper_loop()
+        finally:
+            _logger.propagate = False
+
+        assert 'disabled' in caplog.text.lower()
+        critical_records = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+        assert len(critical_records) >= 1
+
+    # --- U-6e: app broker get_broker raises → fallback to temp ---
+
+    @pytest.mark.asyncio
+    async def test_app_broker_error_falls_back_to_temp(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """When app.get_broker() raises, reaper falls back to temp broker."""
+        worker = _make_reaper_worker(
+            monkeypatch,
+            auto_requeue=True,
+            requeue_results=[Ok(0)],
+        )
+        app = MagicMock()
+        app.get_broker.side_effect = RuntimeError('app broker broken')
+        worker._app = app
+
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
+                await worker._reaper_loop()
+        finally:
+            _logger.propagate = False
+
+        assert 'falling back' in caplog.text.lower()
+
+    # --- U-6f: loop-level exception → logged, continues ---
+
+    @pytest.mark.asyncio
+    async def test_loop_level_exception_logged_continues(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Unexpected exception in loop body is logged and loop continues."""
+        worker = _make_worker()
+        worker.cfg.recovery_config = RecoveryConfig(
+            auto_requeue_stale_claimed=True,
+            auto_fail_stale_running=False,
+            check_interval_ms=1_000,
+            heartbeat_retention_hours=None,
+            worker_state_retention_hours=None,
+            terminal_record_retention_hours=None,
+        )
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.commit = AsyncMock()
+        session.execute = AsyncMock(return_value=MagicMock(rowcount=0))
+
+        loop_call_count = 0
+
+        async def _requeue_with_boom(**kwargs: Any) -> Any:
+            nonlocal loop_call_count
+            loop_call_count += 1
+            if loop_call_count == 1:
+                raise RuntimeError('unexpected boom')
+            worker._stop.set()
+            return Ok(0)
+
+        class _BoomBroker:
+            def __init__(self, config: Any) -> None:
+                self.session_factory = MagicMock(return_value=session)
+                self.close_async = AsyncMock(return_value=Ok(None))
+                self.requeue_stale_claimed = _requeue_with_boom
+                self.mark_stale_tasks_as_failed = AsyncMock(return_value=Ok(0))
+                self.app: Any = None
+
+        monkeypatch.setattr(
+            'horsies.core.brokers.postgres.PostgresBroker', _BoomBroker,
+        )
+        monkeypatch.setattr(
+            'horsies.core.workflows.recovery.recover_stuck_workflows',
+            AsyncMock(return_value=0),
+        )
+
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+                await worker._reaper_loop()
+        finally:
+            _logger.propagate = False
+
+        assert 'reaper loop error' in caplog.text.lower()
+        assert loop_call_count >= 2  # continued after error
+
+    # --- U-6g: CancelledError → clean exit ---
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_clean_exit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """CancelledError in reaper loop results in clean exit with log."""
+        worker = _make_worker()
+        worker.cfg.recovery_config = RecoveryConfig(
+            auto_requeue_stale_claimed=True,
+            auto_fail_stale_running=False,
+            check_interval_ms=1_000,
+            heartbeat_retention_hours=None,
+            worker_state_retention_hours=None,
+            terminal_record_retention_hours=None,
+        )
+
+        async def _cancel_on_requeue(**kwargs: Any) -> Any:
+            raise asyncio.CancelledError()
+
+        class _CancelBroker:
+            def __init__(self, config: Any) -> None:
+                self.session_factory = MagicMock()
+                self.close_async = AsyncMock(return_value=Ok(None))
+                self.requeue_stale_claimed = _cancel_on_requeue
+                self.mark_stale_tasks_as_failed = AsyncMock(return_value=Ok(0))
+                self.app: Any = None
+
+        monkeypatch.setattr(
+            'horsies.core.brokers.postgres.PostgresBroker', _CancelBroker,
+        )
+        monkeypatch.setattr(
+            'horsies.core.workflows.recovery.recover_stuck_workflows',
+            AsyncMock(return_value=0),
+        )
+
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.INFO, logger=self._LOGGER_NAME):
+                await worker._reaper_loop()
+        finally:
+            _logger.propagate = False
+
+        assert 'cancelled' in caplog.text.lower()
+
+    # --- U-6h: temp broker close error → logged ---
+
+    @pytest.mark.asyncio
+    async def test_temp_broker_close_error_logged(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """When temp broker close returns Err, it's logged."""
+        close_err = Err(BrokerOperationError(
+            code=BrokerErrorCode.CLOSE_FAILED,
+            message='close failed',
+            retryable=False,
+        ))
+        worker = _make_reaper_worker(
+            monkeypatch,
+            auto_requeue=True,
+            requeue_results=[Ok(0)],
+            broker_close_result=close_err,
+        )
+
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+                await worker._reaper_loop()
+        finally:
+            _logger.propagate = False
+
+        assert 'closing reaper broker' in caplog.text.lower()
