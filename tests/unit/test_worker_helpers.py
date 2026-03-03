@@ -1603,3 +1603,316 @@ class TestRetryFinalizePhase2:
         await worker._retry_finalize_phase2(err, 0.0)
 
         worker._handle_finalize_error.assert_awaited_once_with(wf_err)
+
+
+# ---------------------------------------------------------------------------
+# 16. Lifecycle utilities
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestRequestStop:
+    """Tests for Worker.request_stop."""
+
+    # --- U-4a ---
+
+    def test_request_stop_sets_event(self) -> None:
+        """request_stop() sets the internal _stop event."""
+        worker = _make_worker()
+        assert not worker._stop.is_set()
+        worker.request_stop()
+        assert worker._stop.is_set()
+
+
+@pytest.mark.unit
+class TestSleepWithStop:
+    """Tests for Worker._sleep_with_stop."""
+
+    # --- U-4b ---
+
+    @pytest.mark.asyncio
+    async def test_sleeps_full_duration_when_stop_not_set(self) -> None:
+        """When stop is never set, sleeps the full duration then returns."""
+        worker = _make_worker()
+        start = asyncio.get_event_loop().time()
+        await worker._sleep_with_stop(0.05)
+        elapsed = asyncio.get_event_loop().time() - start
+        assert elapsed >= 0.04  # allow small tolerance
+
+    # --- U-4c ---
+
+    @pytest.mark.asyncio
+    async def test_returns_early_when_stop_set(self) -> None:
+        """When stop is set during sleep, returns before full duration."""
+        worker = _make_worker()
+
+        async def _set_stop_soon() -> None:
+            await asyncio.sleep(0.02)
+            worker._stop.set()
+
+        asyncio.create_task(_set_stop_soon())
+        start = asyncio.get_event_loop().time()
+        await worker._sleep_with_stop(5.0)  # would hang without stop
+        elapsed = asyncio.get_event_loop().time() - start
+        assert elapsed < 1.0
+
+
+@pytest.mark.unit
+class TestRestartExecutor:
+    """Tests for Worker._restart_executor."""
+
+    # --- U-4d ---
+
+    @pytest.mark.asyncio
+    async def test_stop_set_is_noop(self) -> None:
+        """When stop is set, _restart_executor does nothing."""
+        worker = _make_worker()
+        worker._stop.set()
+        worker._create_executor = MagicMock()  # type: ignore[assignment]
+
+        await worker._restart_executor('test reason')
+
+        worker._create_executor.assert_not_called()
+
+    # --- U-4e ---
+
+    @pytest.mark.asyncio
+    async def test_executor_none_creates_new(self) -> None:
+        """When executor is None, creates a new one without shutdown."""
+        worker = _make_worker()
+        worker._executor = None
+        mock_executor = MagicMock()
+        worker._create_executor = MagicMock(return_value=mock_executor)  # type: ignore[assignment]
+
+        await worker._restart_executor('test reason')
+
+        worker._create_executor.assert_called_once()
+        assert worker._executor is mock_executor
+
+    # --- U-4f ---
+
+    @pytest.mark.asyncio
+    async def test_executor_exists_shuts_down_and_recreates(self) -> None:
+        """When executor exists, shuts it down then creates a new one."""
+        worker = _make_worker()
+        old_executor = MagicMock()
+        new_executor = MagicMock()
+        worker._executor = old_executor
+        worker._create_executor = MagicMock(return_value=new_executor)  # type: ignore[assignment]
+
+        await worker._restart_executor('broken pool')
+
+        old_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+        assert worker._executor is new_executor
+
+    # --- U-4g ---
+
+    @pytest.mark.asyncio
+    async def test_shutdown_error_still_creates_new(self) -> None:
+        """When shutdown raises, still creates a new executor."""
+        worker = _make_worker()
+        old_executor = MagicMock()
+        old_executor.shutdown.side_effect = RuntimeError('shutdown boom')
+        new_executor = MagicMock()
+        worker._executor = old_executor
+        worker._create_executor = MagicMock(return_value=new_executor)  # type: ignore[assignment]
+
+        await worker._restart_executor('broken pool')
+
+        assert worker._executor is new_executor
+
+
+@pytest.mark.unit
+class TestCleanupAfterFailedStart:
+    """Tests for Worker._cleanup_after_failed_start."""
+
+    # --- U-4h ---
+
+    @pytest.mark.asyncio
+    async def test_cleans_listener_and_executor(self) -> None:
+        """Closes listener and shuts down executor."""
+        worker = _make_worker()
+        worker.listener = AsyncMock()
+        mock_executor = MagicMock()
+        worker._executor = mock_executor
+
+        await worker._cleanup_after_failed_start()
+
+        worker.listener.close.assert_awaited_once()
+        mock_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+        assert worker._executor is None
+
+    # --- U-4i ---
+
+    @pytest.mark.asyncio
+    async def test_listener_close_error_logged(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Listener close error is logged, does not propagate."""
+        worker = _make_worker()
+        worker.listener = AsyncMock()
+        worker.listener.close.side_effect = RuntimeError('listener boom')
+        worker._executor = None
+
+        _logger = logging.getLogger('horsies.worker')
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.ERROR, logger='horsies.worker'):
+                await worker._cleanup_after_failed_start()
+        finally:
+            _logger.propagate = False
+
+        assert 'listener' in caplog.text.lower()
+
+    # --- U-4j ---
+
+    @pytest.mark.asyncio
+    async def test_executor_shutdown_error_logged(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Executor shutdown error is logged, does not propagate."""
+        worker = _make_worker()
+        worker.listener = AsyncMock()
+        mock_executor = MagicMock()
+        mock_executor.shutdown.side_effect = RuntimeError('executor boom')
+        worker._executor = mock_executor
+
+        _logger = logging.getLogger('horsies.worker')
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.ERROR, logger='horsies.worker'):
+                await worker._cleanup_after_failed_start()
+        finally:
+            _logger.propagate = False
+
+        assert 'executor' in caplog.text.lower()
+
+
+@pytest.mark.unit
+class TestHandleRetryableStartError:
+    """Tests for Worker._handle_retryable_start_error."""
+
+    def _make_backoff(self, *, can_retry: bool = True) -> MagicMock:
+        backoff = MagicMock()
+        backoff.can_retry.return_value = can_retry
+        backoff.next_delay_seconds.return_value = 0.01
+        backoff.attempts = 1
+        backoff.max_attempts = 3
+        return backoff
+
+    # --- U-4k ---
+
+    @pytest.mark.asyncio
+    async def test_cannot_retry_raises(self) -> None:
+        """When can_retry is False, re-raises the exception."""
+        worker = _make_worker()
+        backoff = self._make_backoff(can_retry=False)
+
+        with pytest.raises(RuntimeError, match='start failed'):
+            try:
+                raise RuntimeError('start failed')
+            except RuntimeError as exc:
+                await worker._handle_retryable_start_error(exc, backoff)
+
+    # --- U-4l ---
+
+    @pytest.mark.asyncio
+    async def test_can_retry_cleans_up_and_sleeps(self) -> None:
+        """When can_retry is True, cleans up and sleeps."""
+        worker = _make_worker()
+        worker._cleanup_after_failed_start = AsyncMock()  # type: ignore[assignment]
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        backoff = self._make_backoff(can_retry=True)
+        exc = RuntimeError('start failed')
+
+        await worker._handle_retryable_start_error(exc, backoff)
+
+        worker._cleanup_after_failed_start.assert_awaited_once()
+        worker._sleep_with_stop.assert_awaited_once()
+
+
+@pytest.mark.unit
+class TestStartWithResilienceConfig:
+    """Tests for Worker._start_with_resilience_config."""
+
+    # --- U-4m ---
+
+    @pytest.mark.asyncio
+    async def test_timeout_triggers_retry(self) -> None:
+        """asyncio.TimeoutError on start() triggers retry via _handle_retryable_start_error."""
+        worker = _make_worker()
+        call_count = 0
+
+        async def _start_side_effect() -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise asyncio.TimeoutError()
+            # Second call succeeds
+
+        worker.start = AsyncMock(side_effect=_start_side_effect)  # type: ignore[assignment]
+        worker._handle_retryable_start_error = AsyncMock()  # type: ignore[assignment]
+
+        await worker._start_with_resilience_config()
+
+        assert call_count == 2
+        worker._handle_retryable_start_error.assert_awaited_once()
+
+    # --- U-4n ---
+
+    @pytest.mark.asyncio
+    async def test_retryable_connection_error_triggers_retry(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Retryable connection error triggers retry."""
+        worker = _make_worker()
+        call_count = 0
+
+        async def _start_side_effect() -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise OperationalError('connection refused')
+
+        worker.start = AsyncMock(side_effect=_start_side_effect)  # type: ignore[assignment]
+        worker._handle_retryable_start_error = AsyncMock()  # type: ignore[assignment]
+        monkeypatch.setattr(
+            'horsies.core.worker.worker.is_retryable_connection_error',
+            lambda exc: isinstance(exc, OperationalError),
+        )
+
+        await worker._start_with_resilience_config()
+
+        assert call_count == 2
+        worker._handle_retryable_start_error.assert_awaited_once()
+
+    # --- U-4o ---
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_error_raises(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Non-retryable error propagates immediately."""
+        worker = _make_worker()
+        worker.start = AsyncMock(side_effect=ValueError('bad config'))  # type: ignore[assignment]
+        monkeypatch.setattr(
+            'horsies.core.worker.worker.is_retryable_connection_error',
+            lambda exc: False,
+        )
+
+        with pytest.raises(ValueError, match='bad config'):
+            await worker._start_with_resilience_config()
+
+    # --- U-4p ---
+
+    @pytest.mark.asyncio
+    async def test_success_returns_immediately(self) -> None:
+        """Successful start() returns without retries."""
+        worker = _make_worker()
+        worker.start = AsyncMock()  # type: ignore[assignment]
+        worker._handle_retryable_start_error = AsyncMock()  # type: ignore[assignment]
+
+        await worker._start_with_resilience_config()
+
+        worker.start.assert_awaited_once()
+        worker._handle_retryable_start_error.assert_not_called()
