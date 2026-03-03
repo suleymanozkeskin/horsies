@@ -291,7 +291,7 @@ class WorkflowHandle(Generic[OutT]):
                         stage='status_lookup',
                         workflow_id=self.workflow_id,
                     ))
-                return Ok(WorkflowStatus(row[0]))
+                return Ok(WorkflowStatus(row.status))
         except SQLAlchemyError as exc:
             return Err(HandleOperationError(
                 code=HandleErrorCode.DB_OPERATION_FAILED,
@@ -450,8 +450,8 @@ class WorkflowHandle(Generic[OutT]):
                     {'wf_id': self.workflow_id},
                 )
                 row = result.fetchone()
-                if row and row[0]:
-                    loads_r = loads_json(row[0])
+                if row and row.result:
+                    loads_r = loads_json(row.result)
                     if is_err(loads_r):
                         return cast('TaskResult[OutT, TaskError]', TaskResult(
                             err=TaskError(
@@ -486,8 +486,8 @@ class WorkflowHandle(Generic[OutT]):
                     {'wf_id': self.workflow_id},
                 )
                 row = result.fetchone()
-                if row and row[0]:
-                    loads_r = loads_json(row[0])
+                if row and row.error:
+                    loads_r = loads_json(row.error)
                     if is_err(loads_r):
                         logger.warning(
                             'Workflow %s error payload corrupt: %s',
@@ -519,7 +519,7 @@ class WorkflowHandle(Generic[OutT]):
                                 )
                             ),
                         )
-                status_str = row[1] if row else 'FAILED'
+                status_str = row.status if row else 'FAILED'
                 return cast(
                     'TaskResult[OutT, TaskError]',
                     TaskResult(
@@ -597,7 +597,7 @@ class WorkflowHandle(Generic[OutT]):
                     {'wf_id': self.workflow_id, 'node_id': node_id},
                 )
                 row = result.fetchone()
-                if row is None or row[0] is None:
+                if row is None or row.result is None:
                     return cast(
                         'TaskResult[OkT, TaskError]',
                         TaskResult(
@@ -611,7 +611,7 @@ class WorkflowHandle(Generic[OutT]):
                         ),
                     )
 
-                loads_r = loads_json(row[0])
+                loads_r = loads_json(row.result)
                 if is_err(loads_r):
                     return cast('TaskResult[OkT, TaskError]', TaskResult(
                         err=TaskError(
@@ -664,25 +664,25 @@ class WorkflowHandle(Generic[OutT]):
 
                 out: dict[str, TaskResult[Any, TaskError]] = {}
                 for row in result.fetchall():
-                    loads_r = loads_json(row[1])
+                    loads_r = loads_json(row.result)
                     if is_err(loads_r):
-                        out[row[0]] = TaskResult(
+                        out[row.node_id] = TaskResult(
                             err=TaskError(
                                 error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
-                                message=f'Result JSON corrupt for node {row[0]}: {loads_r.err_value}',
+                                message=f'Result JSON corrupt for node {row.node_id}: {loads_r.err_value}',
                             ),
                         )
                         continue
                     tr_r = task_result_from_json(loads_r.ok_value)
                     if is_err(tr_r):
-                        out[row[0]] = TaskResult(
+                        out[row.node_id] = TaskResult(
                             err=TaskError(
                                 error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
-                                message=f'Result deser failed for node {row[0]}: {tr_r.err_value}',
+                                message=f'Result deser failed for node {row.node_id}: {tr_r.err_value}',
                             ),
                         )
                         continue
-                    out[row[0]] = tr_r.ok_value
+                    out[row.node_id] = tr_r.ok_value
                 return Ok(out)
         except SQLAlchemyError as exc:
             return Err(HandleOperationError(
@@ -713,8 +713,8 @@ class WorkflowHandle(Generic[OutT]):
                 out: list[WorkflowTaskInfo] = []
                 for row in result.fetchall():
                     task_result_value: TaskResult[Any, TaskError] | None = None
-                    if row[4]:
-                        loads_r = loads_json(row[4])
+                    if row.result:
+                        loads_r = loads_json(row.result)
                         if is_err(loads_r):
                             task_result_value = TaskResult(
                                 err=TaskError(
@@ -735,13 +735,13 @@ class WorkflowHandle(Generic[OutT]):
                                 task_result_value = tr_r.ok_value
 
                     out.append(WorkflowTaskInfo(
-                        node_id=row[0],
-                        index=row[1],
-                        name=row[2],
-                        status=WorkflowTaskStatus(row[3]),
+                        node_id=row.node_id,
+                        index=row.task_index,
+                        name=row.task_name,
+                        status=WorkflowTaskStatus(row.status),
                         result=task_result_value,
-                        started_at=row[5],
-                        completed_at=row[6],
+                        started_at=row.started_at,
+                        completed_at=row.completed_at,
                     ))
                 return Ok(out)
         except SQLAlchemyError as exc:
