@@ -128,8 +128,6 @@ The `.node()` method on task functions returns a `NodeFactory` for type-safe `Ta
 | `queue` | `str` | `None` | Queue override |
 | `priority` | `int` | `None` | Priority override |
 | `allow_failed_deps` | `bool` | `False` | Run despite failed deps |
-| `run_when` | `Callable[[WorkflowContext], bool]` | `None` | Conditional execution |
-| `skip_when` | `Callable[[WorkflowContext], bool]` | `None` | Conditional skip |
 | `join` | `Literal['all', 'any', 'quorum']` | `'all'` | Dependency join semantics |
 | `min_success` | `int` | `None` | Required for `join='quorum'` |
 | `good_until` | `datetime` | `None` | Task expiry deadline |

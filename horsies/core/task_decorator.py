@@ -49,7 +49,6 @@ if TYPE_CHECKING:
     from horsies.core.models.workflow import (
         TaskNode,
         SubWorkflowNode,
-        WorkflowContext,
     )
 
 from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
@@ -404,8 +403,6 @@ class NodeFactory(Generic[P, T]):
     _queue: str | None
     _priority: int | None
     _allow_failed_deps: bool
-    _run_when: Callable[['WorkflowContext'], bool] | None
-    _skip_when: Callable[['WorkflowContext'], bool] | None
     _join: Literal['all', 'any', 'quorum']
     _min_success: int | None
     _good_until: datetime | None
@@ -421,8 +418,6 @@ class NodeFactory(Generic[P, T]):
         queue: str | None,
         priority: int | None,
         allow_failed_deps: bool,
-        run_when: Callable[['WorkflowContext'], bool] | None,
-        skip_when: Callable[['WorkflowContext'], bool] | None,
         join: Literal['all', 'any', 'quorum'],
         min_success: int | None,
         good_until: datetime | None,
@@ -435,8 +430,6 @@ class NodeFactory(Generic[P, T]):
         self._queue = queue
         self._priority = priority
         self._allow_failed_deps = allow_failed_deps
-        self._run_when = run_when
-        self._skip_when = skip_when
         self._join = join
         self._min_success = min_success
         self._good_until = good_until
@@ -505,8 +498,6 @@ class NodeFactory(Generic[P, T]):
             queue=self._queue,
             priority=self._priority,
             allow_failed_deps=self._allow_failed_deps,
-            run_when=self._run_when,
-            skip_when=self._skip_when,
             join=self._join,
             min_success=self._min_success,
             good_until=self._good_until,
@@ -582,8 +573,6 @@ class TaskFunction(Protocol[P, T]):
         queue: str | None = None,
         priority: int | None = None,
         allow_failed_deps: bool = False,
-        run_when: Callable[['WorkflowContext'], bool] | None = None,
-        skip_when: Callable[['WorkflowContext'], bool] | None = None,
         join: Literal['all', 'any', 'quorum'] = 'all',
         min_success: int | None = None,
         good_until: datetime | None = None,
@@ -1289,8 +1278,6 @@ def create_task_wrapper(
             queue: str | None = None,
             priority: int | None = None,
             allow_failed_deps: bool = False,
-            run_when: Callable[['WorkflowContext'], bool] | None = None,
-            skip_when: Callable[['WorkflowContext'], bool] | None = None,
             join: Literal['all', 'any', 'quorum'] = 'all',
             min_success: int | None = None,
             good_until: datetime | None = None,
@@ -1304,8 +1291,6 @@ def create_task_wrapper(
                 queue=queue,
                 priority=priority,
                 allow_failed_deps=allow_failed_deps,
-                run_when=run_when,
-                skip_when=skip_when,
                 join=join,
                 min_success=min_success,
                 good_until=good_until,

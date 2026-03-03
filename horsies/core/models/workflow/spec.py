@@ -207,14 +207,12 @@ class WorkflowSpec(Generic[OutT]):
 
         raise_collected(report)
 
-        # Only if all validation passed: conditions, propagation, registration.
-        self._validate_conditions()
+        # Only if all validation passed: propagation, registration.
         self._snapshot_kwargs_values()
 
-        # Propagate to originals so condition lambdas that capture the
-        # original node objects can read node_id at runtime via
-        # ctx.result_for(original_node). This is a current architectural
-        # coupling, not a desired contract. Phase 2 removes this.
+        # Propagate to originals so task-body injection can use
+        # ctx.result_for(original_node) — the original module-scope node
+        # objects need node_id assigned for WorkflowContext lookups.
         # Gated behind validation: invalid specs must not mutate caller nodes.
         # Skip frozen originals — they already carry valid stamps from a
         # prior spec construction (e.g. tasks=list(old_spec.tasks)).
@@ -228,13 +226,13 @@ class WorkflowSpec(Generic[OutT]):
         # Phase B: freeze copies in-place (after back-propagation).
         self._freeze_graph()
 
-        self._register_for_conditions()
+        self._register_for_subworkflows()
 
     def _isolate_inputs(self) -> list[TaskNode[Any] | SubWorkflowNode[Any]]:
         """Copy input node graph so each spec has independent nodes.
 
-        Uses copy.copy() for shallow copies — callables (fn, run_when,
-        skip_when) and class refs (workflow_def) are shared, not copied.
+        Uses copy.copy() for shallow copies — callables (fn) and class
+        refs (workflow_def) are shared, not copied.
         index is always reset. node_id is only reset when _node_id_auto_derived
         is True (stale auto-derived value from a previous spec). User-provided
         and attribute-name-derived node_ids are preserved.
@@ -243,7 +241,7 @@ class WorkflowSpec(Generic[OutT]):
         Refs pointing outside the task list are preserved as-is for validator detection.
 
         Returns the original task list (for propagation of stamps back to
-        originals — needed for condition lambda runtime coupling).
+        originals — needed for task-body WorkflowContext injection).
         """
         originals = list(self.tasks)
         old_to_new: dict[int, TaskNode[Any] | SubWorkflowNode[Any]] = {}
@@ -1201,16 +1199,6 @@ class WorkflowSpec(Generic[OutT]):
                     )
         return errors
 
-    def _validate_conditions(self) -> None:
-        """Validate condition callables have required context dependencies."""
-        for task in self.tasks:
-            has_condition = task.run_when is not None or task.skip_when is not None
-            if has_condition and not task.workflow_ctx_from:
-                # Conditions require context, but no context sources specified
-                # This is allowed (empty context), but may cause KeyError if
-                # condition tries to access dependency results
-                pass  # Allow - user may have conditions that don't use context
-
     def _collect_subworkflow_cycle_errors(self) -> list[WorkflowValidationError]:
         """Detect cycles in nested workflow definitions. Returns all errors.
 
@@ -1288,14 +1276,10 @@ class WorkflowSpec(Generic[OutT]):
                 )
         return errors
 
-    def _register_for_conditions(self) -> None:
-        """Register this spec for condition evaluation at runtime."""
-        # Register if any task has conditions OR any SubWorkflowNode exists
-        has_conditions = any(
-            t.run_when is not None or t.skip_when is not None for t in self.tasks
-        )
+    def _register_for_subworkflows(self) -> None:
+        """Register this spec for subworkflow dispatch at runtime."""
         has_subworkflow = any(isinstance(t, SubWorkflowNode) for t in self.tasks)
-        if has_conditions or has_subworkflow:
+        if has_subworkflow:
             from horsies.core.workflows.registry import register_workflow_spec
 
             register_workflow_spec(self)

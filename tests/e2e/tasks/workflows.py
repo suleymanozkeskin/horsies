@@ -816,60 +816,6 @@ spec_quorum_ctx_gating = app.workflow(
 
 
 # =============================================================================
-# L6.3: run_when / skip_when precedence
-# =============================================================================
-
-# For conditions to work, TaskNodes must be at module scope
-node_cond_a = TaskNode(fn=produce_int_task, kwargs={"value": 100})
-
-# skip_when takes priority: if skip_when returns True, task is SKIPPED
-# even if run_when would return True
-node_cond_b_skip = TaskNode(
-    fn=mark_task,
-    kwargs={'value': 'should_be_skipped'},
-    waits_for=[node_cond_a],
-    workflow_ctx_from=[node_cond_a],
-    skip_when=lambda _: True,  # Always skip
-    run_when=lambda _: True,  # Would run, but skip_when takes priority
-)
-
-# Downstream receives UPSTREAM_SKIPPED
-node_cond_c = TaskNode(
-    fn=check_upstream_skipped_task,
-    node_id='e2e_wf_check_upstream_skipped',
-    waits_for=[node_cond_b_skip],
-    args_from={'input_result': node_cond_b_skip},
-    allow_failed_deps=True,
-)
-
-spec_skip_when_priority = app.workflow(
-    name='e2e_skip_when_priority',
-    tasks=[node_cond_a, node_cond_b_skip, node_cond_c],
-)
-
-# run_when=False causes skip
-node_run_when_a = TaskNode(fn=produce_int_task, kwargs={"value": 50})
-node_run_when_b = TaskNode(
-    fn=mark_task,
-    kwargs={'value': 'should_be_skipped'},
-    waits_for=[node_run_when_a],
-    workflow_ctx_from=[node_run_when_a],
-    run_when=lambda _: False,  # Never run
-)
-node_run_when_c = TaskNode(
-    fn=check_upstream_skipped_task,
-    waits_for=[node_run_when_b],
-    args_from={'input_result': node_run_when_b},
-    allow_failed_deps=True,
-)
-
-spec_run_when_false = app.workflow(
-    name='e2e_run_when_false',
-    tasks=[node_run_when_a, node_run_when_b, node_run_when_c],
-)
-
-
-# =============================================================================
 # L6.4-L6.5: Pause/Resume semantics
 # =============================================================================
 
@@ -1014,47 +960,4 @@ spec_on_error_pause = app.workflow(
     name='e2e_on_error_pause',
     tasks=[node_oep_a, node_oep_b, node_oep_c],
     on_error=OnError.PAUSE,
-)
-
-
-# =============================================================================
-# L6.3c: run_when raises exception -> task FAILED
-# =============================================================================
-
-
-def _raise_runtime_error(_: WorkflowContext) -> bool:
-    raise RuntimeError('Condition evaluation blew up')
-
-
-node_ce_a = TaskNode(fn=produce_int_task, kwargs={"value": 42})
-node_ce_b = TaskNode(
-    fn=mark_task,
-    kwargs={'value': 'should_skip'},
-    waits_for=[node_ce_a],
-    workflow_ctx_from=[node_ce_a],
-    run_when=_raise_runtime_error,
-)
-
-spec_condition_exception = app.workflow(
-    name='e2e_condition_exception',
-    tasks=[node_ce_a, node_ce_b],
-)
-
-
-# =============================================================================
-# L6.3d: run_when=True → task runs normally
-# =============================================================================
-
-node_rwt_a = TaskNode(fn=produce_int_task, kwargs={"value": 42})
-node_rwt_b = TaskNode(
-    fn=mark_task,
-    kwargs={'value': 'should_run'},
-    waits_for=[node_rwt_a],
-    workflow_ctx_from=[node_rwt_a],
-    run_when=lambda _: True,
-)
-
-spec_run_when_true = app.workflow(
-    name='e2e_run_when_true',
-    tasks=[node_rwt_a, node_rwt_b],
 )

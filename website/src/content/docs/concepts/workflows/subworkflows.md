@@ -15,7 +15,6 @@ A **workflow** is a directed acyclic graph (DAG) of tasks. Each node in the DAG 
 Workflows provide:
 - Dependency ordering (`waits_for`)
 - Data flow between tasks (`args_from`)
-- Conditional execution (`run_when`, `skip_when`)
 - Error handling policies (`on_error`, `allow_failed_deps`)
 - Success criteria (`SuccessPolicy`)
 
@@ -114,7 +113,7 @@ start_result = await spec.start_async()
 handle = start_result.ok_value
 ```
 
-**Warning**: Inline workflows are not portable for `run_when`/`skip_when` or subworkflows.
+**Warning**: Inline workflows are not portable for subworkflows.
 Use class-based `WorkflowDefinition` for anything beyond trivial DAGs.
 
 ---
@@ -518,59 +517,11 @@ def handle_any_failure(
 
 ---
 
-## 8. Conditional Execution
-
-### 8.1 `skip_when`: Skip If Condition Is True
-
-```python
-class ConditionalWorkflow(WorkflowDefinition[str]):
-    name = "conditional"
-
-    check = TaskNode(fn=check_condition)
-    expensive = TaskNode(
-        fn=expensive_operation,
-        waits_for=[check],
-        workflow_ctx_from=[check],
-        skip_when=lambda ctx: ctx.result_for(check).ok_value == "skip",
-    )
-    fallback = TaskNode(
-        fn=fallback_operation,
-        waits_for=[check],
-        workflow_ctx_from=[check],
-        skip_when=lambda ctx: ctx.result_for(check).ok_value != "skip",
-    )
-
-    class Meta:
-        output = expensive  # or use SuccessPolicy for alternatives
-```
-
-### 8.2 `run_when`: Run Only If Condition Is True
-
-```python
-process = TaskNode(
-    fn=process_data,
-    waits_for=[validate],
-    workflow_ctx_from=[validate],
-    run_when=lambda ctx: ctx.result_for(validate).ok_value.is_valid,
-)
-```
-
-### 8.3 Condition Priority
-
-When both are set: `skip_when` is evaluated first.
-- If `skip_when` returns `True` → SKIPPED (regardless of `run_when`)
-- If `skip_when` returns `False` → check `run_when`
-- If `run_when` returns `False` → SKIPPED
-
-**Requirement**: Conditions require `workflow_ctx_from` to access results.
-
----
-
-## 9. Join Semantics
+## 8. Join Semantics
 
 Control when a task with multiple dependencies becomes READY.
 
-### 9.1 `join="all"` (Default)
+### 8.1 `join="all"` (Default)
 
 Task runs when ALL dependencies reach terminal state:
 
@@ -584,7 +535,7 @@ aggregate = TaskNode(
 
 - If ANY dependency fails/skips → task is SKIPPED (unless `allow_failed_deps=True`)
 
-### 9.2 `join="any"`
+### 8.2 `join="any"`
 
 Task runs when ANY dependency completes successfully:
 
@@ -599,7 +550,7 @@ first_success = TaskNode(
 - Task becomes READY when first dependency COMPLETES
 - Task is SKIPPED only if ALL dependencies fail/skip
 
-### 9.3 `join="quorum"`
+### 8.3 `join="quorum"`
 
 Task runs when a minimum number of dependencies succeed:
 
@@ -617,11 +568,11 @@ quorum_result = TaskNode(
 
 ---
 
-## 10. Success Policy
+## 9. Success Policy
 
 Define what "workflow success" means beyond the default output node.
 
-### 10.1 Basic Success Policy
+### 9.1 Basic Success Policy
 
 ```python
 from horsies import SuccessPolicy, SuccessCase
@@ -646,7 +597,7 @@ class DeliveryWorkflow(WorkflowDefinition[str]):
 
 **Evaluation**: Cases are checked in order. First satisfied case determines success.
 
-### 10.2 Multiple Required Tasks
+### 9.2 Multiple Required Tasks
 
 ```python
 # Both validation AND storage must succeed
@@ -657,9 +608,9 @@ success_policy = SuccessPolicy(cases=[
 
 ---
 
-## 11. Pause and Resume
+## 10. Pause and Resume
 
-### 11.1 Manual Pause
+### 10.1 Manual Pause
 
 ```python
 await handle.pause()
@@ -667,14 +618,14 @@ await handle.pause()
 # Running tasks complete, no new tasks enqueue
 ```
 
-### 11.2 Resume
+### 10.2 Resume
 
 ```python
 await handle.resume()
 # Workflow resumes from where it paused
 ```
 
-### 11.3 Pause with Subworkflows
+### 10.3 Pause with Subworkflows
 
 When a parent workflow pauses:
 - Parent enters PAUSED state
@@ -687,7 +638,7 @@ When parent resumes:
 
 ---
 
-## 12. Validation
+## 11. Validation
 
 At `WorkflowSpec` creation, these are validated:
 
@@ -703,7 +654,7 @@ At `WorkflowSpec` creation, these are validated:
 
 ---
 
-## 13. Best Practices
+## 12. Best Practices
 
 ### DO
 
@@ -735,20 +686,6 @@ def build_with(cls, app, param, *_args, **_kwargs):
 ### DON'T
 
 ```python
-# Don't use inline workflows with conditions/subworkflows
-spec = app.workflow(
-    name="inline",
-    tasks=[TaskNode(fn=task, run_when=lambda ctx: ...)],  # Won't work in workers!
-)
-
-# Don't forget workflow_ctx_from when using conditions
-node = TaskNode(
-    fn=task,
-    waits_for=[dep],
-    # workflow_ctx_from=[dep],  # Missing! Condition can't access dep's result
-    run_when=lambda ctx: ctx.result_for(dep).is_ok(),  # Will fail
-)
-
 # Don't access results not in workflow_ctx_from
 node = TaskNode(
     fn=task,
@@ -769,7 +706,7 @@ def build_with(cls, app, *_args, **_kwargs):
 
 ---
 
-## 14. Troubleshooting
+## 13. Troubleshooting
 
 ### Error: `WORKFLOW_SUBWORKFLOW_APP_MISSING`
 
@@ -843,7 +780,7 @@ run_worker(...)
 
 ---
 
-## 15. Complete Example: Multi-Source Data Pipeline
+## 14. Complete Example: Multi-Source Data Pipeline
 
 Putting it all together:
 

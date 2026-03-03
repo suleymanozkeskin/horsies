@@ -409,54 +409,6 @@ class TestSubworkflowIntegration:
         assert tr is not None and tr.is_ok()
         assert tr.unwrap() == 7
 
-    async def test_subworkflow_summary_in_run_when(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        session, broker, app = setup
-
-        @app.task(task_name='summary_post_task')
-        def post_task(
-            workflow_ctx: WorkflowContext | None = None,
-        ) -> TaskResult[int, TaskError]:
-            if workflow_ctx is None:
-                return TaskResult(err=TaskError(error_code='NO_CTX'))
-            return TaskResult(ok=10)
-
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=SummaryChildWorkflow,
-        )
-        node_post: TaskNode[int] = TaskNode(
-            fn=post_task,
-            waits_for=[node_child],
-            workflow_ctx_from=[node_child],
-            run_when=lambda ctx: ctx.summary_for(node_child).failed_tasks == 0,
-        )
-
-        spec = app.workflow(
-            name='parent_workflow_summary',
-            tasks=[node_child, node_post],
-        )
-
-        handle = await start_ok(spec, broker)
-
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
-        assert row is not None
-        _, child_id, _ = row
-        assert isinstance(child_id, str)
-
-        child_task_id = await self._get_child_task_id(session, child_id)
-        assert isinstance(child_task_id, str)
-        await on_workflow_task_complete(
-            session, child_task_id, TaskResult(ok=1), broker
-        )
-        await session.commit()
-
-        post_row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
-        assert post_row is not None
-        post_status, _, _ = post_row
-        assert post_status == 'ENQUEUED'
-
     async def test_child_failure_propagates_to_parent_node(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
@@ -853,87 +805,6 @@ class TestSubworkflowIntegration:
         assert status == 'RUNNING'
         assert isinstance(child_id, str)
 
-    async def test_skip_when_prevents_downstream_after_subworkflow(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """skip_when on a downstream TaskNode skips it based on subworkflow summary."""
-        session, broker, app = setup
-
-        @app.task(task_name='skip_when_post')
-        def post_task(
-            workflow_ctx: WorkflowContext | None = None,
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=99)
-
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=SummaryChildWorkflow,
-        )
-        node_post: TaskNode[int] = TaskNode(
-            fn=post_task,
-            waits_for=[node_child],
-            workflow_ctx_from=[node_child],
-            # Always skip: skip_when returns True
-            skip_when=lambda ctx: ctx.summary_for(node_child).total_tasks > 0,
-        )
-
-        spec = app.workflow(
-            name='parent_skip_when',
-            tasks=[node_child, node_post],
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Complete child successfully (total_tasks > 0 → skip_when fires)
-        await self._complete_child_workflow(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=1),
-        )
-
-        # Downstream should be SKIPPED
-        post_row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
-        assert post_row is not None
-        assert post_row[0] == 'SKIPPED'
-
-    async def test_condition_exception_fails_downstream_task(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """When run_when raises an exception, downstream task fails."""
-        session, broker, app = setup
-
-        @app.task(task_name='cond_err_post')
-        def post_task(
-            workflow_ctx: WorkflowContext | None = None,
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=99)
-
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=SummaryChildWorkflow,
-        )
-        node_post: TaskNode[int] = TaskNode(
-            fn=post_task,
-            waits_for=[node_child],
-            workflow_ctx_from=[node_child],
-            run_when=lambda ctx: bool(1 / 0),  # ZeroDivisionError
-        )
-
-        spec = app.workflow(
-            name='parent_cond_exception',
-            tasks=[node_child, node_post],
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Complete child successfully
-        await self._complete_child_workflow(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=1),
-        )
-
-        # Downstream should be FAILED (condition evaluation error)
-        post_row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
-        assert post_row is not None
-        assert post_row[0] == 'FAILED'
-
     async def test_subworkflow_join_any_starts_on_first_dep(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
@@ -1040,13 +911,11 @@ class TestSubworkflowIntegration:
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=SummaryChildWorkflow,
         )
-        # This downstream runs regardless (run_when checks for failures)
         node_post: TaskNode[int] = TaskNode(
             fn=post_task,
             waits_for=[node_child],
             workflow_ctx_from=[node_child],
             allow_failed_deps=True,
-            run_when=lambda ctx: ctx.summary_for(node_child).failed_tasks > 0,
         )
 
         spec = app.workflow(
@@ -1080,7 +949,7 @@ class TestSubworkflowIntegration:
         assert summary.total_tasks >= 1
         assert summary.error_summary is not None and len(summary.error_summary) > 0
 
-        # Downstream post task should be ENQUEUED (run_when matched failed_tasks > 0)
+        # Downstream post task should be ENQUEUED (allow_failed_deps=True)
         post_row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
         assert post_row is not None
         assert post_row[0] == 'ENQUEUED'

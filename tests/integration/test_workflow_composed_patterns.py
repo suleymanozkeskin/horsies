@@ -1,7 +1,7 @@
 """Integration tests for composed workflow patterns.
 
 These tests cross two axes:
-- **Features**: join modes, args_from, conditions (skip_when), allow_failed_deps, success_policy
+- **Features**: join modes, args_from, allow_failed_deps, success_policy
 - **Topologies**: diamond, fan-out, wide fan-in, mixed DAG
 
 Existing tests cover features on simple topologies and topologies with default
@@ -22,12 +22,11 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.serde import loads_json
 from horsies.core.models.tasks import TaskResult, TaskError
-from horsies.core.models.workflow import TaskNode, WorkflowContext, SuccessPolicy, SuccessCase, OnError
+from horsies.core.models.workflow import TaskNode, SuccessPolicy, SuccessCase, OnError
 from horsies.core.workflows.engine import on_workflow_task_complete
 
 from .conftest import (
     make_simple_task,
-    make_simple_ctx_task,
     make_failing_task,
     make_recovery_task,
     make_workflow_spec,
@@ -390,130 +389,6 @@ class TestComposedPatterns:
         assert await self._get_workflow_status(session, handle.workflow_id) == 'COMPLETED'
 
     # -----------------------------------------------------------------
-    # Test 5: Diamond + skip_when cascades to sink
-    # -----------------------------------------------------------------
-
-    async def test_diamond_skip_when_on_one_arm_cascades(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """A→[B,C]→D: C has skip_when(always true), D has allow_failed_deps=False.
-
-        A completes → B ENQUEUED, C SKIPPED → D SKIPPED (dep SKIPPED, not allowed).
-        Workflow COMPLETED (no FAILED task).
-        """
-        session, broker, app = setup
-
-        task_a = make_simple_task(app, 'dskip_a')
-        task_c_ctx = make_simple_ctx_task(app, 'dskip_c_ctx')
-        task_b = make_simple_task(app, 'dskip_b')
-        task_d = make_simple_task(app, 'dskip_d')
-
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
-
-        def always_skip(_ctx: WorkflowContext) -> bool:
-            return True
-
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
-        node_c = TaskNode(
-            fn=task_c_ctx,
-            kwargs={'value': 3},
-            waits_for=[node_a],
-            workflow_ctx_from=[node_a],
-            skip_when=always_skip,
-        )
-        node_d = TaskNode(
-            fn=task_d,
-            kwargs={'value': 4},
-            waits_for=[node_b, node_c],
-            allow_failed_deps=False,
-        )
-
-        spec = make_workflow_spec(
-            name='diamond_skip_cascade',
-            tasks=[node_a, node_b, node_c, node_d],
-            broker=broker,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Complete A → B ENQUEUED, C SKIPPED (skip_when=True)
-        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
-        assert await self._get_task_status(session, handle.workflow_id, 1) == 'ENQUEUED'
-        assert await self._get_task_status(session, handle.workflow_id, 2) == 'SKIPPED'
-
-        # D still PENDING (B not terminal yet)
-        assert await self._get_task_status(session, handle.workflow_id, 3) == 'PENDING'
-
-        # Complete B → both deps terminal, C is SKIPPED → D SKIPPED (allow_failed_deps=False)
-        await self._complete_task(session, handle.workflow_id, 1, TaskResult(ok=20))
-        assert await self._get_task_status(session, handle.workflow_id, 3) == 'SKIPPED'
-
-        # Workflow COMPLETED (no FAILED task — only COMPLETED and SKIPPED)
-        assert await self._get_workflow_status(session, handle.workflow_id) == 'COMPLETED'
-
-    # -----------------------------------------------------------------
-    # Test 6: Diamond + skip_when + allow_failed_deps on sink
-    # -----------------------------------------------------------------
-
-    async def test_diamond_skip_when_with_allow_failed_deps_on_sink(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """A→[B,C]→D: C has skip_when(always true), D has allow_failed_deps=True.
-
-        A completes → B ENQUEUED, C SKIPPED → D ENQUEUED (tolerates skipped dep).
-        Complete B, complete D → workflow COMPLETED.
-        """
-        session, broker, app = setup
-
-        task_a = make_simple_task(app, 'dska_a')
-        task_c_ctx = make_simple_ctx_task(app, 'dska_c_ctx')
-        task_b = make_simple_task(app, 'dska_b')
-        task_d = make_simple_task(app, 'dska_d')
-
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
-
-        def always_skip(_ctx: WorkflowContext) -> bool:
-            return True
-
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
-        node_c = TaskNode(
-            fn=task_c_ctx,
-            kwargs={'value': 3},
-            waits_for=[node_a],
-            workflow_ctx_from=[node_a],
-            skip_when=always_skip,
-        )
-        node_d = TaskNode(
-            fn=task_d,
-            kwargs={'value': 4},
-            waits_for=[node_b, node_c],
-            allow_failed_deps=True,
-        )
-
-        spec = make_workflow_spec(
-            name='diamond_skip_allow',
-            tasks=[node_a, node_b, node_c, node_d],
-            broker=broker,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Complete A → B ENQUEUED, C SKIPPED
-        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
-        assert await self._get_task_status(session, handle.workflow_id, 1) == 'ENQUEUED'
-        assert await self._get_task_status(session, handle.workflow_id, 2) == 'SKIPPED'
-
-        # Complete B → both deps terminal → D ENQUEUED (allow_failed_deps=True)
-        await self._complete_task(session, handle.workflow_id, 1, TaskResult(ok=20))
-        assert await self._get_task_status(session, handle.workflow_id, 3) == 'ENQUEUED'
-
-        # Complete D → workflow COMPLETED
-        await self._complete_task(session, handle.workflow_id, 3, TaskResult(ok=40))
-        assert await self._get_workflow_status(session, handle.workflow_id) == 'COMPLETED'
-
-    # -----------------------------------------------------------------
     # Test 7: Wide fan-in + quorum join on sink
     # -----------------------------------------------------------------
 
@@ -720,82 +595,6 @@ class TestComposedPatterns:
         assert await self._get_workflow_status(session, handle.workflow_id) == 'COMPLETED'
 
     # -----------------------------------------------------------------
-    # Test 10: Quorum + condition-skip shrinking the success pool
-    # -----------------------------------------------------------------
-
-    async def test_quorum_with_condition_skip_makes_impossible(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """A→[B,C,D]→E(quorum, min_success=2).
-
-        C has skip_when(always true).
-        A completes → B ENQUEUED, C SKIPPED, D ENQUEUED.
-        B fails → completed=0, failed=1, skipped=1, remaining=1 (D).
-        max_possible = 0 + 1 = 1 < 2 → E SKIPPED (quorum impossible).
-        """
-        session, broker, app = setup
-
-        task_a = make_simple_task(app, 'qcs_a')
-        task_b = make_simple_task(app, 'qcs_b')
-        task_c_ctx = make_simple_ctx_task(app, 'qcs_c_ctx')
-        task_d = make_simple_task(app, 'qcs_d')
-        task_e = make_simple_task(app, 'qcs_e')
-
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-
-        def always_skip(_ctx: WorkflowContext) -> bool:
-            return True
-
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
-        node_c = TaskNode(
-            fn=task_c_ctx,
-            kwargs={'value': 3},
-            waits_for=[node_a],
-            workflow_ctx_from=[node_a],
-            skip_when=always_skip,
-        )
-        node_d = TaskNode(fn=task_d, kwargs={'value': 4}, waits_for=[node_a])
-        node_e = TaskNode(
-            fn=task_e,
-            kwargs={'value': 0},
-            waits_for=[node_b, node_c, node_d],
-            join='quorum',
-            min_success=2,
-        )
-
-        spec = make_workflow_spec(
-            name='quorum_skip_impossible',
-            tasks=[node_a, node_b, node_c, node_d, node_e],
-            broker=broker,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Complete A → B ENQUEUED, C SKIPPED, D ENQUEUED
-        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
-        assert await self._get_task_status(session, handle.workflow_id, 1) == 'ENQUEUED'
-        assert await self._get_task_status(session, handle.workflow_id, 2) == 'SKIPPED'
-        assert await self._get_task_status(session, handle.workflow_id, 3) == 'ENQUEUED'
-
-        # E still PENDING (quorum not met, but still possible: max_possible = 0 + 2 = 2)
-        assert await self._get_task_status(session, handle.workflow_id, 4) == 'PENDING'
-
-        # B fails → completed=0, failed=1, skipped=1, remaining=1
-        # max_possible = 0 + 1 = 1 < min_success=2 → E SKIPPED
-        await self._complete_task(
-            session,
-            handle.workflow_id,
-            1,
-            TaskResult(err=TaskError(error_code='B_FAIL', message='B failed')),
-        )
-        assert await self._get_task_status(session, handle.workflow_id, 4) == 'SKIPPED'
-
-        # Complete D (still running) → workflow FAILED due to B failure
-        await self._complete_task(session, handle.workflow_id, 3, TaskResult(ok=40))
-        assert await self._get_workflow_status(session, handle.workflow_id) == 'FAILED'
-
-    # -----------------------------------------------------------------
     # Test 11: Recovery branch that itself fails (double failure)
     # -----------------------------------------------------------------
 
@@ -936,89 +735,6 @@ class TestComposedPatterns:
         assert await self._get_task_status(session, handle.workflow_id, 3) == 'COMPLETED'
 
         # Workflow COMPLETED — success_policy requires only D, and D succeeded
-        assert await self._get_workflow_status(session, handle.workflow_id) == 'COMPLETED'
-
-    # -----------------------------------------------------------------
-    # Test 13: Both diamond arms condition-SKIPPED, sink allow_failed_deps
-    # -----------------------------------------------------------------
-
-    async def test_both_arms_skipped_sink_allow_failed_deps(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """A→[B,C]→D(allow_failed_deps=True, args_from={b_result: B, c_result: C}).
-
-        Both B and C have skip_when(always true).
-        A completes → B SKIPPED, C SKIPPED → D ENQUEUED (allow_failed_deps=True).
-        D receives UPSTREAM_SKIPPED sentinels for both kwargs.
-        Workflow COMPLETED (no FAILED task).
-        """
-        session, broker, app = setup
-
-        task_a = make_simple_task(app, 'bas_a')
-        task_b_ctx = make_simple_ctx_task(app, 'bas_b_ctx')
-        task_c_ctx = make_simple_ctx_task(app, 'bas_c_ctx')
-
-        @app.task(task_name='bas_d')
-        def all_skipped_sink(
-            b_result: TaskResult[int, TaskError] | None = None,
-            c_result: TaskResult[int, TaskError] | None = None,
-        ) -> TaskResult[str, TaskError]:
-            return TaskResult(ok='received')
-
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
-
-        def always_skip(_ctx: WorkflowContext) -> bool:
-            return True
-
-        node_b = TaskNode(
-            fn=task_b_ctx,
-            kwargs={'value': 2},
-            waits_for=[node_a],
-            workflow_ctx_from=[node_a],
-            skip_when=always_skip,
-        )
-        node_c = TaskNode(
-            fn=task_c_ctx,
-            kwargs={'value': 3},
-            waits_for=[node_a],
-            workflow_ctx_from=[node_a],
-            skip_when=always_skip,
-        )
-        node_d = TaskNode(
-            fn=all_skipped_sink,
-            waits_for=[node_b, node_c],
-            args_from={'b_result': node_b, 'c_result': node_c},
-            allow_failed_deps=True,
-        )
-
-        spec = make_workflow_spec(
-            name='both_arms_skipped',
-            tasks=[node_a, node_b, node_c, node_d],
-            broker=broker,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Complete A → B SKIPPED, C SKIPPED
-        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
-        assert await self._get_task_status(session, handle.workflow_id, 1) == 'SKIPPED'
-        assert await self._get_task_status(session, handle.workflow_id, 2) == 'SKIPPED'
-
-        # D ENQUEUED (allow_failed_deps=True, all deps terminal)
-        assert await self._get_task_status(session, handle.workflow_id, 3) == 'ENQUEUED'
-
-        # Verify D received UPSTREAM_SKIPPED sentinels
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 3)
-        b_injected = cast(dict[str, Any], loads_json(kwargs['b_result']['data']).unwrap())
-        c_injected = cast(dict[str, Any], loads_json(kwargs['c_result']['data']).unwrap())
-        assert 'err' in b_injected
-        assert b_injected['err']['error_code'] == 'UPSTREAM_SKIPPED'
-        assert 'err' in c_injected
-        assert c_injected['err']['error_code'] == 'UPSTREAM_SKIPPED'
-
-        # Complete D → workflow COMPLETED (no FAILED task)
-        await self._complete_task(session, handle.workflow_id, 3, TaskResult(ok=42))
         assert await self._get_workflow_status(session, handle.workflow_id) == 'COMPLETED'
 
     # -----------------------------------------------------------------

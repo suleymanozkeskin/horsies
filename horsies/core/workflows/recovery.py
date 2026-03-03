@@ -133,8 +133,8 @@ async def recover_stuck_workflows(
     # This happens when multiple dependencies complete concurrently and the PENDING→READY
     # transition is missed due to timing.
     # Delegates to try_make_ready_and_enqueue which handles all readiness logic:
-    # join types (all/any/quorum), ctx_from gates, run_when/skip_when conditions,
-    # allow_failed_deps, subworkflow routing, and dependent cascade.
+    # join types (all/any/quorum), ctx_from gates, allow_failed_deps,
+    # subworkflow routing, and dependent cascade.
     pending_ready = await session.execute(
         GET_PENDING_WITH_TERMINAL_DEPS_SQL,
         {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES},

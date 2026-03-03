@@ -1,11 +1,8 @@
 """Registry for WorkflowSpec objects.
 
-Enables condition evaluation by providing access to TaskNode and SubWorkflowNode
-objects at runtime. Workers that import workflow modules will automatically
-register the specs.
-
-NOTE: For conditions to work, the workflow module must be imported
-in the worker process so specs are registered.
+Provides access to TaskNode and SubWorkflowNode objects at runtime for
+subworkflow dispatch and node lookup. Workers that import workflow modules
+will automatically register the specs.
 """
 
 from __future__ import annotations
@@ -33,10 +30,9 @@ def _remove_spec_nodes(name: str, spec: 'WorkflowSpec[Any]') -> None:
 
 def register_workflow_spec(spec: 'WorkflowSpec[Any]') -> None:
     """
-    Register a WorkflowSpec for condition evaluation and subworkflow lookup.
+    Register a WorkflowSpec for subworkflow dispatch and node lookup.
 
-    Called automatically when WorkflowSpec is created.
-    Workers need to import the same module to have access to conditions.
+    Called automatically when WorkflowSpec is created with SubWorkflowNodes.
     """
     existing = _active_specs.get(spec.name)
     if existing is not None and existing is not spec:

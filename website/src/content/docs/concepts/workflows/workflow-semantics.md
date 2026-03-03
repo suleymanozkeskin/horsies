@@ -385,69 +385,6 @@ TaskResult(err=TaskError(
 
 This applies to both `args_from` kwargs and `workflow_ctx_from` context data.
 
-## Conditional Execution
-
-Tasks can be conditionally skipped based on runtime conditions using `run_when` and `skip_when` parameters.
-
-### skip_when
-
-Skip the task if the condition returns `True`:
-
-```python
-node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
-
-# Skip node_b if node_a's result is > 10
-node_b: TaskNode[int] = TaskNode(
-    fn=task_b,
-    waits_for=[node_a],
-    workflow_ctx_from=[node_a],  # Required for condition to access results
-    skip_when=lambda ctx: ctx.result_for(node_a).unwrap() > 10,
-)
-```
-
-### run_when
-
-Run the task only if the condition returns `True`:
-
-```python
-node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
-
-# Run node_b only if node_a's result is < 100
-node_b: TaskNode[int] = TaskNode(
-    fn=task_b,
-    waits_for=[node_a],
-    workflow_ctx_from=[node_a],
-    run_when=lambda ctx: ctx.result_for(node_a).unwrap() < 100,
-)
-```
-
-### Condition Priority
-
-When both `skip_when` and `run_when` are set on the same task:
-1. `skip_when` is evaluated first
-2. If `skip_when` returns `True` → task is SKIPPED
-3. If `skip_when` returns `False` → evaluate `run_when`
-4. If `run_when` returns `False` → task is SKIPPED
-
-### Condition Evaluation Timing
-
-Conditions are evaluated:
-- **After** all dependencies are in terminal state
-- **Before** the task is enqueued
-
-This ensures the condition has access to all dependency results via `WorkflowContext`.
-
-### Important Notes
-
-1. **Workflow registration**: The workflow module must be imported in the worker process
-   so the spec is registered. If it isn't, conditions are skipped.
-
-2. **Context sources**: Any TaskNode (or NodeKey) used in the condition via
-   `ctx.result_for(...)` must be included in `workflow_ctx_from`
-
-3. **Error handling**: If condition evaluation raises an exception, the task is SKIPPED
-   (safe default to prevent hanging workflows)
-
 ## DAG Examples
 
 ### Linear Chain
@@ -542,7 +479,6 @@ def process_items(items: list[str]):
 | AND-join with error handling | Yes | `allow_failed_deps=True` |
 | OR-join (any branch succeeds) | Yes | `join="any"` parameter |
 | Quorum join (N of M succeed) | Yes | `join="quorum"` with `min_success` |
-| Conditional skip | Yes | `run_when` / `skip_when` parameters |
 | Partial success workflow | Yes | Via `success_policy` with success cases |
 | Dynamic task generation | No | DAG is static at submission time |
 
@@ -744,8 +680,6 @@ Tasks can access upstream results via `WorkflowContext` using the type-safe `res
 **Scope:** Inside a task function, only results from nodes listed in `workflow_ctx_from` are accessible via `workflow_ctx.result_for()`. Accessing a node not in the list raises `KeyError` with `"TaskNode id '{id}' not in workflow context"`.
 
 This is distinct from `WorkflowHandle.result_for()`, which queries the database for any node in the workflow and returns `RESULT_NOT_READY` if the task hasn't completed.
-
-**Condition evaluation:** For `run_when` / `skip_when` lambdas, if `workflow_ctx_from` is set, conditions can only access those nodes. If `workflow_ctx_from` is **not** set, conditions receive a context with **all dependency** results.
 
 ```python
 from horsies import WorkflowContext, TaskNode, TaskResult, TaskError

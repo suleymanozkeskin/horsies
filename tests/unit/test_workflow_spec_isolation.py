@@ -313,29 +313,19 @@ class TestSpecIsolation:
     # Callables shared, not copied
     # ------------------------------------------------------------------
 
-    def test_callables_shared_not_copied(self) -> None:
-        """fn, run_when, skip_when are shared by reference (not deep-copied)."""
-        def my_run_when(_ctx: WorkflowContext) -> bool:
-            return True
-
-        def my_skip_when(_ctx: WorkflowContext) -> bool:
-            return False
-
+    def test_fn_callable_shared_not_copied(self) -> None:
+        """fn callable is shared by reference (not deep-copied)."""
         a = TaskNode(fn=fn_a)
         b = TaskNode(
             fn=fn_ctx,
             waits_for=[a],
             workflow_ctx_from=[a],
-            run_when=my_run_when,
-            skip_when=my_skip_when,
         )
 
         spec = WorkflowSpec(name='wf', tasks=[a, b])
 
         assert spec.tasks[0].fn is fn_a
         assert spec.tasks[1].fn is fn_ctx
-        assert spec.tasks[1].run_when is my_run_when
-        assert spec.tasks[1].skip_when is my_skip_when
 
     # ------------------------------------------------------------------
     # Failed spec does not mutate originals

@@ -458,26 +458,6 @@ class TestFrozenNodeReuse:
         # Frozen original's node_id must not be overwritten
         assert frozen_a.node_id == old_node_id
 
-    def test_reuse_frozen_tasks_preserves_closure_compatibility(self) -> None:
-        """Closures capturing earlier nodes still resolve after frozen-task reuse."""
-        a = TaskNode(fn=fn_a)
-        b = TaskNode(
-            fn=fn_c,
-            waits_for=[a],
-            workflow_ctx_from=[a],
-            run_when=lambda ctx: ctx.result_for(a).is_ok(),
-        )
-        old_spec = WorkflowSpec(name='wf_old', tasks=[a, b])
-        new_spec = WorkflowSpec(name='wf_new', tasks=list(old_spec.tasks))
-
-        assert new_spec.tasks[1].run_when is not None
-        ctx = WorkflowContext(
-            workflow_id='wf',
-            task_index=1,
-            task_name='task_c',
-            results_by_id={new_spec.tasks[0].node_id: TaskResult[int, TaskError](ok=1)},
-        )
-        assert new_spec.tasks[1].run_when(ctx) is True
 
 
 # ===========================================================================

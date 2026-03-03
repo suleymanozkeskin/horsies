@@ -9,7 +9,6 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Generic,
-    Callable,
     Literal,
 )
 
@@ -23,7 +22,6 @@ from .enums import (
 if TYPE_CHECKING:
     from horsies.core.task_decorator import TaskFunction
     from horsies.core.models.tasks import TaskResult, TaskError
-    from .context import WorkflowContext
     from .definition import WorkflowDefinition
 
 
@@ -108,24 +106,6 @@ class TaskNode(Generic[OkT_co]):
     """
     - If True, this task runs even if dependencies failed (receives failed TaskResults)
     - If False (default), task is SKIPPED when any dependency fails
-    """
-
-    run_when: Callable[[WorkflowContext], bool] | None = field(
-        default=None, repr=False
-    )
-    """
-    - Conditional execution: evaluated after deps are terminal, before enqueue
-    - skip_when has priority over run_when
-    - Callables receive WorkflowContext built from workflow_ctx_from
-    """
-
-    skip_when: Callable[[WorkflowContext], bool] | None = field(
-        default=None, repr=False
-    )
-    """
-    - Conditional execution: evaluated after deps are terminal, before enqueue
-    - skip_when has priority over run_when
-    - Callables receive WorkflowContext built from workflow_ctx_from
     """
 
     join: Literal['all', 'any', 'quorum'] = 'all'
@@ -273,7 +253,7 @@ class SubWorkflowNode(Generic[OkT_co]):
 
     workflow_ctx_from: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] | None = None
     """
-    - Nodes whose results to include in WorkflowContext for run_when/skip_when
+    - Optional context: subset of dependencies to include in WorkflowContext
     - For SubWorkflowNodes: access via ctx.summary_for(node) → SubWorkflowSummary
     """
 
@@ -293,24 +273,6 @@ class SubWorkflowNode(Generic[OkT_co]):
     """
     - False (default): SKIPPED if any dependency failed
     - True: starts regardless, failed deps passed as TaskResult(err=...) via args_from
-    """
-
-    run_when: Callable[[WorkflowContext], bool] | None = field(
-        default=None, repr=False
-    )
-    """
-    - Condition evaluated after deps terminal, before starting child workflow
-    - If returns False: node is SKIPPED
-    - skip_when takes priority over run_when
-    """
-
-    skip_when: Callable[[WorkflowContext], bool] | None = field(
-        default=None, repr=False
-    )
-    """
-    - Condition evaluated after deps terminal, before starting child workflow
-    - If returns True: node is SKIPPED
-    - skip_when takes priority over run_when
     """
 
     retry_mode: SubWorkflowRetryMode = SubWorkflowRetryMode.RERUN_FAILED_ONLY

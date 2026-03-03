@@ -237,13 +237,6 @@ SET_READY_WORKFLOW_TASK_TERMINAL_SQL = text("""
     WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'READY'
     RETURNING task_index
 """)
-# -- SQL constants for _evaluate_conditions --
-
-GET_WORKFLOW_DEF_PATH_SQL = text("""
-    SELECT workflow_def_module, workflow_def_qualname
-    FROM horsies_workflows
-    WHERE id = :wf_id
-""")
 # -- SQL constants for get_dependency_results --
 
 GET_DEPENDENCY_RESULTS_SQL = text("""
