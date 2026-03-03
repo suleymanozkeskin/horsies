@@ -700,3 +700,129 @@ class TestCalculateRetryDelay:
         for _ in range(200):
             delay = Worker._calculate_retry_delay(MagicMock(), 1, policy_data)
             assert delay >= 1.0, f'delay={delay} is below 1.0s minimum'
+
+    # --- U-1a: fixed strategy picks intervals[index] ---
+
+    def test_fixed_first_attempt_uses_first_interval(self) -> None:
+        """Fixed strategy, attempt=1 → intervals[0]."""
+        policy_data = {
+            'intervals': [10, 30, 90],
+            'backoff_strategy': 'fixed',
+            'jitter': False,
+        }
+        delay = Worker._calculate_retry_delay(MagicMock(), 1, policy_data)
+        assert delay == 10.0
+
+    def test_fixed_second_attempt_uses_second_interval(self) -> None:
+        """Fixed strategy, attempt=2 → intervals[1]."""
+        policy_data = {
+            'intervals': [10, 30, 90],
+            'backoff_strategy': 'fixed',
+            'jitter': False,
+        }
+        delay = Worker._calculate_retry_delay(MagicMock(), 2, policy_data)
+        assert delay == 30.0
+
+    # --- U-1b: fixed strategy clamps out-of-bounds attempts ---
+
+    def test_fixed_attempt_exceeds_intervals_clamps_to_last(self) -> None:
+        """Fixed strategy, attempt > len(intervals) → clamped to last interval."""
+        policy_data = {
+            'intervals': [10, 30],
+            'backoff_strategy': 'fixed',
+            'jitter': False,
+        }
+        delay = Worker._calculate_retry_delay(MagicMock(), 5, policy_data)
+        assert delay == 30.0
+
+    # --- U-1c: exponential exact values ---
+
+    def test_exponential_exact_values_without_jitter(self) -> None:
+        """Exponential strategy: base * 2^(attempt-1) with jitter off."""
+        policy_data = {
+            'intervals': [10],
+            'backoff_strategy': 'exponential',
+            'jitter': False,
+        }
+        assert Worker._calculate_retry_delay(MagicMock(), 1, policy_data) == 10.0
+        assert Worker._calculate_retry_delay(MagicMock(), 2, policy_data) == 20.0
+        assert Worker._calculate_retry_delay(MagicMock(), 3, policy_data) == 40.0
+        assert Worker._calculate_retry_delay(MagicMock(), 4, policy_data) == 80.0
+
+    # --- U-1d: unknown strategy → fallback ---
+
+    def test_unknown_strategy_falls_back_to_first_interval(self) -> None:
+        """Unknown backoff_strategy uses intervals[0] as fallback."""
+        policy_data = {
+            'intervals': [42],
+            'backoff_strategy': 'nonexistent_strategy',
+            'jitter': False,
+        }
+        delay = Worker._calculate_retry_delay(MagicMock(), 1, policy_data)
+        assert delay == 42.0
+
+    # --- U-1e: jitter band ±25% ---
+
+    def test_jitter_stays_within_25_percent_band(self) -> None:
+        """With jitter=True, delay stays within ±25% of base_delay."""
+        policy_data = {
+            'intervals': [100],
+            'backoff_strategy': 'fixed',
+            'jitter': True,
+        }
+        for _ in range(300):
+            delay = Worker._calculate_retry_delay(MagicMock(), 1, policy_data)
+            assert 75.0 <= delay <= 125.0, (
+                f'delay={delay} outside ±25% band of base=100'
+            )
+
+    # --- U-1f: jitter=False → deterministic ---
+
+    def test_jitter_disabled_gives_exact_delay(self) -> None:
+        """With jitter=False, delay equals base_delay exactly."""
+        policy_data = {
+            'intervals': [60, 300, 900],
+            'backoff_strategy': 'fixed',
+            'jitter': False,
+        }
+        # Repeated calls must all return the same value
+        for attempt, expected in [(1, 60.0), (2, 300.0), (3, 900.0)]:
+            delay = Worker._calculate_retry_delay(MagicMock(), attempt, policy_data)
+            assert delay == expected, (
+                f'attempt={attempt}: expected {expected}, got {delay}'
+            )
+
+    # --- U-1g: empty intervals → fallback 60 ---
+
+    def test_exponential_empty_intervals_falls_back_to_60(self) -> None:
+        """Exponential with empty intervals list uses 60 as base."""
+        policy_data = {
+            'intervals': [],
+            'backoff_strategy': 'exponential',
+            'jitter': False,
+        }
+        assert Worker._calculate_retry_delay(MagicMock(), 1, policy_data) == 60.0
+        assert Worker._calculate_retry_delay(MagicMock(), 2, policy_data) == 120.0
+
+    def test_unknown_strategy_empty_intervals_falls_back_to_60(self) -> None:
+        """Unknown strategy with empty intervals list uses 60 as fallback."""
+        policy_data = {
+            'intervals': [],
+            'backoff_strategy': 'bogus',
+            'jitter': False,
+        }
+        delay = Worker._calculate_retry_delay(MagicMock(), 1, policy_data)
+        assert delay == 60.0
+
+    # --- U-1h: floor at 1.0 with small base and negative jitter ---
+
+    def test_floor_at_one_second_with_tiny_base_and_jitter(self) -> None:
+        """Even with a tiny base interval and worst-case jitter, floor is 1.0."""
+        policy_data = {
+            'intervals': [1],
+            'backoff_strategy': 'fixed',
+            'jitter': True,
+        }
+        for _ in range(300):
+            delay = Worker._calculate_retry_delay(MagicMock(), 1, policy_data)
+            assert delay >= 1.0, f'delay={delay} below 1.0s floor'
