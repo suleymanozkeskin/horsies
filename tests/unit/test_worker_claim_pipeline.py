@@ -246,7 +246,7 @@ class _FakeConn:
         self.commits = 0
         self.rollbacks = 0
 
-    def cursor(self) -> _FakeCursor:
+    def cursor(self, **kwargs: Any) -> _FakeCursor:
         return self._cursor
 
     def commit(self) -> None:

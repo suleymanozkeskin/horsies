@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -36,7 +37,7 @@ class TestWorkflowRecoveryDelegation:
             if stmt is recovery.GET_CRASHED_WORKER_TASKS_SQL:
                 return _rows_result([])
             if stmt is recovery.GET_TERMINAL_WORKFLOW_CANDIDATES_SQL:
-                return _rows_result([('wf-1', None, None, 0)])
+                return _rows_result([SimpleNamespace(id='wf-1')])
             return _rows_result([])
 
         session.execute = AsyncMock(side_effect=_execute)

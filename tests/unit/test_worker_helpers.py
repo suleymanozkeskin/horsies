@@ -6,6 +6,7 @@ import asyncio
 import os
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -3116,7 +3117,7 @@ class TestClaimAndDispatchBranches:
             async def _execute(stmt: object, params: object = None) -> MagicMock:
                 executed_stmts.append(stmt)
                 result = MagicMock()
-                result.fetchone.return_value = (0,)
+                result.fetchone.return_value = SimpleNamespace(cnt=0)
                 result.keys.return_value = ['id', 'task_name', 'args', 'kwargs']
                 result.fetchall.return_value = []
                 return result

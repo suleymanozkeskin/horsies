@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -406,7 +407,7 @@ def _make_conflict_session(
         select_result = MagicMock()
         if row_exists:
             mock_row = MagicMock()
-            mock_row.__getitem__ = lambda self, idx: existing_sha  # row[0]
+            mock_row.enqueue_sha = existing_sha
             select_result.fetchone.return_value = mock_row
         else:
             select_result.fetchone.return_value = None  # row purged
@@ -869,10 +870,9 @@ class TestMarkStaleTasksAsFailed:
         """Found stale tasks should be marked FAILED and committed."""
         broker = _make_broker()
         stale_started_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
-        # Each row: (id, worker_pid, worker_hostname, claimed_by_worker_id, started_at, last_heartbeat)
         stale_rows = [
-            ('task-1', 1234, 'host-1', 'worker-1', stale_started_at, None),
-            ('task-2', 5678, 'host-2', 'worker-2', stale_started_at, stale_started_at),
+            SimpleNamespace(id='task-1', worker_pid=1234, worker_hostname='host-1', claimed_by_worker_id='worker-1', started_at=stale_started_at, last_heartbeat=None),
+            SimpleNamespace(id='task-2', worker_pid=5678, worker_hostname='host-2', claimed_by_worker_id='worker-2', started_at=stale_started_at, last_heartbeat=stale_started_at),
         ]
         select_result = MagicMock()
         select_result.fetchall.return_value = stale_rows
@@ -899,7 +899,7 @@ class TestMarkStaleTasksAsFailed:
         """Each update call should include WORKER_CRASHED in the result JSON."""
         broker = _make_broker()
         stale_rows = [
-            ('task-1', 100, 'host', 'w-1', datetime(2025, 1, 1, tzinfo=timezone.utc), None),
+            SimpleNamespace(id='task-1', worker_pid=100, worker_hostname='host', claimed_by_worker_id='w-1', started_at=datetime(2025, 1, 1, tzinfo=timezone.utc), last_heartbeat=None),
         ]
         select_result = MagicMock()
         select_result.fetchall.return_value = stale_rows
