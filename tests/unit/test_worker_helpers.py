@@ -2497,3 +2497,212 @@ class TestPreloadModulesMain:
         worker._preload_modules_main()
 
         mocks['locate_app'].assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 19. Monitoring — psutil, worker state, heartbeat loops
+# ---------------------------------------------------------------------------
+
+from horsies.core.worker.worker import (
+    _collect_psutil_metrics,
+    INSERT_WORKER_STATE_SQL,
+)
+
+
+@pytest.mark.unit
+class TestCollectPsutilMetrics:
+    """Tests for _collect_psutil_metrics."""
+
+    # --- U-7a ---
+
+    def test_returns_three_floats(self) -> None:
+        """Returns (rss_mb, mem_pct, cpu_pct) as floats."""
+        result = _collect_psutil_metrics()
+
+        assert isinstance(result, tuple)
+        assert len(result) == 3
+        rss_mb, mem_pct, cpu_pct = result
+        assert isinstance(rss_mb, float)
+        assert isinstance(mem_pct, float)
+        assert isinstance(cpu_pct, float)
+        assert rss_mb > 0  # process must use some memory
+
+
+@pytest.mark.unit
+class TestUpdateWorkerState:
+    """Tests for Worker._update_worker_state."""
+
+    _LOGGER_NAME = 'horsies.worker'
+
+    # --- U-7b ---
+
+    @pytest.mark.asyncio
+    async def test_inserts_row_with_correct_params(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Executes INSERT_WORKER_STATE_SQL with expected parameters."""
+        worker = _make_worker()
+        worker._started_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+        monkeypatch.setattr(
+            'horsies.core.worker.worker._collect_psutil_metrics',
+            lambda: (100.0, 5.5, 12.3),
+        )
+        worker._count_only_running_for_worker = AsyncMock(return_value=3)  # type: ignore[assignment]
+        worker._count_claimed_for_worker = AsyncMock(return_value=7)  # type: ignore[assignment]
+
+        executed_stmts: list[Any] = []
+        executed_params: list[Any] = []
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.commit = AsyncMock()
+
+        async def _capture_execute(stmt: Any, params: Any = None) -> MagicMock:
+            executed_stmts.append(stmt)
+            if params:
+                executed_params.append(params)
+            return MagicMock(rowcount=1)
+
+        session.execute = _capture_execute
+        worker.sf = MagicMock(return_value=session)
+
+        await worker._update_worker_state()
+
+        assert INSERT_WORKER_STATE_SQL in executed_stmts
+        assert len(executed_params) == 1
+        params = executed_params[0]
+        assert params['wid'] == worker.worker_instance_id
+        assert params['running'] == 3
+        assert params['claimed'] == 7
+        assert params['mem_mb'] == 100.0
+        assert params['mem_pct'] == 5.5
+        assert params['cpu_pct'] == 12.3
+
+    # --- U-7c ---
+
+    @pytest.mark.asyncio
+    async def test_exception_logged_no_propagation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Exception in _update_worker_state is logged, does not propagate."""
+        worker = _make_worker()
+        monkeypatch.setattr(
+            'horsies.core.worker.worker._collect_psutil_metrics',
+            MagicMock(side_effect=RuntimeError('psutil boom')),
+        )
+
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+                await worker._update_worker_state()  # should not raise
+        finally:
+            _logger.propagate = False
+
+        assert 'failed to update worker state' in caplog.text.lower()
+
+
+@pytest.mark.unit
+class TestWorkerStateHeartbeatLoop:
+    """Tests for Worker._worker_state_heartbeat_loop."""
+
+    # --- U-7d ---
+
+    @pytest.mark.asyncio
+    async def test_runs_update_and_respects_stop(self) -> None:
+        """Calls _update_worker_state then exits when stop is set."""
+        worker = _make_worker()
+        update_count = 0
+
+        async def _fake_update() -> None:
+            nonlocal update_count
+            update_count += 1
+            worker._stop.set()  # stop after first update
+
+        worker._update_worker_state = _fake_update  # type: ignore[assignment]
+
+        await worker._worker_state_heartbeat_loop()
+
+        assert update_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_clean_exit(self) -> None:
+        """CancelledError in loop exits cleanly."""
+        worker = _make_worker()
+
+        async def _cancel_update() -> None:
+            raise asyncio.CancelledError()
+
+        worker._update_worker_state = _cancel_update  # type: ignore[assignment]
+
+        # Should not raise
+        await worker._worker_state_heartbeat_loop()
+
+
+@pytest.mark.unit
+class TestClaimerHeartbeatLoopErrorPaths:
+    """Tests for _claimer_heartbeat_loop error/cancel paths (U-7e, U-7f)."""
+
+    _LOGGER_NAME = 'horsies.worker'
+
+    # --- U-7e ---
+
+    @pytest.mark.asyncio
+    async def test_error_logged_loop_continues(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Exception in heartbeat body is logged, loop continues."""
+        worker = _make_worker()
+        call_count = 0
+
+        async def _execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError('db boom')
+            # Second call: stop the worker
+            worker._stop.set()
+            return MagicMock(rowcount=0)
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(side_effect=_execute)
+        session.commit = AsyncMock()
+        worker.sf = MagicMock(return_value=session)
+
+        # Use minimal sleep interval
+        worker.cfg.recovery_config = RecoveryConfig(
+            claimer_heartbeat_interval_ms=1_000,
+        )
+
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+                await worker._claimer_heartbeat_loop()
+        finally:
+            _logger.propagate = False
+
+        assert 'claimer heartbeat error' in caplog.text.lower()
+        assert call_count >= 2  # continued after error
+
+    # --- U-7f ---
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_clean_exit(self) -> None:
+        """CancelledError in claimer heartbeat exits cleanly."""
+        worker = _make_worker()
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(side_effect=asyncio.CancelledError())
+        worker.sf = MagicMock(return_value=session)
+
+        # Should not raise
+        await worker._claimer_heartbeat_loop()
