@@ -677,7 +677,7 @@ class Worker:
                 res = await s.execute(COUNT_GLOBAL_IN_FLIGHT_SQL)
                 row = res.fetchone()
                 if row:
-                    in_flight_global = int(row[0])
+                    in_flight_global = int(row.cnt)
                 else:
                     in_flight_global = 0
                 global_remaining = max(
@@ -719,7 +719,7 @@ class Worker:
                         )
                     row = resq.fetchone()
                     if row:
-                        in_flight_q = int(row[0])
+                        in_flight_q = int(row.cnt)
                     else:
                         in_flight_q = 0
                     max_q = int(self.cfg.queue_max_concurrency.get(qname, 0))
@@ -788,8 +788,8 @@ class Worker:
                 {'ids': task_ids},
             )
             for row in res.fetchall():
-                task_id = row[0]
-                wf_status = row[1]
+                task_id = row.id
+                wf_status = row.status
                 if wf_status == 'PAUSED':
                     paused_task_ids.add(task_id)
                 elif wf_status == 'CANCELLED':
@@ -876,7 +876,7 @@ class Worker:
                 {'wid': self.worker_instance_id},
             )
             row = res.fetchone()
-            return int(row[0]) if row else 0
+            return int(row.cnt) if row else 0
 
     async def _count_only_running_for_worker(self) -> int:
         """Count only RUNNING tasks for this worker (excludes CLAIMED)."""
@@ -886,7 +886,7 @@ class Worker:
                 {'wid': self.worker_instance_id},
             )
             row = res.fetchone()
-            return int(row[0]) if row else 0
+            return int(row.cnt) if row else 0
 
     async def _count_in_flight_for_worker(self) -> int:
         """Count RUNNING + CLAIMED tasks for this worker (hard cap mode)."""
@@ -896,7 +896,7 @@ class Worker:
                 {'wid': self.worker_instance_id},
             )
             row = res.fetchone()
-            return int(row[0]) if row else 0
+            return int(row.cnt) if row else 0
 
     async def _count_running_in_queue(self, queue_name: str) -> int:
         """Count RUNNING tasks in a given queue across the cluster."""
@@ -906,7 +906,7 @@ class Worker:
                 {'q': queue_name},
             )
             row = res.fetchone()
-            return int(row[0]) if row else 0
+            return int(row.cnt) if row else 0
 
     async def _requeue_claimed_task(self, task_id: str, reason: str) -> _RequeueOutcome:
         try:
@@ -1323,8 +1323,8 @@ class Worker:
                             retryable=False,
                         )
                     )
-                status = str(row[0]) if row[0] is not None else ''
-                raw_result = row[1]
+                status = str(row.status) if row.status is not None else ''
+                raw_result = row.result
                 if status not in ('COMPLETED', 'FAILED') or raw_result is None:
                     return Err(
                         self._make_finalize_error(
@@ -1759,7 +1759,7 @@ class Worker:
                 {'id': task_id},
             )
             row = res.fetchone()
-            return str(row[0]) if row and row[0] else 'default'
+            return str(row.queue_name) if row and row.queue_name else 'default'
 
     async def _claimer_heartbeat_loop(self) -> None:
         """Emit claimer heartbeats for tasks we've claimed but not yet started."""

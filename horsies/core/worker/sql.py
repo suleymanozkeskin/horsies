@@ -57,14 +57,14 @@ CLAIM_ADVISORY_LOCK_SQL = text("""
 # "active" claim is: claim_expires_at IS NULL OR claim_expires_at > now().
 
 COUNT_GLOBAL_IN_FLIGHT_SQL = text("""
-    SELECT COUNT(*) FROM horsies_tasks
+    SELECT COUNT(*) AS cnt FROM horsies_tasks
     WHERE status = 'RUNNING'
        OR (status = 'CLAIMED'
            AND (claim_expires_at IS NULL OR claim_expires_at > now()))
 """)
 
 COUNT_QUEUE_IN_FLIGHT_HARD_SQL = text("""
-    SELECT COUNT(*) FROM horsies_tasks
+    SELECT COUNT(*) AS cnt FROM horsies_tasks
     WHERE queue_name = :q
       AND (status = 'RUNNING'
            OR (status = 'CLAIMED'
@@ -72,11 +72,11 @@ COUNT_QUEUE_IN_FLIGHT_HARD_SQL = text("""
 """)
 
 COUNT_QUEUE_IN_FLIGHT_SOFT_SQL = text("""
-    SELECT COUNT(*) FROM horsies_tasks WHERE status = 'RUNNING' AND queue_name = :q
+    SELECT COUNT(*) AS cnt FROM horsies_tasks WHERE status = 'RUNNING' AND queue_name = :q
 """)
 
 COUNT_CLAIMED_FOR_WORKER_SQL = text("""
-    SELECT COUNT(*)
+    SELECT COUNT(*) AS cnt
     FROM horsies_tasks
     WHERE claimed_by_worker_id = CAST(:wid AS VARCHAR)
       AND status = 'CLAIMED'
@@ -84,14 +84,14 @@ COUNT_CLAIMED_FOR_WORKER_SQL = text("""
 """)
 
 COUNT_RUNNING_FOR_WORKER_SQL = text("""
-    SELECT COUNT(*)
+    SELECT COUNT(*) AS cnt
     FROM horsies_tasks
     WHERE claimed_by_worker_id = CAST(:wid AS VARCHAR)
       AND status = 'RUNNING'
 """)
 
 COUNT_IN_FLIGHT_FOR_WORKER_SQL = text("""
-    SELECT COUNT(*)
+    SELECT COUNT(*) AS cnt
     FROM horsies_tasks
     WHERE claimed_by_worker_id = CAST(:wid AS VARCHAR)
       AND (status = 'RUNNING'
@@ -100,7 +100,7 @@ COUNT_IN_FLIGHT_FOR_WORKER_SQL = text("""
 """)
 
 COUNT_RUNNING_IN_QUEUE_SQL = text("""
-    SELECT COUNT(*)
+    SELECT COUNT(*) AS cnt
     FROM horsies_tasks
     WHERE status = 'RUNNING'
       AND queue_name = :q
