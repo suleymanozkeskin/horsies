@@ -1,6 +1,7 @@
 # app/core/task_decorator.py
 from __future__ import annotations
 import asyncio
+import inspect
 import time
 import uuid
 from typing import (
@@ -594,10 +595,49 @@ def create_task_wrapper(
     Called by app.task() decorator.
     """
 
+    fn_location = SourceLocation.from_function(fn)
+
+    # Strict contract: @app.task() must decorate the raw task function directly.
+    # Reject pre-decorated wrappers to keep signature/type contract deterministic.
+    unwrapped = inspect.unwrap(fn)
+    if unwrapped is not fn:
+        raise TaskDefinitionError(
+            message='task function must not be pre-decorated',
+            code=ErrorCode.TASK_PREDECORATED_NOT_SUPPORTED,
+            location=fn_location,
+            notes=[
+                f"task '{task_name}' received a callable with __wrapped__ chain",
+                'inner decorators are not supported for @app.task()',
+            ],
+            help_text='remove inner decorators and apply @app.task() directly to the raw function',
+        )
+
+    closure_cells = getattr(fn, '__closure__', None)
+    closure_callable = None
+    if closure_cells:
+        for cell in closure_cells:
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            if inspect.isfunction(value) or inspect.ismethod(value):
+                closure_callable = value
+                break
+    if closure_callable is not None:
+        raise TaskDefinitionError(
+            message='task function must not be pre-decorated',
+            code=ErrorCode.TASK_PREDECORATED_NOT_SUPPORTED,
+            location=fn_location,
+            notes=[
+                f"task '{task_name}' closes over callable '{type(closure_callable).__name__}'",
+                'this usually indicates an inner decorator wrapper',
+            ],
+            help_text='remove inner decorators and apply @app.task() directly to the raw function',
+        )
+
     hints = get_type_hints(fn)
 
     # Validate that return type is TaskResult[*, TaskError]
-    fn_location = SourceLocation.from_function(fn)
     return_hint = hints.get('return')
     if return_hint is None:
         raise TaskDefinitionError(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from functools import wraps
 import pytest
 
 from horsies.core.app import Horsies
@@ -105,6 +106,45 @@ class TestTaskDecoratorValidation:
                 return TaskResult(ok='ok')
 
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
+
+    def test_inner_decorator_with_wraps_rejected(self) -> None:
+        """Task pre-decorated with @wraps wrapper is rejected."""
+        app = _make_app()
+
+        def passthrough(fn):  # type: ignore[no-untyped-def]
+            @wraps(fn)
+            def wrapper(*args, **kwargs):  # type: ignore[no-untyped-def]
+                return fn(*args, **kwargs)
+
+            return wrapper
+
+        with pytest.raises(TaskDefinitionError) as exc_info:
+
+            @app.task('predecorated_with_wraps')
+            @passthrough
+            def predecorated_with_wraps() -> TaskResult[str, TaskError]:
+                return TaskResult(ok='ok')
+
+        assert exc_info.value.code == ErrorCode.TASK_PREDECORATED_NOT_SUPPORTED
+
+    def test_inner_decorator_without_wraps_rejected(self) -> None:
+        """Task pre-decorated without @wraps is rejected."""
+        app = _make_app()
+
+        def passthrough(fn):  # type: ignore[no-untyped-def]
+            def wrapper(*args, **kwargs):  # type: ignore[no-untyped-def]
+                return fn(*args, **kwargs)
+
+            return wrapper
+
+        with pytest.raises(TaskDefinitionError) as exc_info:
+
+            @app.task('predecorated_no_wraps')
+            @passthrough
+            def predecorated_no_wraps() -> TaskResult[str, TaskError]:
+                return TaskResult(ok='ok')
+
+        assert exc_info.value.code == ErrorCode.TASK_PREDECORATED_NOT_SUPPORTED
 
 
 @pytest.mark.unit

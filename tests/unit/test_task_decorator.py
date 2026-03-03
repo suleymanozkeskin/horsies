@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from functools import wraps
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -517,6 +518,45 @@ class TestCreateTaskWrapperValidation:
 
         assert wrapper.task_name == 'test.good_fn'
         assert callable(wrapper)
+
+    def test_predecorated_with_wraps_rejected(self) -> None:
+        """Wrapper chain via __wrapped__ is rejected."""
+
+        def passthrough(fn):  # type: ignore[no-untyped-def]
+            @wraps(fn)
+            def wrapper(*args, **kwargs):  # type: ignore[no-untyped-def]
+                return fn(*args, **kwargs)
+
+            return wrapper
+
+        @passthrough
+        def bad_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        with pytest.raises(TaskDefinitionError) as exc_info:
+            create_task_wrapper(bad_fn, app, 'test.bad_fn')
+
+        assert exc_info.value.code == ErrorCode.TASK_PREDECORATED_NOT_SUPPORTED
+
+    def test_predecorated_without_wraps_rejected(self) -> None:
+        """Closure-based decorator wrapper is rejected."""
+
+        def passthrough(fn):  # type: ignore[no-untyped-def]
+            def wrapper(*args, **kwargs):  # type: ignore[no-untyped-def]
+                return fn(*args, **kwargs)
+
+            return wrapper
+
+        @passthrough
+        def bad_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        with pytest.raises(TaskDefinitionError) as exc_info:
+            create_task_wrapper(bad_fn, app, 'test.bad_fn')  # type: ignore[arg-type]
+
+        assert exc_info.value.code == ErrorCode.TASK_PREDECORATED_NOT_SUPPORTED
 
 
 # =============================================================================
