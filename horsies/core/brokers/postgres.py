@@ -237,10 +237,18 @@ SET_ENQUEUED_AT_DEFAULT_SQL = text("""
 """)
 
 # Migration: add enqueue_sha column for idempotent enqueue verification.
-# Existing rows stay NULL; new inserts always set it.
+# 3-step: add nullable column, backfill NULLs, enforce NOT NULL.
 ADD_ENQUEUE_SHA_COLUMN_SQL = text("""
     ALTER TABLE horsies_tasks
     ADD COLUMN IF NOT EXISTS enqueue_sha VARCHAR(64);
+""")
+BACKFILL_ENQUEUE_SHA_SQL = text("""
+    UPDATE horsies_tasks SET enqueue_sha = 'legacy-pre-sha'
+    WHERE enqueue_sha IS NULL;
+""")
+SET_ENQUEUE_SHA_NOT_NULL_SQL = text("""
+    ALTER TABLE horsies_tasks
+    ALTER COLUMN enqueue_sha SET NOT NULL;
 """)
 
 CREATE_HEARTBEATS_TASK_ROLE_SENT_INDEX_SQL = text("""
@@ -613,9 +621,10 @@ class PostgresBroker:
             await conn.execute(SET_ENQUEUED_AT_NOT_NULL_SQL)
             await conn.execute(SET_ENQUEUED_AT_DEFAULT_SQL)
 
-            # Migration: add enqueue_sha column for idempotent enqueue verification.
-            # Existing rows stay NULL; new inserts always set it.
+            # Migration: add enqueue_sha column, backfill NULLs, enforce NOT NULL.
             await conn.execute(ADD_ENQUEUE_SHA_COLUMN_SQL)
+            await conn.execute(BACKFILL_ENQUEUE_SHA_SQL)
+            await conn.execute(SET_ENQUEUE_SHA_NOT_NULL_SQL)
 
             # Migration: add workflow sent_at column (immutable workflow start
             # call-site timestamp), backfill existing rows, and enforce NOT NULL.
@@ -815,19 +824,11 @@ class PostgresBroker:
             )
             return Ok(task_id)
 
-        existing_sha: str | None = row[0]
-
-        if existing_sha is None:
-            # Pre-migration row without enqueue_sha — cannot verify payload identity.
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.ENQUEUE_FAILED,
-                message=(
-                    f'task_id {task_id} exists but has no enqueue_sha — '
-                    f'cannot verify payload identity for {task_name}'
-                ),
-                retryable=False,
-                exception=None,
-            ))
+        existing_sha: str = row[0]
+        # enqueue_sha is NOT NULL — defensive assertion against data corruption.
+        assert existing_sha is not None, (
+            f'enqueue_sha is NULL for task_id={task_id} — column is NOT NULL'
+        )
 
         if existing_sha == enqueue_sha:
             # Idempotent success — same payload already enqueued.

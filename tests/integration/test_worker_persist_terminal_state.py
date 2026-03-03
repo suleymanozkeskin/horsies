@@ -24,6 +24,7 @@ from horsies.core.models.tasks import LibraryErrorCode, TaskError, TaskResult
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
+from tests.integration.conftest import compute_test_enqueue_sha
 
 pytestmark = [pytest.mark.integration]
 
@@ -49,18 +50,19 @@ def _make_worker(engine: AsyncEngine) -> Worker:
 async def _insert_running_task(session: AsyncSession) -> str:
     """Insert a minimal horsies_tasks row in RUNNING state."""
     task_id = str(uuid.uuid4())
+    sent_at, sha = compute_test_enqueue_sha(task_name='persist_terminal_test')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at)
+                 max_retries, started_at, enqueue_sha)
             VALUES
                 (:id, 'persist_terminal_test', 'default', 100, '[]', '{}',
-                 'RUNNING', NOW(), NOW(), NOW(), FALSE, 0,
-                 0, NOW())
+                 'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
+                 0, NOW(), :enqueue_sha)
         """),
-        {'id': task_id},
+        {'id': task_id, 'sent_at': sent_at, 'enqueue_sha': sha},
     )
     await session.commit()
     return task_id
@@ -93,19 +95,26 @@ async def _insert_running_task_with_retry(
         'good_until': good_until.isoformat(),
     })
 
+    sent_at, sha = compute_test_enqueue_sha(
+        task_name='persist_retry_test',
+        good_until=good_until,
+        task_options=task_options,
+    )
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs, status, sent_at,
                  created_at, updated_at, claimed, retry_count, max_retries, started_at,
-                 good_until, task_options)
+                 good_until, task_options, enqueue_sha)
             VALUES
-                (:id, 'persist_retry_test', 'default', 100, '[]', '{}', 'RUNNING', NOW(),
+                (:id, 'persist_retry_test', 'default', 100, '[]', '{}', 'RUNNING', :sent_at,
                  NOW(), NOW(), FALSE, :retry_count, :max_retries, NOW(),
-                 :good_until, :task_options)
+                 :good_until, :task_options, :enqueue_sha)
         """),
         {
             'id': task_id,
+            'sent_at': sent_at,
+            'enqueue_sha': sha,
             'retry_count': retry_count,
             'max_retries': max_retries,
             'good_until': good_until,

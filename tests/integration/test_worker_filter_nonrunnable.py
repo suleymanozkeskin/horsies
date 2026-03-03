@@ -8,6 +8,7 @@ horsies_tasks and horsies_workflow_tasks rows accordingly.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -17,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
+from tests.integration.conftest import compute_test_enqueue_sha
 
 pytestmark = [pytest.mark.integration]
 
@@ -40,18 +42,19 @@ def _make_worker(engine: AsyncEngine) -> Worker:
 async def _insert_claimed_task(session: AsyncSession) -> str:
     """Insert a horsies_tasks row in CLAIMED state (post-claim)."""
     task_id = str(uuid.uuid4())
+    sent_at, sha = compute_test_enqueue_sha(task_name='filter_test')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, claimed_at)
+                 max_retries, claimed_at, enqueue_sha)
             VALUES
                 (:id, 'filter_test', 'default', 100, '[]', '{}',
-                 'CLAIMED', NOW(), NOW(), NOW(), TRUE, 0,
-                 0, NOW())
+                 'CLAIMED', :sent_at, NOW(), NOW(), TRUE, 0,
+                 0, NOW(), :enqueue_sha)
         """),
-        {'id': task_id},
+        {'id': task_id, 'sent_at': sent_at, 'enqueue_sha': sha},
     )
     return task_id
 

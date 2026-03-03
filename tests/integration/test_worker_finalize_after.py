@@ -34,6 +34,7 @@ from horsies.core.worker.worker import (
     _FINALIZE_STAGE_PHASE2,
     _FINALIZE_STAGE_FUTURE,
 )
+from tests.integration.conftest import compute_test_enqueue_sha
 
 pytestmark = [pytest.mark.integration]
 
@@ -57,18 +58,19 @@ def _make_worker(engine: AsyncEngine) -> Worker:
 async def _insert_running_task(session: AsyncSession) -> str:
     """Insert a minimal horsies_tasks row in RUNNING state."""
     task_id = str(uuid.uuid4())
+    sent_at, sha = compute_test_enqueue_sha(task_name='finalize_after_test')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at)
+                 max_retries, started_at, enqueue_sha)
             VALUES
                 (:id, 'finalize_after_test', 'default', 100, '[]', '{}',
-                 'RUNNING', NOW(), NOW(), NOW(), FALSE, 0,
-                 0, NOW())
+                 'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
+                 0, NOW(), :enqueue_sha)
         """),
-        {'id': task_id},
+        {'id': task_id, 'sent_at': sent_at, 'enqueue_sha': sha},
     )
     await session.commit()
     return task_id

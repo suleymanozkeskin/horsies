@@ -9,10 +9,13 @@ these tests validate the SQL against real DB rows.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+
+from tests.integration.conftest import compute_test_enqueue_sha
 
 from horsies.core.worker.sql import (
     DELETE_EXPIRED_HEARTBEATS_SQL,
@@ -240,55 +243,71 @@ async def test_expired_terminal_tasks_deleted_but_protected_by_workflow(
     old_completed_protected = str(uuid.uuid4())
 
     # 1. Old COMPLETED task (48h ago) — should be deleted
+    sent_at_1, sha_1 = compute_test_enqueue_sha(
+        task_name='ret_test',
+        sent_at=datetime.now(timezone.utc) - timedelta(hours=48),
+    )
     await session.execute(text("""
         INSERT INTO horsies_tasks
             (id, task_name, queue_name, priority, args, kwargs,
              status, sent_at, created_at, updated_at, claimed, retry_count,
-             max_retries, completed_at)
+             max_retries, completed_at, enqueue_sha)
         VALUES
             (:id, 'ret_test', 'default', 100, '[]', '{}',
-             'COMPLETED', NOW(), NOW() - INTERVAL '48 hours',
+             'COMPLETED', :sent_at, NOW() - INTERVAL '48 hours',
              NOW() - INTERVAL '48 hours', FALSE, 0,
-             0, NOW() - INTERVAL '48 hours')
-    """), {'id': old_completed_task})
+             0, NOW() - INTERVAL '48 hours', :enqueue_sha)
+    """), {'id': old_completed_task, 'sent_at': sent_at_1, 'enqueue_sha': sha_1})
 
     # 2. Old RUNNING task (48h ago) — should survive (not terminal)
+    sent_at_2, sha_2 = compute_test_enqueue_sha(
+        task_name='ret_test',
+        sent_at=datetime.now(timezone.utc) - timedelta(hours=48),
+    )
     await session.execute(text("""
         INSERT INTO horsies_tasks
             (id, task_name, queue_name, priority, args, kwargs,
              status, sent_at, created_at, updated_at, claimed, retry_count,
-             max_retries)
+             max_retries, enqueue_sha)
         VALUES
             (:id, 'ret_test', 'default', 100, '[]', '{}',
-             'RUNNING', NOW(), NOW() - INTERVAL '48 hours',
-             NOW() - INTERVAL '48 hours', FALSE, 0, 0)
-    """), {'id': old_running_task})
+             'RUNNING', :sent_at, NOW() - INTERVAL '48 hours',
+             NOW() - INTERVAL '48 hours', FALSE, 0, 0, :enqueue_sha)
+    """), {'id': old_running_task, 'sent_at': sent_at_2, 'enqueue_sha': sha_2})
 
     # 3. Recent COMPLETED task (1h ago) — should survive (within retention)
+    sent_at_3, sha_3 = compute_test_enqueue_sha(
+        task_name='ret_test',
+        sent_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
     await session.execute(text("""
         INSERT INTO horsies_tasks
             (id, task_name, queue_name, priority, args, kwargs,
              status, sent_at, created_at, updated_at, claimed, retry_count,
-             max_retries, completed_at)
+             max_retries, completed_at, enqueue_sha)
         VALUES
             (:id, 'ret_test', 'default', 100, '[]', '{}',
-             'COMPLETED', NOW(), NOW() - INTERVAL '1 hour',
+             'COMPLETED', :sent_at, NOW() - INTERVAL '1 hour',
              NOW() - INTERVAL '1 hour', FALSE, 0,
-             0, NOW() - INTERVAL '1 hour')
-    """), {'id': recent_completed_task})
+             0, NOW() - INTERVAL '1 hour', :enqueue_sha)
+    """), {'id': recent_completed_task, 'sent_at': sent_at_3, 'enqueue_sha': sha_3})
 
     # 4. Old COMPLETED task linked to a RUNNING workflow — should survive (protected)
+    sent_at_4, sha_4 = compute_test_enqueue_sha(
+        task_name='ret_test',
+        sent_at=datetime.now(timezone.utc) - timedelta(hours=48),
+    )
     await session.execute(text("""
         INSERT INTO horsies_tasks
             (id, task_name, queue_name, priority, args, kwargs,
              status, sent_at, created_at, updated_at, claimed, retry_count,
-             max_retries, completed_at)
+             max_retries, completed_at, enqueue_sha)
         VALUES
             (:id, 'ret_test', 'default', 100, '[]', '{}',
-             'COMPLETED', NOW(), NOW() - INTERVAL '48 hours',
+             'COMPLETED', :sent_at, NOW() - INTERVAL '48 hours',
              NOW() - INTERVAL '48 hours', FALSE, 0,
-             0, NOW() - INTERVAL '48 hours')
-    """), {'id': old_completed_protected})
+             0, NOW() - INTERVAL '48 hours', :enqueue_sha)
+    """), {'id': old_completed_protected, 'sent_at': sent_at_4, 'enqueue_sha': sha_4})
 
     # Create a RUNNING workflow linking to the protected task
     running_wf = str(uuid.uuid4())

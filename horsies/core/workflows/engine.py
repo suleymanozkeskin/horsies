@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.codec.serde import dumps_json, loads_json, task_result_from_json, serialize_error_payload, SerdeResult
+from horsies.core.utils.fingerprint import enqueue_fingerprint
 from horsies.core.types.result import is_err
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
@@ -133,6 +134,7 @@ async def enqueue_workflow_task(
     task_options_str: str | None = row[8]
     max_retries = 0
     good_until_str: str | None = None
+    good_until_dt: datetime | None = None
     if task_options_str:
         options_data = _deser_json(task_options_str, 'task_options', fallback={})
         if isinstance(options_data, dict):
@@ -142,6 +144,10 @@ async def enqueue_workflow_task(
             good_until_raw = options_data.get('good_until')
             if good_until_raw is not None:
                 good_until_str = str(good_until_raw)
+                try:
+                    good_until_dt = datetime.fromisoformat(good_until_str)
+                except (ValueError, TypeError):
+                    pass  # SHA will use None; good_until_str still passed to DB
 
     # Start with static kwargs — corrupt kwargs is fatal for this task
     raw_kwargs = _deser_json(row[3], 'workflow task kwargs')
@@ -243,6 +249,17 @@ async def enqueue_workflow_task(
     # Create actual task in tasks table
     task_id = str(uuid.uuid4())
     sent_at = datetime.now(timezone.utc)
+    sha = enqueue_fingerprint(
+        task_name=row[1],
+        queue_name=row[4],
+        priority=row[5],
+        args_json=row[2],
+        kwargs_json=kwargs_json,
+        sent_at=sent_at,
+        good_until=good_until_dt,
+        enqueue_delay_seconds=None,
+        task_options=task_options_str,
+    )
     await session.execute(
         INSERT_TASK_FOR_WORKFLOW_SQL,
         {
@@ -259,6 +276,7 @@ async def enqueue_workflow_task(
             'max_retries': max_retries,
             'task_options': task_options_str,
             'good_until': good_until_str,
+            'enqueue_sha': sha,
         },
     )
 

@@ -25,16 +25,17 @@ from horsies.core.worker.sql import (
     COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
 )
 from horsies.core.worker.worker import Worker
+from tests.integration.conftest import compute_test_enqueue_sha
 
 
 INSERT_TEST_TASK_SQL = text("""
     INSERT INTO horsies_tasks (
         id, task_name, queue_name, priority, args, kwargs,
         status, sent_at, created_at, updated_at, claimed,
-        retry_count, max_retries
+        retry_count, max_retries, enqueue_sha
     ) VALUES (
         :id, :task_name, :queue_name, 100, '[]', '{}',
-        'PENDING', NOW(), NOW(), NOW(), FALSE, 0, 0
+        'PENDING', :sent_at, NOW(), NOW(), FALSE, 0, 0, :enqueue_sha
     )
 """)
 
@@ -42,10 +43,16 @@ INSERT_TEST_TASK_SQL = text("""
 async def _seed_task(session: AsyncSession, queue_name: str = 'default') -> str:
     """Insert a minimal PENDING task row and return its id."""
     task_id = str(uuid.uuid4())
+    sent_at, sha = compute_test_enqueue_sha(
+        task_name='cap_test_task',
+        queue_name=queue_name,
+    )
     await session.execute(INSERT_TEST_TASK_SQL, {
         'id': task_id,
         'task_name': 'cap_test_task',
         'queue_name': queue_name,
+        'sent_at': sent_at,
+        'enqueue_sha': sha,
     })
     await session.commit()
     return task_id

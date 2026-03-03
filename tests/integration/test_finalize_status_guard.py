@@ -24,6 +24,7 @@ from horsies.core.worker.worker import (
     MARK_TASK_FAILED_WORKER_SQL,
     SCHEDULE_TASK_RETRY_SQL,
 )
+from tests.integration.conftest import compute_test_enqueue_sha
 
 pytestmark = [pytest.mark.integration]
 
@@ -35,18 +36,19 @@ pytestmark = [pytest.mark.integration]
 async def _insert_running_task(session: AsyncSession) -> str:
     """Insert a minimal horsies_tasks row in RUNNING state and return its id."""
     task_id = str(uuid.uuid4())
+    sent_at, sha = compute_test_enqueue_sha(task_name='guard_test')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at)
+                 max_retries, started_at, enqueue_sha)
             VALUES
                 (:id, 'guard_test', 'default', 100, '[]', '{}',
-                 'RUNNING', NOW(), NOW(), NOW(), FALSE, 0,
-                 3, NOW())
+                 'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
+                 3, NOW(), :enqueue_sha)
         """),
-        {'id': task_id},
+        {'id': task_id, 'sent_at': sent_at, 'enqueue_sha': sha},
     )
     await session.flush()
     return task_id
@@ -76,19 +78,26 @@ async def _insert_running_task_with_retry(
         'good_until': good_until.isoformat(),
     })
 
+    sent_at, sha = compute_test_enqueue_sha(
+        task_name='guard_test_retry',
+        good_until=good_until,
+        task_options=task_options,
+    )
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs, status, sent_at,
                  created_at, updated_at, claimed, retry_count, max_retries, started_at,
-                 good_until, task_options)
+                 good_until, task_options, enqueue_sha)
             VALUES
-                (:id, 'guard_test_retry', 'default', 100, '[]', '{}', 'RUNNING', NOW(),
+                (:id, 'guard_test_retry', 'default', 100, '[]', '{}', 'RUNNING', :sent_at,
                  NOW(), NOW(), FALSE, :retry_count, :max_retries, NOW(),
-                 :good_until, :task_options)
+                 :good_until, :task_options, :enqueue_sha)
         """),
         {
             'id': task_id,
+            'sent_at': sent_at,
+            'enqueue_sha': sha,
             'retry_count': retry_count,
             'max_retries': max_retries,
             'good_until': good_until,

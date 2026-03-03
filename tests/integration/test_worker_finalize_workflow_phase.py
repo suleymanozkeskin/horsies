@@ -8,6 +8,7 @@ and the non-fatal NOTIFY failure swallow.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,6 +24,7 @@ from horsies.core.worker.worker import (
     Worker,
     _FINALIZE_STAGE_PHASE2,
 )
+from tests.integration.conftest import compute_test_enqueue_sha
 
 pytestmark = [pytest.mark.integration]
 
@@ -51,18 +53,28 @@ async def _insert_task(
 ) -> str:
     """Insert a horsies_tasks row and return its id."""
     task_id = str(uuid.uuid4())
+    sent_at, sha = compute_test_enqueue_sha(
+        task_name='wf_phase_test',
+        queue_name=queue_name,
+    )
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at)
+                 max_retries, started_at, enqueue_sha)
             VALUES
                 (:id, 'wf_phase_test', :queue, 100, '[]', '{}',
-                 :status, NOW(), NOW(), NOW(), FALSE, 0,
-                 0, NOW())
+                 :status, :sent_at, NOW(), NOW(), FALSE, 0,
+                 0, NOW(), :enqueue_sha)
         """),
-        {'id': task_id, 'queue': queue_name, 'status': status},
+        {
+            'id': task_id,
+            'queue': queue_name,
+            'status': status,
+            'sent_at': sent_at,
+            'enqueue_sha': sha,
+        },
     )
     await session.commit()
     return task_id

@@ -134,9 +134,9 @@ class TaskModel(Base):
     task_options: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Idempotent enqueue verification
-    enqueue_sha: Mapped[Optional[str]] = mapped_column(
-        String(64), nullable=True,
-    )  # SHA-256 hex digest; NULL for pre-migration rows
+    enqueue_sha: Mapped[str] = mapped_column(
+        String(64), nullable=False,
+    )  # SHA-256 hex digest
 
     # Worker process tracking
     worker_pid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

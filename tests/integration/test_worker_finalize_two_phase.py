@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -15,6 +16,7 @@ from horsies.core.models.tasks import TaskResult
 from horsies.core.types.result import is_err
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
+from tests.integration.conftest import compute_test_enqueue_sha
 
 pytestmark = [pytest.mark.integration]
 
@@ -22,18 +24,19 @@ pytestmark = [pytest.mark.integration]
 async def _insert_running_task(session: AsyncSession) -> str:
     """Insert a minimal horsies_tasks row in RUNNING state and return its id."""
     task_id = str(uuid.uuid4())
+    sent_at, sha = compute_test_enqueue_sha(task_name='two_phase_finalize_test')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at)
+                 max_retries, started_at, enqueue_sha)
             VALUES
                 (:id, 'two_phase_finalize_test', 'default', 100, '[]', '{}',
-                 'RUNNING', NOW(), NOW(), NOW(), FALSE, 0,
-                 3, NOW())
+                 'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
+                 3, NOW(), :enqueue_sha)
         """),
-        {'id': task_id},
+        {'id': task_id, 'sent_at': sent_at, 'enqueue_sha': sha},
     )
     await session.commit()
     return task_id

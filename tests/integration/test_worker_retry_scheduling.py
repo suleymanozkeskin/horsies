@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from horsies.core.models.tasks import TaskError
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
+from tests.integration.conftest import compute_test_enqueue_sha
 
 pytestmark = [pytest.mark.integration]
 
@@ -51,19 +52,26 @@ async def _insert_task(
 ) -> str:
     """Insert a horsies_tasks row with configurable retry fields."""
     task_id = str(uuid.uuid4())
+    sent_at, sha = compute_test_enqueue_sha(
+        task_name='retry_test',
+        good_until=good_until,
+        task_options=task_options,
+    )
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs, status, sent_at,
                  created_at, updated_at, claimed, retry_count, max_retries, started_at,
-                 good_until, task_options)
+                 good_until, task_options, enqueue_sha)
             VALUES
-                (:id, 'retry_test', 'default', 100, '[]', '{}', :status, NOW(),
+                (:id, 'retry_test', 'default', 100, '[]', '{}', :status, :sent_at,
                  NOW(), NOW(), FALSE, :retry_count, :max_retries, NOW(),
-                 :good_until, :task_options)
+                 :good_until, :task_options, :enqueue_sha)
         """),
         {
             'id': task_id,
+            'sent_at': sent_at,
+            'enqueue_sha': sha,
             'status': status,
             'retry_count': retry_count,
             'max_retries': max_retries,

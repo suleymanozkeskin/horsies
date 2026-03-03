@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import AsyncGenerator, Generator
 import os
 import pytest
@@ -171,3 +172,41 @@ def clean_stale_workers_session() -> Generator[None, None, None]:
         yield
     finally:
         kill_stale_workers()
+
+
+# =============================================================================
+# Enqueue SHA helper
+# =============================================================================
+
+
+def compute_test_enqueue_sha(
+    task_name: str,
+    queue_name: str = 'default',
+    priority: int = 100,
+    args_json: str = '[]',
+    kwargs_json: str = '{}',
+    sent_at: datetime | None = None,
+    good_until: datetime | None = None,
+    task_options: str | None = None,
+) -> tuple[datetime, str]:
+    """Compute (sent_at, enqueue_sha) pair for test task insertion.
+
+    Returns a consistent pair: the sent_at used in the hash matches
+    the one to be stored in the row.
+    """
+    from horsies.core.utils.fingerprint import enqueue_fingerprint
+
+    if sent_at is None:
+        sent_at = datetime.now(timezone.utc)
+    sha = enqueue_fingerprint(
+        task_name=task_name,
+        queue_name=queue_name,
+        priority=priority,
+        args_json=args_json,
+        kwargs_json=kwargs_json,
+        sent_at=sent_at,
+        good_until=good_until,
+        enqueue_delay_seconds=None,
+        task_options=task_options,
+    )
+    return sent_at, sha

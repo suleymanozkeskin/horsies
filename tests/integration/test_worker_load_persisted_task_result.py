@@ -8,6 +8,7 @@ invalid TaskResult structure, and valid success/error results.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -19,6 +20,7 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker, _FINALIZE_STAGE_PHASE2
+from tests.integration.conftest import compute_test_enqueue_sha
 
 pytestmark = [pytest.mark.integration]
 
@@ -47,18 +49,19 @@ async def _insert_task(
 ) -> str:
     """Insert a horsies_tasks row with given status and result column."""
     task_id = str(uuid.uuid4())
+    sent_at, sha = compute_test_enqueue_sha(task_name='load_result_test')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, result)
+                 max_retries, started_at, result, enqueue_sha)
             VALUES
                 (:id, 'load_result_test', 'default', 100, '[]', '{}',
-                 :status, NOW(), NOW(), NOW(), FALSE, 0,
-                 0, NOW(), :result)
+                 :status, :sent_at, NOW(), NOW(), FALSE, 0,
+                 0, NOW(), :result, :enqueue_sha)
         """),
-        {'id': task_id, 'status': status, 'result': result},
+        {'id': task_id, 'status': status, 'result': result, 'sent_at': sent_at, 'enqueue_sha': sha},
     )
     await session.commit()
     return task_id

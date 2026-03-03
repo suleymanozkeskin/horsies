@@ -461,8 +461,12 @@ class TestEnqueueIdempotency:
         assert result.err_value.retryable is False
 
     @pytest.mark.asyncio
-    async def test_enqueue_same_id_null_sha_returns_non_retryable_err(self) -> None:
-        """INSERT conflicts, existing row has NULL SHA -> Err(non-retryable)."""
+    async def test_enqueue_same_id_null_sha_raises_assertion(self) -> None:
+        """INSERT conflicts, existing row has NULL SHA -> AssertionError (data corruption).
+
+        enqueue_sha is NOT NULL in the schema. A NULL value from the DB
+        indicates data corruption, so the assertion is the expected outcome.
+        """
         broker = _make_broker()
         session = _make_conflict_session(existing_sha=None)
         broker.session_factory = MagicMock(return_value=session)
@@ -473,10 +477,11 @@ class TestEnqueueIdempotency:
             enqueue_sha='test-sha',
         )
 
+        # The assertion fires inside _verify_enqueue_conflict, which is
+        # caught by the outer try/except in enqueue_async -> Err(ENQUEUE_FAILED).
         assert is_err(result)
         assert result.err_value.code == BrokerErrorCode.ENQUEUE_FAILED
         assert result.err_value.retryable is False
-        assert 'cannot verify payload identity' in result.err_value.message
 
     @pytest.mark.asyncio
     async def test_enqueue_same_id_row_deleted_returns_ok_with_warning(self) -> None:

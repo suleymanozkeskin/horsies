@@ -25,6 +25,7 @@ from horsies.core.types.result import is_ok, is_err
 from horsies.core.models.task_send_types import TaskSendResult, TaskSendErrorCode
 from sqlalchemy import text
 
+from tests.e2e.conftest import compute_test_enqueue_sha
 from tests.e2e.helpers.assertions import assert_ok, assert_err, unwrap_send
 from tests.e2e.helpers.db import poll_max_during
 from tests.e2e.helpers.worker import run_worker
@@ -814,17 +815,20 @@ async def test_argument_deserialization_error(broker: PostgresBroker) -> None:
     """L1.7.7: Corrupted args JSON triggers WORKER_SERIALIZATION_ERROR."""
     task_id = str(uuid4())
     # Store args as a JSON string instead of a JSON array
+    sent_at, sha = compute_test_enqueue_sha(
+        task_name='e2e_simple', args_json='"not_a_list"',
+    )
     async with broker.session_factory() as session:
         await session.execute(
             text("""
                 INSERT INTO horsies_tasks
                     (id, task_name, queue_name, status, args, kwargs, priority, sent_at,
-                     claimed, retry_count, max_retries)
+                     claimed, retry_count, max_retries, enqueue_sha)
                 VALUES
-                    (:tid, 'e2e_simple', 'default', 'PENDING', :args, '{}', 100, now(),
-                     FALSE, 0, 0)
+                    (:tid, 'e2e_simple', 'default', 'PENDING', :args, '{}', 100, :sent_at,
+                     FALSE, 0, 0, :enqueue_sha)
             """),
-            {'tid': task_id, 'args': '"not_a_list"'},
+            {'tid': task_id, 'args': '"not_a_list"', 'sent_at': sent_at, 'enqueue_sha': sha},
         )
         await session.commit()
 
@@ -847,17 +851,20 @@ async def test_malformed_pydantic_args(broker: PostgresBroker) -> None:
         'qualname': 'UserInput',
         'data': {'name': 'Alice', 'age': 'not_a_number'},
     }])
+    sent_at, sha = compute_test_enqueue_sha(
+        task_name='e2e_pydantic', args_json=corrupted_args,
+    )
     async with broker.session_factory() as session:
         await session.execute(
             text("""
                 INSERT INTO horsies_tasks
                     (id, task_name, queue_name, status, args, kwargs, priority, sent_at,
-                     claimed, retry_count, max_retries)
+                     claimed, retry_count, max_retries, enqueue_sha)
                 VALUES
-                    (:tid, 'e2e_pydantic', 'default', 'PENDING', :args, '{}', 100, now(),
-                     FALSE, 0, 0)
+                    (:tid, 'e2e_pydantic', 'default', 'PENDING', :args, '{}', 100, :sent_at,
+                     FALSE, 0, 0, :enqueue_sha)
             """),
-            {'tid': task_id, 'args': corrupted_args},
+            {'tid': task_id, 'args': corrupted_args, 'sent_at': sent_at, 'enqueue_sha': sha},
         )
         await session.commit()
 
@@ -1114,17 +1121,18 @@ async def test_pydantic_hydration_error(broker: PostgresBroker) -> None:
         },
         'err': None,
     })
+    sent_at, sha = compute_test_enqueue_sha(task_name='e2e_simple')
     async with broker.session_factory() as session:
         await session.execute(
             text("""
                 INSERT INTO horsies_tasks
                     (id, task_name, queue_name, status, result, priority, sent_at, completed_at,
-                     claimed, retry_count, max_retries)
+                     claimed, retry_count, max_retries, enqueue_sha)
                 VALUES
-                    (:tid, 'e2e_simple', 'default', 'COMPLETED', :result, 100, now(), now(),
-                     FALSE, 0, 0)
+                    (:tid, 'e2e_simple', 'default', 'COMPLETED', :result, 100, :sent_at, now(),
+                     FALSE, 0, 0, :enqueue_sha)
             """),
-            {'tid': task_id, 'result': corrupted_result},
+            {'tid': task_id, 'result': corrupted_result, 'sent_at': sent_at, 'enqueue_sha': sha},
         )
         await session.commit()
 
