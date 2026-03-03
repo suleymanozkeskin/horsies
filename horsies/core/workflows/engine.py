@@ -130,8 +130,8 @@ async def enqueue_workflow_task(
     if row is None:
         return None  # Already enqueued, not ready, or workflow not RUNNING
 
-    # Parse retry config and good_until from task_options (row[8])
-    task_options_str: str | None = row[8]
+    # Parse retry config and good_until from task_options
+    task_options_str: str | None = row.task_options
     max_retries = 0
     good_until_str: str | None = None
     good_until_dt: datetime | None = None
@@ -150,8 +150,8 @@ async def enqueue_workflow_task(
                     pass  # SHA will use None; good_until_str still passed to DB
 
     # Start with static kwargs — corrupt kwargs is fatal for this task
-    raw_kwargs = _deser_json(row[3], 'workflow task kwargs')
-    if raw_kwargs is None and row[3]:
+    raw_kwargs = _deser_json(row.task_kwargs, 'workflow task kwargs')
+    if raw_kwargs is None and row.task_kwargs:
         await _fail_enqueued_task(
             session,
             workflow_id,
@@ -164,8 +164,8 @@ async def enqueue_workflow_task(
     kwargs: dict[str, Any] = raw_kwargs if isinstance(raw_kwargs, dict) else {}
 
     # Inject args_from: map kwarg_name -> TaskResult from dependency
-    if row[6]:  # args_from
-        args_from_raw = row[6]
+    if row.args_from:
+        args_from_raw = row.args_from
         # args_from is stored as JSONB, may come back as dict directly
         if isinstance(args_from_raw, str):
             args_from_map = _deser_json(args_from_raw, 'args_from')
@@ -216,13 +216,13 @@ async def enqueue_workflow_task(
                     }
 
     # Inject workflow_ctx if workflow_ctx_from is set
-    if row[7]:  # workflow_ctx_from
-        ctx_from_ids = cast(list[str], row[7])  # Already a list from PostgreSQL ARRAY
+    if row.workflow_ctx_from:
+        ctx_from_ids = cast(list[str], row.workflow_ctx_from)  # Already a list from PostgreSQL ARRAY
         ctx_data = await _build_workflow_context_data(
             session=session,
             workflow_id=workflow_id,
             task_index=task_index,
-            task_name=row[1],
+            task_name=row.task_name,
             ctx_from_ids=ctx_from_ids,
         )
         # Will be filtered out by worker if task doesn't declare workflow_ctx param
@@ -233,7 +233,7 @@ async def enqueue_workflow_task(
     kwargs['__horsies_workflow_meta__'] = {
         'workflow_id': workflow_id,
         'task_index': task_index,
-        'task_name': row[1],
+        'task_name': row.task_name,
     }
 
     # Serialize kwargs before creating the task — fail early on corrupt data
@@ -250,10 +250,10 @@ async def enqueue_workflow_task(
     task_id = str(uuid.uuid4())
     sent_at = datetime.now(timezone.utc)
     sha = enqueue_fingerprint(
-        task_name=row[1],
-        queue_name=row[4],
-        priority=row[5],
-        args_json=row[2],
+        task_name=row.task_name,
+        queue_name=row.queue_name,
+        priority=row.priority,
+        args_json=row.task_args,
         kwargs_json=kwargs_json,
         sent_at=sent_at,
         good_until=good_until_dt,
@@ -264,13 +264,13 @@ async def enqueue_workflow_task(
         INSERT_TASK_FOR_WORKFLOW_SQL,
         {
             'id': task_id,
-            'name': row[1],  # task_name
-            'queue': row[4],  # queue_name
-            'priority': row[5],  # priority
+            'name': row.task_name,
+            'queue': row.queue_name,
+            'priority': row.priority,
             # Compat: new writes store [] for task_args (kwargs-only).
             # Old persisted rows may still carry non-empty task_args;
             # passing them through preserves backward compatibility.
-            'args': row[2],  # task_args (already JSON string)
+            'args': row.task_args,
             'kwargs': kwargs_json,
             'sent_at': sent_at,
             'max_retries': max_retries,
@@ -329,15 +329,15 @@ async def enqueue_subworkflow_task(
     if row is None:
         return None  # Already enqueued, not ready, or workflow not RUNNING
 
-    _wt_id = row[0]  # Unused but kept for row unpacking clarity
-    _sub_workflow_name = row[1]  # Unused but kept for row unpacking clarity
-    task_args_json = row[2]
-    task_kwargs_json = row[3]
-    args_from_raw = row[4]
-    _node_id = row[5]  # Unused but kept for row unpacking clarity
-    sub_workflow_module = row[6]
-    sub_workflow_qualname = row[7]
-    _sub_workflow_retry_mode = row[8]  # Currently unused (retry_mode not implemented)
+    _wt_id = row.id  # Unused but kept for row unpacking clarity
+    _sub_workflow_name = row.sub_workflow_name  # Unused but kept for row unpacking clarity
+    task_args_json = row.task_args
+    task_kwargs_json = row.task_kwargs
+    args_from_raw = row.args_from
+    _node_id = row.node_id  # Unused but kept for row unpacking clarity
+    sub_workflow_module = row.sub_workflow_module
+    sub_workflow_qualname = row.sub_workflow_qualname
+    _sub_workflow_retry_mode = row.sub_workflow_retry_mode  # Currently unused (retry_mode not implemented)
 
     # 2. Try to get workflow_def from registry (fast path) or import fallback
     #
@@ -361,7 +361,7 @@ async def enqueue_subworkflow_task(
         )
         return None
 
-    workflow_name = workflow_name_row[0]
+    workflow_name = workflow_name_row.name
 
     from horsies.core.workflows.registry import get_subworkflow_node
 
@@ -776,8 +776,8 @@ async def _build_workflow_context_data(
             {'wf_id': workflow_id, 'node_ids': ctx_from_ids},
         )
         for row in summary_result.fetchall():
-            node_id = row[0]
-            summary_json = row[1]
+            node_id = row.node_id
+            summary_json = row.sub_workflow_summary
             if node_id and summary_json:
                 summaries_by_id[node_id] = summary_json
 
@@ -814,8 +814,8 @@ async def on_workflow_task_complete(
     if row is None:
         return  # Not a workflow task
 
-    workflow_id = row[0]
-    task_index = row[1]
+    workflow_id = row.workflow_id
+    task_index = row.task_index
 
     # Serialize completion handling per workflow so concurrent task completions
     # don't race dependency promotion (PENDING -> READY/SKIPPED).
@@ -861,7 +861,7 @@ async def on_workflow_task_complete(
         {'wf_id': workflow_id},
     )
     status_row = status_check.fetchone()
-    if status_row and status_row[0] == 'PAUSED':
+    if status_row and status_row.status == 'PAUSED':
         return  # Don't propagate - workflow is paused
 
     # 5. Find and potentially enqueue dependent tasks
@@ -901,12 +901,12 @@ async def _process_dependents(
         {'wf_id': workflow_id},
     )
     wf_row = wf_info.fetchone()
-    depth = wf_row[0] if wf_row else 0
-    root_wf_id = wf_row[1] if wf_row else workflow_id
+    depth = wf_row.depth if wf_row else 0
+    root_wf_id = wf_row.root_workflow_id if wf_row else workflow_id
 
     for row in dependents.fetchall():
         await try_make_ready_and_enqueue(
-            session, broker, workflow_id, row[0], depth, root_wf_id
+            session, broker, workflow_id, row.task_index, depth, root_wf_id,
         )
 
 
@@ -956,14 +956,14 @@ async def try_make_ready_and_enqueue(
     if config_row is None:
         return
 
-    task_status = config_row[0]
-    raw_deps = config_row[1]
-    allow_failed_deps: bool = config_row[2] if config_row[2] is not None else False
-    join_type: str = config_row[3] or 'all'
-    min_success: int | None = config_row[4]
-    raw_ctx_from = config_row[5]
-    is_subworkflow: bool = config_row[6] if config_row[6] is not None else False
-    wf_status = config_row[7]
+    task_status = config_row.status
+    raw_deps = config_row.dependencies
+    allow_failed_deps: bool = config_row.allow_failed_deps if config_row.allow_failed_deps is not None else False
+    join_type: str = config_row.join_type or 'all'
+    min_success: int | None = config_row.min_success
+    raw_ctx_from = config_row.workflow_ctx_from
+    is_subworkflow: bool = config_row.is_subworkflow if config_row.is_subworkflow is not None else False
+    wf_status = config_row.wf_status
 
     # Guard: only proceed if task is PENDING and workflow is RUNNING
     if task_status != 'PENDING' or wf_status != 'RUNNING':
@@ -983,7 +983,7 @@ async def try_make_ready_and_enqueue(
         {'wf_id': workflow_id, 'deps': dependencies},
     )
     status_counts: dict[str, int] = {
-        row[0]: row[1] for row in dep_status_result.fetchall()
+        row.status: row.cnt for row in dep_status_result.fetchall()
     }
 
     completed = status_counts.get(WorkflowTaskStatus.COMPLETED.value, 0)
@@ -1123,9 +1123,9 @@ async def get_dependency_results(
 
     results: dict[int, TaskResult[Any, TaskError]] = {}
     for row in result.fetchall():
-        task_index = row[0]
-        status = row[1]
-        stored_result = row[2]
+        task_index = row.task_index
+        status = row.status
+        stored_result = row.result
 
         if status == WorkflowTaskStatus.SKIPPED.value:
             # Inject sentinel TaskResult for SKIPPED dependencies
@@ -1193,11 +1193,11 @@ async def get_dependency_results_with_names(
     )
 
     for row in result.fetchall():
-        task_index = row[0]
-        task_name = row[1]
-        node_id = row[2]
-        status = row[3]
-        stored_result = row[4]
+        task_index = row.task_index
+        task_name = row.task_name
+        node_id = row.node_id
+        status = row.status
+        stored_result = row.result
 
         if status == WorkflowTaskStatus.SKIPPED.value:
             # Inject sentinel TaskResult for SKIPPED dependencies
@@ -1290,15 +1290,15 @@ async def check_workflow_completion(
     if row is None:
         return
 
-    current_status = row[0]
-    already_completed = row[1] is not None
-    has_error = row[2] is not None
-    success_policy_data = row[3]  # JSONB, may be None
-    workflow_name = row[4]
-    incomplete = row[5] or 0
-    failed = row[6] or 0
-    completed = row[7] or 0
-    total = row[8] or 0
+    current_status = row.status
+    already_completed = row.completed_at is not None
+    has_error = row.error is not None
+    success_policy_data = row.success_policy  # JSONB, may be None
+    workflow_name = row.name
+    incomplete = row.incomplete or 0
+    failed = row.failed or 0
+    completed = row.completed or 0
+    total = row.total or 0
 
     # Don't process if workflow is PAUSED (waiting for manual intervention)
     if current_status == 'PAUSED':
@@ -1361,7 +1361,7 @@ async def check_workflow_completion(
         {'wf_id': workflow_id},
     )
     parent_row = parent_result.fetchone()
-    if parent_row and parent_row[0] is not None:
+    if parent_row and parent_row.parent_workflow_id is not None:
         # This is a child workflow - notify parent
         await on_subworkflow_complete(session, workflow_id, broker)
 
@@ -1391,15 +1391,15 @@ async def on_subworkflow_complete(
         logger.error(f'Child workflow {child_workflow_id} not found')
         return
 
-    child_status = row[0]
-    child_result_json = row[1]
-    child_error = row[2]
-    parent_wf_id = row[3]
-    parent_task_idx = row[4]
-    total_tasks = row[5] or 0
-    completed_tasks = row[6] or 0
-    failed_tasks = row[7] or 0
-    skipped_tasks = row[8] or 0
+    child_status = row.status
+    child_result_json = row.result
+    child_error = row.error
+    parent_wf_id = row.parent_workflow_id
+    parent_task_idx = row.parent_task_index
+    total_tasks = row.total or 0
+    completed_tasks = row.completed or 0
+    failed_tasks = row.failed or 0
+    skipped_tasks = row.skipped or 0
 
     if parent_wf_id is None:
         # Not a child workflow (or already detached)
@@ -1489,7 +1489,7 @@ async def on_subworkflow_complete(
         {'wf_id': parent_wf_id},
     )
     parent_status_row = parent_status_check.fetchone()
-    if parent_status_row and parent_status_row[0] == 'PAUSED':
+    if parent_status_row and parent_status_row.status == 'PAUSED':
         return  # Don't propagate - parent is paused
 
     # 7. Process parent dependents
@@ -1534,7 +1534,7 @@ async def evaluate_workflow_success(
         {'wf_id': workflow_id},
     )
 
-    status_by_index: dict[int, str] = {row[0]: row[1] for row in result.fetchall()}
+    status_by_index: dict[int, str] = {row.task_index: row.status for row in result.fetchall()}
 
     # Note: optional_indices from success_policy are ignored here because
     # optional tasks can fail without affecting whether a success case is satisfied.
@@ -1581,8 +1581,8 @@ async def get_workflow_failure_error(
             {'wf_id': workflow_id},
         )
         row = result.fetchone()
-        if row and row[0]:
-            deser = _deser_json(row[0], 'first failed task result')
+        if row and row.result:
+            deser = _deser_json(row.result, 'first failed task result')
             if deser is not None:
                 parsed_tr = task_result_from_json(deser)
                 if not is_err(parsed_tr):
@@ -1614,8 +1614,8 @@ async def get_workflow_failure_error(
             {'wf_id': workflow_id, 'required': list(all_required)},
         )
         row = result.fetchone()
-        if row and row[0]:
-            deser = _deser_json(row[0], 'first failed required task result')
+        if row and row.result:
+            deser = _deser_json(row.result, 'first failed required task result')
             if deser is not None:
                 parsed_tr = task_result_from_json(deser)
                 if not is_err(parsed_tr):
@@ -1657,14 +1657,14 @@ async def get_workflow_final_result(
     )
     wf_row = wf_result.fetchone()
 
-    if wf_row and wf_row[0] is not None:
+    if wf_row and wf_row.output_task_index is not None:
         # Return explicit output task's result
         output_result = await session.execute(
             GET_OUTPUT_TASK_RESULT_SQL,
-            {'wf_id': workflow_id, 'idx': wf_row[0]},
+            {'wf_id': workflow_id, 'idx': wf_row.output_task_index},
         )
         output_row = output_result.fetchone()
-        return output_row[0] if output_row and output_row[0] else 'null'
+        return output_row.result if output_row and output_row.result else 'null'
 
     # Find terminal tasks (not in any other task's dependencies)
     terminal_results = await session.execute(
@@ -1676,13 +1676,13 @@ async def get_workflow_final_result(
     # This ensures WorkflowHandle.get() returns dict[str, TaskResult], not raw dicts
     results_dict: dict[str, Any] = {}
     for row in terminal_results.fetchall():
-        node_id = row[0]
+        node_id = row.node_id
         if not isinstance(node_id, str):
             continue
         unique_key = node_id
-        if row[2]:
+        if row.result:
             # Rehydrate to TaskResult and serialize back (will be parsed on get())
-            deser = _deser_json(row[2], 'terminal task result json')
+            deser = _deser_json(row.result, 'terminal task result json')
             if deser is not None:
                 parsed_tr = task_result_from_json(deser)
                 if not is_err(parsed_tr):
@@ -1730,7 +1730,7 @@ async def _handle_workflow_task_failure(
     if wf_row is None:
         return True
 
-    on_error = wf_row[0]
+    on_error = wf_row.on_error
 
     # Extract TaskError for storage (not the full TaskResult)
     error_payload = _ser(dumps_json(result.err), 'error payload') if result.is_err() and result.err else None
