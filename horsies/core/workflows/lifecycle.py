@@ -719,15 +719,15 @@ async def resume_workflow(
                     ))
                 return Ok(False)
 
-            depth = row[1] or 0
-            root_wf_id = row[2] or workflow_id
+            depth = row.depth or 0
+            root_wf_id = row.root_workflow_id or workflow_id
 
             # 2. Find all PENDING tasks and try to make them READY
             pending_result = await session.execute(
                 GET_PENDING_WORKFLOW_TASKS_SQL,
                 {'wf_id': workflow_id},
             )
-            pending_indices = [r[0] for r in pending_result.fetchall()]
+            pending_indices = [r.task_index for r in pending_result.fetchall()]
 
             for task_index in pending_indices:
                 await try_make_ready_and_enqueue(
@@ -849,7 +849,7 @@ async def cascade_resume_to_children(
             )
             for pending_row in child_pending.fetchall():
                 await try_make_ready_and_enqueue(
-                    session, broker, child_id, pending_row[0], child_depth, child_root
+                    session, broker, child_id, pending_row.task_index, child_depth, child_root,
                 )
 
             child_ready = await session.execute(
@@ -857,9 +857,9 @@ async def cascade_resume_to_children(
                 {'wf_id': child_id},
             )
             for ready_row in child_ready.fetchall():
-                task_idx = ready_row[0]
-                deps = ready_row[1]
-                is_sub = ready_row[2]
+                task_idx = ready_row.task_index
+                deps = ready_row.dependencies
+                is_sub = ready_row.is_subworkflow
                 dep_indices: list[int] = (
                     cast(list[int], deps) if isinstance(deps, list) else []
                 )

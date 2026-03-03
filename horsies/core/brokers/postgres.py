@@ -824,7 +824,7 @@ class PostgresBroker:
             )
             return Ok(task_id)
 
-        existing_sha: str = row[0]
+        existing_sha: str = row.enqueue_sha
         # enqueue_sha is NOT NULL — defensive assertion against data corruption.
         assert existing_sha is not None, (
             f'enqueue_sha is NULL for task_id={task_id} — column is NOT NULL'

@@ -14,6 +14,7 @@ from importlib import import_module
 from typing import Any, Optional, Tuple, cast
 
 from psycopg import Connection, Cursor, InterfaceError, OperationalError
+from psycopg.rows import namedtuple_row
 from psycopg.errors import DeadlockDetected, SerializationFailure
 
 from horsies.core.app import Horsies
@@ -251,7 +252,7 @@ def _heartbeat_worker(
         try:
             pool = _get_worker_pool()
             with pool.connection() as conn:
-                cursor = conn.cursor()
+                cursor = conn.cursor(row_factory=namedtuple_row)
                 cursor.execute(
                     """
                     INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid)
@@ -309,7 +310,7 @@ def _get_workflow_status_for_task(cursor: Cursor[Any], task_id: str) -> str | No
     row = cursor.fetchone()
     if row is None:
         return None
-    status = row[0]
+    status = row.status
     if isinstance(status, str):
         return status
     return None
@@ -395,7 +396,7 @@ def _update_workflow_task_running_with_retry(task_id: str) -> None:
         try:
             pool = _get_worker_pool()
             with pool.connection() as conn:
-                cursor = conn.cursor()
+                cursor = conn.cursor(row_factory=namedtuple_row)
                 cursor.execute(
                     """
                     UPDATE horsies_workflow_tasks wt
@@ -442,7 +443,7 @@ def _preflight_workflow_check(
     try:
         pool = _get_worker_pool()
         with pool.connection() as conn:
-            cursor = conn.cursor()
+            cursor = conn.cursor(row_factory=namedtuple_row)
             workflow_status = _get_workflow_status_for_task(cursor, task_id)
             match workflow_status:
                 case 'PAUSED' | 'CANCELLED':
@@ -466,7 +467,7 @@ def _confirm_ownership_and_set_running(
     try:
         pool = _get_worker_pool()
         with pool.connection() as conn:
-            cursor = conn.cursor()
+            cursor = conn.cursor(row_factory=namedtuple_row)
             cursor.execute(
                 """
                 UPDATE horsies_tasks
