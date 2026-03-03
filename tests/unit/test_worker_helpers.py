@@ -1291,3 +1291,315 @@ class TestHandleFinalizeError:
             assert delay == expected, (
                 f'attempt {attempt_no}: expected {expected}s, got {delay}s'
             )
+
+
+# ---------------------------------------------------------------------------
+# 15. _retry_finalize_phase1 / _retry_finalize_phase2 — orchestration
+# ---------------------------------------------------------------------------
+
+
+_SENTINEL_FINALIZE_ERR = _FinalizeError(
+    error_code='PHASE_ERR',
+    message='phase failed',
+    stage=_FINALIZE_STAGE_PHASE1,
+    task_id='task-rf-1',
+    retryable=True,
+)
+
+_SENTINEL_TASK_RESULT = MagicMock(name='TaskResult')
+
+
+@pytest.mark.unit
+class TestRetryFinalizePhase1:
+    """Tests for Worker._retry_finalize_phase1."""
+
+    def _make_err(
+        self,
+        *,
+        outcome: dict[str, Any] | None = None,
+        task_id: str = 'task-rf-1',
+    ) -> _FinalizeError:
+        data = {'outcome': outcome} if outcome is not None else None
+        return _FinalizeError(
+            error_code='TEST',
+            message='test',
+            stage=_FINALIZE_STAGE_PHASE1,
+            task_id=task_id,
+            retryable=True,
+            data=data,
+        )
+
+    # --- U-3a: stop set → early return ---
+
+    @pytest.mark.asyncio
+    async def test_stop_set_returns_without_db_call(self) -> None:
+        """When stop is set during sleep, no DB calls are made."""
+        worker = _make_worker()
+        worker._stop.set()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        worker._persist_task_terminal_state = AsyncMock()  # type: ignore[assignment]
+
+        err = self._make_err(outcome={'ok': True, 'result_json_str': '{}'})
+        await worker._retry_finalize_phase1(err, 1.0)
+
+        worker._persist_task_terminal_state.assert_not_called()
+
+    # --- U-3b: missing outcome dict ---
+
+    @pytest.mark.asyncio
+    async def test_missing_outcome_logs_error_clears_attempts(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Missing outcome dict → logs error, clears phase1 attempts."""
+        worker = _make_worker()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        err = self._make_err()  # data=None → no outcome
+        key = (err.task_id, _FINALIZE_STAGE_PHASE1)
+        worker._finalize_retry_attempts[key] = 2
+
+        _logger = logging.getLogger('horsies.worker')
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.ERROR, logger='horsies.worker'):
+                await worker._retry_finalize_phase1(err, 0.0)
+        finally:
+            _logger.propagate = False
+
+        assert 'missing outcome payload' in caplog.text.lower()
+        assert key not in worker._finalize_retry_attempts
+
+    # --- U-3c: missing result_json_str ---
+
+    @pytest.mark.asyncio
+    async def test_missing_result_json_str_logs_error_clears_attempts(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Outcome present but result_json_str not a string → logs error, clears."""
+        worker = _make_worker()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        err = self._make_err(outcome={'ok': True, 'result_json_str': 123})
+        key = (err.task_id, _FINALIZE_STAGE_PHASE1)
+        worker._finalize_retry_attempts[key] = 1
+
+        _logger = logging.getLogger('horsies.worker')
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.ERROR, logger='horsies.worker'):
+                await worker._retry_finalize_phase1(err, 0.0)
+        finally:
+            _logger.propagate = False
+
+        assert 'missing result_json_str' in caplog.text.lower()
+        assert key not in worker._finalize_retry_attempts
+
+    # --- U-3d: happy path ---
+
+    @pytest.mark.asyncio
+    async def test_happy_path_calls_persist_and_workflow_clears_both(self) -> None:
+        """Happy path: persist succeeds with result, workflow succeeds → clears both stages."""
+        worker = _make_worker()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        worker._persist_task_terminal_state = AsyncMock(  # type: ignore[assignment]
+            return_value=Ok(_SENTINEL_TASK_RESULT),
+        )
+        worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
+            return_value=Ok(None),
+        )
+        err = self._make_err(outcome={
+            'ok': True,
+            'result_json_str': '{"value": 1}',
+            'failed_reason': None,
+        })
+        key_p1 = (err.task_id, _FINALIZE_STAGE_PHASE1)
+        key_p2 = (err.task_id, _FINALIZE_STAGE_PHASE2)
+        worker._finalize_retry_attempts[key_p1] = 2
+        worker._finalize_retry_attempts[key_p2] = 1
+
+        await worker._retry_finalize_phase1(err, 0.0)
+
+        worker._persist_task_terminal_state.assert_awaited_once()
+        worker._finalize_workflow_phase.assert_awaited_once_with(
+            err.task_id, _SENTINEL_TASK_RESULT,
+        )
+        assert key_p1 not in worker._finalize_retry_attempts
+        assert key_p2 not in worker._finalize_retry_attempts
+
+    # --- U-3e: _persist fails → delegates ---
+
+    @pytest.mark.asyncio
+    async def test_persist_err_delegates_to_handle_finalize_error(self) -> None:
+        """When _persist returns Err, delegates to _handle_finalize_error."""
+        worker = _make_worker()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        worker._persist_task_terminal_state = AsyncMock(  # type: ignore[assignment]
+            return_value=Err(_SENTINEL_FINALIZE_ERR),
+        )
+        worker._handle_finalize_error = AsyncMock()  # type: ignore[assignment]
+        err = self._make_err(outcome={
+            'ok': True,
+            'result_json_str': '{}',
+        })
+
+        await worker._retry_finalize_phase1(err, 0.0)
+
+        worker._handle_finalize_error.assert_awaited_once_with(_SENTINEL_FINALIZE_ERR)
+
+    # --- U-3f: _persist Ok(None) → clears phase1 only ---
+
+    @pytest.mark.asyncio
+    async def test_persist_ok_none_clears_phase1_only(self) -> None:
+        """When _persist returns Ok(None) (skip path), clears phase1 only."""
+        worker = _make_worker()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        worker._persist_task_terminal_state = AsyncMock(  # type: ignore[assignment]
+            return_value=Ok(None),
+        )
+        worker._finalize_workflow_phase = AsyncMock()  # type: ignore[assignment]
+        err = self._make_err(outcome={
+            'ok': True,
+            'result_json_str': '{}',
+        })
+        key_p1 = (err.task_id, _FINALIZE_STAGE_PHASE1)
+        key_p2 = (err.task_id, _FINALIZE_STAGE_PHASE2)
+        worker._finalize_retry_attempts[key_p1] = 2
+        worker._finalize_retry_attempts[key_p2] = 1
+
+        await worker._retry_finalize_phase1(err, 0.0)
+
+        worker._finalize_workflow_phase.assert_not_called()
+        assert key_p1 not in worker._finalize_retry_attempts
+        assert key_p2 in worker._finalize_retry_attempts  # not cleared
+
+    # --- U-3g: phase2 fails → delegates ---
+
+    @pytest.mark.asyncio
+    async def test_workflow_phase_err_delegates_to_handle_finalize_error(self) -> None:
+        """When _finalize_workflow_phase returns Err, delegates to handler."""
+        worker = _make_worker()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        phase2_err = _FinalizeError(
+            error_code='WF_ERR',
+            message='workflow failed',
+            stage=_FINALIZE_STAGE_PHASE2,
+            task_id='task-rf-1',
+            retryable=True,
+        )
+        worker._persist_task_terminal_state = AsyncMock(  # type: ignore[assignment]
+            return_value=Ok(_SENTINEL_TASK_RESULT),
+        )
+        worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
+            return_value=Err(phase2_err),
+        )
+        worker._handle_finalize_error = AsyncMock()  # type: ignore[assignment]
+        err = self._make_err(outcome={
+            'ok': True,
+            'result_json_str': '{}',
+        })
+
+        await worker._retry_finalize_phase1(err, 0.0)
+
+        worker._handle_finalize_error.assert_awaited_once_with(phase2_err)
+
+
+@pytest.mark.unit
+class TestRetryFinalizePhase2:
+    """Tests for Worker._retry_finalize_phase2."""
+
+    def _make_err(self, *, task_id: str = 'task-rf2-1') -> _FinalizeError:
+        return _FinalizeError(
+            error_code='TEST',
+            message='test',
+            stage=_FINALIZE_STAGE_PHASE2,
+            task_id=task_id,
+            retryable=True,
+        )
+
+    # --- U-3h: stop set → early return ---
+
+    @pytest.mark.asyncio
+    async def test_stop_set_returns_without_load(self) -> None:
+        """When stop is set during sleep, no load or workflow calls made."""
+        worker = _make_worker()
+        worker._stop.set()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        worker._load_persisted_task_result = AsyncMock()  # type: ignore[assignment]
+
+        err = self._make_err()
+        await worker._retry_finalize_phase2(err, 1.0)
+
+        worker._load_persisted_task_result.assert_not_called()
+
+    # --- U-3i: _load fails → delegates ---
+
+    @pytest.mark.asyncio
+    async def test_load_err_delegates_to_handle_finalize_error(self) -> None:
+        """When _load_persisted_task_result returns Err, delegates to handler."""
+        worker = _make_worker()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        load_err = _FinalizeError(
+            error_code='LOAD_ERR',
+            message='load failed',
+            stage=_FINALIZE_STAGE_PHASE2,
+            task_id='task-rf2-1',
+            retryable=True,
+        )
+        worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
+            return_value=Err(load_err),
+        )
+        worker._handle_finalize_error = AsyncMock()  # type: ignore[assignment]
+
+        err = self._make_err()
+        await worker._retry_finalize_phase2(err, 0.0)
+
+        worker._handle_finalize_error.assert_awaited_once_with(load_err)
+
+    # --- U-3j: happy path ---
+
+    @pytest.mark.asyncio
+    async def test_happy_path_calls_workflow_clears_phase2(self) -> None:
+        """Happy path: load succeeds, workflow succeeds → clears phase2 attempts."""
+        worker = _make_worker()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
+            return_value=Ok(_SENTINEL_TASK_RESULT),
+        )
+        worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
+            return_value=Ok(None),
+        )
+        err = self._make_err()
+        key = (err.task_id, _FINALIZE_STAGE_PHASE2)
+        worker._finalize_retry_attempts[key] = 3
+
+        await worker._retry_finalize_phase2(err, 0.0)
+
+        worker._finalize_workflow_phase.assert_awaited_once_with(
+            err.task_id, _SENTINEL_TASK_RESULT,
+        )
+        assert key not in worker._finalize_retry_attempts
+
+    # --- U-3k: _finalize_workflow fails → delegates ---
+
+    @pytest.mark.asyncio
+    async def test_workflow_err_delegates_to_handle_finalize_error(self) -> None:
+        """When _finalize_workflow_phase returns Err, delegates to handler."""
+        worker = _make_worker()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        wf_err = _FinalizeError(
+            error_code='WF_ERR',
+            message='workflow failed',
+            stage=_FINALIZE_STAGE_PHASE2,
+            task_id='task-rf2-1',
+            retryable=True,
+        )
+        worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
+            return_value=Ok(_SENTINEL_TASK_RESULT),
+        )
+        worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
+            return_value=Err(wf_err),
+        )
+        worker._handle_finalize_error = AsyncMock()  # type: ignore[assignment]
+
+        err = self._make_err()
+        await worker._retry_finalize_phase2(err, 0.0)
+
+        worker._handle_finalize_error.assert_awaited_once_with(wf_err)
