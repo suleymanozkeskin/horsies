@@ -141,10 +141,10 @@ async def recover_stuck_workflows(
     )
 
     for row in pending_ready.fetchall():
-        workflow_id = row[0]
-        task_index = row[1]
-        depth = row[2] or 0
-        root_wf_id = row[3] or workflow_id
+        workflow_id = row.workflow_id
+        task_index = row.task_index
+        depth = row.depth or 0
+        root_wf_id = row.root_workflow_id or workflow_id
 
         await try_make_ready_and_enqueue(
             session, broker, workflow_id, task_index, depth, root_wf_id,
@@ -161,9 +161,9 @@ async def recover_stuck_workflows(
     ready_not_enqueued = await session.execute(GET_READY_NOT_ENQUEUED_SQL)
 
     for row in ready_not_enqueued.fetchall():
-        workflow_id = row[0]
-        task_index = row[1]
-        raw_deps = row[2]
+        workflow_id = row.workflow_id
+        task_index = row.task_index
+        raw_deps = row.dependencies
         dependencies: list[int] = (
             cast(list[int], raw_deps) if isinstance(raw_deps, list) else []
         )
@@ -191,11 +191,11 @@ async def recover_stuck_workflows(
     ready_subworkflows = await session.execute(GET_READY_SUBWORKFLOWS_NOT_STARTED_SQL)
 
     for row in ready_subworkflows.fetchall():
-        workflow_id = row[0]
-        task_index = row[1]
-        dependencies = row[2]
-        depth = row[3] or 0
-        root_wf_id = row[4] or workflow_id
+        workflow_id = row.workflow_id
+        task_index = row.task_index
+        dependencies = row.dependencies
+        depth = row.depth or 0
+        root_wf_id = row.root_workflow_id or workflow_id
 
         if broker is not None:
             from horsies.core.workflows.engine import (
@@ -233,10 +233,10 @@ async def recover_stuck_workflows(
     completed_children = await session.execute(GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL)
 
     for row in completed_children.fetchall():
-        child_id = row[0]
-        parent_wf_id = row[1]
-        parent_task_idx = row[2]
-        child_status = row[3]
+        child_id = row.id
+        parent_wf_id = row.parent_workflow_id
+        parent_task_idx = row.parent_task_index
+        child_status = row.status
 
         # Re-trigger the subworkflow completion callback
         from horsies.core.workflows.engine import on_subworkflow_complete
@@ -259,11 +259,11 @@ async def recover_stuck_workflows(
     )
 
     for row in crashed_worker_tasks.fetchall():
-        workflow_id = row[0]
-        task_index = row[1]
-        task_id = row[2]
-        task_status = row[3]  # uppercase: COMPLETED, FAILED, or CANCELLED
-        raw_task_result = row[4]
+        workflow_id = row.workflow_id
+        task_index = row.task_index
+        task_id = row.task_id
+        task_status = row.task_status  # uppercase: COMPLETED, FAILED, or CANCELLED
+        raw_task_result = row.task_result
 
         from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
 
@@ -332,7 +332,7 @@ async def recover_stuck_workflows(
     )
 
     for row in terminal_candidates.fetchall():
-        workflow_id = row[0]
+        workflow_id = row.id
         # Delegate to the canonical completion path so recovery inherits locking,
         # parent propagation, and finalization semantics from engine.py.
         from horsies.core.workflows.engine import check_workflow_completion
