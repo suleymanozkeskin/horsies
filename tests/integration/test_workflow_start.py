@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from typing import Any
@@ -21,6 +22,7 @@ from horsies.core.models.workflow import (
 )
 from horsies.core.task_decorator import from_node
 from horsies.core.workflows.engine import on_workflow_task_complete
+from horsies.core.workflows.start_types import WorkflowStartErrorCode
 from horsies.core.types.result import is_err
 
 from .conftest import (
@@ -517,7 +519,7 @@ class TestWorkflowStart:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """Calling start_workflow_async twice with same custom ID returns same handle."""
+        """Same workflow + custom ID started twice returns existing handle."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'idempotent_a')
 
@@ -533,7 +535,7 @@ class TestWorkflowStart:
         task_b = make_simple_task(app, 'idempotent_b')
         node_b = TaskNode(fn=task_b, kwargs={'value': 2})
         spec_2 = make_workflow_spec(
-            broker=broker, name='idempotent_wf_2', tasks=[node_b],
+            broker=broker, name='idempotent_wf', tasks=[node_b],
         )
         handle_2 = await start_ok(spec_2, broker, custom_id)
 
@@ -547,6 +549,68 @@ class TestWorkflowStart:
         assert result.scalar() == 1
 
         # Task count matches the first spec, not the second
+        task_count = await session.execute(
+            text('SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = :wf_id'),
+            {'wf_id': custom_id},
+        )
+        assert task_count.scalar() == 1
+
+    async def test_duplicate_workflow_id_with_different_name_fails_validation(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """Same workflow_id cannot be reused for a different workflow name."""
+        _session, broker, app = setup
+        task_a = make_simple_task(app, 'idempotent_name_guard_a')
+        task_b = make_simple_task(app, 'idempotent_name_guard_b')
+
+        first = make_workflow_spec(
+            broker=broker,
+            name='idempotent_name_guard_first',
+            tasks=[TaskNode(fn=task_a, kwargs={'value': 1})],
+        )
+        second = make_workflow_spec(
+            broker=broker,
+            name='idempotent_name_guard_second',
+            tasks=[TaskNode(fn=task_b, kwargs={'value': 2})],
+        )
+
+        custom_id = 'idempotent-name-guard-id'
+        await start_ok(first, broker, custom_id)
+        second_start = await second.start_async(custom_id)
+
+        assert is_err(second_start)
+        assert second_start.err_value.code == WorkflowStartErrorCode.VALIDATION_FAILED
+        assert custom_id in second_start.err_value.message
+
+    async def test_concurrent_duplicate_workflow_id_returns_existing_handle(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """Concurrent starts with same custom ID are idempotent (no duplicate inserts)."""
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'idempotent_concurrent_a')
+
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker, name='idempotent_wf_concurrent', tasks=[node_a],
+        )
+
+        custom_id = 'idempotent-concurrent-test-id'
+        handle_1, handle_2 = await asyncio.gather(
+            start_ok(spec, broker, custom_id),
+            start_ok(spec, broker, custom_id),
+        )
+        assert handle_1.workflow_id == custom_id
+        assert handle_2.workflow_id == custom_id
+
+        # Exactly one workflow record and one task graph must exist.
+        wf_count = await session.execute(
+            text('SELECT COUNT(*) FROM horsies_workflows WHERE id = :wf_id'),
+            {'wf_id': custom_id},
+        )
+        assert wf_count.scalar() == 1
+
         task_count = await session.execute(
             text('SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = :wf_id'),
             {'wf_id': custom_id},

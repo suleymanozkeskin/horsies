@@ -34,6 +34,7 @@ from horsies.core.workflows.start_types import (
 )
 from horsies.core.workflows.sql import (
     CHECK_WORKFLOW_EXISTS_SQL,
+    GET_WORKFLOW_NAME_SQL,
     INSERT_WORKFLOW_SQL,
     INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL,
     INSERT_WORKFLOW_TASK_SQL,
@@ -204,22 +205,7 @@ async def start_workflow_async(
     # ── Zone 2: DB transaction ───────────────────────────────────────
     try:
         async with broker.session_factory() as session:
-            # Check if workflow already exists (idempotent start)
-            if workflow_id:
-                existing = await session.execute(
-                    CHECK_WORKFLOW_EXISTS_SQL,
-                    {'wf_id': wf_id},
-                )
-                if existing.fetchone():
-                    logger.warning(
-                        f'Workflow {wf_id} already exists, returning existing handle'
-                    )
-                    return Ok(cast(
-                        'WorkflowHandle[OutT]',
-                        WorkflowHandle(workflow_id=wf_id, broker=broker),
-                    ))
-
-            # 1. Insert workflow record
+            # 1. Insert workflow record atomically (idempotent on workflow ID)
             output_index = spec.output.index if spec.output else None
 
             # Serialize success_policy to index-based format
@@ -240,7 +226,7 @@ async def start_workflow_async(
                         t.index for t in spec.success_policy.optional if t.index is not None
                     ]
 
-            await session.execute(
+            insert_result = await session.execute(
                 INSERT_WORKFLOW_SQL,
                 {
                     'id': wf_id,
@@ -255,6 +241,34 @@ async def start_workflow_async(
                     'sent_at': workflow_sent_at,
                 },
             )
+            inserted_wf_id = insert_result.scalar_one_or_none()
+            if inserted_wf_id is None:
+                existing_name_result = await session.execute(
+                    GET_WORKFLOW_NAME_SQL,
+                    {'wf_id': wf_id},
+                )
+                existing_name_row = existing_name_result.fetchone()
+                existing_name = existing_name_row[0] if existing_name_row else None
+                if existing_name is not None and existing_name != spec.name:
+                    return Err(WorkflowStartError(
+                        code=WorkflowStartErrorCode.VALIDATION_FAILED,
+                        message=(
+                            f"workflow_id '{wf_id}' already exists for workflow "
+                            f"name '{existing_name}', cannot start workflow "
+                            f"name '{spec.name}' with the same id"
+                        ),
+                        retryable=False,
+                        stage=WorkflowStartStage.DB_TRANSACTION,
+                        workflow_name=spec.name,
+                        workflow_id=wf_id,
+                    ))
+                logger.warning(
+                    f'Workflow {wf_id} already exists, returning existing handle'
+                )
+                return Ok(cast(
+                    'WorkflowHandle[OutT]',
+                    WorkflowHandle(workflow_id=wf_id, broker=broker),
+                ))
 
             # 2. Insert all workflow_tasks
             # NOTE: Serialization failures (_ser_or_raise) can raise mid-loop after

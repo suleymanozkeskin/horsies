@@ -18,6 +18,8 @@ INSERT_WORKFLOW_SQL = text("""
             :success_policy, :wf_module, :wf_qualname,
             0, :id,
             :sent_at, NOW(), NOW(), NOW())
+    ON CONFLICT (id) DO NOTHING
+    RETURNING id
 """)
 INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL = text("""
     INSERT INTO horsies_workflow_tasks
