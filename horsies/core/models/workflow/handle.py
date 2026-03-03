@@ -789,7 +789,7 @@ class WorkflowHandle(Generic[OutT]):
                         workflow_id=self.workflow_id,
                     ))
 
-                status_val = WorkflowStatus(exists_row[0])
+                status_val = WorkflowStatus(exists_row.status)
                 if status_val != WorkflowStatus.CANCELLED:
                     # Non-cancellable state (COMPLETED, FAILED) → no-op
                     return Ok(None)

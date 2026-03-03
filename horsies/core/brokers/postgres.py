@@ -1161,12 +1161,12 @@ class PostgresBroker:
                     return Ok(0)
 
                 for task_row in stale_tasks:
-                    task_id = task_row[0]
-                    worker_pid = task_row[1]
-                    worker_hostname = task_row[2]
-                    worker_id = task_row[3]
-                    started_at = task_row[4]
-                    last_heartbeat = task_row[5]
+                    task_id = task_row.id
+                    worker_pid = task_row.worker_pid
+                    worker_hostname = task_row.worker_hostname
+                    worker_id = task_row.claimed_by_worker_id
+                    started_at = task_row.started_at
+                    last_heartbeat = task_row.last_heartbeat
 
                     task_error = TaskError(
                         error_code=LibraryErrorCode.WORKER_CRASHED,

@@ -248,7 +248,7 @@ async def start_workflow_async(
                     {'wf_id': wf_id},
                 )
                 existing_name_row = existing_name_result.fetchone()
-                existing_name = existing_name_row[0] if existing_name_row else None
+                existing_name = existing_name_row.name if existing_name_row else None
                 if existing_name is not None and existing_name != spec.name:
                     return Err(WorkflowStartError(
                         code=WorkflowStartErrorCode.VALIDATION_FAILED,
@@ -596,7 +596,7 @@ async def cascade_pause_to_children(
         )
 
         for child_row in children.fetchall():
-            child_id = child_row[0]
+            child_id = child_row.id
 
             # Pause child
             await session.execute(
@@ -832,9 +832,9 @@ async def cascade_resume_to_children(
         )
 
         for child_row in children.fetchall():
-            child_id = child_row[0]
-            child_depth = child_row[1] or 0
-            child_root = child_row[2] or child_id
+            child_id = child_row.id
+            child_depth = child_row.depth or 0
+            child_root = child_row.root_workflow_id or child_id
 
             # Resume child
             await session.execute(
