@@ -33,6 +33,12 @@ from horsies.core.worker.worker import (
     _dedupe_paths,
     _derive_sys_path_roots_from_file,
     _FinalizeError,
+    _FINALIZE_PHASE1_MAX_RETRIES,
+    _FINALIZE_PHASE2_MAX_RETRIES,
+    _FINALIZE_RETRY_BASE_DELAY_S,
+    _FINALIZE_RETRY_MAX_DELAY_S,
+    _FINALIZE_STAGE_PHASE1,
+    _FINALIZE_STAGE_PHASE2,
     _is_retryable_db_error,
     _RequeueOutcome,
 )
@@ -1036,3 +1042,252 @@ class TestLeaseRenewalAgeGuard:
         renewal_params = renewal_calls[0][0][1]
         assert 'max_claim_age_ms' in renewal_params
         assert renewal_params['max_claim_age_ms'] == 180_000
+
+
+# ---------------------------------------------------------------------------
+# 14. _handle_finalize_error — retry routing logic
+# ---------------------------------------------------------------------------
+
+
+def _make_finalize_error(
+    *,
+    stage: str = _FINALIZE_STAGE_PHASE1,
+    task_id: str = 'task-fe-1',
+    retryable: bool = True,
+    message: str = 'test error',
+    error_code: str = 'TEST_ERR',
+    data: dict[str, Any] | None = None,
+) -> _FinalizeError:
+    return _FinalizeError(
+        error_code=error_code,
+        message=message,
+        stage=stage,
+        task_id=task_id,
+        retryable=retryable,
+        data=data,
+    )
+
+
+from typing import Any
+
+
+@pytest.mark.unit
+class TestHandleFinalizeError:
+    """Tests for Worker._handle_finalize_error — retry routing logic."""
+
+    _LOGGER_NAME = 'horsies.worker'
+
+    # --- U-2a: non-_FinalizeError payload ---
+
+    @pytest.mark.asyncio
+    async def test_non_finalize_error_payload_logs_and_returns(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Non-_FinalizeError payload → logs error, no attempts touched."""
+        worker = _make_worker()
+        worker._spawn_background = MagicMock()  # type: ignore[assignment]
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+                await worker._handle_finalize_error('not a _FinalizeError')
+        finally:
+            _logger.propagate = False
+
+        assert 'Unexpected finalize error payload type' in caplog.text
+        assert worker._spawn_background.call_count == 0
+        assert worker._finalize_retry_attempts == {}
+
+    # --- U-2b: unknown stage ---
+
+    @pytest.mark.asyncio
+    async def test_unknown_stage_logs_and_returns(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Unknown stage value → logs error with stage info, returns."""
+        worker = _make_worker()
+        worker._spawn_background = MagicMock()  # type: ignore[assignment]
+        err = _make_finalize_error(stage='phase99_unknown')
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+                await worker._handle_finalize_error(err)
+        finally:
+            _logger.propagate = False
+
+        assert 'phase99_unknown' in caplog.text
+        assert worker._spawn_background.call_count == 0
+
+    # --- U-2c: non-retryable error ---
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_clears_attempts_no_spawn(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Non-retryable error → logs, clears attempts, no retry spawned."""
+        worker = _make_worker()
+        worker._spawn_background = MagicMock()  # type: ignore[assignment]
+        err = _make_finalize_error(retryable=False)
+        key = (err.task_id, err.stage)
+        worker._finalize_retry_attempts[key] = 2
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+                await worker._handle_finalize_error(err)
+        finally:
+            _logger.propagate = False
+
+        assert 'non-retryable' in caplog.text.lower()
+        assert key not in worker._finalize_retry_attempts
+        assert worker._spawn_background.call_count == 0
+
+    # --- U-2d: retryable, under max_attempts → spawns retry ---
+
+    @pytest.mark.asyncio
+    async def test_retryable_under_max_increments_and_spawns(self) -> None:
+        """Retryable error under max attempts → increments counter, spawns retry."""
+        worker = _make_worker()
+        worker._spawn_background = MagicMock()  # type: ignore[assignment]
+        err = _make_finalize_error(retryable=True, stage=_FINALIZE_STAGE_PHASE1)
+
+        await worker._handle_finalize_error(err)
+
+        key = (err.task_id, _FINALIZE_STAGE_PHASE1)
+        assert worker._finalize_retry_attempts[key] == 1
+        assert worker._spawn_background.call_count == 1
+
+    # --- U-2e: retryable, at max_attempts → CRITICAL, no spawn ---
+
+    @pytest.mark.asyncio
+    async def test_retryable_at_max_attempts_logs_critical_no_spawn(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Retryable at max attempts → logs CRITICAL, clears attempts, no spawn."""
+        worker = _make_worker()
+        worker._spawn_background = MagicMock()  # type: ignore[assignment]
+        err = _make_finalize_error(retryable=True, stage=_FINALIZE_STAGE_PHASE1)
+        key = (err.task_id, _FINALIZE_STAGE_PHASE1)
+        worker._finalize_retry_attempts[key] = _FINALIZE_PHASE1_MAX_RETRIES
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.CRITICAL, logger=self._LOGGER_NAME):
+                await worker._handle_finalize_error(err)
+        finally:
+            _logger.propagate = False
+
+        assert 'retries exhausted' in caplog.text.lower()
+        assert key not in worker._finalize_retry_attempts
+        assert worker._spawn_background.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_phase2_at_max_attempts_uses_phase2_limit(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Phase2 uses its own max retries (5), not phase1's (3)."""
+        worker = _make_worker()
+        worker._spawn_background = MagicMock()  # type: ignore[assignment]
+        err = _make_finalize_error(retryable=True, stage=_FINALIZE_STAGE_PHASE2)
+        key = (err.task_id, _FINALIZE_STAGE_PHASE2)
+
+        # At phase1 max (3) but under phase2 max (5) → should still spawn
+        worker._finalize_retry_attempts[key] = _FINALIZE_PHASE1_MAX_RETRIES
+        assert _FINALIZE_PHASE1_MAX_RETRIES < _FINALIZE_PHASE2_MAX_RETRIES
+
+        await worker._handle_finalize_error(err)
+        assert worker._spawn_background.call_count == 1
+
+    # --- U-2f: phase1 retryable → spawns _retry_finalize_phase1 ---
+
+    @pytest.mark.asyncio
+    async def test_phase1_retryable_spawns_phase1_retry(self) -> None:
+        """Phase1 retryable error spawns _retry_finalize_phase1."""
+        worker = _make_worker()
+        spawned_names: list[str] = []
+
+        def _capture_spawn(coro: Any, *, name: str, **kwargs: Any) -> MagicMock:
+            spawned_names.append(name)
+            # Close the coroutine to avoid RuntimeWarning
+            coro.close()
+            return MagicMock()
+
+        worker._spawn_background = _capture_spawn  # type: ignore[assignment]
+        err = _make_finalize_error(retryable=True, stage=_FINALIZE_STAGE_PHASE1)
+
+        await worker._handle_finalize_error(err)
+
+        assert len(spawned_names) == 1
+        assert 'finalize-retry-phase1' in spawned_names[0]
+
+    # --- U-2g: phase2 retryable → spawns _retry_finalize_phase2 ---
+
+    @pytest.mark.asyncio
+    async def test_phase2_retryable_spawns_phase2_retry(self) -> None:
+        """Phase2 retryable error spawns _retry_finalize_phase2."""
+        worker = _make_worker()
+        spawned_names: list[str] = []
+
+        def _capture_spawn(coro: Any, *, name: str, **kwargs: Any) -> MagicMock:
+            spawned_names.append(name)
+            coro.close()
+            return MagicMock()
+
+        worker._spawn_background = _capture_spawn  # type: ignore[assignment]
+        err = _make_finalize_error(retryable=True, stage=_FINALIZE_STAGE_PHASE2)
+
+        await worker._handle_finalize_error(err)
+
+        assert len(spawned_names) == 1
+        assert 'finalize-retry-phase2' in spawned_names[0]
+
+    # --- U-2h: backoff delay grows with attempt number, capped ---
+
+    @pytest.mark.asyncio
+    async def test_backoff_delay_doubles_per_attempt(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Delay doubles per attempt: 0.5, 1.0, 2.0, 4.0, ... capped at 15s."""
+        worker = _make_worker()
+        err = _make_finalize_error(
+            retryable=True,
+            stage=_FINALIZE_STAGE_PHASE2,
+            task_id='task-backoff',
+        )
+        logged_delays: list[float] = []
+
+        def _capture_spawn(coro: Any, *, name: str, **kwargs: Any) -> MagicMock:
+            coro.close()
+            return MagicMock()
+
+        worker._spawn_background = _capture_spawn  # type: ignore[assignment]
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            for _ in range(_FINALIZE_PHASE2_MAX_RETRIES):
+                with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
+                    await worker._handle_finalize_error(err)
+
+                for record in caplog.records:
+                    if 'Finalize retry scheduled' in record.message and err.task_id in record.message:
+                        parts = record.message.split(' in ')
+                        if len(parts) >= 2:
+                            delay_str = parts[-1].split('s:')[0]
+                            logged_delays.append(float(delay_str))
+                caplog.clear()
+        finally:
+            _logger.propagate = False
+
+        assert len(logged_delays) == _FINALIZE_PHASE2_MAX_RETRIES
+
+        # Verify delays double: attempt 1→0.5, 2→1.0, 3→2.0, 4→4.0, 5→8.0
+        for i, delay in enumerate(logged_delays):
+            attempt_no = i + 1
+            expected = min(
+                _FINALIZE_RETRY_MAX_DELAY_S,
+                _FINALIZE_RETRY_BASE_DELAY_S * (2 ** (attempt_no - 1)),
+            )
+            assert delay == expected, (
+                f'attempt {attempt_no}: expected {expected}s, got {delay}s'
+            )
