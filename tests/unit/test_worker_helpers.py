@@ -20,7 +20,15 @@ import logging
 from horsies.core.worker.worker import (
     Worker,
     WorkerConfig,
+    CLAIM_ADVISORY_LOCK_SQL,
     CLAIM_SQL,
+    COUNT_CLAIMED_FOR_WORKER_SQL,
+    COUNT_GLOBAL_IN_FLIGHT_SQL,
+    COUNT_IN_FLIGHT_FOR_WORKER_SQL,
+    COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
+    COUNT_QUEUE_IN_FLIGHT_SOFT_SQL,
+    COUNT_RUNNING_FOR_WORKER_SQL,
+    COUNT_RUNNING_IN_QUEUE_SQL,
     DELETE_EXPIRED_HEARTBEATS_SQL,
     DELETE_EXPIRED_TASKS_SQL,
     DELETE_EXPIRED_WORKER_STATES_SQL,
@@ -41,8 +49,10 @@ from horsies.core.worker.worker import (
     _FINALIZE_STAGE_PHASE2,
     _is_retryable_db_error,
     _RequeueOutcome,
+    _RetryBackoff,
 )
 from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.models.resilience import WorkerResilienceConfig
 
 
 # ---------------------------------------------------------------------------
@@ -2706,3 +2716,499 @@ class TestClaimerHeartbeatLoopErrorPaths:
 
         # Should not raise
         await worker._claimer_heartbeat_loop()
+
+
+# ---------------------------------------------------------------------------
+# 20. TestRunForever (U-8a – U-8d)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestRunForever:
+    """Tests for Worker.run_forever: main orchestration loop."""
+
+    _LOGGER_NAME = 'horsies.worker'
+
+    # --- U-8a ---
+
+    @pytest.mark.asyncio
+    async def test_calls_start_enters_loop_then_stop(self) -> None:
+        """Resilience start called, loop body executed, stop exits cleanly."""
+        worker = _make_worker()
+        resilience_called = False
+
+        async def _fake_start() -> None:
+            nonlocal resilience_called
+            resilience_called = True
+
+        call_count = 0
+
+        async def _fake_claim_and_dispatch() -> bool:
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                worker._stop.set()
+            return False
+
+        async def _fake_wait(poll_interval_ms: int) -> None:
+            return
+
+        async def _fake_stop(**kwargs: object) -> None:
+            return
+
+        worker._start_with_resilience_config = _fake_start  # type: ignore[assignment]
+        worker._claim_and_dispatch_all = _fake_claim_and_dispatch  # type: ignore[assignment]
+        worker._wait_for_any_notify = _fake_wait  # type: ignore[assignment]
+        worker.stop = _fake_stop  # type: ignore[assignment]
+
+        await worker.run_forever()
+
+        assert resilience_called
+        assert call_count >= 2
+
+    # --- U-8b ---
+
+    @pytest.mark.asyncio
+    async def test_retryable_error_backoff_and_retry(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Retryable connection error triggers backoff then retry."""
+        worker = _make_worker()
+
+        async def _fake_start() -> None:
+            return
+
+        call_count = 0
+
+        async def _fake_claim_and_dispatch() -> bool:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise OperationalError('connection lost')
+            # Second pass: stop
+            worker._stop.set()
+            return False
+
+        async def _fake_wait(poll_interval_ms: int) -> None:
+            return
+
+        async def _fake_stop(**kwargs: object) -> None:
+            return
+
+        worker._start_with_resilience_config = _fake_start  # type: ignore[assignment]
+        worker._claim_and_dispatch_all = _fake_claim_and_dispatch  # type: ignore[assignment]
+        worker._wait_for_any_notify = _fake_wait  # type: ignore[assignment]
+        worker.stop = _fake_stop  # type: ignore[assignment]
+        # Use a fast sleep to avoid test slowness
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+                await worker.run_forever()
+        finally:
+            _logger.propagate = False
+
+        assert call_count >= 2  # retried after error
+        assert 'retrying' in caplog.text.lower()
+
+    # --- U-8c ---
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_error_raises_and_stops(self) -> None:
+        """Non-retryable error propagates; stop() called in finally."""
+        worker = _make_worker()
+        stop_called = False
+
+        async def _fake_start() -> None:
+            return
+
+        async def _fake_claim_and_dispatch() -> bool:
+            raise ValueError('non-retryable')
+
+        async def _fake_stop(**kwargs: object) -> None:
+            nonlocal stop_called
+            stop_called = True
+
+        worker._start_with_resilience_config = _fake_start  # type: ignore[assignment]
+        worker._claim_and_dispatch_all = _fake_claim_and_dispatch  # type: ignore[assignment]
+        worker.stop = _fake_stop  # type: ignore[assignment]
+
+        with pytest.raises(ValueError, match='non-retryable'):
+            await worker.run_forever()
+
+        assert stop_called
+
+    # --- U-8d ---
+
+    @pytest.mark.asyncio
+    async def test_stop_set_before_loop_exits_cleanly(self) -> None:
+        """If stop is set during resilience start, loop never entered."""
+        worker = _make_worker()
+        loop_entered = False
+
+        async def _fake_start() -> None:
+            worker._stop.set()
+
+        async def _fake_claim_and_dispatch() -> bool:
+            nonlocal loop_entered
+            loop_entered = True
+            return False
+
+        async def _fake_stop(**kwargs: object) -> None:
+            return
+
+        worker._start_with_resilience_config = _fake_start  # type: ignore[assignment]
+        worker._claim_and_dispatch_all = _fake_claim_and_dispatch  # type: ignore[assignment]
+        worker.stop = _fake_stop  # type: ignore[assignment]
+
+        await worker.run_forever()
+
+        assert not loop_entered
+
+
+# ---------------------------------------------------------------------------
+# 21. TestWaitForAnyNotify (U-8e – U-8g)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestWaitForAnyNotify:
+    """Tests for Worker._wait_for_any_notify: NOTIFY coalescing."""
+
+    # --- U-8e ---
+
+    @pytest.mark.asyncio
+    async def test_stop_signal_cancels_pending_returns(self) -> None:
+        """When stop is already set, cancels all queue tasks and returns."""
+        worker = _make_worker()
+        # Set up queue/global attributes as start() would
+        q1: asyncio.Queue[object] = asyncio.Queue()
+        worker._queues = [q1]
+        worker._global = asyncio.Queue()
+        worker._stop.set()
+
+        # Should return immediately without hanging
+        await worker._wait_for_any_notify(poll_interval_ms=5_000)
+
+    # --- U-8f ---
+
+    @pytest.mark.asyncio
+    async def test_timeout_no_done_cancels_and_returns(self) -> None:
+        """Timeout with no queue activity cancels pending and returns."""
+        worker = _make_worker()
+        q1: asyncio.Queue[object] = asyncio.Queue()
+        worker._queues = [q1]
+        worker._global = asyncio.Queue()
+
+        # Very short timeout → nothing will resolve
+        await worker._wait_for_any_notify(poll_interval_ms=1)
+
+    # --- U-8g ---
+
+    @pytest.mark.asyncio
+    async def test_notification_received_drains_burst(self) -> None:
+        """Notification arrives → drains queued items up to coalesce_notifies."""
+        worker = _make_worker()
+        worker.cfg.coalesce_notifies = 5
+
+        q1: asyncio.Queue[object] = asyncio.Queue()
+        # Pre-fill items: one will be consumed by asyncio.wait, rest by burst drain
+        for i in range(4):
+            q1.put_nowait(f'notify-{i}')
+
+        worker._queues = [q1]
+        worker._global = asyncio.Queue()
+
+        await worker._wait_for_any_notify(poll_interval_ms=5_000)
+
+        # All items should have been drained (1 by wait + up to 5 by drain)
+        assert q1.empty()
+
+
+# ---------------------------------------------------------------------------
+# 22. TestClaimAndDispatchBranches (U-9a – U-9h)
+# ---------------------------------------------------------------------------
+
+
+def _make_claim_worker(
+    *,
+    queues: list[str] | None = None,
+    prefetch_buffer: int = 0,
+    max_claim_per_worker: int = 0,
+    processes: int = 2,
+    queue_priorities: dict[str, int] | None = None,
+    queue_max_concurrency: dict[str, int] | None = None,
+    cluster_wide_cap: int | None = None,
+    max_claim_batch: int = 2,
+) -> Worker:
+    """Build a Worker pre-configured for claim-and-dispatch testing."""
+    cfg = WorkerConfig(
+        dsn="postgresql+psycopg://u:p@localhost/db",
+        psycopg_dsn="postgresql://u:p@localhost/db",
+        queues=queues or ["default"],
+        prefetch_buffer=prefetch_buffer,
+        max_claim_per_worker=max_claim_per_worker,
+        processes=processes,
+        queue_priorities=queue_priorities or {},
+        queue_max_concurrency=queue_max_concurrency or {},
+        cluster_wide_cap=cluster_wide_cap,
+        max_claim_batch=max_claim_batch,
+    )
+    return Worker(
+        session_factory=MagicMock(),
+        listener=MagicMock(),
+        cfg=cfg,
+    )
+
+
+@pytest.mark.unit
+class TestClaimAndDispatchBranches:
+    """Tests for _claim_and_dispatch_all scattered branches (U-9)."""
+
+    # --- U-9a ---
+
+    @pytest.mark.asyncio
+    async def test_softcap_mode_uses_running_count_only(self) -> None:
+        """With prefetch_buffer > 0, calls _count_only_running (not in_flight)."""
+        worker = _make_claim_worker(
+            prefetch_buffer=2,
+            processes=2,
+        )
+        # Mock _count_claimed: under the limit
+        worker._count_claimed_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+        # Mock _count_only_running (soft-cap path)
+        worker._count_only_running_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+        # Mock _count_in_flight (hard-cap path — should NOT be called)
+        worker._count_in_flight_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+
+        # Session mock for advisory lock + commit
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        # No rows returned by claim
+        claim_result = MagicMock()
+        claim_result.keys.return_value = ['id', 'task_name', 'args', 'kwargs']
+        claim_result.fetchall.return_value = []
+        session.execute = AsyncMock(return_value=claim_result)
+        session.commit = AsyncMock()
+        worker.sf = MagicMock(return_value=session)
+
+        result = await worker._claim_and_dispatch_all()
+
+        assert result is False
+        worker._count_only_running_for_worker.assert_awaited_once()
+        worker._count_in_flight_for_worker.assert_not_awaited()
+
+    # --- U-9b ---
+
+    @pytest.mark.asyncio
+    async def test_max_claim_per_worker_guard_returns_false(self) -> None:
+        """claimed_count >= max_claimed → returns False immediately."""
+        worker = _make_claim_worker(max_claim_per_worker=3)
+        # Already at the limit
+        worker._count_claimed_for_worker = AsyncMock(return_value=3)  # type: ignore[assignment]
+
+        result = await worker._claim_and_dispatch_all()
+
+        assert result is False
+
+    # --- U-9c ---
+
+    @pytest.mark.asyncio
+    async def test_queue_priority_sorting(self) -> None:
+        """Custom queue_priorities → queues processed in priority order."""
+        worker = _make_claim_worker(
+            queues=["high", "low", "mid"],
+            queue_priorities={"high": 1, "mid": 50, "low": 100},
+            processes=10,
+            max_claim_batch=10,
+        )
+        worker._count_claimed_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+        worker._count_in_flight_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+
+        claimed_queues: list[str] = []
+
+        async def _fake_claim_batch(s: object, qname: str, limit: int) -> list[dict[str, object]]:
+            claimed_queues.append(qname)
+            return []  # no rows, but tracks order
+
+        worker._claim_batch_locked = _fake_claim_batch  # type: ignore[assignment]
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(return_value=MagicMock())
+        session.commit = AsyncMock()
+        worker.sf = MagicMock(return_value=session)
+
+        await worker._claim_and_dispatch_all()
+
+        assert claimed_queues == ["high", "mid", "low"]
+
+    # --- U-9d ---
+
+    @pytest.mark.asyncio
+    async def test_global_inflight_row_none_defaults_to_zero(self) -> None:
+        """cluster_wide_cap set, fetchone() returns None → in_flight_global = 0."""
+        worker = _make_claim_worker(
+            cluster_wide_cap=10,
+            processes=4,
+        )
+        worker._count_claimed_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+        worker._count_in_flight_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+
+        call_count = 0
+
+        async def _execute(stmt: object, params: object = None) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            result = MagicMock()
+            if call_count == 1:
+                # Advisory lock — no return needed
+                return result
+            if call_count == 2:
+                # COUNT_GLOBAL_IN_FLIGHT_SQL → None row
+                result.fetchone.return_value = None
+                return result
+            # Claim SQL — no rows
+            result.keys.return_value = ['id', 'task_name', 'args', 'kwargs']
+            result.fetchall.return_value = []
+            return result
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(side_effect=_execute)
+        session.commit = AsyncMock()
+        worker.sf = MagicMock(return_value=session)
+
+        result = await worker._claim_and_dispatch_all()
+
+        # Should not crash from None row — defaults to 0, continues
+        assert result is False
+
+    # --- U-9e ---
+
+    @pytest.mark.asyncio
+    async def test_queue_concurrency_soft_vs_hard_sql(self) -> None:
+        """Verifies correct SQL is selected based on hard/soft cap mode."""
+        for prefetch, expected_sql in [
+            (0, COUNT_QUEUE_IN_FLIGHT_HARD_SQL),
+            (2, COUNT_QUEUE_IN_FLIGHT_SOFT_SQL),
+        ]:
+            worker = _make_claim_worker(
+                queues=["q1"],
+                prefetch_buffer=prefetch,
+                processes=4,
+                queue_priorities={"q1": 1},
+                queue_max_concurrency={"q1": 10},
+            )
+            worker._count_claimed_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+            if prefetch == 0:
+                worker._count_in_flight_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+            else:
+                worker._count_only_running_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+
+            executed_stmts: list[object] = []
+
+            async def _execute(stmt: object, params: object = None) -> MagicMock:
+                executed_stmts.append(stmt)
+                result = MagicMock()
+                result.fetchone.return_value = (0,)
+                result.keys.return_value = ['id', 'task_name', 'args', 'kwargs']
+                result.fetchall.return_value = []
+                return result
+
+            session = AsyncMock()
+            session.__aenter__ = AsyncMock(return_value=session)
+            session.__aexit__ = AsyncMock(return_value=None)
+            session.execute = AsyncMock(side_effect=_execute)
+            session.commit = AsyncMock()
+            worker.sf = MagicMock(return_value=session)
+
+            await worker._claim_and_dispatch_all()
+
+            assert expected_sql in executed_stmts, (
+                f'Expected {expected_sql!r} for prefetch={prefetch}, '
+                f'got stmts: {executed_stmts}'
+            )
+
+    # --- U-9f ---
+
+    @pytest.mark.asyncio
+    async def test_budget_exhaustion_mid_queue_stops_claiming(self) -> None:
+        """total_remaining reaches 0 mid-iteration → breaks queue loop."""
+        worker = _make_claim_worker(
+            queues=["q1", "q2"],
+            processes=1,  # budget = 1
+        )
+        worker._count_claimed_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+        worker._count_in_flight_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+
+        claimed_queues: list[str] = []
+
+        async def _fake_claim_batch(s: object, qname: str, limit: int) -> list[dict[str, object]]:
+            claimed_queues.append(qname)
+            # First queue claims 1 task (exhausting budget)
+            if qname == "q1":
+                return [{'id': 'task-1', 'task_name': 'fn', 'args': None, 'kwargs': None}]
+            return []
+
+        worker._claim_batch_locked = _fake_claim_batch  # type: ignore[assignment]
+        worker._filter_nonrunnable_workflow_tasks = AsyncMock(  # type: ignore[assignment]
+            side_effect=lambda rows: rows,
+        )
+        worker._dispatch_one = AsyncMock()  # type: ignore[assignment]
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(return_value=MagicMock())
+        session.commit = AsyncMock()
+        worker.sf = MagicMock(return_value=session)
+
+        result = await worker._claim_and_dispatch_all()
+
+        assert result is True
+        # q2 should NOT have been claimed because budget was exhausted
+        assert claimed_queues == ["q1"]
+
+    # --- U-9g ---
+
+    @pytest.mark.asyncio
+    async def test_count_only_running_for_worker_row_none(self) -> None:
+        """fetchone() returns None → returns 0."""
+        worker = _make_worker()
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        result_mock = MagicMock()
+        result_mock.fetchone.return_value = None
+        session.execute = AsyncMock(return_value=result_mock)
+        worker.sf = MagicMock(return_value=session)
+
+        count = await worker._count_only_running_for_worker()
+
+        assert count == 0
+
+    # --- U-9h ---
+
+    @pytest.mark.asyncio
+    async def test_count_running_in_queue_row_none(self) -> None:
+        """fetchone() returns None → returns 0."""
+        worker = _make_worker()
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        result_mock = MagicMock()
+        result_mock.fetchone.return_value = None
+        session.execute = AsyncMock(return_value=result_mock)
+        worker.sf = MagicMock(return_value=session)
+
+        count = await worker._count_running_in_queue('some_queue')
+
+        assert count == 0
