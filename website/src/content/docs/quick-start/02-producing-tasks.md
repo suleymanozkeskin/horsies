@@ -44,22 +44,16 @@ Every task returns `TaskResult[T, TaskError]`. Use `TaskResult(ok=value)` for su
 
 ## Sending a Task
 
-`send()` dispatches the task to its queue and returns a `TaskSendResult[TaskHandle[T]]`. Unwrap the result to get the handle, then call `TaskHandle.get()` to block until the task result is available:
+`send()` dispatches the task to its queue and returns a `TaskSendResult[TaskHandle[T]]` — a `Result` type that is either `Ok(TaskHandle)` on success or `Err(TaskSendError)` on failure:
 
 ```python
-handle = validate_order.send(order).unwrap()  # raises on send failure
-result = handle.get(timeout_ms=5000)  # blocks up to 5 seconds
-```
+from horsies import Ok, Err
 
-For production code, check the result explicitly:
-
-```python
-from horsies import is_ok
-
-send_result = validate_order.send(order)
-if is_ok(send_result):
-    handle = send_result.ok_value
-    result = handle.get(timeout_ms=5000)
+match validate_order.send(order):
+    case Ok(handle):
+        result = handle.get(timeout_ms=5000)  # blocks up to 5 seconds
+    case Err(send_err):
+        print(f"Send failed: {send_err.code} - {send_err.message}")
 ```
 
 `timeout_ms` controls the maximum wait time. If the task does not complete within the timeout, `get()` raises a `TimeoutError`.
@@ -69,9 +63,13 @@ if is_ok(send_result):
 `send_async()` and `get_async()` are the async equivalents:
 
 ```python
-send_result = await validate_order.send_async(order)
-handle = send_result.unwrap()
-result = await handle.get_async(timeout_ms=5000)
+from horsies import Ok, Err
+
+match await validate_order.send_async(order):
+    case Ok(handle):
+        result = await handle.get_async(timeout_ms=5000)
+    case Err(send_err):
+        print(f"Send failed: {send_err.code}")
 ```
 
 ## Delayed Execution
@@ -79,5 +77,11 @@ result = await handle.get_async(timeout_ms=5000)
 `schedule()` dispatches the task after a delay (in seconds):
 
 ```python
-handle = validate_order.schedule(5, order).unwrap()  # dispatched after 5 seconds
+from horsies import Ok, Err
+
+match validate_order.schedule(5, order):
+    case Ok(handle):
+        print(f"Scheduled: {handle.task_id}")
+    case Err(err):
+        print(f"Schedule failed: {err.code}")
 ```

@@ -1,7 +1,7 @@
 """Unit tests for lifecycle pause/resume Result typing.
 
 Tests that pause_workflow / resume_workflow return typed
-LifecycleResult[bool] instead of the previous bool | None sentinel,
+HandleResult[bool] instead of the previous bool | None sentinel,
 and that sync wrappers catch LoopRunnerError / unexpected exceptions.
 """
 
@@ -13,9 +13,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from horsies.core.types.result import is_ok, is_err
-from horsies.core.workflows.lifecycle_types import (
-    LifecycleErrorCode,
-    LifecycleOperationError,
+from horsies.core.models.workflow.handle_types import (
+    HandleErrorCode,
+    HandleOperationError,
 )
 
 
@@ -100,7 +100,7 @@ def _mock_broker(
 
 @pytest.mark.unit
 class TestPauseWorkflowResult:
-    """pause_workflow returns LifecycleResult[bool]."""
+    """pause_workflow returns HandleResult[bool]."""
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_pause_running_returns_ok_true(self) -> None:
@@ -134,10 +134,8 @@ class TestPauseWorkflowResult:
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, LifecycleOperationError)
-        assert err.code == LifecycleErrorCode.WORKFLOW_NOT_FOUND
-        assert err.operation == 'pause'
-        assert err.stage == 'existence_check'
+        assert isinstance(err, HandleOperationError)
+        assert err.code == HandleErrorCode.WORKFLOW_NOT_FOUND
         assert err.workflow_id == 'wf-1'
         assert err.retryable is False
 
@@ -154,10 +152,8 @@ class TestPauseWorkflowResult:
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, LifecycleOperationError)
-        assert err.code == LifecycleErrorCode.DB_OPERATION_FAILED
-        assert err.operation == 'pause'
-        assert err.stage == 'state_transition'
+        assert isinstance(err, HandleOperationError)
+        assert err.code == HandleErrorCode.DB_OPERATION_FAILED
         assert err.workflow_id == 'wf-1'
         assert err.exception is not None
 
@@ -171,8 +167,8 @@ class TestPauseWorkflowResult:
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, LifecycleOperationError)
-        assert err.code == LifecycleErrorCode.INTERNAL_FAILED
+        assert isinstance(err, HandleOperationError)
+        assert err.code == HandleErrorCode.INTERNAL_FAILED
         assert err.retryable is False
         assert err.exception is not None
 
@@ -184,7 +180,7 @@ class TestPauseWorkflowResult:
 
 @pytest.mark.unit
 class TestResumeWorkflowResult:
-    """resume_workflow returns LifecycleResult[bool]."""
+    """resume_workflow returns HandleResult[bool]."""
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_resume_wrong_state_returns_ok_false(self) -> None:
@@ -207,10 +203,8 @@ class TestResumeWorkflowResult:
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, LifecycleOperationError)
-        assert err.code == LifecycleErrorCode.WORKFLOW_NOT_FOUND
-        assert err.operation == 'resume'
-        assert err.stage == 'existence_check'
+        assert isinstance(err, HandleOperationError)
+        assert err.code == HandleErrorCode.WORKFLOW_NOT_FOUND
         assert err.workflow_id == 'wf-1'
         assert err.retryable is False
 
@@ -227,10 +221,8 @@ class TestResumeWorkflowResult:
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, LifecycleOperationError)
-        assert err.code == LifecycleErrorCode.DB_OPERATION_FAILED
-        assert err.operation == 'resume'
-        assert err.stage == 'state_transition'
+        assert isinstance(err, HandleOperationError)
+        assert err.code == HandleErrorCode.DB_OPERATION_FAILED
         assert err.workflow_id == 'wf-1'
         assert err.exception is not None
 
@@ -244,8 +236,8 @@ class TestResumeWorkflowResult:
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, LifecycleOperationError)
-        assert err.code == LifecycleErrorCode.INTERNAL_FAILED
+        assert isinstance(err, HandleOperationError)
+        assert err.code == HandleErrorCode.INTERNAL_FAILED
         assert err.retryable is False
         assert err.exception is not None
 
@@ -273,10 +265,8 @@ class TestPauseSyncWrapper:
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, LifecycleOperationError)
-        assert err.code == LifecycleErrorCode.LOOP_RUNNER_FAILED
-        assert err.operation == 'pause'
-        assert err.stage == 'sync_bridge'
+        assert isinstance(err, HandleOperationError)
+        assert err.code == HandleErrorCode.LOOP_RUNNER_FAILED
         assert err.workflow_id == 'wf-1'
         assert err.retryable is False
 
@@ -293,10 +283,8 @@ class TestPauseSyncWrapper:
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, LifecycleOperationError)
-        assert err.code == LifecycleErrorCode.INTERNAL_FAILED
-        assert err.operation == 'pause'
-        assert err.stage == 'sync_bridge'
+        assert isinstance(err, HandleOperationError)
+        assert err.code == HandleErrorCode.INTERNAL_FAILED
 
 
 @pytest.mark.unit
@@ -317,10 +305,8 @@ class TestResumeSyncWrapper:
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, LifecycleOperationError)
-        assert err.code == LifecycleErrorCode.LOOP_RUNNER_FAILED
-        assert err.operation == 'resume'
-        assert err.stage == 'sync_bridge'
+        assert isinstance(err, HandleOperationError)
+        assert err.code == HandleErrorCode.LOOP_RUNNER_FAILED
         assert err.workflow_id == 'wf-1'
         assert err.retryable is False
 
@@ -337,7 +323,5 @@ class TestResumeSyncWrapper:
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, LifecycleOperationError)
-        assert err.code == LifecycleErrorCode.INTERNAL_FAILED
-        assert err.operation == 'resume'
-        assert err.stage == 'sync_bridge'
+        assert isinstance(err, HandleOperationError)
+        assert err.code == HandleErrorCode.INTERNAL_FAILED

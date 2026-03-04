@@ -20,8 +20,11 @@ Use this page for the exact method signatures and return types used by workflows
 | `.on_error` | `OnError` | Error policy (`FAIL` or `PAUSE`) |
 | `.output` | `TaskNode[Any] \| SubWorkflowNode[Any] \| None` | Output node for `handle.get()` |
 | `.success_policy` | `SuccessPolicy \| None` | Custom success criteria |
+| `.resend_on_transient_err` | `bool` | Auto-retry transient start errors (default `False`) |
 | `.start(workflow_id=None)` | `(str \| None) -> WorkflowStartResult[WorkflowHandle[T]]` | Start workflow (sync) |
 | `.start_async(workflow_id=None)` | `(str \| None) -> WorkflowStartResult[WorkflowHandle[T]]` | Start workflow (async) |
+| `.retry_start(error)` | `(WorkflowStartError) -> WorkflowStartResult[WorkflowHandle[T]]` | Retry a failed start (sync) |
+| `.retry_start_async(error)` | `(WorkflowStartError) -> WorkflowStartResult[WorkflowHandle[T]]` | Retry a failed start (async) |
 
 ### WorkflowStartResult
 
@@ -41,46 +44,49 @@ Returned by `.start()`, `.start_async()`, `start_workflow()`, and `start_workflo
 | `code` | `WorkflowStartErrorCode` | Failure category |
 | `message` | `str` | Human-readable description |
 | `retryable` | `bool` | Whether caller can safely retry |
-| `stage` | `WorkflowStartStage` | Pipeline stage where failure occurred |
 | `workflow_name` | `str` | Workflow spec name |
 | `workflow_id` | `str` | Generated workflow ID (always populated) |
 | `exception` | `BaseException \| None` | Original cause |
-| `details` | `dict[str, Any] \| None` | Structured metadata |
 
 **WorkflowStartErrorCode values:**
 
 | Code | Retryable | When |
 |---|---|---|
 | `BROKER_NOT_CONFIGURED` | No | `spec.start()` called without broker |
-| `VALIDATION_FAILED` | No | DAG validation failed (unresolved queue/priority) |
-| `SERIALIZATION_FAILED` | No | Args/kwargs serialization failed |
-| `SCHEMA_INIT_FAILED` | Maybe | Database schema initialization failed |
-| `DB_OPERATION_FAILED` | Maybe | Database transaction failed |
-| `LOOP_RUNNER_FAILED` | No | Sync bridge infrastructure failure |
-| `INTERNAL_FAILED` | No | Unexpected sync-path exception |
-
-**WorkflowStartStage values:**
-
-| Stage | Description |
-|---|---|
-| `PREVALIDATE` | Pre-submission validation |
-| `ENSURE_SCHEMA` | Schema initialization |
-| `DB_TRANSACTION` | Database insert/enqueue |
-| `SYNC_BRIDGE` | Sync wrapper infrastructure |
+| `VALIDATION_FAILED` | No | DAG validation, serialization, or args error |
+| `ENQUEUE_FAILED` | Maybe | Schema init or DB transaction failed |
+| `INTERNAL_FAILED` | No | Sync bridge or unexpected exception |
 
 **Usage:**
 
 ```python
-from horsies import is_err
+from horsies import Ok, Err
 
-result = spec.start()
-if is_err(result):
-    err = result.err_value
-    print(f"[{err.code}] {err.message} (retryable={err.retryable})")
-    return
+match spec.start():
+    case Ok(handle):
+        handle.get(timeout_ms=30000)  # Wait for completion
+        result = handle.result_for(output_node)
+        if result.is_ok():
+            print(f"Success: {result.ok_value}")
+        else:
+            print(f"Task failed: {result.err_value.error_code}")
 
-handle = result.ok_value  # WorkflowHandle[T]
+    case Err(err) if err.retryable:
+        # Transient infra failure — retry with stored workflow_id
+        match spec.retry_start(err):
+            case Ok(handle):
+                handle.get(timeout_ms=30000)
+            case Err(retry_err):
+                print(f"Retry failed: {retry_err.code} - {retry_err.message}")
+
+    case Err(err):
+        print(f"[{err.code}] {err.message}")
 ```
+
+> **Idempotency caveat:** `retry_start` is best-effort idempotent by `workflow_id`.
+> Unlike task send, workflow start does not verify payload identity on collision.
+> Safe for transient DB retries within the same deploy. Cross-version spec drift
+> on the same `workflow_id` will silently return the existing handle.
 
 ### WorkflowHandle
 

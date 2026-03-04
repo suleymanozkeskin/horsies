@@ -14,59 +14,59 @@ Enqueue tasks with `.send()`, `.send_async()`, or `.schedule()`. All return a `T
 ### Send a Task (Sync)
 
 ```python
+from horsies import Ok, Err
 from instance import my_task
 
-handle = my_task.send(arg1, arg2, key="value").unwrap()
-print(f"Task submitted: {handle.task_id}")
-```
-
-Or with explicit error handling:
-
-```python
-from horsies import is_ok, is_err
-
-send_result = my_task.send(arg1, arg2, key="value")
-if is_ok(send_result):
-    handle = send_result.ok_value
-    print(f"Task submitted: {handle.task_id}")
-else:
-    error = send_result.err_value
-    print(f"Send failed: {error.code} - {error.message}")
+match my_task.send(arg1, arg2, key="value"):
+    case Ok(handle):
+        print(f"Task submitted: {handle.task_id}")
+    case Err(send_err):
+        print(f"Send failed: {send_err.code} - {send_err.message}")
 ```
 
 ### Send a Task (Async)
 
 ```python
+from horsies import Ok, Err
+
 async def my_endpoint():
-    send_result = await my_task.send_async(arg1, arg2)
-    handle = send_result.unwrap()
-    return {"task_id": handle.task_id}
+    match await my_task.send_async(arg1, arg2):
+        case Ok(handle):
+            return {"task_id": handle.task_id}
+        case Err(send_err):
+            return {"error": send_err.message}
 ```
 `send_async()` only enqueues the task. Use `handle.get_async()` if you want to wait for completion.
 
 ### Delay Execution
 
 ```python
-# Execute after 60 seconds
-handle = my_task.schedule(60, arg1, arg2).unwrap()
+from horsies import Ok, Err
 
-# Execute after 5 minutes
-handle = my_task.schedule(300, arg1, arg2).unwrap()
+match my_task.schedule(60, arg1, arg2):
+    case Ok(handle):
+        print(f"Scheduled: {handle.task_id}")
+    case Err(err):
+        print(f"Schedule failed: {err.code}")
 ```
 
 ### Wait for Result
 
 ```python
-handle = my_task.send(...).unwrap()
+from horsies import Ok, Err
 
-# Blocking wait
-result = handle.get()
+match my_task.send(arg1, arg2):
+    case Ok(handle):
+        # Blocking wait
+        result = handle.get()
 
-# With timeout (milliseconds)
-result = handle.get(timeout_ms=5000)
+        # With timeout (milliseconds)
+        result = handle.get(timeout_ms=5000)
 
-# Async wait
-result = await handle.get_async(timeout_ms=5000)
+        # Async wait
+        result = await handle.get_async(timeout_ms=5000)
+    case Err(err):
+        print(f"Send failed: {err.code}")
 ```
 `get_async()` waits via broker notifications (LISTEN/NOTIFY) with a polling fallback.
 
@@ -82,17 +82,21 @@ my_task.send(arg1, arg2)
 Arguments must be JSON-serializable. Pydantic models and dataclass instances are supported directly and rehydrated on the worker side.
 
 ```python
-handle = process.send(
-    data={"key": "value", "nested": {"a": 1}},
-    items=[1, 2, 3],
-).unwrap()
+from horsies import Ok, Err
+
+match process.send(data={"key": "value", "nested": {"a": 1}}, items=[1, 2, 3]):
+    case Ok(handle):
+        result = handle.get()
+    case Err(err):
+        print(f"Send failed: {err.code}")
 
 # Pydantic models - pass the instance to preserve type metadata
 order = Order(id=123, items=["a", "b"])
-handle = process_order.send(order=order).unwrap()
-
-# Use model_dump() only when a plain dict is required
-handle = process_order.send(order=order.model_dump()).unwrap()
+match process_order.send(order=order):
+    case Ok(handle):
+        result = handle.get()
+    case Err(err):
+        print(f"Send failed: {err.code}")
 ```
 
 Pydantic models and dataclasses must be defined in importable modules (not `__main__` and not inside functions).
@@ -124,17 +128,21 @@ result = my_task.send("test")  # Err(SEND_SUPPRESSED)
 
 # Correct - call from functions/endpoints
 def process():
-    handle = my_task.send("test").unwrap()
+    match my_task.send("test"):
+        case Ok(handle):
+            ...
+        case Err(err):
+            ...
 ```
 
 **Don't pass non-serializable objects.**
 
 ```python
 # Wrong
-handle = my_task.send(connection=db_connection).unwrap()
+my_task.send(connection=db_connection)
 
 # Correct
-handle = my_task.send(connection_url=str(db_connection.url)).unwrap()
+my_task.send(connection_url=str(db_connection.url))
 ```
 
 ## Retrying Failed Sends
@@ -142,14 +150,19 @@ handle = my_task.send(connection_url=str(db_connection.url)).unwrap()
 When `.send()` fails with `ENQUEUE_FAILED` (a transient broker error), use the retry methods to replay the exact same payload without re-supplying arguments. The `enqueue_sha` on the stored `TaskSendPayload` guarantees the retry carries the identical serialized payload.
 
 ```python
-from horsies import is_err, TaskSendErrorCode
+from horsies import Ok, Err
 
-send_result = my_task.send(arg1, arg2)
-if is_err(send_result):
-    error = send_result.err_value
-    if error.retryable:
-        retry_result = my_task.retry_send(error)
-        handle = retry_result.unwrap()
+match my_task.send(arg1, arg2):
+    case Ok(handle):
+        result = handle.get()
+    case Err(err) if err.retryable:
+        match my_task.retry_send(err):
+            case Ok(handle):
+                result = handle.get()
+            case Err(retry_err):
+                print(f"Retry failed: {retry_err.code}")
+    case Err(err):
+        print(f"Permanent failure: {err.code}")
 ```
 
 Retry methods only accept `ENQUEUE_FAILED` errors. Passing `SEND_SUPPRESSED`, `VALIDATION_FAILED`, or `PAYLOAD_MISMATCH` returns `Err(TaskSendError(VALIDATION_FAILED))`.

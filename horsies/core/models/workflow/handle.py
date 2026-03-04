@@ -30,37 +30,7 @@ from .enums import OkT, OutT, WorkflowStatus, WorkflowTaskStatus
 from .handle_types import HandleErrorCode, HandleOperationError, HandleResult
 from .nodes import NodeKey
 
-if TYPE_CHECKING:
-    from horsies.core.workflows.lifecycle_types import (
-        LifecycleOperationError,
-    )
-
 logger = get_logger('workflow.handle')
-
-
-def _lifecycle_err_to_handle_err(
-    err: 'LifecycleOperationError',
-    operation: str,
-    workflow_id: str,
-) -> HandleOperationError:
-    """Map a lifecycle-layer error to a handle-layer error."""
-    from horsies.core.workflows.lifecycle_types import LifecycleErrorCode
-
-    code_map: dict[LifecycleErrorCode, HandleErrorCode] = {
-        LifecycleErrorCode.WORKFLOW_NOT_FOUND: HandleErrorCode.WORKFLOW_NOT_FOUND,
-        LifecycleErrorCode.DB_OPERATION_FAILED: HandleErrorCode.DB_OPERATION_FAILED,
-        LifecycleErrorCode.LOOP_RUNNER_FAILED: HandleErrorCode.LOOP_RUNNER_FAILED,
-        LifecycleErrorCode.INTERNAL_FAILED: HandleErrorCode.INTERNAL_FAILED,
-    }
-    return HandleOperationError(
-        code=code_map.get(err.code, HandleErrorCode.INTERNAL_FAILED),
-        message=err.message,
-        retryable=err.retryable,
-        operation=operation,
-        stage=err.stage,
-        workflow_id=workflow_id,
-        exception=err.exception,
-    )
 
 _T = TypeVar('_T')
 
@@ -228,8 +198,6 @@ class WorkflowHandle(Generic[OutT]):
                 code=HandleErrorCode.LOOP_RUNNER_FAILED,
                 message=f'Loop runner failed for {operation}: {exc}',
                 retryable=False,
-                operation=operation,
-                stage='loop_runner',
                 workflow_id=self.workflow_id,
                 exception=exc,
             ))
@@ -238,8 +206,6 @@ class WorkflowHandle(Generic[OutT]):
                 code=HandleErrorCode.INTERNAL_FAILED,
                 message=f'Unexpected error in sync bridge for {operation}: {exc}',
                 retryable=False,
-                operation=operation,
-                stage='loop_runner',
                 workflow_id=self.workflow_id,
                 exception=exc,
             ))
@@ -287,8 +253,6 @@ class WorkflowHandle(Generic[OutT]):
                         code=HandleErrorCode.WORKFLOW_NOT_FOUND,
                         message=f'Workflow {self.workflow_id} not found',
                         retryable=False,
-                        operation='status',
-                        stage='status_lookup',
                         workflow_id=self.workflow_id,
                     ))
                 return Ok(WorkflowStatus(row.status))
@@ -297,8 +261,6 @@ class WorkflowHandle(Generic[OutT]):
                 code=HandleErrorCode.DB_OPERATION_FAILED,
                 message=f'DB query failed for workflow {self.workflow_id} status: {exc}',
                 retryable=is_retryable_connection_error(exc),
-                operation='status',
-                stage='query',
                 workflow_id=self.workflow_id,
                 exception=exc,
             ))
@@ -689,8 +651,6 @@ class WorkflowHandle(Generic[OutT]):
                 code=HandleErrorCode.DB_OPERATION_FAILED,
                 message=f'DB query failed for workflow {self.workflow_id} results: {exc}',
                 retryable=is_retryable_connection_error(exc),
-                operation='results',
-                stage='query',
                 workflow_id=self.workflow_id,
                 exception=exc,
             ))
@@ -749,8 +709,6 @@ class WorkflowHandle(Generic[OutT]):
                 code=HandleErrorCode.DB_OPERATION_FAILED,
                 message=f'DB query failed for workflow {self.workflow_id} tasks: {exc}',
                 retryable=is_retryable_connection_error(exc),
-                operation='tasks',
-                stage='query',
                 workflow_id=self.workflow_id,
                 exception=exc,
             ))
@@ -763,7 +721,6 @@ class WorkflowHandle(Generic[OutT]):
 
     async def cancel_async(self) -> HandleResult[None]:
         """Async version of cancel()."""
-        stage = 'query'
         try:
             async with self.broker.session_factory() as session:
                 # Cancel workflow (UPDATE is a no-op if not found or already terminal)
@@ -784,8 +741,6 @@ class WorkflowHandle(Generic[OutT]):
                         code=HandleErrorCode.WORKFLOW_NOT_FOUND,
                         message=f'Workflow {self.workflow_id} not found',
                         retryable=False,
-                        operation='cancel',
-                        stage='existence_check',
                         workflow_id=self.workflow_id,
                     ))
 
@@ -821,7 +776,6 @@ class WorkflowHandle(Generic[OutT]):
                     {'wf_id': self.workflow_id},
                 )
 
-                stage = 'commit'
                 await session.commit()
             return Ok(None)
         except SQLAlchemyError as exc:
@@ -829,8 +783,6 @@ class WorkflowHandle(Generic[OutT]):
                 code=HandleErrorCode.DB_OPERATION_FAILED,
                 message=f'Cancel failed for workflow {self.workflow_id}: {exc}',
                 retryable=is_retryable_connection_error(exc),
-                operation='cancel',
-                stage=stage,
                 workflow_id=self.workflow_id,
                 exception=exc,
             ))
@@ -861,12 +813,7 @@ class WorkflowHandle(Generic[OutT]):
         """
         from horsies.core.workflows.engine import pause_workflow
 
-        result = await pause_workflow(self.broker, self.workflow_id)
-        match result:
-            case Ok(value):
-                return Ok(value)
-            case Err(err):
-                return Err(_lifecycle_err_to_handle_err(err, 'pause', self.workflow_id))
+        return await pause_workflow(self.broker, self.workflow_id)
 
     # ─── resume ──────────────────────────────────────────────────────
 
@@ -892,9 +839,4 @@ class WorkflowHandle(Generic[OutT]):
         """
         from horsies.core.workflows.engine import resume_workflow
 
-        result = await resume_workflow(self.broker, self.workflow_id)
-        match result:
-            case Ok(value):
-                return Ok(value)
-            case Err(err):
-                return Err(_lifecycle_err_to_handle_err(err, 'resume', self.workflow_id))
+        return await resume_workflow(self.broker, self.workflow_id)

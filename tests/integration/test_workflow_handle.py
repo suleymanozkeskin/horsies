@@ -861,7 +861,6 @@ class TestWorkflowHandleCancel:
         assert is_err(cancel_r)
         assert cancel_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
         assert cancel_r.err_value.retryable is False
-        assert cancel_r.err_value.operation == 'cancel'
 
     async def test_worker_filter_rejects_cancelled_workflow_claimed_rows(
         self,
@@ -1298,7 +1297,6 @@ class TestWorkflowHandlePauseResume:
         assert is_err(pause_r)
         assert pause_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
         assert pause_r.err_value.retryable is False
-        assert pause_r.err_value.operation == 'pause'
 
     async def test_resume_nonexistent_returns_not_found(
         self,
@@ -1315,7 +1313,6 @@ class TestWorkflowHandlePauseResume:
         assert is_err(resume_r)
         assert resume_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
         assert resume_r.err_value.retryable is False
-        assert resume_r.err_value.operation == 'resume'
 
     async def test_pause_resume_round_trip(
         self,
@@ -1409,7 +1406,7 @@ class TestWorkflowHandleInfraErrors:
 
         assert is_err(status_r)
         assert status_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
-        assert status_r.err_value.operation == 'status'
+        assert status_r.err_value.workflow_id
         assert status_r.err_value.retryable is True
 
     async def test_get_db_error_returns_taskresult_broker_error(
@@ -1468,7 +1465,7 @@ class TestWorkflowHandleInfraErrors:
 
         assert is_err(cancel_r)
         assert cancel_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
-        assert cancel_r.err_value.operation == 'cancel'
+        assert cancel_r.err_value.retryable is True
 
     async def test_results_db_error_returns_err_db_operation_failed(
         self,
@@ -1497,7 +1494,7 @@ class TestWorkflowHandleInfraErrors:
 
         assert is_err(results_r)
         assert results_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
-        assert results_r.err_value.operation == 'results'
+        assert results_r.err_value.workflow_id
 
     async def test_handle_methods_do_not_leak_db_exceptions(
         self,

@@ -27,7 +27,7 @@ from horsies.core.workflows.engine import (
     enqueue_workflow_task,
     enqueue_subworkflow_task,
 )
-from horsies.core.workflows.start_types import WorkflowStartErrorCode, WorkflowStartStage
+from horsies.core.workflows.start_types import WorkflowStartErrorCode
 from horsies.core.codec.serde import loads_json
 
 from .conftest import (
@@ -2197,7 +2197,6 @@ class TestWorkflowStartErrors:
         assert is_err(r)
         assert r.err_value.code == WorkflowStartErrorCode.BROKER_NOT_CONFIGURED
         assert r.err_value.retryable is False
-        assert r.err_value.stage == WorkflowStartStage.PREVALIDATE
         assert r.err_value.workflow_name == 'no_broker'
         assert r.err_value.workflow_id  # always populated
 
@@ -2214,7 +2213,6 @@ class TestWorkflowStartErrors:
         r = await start_workflow_async(spec, broker)
         assert is_err(r)
         assert r.err_value.code == WorkflowStartErrorCode.VALIDATION_FAILED
-        assert r.err_value.stage == WorkflowStartStage.PREVALIDATE
         assert 'unresolved queue' in r.err_value.message
         assert r.err_value.retryable is False
         assert r.err_value.workflow_name == 'val_q_wf'
@@ -2234,7 +2232,6 @@ class TestWorkflowStartErrors:
         r = await start_workflow_async(spec, broker)
         assert is_err(r)
         assert r.err_value.code == WorkflowStartErrorCode.VALIDATION_FAILED
-        assert r.err_value.stage == WorkflowStartStage.PREVALIDATE
         assert 'unresolved priority' in r.err_value.message
         assert r.err_value.retryable is False
 
@@ -2242,7 +2239,7 @@ class TestWorkflowStartErrors:
         self,
         setup: _SetupTuple,
     ) -> None:
-        """Schema init failure returns Err(SCHEMA_INIT_FAILED)."""
+        """Schema init failure returns Err(ENQUEUE_FAILED)."""
         from unittest.mock import AsyncMock, patch
 
         from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
@@ -2264,8 +2261,7 @@ class TestWorkflowStartErrors:
             r = await start_workflow_async(spec, broker)
 
         assert is_err(r)
-        assert r.err_value.code == WorkflowStartErrorCode.SCHEMA_INIT_FAILED
-        assert r.err_value.stage == WorkflowStartStage.ENSURE_SCHEMA
+        assert r.err_value.code == WorkflowStartErrorCode.ENQUEUE_FAILED
         assert r.err_value.retryable is True
         assert 'connection refused' in r.err_value.message
         assert r.err_value.workflow_id  # always populated
@@ -2298,8 +2294,7 @@ class TestWorkflowStartErrors:
             r = await start_workflow_async(spec, broker)
 
         assert is_err(r)
-        assert r.err_value.code == WorkflowStartErrorCode.DB_OPERATION_FAILED
-        assert r.err_value.stage == WorkflowStartStage.DB_TRANSACTION
+        assert r.err_value.code == WorkflowStartErrorCode.ENQUEUE_FAILED
         assert r.err_value.retryable is True
         assert r.err_value.workflow_id  # always populated
 
@@ -2352,8 +2347,7 @@ class TestWorkflowStartErrors:
             r = await start_workflow_async(spec, broker)
 
         assert is_err(r)
-        assert r.err_value.code == WorkflowStartErrorCode.DB_OPERATION_FAILED
-        assert r.err_value.stage == WorkflowStartStage.DB_TRANSACTION
+        assert r.err_value.code == WorkflowStartErrorCode.ENQUEUE_FAILED
 
         # Verify no rows persisted
         wf_check = await session.execute(
@@ -2365,7 +2359,7 @@ class TestWorkflowStartErrors:
         self,
         setup: _SetupTuple,
     ) -> None:
-        """Sync bridge failure returns Err(LOOP_RUNNER_FAILED)."""
+        """Sync bridge failure returns Err(INTERNAL_FAILED)."""
         from unittest.mock import patch, MagicMock
 
         from horsies.core.workflows.engine import start_workflow
@@ -2391,8 +2385,7 @@ class TestWorkflowStartErrors:
             r = start_workflow(spec, broker)
 
         assert is_err(r)
-        assert r.err_value.code == WorkflowStartErrorCode.LOOP_RUNNER_FAILED
-        assert r.err_value.stage == WorkflowStartStage.SYNC_BRIDGE
+        assert r.err_value.code == WorkflowStartErrorCode.INTERNAL_FAILED
         assert r.err_value.retryable is False
         assert r.err_value.workflow_name == 'sync_fail_wf'
         assert r.err_value.workflow_id  # always populated
@@ -2427,7 +2420,6 @@ class TestWorkflowStartErrors:
 
         assert is_err(r)
         assert r.err_value.code == WorkflowStartErrorCode.INTERNAL_FAILED
-        assert r.err_value.stage == WorkflowStartStage.SYNC_BRIDGE
         assert r.err_value.retryable is False
         assert r.err_value.workflow_name == 'sync_internal_fail_wf'
         assert r.err_value.workflow_id  # always populated

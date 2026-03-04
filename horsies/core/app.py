@@ -955,6 +955,7 @@ class Horsies:
             workflow_def_module=workflow_def_module,
             workflow_def_qualname=workflow_def_qualname,
             workflow_def_cls=workflow_def_cls,
+            resend_on_transient_err=self.config.resend_on_transient_err,
         )
         if output is None:
             return cast('WorkflowSpec[WorkflowTerminalResults]', spec)

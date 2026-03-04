@@ -66,21 +66,26 @@ Requirements:
 Create `producer.py`:
 
 ```python
+from horsies import Ok, Err
 from instance import app, add_numbers, process_data
 
 # Send and wait for result
-handle = add_numbers.send(5, 3).unwrap()
-result = handle.get()
-
-if result.is_err():
-    handle_error(result.err_value)
-else:
-    do_something(result.ok_value)
-
+match add_numbers.send(5, 3):
+    case Ok(handle):
+        result = handle.get()
+        if result.is_ok():
+            do_something(result.ok_value)
+        else:
+            handle_error(result.err_value)
+    case Err(send_err):
+        print(f"Send failed: {send_err.code} - {send_err.message}")
 
 # Send with blocking timeout
-handle = process_data.send({"key": "value"}).unwrap()
-result = handle.get(timeout_ms=5000)
+match process_data.send(data={"key": "value"}):
+    case Ok(handle):
+        result = handle.get(timeout_ms=5000)
+    case Err(send_err):
+        print(f"Send failed: {send_err.code}")
 ```
 
 ## 4. Run the Worker
@@ -96,12 +101,16 @@ The worker connects to PostgreSQL, subscribes to notifications, claims tasks, ex
 For async frameworks (FastAPI, etc.):
 
 ```python
+from horsies import Ok, Err
 from instance import add_numbers
 
 async def my_endpoint():
-    handle = (await add_numbers.send_async(10, 20)).unwrap()
-    result = await handle.get_async(timeout_ms=10000)
-    return {"result": result.ok_value if result.is_ok() else None}
+    match await add_numbers.send_async(10, 20):
+        case Ok(handle):
+            result = await handle.get_async(timeout_ms=10000)
+            return {"result": result.ok_value if result.is_ok() else None}
+        case Err(send_err):
+            return {"error": send_err.message}
 ```
 
 These async APIs are producer-side I/O helpers; task execution still happens in worker processes.

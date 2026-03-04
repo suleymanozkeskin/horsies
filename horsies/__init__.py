@@ -49,7 +49,6 @@ from .core.workflows.start_types import (
     WorkflowStartError,
     WorkflowStartErrorCode,
     WorkflowStartResult,
-    WorkflowStartStage,
 )
 from .core.models.schedule import (
     Weekday,
@@ -130,7 +129,6 @@ __all__ = [
     'WorkflowStartError',
     'WorkflowStartErrorCode',
     'WorkflowStartResult',
-    'WorkflowStartStage',
     # Scheduling
     'Weekday',
     'IntervalSchedule',

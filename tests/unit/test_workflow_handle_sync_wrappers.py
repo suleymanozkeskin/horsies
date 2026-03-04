@@ -47,8 +47,6 @@ class TestSyncCallWrapStrategy:
 
         assert is_err(result)
         assert result.err_value.code == HandleErrorCode.LOOP_RUNNER_FAILED
-        assert result.err_value.operation == 'status'
-        assert result.err_value.stage == 'loop_runner'
         assert result.err_value.retryable is False
         assert result.err_value.workflow_id == 'test-wf-id'
 
@@ -66,7 +64,7 @@ class TestSyncCallWrapStrategy:
 
         assert is_err(result)
         assert result.err_value.code == HandleErrorCode.LOOP_RUNNER_FAILED
-        assert result.err_value.operation == 'cancel'
+        assert result.err_value.workflow_id == 'test-wf-id'
 
     def test_pause_loop_runner_failure_returns_loop_runner_failed(self) -> None:
         """pause() returns Err(LOOP_RUNNER_FAILED) when LoopRunner fails."""
@@ -82,7 +80,7 @@ class TestSyncCallWrapStrategy:
 
         assert is_err(result)
         assert result.err_value.code == HandleErrorCode.LOOP_RUNNER_FAILED
-        assert result.err_value.operation == 'pause'
+        assert result.err_value.workflow_id == 'test-wf-id'
 
     def test_resume_loop_runner_failure_returns_loop_runner_failed(self) -> None:
         """resume() returns Err(LOOP_RUNNER_FAILED) when LoopRunner fails."""
@@ -98,7 +96,7 @@ class TestSyncCallWrapStrategy:
 
         assert is_err(result)
         assert result.err_value.code == HandleErrorCode.LOOP_RUNNER_FAILED
-        assert result.err_value.operation == 'resume'
+        assert result.err_value.workflow_id == 'test-wf-id'
 
     def test_results_loop_runner_failure_returns_loop_runner_failed(self) -> None:
         """results() returns Err(LOOP_RUNNER_FAILED) when LoopRunner fails."""
@@ -114,7 +112,7 @@ class TestSyncCallWrapStrategy:
 
         assert is_err(result)
         assert result.err_value.code == HandleErrorCode.LOOP_RUNNER_FAILED
-        assert result.err_value.operation == 'results'
+        assert result.err_value.workflow_id == 'test-wf-id'
 
     def test_tasks_loop_runner_failure_returns_loop_runner_failed(self) -> None:
         """tasks() returns Err(LOOP_RUNNER_FAILED) when LoopRunner fails."""
@@ -130,7 +128,7 @@ class TestSyncCallWrapStrategy:
 
         assert is_err(result)
         assert result.err_value.code == HandleErrorCode.LOOP_RUNNER_FAILED
-        assert result.err_value.operation == 'tasks'
+        assert result.err_value.workflow_id == 'test-wf-id'
 
     def test_status_unexpected_exception_returns_internal_failed(self) -> None:
         """status() returns Err(INTERNAL_FAILED) on unexpected exception."""
@@ -146,7 +144,6 @@ class TestSyncCallWrapStrategy:
 
         assert is_err(result)
         assert result.err_value.code == HandleErrorCode.INTERNAL_FAILED
-        assert result.err_value.operation == 'status'
         assert result.err_value.retryable is False
 
     def test_sync_call_propagates_ok_result(self) -> None:

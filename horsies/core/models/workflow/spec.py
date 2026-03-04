@@ -51,7 +51,7 @@ from .typing_utils import (
 if TYPE_CHECKING:
     from horsies.core.brokers.postgres import PostgresBroker
     from horsies.core.models.workflow.handle import WorkflowHandle
-    from horsies.core.workflows.start_types import WorkflowStartResult
+    from horsies.core.workflows.start_types import WorkflowStartError, WorkflowStartResult
 
 
 # =============================================================================
@@ -130,6 +130,14 @@ class WorkflowSpec(Generic[OutT]):
     """
     - Database broker for start()/start_async()
     - Set automatically by app.workflow()
+    """
+
+    resend_on_transient_err: bool = False
+    """
+    - When True, start()/start_async() automatically retry transient
+      infra failures (ENQUEUE_FAILED with retryable=True) up to 3 times
+      with exponential backoff.
+    - Set automatically by app.workflow() from AppConfig.resend_on_transient_err.
     """
 
     _frozen: bool = field(default=False, init=False, repr=False, compare=False)
@@ -1300,7 +1308,6 @@ class WorkflowSpec(Generic[OutT]):
             from horsies.core.workflows.start_types import (
                 WorkflowStartError as _WSE,
                 WorkflowStartErrorCode as _WSEC,
-                WorkflowStartStage as _WSS,
             )
             from horsies.core.types.result import Err as _Err
 
@@ -1308,7 +1315,6 @@ class WorkflowSpec(Generic[OutT]):
                 code=_WSEC.BROKER_NOT_CONFIGURED,
                 message='WorkflowSpec requires a broker. Use app.workflow() or set broker.',
                 retryable=False,
-                stage=_WSS.PREVALIDATE,
                 workflow_name=self.name,
                 workflow_id=workflow_id or str(_uuid.uuid4()),
             ))
@@ -1316,7 +1322,13 @@ class WorkflowSpec(Generic[OutT]):
         # Import here to avoid circular imports
         from horsies.core.workflows.engine import start_workflow
         workflow_sent_at = datetime.now(timezone.utc)
-        return start_workflow(self, self.broker, workflow_id, workflow_sent_at)
+        return start_workflow(
+            self,
+            self.broker,
+            workflow_id,
+            workflow_sent_at,
+            resend_on_transient_err=self.resend_on_transient_err,
+        )
 
     async def start_async(
         self, workflow_id: str | None = None,
@@ -1336,7 +1348,6 @@ class WorkflowSpec(Generic[OutT]):
             from horsies.core.workflows.start_types import (
                 WorkflowStartError as _WSE,
                 WorkflowStartErrorCode as _WSEC,
-                WorkflowStartStage as _WSS,
             )
             from horsies.core.types.result import Err as _Err
 
@@ -1344,7 +1355,6 @@ class WorkflowSpec(Generic[OutT]):
                 code=_WSEC.BROKER_NOT_CONFIGURED,
                 message='WorkflowSpec requires a broker. Use app.workflow() or set broker.',
                 retryable=False,
-                stage=_WSS.PREVALIDATE,
                 workflow_name=self.name,
                 workflow_id=workflow_id or str(_uuid.uuid4()),
             ))
@@ -1352,4 +1362,85 @@ class WorkflowSpec(Generic[OutT]):
         # Import here to avoid circular imports
         from horsies.core.workflows.engine import start_workflow_async
         workflow_sent_at = datetime.now(timezone.utc)
-        return await start_workflow_async(self, self.broker, workflow_id, workflow_sent_at)
+        return await start_workflow_async(
+            self,
+            self.broker,
+            workflow_id,
+            workflow_sent_at,
+            resend_on_transient_err=self.resend_on_transient_err,
+        )
+
+    def _validate_start_retry(
+        self, error: 'WorkflowStartError',
+    ) -> 'WorkflowStartResult[str]':
+        """Validate a WorkflowStartError for retry eligibility.
+
+        Returns ``Ok(workflow_id)`` when the error is retryable, or
+        ``Err(WorkflowStartError(VALIDATION_FAILED))`` when it is not.
+        """
+        from horsies.core.workflows.start_types import (
+            WorkflowStartError as _WSE,
+            WorkflowStartErrorCode as _WSEC,
+        )
+        from horsies.core.types.result import Ok as _Ok, Err as _Err
+
+        if error.code != _WSEC.ENQUEUE_FAILED:
+            return _Err(_WSE(
+                code=_WSEC.VALIDATION_FAILED,
+                message=f'retry is only valid for ENQUEUE_FAILED errors, got {error.code!r}',
+                retryable=False,
+                workflow_name=self.name,
+                workflow_id=error.workflow_id,
+            ))
+        if error.workflow_name != self.name:
+            return _Err(_WSE(
+                code=_WSEC.VALIDATION_FAILED,
+                message=(
+                    f'cross-workflow retry: error is for {error.workflow_name!r} '
+                    f'but this workflow is {self.name!r}'
+                ),
+                retryable=False,
+                workflow_name=self.name,
+                workflow_id=error.workflow_id,
+            ))
+        return _Ok(error.workflow_id)
+
+    def retry_start(
+        self, error: 'WorkflowStartError',
+    ) -> 'WorkflowStartResult[WorkflowHandle[OutT]]':
+        """Retry a failed workflow start using the stored workflow_id.
+
+        Best-effort idempotent by workflow_id (not payload-verified).
+        Safe for transient DB retries within the same deploy.  Cannot
+        detect spec changes on collision.
+
+        Only ``ENQUEUE_FAILED`` errors are eligible for retry.
+
+        Args:
+            error: The ``WorkflowStartError`` from a previous ``start()`` call.
+
+        Returns:
+            ``Ok(WorkflowHandle)`` on success,
+            ``Err(WorkflowStartError)`` on failure.
+        """
+        v = self._validate_start_retry(error)
+        if is_err(v):
+            return v  # type: ignore[return-value]
+        return self.start(workflow_id=v.ok_value)
+
+    async def retry_start_async(
+        self, error: 'WorkflowStartError',
+    ) -> 'WorkflowStartResult[WorkflowHandle[OutT]]':
+        """Async variant of ``retry_start()``.
+
+        Args:
+            error: The ``WorkflowStartError`` from a previous ``start_async()`` call.
+
+        Returns:
+            ``Ok(WorkflowHandle)`` on success,
+            ``Err(WorkflowStartError)`` on failure.
+        """
+        v = self._validate_start_retry(error)
+        if is_err(v):
+            return v  # type: ignore[return-value]
+        return await self.start_async(workflow_id=v.ok_value)

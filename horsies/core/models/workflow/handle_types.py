@@ -40,8 +40,6 @@ class HandleOperationError:
         code: which failure category
         message: human-readable description
         retryable: whether the caller can safely retry
-        operation: handle method name (status, cancel, pause, resume, results, tasks)
-        stage: coarse location within the operation (status_lookup, query, commit, loop_runner)
         workflow_id: the workflow this handle refers to
         exception: the original cause (if any)
     """
@@ -49,8 +47,6 @@ class HandleOperationError:
     code: HandleErrorCode
     message: str
     retryable: bool
-    operation: str
-    stage: str
     workflow_id: str
     exception: BaseException | None = None
 
