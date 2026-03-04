@@ -362,13 +362,13 @@ from horsies import LibraryErrorCode
 @app.task()
 def recovery_handler(input_result: TaskResult[Data, TaskError]) -> TaskResult[...]:
     if input_result.is_err():
-        err = input_result.unwrap_err()
+        err = input_result.err_value
         if err.error_code == LibraryErrorCode.UPSTREAM_SKIPPED:
             # Dependency was skipped (upstream failure)
             return TaskResult(ok={"status": "skipped_upstream"})
         # Handle actual failure
         return TaskResult(ok={"recovered": True, "error": err})
-    return TaskResult(ok={"passed_through": input_result.unwrap()})
+    return TaskResult(ok={"passed_through": input_result.ok_value})
 ```
 
 ### UPSTREAM_SKIPPED Sentinel
@@ -702,11 +702,11 @@ def aggregate(workflow_ctx: WorkflowContext | None = None) -> TaskResult[Summary
     b_result: TaskResult[str, TaskError] = workflow_ctx.result_for(node_b)
 
     if a_result.is_err():
-        return TaskResult(err=a_result.unwrap_err())
+        return TaskResult(err=a_result.err_value)
 
     return TaskResult(ok=Summary(
-        data=a_result.unwrap(),
-        transformed=b_result.unwrap() if b_result.is_ok() else None,
+        data=a_result.ok_value,
+        transformed=b_result.ok_value if b_result.is_ok() else None,
     ))
 ```
 
@@ -719,7 +719,8 @@ def aggregate(workflow_ctx: WorkflowContext | None = None) -> TaskResult[Summary
 a_result: TaskResult[int, TaskError] = ctx.result_for(node_a)      # node_a is TaskNode[int]
 b_result: TaskResult[str, TaskError] = ctx.result_for(node_b)      # node_b is TaskNode[str]
 
-value: int = a_result.unwrap()  # Type checker knows this is int
+if a_result.is_ok():
+    value: int = a_result.ok_value  # Type checker knows this is int
 ```
 
 ### NodeKey (Stable Lookup)
@@ -760,7 +761,7 @@ def fan_in(workflow_ctx: WorkflowContext | None = None) -> TaskResult[str, TaskE
     i: int = 0
     result = workflow_ctx.result_for(NodeKey(f"save_{i}"))
     if result.is_err():
-        return TaskResult(err=result.unwrap_err())
+        return TaskResult(err=result.err_value)
     return TaskResult(ok="ok")
 ```
 
@@ -833,7 +834,7 @@ For type-safe node construction with static arguments, see [Typed Node Builder](
 
 ### args_from: What the Receiving Function Gets
 
-`args_from` delivers the upstream task's full `TaskResult[T, TaskError]` — not the unwrapped `T`.
+`args_from` delivers the upstream task's full `TaskResult[T, TaskError]` — not just the raw `T`.
 
 ```python
 from horsies import (
@@ -860,7 +861,7 @@ def produce_number() -> TaskResult[int, TaskError]:
 @app.task("transform")
 def transform(data: TaskResult[int, TaskError]) -> TaskResult[str, TaskError]:
     if data.is_err():
-        return TaskResult(err=data.unwrap_err())
+        return TaskResult(err=data.err_value)
     value: int = data.ok_value
     return TaskResult(ok=str(value))
 

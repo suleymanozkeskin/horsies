@@ -65,8 +65,6 @@ TaskResult(err=TaskError(...))    # failure
 | `.err` | `E \| None` | Error value or `None` — safe, never raises |
 | `.ok_value` | `T` | Success value — **raises `ValueError`** if err |
 | `.err_value` | `E` | Error value — **raises `ValueError`** if ok |
-| `.unwrap()` | `T` | Same as `.ok_value` |
-| `.unwrap_err()` | `E` | Same as `.err_value` |
 
 **`.ok` vs `.ok_value`**: `.ok` is safe (returns `None` on wrong side). `.ok_value` raises. Always guard with `is_ok()` / `is_err()` before using `_value` forms.
 

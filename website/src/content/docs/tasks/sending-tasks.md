@@ -244,8 +244,6 @@ Type alias: `Result[T, TaskSendError]`. The `Ok` side is `TaskHandle[T]` when re
 | `.is_err()` | `bool` | True if send failed |
 | `.ok_value` | `T` | The `TaskHandle`; raises `ValueError` if error |
 | `.err_value` | `TaskSendError` | The error; raises `ValueError` if success |
-| `.unwrap()` | `T` | Same as `.ok_value` |
-| `.unwrap_err()` | `TaskSendError` | Same as `.err_value` |
 
 Use `is_ok(result)` / `is_err(result)` from `horsies` as type-narrowing guards.
 

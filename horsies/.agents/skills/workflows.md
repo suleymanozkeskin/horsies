@@ -464,7 +464,7 @@ When a task becomes SKIPPED, all dependents are SKIPPED too (unless `allow_faile
 ### `args_from` — data flow
 
 - Maps kwarg names to upstream nodes.
-- Injects the full `TaskResult[T, TaskError]` — **not the unwrapped value**.
+- Injects the full `TaskResult[T, TaskError]` — **not just the raw value**.
 - Receiving function parameter must be typed `TaskResult[T, TaskError]`.
 - Upstream must be in `waits_for` (E008). Keys must not overlap with `kwargs` (E021).
 - Positional args not supported on workflow nodes (E026).

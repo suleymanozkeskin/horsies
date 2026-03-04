@@ -103,7 +103,7 @@ def create_order() -> TaskResult[Order, TaskError]:
 @app.task("process_order")
 def process_order(order_result: TaskResult[Order, TaskError]) -> TaskResult[str, TaskError]:
     if order_result.is_err():
-        return TaskResult(err=order_result.unwrap_err())
+        return TaskResult(err=order_result.err_value)
     order: Order = order_result.ok_value  # Rehydrated Order instance, not a dict
     print(order.created_at)               # datetime object, not a string
     return TaskResult(ok=f"Processed {order.item}")

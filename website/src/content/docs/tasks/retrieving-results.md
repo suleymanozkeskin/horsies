@@ -17,7 +17,10 @@ Retrieve task outcomes through `TaskHandle.get()` / `get_async()`. For error han
 from horsies import LibraryErrorCode
 from instance import my_task
 
-handle = my_task.send(10, 20).unwrap()
+send_result = my_task.send(10, 20)
+if send_result.is_err():
+    raise RuntimeError(f"Send failed: {send_result.err_value.code}")
+handle = send_result.ok_value
 
 # Block until complete (or timeout/error)
 result = handle.get()
@@ -36,7 +39,10 @@ else:
 ### Async Retrieval
 
 ```python
-handle = (await my_task.send_async(10, 20)).unwrap()
+send_result = await my_task.send_async(10, 20)
+if send_result.is_err():
+    raise RuntimeError(f"Send failed: {send_result.err_value.code}")
+handle = send_result.ok_value
 result = await handle.get_async()
 ```
 `get_async()` waits for broker notifications (LISTEN/NOTIFY) with a polling fallback if notifications are lost.
@@ -61,7 +67,10 @@ if result.is_err() and result.err_value.error_code == LibraryErrorCode.WAIT_TIME
 Results are cached on the handle:
 
 ```python
-handle = my_task.send(...).unwrap()
+send_result = my_task.send(...)
+if send_result.is_err():
+    raise RuntimeError(f"Send failed: {send_result.err_value.code}")
+handle = send_result.ok_value
 
 # First call fetches from database
 result1 = handle.get()

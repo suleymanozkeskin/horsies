@@ -406,7 +406,7 @@ def process_child_result(
         # Child workflow failed - error is SubWorkflowError
         return TaskResult(err=child_result.err_value)
 
-    # Child succeeded - unwrap the output
+    # Child succeeded - access the output value
     child_output: ChildOutput = child_result.ok_value
     return TaskResult(ok=ParentOutput(derived_from=child_output))
 

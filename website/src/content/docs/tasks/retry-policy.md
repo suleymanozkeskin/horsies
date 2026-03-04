@@ -168,7 +168,7 @@ Access via database or result:
 ```python
 result = handle.get()
 if result.is_err():
-    error = result.unwrap_err()
+    error = result.err_value
     # Check if retries exhausted
     if "retry" in str(error.data):
         print("All retries exhausted")

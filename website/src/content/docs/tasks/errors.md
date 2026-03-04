@@ -283,5 +283,3 @@ except HorsiesError as e:
 | `err` | `TaskError \| None` | Error value or `None` |
 | `ok_value` | `T` | Success value; raises `ValueError` if error |
 | `err_value` | `TaskError` | Error value; raises `ValueError` if success |
-| `unwrap()` | `T` | Same as `ok_value` |
-| `unwrap_err()` | `TaskError` | Same as `err_value` |

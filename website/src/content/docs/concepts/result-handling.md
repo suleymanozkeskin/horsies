@@ -179,6 +179,6 @@ result.is_ok()    # True if success
 result.is_err()   # True if error
 
 # Access values (raises if wrong state)
-result.ok_value   # Same as unwrap()
-result.err_value  # Same as unwrap_err()
+result.ok_value   # Success value
+result.err_value  # Error value
 ```

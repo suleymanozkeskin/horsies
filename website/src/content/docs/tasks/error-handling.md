@@ -79,7 +79,7 @@ See [retry-policy](../retry-policy) for configuration details.
 
 ### Handling Upstream Failures in Chained Tasks
 
-Tasks wired with `args_from` receive the upstream `TaskResult`, not the unwrapped value. Use this workflow example as the canonical guard pattern:
+Tasks wired with `args_from` receive the upstream `TaskResult`, not just the raw success value. Use this workflow example as the canonical guard pattern:
 
 ```python
 from dataclasses import dataclass
@@ -92,6 +92,8 @@ from horsies import (
     TaskError,
     TaskNode,
     OnError,
+    Ok,
+    Err,
 )
 
 config = AppConfig(
@@ -175,8 +177,11 @@ spec = app.workflow(
     output=save,
     on_error=OnError.FAIL,
 )
-handle = spec.start().unwrap()
-handle.get(timeout_ms=30000)
+match spec.start():
+    case Ok(handle):
+        handle.get(timeout_ms=30000)
+    case Err(start_err):
+        raise RuntimeError(f"Start failed: {start_err.code}")
 ```
 
 This pattern only runs when the downstream task actually executes. With `join="all"` and `allow_failed_deps=False` (default), any failed or skipped dependency causes the task to be SKIPPED, so this guard code never runs. With `join="any"` or `join="quorum"`, the task can still run if the success threshold is met. See [Workflow Semantics](../concepts/workflows/workflow-semantics) for default join rules and failure propagation.

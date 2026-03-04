@@ -72,7 +72,6 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .is_ok() -> bool, .is_err() -> bool
 - .ok -> T | None, .err -> E | None
 - .ok_value -> T (raises on err), .err_value -> E (raises on ok)
-- .unwrap() -> T (raises on err), .unwrap_err() -> E (raises on ok)
 
 ### TaskError
 - error_code: str | LibraryErrorCode | None
@@ -98,7 +97,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - All PostgresBroker methods return BrokerResult[T] = Ok[T] | Err[BrokerOperationError]
 - Ok(value): operation succeeded
 - Err(BrokerOperationError): operation failed
-- Use is_ok(result) / is_err(result) type guards, or result.unwrap() to extract value
+- Use is_ok(result) / is_err(result) type guards, then access ok_value/err_value
 - BrokerOperationError fields: code (BrokerErrorCode), message (str), retryable (bool), exception (BaseException | None)
 - BrokerErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, CLEANUP_FAILED, CLOSE_FAILED
 - retryable=True: transient (connection blip), retryable=False: permanent (schema drift, code bug)
@@ -111,7 +110,6 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### Result[T, E] (vendored Ok/Err type)
 - from horsies import Result, Ok, Err, is_ok, is_err
-- Ok(value).unwrap() -> value, Err(error).unwrap() -> raises UnwrapError
 - .ok_value / .err_value properties, .is_ok() / .is_err() methods
 - is_ok(result) / is_err(result) are TypeIs type guards for narrowing
 
@@ -143,7 +141,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .send() / .send_async() / .schedule() return TaskSendResult[TaskHandle[T]]
 - Ok(TaskHandle): task enqueued successfully
 - Err(TaskSendError): enqueue failed with categorized error
-- Use is_ok(result) / is_err(result) type guards, or result.unwrap() to extract handle
+- Use is_ok(result) / is_err(result) type guards, then access ok_value/err_value
 - .retry_send(error) / .retry_send_async(error) / .retry_schedule(error): replay stored payload
 
 ### TaskSendError
@@ -613,7 +611,7 @@ PostgresConfig, pool_size, max_overflow, connection -> /horsies/configuration/br
 RecoveryConfig, stale, requeue, crash recovery -> /horsies/configuration/recovery-config/
 @app.task, decorator, task definition, define task -> /horsies/tasks/defining-tasks/
 send, send_async, enqueue, dispatch, produce, TaskSendResult, TaskSendError, retry_send -> /horsies/tasks/sending-tasks/
-TaskResult, is_ok, is_err, unwrap, ok_value, err_value -> /horsies/tasks/error-handling/
+TaskResult, is_ok, is_err, ok_value, err_value -> /horsies/tasks/error-handling/
 LibraryErrorCode, TaskError, TaskSendErrorCode, error codes, UNHANDLED_EXCEPTION -> /horsies/tasks/errors/
 TaskHandle, get, get_async, timeout, result -> /horsies/tasks/retrieving-results/
 RetryPolicy, retry, backoff, exponential, fixed, auto_retry_for -> /horsies/tasks/retry-policy/
