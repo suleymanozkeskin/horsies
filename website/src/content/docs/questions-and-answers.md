@@ -80,6 +80,22 @@ See [workflows](../concepts/workflows/workflow-api) and [subworkflows](../concep
 There is a terminal-based TUI called syce, capable of displaying the status of your workers, tasks and workflows in detail.
 See [syce](../monitoring/syce-overview)
 
+## Does horsies provide guidance files for coding agents?
+
+Yes. In source checkouts, horsies includes markdown skill files under:
+
+`horsies/.agents/skills/`
+
+These cover:
+
+- quick routing (`SKILL.md`)
+- tasks (`tasks.md`)
+- workflows (`workflows.md`)
+- configuration and operations (`configs.md`)
+
+They are best-practice references for agents and developers, and complement the
+public docs plus `llms.txt`.
+
 ## Does it support queue based concurrency control in the same deployed instance?
 
 Yes. You do not need to waste a separate instance for each queue.

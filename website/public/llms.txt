@@ -10,6 +10,14 @@ making web request, local will cost you less tokens and greater knowledgebase at
 > Source: https://github.com/suleymanozkeskin/horsies
 > All public symbols: from horsies import <name>
 
+## Agent Skills (Repository Guidance)
+- In source checkouts, skills live under: `horsies/.agents/skills/`
+- `SKILL.md` -> quick orientation and routing
+- `tasks.md` -> task APIs, send/retry flows, serialization, error handling
+- `workflows.md` -> DAG construction, WorkflowHandle semantics, E001-E031 validation
+- `configs.md` -> AppConfig, queues, recovery/resilience, scheduling, CLI/runtime settings
+- These are markdown guidance files (no bundled scripts) designed for on-demand agent loading
+
 ## Quick Reference
 
 ### Horsies (app instance)
@@ -589,6 +597,7 @@ Each entry: Title -- summary -> URL
 
 ### CLI
 - CLI Reference -- horsies worker, scheduler, check -> /horsies/cli/
+- Agent Skills (repository path, usage guidance) -> /horsies/cli/
 
 ### Internals
 - Database Schema -- PostgreSQL tables -> /horsies/internals/database-schema/
@@ -648,5 +657,6 @@ SourceLocation, Rust-style errors, format_rust_style, error display -> /horsies/
 HORSIES_VERBOSE, HORSIES_PLAIN_ERRORS, HORSIES_FORCE_COLOR, NO_COLOR -> /horsies/tasks/errors/
 horsies check, app.check, phased validation, startup validation -> /horsies/cli/
 get-docs, AI agent, local docs, offline docs -> /horsies/cli/
+agent skills, SKILL.md, tasks.md, workflows.md, configs.md, horsies/.agents/skills -> /horsies/cli/
 discover_tasks, import_task_modules, expand_module_globs -> /horsies/quick-start/01-configuring-horsies/
 slugify, node_id, NODE_ID_PATTERN -> /horsies/concepts/workflows/workflow-semantics/

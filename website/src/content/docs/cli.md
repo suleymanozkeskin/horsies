@@ -141,6 +141,23 @@ horsies get-docs
 
 Uses git sparse checkout when git is available, falls back to tarball download otherwise. No app instance or database connection required.
 
+## Agent Skills (Repository)
+
+If you are using an AI coding agent from a source checkout, Horsies also ships
+guidance-oriented skill files in:
+
+`horsies/.agents/skills/`
+
+Available files:
+
+- `SKILL.md` — quick orientation and routing
+- `tasks.md` — task authoring, send/retry, serialization, error handling
+- `workflows.md` — DAG construction, handles, failure semantics, validation
+- `configs.md` — configuration, scheduling, CLI checks, environment variables
+
+These files are documentation-focused (no bundled scripts) and are intended for
+on-demand loading by agents that support markdown skill files.
+
 ## Module Formats
 
 The recommended format is a dotted module path with an explicit variable name:
