@@ -359,7 +359,7 @@ Tasks with `allow_failed_deps=True` receive the `TaskResult` from dependencies:
 ```python
 from horsies import LibraryErrorCode
 
-@app.task()
+@app.task(task_name="recovery_handler")
 def recovery_handler(input_result: TaskResult[Data, TaskError]) -> TaskResult[...]:
     if input_result.is_err():
         err = input_result.err_value
@@ -692,7 +692,7 @@ node_c: TaskNode[Summary] = TaskNode(
     workflow_ctx_from=[node_a, node_b],  # Include both in context
 )
 
-@app.task()
+@app.task(task_name="aggregate")
 def aggregate(workflow_ctx: WorkflowContext | None = None) -> TaskResult[Summary, TaskError]:
     if workflow_ctx is None:
         return TaskResult(err=TaskError(error_code="NO_CTX", message="Missing context"))
@@ -800,7 +800,7 @@ For tasks that only need workflow metadata without result access, use `WorkflowM
 ```python
 from horsies import WorkflowMeta
 
-@app.task()
+@app.task(task_name="my_task")
 def my_task(workflow_meta: WorkflowMeta | None = None) -> TaskResult[str, TaskError]:
     if workflow_meta:
         print(f"Running in workflow {workflow_meta.workflow_id}")

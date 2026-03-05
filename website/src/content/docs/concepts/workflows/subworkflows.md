@@ -31,18 +31,18 @@ app = Horsies(AppConfig(
     broker=PostgresConfig(database_url="postgresql+psycopg://user:pass@localhost:5432/mydb"),
 ))
 
-@app.task()
+@app.task(task_name="fetch_data")
 def fetch_data(url: str) -> TaskResult[dict, TaskError]:
     # fetch logic...
     return TaskResult(ok={"data": "..."})
 
-@app.task()
+@app.task(task_name="transform")
 def transform(raw: TaskResult[dict, TaskError]) -> TaskResult[str, TaskError]:
     if raw.is_err():
         return TaskResult(err=raw.err_value)
     return TaskResult(ok=str(raw.ok_value))
 
-@app.task()
+@app.task(task_name="store")
 def store(transformed: str) -> TaskResult[bool, TaskError]:
     # store logic...
     return TaskResult(ok=True)
@@ -150,11 +150,11 @@ Use `allow_failed_deps=True` to run anyway (see Section 6).
 `args_from` injects upstream results as keyword arguments.
 
 ```python
-@app.task()
+@app.task(task_name="add")
 def add(a: int, b: int) -> TaskResult[int, TaskError]:
     return TaskResult(ok=a + b)
 
-@app.task()
+@app.task(task_name="multiply")
 def multiply(
     sum_result: TaskResult[int, TaskError],
     factor: int,
@@ -192,7 +192,7 @@ use `workflow_ctx_from` instead of multiple `args_from` entries.
 ```python
 from horsies import WorkflowContext
 
-@app.task()
+@app.task(task_name="aggregate")
 def aggregate(
     workflow_ctx: WorkflowContext | None = None,
 ) -> TaskResult[Summary, TaskError]:
@@ -345,7 +345,7 @@ When you need visibility into child workflow internals:
 ```python
 from horsies import WorkflowContext, SubWorkflowSummary
 
-@app.task()
+@app.task(task_name="report_health")
 def report_health(
     workflow_ctx: WorkflowContext | None = None,
 ) -> TaskResult[HealthReport, TaskError]:
@@ -358,11 +358,11 @@ def report_health(
     return TaskResult(ok=HealthReport(
         status=summary.status,           # WorkflowStatus (COMPLETED, FAILED, etc.)
         output=summary.output,           # Child workflow output (if completed)
-        total_tasks=summary.total,       # Total tasks in child
-        completed=summary.completed,     # Successfully completed tasks
-        failed=summary.failed,           # Failed tasks
-        skipped=summary.skipped,         # Skipped tasks
-        error_summary=summary.error,     # Error details (if failed)
+        total_tasks=summary.total_tasks,       # Total tasks in child
+        completed=summary.completed_tasks,     # Successfully completed tasks
+        failed=summary.failed_tasks,           # Failed tasks
+        skipped=summary.skipped_tasks,         # Skipped tasks
+        error_summary=summary.error_summary,   # Error details (if failed)
     ))
 
 
@@ -386,19 +386,20 @@ class MonitoredPipeline(WorkflowDefinition[HealthReport]):
 | Field | Type | Description |
 |-------|------|-------------|
 | `status` | `WorkflowStatus` | Terminal status of child workflow |
+| `success_case` | `str \| None` | Which SuccessCase was satisfied (if success_policy used) |
 | `output` | `Any \| None` | Child workflow output (if COMPLETED) |
-| `total` | `int` | Total tasks in child workflow |
-| `completed` | `int` | Tasks that completed successfully |
-| `failed` | `int` | Tasks that failed |
-| `skipped` | `int` | Tasks that were skipped |
-| `error` | `str \| None` | Error summary (if FAILED) |
+| `total_tasks` | `int` | Total tasks in child workflow |
+| `completed_tasks` | `int` | Tasks that completed successfully |
+| `failed_tasks` | `int` | Tasks that failed |
+| `skipped_tasks` | `int` | Tasks that were skipped |
+| `error_summary` | `str \| None` | Error summary (if FAILED) |
 
 ### 6.5 Receiving Subworkflow Results via `args_from`
 
 SubWorkflowNode results flow like TaskNode results:
 
 ```python
-@app.task()
+@app.task(task_name="process_child_result")
 def process_child_result(
     child_result: TaskResult[ChildOutput, TaskError],
 ) -> TaskResult[ParentOutput, TaskError]:
@@ -444,7 +445,7 @@ This prevents cascading execution of tasks that depend on failed data.
 Use this for recovery tasks or aggregators that handle failures:
 
 ```python
-@app.task()
+@app.task(task_name="recovery_handler")
 def recovery_handler(
     primary_result: TaskResult[Data, TaskError],
 ) -> TaskResult[Data, TaskError]:
@@ -499,7 +500,7 @@ When a task runs with `allow_failed_deps=True` and its dependency was SKIPPED
 (not just FAILED), the injected result has error code `UPSTREAM_SKIPPED`:
 
 ```python
-@app.task()
+@app.task(task_name="handle_any_failure")
 def handle_any_failure(
     upstream: TaskResult[Data, TaskError],
 ) -> TaskResult[Report, TaskError]:
@@ -730,7 +731,7 @@ workflow can continue deterministic failure propagation without leaving the node
 
 **Fix**: Add the parameter:
 ```python
-@app.task()
+@app.task(task_name="my_task")
 def my_task(
     workflow_ctx: WorkflowContext | None = None,  # Add this
 ) -> TaskResult[Output, TaskError]:
@@ -827,12 +828,12 @@ class AggregatedReport(BaseModel):
 
 # --- Task Functions ---
 
-@app.task()
+@app.task(task_name="fetch_from_api")
 def fetch_from_api(url: str) -> TaskResult[RawData, TaskError]:
     # Simulate fetch
     return TaskResult(ok=RawData(source=url, content="..."))
 
-@app.task()
+@app.task(task_name="parse_and_validate")
 def parse_and_validate(
     raw: TaskResult[RawData, TaskError],
 ) -> TaskResult[ProcessedData, TaskError]:
@@ -842,7 +843,7 @@ def parse_and_validate(
     # Simulate parsing
     return TaskResult(ok=ProcessedData(source=data.source, records=[{"id": 1}]))
 
-@app.task()
+@app.task(task_name="aggregate_sources")
 def aggregate_sources(
     workflow_ctx: WorkflowContext | None = None,
 ) -> TaskResult[AggregatedReport, TaskError]:
@@ -857,11 +858,11 @@ def aggregate_sources(
     for node in [source1_node, source2_node]:
         summary = workflow_ctx.summary_for(node)
         if summary.status.value == "COMPLETED":
-            sources.append(f"{node.name}: {summary.completed}/{summary.total} tasks")
+            sources.append(f"{node.name}: {summary.completed_tasks}/{summary.total_tasks} tasks")
             if summary.output:
                 total += len(summary.output.records)
         else:
-            errors.append(f"{node.name}: {summary.error or 'unknown error'}")
+            errors.append(f"{node.name}: {summary.error_summary or 'unknown error'}")
 
     return TaskResult(ok=AggregatedReport(
         total_records=total,

@@ -64,8 +64,7 @@ from horsies import Ok, Err
 
 match spec.start():
     case Ok(handle):
-        handle.get(timeout_ms=30000)  # Wait for completion
-        result = handle.result_for(output_node)
+        result = handle.get(timeout_ms=30000)  # Wait for completion
         if result.is_ok():
             print(f"Success: {result.ok_value}")
         else:
@@ -75,7 +74,9 @@ match spec.start():
         # Transient infra failure — retry with stored workflow_id
         match spec.retry_start(err):
             case Ok(handle):
-                handle.get(timeout_ms=30000)
+                result = handle.get(timeout_ms=30000)
+                if result.is_err():
+                    print(f"Task failed: {result.err_value.error_code}")
             case Err(retry_err):
                 print(f"Retry failed: {retry_err.code} - {retry_err.message}")
 
@@ -93,13 +94,13 @@ match spec.start():
 | Attribute / Method | Type / Signature | Description |
 |---|---|---|
 | `.workflow_id` | `str` | Workflow UUID |
-| `.status()` / `.status_async()` | `-> WorkflowStatus` | Current workflow status |
+| `.status()` / `.status_async()` | `-> HandleResult[WorkflowStatus]` | Current workflow status |
 | `.get()` / `.get_async()` | `(timeout_ms: int \| None) -> TaskResult[Any, TaskError]` | Block until completion or timeout |
-| `.results()` / `.results_async()` | `-> dict[str, TaskResult[Any, TaskError]]` | All results keyed by node_id |
+| `.results()` / `.results_async()` | `-> HandleResult[dict[str, TaskResult[Any, TaskError]]]` | All results keyed by node_id |
 | `.result_for()` / `.result_for_async()` | `(TaskNode[T] \| NodeKey[T]) -> TaskResult[T, TaskError]` | Single node result (non-blocking) |
-| `.tasks()` / `.tasks_async()` | `-> list[WorkflowTaskInfo]` | Status of all workflow tasks |
-| `.cancel()` / `.cancel_async()` | `-> None` | Cancel workflow |
-| `.pause()` / `.pause_async()` | `-> bool` | Pause running workflow |
+| `.tasks()` / `.tasks_async()` | `-> HandleResult[list[WorkflowTaskInfo]]` | Status of all workflow tasks |
+| `.cancel()` / `.cancel_async()` | `-> HandleResult[None]` | Cancel workflow |
+| `.pause()` / `.pause_async()` | `-> HandleResult[bool]` | Pause running workflow |
 | `.resume()` / `.resume_async()` | `-> bool` | Resume paused workflow |
 
 ### WorkflowTaskInfo
