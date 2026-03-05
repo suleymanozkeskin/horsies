@@ -854,3 +854,47 @@ class TestFormatSchedulePattern:
         pattern = MonthlySchedule(day=15, time=datetime_time(3, 0, 0))
         result = AppConfig._format_schedule_pattern(pattern)
         assert result == 'monthly on day 15 at 03:00:00'
+
+
+@pytest.mark.unit
+class TestGetBrokerErrorHandling:
+    """Regression tests for Horsies.get_broker() error wrapping (E211)."""
+
+    def test_non_horsies_error_wrapped_as_broker_init_failed(self) -> None:
+        """Non-HorsiesError exceptions are wrapped with BROKER_INIT_FAILED."""
+        from horsies import Horsies
+
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER))
+        app._broker = None  # ensure fresh init path
+
+        with patch(
+            'horsies.core.app.PostgresBroker',
+            side_effect=RuntimeError('driver missing'),
+        ):
+            with pytest.raises(HorsiesError) as exc_info:
+                app.get_broker()
+
+            assert exc_info.value.code == ErrorCode.BROKER_INIT_FAILED
+            assert 'driver missing' in str(exc_info.value.message)
+            assert exc_info.value.__cause__ is not None
+
+    def test_horsies_error_passes_through(self) -> None:
+        """HorsiesError from broker init is re-raised, not double-wrapped."""
+        from horsies import Horsies
+
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER))
+        app._broker = None
+
+        original = HorsiesError(
+            message='bad config',
+            code=ErrorCode.BROKER_INVALID_URL,
+        )
+        with patch(
+            'horsies.core.app.PostgresBroker',
+            side_effect=original,
+        ):
+            with pytest.raises(HorsiesError) as exc_info:
+                app.get_broker()
+
+            assert exc_info.value is original
+            assert exc_info.value.code == ErrorCode.BROKER_INVALID_URL

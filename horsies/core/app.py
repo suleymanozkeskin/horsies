@@ -666,7 +666,11 @@ class Horsies:
         except HorsiesError:
             raise
         except Exception as e:
-            raise ValueError(f'Failed to get broker: {e}')
+            raise HorsiesError(
+                message=f'Failed to initialize broker: {e}',
+                code=ErrorCode.BROKER_INIT_FAILED,
+                notes=[str(e)],
+            ) from e
 
     def discover_tasks(
         self,

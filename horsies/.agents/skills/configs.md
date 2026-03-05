@@ -289,7 +289,7 @@ Phases are fail-fast: errors in phase N stop later phases.
 | 3.1 — Builders | Execute `@app.workflow_builder` functions | E027–E030 |
 | 3.2 — Undecorated | Scan for functions returning WorkflowSpec without decorator | E030 |
 | 3.5 — Policies | Re-validate exception_mapper after imports | E209 |
-| 4 — Broker | `SELECT 1` against PostgreSQL (`--live` only) | Connection error |
+| 4 — Broker | `SELECT 1` against PostgreSQL (`--live` only) | E211, Connection error |
 
 **Guarantee model:**
 - **Strong:** `@app.workflow_builder` functions are fully executed and validated.

@@ -232,6 +232,7 @@ horsies check myapp.instance:app
 | E208 | `CONFIG_INVALID_RESILIENCE` | Invalid resilience configuration |
 | E209 | `CONFIG_INVALID_EXCEPTION_MAPPER` | Invalid exception mapper |
 | E210 | `MODULE_EXEC_ERROR` | Module raised an error during import |
+| E211 | `BROKER_INIT_FAILED` | Broker failed to initialize |
 
 ### Registry (E300-E399)
 
