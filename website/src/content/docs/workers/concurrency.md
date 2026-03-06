@@ -138,7 +138,7 @@ config = AppConfig(
 - Soft limit: actual concurrent tasks may briefly exceed the cap during claiming
 
 **Important:** `cluster_wide_cap` and `prefetch_buffer > 0` cannot be combined. If you need a global cap, use hard cap mode.
-**Important:** `claim_lease_ms` must be set when `prefetch_buffer > 0`, and must be `None` when `prefetch_buffer = 0`.
+**Important:** `claim_lease_ms` must be set when `prefetch_buffer > 0`. In hard cap mode (`prefetch_buffer = 0`), it is optional and overrides the default 60s lease.
 
 **When to use soft cap:**
 - Single-worker deployments where prefetch latency matters

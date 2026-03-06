@@ -479,8 +479,14 @@ Control what happens when any task fails:
 ```python
 from horsies import OnError
 
-spec = MyWorkflow.build(app)
-spec = spec.with_on_error(OnError.FAIL)  # or OnError.PAUSE
+# Set on_error in the WorkflowDefinition's Meta class
+class MyWorkflow(WorkflowDefinition[OutputType]):
+    name = "my_workflow"
+    # ... nodes ...
+
+    class Meta:
+        output = some_node
+        on_error = OnError.PAUSE  # default is OnError.FAIL
 ```
 
 | Policy | Behavior |
@@ -645,13 +651,12 @@ At `WorkflowSpec` creation, these are validated:
 
 | Validation | Error Code |
 |------------|------------|
-| No root tasks (all have dependencies) | `WORKFLOW_INVALID_STRUCTURE` |
+| No root tasks (all have dependencies) | `WORKFLOW_NO_ROOT_TASKS` |
 | Cycle detected | `WORKFLOW_CYCLE_DETECTED` |
 | `args_from` references task not in `waits_for` | `WORKFLOW_INVALID_ARGS_FROM` |
 | `workflow_ctx_from` references task not in `waits_for` | `WORKFLOW_INVALID_CTX_FROM` |
 | `workflow_ctx_from` set but function lacks param | `WORKFLOW_CTX_PARAM_MISSING` |
 | Unsupported subworkflow retry mode | `WORKFLOW_INVALID_SUBWORKFLOW_RETRY_MODE` |
-| Nested workflow cycle (A contains B contains A) | `WORKFLOW_SUBWORKFLOW_CYCLE` |
 
 ---
 
@@ -761,13 +766,14 @@ node_b = TaskNode(
 
 **Cause**: Worker process doesn't have the workflow module imported.
 
-**Fix**: Ensure the workflow definition module is imported in your worker entry point:
+**Fix**: Ensure the workflow definition module is discovered by the app:
 ```python
-# worker.py
-import myapp.workflows  # Import all workflow definitions
-from horsies import run_worker
-
-run_worker(...)
+# In your app setup
+app.discover_tasks(["myapp.tasks", "myapp.workflows"])
+```
+Then start the worker via CLI:
+```bash
+horsies worker myapp.instance:app
 ```
 
 ### Task Stuck in PENDING

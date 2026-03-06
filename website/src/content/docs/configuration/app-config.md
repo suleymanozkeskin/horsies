@@ -26,7 +26,7 @@ app = Horsies(config)
 | `broker` | `PostgresConfig` | required | Database connection settings |
 | `cluster_wide_cap` | `int` | `None` | Max in-flight tasks cluster-wide |
 | `prefetch_buffer` | `int` | `0` | 0 = hard cap mode, >0 = soft cap with prefetch |
-| `claim_lease_ms` | `int` | `None` | Claim lease duration (required if prefetch_buffer > 0; must be None when prefetch_buffer = 0) |
+| `claim_lease_ms` | `int` | `None` | Claim lease duration (required if prefetch_buffer > 0; optional override in hard cap mode) |
 | `recovery` | `RecoveryConfig` | defaults | Crash recovery settings |
 | `resilience` | `WorkerResilienceConfig` | defaults | Worker retry/backoff and notify polling |
 | `schedule` | `ScheduleConfig` | `None` | Scheduled task configuration |
@@ -173,7 +173,7 @@ See [Scheduler Overview](../../scheduling/scheduler-overview) for details.
 - `cluster_wide_cap` must be positive if set
 - `prefetch_buffer` must be non-negative
 - `claim_lease_ms` is required when `prefetch_buffer > 0`
-- `claim_lease_ms` must be None when `prefetch_buffer = 0`
+- `claim_lease_ms` is optional when `prefetch_buffer = 0` (overrides the default 60s lease)
 - `cluster_wide_cap` cannot be combined with `prefetch_buffer > 0`
 
 Multiple validation errors within the same phase are collected and reported together (compiler-style), rather than stopping at the first error.
