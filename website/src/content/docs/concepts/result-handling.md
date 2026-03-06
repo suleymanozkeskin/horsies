@@ -178,7 +178,13 @@ result = handle.get()
 result.is_ok()    # True if success
 result.is_err()   # True if error
 
-# Access values (raises if wrong state)
+# Access values (raises ValueError if wrong state)
 result.ok_value   # Success value
 result.err_value  # Error value
+
+# Unwrap shortcuts (raises ValueError if wrong state)
+result.unwrap()       # Returns ok value, raises if err
+result.unwrap_err()   # Returns err value, raises if ok
 ```
+
+`unwrap()` and `unwrap_err()` are equivalent to `ok_value` and `err_value` — use whichever reads better in context. Both raise `ValueError` when called on the wrong variant, so always check `is_ok()`/`is_err()` first or use pattern matching.

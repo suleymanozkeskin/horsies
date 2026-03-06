@@ -26,6 +26,27 @@ Use this page for the exact method signatures and return types used by workflows
 | `.retry_start(error)` | `(WorkflowStartError) -> WorkflowStartResult[WorkflowHandle[T]]` | Retry a failed start (sync) |
 | `.retry_start_async(error)` | `(WorkflowStartError) -> WorkflowStartResult[WorkflowHandle[T]]` | Retry a failed start (async) |
 
+### Module-Level Start Functions
+
+For cases where you have a `WorkflowSpec` and a `PostgresBroker` separately (e.g., in tests or custom orchestration), use the module-level functions:
+
+```python
+from horsies import start_workflow, start_workflow_async
+
+# Sync
+result = start_workflow(spec, broker, workflow_id="custom-id")
+
+# Async
+result = await start_workflow_async(spec, broker)
+```
+
+| Function | Signature |
+|---|---|
+| `start_workflow(spec, broker, workflow_id=None, sent_at=None, *, resend_on_transient_err=False)` | `-> WorkflowStartResult[WorkflowHandle[T]]` |
+| `start_workflow_async(spec, broker, workflow_id=None, sent_at=None, *, resend_on_transient_err=False)` | `-> WorkflowStartResult[WorkflowHandle[T]]` |
+
+These are equivalent to `spec.start()` / `spec.start_async()` but allow passing a broker explicitly instead of relying on the one attached to the spec.
+
 ### WorkflowStartResult
 
 `WorkflowStartResult[T] = Result[T, WorkflowStartError]`
@@ -101,7 +122,7 @@ match spec.start():
 | `.tasks()` / `.tasks_async()` | `-> HandleResult[list[WorkflowTaskInfo]]` | Status of all workflow tasks |
 | `.cancel()` / `.cancel_async()` | `-> HandleResult[None]` | Cancel workflow |
 | `.pause()` / `.pause_async()` | `-> HandleResult[bool]` | Pause running workflow |
-| `.resume()` / `.resume_async()` | `-> bool` | Resume paused workflow |
+| `.resume()` / `.resume_async()` | `-> HandleResult[bool]` | Resume paused workflow |
 
 ### WorkflowTaskInfo
 

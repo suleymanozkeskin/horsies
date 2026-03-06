@@ -27,6 +27,7 @@ app = Horsies(config)
 | `cluster_wide_cap` | `int` | `None` | Max in-flight tasks cluster-wide |
 | `prefetch_buffer` | `int` | `0` | 0 = hard cap mode, >0 = soft cap with prefetch |
 | `claim_lease_ms` | `int` | `None` | Claim lease duration (required if prefetch_buffer > 0; optional override in hard cap mode) |
+| `max_claim_renew_age_ms` | `int` | `180000` | Max age (ms) of a CLAIMED task that heartbeat will renew. Older claims are left to expire, preventing indefinite renewal of orphaned tasks. Must be >= effective claim lease |
 | `recovery` | `RecoveryConfig` | defaults | Crash recovery settings |
 | `resilience` | `WorkerResilienceConfig` | defaults | Worker retry/backoff and notify polling |
 | `schedule` | `ScheduleConfig` | `None` | Scheduled task configuration |

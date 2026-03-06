@@ -229,6 +229,7 @@ class AggregationWorkflow(WorkflowDefinition[Summary]):
 - Every node in `workflow_ctx_from` must also be in `waits_for`
 - The task function must have `workflow_ctx: WorkflowContext | None` parameter
 - Context is built fresh per task; it does not propagate downstream
+- `result_for()` and `summary_for()` raise `WorkflowContextMissingIdError` if the node has no `node_id`. Always assign `node_id` to nodes used with context
 
 ---
 

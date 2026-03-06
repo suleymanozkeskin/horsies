@@ -85,12 +85,12 @@ _score_c = compute_score.node(
 )
 ```
 
-### Mixed with args_from
+### Dependency Injection with `from_node()`
 
-Use `.node()` for root tasks with static arguments. Use `TaskNode` for tasks receiving `args_from` injections:
+Use `from_node()` to wire upstream results into downstream task arguments. It auto-adds the upstream node to `waits_for` and `args_from`:
 
 ```python
-from horsies import TaskNode
+from horsies import from_node
 
 @app.task(task_name='fetch_user')
 def fetch_user(user_id: str) -> TaskResult[UserData, TaskError]:
@@ -103,10 +103,29 @@ def process_user(
 ) -> TaskResult[ProcessedUser, TaskError]:
     ...
 
-# Root task: .node() with static args
 fetch_node = fetch_user.node(node_id='fetch')(user_id='user-123')
 
-# Downstream task: TaskNode with args_from
+# from_node() wires fetch_node's result into user_data
+process_node = process_user.node(node_id='process')(
+    user_data=from_node(fetch_node),
+    threshold=70,
+)
+# Equivalent to:
+# TaskNode(fn=process_user, args_from={'user_data': fetch_node},
+#          waits_for=[fetch_node], kwargs={'threshold': 70})
+```
+
+`from_node()` accepts `TaskNode` or `SubWorkflowNode`. Passing anything else raises `WorkflowValidationError` (E008).
+
+### Mixed with args_from
+
+You can also use `TaskNode` directly for tasks receiving `args_from` injections:
+
+```python
+from horsies import TaskNode
+
+fetch_node = fetch_user.node(node_id='fetch')(user_id='user-123')
+
 process_node = TaskNode(
     fn=process_user,
     waits_for=[fetch_node],
