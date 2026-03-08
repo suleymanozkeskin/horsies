@@ -208,14 +208,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - kwargs: passed to workflow_def.build_with(app, **kwargs)
 - waits_for, args_from, workflow_ctx_from: same semantics as TaskNode
 - join, min_success, allow_failed_deps: same as TaskNode
-- retry_mode: SubWorkflowRetryMode (default RERUN_FAILED_ONLY, only supported mode)
 - node_id: str | None (auto-assigned if None)
 - .name -> str, .key() -> NodeKey[T]
-
-### SubWorkflowRetryMode (enum)
-- RERUN_FAILED_ONLY — re-run only failed/cancelled child tasks (default, only supported)
-- RERUN_ALL — re-run entire child workflow (not yet implemented)
-- NO_RERUN — re-evaluate success policy without re-running (not yet implemented)
 
 ### WorkflowSpec
 - .name -> str
@@ -279,7 +273,6 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ### SubWorkflowSummary[T]
 - Accessible via WorkflowContext.summary_for(subworkflow_node)
 - .status -> WorkflowStatus (child's final status)
-- .success_case -> str | None (which SuccessCase was satisfied)
 - .output -> T | None (child's output value, typed via generic)
 - .total_tasks -> int, .completed_tasks -> int
 - .failed_tasks -> int, .skipped_tasks -> int
@@ -446,7 +439,6 @@ making web request, local will cost you less tokens and greater knowledgebase at
   - E009 WORKFLOW_INVALID_CTX_FROM, E010 WORKFLOW_CTX_PARAM_MISSING
   - E011 WORKFLOW_INVALID_OUTPUT, E012 WORKFLOW_INVALID_SUCCESS_POLICY
   - E013 WORKFLOW_INVALID_JOIN, E014 WORKFLOW_UNRESOLVED_QUEUE, E015 WORKFLOW_UNRESOLVED_PRIORITY
-  - E017 WORKFLOW_INVALID_SUBWORKFLOW_RETRY_MODE
   - E018 WORKFLOW_SUBWORKFLOW_APP_MISSING, E019 WORKFLOW_INVALID_KWARG_KEY
   - E020 WORKFLOW_MISSING_REQUIRED_PARAMS, E021 WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
   - E022 WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH, E023 WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING

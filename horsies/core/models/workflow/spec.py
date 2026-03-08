@@ -27,7 +27,7 @@ from horsies.core.errors import (
 )
 from horsies.core.types.result import is_err
 
-from .enums import OutT, OnError, SubWorkflowRetryMode
+from .enums import OutT, OnError
 from .nodes import (
     TaskNode,
     SubWorkflowNode,
@@ -207,8 +207,6 @@ class WorkflowSpec(Generic[OutT]):
         for error in self._collect_success_policy_errors():
             report.add(error)
         for error in self._collect_join_semantics_errors():
-            report.add(error)
-        for error in self._collect_subworkflow_retry_mode_errors():
             report.add(error)
         for error in self._collect_subworkflow_cycle_errors():
             report.add(error)
@@ -1262,26 +1260,6 @@ class WorkflowSpec(Generic[OutT]):
             if isinstance(node, SubWorkflowNode):
                 visit(node.workflow_def.name, node.workflow_def)
 
-        return errors
-
-    def _collect_subworkflow_retry_mode_errors(self) -> list[WorkflowValidationError]:
-        """Reject unsupported subworkflow retry modes. Returns all errors."""
-        errors: list[WorkflowValidationError] = []
-        for node in self.tasks:
-            if not isinstance(node, SubWorkflowNode):
-                continue
-            if node.retry_mode != SubWorkflowRetryMode.RERUN_FAILED_ONLY:
-                errors.append(
-                    WorkflowValidationError(
-                        message='unsupported SubWorkflowRetryMode',
-                        code=ErrorCode.WORKFLOW_INVALID_SUBWORKFLOW_RETRY_MODE,
-                        notes=[
-                            f"node '{node.name}' uses retry_mode='{node.retry_mode.value}'",
-                            "only 'rerun_failed_only' is supported in this release",
-                        ],
-                        help_text='use SubWorkflowRetryMode.RERUN_FAILED_ONLY',
-                    )
-                )
         return errors
 
     def _register_for_subworkflows(self) -> None:

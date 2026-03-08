@@ -387,7 +387,6 @@ class MonitoredPipeline(WorkflowDefinition[HealthReport]):
 | Field | Type | Description |
 |-------|------|-------------|
 | `status` | `WorkflowStatus` | Terminal status of child workflow |
-| `success_case` | `str \| None` | Which SuccessCase was satisfied (if success_policy used) |
 | `output` | `Any \| None` | Child workflow output (if COMPLETED) |
 | `total_tasks` | `int` | Total tasks in child workflow |
 | `completed_tasks` | `int` | Tasks that completed successfully |
@@ -657,7 +656,6 @@ At `WorkflowSpec` creation, these are validated:
 | `args_from` references task not in `waits_for` | `WORKFLOW_INVALID_ARGS_FROM` |
 | `workflow_ctx_from` references task not in `waits_for` | `WORKFLOW_INVALID_CTX_FROM` |
 | `workflow_ctx_from` set but function lacks param | `WORKFLOW_CTX_PARAM_MISSING` |
-| Unsupported subworkflow retry mode | `WORKFLOW_INVALID_SUBWORKFLOW_RETRY_MODE` |
 
 ---
 

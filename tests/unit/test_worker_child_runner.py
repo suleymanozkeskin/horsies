@@ -1426,7 +1426,6 @@ class TestRunTaskEntryWorkflowHappyPaths:
         })
         valid_summary = json.dumps({
             'status': 'COMPLETED',
-            'success_case': None,
             'output': None,
             'total_tasks': 3,
             'completed_tasks': 3,

@@ -118,18 +118,3 @@ class OnError(str, Enum):
 
     PAUSE = 'pause'
     """Pause workflow immediately. No new tasks enqueued until resume()."""
-
-
-class SubWorkflowRetryMode(str, Enum):
-    """
-    Retry behavior for subworkflows (only RERUN_FAILED_ONLY currently supported).
-    """
-
-    RERUN_FAILED_ONLY = 'rerun_failed_only'
-    """Re-run only failed/cancelled child tasks (default, only supported mode)"""
-
-    RERUN_ALL = 'rerun_all'
-    """Re-run entire child workflow from scratch (not yet implemented)"""
-
-    NO_RERUN = 'no_rerun'
-    """Re-evaluate success policy without re-running (not yet implemented)"""

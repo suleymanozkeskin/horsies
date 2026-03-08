@@ -166,9 +166,9 @@ ADD_SUB_WORKFLOW_NAME_COLUMN_SQL = text("""
     ADD COLUMN IF NOT EXISTS sub_workflow_name VARCHAR(255);
 """)
 
-ADD_SUB_WORKFLOW_RETRY_MODE_COLUMN_SQL = text("""
+DROP_SUB_WORKFLOW_RETRY_MODE_COLUMN_SQL = text("""
     ALTER TABLE horsies_workflow_tasks
-    ADD COLUMN IF NOT EXISTS sub_workflow_retry_mode VARCHAR(50);
+    DROP COLUMN IF EXISTS sub_workflow_retry_mode;
 """)
 
 ADD_SUB_WORKFLOW_SUMMARY_COLUMN_SQL = text("""
@@ -582,7 +582,7 @@ class PostgresBroker:
             await conn.execute(ADD_IS_SUBWORKFLOW_COLUMN_SQL)
             await conn.execute(ADD_SUB_WORKFLOW_ID_COLUMN_SQL)
             await conn.execute(ADD_SUB_WORKFLOW_NAME_COLUMN_SQL)
-            await conn.execute(ADD_SUB_WORKFLOW_RETRY_MODE_COLUMN_SQL)
+            await conn.execute(DROP_SUB_WORKFLOW_RETRY_MODE_COLUMN_SQL)
             await conn.execute(ADD_SUB_WORKFLOW_SUMMARY_COLUMN_SQL)
             await conn.execute(ADD_SUB_WORKFLOW_MODULE_COLUMN_SQL)
             await conn.execute(ADD_SUB_WORKFLOW_QUALNAME_COLUMN_SQL)

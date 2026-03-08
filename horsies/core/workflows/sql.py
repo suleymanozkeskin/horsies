@@ -26,11 +26,11 @@ INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL = text("""
     (id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
      queue_name, priority, dependencies, args_from, workflow_ctx_from,
      allow_failed_deps, join_type, min_success, task_options, status,
-     is_subworkflow, sub_workflow_name, sub_workflow_retry_mode,
+     is_subworkflow, sub_workflow_name,
      sub_workflow_module, sub_workflow_qualname, created_at)
     VALUES (:id, :wf_id, :idx, :node_id, :name, :args, :kwargs, :queue, :priority,
             :deps, :args_from, :ctx_from, :allow_failed, :join_type, :min_success,
-            :task_options, :status, TRUE, :sub_wf_name, :sub_wf_retry_mode,
+            :task_options, :status, TRUE, :sub_wf_name,
             :sub_wf_module, :sub_wf_qualname, NOW())
 """)
 INSERT_WORKFLOW_TASK_SQL = text("""
@@ -129,7 +129,7 @@ ENQUEUE_SUBWORKFLOW_TASK_SQL = text("""
       AND w.status = 'RUNNING'
     RETURNING wt.id, wt.sub_workflow_name, wt.task_args, wt.task_kwargs,
               wt.args_from, wt.node_id, wt.sub_workflow_module,
-              wt.sub_workflow_qualname, wt.sub_workflow_retry_mode
+              wt.sub_workflow_qualname
 """)
 GET_WORKFLOW_NAME_SQL = text("""SELECT name FROM horsies_workflows WHERE id = :wf_id""")
 MARK_WORKFLOW_TASK_FAILED_SQL = text("""

@@ -14,7 +14,6 @@ from horsies.core.models.workflow.enums import (
     WORKFLOW_TASK_TERMINAL_STATES,
     WF_TASK_TERMINAL_VALUES as WF_TASK_TERMINAL_VALUES,
     OnError,
-    SubWorkflowRetryMode,
 )
 from horsies.core.models.workflow.nodes import (
     NodeKey,
@@ -61,7 +60,6 @@ __all__ = [
     'WorkflowTaskStatus',
     'WORKFLOW_TASK_TERMINAL_STATES',
     'OnError',
-    'SubWorkflowRetryMode',
     # nodes
     'NodeKey',
     'TaskNode',

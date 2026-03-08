@@ -1160,14 +1160,22 @@ class TestHandleFinalizeError:
     async def test_retryable_under_max_increments_and_spawns(self) -> None:
         """Retryable error under max attempts → increments counter, spawns retry."""
         worker = _make_worker()
-        worker._spawn_background = MagicMock()  # type: ignore[assignment]
+        spawn_count = 0
+
+        def _capture_spawn(coro: Any, *, name: str, **kwargs: Any) -> MagicMock:
+            nonlocal spawn_count
+            spawn_count += 1
+            coro.close()
+            return MagicMock()
+
+        worker._spawn_background = _capture_spawn  # type: ignore[assignment]
         err = _make_finalize_error(retryable=True, stage=_FINALIZE_STAGE_PHASE1)
 
         await worker._handle_finalize_error(err)
 
         key = (err.task_id, _FINALIZE_STAGE_PHASE1)
         assert worker._finalize_retry_attempts[key] == 1
-        assert worker._spawn_background.call_count == 1
+        assert spawn_count == 1
 
     # --- U-2e: retryable, at max_attempts → CRITICAL, no spawn ---
 
@@ -1199,7 +1207,15 @@ class TestHandleFinalizeError:
     ) -> None:
         """Phase2 uses its own max retries (5), not phase1's (3)."""
         worker = _make_worker()
-        worker._spawn_background = MagicMock()  # type: ignore[assignment]
+        spawn_count = 0
+
+        def _capture_spawn(coro: Any, *, name: str, **kwargs: Any) -> MagicMock:
+            nonlocal spawn_count
+            spawn_count += 1
+            coro.close()
+            return MagicMock()
+
+        worker._spawn_background = _capture_spawn  # type: ignore[assignment]
         err = _make_finalize_error(retryable=True, stage=_FINALIZE_STAGE_PHASE2)
         key = (err.task_id, _FINALIZE_STAGE_PHASE2)
 
@@ -1208,7 +1224,7 @@ class TestHandleFinalizeError:
         assert _FINALIZE_PHASE1_MAX_RETRIES < _FINALIZE_PHASE2_MAX_RETRIES
 
         await worker._handle_finalize_error(err)
-        assert worker._spawn_background.call_count == 1
+        assert spawn_count == 1
 
     # --- U-2f: phase1 retryable → spawns _retry_finalize_phase1 ---
 

@@ -1143,24 +1143,6 @@ class TestSubworkflowValidation:
 
         assert 'cycle' in str(exc.value).lower()
 
-    def test_unsupported_retry_mode_rejected(self, app: Horsies) -> None:
-        """SubWorkflowNode with unsupported retry_mode raises validation error."""
-        from horsies.core.models.workflow import SubWorkflowRetryMode
-
-        child_node = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
-            retry_mode=SubWorkflowRetryMode.RERUN_ALL,
-        )
-
-        with pytest.raises(WorkflowValidationError) as exc:
-            app.workflow(
-                name='unsupported_retry_mode',
-                tasks=[child_node],
-                output=child_node,
-            )
-
-        assert 'retry_mode' in str(exc.value).lower()
-
     def test_args_from_without_waits_for_rejected(self, app: Horsies) -> None:
         """args_from referencing a node not in waits_for raises WORKFLOW_INVALID_ARGS_FROM."""
         task_a_fn = make_simple_task(app, 'args_from_no_dep_a')

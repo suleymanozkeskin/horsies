@@ -134,7 +134,6 @@ class SubWorkflowNode(Generic[OkT]):
     join: Literal['all', 'any', 'quorum'] = 'all'
     min_success: int | None = None
     allow_failed_deps: bool = False
-    retry_mode: SubWorkflowRetryMode = SubWorkflowRetryMode.RERUN_FAILED_ONLY
     node_id: str | None = None
     index: int | None = None
 ```
@@ -426,7 +425,6 @@ class NodeKey(Generic[OkT]):
 @dataclass
 class SubWorkflowSummary(Generic[OkT]):
     status: WorkflowStatus
-    success_case: str | None
     output: OkT | None
     total_tasks: int
     completed_tasks: int
@@ -498,7 +496,6 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | E013 | `WORKFLOW_INVALID_JOIN` | `quorum` without valid `min_success` |
 | E014 | `WORKFLOW_UNRESOLVED_QUEUE` | Queue not registered |
 | E015 | `WORKFLOW_UNRESOLVED_PRIORITY` | Priority unresolvable |
-| E017 | `WORKFLOW_INVALID_SUBWORKFLOW_RETRY_MODE` | Unsupported retry mode |
 | E018 | `WORKFLOW_SUBWORKFLOW_APP_MISSING` | No app when subworkflow enqueues |
 | E019 | `WORKFLOW_INVALID_KWARG_KEY` | `kwargs` key not in function signature |
 | E020 | `WORKFLOW_MISSING_REQUIRED_PARAMS` | Required param not in kwargs or args_from |
@@ -517,7 +514,6 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 ## Known Constraints
 
 - DAG is **static at submission time**. No runtime-defined nodes.
-- Only `SubWorkflowRetryMode.RERUN_FAILED_ONLY` is supported.
 - `workflow_ctx_from` scope is per-task, does not propagate downstream.
 - `retry_start()` is best-effort idempotent by `workflow_id` only (no payload verification).
 - WorkflowSpec and all nodes are frozen after construction. Reusing node objects across specs is safe (they are copied internally).
@@ -538,7 +534,6 @@ from horsies import (
     # Enums
     WorkflowStatus, WorkflowTaskStatus,
     WORKFLOW_TERMINAL_STATES, WORKFLOW_TASK_TERMINAL_STATES,
-    SubWorkflowRetryMode,
     # Handle
     WorkflowHandle, WorkflowTaskInfo,
     # Handle result types

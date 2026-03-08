@@ -288,7 +288,6 @@ class TestEnqueueSubworkflowTask:
             node_id='node-0',
             sub_workflow_module='some.module',
             sub_workflow_qualname='ChildWorkflow',
-            sub_workflow_retry_mode='none',
         )
         defaults.update(overrides)
         return SimpleNamespace(**defaults)

@@ -216,11 +216,6 @@ class WorkflowTaskModel(Base):
         String(512), nullable=True
     )
 
-    # Retry mode for subworkflow (rerun_failed_only, rerun_all, no_rerun)
-    sub_workflow_retry_mode: Mapped[Optional[str]] = mapped_column(
-        String(50), nullable=True
-    )
-
     # Summary of subworkflow execution (serialized SubWorkflowSummary)
     sub_workflow_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 

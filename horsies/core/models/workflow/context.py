@@ -47,9 +47,6 @@ class SubWorkflowSummary(Generic[OkT_co]):
     status: WorkflowStatus
     """Child workflow's final status (COMPLETED, FAILED, etc.)"""
 
-    success_case: str | None
-    """Which SuccessCase was satisfied (if success_policy used)"""
-
     output: OkT_co | None
     """Child's output value (typed via generic parameter)"""
 
@@ -92,12 +89,10 @@ class SubWorkflowSummary(Generic[OkT_co]):
         except Exception:
             status = WorkflowStatus.FAILED
 
-        success_case_val = payload.get('success_case')
         error_val = payload.get('error_summary')
 
         return cls(
             status=status,
-            success_case=str(success_case_val) if success_case_val else None,
             output=payload.get('output'),
             total_tasks=_as_int(payload.get('total_tasks')),
             completed_tasks=_as_int(payload.get('completed_tasks')),

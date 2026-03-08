@@ -16,7 +16,6 @@ from horsies.core.models.workflow import (
     NodeKey,
     TaskNode,
     SubWorkflowNode,
-    SubWorkflowRetryMode,
     SubWorkflowSummary,
     WorkflowSpec,
     WorkflowContext,
@@ -2072,46 +2071,6 @@ class TestWorkflowDefinition:
         assert spec.tasks[2].workflow_ctx_from is not None
         assert len(spec.tasks[2].workflow_ctx_from) == 2
 
-    def test_subworkflow_retry_mode_guard(self) -> None:
-        """Unsupported SubWorkflowRetryMode raises validation error."""
-        from horsies.core.app import Horsies
-        from horsies.core.models.app import AppConfig
-        from horsies.core.models.broker import PostgresConfig
-
-        fn_a = MockTaskWrapper(task_name='task_a')
-
-        class ChildWorkflow(WorkflowDefinition[int]):
-            name = 'child_retry_guard'
-            child = TaskNode(fn=fn_a)
-
-            class Meta:
-                output = None
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
-
-        child_node = SubWorkflowNode(
-            workflow_def=ChildWorkflow,
-            retry_mode=SubWorkflowRetryMode.RERUN_ALL,
-        )
-
-        app = Horsies(
-            config=AppConfig(
-                broker=PostgresConfig(
-                    database_url='postgresql+psycopg://test:test@localhost/test'
-                ),
-            )
-        )
-
-        with pytest.raises(WorkflowValidationError) as exc:
-            app.workflow(
-                name='parent_retry_guard',
-                tasks=[child_node],
-                output=child_node,
-            )
-
-        err = exc.value
-        assert err.code == ErrorCode.WORKFLOW_INVALID_SUBWORKFLOW_RETRY_MODE
-
 
 # =============================================================================
 # Workflow Output Type Mismatch Tests (E025)
@@ -2433,7 +2392,6 @@ class TestSubWorkflowNode:
         assert node.join == 'all'
         assert node.min_success is None
         assert node.allow_failed_deps is False
-        assert node.retry_mode == SubWorkflowRetryMode.RERUN_FAILED_ONLY
         assert node.index is None
         assert node.node_id is None
 
@@ -2468,7 +2426,6 @@ class TestWorkflowContextSummary:
         """summary_for(node) returns the correct SubWorkflowSummary."""
         summary = SubWorkflowSummary(
             status=WorkflowStatus.COMPLETED,
-            success_case=None,
             output=42,
             total_tasks=3,
             completed_tasks=3,
@@ -2559,7 +2516,6 @@ class TestWorkflowContextSummary:
         """has_summary returns True when summary exists."""
         summary = SubWorkflowSummary(
             status=WorkflowStatus.COMPLETED,
-            success_case=None,
             output=1,
             total_tasks=1,
             completed_tasks=1,

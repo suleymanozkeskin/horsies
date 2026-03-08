@@ -337,7 +337,6 @@ async def start_workflow_async(
                                 'task_options': None,
                                 'status': 'PENDING' if dep_indices else 'READY',
                                 'sub_wf_name': node.workflow_def.name,
-                                'sub_wf_retry_mode': node.retry_mode.value,
                                 'sub_wf_module': node.workflow_def.__module__,
                                 'sub_wf_qualname': node.workflow_def.__qualname__,
                             },

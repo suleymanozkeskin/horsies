@@ -16,7 +16,6 @@ from horsies.core.errors import WorkflowValidationError
 
 from .enums import (
     OkT_co,
-    SubWorkflowRetryMode,
 )
 
 if TYPE_CHECKING:
@@ -273,11 +272,6 @@ class SubWorkflowNode(Generic[OkT_co]):
     """
     - False (default): SKIPPED if any dependency failed
     - True: starts regardless, failed deps passed as TaskResult(err=...) via args_from
-    """
-
-    retry_mode: SubWorkflowRetryMode = SubWorkflowRetryMode.RERUN_FAILED_ONLY
-    """
-    - How to retry if child workflow fails (only RERUN_FAILED_ONLY supported)
     """
 
     index: int | None = field(default=None, repr=False)

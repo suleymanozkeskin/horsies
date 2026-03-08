@@ -337,8 +337,6 @@ async def enqueue_subworkflow_task(
     _node_id = row.node_id  # Unused but kept for row unpacking clarity
     sub_workflow_module = row.sub_workflow_module
     sub_workflow_qualname = row.sub_workflow_qualname
-    _sub_workflow_retry_mode = row.sub_workflow_retry_mode  # Currently unused (retry_mode not implemented)
-
     # 2. Try to get workflow_def from registry (fast path) or import fallback
     #
     # Registry lookup succeeds when:
@@ -641,7 +639,6 @@ async def enqueue_subworkflow_task(
                     'task_options': None,
                     'status': 'PENDING' if child_dep_indices else 'READY',
                     'sub_wf_name': child_sub.workflow_def.name,
-                    'sub_wf_retry_mode': child_sub.retry_mode.value,
                     'sub_wf_module': child_sub.workflow_def.__module__,
                     'sub_wf_qualname': child_sub.workflow_def.__qualname__,
                 },
@@ -1428,7 +1425,6 @@ async def on_subworkflow_complete(
 
     child_summary = SubWorkflowSummary(
         status=WorkflowStatus(child_status),
-        success_case=None,  # TODO: extract from child if success_policy matched
         output=child_output,
         total_tasks=total_tasks,
         completed_tasks=completed_tasks,
