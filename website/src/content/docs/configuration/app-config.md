@@ -31,6 +31,9 @@ app = Horsies(config)
 | `recovery` | `RecoveryConfig` | defaults | Crash recovery settings |
 | `resilience` | `WorkerResilienceConfig` | defaults | Worker retry/backoff and notify polling |
 | `schedule` | `ScheduleConfig` | `None` | Scheduled task configuration |
+| `exception_mapper` | `ExceptionMapper` | `ExceptionMapper()` | Maps exceptions to `TaskError` codes |
+| `default_unhandled_error_code` | `str` | `"UNHANDLED_EXCEPTION"` | Error code for uncaught exceptions |
+| `resend_on_transient_err` | `bool` | `False` | Auto-retry transient enqueue failures in workflow start |
 
 ## Queue Mode Configuration
 

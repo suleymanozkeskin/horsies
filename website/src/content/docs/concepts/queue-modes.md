@@ -15,7 +15,7 @@ The simplest configuration - all tasks go to a single "default" queue.
 
 ```python
 from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
-from horsies.core.models.queues import QueueMode
+from horsies import QueueMode
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
@@ -42,8 +42,7 @@ Multiple named queues with individual priorities and concurrency limits.
 Queues limits are supported within the same deployed device, no need for deploying a separate device for each queue.
 
 ```python
-from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
-from horsies.core.models.queues import QueueMode, CustomQueueConfig
+from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError, QueueMode, CustomQueueConfig
 
 config = AppConfig(
     queue_mode=QueueMode.CUSTOM,

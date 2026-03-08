@@ -169,7 +169,7 @@ RecoveryConfig(
 
 ## Database Schema
 
-Heartbeats are stored in the `heartbeats` table:
+Heartbeats are stored in the `horsies_heartbeats` table:
 
 | Column | Type | Description |
 | ------ | ---- | ----------- |
@@ -221,14 +221,14 @@ Tasks will remain stuck until manually resolved.
 
 ## Table Cleanup
 
-The `heartbeats` table grows over time. Recommended cleanup:
+Heartbeat cleanup is automatic by default. The worker reaper deletes expired heartbeats on every tick based on `RecoveryConfig.heartbeat_retention_hours` (default: `24`, set to `None` to disable).
+
+For manual cleanup:
 
 ```sql
 -- Delete heartbeats older than 24 hours
-DELETE FROM heartbeats WHERE sent_at < NOW() - INTERVAL '24 hours';
+DELETE FROM horsies_heartbeats WHERE sent_at < NOW() - INTERVAL '24 hours';
 ```
-
-Run periodically (daily) via scheduler or external cron.
 
 ## Troubleshooting
 

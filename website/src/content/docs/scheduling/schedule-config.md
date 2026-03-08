@@ -64,6 +64,7 @@ TaskSchedule(
 | `enabled` | `bool` | `True` | Enable/disable this schedule |
 | `timezone` | `str` | `"UTC"` | Timezone for schedule evaluation |
 | `catch_up_missed` | `bool` | `False` | Execute missed runs on restart |
+| `max_catch_up_runs` | `int` | `100` | Maximum runs to enqueue per scheduler tick when `catch_up_missed=True` (range: 1–10000) |
 
 ### Name
 

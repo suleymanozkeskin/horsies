@@ -27,7 +27,7 @@ broker = app.get_broker()
 
 Find RUNNING tasks whose workers have not sent a heartbeat within the threshold. Indicates a crashed or unresponsive worker.
 
-**Returns:** `Ok(list[dict])` with keys: `id`, `worker_hostname`, `worker_pid`, `last_heartbeat`.
+**Returns:** `Ok(list[dict])` with keys: `id`, `worker_hostname`, `worker_pid`, `worker_process_name`, `last_heartbeat`, `started_at`, `task_name`.
 
 ```python
 result = await broker.get_stale_tasks(stale_threshold_minutes=5)
@@ -40,7 +40,7 @@ if is_ok(result):
 
 Group RUNNING tasks by worker to show load distribution and health.
 
-**Returns:** `Ok(list[dict])` with keys: `worker_hostname`, `worker_pid`, `active_tasks`, `oldest_task_start`.
+**Returns:** `Ok(list[dict])` with keys: `worker_hostname`, `worker_pid`, `worker_process_name`, `active_tasks`, `oldest_task_start`, `latest_heartbeat`.
 
 ```python
 result = await broker.get_worker_stats()
