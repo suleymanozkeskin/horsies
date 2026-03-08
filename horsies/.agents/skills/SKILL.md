@@ -179,7 +179,7 @@ task sends and workflow starts.
 ```python
 handle.status()          # WorkflowStatus
 handle.get(timeout_ms=N) # TaskResult (blocks for output node)
-handle.results()         # dict[str, TaskResult] keyed by node_id
+handle.results()         # HandleResult[dict[str, TaskResult]] — unwrap before use
 handle.tasks()           # list[WorkflowTaskInfo]
 handle.cancel()          # cancel workflow
 handle.pause()           # pause (RUNNING -> PAUSED)

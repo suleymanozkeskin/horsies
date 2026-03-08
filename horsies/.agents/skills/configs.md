@@ -267,7 +267,7 @@ When `True` on `AppConfig`, enables automatic retry of transient `ENQUEUE_FAILED
 - 3 retries after initial attempt (4 total)
 - Initial backoff: 200ms
 - Max backoff: 2000ms
-- Exponential with ±25% jitter
+- Exponential backoff (no jitter)
 
 Only retries errors with `retryable=True`. Permanent errors (validation, serialization) return immediately.
 
@@ -283,7 +283,7 @@ Phases are fail-fast: errors in phase N stop later phases.
 
 | Phase | What | Errors |
 |---|---|---|
-| 1 — Config | `AppConfig` Pydantic validators | E200–E209 |
+| 1 — Config | `AppConfig` Pydantic validators (implicit — already validated at construction) | E200–E209 |
 | 2 — Imports | Import each discovered module | ImportError, E210 |
 | 3 — Workflows | `WorkflowSpec` DAG validation during imports | E001–E031 |
 | 3.1 — Builders | Execute `@app.workflow_builder` functions | E027–E030 |

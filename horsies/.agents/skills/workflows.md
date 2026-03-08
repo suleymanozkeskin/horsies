@@ -25,7 +25,7 @@ spec = app.workflow(
 ```
 
 - When `output` is provided: returns `WorkflowSpec[OutT]` typed to that node's ok-type.
-- When `output=None`: returns `WorkflowSpec[WorkflowTerminalResults]` — `handle.get()` returns `TaskResult[dict[str, TaskResult], TaskError]` where `.ok` is `{node_id: TaskResult, ...}`.
+- When `output=None`: returns `WorkflowSpec[WorkflowTerminalResults]` — `handle.get()` returns `TaskResult[dict[str, TaskResult | None], TaskError]` where `.ok` is `{node_id: TaskResult | None, ...}`.
 - Resolves queue/priority for each `TaskNode` using app config; raises E014/E015 if unregistered.
 - Attaches broker and `resend_on_transient_err` from app config automatically.
 

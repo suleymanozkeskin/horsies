@@ -26,7 +26,7 @@ def my_task(...) -> TaskResult[T, TaskError]: ...
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `task_name` | `str` | required | Unique identifier. Duplicate names raise `RegistryError(E301)`. |
-| `queue_name` | `str \| None` | `None` | Must be `None` in DEFAULT mode; must match a configured queue in CUSTOM mode. Invalid raises `E103`. |
+| `queue_name` | `str \| None` | `None` | Must be `None` in DEFAULT mode (raises `E200`); must match a configured queue in CUSTOM mode (unrecognized raises `E103`). |
 | `good_until` | `datetime \| None` | `None` | Task expiry deadline. Must be timezone-aware. |
 | `retry_policy` | `RetryPolicy \| None` | `None` | See RetryPolicy section. |
 | `exception_mapper` | `dict[type[BaseException], str] \| None` | `None` | Per-task exception-to-error-code mapping. See ExceptionMapper section. |
@@ -128,6 +128,7 @@ All values grouped by category:
 - `SEND_SUPPRESSED` — send called during worker import/discovery
 
 **Workflow:**
+- `WORKFLOW_NOT_FOUND` — workflow ID does not exist
 - `UPSTREAM_SKIPPED` — upstream task was skipped
 - `WORKFLOW_CTX_MISSING_ID` — workflow context missing required ID
 - `WORKFLOW_SUCCESS_CASE_NOT_MET` — success condition not satisfied
@@ -224,7 +225,7 @@ class TaskSendError:
     code: TaskSendErrorCode
     message: str
     retryable: bool
-    task_id: str | None         # None for SEND_SUPPRESSED, VALIDATION_FAILED
+    task_id: str | None         # None for SEND_SUPPRESSED; may be set or None for VALIDATION_FAILED
     payload: TaskSendPayload | None  # None when no serialization happened
     exception: BaseException | None
 ```
@@ -476,7 +477,7 @@ if result.is_err() and result.err_value.error_code == LibraryErrorCode.WAIT_TIME
 ### `queue_name` in DEFAULT mode
 
 ```python
-# WRONG — raises E103 at definition time if app uses QueueMode.DEFAULT
+# WRONG — raises E200 at definition time if app uses QueueMode.DEFAULT
 @app.task("t", queue_name="critical")
 def t() -> TaskResult[str, TaskError]: ...
 ```
