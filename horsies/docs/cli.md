@@ -110,6 +110,30 @@ horsies check myapp.instance:app
 horsies check myapp.instance:app --live
 ```
 
+### horsies get-docs
+
+Fetch documentation locally for AI agents.
+
+```bash
+horsies get-docs [OPTIONS]
+```
+
+**Options:**
+
+| Option | Default | Description |
+| ------ | ------- | ----------- |
+| `--output DIR` | .horsies-docs | Output directory for downloaded docs |
+
+**Examples:**
+
+```bash
+# Default output directory
+horsies get-docs
+
+# Custom output directory
+horsies get-docs --output docs/horsies
+```
+
 ## Module Formats
 
 The recommended format is a dotted module path with an explicit variable name:
@@ -207,7 +231,7 @@ WantedBy=multi-user.target
 ### Docker
 
 ```dockerfile
-FROM python:3.11
+FROM python:3.13
 
 WORKDIR /app
 COPY . .

@@ -255,7 +255,7 @@ WantedBy=multi-user.target
 ### Docker
 
 ```dockerfile
-FROM python:3.11
+FROM python:3.13
 
 WORKDIR /app
 COPY . .
