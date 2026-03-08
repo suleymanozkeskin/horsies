@@ -29,6 +29,9 @@ class TaskSendErrorCode(str, Enum):
     """
 
     SEND_SUPPRESSED = 'SEND_SUPPRESSED'
+    """Send called while suppression is active (worker/scheduler import phase,
+    ``check()``, or ``TASKLIB_SUPPRESS_SENDS=1``). Non-retryable."""
+
     VALIDATION_FAILED = 'VALIDATION_FAILED'
     ENQUEUE_FAILED = 'ENQUEUE_FAILED'
     PAYLOAD_MISMATCH = 'PAYLOAD_MISMATCH'
@@ -62,7 +65,8 @@ class TaskSendError:
         code: which failure category
         message: human-readable description
         retryable: whether the caller can retry with the same task_id
-        task_id: generated task ID (None for SEND_SUPPRESSED, VALIDATION_FAILED)
+        task_id: generated task ID (None for SEND_SUPPRESSED; may or may not
+            be set for VALIDATION_FAILED depending on when the failure occurs)
         payload: serialized envelope for replay (None when no serialization happened)
         exception: the original cause (if any)
     """

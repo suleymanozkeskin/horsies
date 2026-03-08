@@ -78,7 +78,7 @@ class LibraryErrorCode(str, Enum):
     RETURN_TYPE_MISMATCH = 'RETURN_TYPE_MISMATCH'
     PYDANTIC_HYDRATION_ERROR = 'PYDANTIC_HYDRATION_ERROR'
 
-    # Lifecycle errors
+    # Lifecycle errors (internal suppression during import/check/TASKLIB_SUPPRESS_SENDS=1)
     SEND_SUPPRESSED = 'SEND_SUPPRESSED'
 
     # Workflow errors

@@ -39,6 +39,14 @@ def add_numbers(a: int, b: int) -> TaskResult[int, TaskError]:
 Every task must return `TaskResult[T, TaskError]`.
 Use `TaskResult(ok=value)` for success, `TaskResult(err=TaskError(...))` for failure.
 
+Register task modules for worker discovery:
+
+```python
+app.discover_tasks(["myapp.tasks", "myapp.jobs.tasks"])
+```
+
+Only records paths — actual imports happen when the worker starts.
+
 ## Send a Task
 
 `send()` returns `TaskSendResult[TaskHandle[T]]` — always handle both branches:
@@ -86,11 +94,11 @@ Workflows are DAGs of tasks. Two approaches:
 First call sets workflow options, second call sets task arguments:
 
 ```python
-from horsies import OnError
+from horsies import OnError, from_node
 
 fetch = fetch_data.node()()
-process = process_data.node(waits_for=[fetch], args_from={"data": fetch})()
-save = save_result.node(waits_for=[process], args_from={"result": process})()
+process = process_data.node()(data=from_node(fetch))
+save = save_result.node()(result=from_node(process))
 
 spec = app.workflow(
     name="etl_pipeline",

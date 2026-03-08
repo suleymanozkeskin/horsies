@@ -176,6 +176,27 @@ def node(
 
 **Direct call vs `.send()`**: Direct call runs synchronously in current process, no queue, no retry, no persistence. `.send()` enqueues for background execution by a worker.
 
+## `from_node()` — Ergonomic Data Flow for `.node()()`
+
+```python
+from horsies import from_node
+
+def from_node(upstream: TaskNode[Any] | SubWorkflowNode[Any]) -> Any
+```
+
+When used as a kwarg value in the second call of `.node()()`, the `NodeFactory` will:
+1. Add the upstream node to `args_from` under this kwarg's key.
+2. Auto-add the upstream node to `waits_for` if not already present.
+
+```python
+producer = produce.node()(value=42)
+consumer = consume.node()(data=from_node(producer))
+# Equivalent to:
+# TaskNode(fn=consume, args_from={"data": producer}, waits_for=[producer])
+```
+
+Raises `WorkflowValidationError(E008)` if argument is not a `TaskNode` or `SubWorkflowNode`.
+
 ## `TaskHandle[T]`
 
 Returned by successful `.send()` / `.send_async()` / `.schedule()`.
@@ -510,6 +531,8 @@ from horsies import (
     TaskStatus, TASK_TERMINAL_STATES,
     # Broker result (for handle.info())
     BrokerResult, BrokerOperationError, BrokerErrorCode,
+    # Node data flow helper
+    from_node,
     # Result primitives
     Result, Ok, Err, is_ok, is_err,
 )

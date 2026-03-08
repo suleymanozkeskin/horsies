@@ -800,19 +800,23 @@ class Horsies:
 
     # -------- side-effect control (import/discovery) --------
     def suppress_sends(self, value: bool = True) -> None:
-        """Enable/disable suppression of task sends/schedules.
+        """Internal: enable/disable suppression of task sends/schedules.
 
-        Library-internal use: the worker sets this True while importing user
-        modules for task discovery so any top-level `.send()` calls in those
-        modules do not enqueue tasks as an import side effect.
+        Do not call from user code. This is set automatically by the worker,
+        scheduler, and check phases during module imports so that top-level
+        ``.send()`` calls do not enqueue tasks as an import side effect.
         """
         self._suppress_sends = value
 
     def are_sends_suppressed(self) -> bool:
-        """Return True if sends/schedules should be no-ops.
+        """Internal: return True if sends/schedules should be no-ops.
 
-        Environment override: if TASKLIB_SUPPRESS_SENDS=1, suppression is also
-        considered active (useful for ad-hoc scripting).
+        True when ``suppress_sends(True)`` was called (worker/scheduler import
+        phase, ``check()``, builder execution) or when the environment variable
+        ``TASKLIB_SUPPRESS_SENDS=1`` is set.
+
+        This is process-local state — it has no effect on other producers or
+        workers in a multi-process cluster.
         """
         env_flag = os.getenv('TASKLIB_SUPPRESS_SENDS', '').strip()
         return self._suppress_sends or env_flag == '1'

@@ -60,6 +60,25 @@ app = Horsies(config=AppConfig(
 - Values must match `^[A-Z][A-Z0-9_]*$`.
 - Values that look like exception class names (e.g., `"TimeoutError"`) are rejected.
 
+## Horsies App Methods
+
+Methods on the `Horsies` instance beyond `@app.task(...)` and `app.workflow(...)`:
+
+```python
+# Register task modules for worker discovery (records paths, no I/O)
+app.discover_tasks(["myapp.tasks", "myapp.jobs.tasks"])
+
+# Glob patterns — expand first, then discover
+paths = app.expand_module_globs(["src/**/*_tasks.py"])
+app.discover_tasks(paths)
+
+# Get the configured PostgresBroker (for monitoring/introspection)
+broker = app.get_broker()
+
+# List registered task names
+names = app.list_tasks()  # list[str]
+```
+
 ## PostgresConfig
 
 ```python

@@ -1113,7 +1113,7 @@ def create_task_wrapper(
         if app.are_sends_suppressed():
             return Err(TaskSendError(
                 code=TaskSendErrorCode.SEND_SUPPRESSED,
-                message=f'Task send suppressed for {task_name} during module import/discovery',
+                message=f'Task send suppressed for {task_name} (import/check phase or TASKLIB_SUPPRESS_SENDS=1)',
                 retryable=False,
             ))
 
@@ -1131,7 +1131,7 @@ def create_task_wrapper(
         if app.are_sends_suppressed():
             return Err(TaskSendError(
                 code=TaskSendErrorCode.SEND_SUPPRESSED,
-                message=f'Task send (async) suppressed for {task_name} during module import/discovery',
+                message=f'Task send suppressed for {task_name} (import/check phase or TASKLIB_SUPPRESS_SENDS=1)',
                 retryable=False,
             ))
 
@@ -1150,7 +1150,7 @@ def create_task_wrapper(
         if app.are_sends_suppressed():
             return Err(TaskSendError(
                 code=TaskSendErrorCode.SEND_SUPPRESSED,
-                message=f'Task schedule suppressed for {task_name} during module import/discovery',
+                message=f'Task schedule suppressed for {task_name} (import/check phase or TASKLIB_SUPPRESS_SENDS=1)',
                 retryable=False,
             ))
 
