@@ -46,6 +46,7 @@ Errors from `handle.get()` / `get_async()`. These indicate issues retrieving the
 | `TASK_NOT_FOUND` | Task ID doesn't exist in database | No |
 | `TASK_CANCELLED` | Task was cancelled before completion | No |
 | `RESULT_NOT_AVAILABLE` | Result cache was never set | No |
+| `RESULT_NOT_READY` | Result not yet available; task is still running | No |
 | `RESULT_DESERIALIZATION_ERROR` | Stored result JSON is corrupt or could not be deserialized | No |
 
 #### Broker Errors
@@ -117,6 +118,7 @@ Errors specific to workflow execution.
 | `UPSTREAM_SKIPPED` | Upstream task in workflow was skipped | No |
 | `WORKFLOW_CTX_MISSING_ID` | Workflow context is missing required ID | No |
 | `WORKFLOW_SUCCESS_CASE_NOT_MET` | Workflow success condition was not satisfied | No |
+| `WORKFLOW_NOT_FOUND` | Workflow ID doesn't exist in database | No |
 | `WORKFLOW_ENQUEUE_FAILED` | Workflow node failed after READY→ENQUEUED transition during enqueue/build | No |
 
 ### User-Defined Error Codes
@@ -206,6 +208,7 @@ horsies check myapp.instance:app
 | E028 | `WORKFLOW_CHECK_CASE_INVALID` | Workflow builder test case is invalid |
 | E029 | `WORKFLOW_CHECK_BUILDER_EXCEPTION` | Workflow builder raised an exception or returned non-WorkflowSpec |
 | E030 | `WORKFLOW_CHECK_UNDECORATED_BUILDER` | Function returns WorkflowSpec but lacks @app.workflow_builder |
+| E031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails JSON serialization |
 
 ### Task Definition (E100-E199)
 
@@ -215,6 +218,7 @@ horsies check myapp.instance:app
 | E101 | `TASK_INVALID_RETURN_TYPE` | Return type is not TaskResult |
 | E102 | `TASK_INVALID_OPTIONS` | Invalid task options |
 | E103 | `TASK_INVALID_QUEUE` | Invalid queue specification |
+| E104 | `TASK_PREDECORATED_NOT_SUPPORTED` | Task function is already decorated by another app instance |
 
 ### Configuration (E200-E299)
 
