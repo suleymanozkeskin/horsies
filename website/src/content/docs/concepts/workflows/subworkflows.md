@@ -277,7 +277,7 @@ class ParentWorkflow(WorkflowDefinition[int]):
 
 ### 6.3 Parameterized Subworkflows with `build_with()`
 
-**Important:** Passing `kwargs`, `args`, or `args_from` to a `SubWorkflowNode` requires overriding `build_with()`.
+**Important:** Passing `kwargs` or `args_from` to a `SubWorkflowNode` requires overriding `build_with()`.
 The default implementation ignores all parameters. If you pass params without overriding, validation
 fails with `E022` (`WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH`).
 

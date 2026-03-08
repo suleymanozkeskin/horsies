@@ -237,7 +237,7 @@ When a task fails with `on_error="pause"`:
 1. **Immediate status change**: Workflow status becomes `PAUSED`
 2. **New enqueues blocked**: No new tasks will transition from PENDING → READY or READY → ENQUEUED
 3. **Running tasks may complete**: Tasks already running will finish (cooperative, no force-kill)
-4. **Already-enqueued tasks**: Tasks already in the queue may still be claimed and run
+4. **Already-enqueued tasks**: Tasks may still be claimed briefly, but paused workflows are filtered post-claim and those tasks are unclaimed (they do not execute until resume)
 5. **Resume required**: Workflow remains PAUSED until an explicit resume operation
 
 **What PAUSE blocks:**
