@@ -17,7 +17,9 @@ SELECT
     COUNT(*) FILTER (WHERE wt.status = 'COMPLETED') as completed_tasks,
     COUNT(*) FILTER (WHERE wt.status = 'FAILED') as failed_tasks,
     COUNT(*) FILTER (WHERE wt.status = 'RUNNING') as running_tasks,
-    COUNT(*) FILTER (WHERE wt.status = 'PENDING' OR wt.status = 'READY') as pending_tasks
+    COUNT(*) FILTER (WHERE wt.status = 'PENDING' OR wt.status = 'READY') as pending_tasks,
+    COUNT(*) FILTER (WHERE wt.status = 'ENQUEUED') as enqueued_tasks,
+    COUNT(*) FILTER (WHERE wt.status = 'SKIPPED') as skipped_tasks
 FROM horsies_workflows w
 LEFT JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
 GROUP BY w.id

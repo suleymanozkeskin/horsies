@@ -208,6 +208,8 @@ pub enum TaskStatus {
     Running,
     Completed,
     Failed,
+    Cancelled,
+    Requeued,
 }
 
 impl TaskStatus {
@@ -218,6 +220,8 @@ impl TaskStatus {
             TaskStatus::Running,
             TaskStatus::Completed,
             TaskStatus::Failed,
+            TaskStatus::Cancelled,
+            TaskStatus::Requeued,
         ]
     }
 
@@ -228,6 +232,8 @@ impl TaskStatus {
             TaskStatus::Running => "Running",
             TaskStatus::Completed => "Completed",
             TaskStatus::Failed => "Failed",
+            TaskStatus::Cancelled => "Cancelled",
+            TaskStatus::Requeued => "Requeued",
         }
     }
 
@@ -238,6 +244,8 @@ impl TaskStatus {
             TaskStatus::Running => "RUNNING",
             TaskStatus::Completed => "COMPLETED",
             TaskStatus::Failed => "FAILED",
+            TaskStatus::Cancelled => "CANCELLED",
+            TaskStatus::Requeued => "REQUEUED",
         }
     }
 }

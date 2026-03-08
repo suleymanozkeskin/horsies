@@ -1145,6 +1145,12 @@ impl App {
             (KeyCode::Char('f'), _) if self.state.current_tab == Tab::Tasks && !self.state.show_task_detail => {
                 Some(Action::ToggleTaskStatusFilter(TaskStatus::Failed))
             }
+            (KeyCode::Char('x'), _) if self.state.current_tab == Tab::Tasks && !self.state.show_task_detail => {
+                Some(Action::ToggleTaskStatusFilter(TaskStatus::Cancelled))
+            }
+            (KeyCode::Char('R'), _) if self.state.current_tab == Tab::Tasks && !self.state.show_task_detail => {
+                Some(Action::ToggleTaskStatusFilter(TaskStatus::Requeued))
+            }
             (KeyCode::Char('a'), _) if self.state.current_tab == Tab::Tasks && !self.state.show_task_detail => {
                 Some(Action::SelectAllTaskStatuses)
             }

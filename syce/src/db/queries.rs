@@ -92,7 +92,7 @@ pub async fn fetch_worker_queues(pool: &PgPool) -> Result<Vec<WorkerQueuesRow>> 
 /// Worker load for a custom time window
 /// Dynamically fetches worker load data for the specified time interval
 pub async fn fetch_worker_load(pool: &PgPool, interval: &str) -> Result<Vec<WorkerLoadPoint>> {
-    let query = format!(
+    let rows = sqlx::query_as::<_, WorkerLoadPoint>(
         r#"
         SELECT
             worker_id,
@@ -102,15 +102,13 @@ pub async fn fetch_worker_load(pool: &PgPool, interval: &str) -> Result<Vec<Work
             memory_percent,
             cpu_percent
         FROM horsies_worker_states
-        WHERE snapshot_at > NOW() - INTERVAL '{}'
+        WHERE snapshot_at > NOW() - $1::interval
         ORDER BY worker_id, snapshot_at
         "#,
-        interval
-    );
-
-    let rows = sqlx::query_as::<_, WorkerLoadPoint>(&query)
-        .fetch_all(pool)
-        .await?;
+    )
+    .bind(interval)
+    .fetch_all(pool)
+    .await?;
     Ok(rows)
 }
 
@@ -228,7 +226,9 @@ pub async fn fetch_workflow_by_id(pool: &PgPool, workflow_id: &str) -> Result<Op
             COUNT(*) FILTER (WHERE wt.status = 'COMPLETED') as completed_tasks,
             COUNT(*) FILTER (WHERE wt.status = 'FAILED') as failed_tasks,
             COUNT(*) FILTER (WHERE wt.status = 'RUNNING') as running_tasks,
-            COUNT(*) FILTER (WHERE wt.status = 'PENDING' OR wt.status = 'READY') as pending_tasks
+            COUNT(*) FILTER (WHERE wt.status = 'PENDING' OR wt.status = 'READY') as pending_tasks,
+            COUNT(*) FILTER (WHERE wt.status = 'ENQUEUED') as enqueued_tasks,
+            COUNT(*) FILTER (WHERE wt.status = 'SKIPPED') as skipped_tasks
         FROM horsies_workflows w
         LEFT JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
         WHERE w.id = $1

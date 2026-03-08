@@ -48,16 +48,19 @@ pub struct WorkflowRow {
     pub failed_tasks: Option<i64>,
     pub running_tasks: Option<i64>,
     pub pending_tasks: Option<i64>,
+    pub enqueued_tasks: Option<i64>,
+    pub skipped_tasks: Option<i64>,
 }
 
 impl WorkflowRow {
     /// Get terminal (done) tasks count: completed + failed + skipped
     fn terminal_tasks(&self) -> i64 {
-        // terminal = total - pending - running
+        // terminal = total - pending - running - enqueued
         let total = self.total_tasks.unwrap_or(0);
         let pending = self.pending_tasks.unwrap_or(0);
         let running = self.running_tasks.unwrap_or(0);
-        total - pending - running
+        let enqueued = self.enqueued_tasks.unwrap_or(0);
+        total - pending - running - enqueued
     }
 
     /// Get execution progress as a string like "97/97" (terminal / total)

@@ -612,6 +612,8 @@ impl<'a> WorkflowDetailPanel<'a> {
         let running = self.workflow.running_tasks.unwrap_or(0);
         let failed = self.workflow.failed_tasks.unwrap_or(0);
         let pending = self.workflow.pending_tasks.unwrap_or(0);
+        let enqueued = self.workflow.enqueued_tasks.unwrap_or(0);
+        let skipped = self.workflow.skipped_tasks.unwrap_or(0);
 
         lines.push(DetailLine::new(Line::from(vec![
             Span::styled("  Total: ", Style::default().fg(theme.muted)),
@@ -624,6 +626,10 @@ impl<'a> WorkflowDetailPanel<'a> {
             Span::styled(format!("{}", failed), Style::default().fg(theme.error)),
             Span::styled("  Pending: ", Style::default().fg(theme.muted)),
             Span::styled(format!("{}", pending), Style::default().fg(Color::Yellow)),
+            Span::styled("  Enqueued: ", Style::default().fg(theme.muted)),
+            Span::styled(format!("{}", enqueued), Style::default().fg(Color::Cyan)),
+            Span::styled("  Skipped: ", Style::default().fg(theme.muted)),
+            Span::styled(format!("{}", skipped), Style::default().fg(theme.muted)),
         ])));
 
         lines.push(DetailLine::new(Line::from("")));

@@ -115,6 +115,8 @@ pub struct AggregatedBreakdownRow {
     pub running_count: i64,
     pub completed_count: i64,
     pub failed_count: i64,
+    pub cancelled_count: i64,
+    pub requeued_count: i64,
     pub claimed_task_ids: Option<Vec<String>>,
     pub running_task_ids: Option<Vec<String>>,
 }

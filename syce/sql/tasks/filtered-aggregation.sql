@@ -21,6 +21,8 @@ agg AS (
     COUNT(*) FILTER (WHERE status = 'RUNNING')      AS running_count,
     COUNT(*) FILTER (WHERE status = 'COMPLETED')    AS completed_count,
     COUNT(*) FILTER (WHERE status = 'FAILED')       AS failed_count,
+    COUNT(*) FILTER (WHERE status = 'CANCELLED')   AS cancelled_count,
+    COUNT(*) FILTER (WHERE status = 'REQUEUED')    AS requeued_count,
     -- Collect task IDs for all filtered statuses (not just claimed/running)
     ARRAY_AGG(id ORDER BY enqueued_at) AS task_ids
   FROM base
@@ -36,6 +38,8 @@ SELECT
   running_count,
   completed_count,
   failed_count,
+  cancelled_count,
+  requeued_count,
   -- For backwards compat, map task_ids to claimed_task_ids (we'll use this for all filtered IDs)
   CASE WHEN g = 1 THEN NULL ELSE task_ids END       AS claimed_task_ids,
   CASE WHEN g = 1 THEN NULL ELSE NULL::text[] END   AS running_task_ids

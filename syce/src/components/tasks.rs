@@ -39,6 +39,8 @@ impl<'a> Tasks<'a> {
                 TaskStatus::Running => "r",
                 TaskStatus::Completed => "o",
                 TaskStatus::Failed => "f",
+                TaskStatus::Cancelled => "x",
+                TaskStatus::Requeued => "R",
             };
 
             let style = if is_selected {
@@ -71,6 +73,8 @@ impl<'a> Tasks<'a> {
             TaskStatus::Running => Color::Blue,
             TaskStatus::Completed => theme.success,
             TaskStatus::Failed => theme.error,
+            TaskStatus::Cancelled => theme.muted,
+            TaskStatus::Requeued => Color::Magenta,
         }
     }
 
@@ -147,6 +151,8 @@ impl<'a> Tasks<'a> {
             Cell::from("Running"),
             Cell::from("Completed"),
             Cell::from("Failed"),
+            Cell::from("Cancelled"),
+            Cell::from("Requeued"),
         ])
         .style(header_style)
         .height(1);
@@ -197,6 +203,8 @@ impl<'a> Tasks<'a> {
                             Cell::from(agg_row.running_count.to_string()),
                             Cell::from(agg_row.completed_count.to_string()),
                             Cell::from(agg_row.failed_count.to_string()),
+                            Cell::from(agg_row.cancelled_count.to_string()),
+                            Cell::from(agg_row.requeued_count.to_string()),
                         ])
                         .style(style)
                     }
@@ -234,6 +242,8 @@ impl<'a> Tasks<'a> {
                             Cell::from(""),
                             Cell::from(""),
                             Cell::from(""),
+                            Cell::from(""),
+                            Cell::from(""),
                         ])
                         .style(style)
                     }
@@ -250,6 +260,8 @@ impl<'a> Tasks<'a> {
             Constraint::Length(8),      // Running
             Constraint::Length(10),     // Completed
             Constraint::Length(8),      // Failed
+            Constraint::Length(10),     // Cancelled
+            Constraint::Length(9),      // Requeued
         ];
 
         let table = Table::new(rows, widths)
