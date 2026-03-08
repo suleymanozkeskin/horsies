@@ -64,7 +64,7 @@ def urgent_alert() -> TaskResult[str, TaskError]:
 def process_order() -> TaskResult[str, TaskError]:
     return TaskResult(ok="processed")
 
-@app.task("ship_item", queue_name="shipping")
+@app.task("ship_item", queue_name="low")
 def ship_to_address() -> TaskResult[str, TaskError]:
     return TaskResult(ok="shipped")
 ```

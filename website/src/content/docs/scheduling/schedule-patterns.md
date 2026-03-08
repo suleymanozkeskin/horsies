@@ -143,7 +143,7 @@ MonthlySchedule(day=15, time=time(12, 0, 0))
 
 # Last valid day handling
 MonthlySchedule(day=31, time=time(23, 59, 0))
-# In February, runs on 28th (or 29th)
+# Months with fewer than 31 days are skipped (e.g. February, April)
 ```
 
 | Field | Range | Description |
