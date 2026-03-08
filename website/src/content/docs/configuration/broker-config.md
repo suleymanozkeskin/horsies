@@ -20,8 +20,8 @@ broker = PostgresConfig(
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `database_url` | `str` | required | SQLAlchemy connection URL |
-| `pool_size` | `int` | 5 | Connection pool size |
-| `max_overflow` | `int` | 10 | Additional connections beyond pool_size |
+| `pool_size` | `int` | 30 | Connection pool size |
+| `max_overflow` | `int` | 30 | Additional connections beyond pool_size |
 | `pool_timeout` | `int` | 30 | Seconds to wait for connection |
 | `pool_recycle` | `int` | 1800 | Recycle connections after N seconds |
 
