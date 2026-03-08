@@ -17,7 +17,7 @@ Primary task storage table.
 | `priority` | INT | 1-100, lower = higher priority |
 | `args` | TEXT | JSON-serialized positional args |
 | `kwargs` | TEXT | JSON-serialized keyword args |
-| `status` | ENUM | PENDING/CLAIMED/RUNNING/COMPLETED/FAILED/CANCELLED/REQUEUED |
+| `status` | VARCHAR | PENDING/CLAIMED/RUNNING/COMPLETED/FAILED/CANCELLED/REQUEUED (stored as VARCHAR via `native_enum=False`) |
 
 These values correspond to `TaskStatus` in the API (see Task Lifecycle for terminal states).
 | `sent_at` | TIMESTAMP | Immutable call-site timestamp (when `.send()`/`.schedule()` was called) |
@@ -38,6 +38,8 @@ These values correspond to `TaskStatus` in the API (see Task Lifecycle for termi
 | `worker_pid` | INT | Executing process ID |
 | `worker_hostname` | VARCHAR(255) | Executing machine |
 | `worker_process_name` | VARCHAR(255) | Process identifier |
+| `claim_expires_at` | TIMESTAMP | Claim lease expiry deadline |
+| `enqueue_sha` | VARCHAR(64) | SHA-256 digest for idempotent retry |
 | `created_at` | TIMESTAMP | Row creation time |
 | `updated_at` | TIMESTAMP | Last update time |
 
@@ -76,6 +78,13 @@ Worker monitoring snapshots (timeseries).
 | `tasks_claimed` | INT | Current claimed count |
 | `memory_usage_mb` | FLOAT | Memory consumption |
 | `cpu_percent` | FLOAT | CPU usage |
+| `memory_percent` | FLOAT | Memory usage percentage |
+| `max_claim_batch` | INT | Max tasks claimed per batch |
+| `max_claim_per_worker` | INT | Max tasks claimable per worker |
+| `cluster_wide_cap` | INT | Cluster-wide in-flight cap |
+| `queue_priorities` | JSONB | Queue priority configuration |
+| `queue_max_concurrency` | JSONB | Per-queue concurrency limits |
+| `recovery_config` | JSONB | Recovery configuration snapshot |
 | `worker_started_at` | TIMESTAMP | Worker start time |
 
 ## horsies_schedule_state
@@ -102,7 +111,7 @@ BEGIN
         PERFORM pg_notify('task_new', NEW.id);
         PERFORM pg_notify('task_queue_' || NEW.queue_name, NEW.id);
     ELSIF TG_OP = 'UPDATE' AND OLD.status != NEW.status THEN
-        IF NEW.status IN ('COMPLETED', 'FAILED') THEN
+        IF NEW.status IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN
             PERFORM pg_notify('task_done', NEW.id);
         END IF;
     END IF;

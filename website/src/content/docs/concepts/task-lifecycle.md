@@ -156,9 +156,10 @@ Tasks can have a `good_until` deadline:
 ```python
 from datetime import datetime, timedelta, timezone
 
-deadline = datetime.now(timezone.utc) + timedelta(minutes=5)
-
-@app.task("urgent_task", good_until=deadline)
+@app.task("urgent_task")
 def urgent_task() -> TaskResult[str, TaskError]:
     ...
+
+# Compute deadline at send time, not module load time
+urgent_task.send(good_until=datetime.now(timezone.utc) + timedelta(minutes=5))
 ```

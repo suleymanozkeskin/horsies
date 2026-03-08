@@ -21,7 +21,7 @@ All serialization and deserialization functions return `SerdeResult[T]` (an alia
 | `kwargs_to_json(kwargs)` | `SerdeResult[str]` | Serialize keyword arguments |
 | `dumps_json(value)` | `SerdeResult[str]` | Serialize a value to a JSON string |
 | `loads_json(json_str)` | `SerdeResult[Json]` | Deserialize a JSON string |
-| `task_result_from_json(data)` | `SerdeResult[TaskResult]` | Deserialize a `TaskResult` |
+| `task_result_from_json(j)` | `SerdeResult[TaskResult[Any, TaskError]]` | Deserialize a `TaskResult` |
 | `serialize_error_payload(tr)` | `str` | Serialize a `TaskResult` error with hardcoded fallback (never fails) |
 
 ## Supported Types

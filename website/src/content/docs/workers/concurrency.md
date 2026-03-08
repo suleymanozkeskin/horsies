@@ -18,7 +18,7 @@ tags: [workers, concurrency, claiming, limits]
 ```text
 ┌─────────────────────────────────────────────────────────┐
 │  Cluster Wide Cap (optional)                            │
-│  Max RUNNING tasks across all workers                   │
+│  Max in-flight tasks across all workers (RUNNING+CLAIMED)│
 │                                                         │
 │  ┌───────────────────────────────────────────────────┐  │
 │  │  Per-Queue Concurrency (CUSTOM mode)              │  │
