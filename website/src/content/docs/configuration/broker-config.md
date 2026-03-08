@@ -23,6 +23,8 @@ broker = PostgresConfig(
 | `pool_size` | `int` | 30 | Connection pool size |
 | `max_overflow` | `int` | 30 | Additional connections beyond pool_size |
 | `pool_timeout` | `int` | 30 | Seconds to wait for connection |
+| `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use |
+| `echo` | `bool` | `False` | Echo SQL statements to logs |
 | `pool_recycle` | `int` | 1800 | Recycle connections after N seconds |
 
 ## Connection URL Format

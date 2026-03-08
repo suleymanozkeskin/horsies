@@ -263,7 +263,7 @@ handle = start_result.ok_value
 # ... workflow pauses due to task failure ...
 
 # Resume the workflow
-resumed = await handle.resume_async()  # Returns True if resumed, False if not PAUSED
+resumed = await handle.resume_async()  # Returns HandleResult[bool] — unwrap with .ok_value
 ```
 
 **Resume behavior:**
@@ -655,7 +655,8 @@ handle = start_result.ok_value
 await handle.get_async(timeout_ms=30000)
 
 # Now safe to access individual results (node_id keys)
-results = handle.results()
+results_handle = handle.results()
+results = results_handle.ok_value  # HandleResult[dict[...]] → unwrap
 result_a = results["parallel_fetch:0"]  # First fetch
 result_b = results["parallel_fetch:1"]  # Second fetch
 
