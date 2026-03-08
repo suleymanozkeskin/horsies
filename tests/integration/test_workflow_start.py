@@ -617,6 +617,50 @@ class TestWorkflowStart:
         )
         assert task_count.scalar() == 1
 
+    async def test_concurrent_auto_id_creates_distinct_workflows(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """Concurrent starts with same name but no explicit ID create separate workflows."""
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'auto_id_concurrent_a')
+
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker, name='auto_id_wf', tasks=[node_a],
+        )
+
+        handle_1, handle_2 = await asyncio.gather(
+            start_ok(spec, broker),
+            start_ok(spec, broker),
+        )
+
+        # Each call must produce a distinct workflow ID
+        assert handle_1.workflow_id != handle_2.workflow_id
+
+        # Both returned handles must map to persisted workflow rows.
+        rows = await session.execute(
+            text("""
+                SELECT id
+                FROM horsies_workflows
+                WHERE id IN (:wf_id_1, :wf_id_2)
+            """),
+            {
+                'wf_id_1': handle_1.workflow_id,
+                'wf_id_2': handle_2.workflow_id,
+            },
+        )
+        assert {row[0] for row in rows.fetchall()} == {
+            handle_1.workflow_id,
+            handle_2.workflow_id,
+        }
+
+        # Two separate workflow rows with the same workflow name
+        wf_count = await session.execute(
+            text("SELECT COUNT(*) FROM horsies_workflows WHERE name = 'auto_id_wf'"),
+        )
+        assert wf_count.scalar() == 2
+
     async def test_output_task_index_null_when_no_output(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],

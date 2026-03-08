@@ -167,6 +167,12 @@ class WorkflowSpec(Generic[OutT]):
         Phase-gated: node_id errors gate the rest (downstream needs valid IDs).
         All other validations run and collect errors together.
         """
+        if not self.tasks:
+            raise WorkflowValidationError(
+                'WorkflowSpec has no tasks',
+                code=ErrorCode.WORKFLOW_NO_NODES,
+            )
+
         originals = self._isolate_inputs()
         self._assign_indices()
 

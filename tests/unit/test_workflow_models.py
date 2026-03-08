@@ -596,6 +596,12 @@ class TestTaskNode:
 class TestWorkflowSpecValidation:
     """Tests for WorkflowSpec DAG validation."""
 
+    def test_empty_tasks_raises_no_nodes(self) -> None:
+        """WorkflowSpec with tasks=[] raises WORKFLOW_NO_NODES."""
+        with pytest.raises(WorkflowValidationError, match='has no tasks') as exc_info:
+            WorkflowSpec(name='empty', tasks=[])
+        assert exc_info.value.code == ErrorCode.WORKFLOW_NO_NODES
+
     def test_valid_linear_dag(self) -> None:
         """A -> B -> C passes validation."""
         fn_a = MockTaskWrapper(task_name='task_a')
