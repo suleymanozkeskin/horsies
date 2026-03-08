@@ -166,7 +166,7 @@ Set `allow_failed_deps=True` on the downstream task. It will run and receive the
 
 **Result access is separate:**
 
-- `WorkflowHandle.get()` returns the workflow-level status (it can be FAILED even if the output task succeeded).
+- `WorkflowHandle.get()` returns the workflow-level `TaskResult` (output value or error, not a status enum).
 - `WorkflowHandle.result_for()` is non-blocking and may return `RESULT_NOT_READY` if the task has not completed.
 
 ### Upstream Failure and args_from

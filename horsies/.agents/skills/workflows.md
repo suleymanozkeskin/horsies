@@ -481,7 +481,7 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | Code | Name | Trigger |
 |---|---|---|
 | E001 | `WORKFLOW_NO_NAME` | Missing `name` |
-| E002 | `WORKFLOW_NO_NODES` | No TaskNode attributes |
+| E002 | `WORKFLOW_NO_NODES` | WorkflowSpec has no tasks |
 | E003 | `WORKFLOW_INVALID_NODE_ID` | Empty, >128 chars, or invalid chars |
 | E004 | `WORKFLOW_DUPLICATE_NODE_ID` | Duplicate `node_id` |
 | E005 | `WORKFLOW_NO_ROOT_TASKS` | All tasks have deps |

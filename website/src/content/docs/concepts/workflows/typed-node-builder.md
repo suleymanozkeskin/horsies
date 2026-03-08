@@ -165,7 +165,7 @@ class ScoreWorkflow(WorkflowDefinition[int]):
 
 ## Things to Avoid
 
-**Don't use `.node()` when parameters come from `args_from`.**
+**Don't pass `args_from` parameters as positional arguments to `.node()()`.**
 
 ```python
 # Wrong - user_data is injected at runtime, not known at construction
@@ -174,13 +174,11 @@ process_node = process_user.node(node_id='process')(
     threshold=70,
 )
 
-# Correct - use TaskNode with args_from
-process_node = TaskNode(
-    fn=process_user,
-    args_from={'user_data': fetch_node},
-    kwargs={'threshold': 70},
+# Correct - use args_from to declare runtime injection
+process_node = process_user.node(
     node_id='process',
-)
+    args_from={'user_data': fetch_node},
+)(threshold=70)
 ```
 
 ## API Reference
