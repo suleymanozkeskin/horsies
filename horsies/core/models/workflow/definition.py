@@ -14,7 +14,7 @@ from typing import (
     cast,
 )
 
-from horsies.core.errors import WorkflowValidationError
+from horsies.core.errors import ErrorCode, WorkflowValidationError
 
 from .enums import OkT_co, OnError
 from .nodes import TaskNode, SubWorkflowNode, AnyNode, SuccessPolicy, SuccessCase
@@ -207,14 +207,16 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
         # Validate name is defined
         if not hasattr(cls, 'name') or not cls.name:
             raise WorkflowValidationError(
-                f"WorkflowDefinition '{cls.__name__}' must define a 'name' class attribute"
+                f"WorkflowDefinition '{cls.__name__}' must define a 'name' class attribute",
+                code=ErrorCode.WORKFLOW_NO_NAME,
             )
 
         # Get collected nodes from metaclass
         nodes = cls.get_workflow_nodes()
         if not nodes:
             raise WorkflowValidationError(
-                f"WorkflowDefinition '{cls.__name__}' has no TaskNode attributes"
+                f"WorkflowDefinition '{cls.__name__}' has no TaskNode attributes",
+                code=ErrorCode.WORKFLOW_NO_NODES,
             )
 
         # Copy-on-build: shallow-copy class-level nodes so app.workflow()

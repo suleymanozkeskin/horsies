@@ -1178,12 +1178,14 @@ class WorkflowSpec(Generic[OutT]):
                     errors.append(
                         WorkflowValidationError(
                             f"Task '{task.name}' has join='quorum' but min_success is not set",
+                            code=ErrorCode.WORKFLOW_INVALID_JOIN,
                         )
                     )
                 elif task.min_success < 1:
                     errors.append(
                         WorkflowValidationError(
                             f"Task '{task.name}' min_success must be >= 1, got {task.min_success}",
+                            code=ErrorCode.WORKFLOW_INVALID_JOIN,
                         )
                     )
                 else:
@@ -1193,6 +1195,7 @@ class WorkflowSpec(Generic[OutT]):
                             WorkflowValidationError(
                                 f"Task '{task.name}' min_success ({task.min_success}) exceeds "
                                 f'dependency count ({dep_count})',
+                                code=ErrorCode.WORKFLOW_INVALID_JOIN,
                             )
                         )
             elif task.join in ('all', 'any'):
@@ -1201,6 +1204,7 @@ class WorkflowSpec(Generic[OutT]):
                         WorkflowValidationError(
                             f"Task '{task.name}' has min_success set but join='{task.join}' "
                             "(min_success is only used with join='quorum')",
+                            code=ErrorCode.WORKFLOW_INVALID_JOIN,
                         )
                     )
         return errors

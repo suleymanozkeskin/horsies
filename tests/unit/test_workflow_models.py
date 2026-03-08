@@ -1513,8 +1513,9 @@ class TestWorkflowSpecValidation:
             # min_success not set
         )
 
-        with pytest.raises(WorkflowValidationError, match='min_success is not set'):
+        with pytest.raises(WorkflowValidationError, match='min_success is not set') as exc_info:
             WorkflowSpec(name='quorum_no_min', tasks=[node_a, node_b])
+        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_JOIN
 
     def test_quorum_min_success_too_high_raises(self) -> None:
         """min_success exceeding dependency count raises error."""
@@ -1529,8 +1530,9 @@ class TestWorkflowSpecValidation:
             min_success=5,  # Only 1 dep, but min_success is 5
         )
 
-        with pytest.raises(WorkflowValidationError, match='exceeds dependency count'):
+        with pytest.raises(WorkflowValidationError, match='exceeds dependency count') as exc_info:
             WorkflowSpec(name='quorum_too_high', tasks=[node_a, node_b])
+        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_JOIN
 
     def test_quorum_min_success_zero_raises(self) -> None:
         """min_success < 1 raises error."""
@@ -1545,8 +1547,9 @@ class TestWorkflowSpecValidation:
             min_success=0,
         )
 
-        with pytest.raises(WorkflowValidationError, match='must be >= 1'):
+        with pytest.raises(WorkflowValidationError, match='must be >= 1') as exc_info:
             WorkflowSpec(name='quorum_zero', tasks=[node_a, node_b])
+        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_JOIN
 
     def test_all_join_with_min_success_raises(self) -> None:
         """min_success set with join='all' raises error."""
@@ -1563,8 +1566,9 @@ class TestWorkflowSpecValidation:
 
         with pytest.raises(
             WorkflowValidationError, match="only used with join='quorum'"
-        ):
+        ) as exc_info:
             WorkflowSpec(name='all_with_min', tasks=[node_a, node_b])
+        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_JOIN
 
     def test_any_join_with_min_success_raises(self) -> None:
         """min_success set with join='any' raises error."""
@@ -1581,8 +1585,9 @@ class TestWorkflowSpecValidation:
 
         with pytest.raises(
             WorkflowValidationError, match="only used with join='quorum'"
-        ):
+        ) as exc_info:
             WorkflowSpec(name='any_with_min', tasks=[node_a, node_b])
+        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_JOIN
 
     def test_valid_quorum_join(self) -> None:
         """Valid quorum configuration passes validation."""
@@ -1975,8 +1980,9 @@ class TestWorkflowDefinition:
             )
         )
 
-        with pytest.raises(WorkflowValidationError, match="must define a 'name'"):
+        with pytest.raises(WorkflowValidationError, match="must define a 'name'") as exc_info:
             NoNameWorkflow.build(app)
+        assert exc_info.value.code == ErrorCode.WORKFLOW_NO_NAME
 
     def test_no_tasks_raises(self) -> None:
         """No TaskNode attributes raises WorkflowValidationError."""
@@ -1997,8 +2003,9 @@ class TestWorkflowDefinition:
             )
         )
 
-        with pytest.raises(WorkflowValidationError, match='has no TaskNode'):
+        with pytest.raises(WorkflowValidationError, match='has no TaskNode') as exc_info:
             EmptyWorkflow.build(app)
+        assert exc_info.value.code == ErrorCode.WORKFLOW_NO_NODES
 
     def test_duplicate_task_function_allowed(self) -> None:
         """Same task function can be used multiple times."""
