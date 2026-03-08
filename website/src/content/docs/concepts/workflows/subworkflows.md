@@ -620,22 +620,22 @@ success_policy = SuccessPolicy(cases=[
 ### 10.1 Manual Pause
 
 ```python
-handle.pause()
+result = handle.pause()  # Returns HandleResult[bool]
 # Workflow enters PAUSED state
 # Running tasks complete, no new tasks enqueue
 
 # Async variant:
-await handle.pause_async()
+result = await handle.pause_async()
 ```
 
 ### 10.2 Resume
 
 ```python
-handle.resume()
+result = handle.resume()  # Returns HandleResult[bool]
 # Workflow resumes from where it paused
 
 # Async variant:
-await handle.resume_async()
+result = await handle.resume_async()
 ```
 
 ### 10.3 Pause with Subworkflows

@@ -20,7 +20,7 @@ Runtime errors are returned via `TaskResult[T, TaskError]`. The `TaskError.error
 | `error_code` | `LibraryErrorCode \| str \| None` | Library or domain error code |
 | `message` | `str \| None` | Human-readable description |
 | `data` | `Any \| None` | Additional context (task_id, etc.) |
-| `exception` | `dict \| BaseException \| None` | Original exception if applicable |
+| `exception` | `dict[str, Any] \| BaseException \| None` | Original exception if applicable |
 
 ### LibraryErrorCode
 

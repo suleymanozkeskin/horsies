@@ -16,7 +16,7 @@ Use this page for the exact method signatures and return types used by workflows
 | Attribute / Method | Type / Signature | Description |
 |---|---|---|
 | `.name` | `str` | Workflow name |
-| `.tasks` | `list[TaskNode[Any] \| SubWorkflowNode[Any]]` | All nodes in the DAG |
+| `.tasks` | `Sequence[TaskNode[Any] \| SubWorkflowNode[Any]]` | All nodes in the DAG |
 | `.on_error` | `OnError` | Error policy (`FAIL` or `PAUSE`) |
 | `.output` | `TaskNode[Any] \| SubWorkflowNode[Any] \| None` | Output node for `handle.get()` |
 | `.success_policy` | `SuccessPolicy \| None` | Custom success criteria |
@@ -116,7 +116,7 @@ match spec.start():
 |---|---|---|
 | `.workflow_id` | `str` | Workflow UUID |
 | `.status()` / `.status_async()` | `-> HandleResult[WorkflowStatus]` | Current workflow status |
-| `.get()` / `.get_async()` | `(timeout_ms: int \| None) -> TaskResult[Any, TaskError]` | Block until completion or timeout |
+| `.get()` / `.get_async()` | `(timeout_ms: int \| None) -> TaskResult[OutT, TaskError]` | Block until completion or timeout |
 | `.results()` / `.results_async()` | `-> HandleResult[dict[str, TaskResult[Any, TaskError]]]` | All results keyed by node_id |
 | `.result_for()` / `.result_for_async()` | `(TaskNode[T] \| NodeKey[T]) -> TaskResult[T, TaskError]` | Single node result (non-blocking) |
 | `.tasks()` / `.tasks_async()` | `-> HandleResult[list[WorkflowTaskInfo]]` | Status of all workflow tasks |

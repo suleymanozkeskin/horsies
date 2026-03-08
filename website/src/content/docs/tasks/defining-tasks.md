@@ -178,7 +178,7 @@ def task_two() -> TaskResult[str, TaskError]:
 | `task_name` | `str` | Yes | Unique task identifier |
 | `queue_name` | `str` | No | Target queue (CUSTOM mode only) |
 | `retry_policy` | `RetryPolicy` | No | Retry timing, backoff, and auto-retry triggers |
-| `good_until` | `datetime` | No | Task expiry deadline (set at definition time) |
+| `good_until` | `datetime \| None` | No | Task expiry deadline (set at definition time) |
 | `exception_mapper` | `dict[type[BaseException], str]` | No | Maps exception classes to error codes |
 | `default_unhandled_error_code` | `str` | No | Error code for unmapped exceptions (overrides global) |
 
