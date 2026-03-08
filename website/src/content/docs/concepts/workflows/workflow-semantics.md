@@ -565,11 +565,10 @@ policy = SuccessPolicy(
     optional=[notify],  # Notification can fail
 )
 
-spec = WorkflowSpec(
+spec = app.workflow(
     name="ship_package",
     tasks=[pickup, deliver_recipient, deliver_neighbor, deliver_locker, notify],
     success_policy=policy,
-    broker=broker,
 )
 ```
 
