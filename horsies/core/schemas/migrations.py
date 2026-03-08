@@ -89,12 +89,6 @@ ADD_NODE_ID_COLUMN_SQL = text("""
     ADD COLUMN IF NOT EXISTS node_id VARCHAR(128);
 """)
 
-ALTER_WORKFLOW_CTX_FROM_TYPE_SQL = text("""
-    ALTER TABLE horsies_workflow_tasks
-    ALTER COLUMN workflow_ctx_from
-    TYPE VARCHAR(128)[]
-    USING workflow_ctx_from::VARCHAR(128)[];
-""")
 
 ADD_PARENT_WORKFLOW_ID_COLUMN_SQL = text("""
     ALTER TABLE horsies_workflows

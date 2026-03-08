@@ -165,7 +165,7 @@ class WorkflowTaskModel(Base):
 
     # Context injection: node_ids to include in WorkflowContext
     workflow_ctx_from: Mapped[Optional[list[str]]] = mapped_column(
-        ARRAY(String), nullable=True
+        ARRAY(String(128)), nullable=True
     )
 
     # If True, task runs even if dependencies failed (receives failed TaskResults)

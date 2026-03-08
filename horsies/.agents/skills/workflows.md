@@ -143,7 +143,6 @@ Differences from `TaskNode`:
 - `kwargs` forwarded to `workflow_def.build_with(app, **kwargs)` at execution time.
 - `args_from` injects upstream `TaskResult` into `build_with()`.
 - Child status mirrors parent node: child COMPLETED → node COMPLETED with output; child FAILED → node FAILED with `SubWorkflowError`.
-- Only `RERUN_FAILED_ONLY` is supported (E017 for others).
 
 ## NodeFactory / `.node()` — Two-Step Builder
 

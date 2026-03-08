@@ -89,7 +89,6 @@ from horsies.core.schemas.migrations import (
     ADD_WORKFLOW_DEF_MODULE_COLUMN_SQL,
     ADD_WORKFLOW_DEF_QUALNAME_COLUMN_SQL,
     ADD_WORKFLOW_SENT_AT_COLUMN_SQL,
-    ALTER_WORKFLOW_CTX_FROM_TYPE_SQL,
     BACKFILL_ENQUEUE_SHA_SQL,
     BACKFILL_ENQUEUED_AT_SQL,
     BACKFILL_WORKFLOW_SENT_AT_SQL,
@@ -325,7 +324,6 @@ class PostgresBroker:
             await conn.execute(ADD_JOIN_TYPE_COLUMN_SQL)
             await conn.execute(ADD_MIN_SUCCESS_COLUMN_SQL)
             await conn.execute(ADD_NODE_ID_COLUMN_SQL)
-            await conn.execute(ALTER_WORKFLOW_CTX_FROM_TYPE_SQL)
 
             # Subworkflow support columns
             await conn.execute(ADD_PARENT_WORKFLOW_ID_COLUMN_SQL)
