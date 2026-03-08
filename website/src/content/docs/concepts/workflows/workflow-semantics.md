@@ -592,14 +592,15 @@ When no success case is satisfied:
 
 ```python
 # Primary task that can fail
-primary = TaskNode("primary_fetch", fetch_data)
+primary = TaskNode(fn=fetch_data)
 
 # Recovery handler receives the error
 recovery = TaskNode(
-    "handle_failure",
-    recovery_handler,
+    fn=recovery_handler,
     allow_failed_deps=True,
-).waits_for(primary).with_args_from(primary=primary)
+    waits_for=[primary],
+    args_from={"primary": primary},
+)
 ```
 
 ### 2. Design for Failure Visibility
@@ -609,10 +610,10 @@ Structure DAGs so failures are visible in the final result:
 ```python
 # Final aggregator that reports all branch outcomes
 final = TaskNode(
-    "summarize",
-    summarize_results,
+    fn=summarize_results,
     allow_failed_deps=True,
-).waits_for([branch_a, branch_b, branch_c])
+    waits_for=[branch_a, branch_b, branch_c],
+)
 ```
 
 ### 3. Use on_error="pause" for Critical Workflows
