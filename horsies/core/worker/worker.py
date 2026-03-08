@@ -441,7 +441,7 @@ class Worker:
             try:
                 await loop.run_in_executor(
                     None, lambda: executor.shutdown(wait=True, cancel_futures=True)
-                )  # TODO:inspect this behaviour more in depth!
+                )
             except Exception as e:
                 logger.error(f'Error shutting down executor: {e}')
             logger.info('Worker executor shutdown')
