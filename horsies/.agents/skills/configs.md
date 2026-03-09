@@ -79,6 +79,26 @@ broker = app.get_broker()
 names = app.list_tasks()  # list[str]
 ```
 
+### Direct Broker Methods
+
+`app.get_broker()` returns a `PostgresBroker` with methods for result retrieval and monitoring. All methods have sync and async variants.
+
+**Result retrieval** (use when you have a task ID but no `TaskHandle`):
+
+```python
+broker = app.get_broker()
+
+# Wait for a task result by ID — returns TaskResult[Any, TaskError], never raises
+result = await broker.get_result_async("task-uuid", timeout_ms=5000)
+result = broker.get_result("task-uuid", timeout_ms=5000)  # sync
+
+# Fetch task metadata by ID — returns BrokerResult[TaskInfo | None]
+info = await broker.get_task_info_async("task-uuid", include_result=True)
+info = broker.get_task_info("task-uuid", include_result=True)  # sync
+```
+
+**Monitoring** (async only): `get_stale_tasks()`, `get_worker_stats()`, `get_expired_tasks()`, `mark_stale_tasks_as_failed()`, `requeue_stale_claimed()`. See website docs `monitoring/broker-methods` for full signatures.
+
 ## PostgresConfig
 
 ```python

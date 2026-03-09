@@ -209,11 +209,25 @@ class WorkflowStartError:
 
 ## WorkflowHandle
 
-Obtained from `spec.start()` — never constructed directly.
+Obtained from `spec.start()`, or constructed directly to reconnect to an existing workflow by ID.
 
 ```python
 handle.workflow_id  # str — the workflow's UUID
 ```
+
+### Reconnecting to an Existing Workflow
+
+`WorkflowHandle` is a `@dataclass` with two fields — `workflow_id: str` and `broker: PostgresBroker`. You can construct it directly to reconnect to a workflow you already know the ID of (e.g. from a database, an HTTP request, or a previous session):
+
+```python
+from horsies import WorkflowHandle
+
+handle = WorkflowHandle(workflow_id="existing-wf-uuid", broker=app.get_broker())
+status = handle.status()       # works — queries DB by workflow_id
+result = handle.get()          # works — polls for completion
+```
+
+All handle methods (`status`, `get`, `result_for`, `cancel`, `pause`, `resume`, `results`, `tasks`) work identically whether the handle came from `spec.start()` or direct construction. If the `workflow_id` does not exist, methods return `Err(HandleOperationError(WORKFLOW_NOT_FOUND))` or `TaskResult(err=TaskError(WORKFLOW_NOT_FOUND))`.
 
 ### Two error strategies
 

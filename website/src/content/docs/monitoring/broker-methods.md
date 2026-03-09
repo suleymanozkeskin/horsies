@@ -23,6 +23,38 @@ broker = app.get_broker()
 
 ## Methods
 
+### `get_result(task_id: str, timeout_ms: int | None = None) -> TaskResult[Any, TaskError]`
+
+Retrieve a task's result by ID, waiting if necessary. This is the broker-level equivalent of `TaskHandle.get()` — use it when you need to fetch a result by task ID without holding a `TaskHandle` (e.g. in HTTP endpoints that receive a task ID from the client).
+
+Uses PostgreSQL `LISTEN/NOTIFY` with a 1-second polling fallback.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `task_id` | `str` | — | Task ID to retrieve result for |
+| `timeout_ms` | `int \| None` | `None` | Max wait time in milliseconds; `None` waits indefinitely |
+
+**Returns:** `TaskResult[Any, TaskError]` — never raises. Error codes on the error branch:
+- `WAIT_TIMEOUT` — timed out; task may still be running
+- `TASK_NOT_FOUND` — task ID does not exist
+- `TASK_CANCELLED` — task was cancelled
+- `BROKER_ERROR` — database/infrastructure failure
+
+Async variant: `get_result_async(...)`.
+Sync variant: `get_result(...)` (runs the async version in a background loop).
+
+```python
+# Async
+result = await broker.get_result_async("task-uuid-here", timeout_ms=5000)
+if result.is_ok():
+    print(f"Result: {result.ok_value}")
+elif result.err_value.error_code == LibraryErrorCode.WAIT_TIMEOUT:
+    print("Still running, try again later")
+
+# Sync
+result = broker.get_result("task-uuid-here", timeout_ms=5000)
+```
+
 ### `get_stale_tasks(stale_threshold_minutes: int = 2) -> BrokerResult[list[dict[str, Any]]]`
 
 Find RUNNING tasks whose workers have not sent a heartbeat within the threshold. Indicates a crashed or unresponsive worker.

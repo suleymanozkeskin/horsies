@@ -196,6 +196,27 @@ handle.resume()          # resume (PAUSED -> RUNNING)
 
 All methods have `_async()` variants.
 
+### Reconnect to an Existing Workflow
+
+```python
+from horsies import WorkflowHandle
+
+handle = WorkflowHandle(workflow_id="known-uuid", broker=app.get_broker())
+result = handle.get(timeout_ms=30_000)
+```
+
+### Direct Broker Result Access
+
+Fetch a task result by ID without a `TaskHandle` (e.g. in HTTP endpoints):
+
+```python
+broker = app.get_broker()
+result = await broker.get_result_async("task-uuid", timeout_ms=5000)
+info = await broker.get_task_info_async("task-uuid", include_result=True)
+```
+
+See `configs.md` for all broker methods. See website docs `monitoring/broker-methods` for full reference.
+
 ## Result Types
 
 | Operation | Result type | Ok | Err |
