@@ -7,6 +7,8 @@ use crate::models::{
     TaskStatusRow, WorkerLoadPoint, WorkerQueuesRow, WorkerUptimeRow, WorkflowRow,
     WorkflowSummary, WorkflowTaskRow,
 };
+use ratatui::prelude::Rect;
+use ratatui::text::Line;
 
 /// Search state for the reusable search modal
 #[derive(Debug, Clone, Default)]
@@ -19,6 +21,14 @@ pub struct SearchState {
     pub matches: Vec<SearchMatch>,
     /// Currently selected match index
     pub selected_index: usize,
+    /// Top-most visible result row in the search results viewport
+    pub scroll_offset: usize,
+    /// Visible results rows in current viewport (captured from render)
+    pub results_view_height: usize,
+    /// Search results area for mouse hit-testing
+    pub results_area: Option<Rect>,
+    /// Search scrollbar area for mouse hit-testing
+    pub scrollbar_area: Option<Rect>,
     /// Cursor position in the query string
     pub cursor_position: usize,
 }
@@ -128,6 +138,10 @@ impl SearchState {
         self.query.clear();
         self.matches.clear();
         self.selected_index = 0;
+        self.scroll_offset = 0;
+        self.results_view_height = 0;
+        self.results_area = None;
+        self.scrollbar_area = None;
         self.cursor_position = 0;
     }
 
@@ -137,6 +151,10 @@ impl SearchState {
         self.query.clear();
         self.matches.clear();
         self.selected_index = 0;
+        self.scroll_offset = 0;
+        self.results_view_height = 0;
+        self.results_area = None;
+        self.scrollbar_area = None;
         self.cursor_position = 0;
     }
 
@@ -162,12 +180,16 @@ impl SearchState {
         self.cursor_position = 0;
         self.matches.clear();
         self.selected_index = 0;
+        self.scroll_offset = 0;
+        self.results_area = None;
+        self.scrollbar_area = None;
     }
 
     /// Move selection up
     pub fn select_up(&mut self) {
         if !self.matches.is_empty() && self.selected_index > 0 {
             self.selected_index -= 1;
+            self.ensure_selected_visible();
         }
     }
 
@@ -175,6 +197,83 @@ impl SearchState {
     pub fn select_down(&mut self) {
         if !self.matches.is_empty() && self.selected_index < self.matches.len() - 1 {
             self.selected_index += 1;
+            self.ensure_selected_visible();
+        }
+    }
+
+    pub fn select_page_up(&mut self) {
+        if self.matches.is_empty() {
+            return;
+        }
+        let step = self.results_view_height.max(1);
+        self.selected_index = self.selected_index.saturating_sub(step);
+        self.ensure_selected_visible();
+    }
+
+    pub fn select_page_down(&mut self) {
+        if self.matches.is_empty() {
+            return;
+        }
+        let step = self.results_view_height.max(1);
+        self.selected_index = (self.selected_index + step).min(self.matches.len().saturating_sub(1));
+        self.ensure_selected_visible();
+    }
+
+    pub fn select_home(&mut self) {
+        if self.matches.is_empty() {
+            return;
+        }
+        self.selected_index = 0;
+        self.ensure_selected_visible();
+    }
+
+    pub fn select_end(&mut self) {
+        if self.matches.is_empty() {
+            return;
+        }
+        self.selected_index = self.matches.len().saturating_sub(1);
+        self.ensure_selected_visible();
+    }
+
+    pub fn select_index(&mut self, idx: usize) {
+        if self.matches.is_empty() {
+            self.selected_index = 0;
+            self.scroll_offset = 0;
+            return;
+        }
+        self.selected_index = idx.min(self.matches.len().saturating_sub(1));
+        self.ensure_selected_visible();
+    }
+
+    pub fn set_scroll_offset(&mut self, offset: usize) {
+        if self.matches.is_empty() {
+            self.selected_index = 0;
+            self.scroll_offset = 0;
+            return;
+        }
+
+        let visible = self.results_view_height.max(1);
+        let max_scroll = self.matches.len().saturating_sub(visible);
+        self.scroll_offset = offset.min(max_scroll);
+
+        // Keep current selection visible after scrollbar jumps.
+        if self.selected_index < self.scroll_offset
+            || self.selected_index >= self.scroll_offset + visible
+        {
+            self.selected_index = self.scroll_offset;
+        }
+    }
+
+    fn ensure_selected_visible(&mut self) {
+        let visible = self.results_view_height.max(1);
+        let max_scroll = self.matches.len().saturating_sub(visible);
+        if self.scroll_offset > max_scroll {
+            self.scroll_offset = max_scroll;
+        }
+        if self.selected_index < self.scroll_offset {
+            self.scroll_offset = self.selected_index;
+        } else if self.selected_index >= self.scroll_offset + visible {
+            self.scroll_offset = self.selected_index + 1 - visible;
         }
     }
 
@@ -190,6 +289,7 @@ impl SearchState {
         if self.selected_index >= self.matches.len() {
             self.selected_index = self.matches.len().saturating_sub(1);
         }
+        self.ensure_selected_visible();
     }
 
     /// Check if query is non-empty
@@ -208,7 +308,11 @@ pub struct AppState {
     pub show_help: bool,
     pub show_task_detail: bool,
     pub task_detail: Option<TaskDetail>,
+    pub task_detail_cached_lines: Vec<Line<'static>>,
     pub task_detail_scroll: u16,
+    pub task_detail_scrollbar_area: Option<Rect>,
+    pub task_detail_content_height: u16,
+    pub task_detail_visible_height: u16,
     pub show_error_modal: bool,
 
     // Search state
@@ -253,7 +357,11 @@ pub struct AppState {
     pub show_workflow_detail: bool,
     pub workflow_detail: Option<WorkflowRow>,
     pub workflow_tasks: Vec<WorkflowTaskRow>,
+    pub workflow_detail_cached_lines: Vec<Line<'static>>,
     pub workflow_detail_scroll: u16,
+    pub workflow_detail_scrollbar_area: Option<Rect>,
+    pub workflow_detail_content_height: u16,
+    pub workflow_detail_visible_height: u16,
     pub workflow_status_filter: WorkflowStatusFilter,
 
     // Loading & error state per dataset
@@ -272,7 +380,11 @@ impl AppState {
             show_help: false,
             show_task_detail: false,
             task_detail: None,
+            task_detail_cached_lines: vec![],
             task_detail_scroll: 0,
+            task_detail_scrollbar_area: None,
+            task_detail_content_height: 0,
+            task_detail_visible_height: 0,
             show_error_modal: false,
             search: SearchState::new(),
             toast: None,
@@ -301,7 +413,11 @@ impl AppState {
             show_workflow_detail: false,
             workflow_detail: None,
             workflow_tasks: vec![],
+            workflow_detail_cached_lines: vec![],
             workflow_detail_scroll: 0,
+            workflow_detail_scrollbar_area: None,
+            workflow_detail_content_height: 0,
+            workflow_detail_visible_height: 0,
             workflow_status_filter: WorkflowStatusFilter::default(),
             loading: HashMap::new(),
             errors: HashMap::new(),

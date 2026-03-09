@@ -1,8 +1,8 @@
 use std::cell::Cell;
 
 use crate::errors::{Result, SyceError};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
-use ratatui::prelude::Rect;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+use ratatui::prelude::{Position, Rect};
 use sqlx::PgPool;
 use tokio::sync::mpsc;
 
@@ -109,6 +109,8 @@ pub struct App {
     pool: Option<PgPool>,
     tick_counter: u64,
     listener_handle: Option<NotifyListenerHandle>,
+    task_detail_fetch_inflight: bool,
+    workflow_detail_fetch_inflight: bool,
 }
 
 impl App {
@@ -145,6 +147,8 @@ impl App {
             pool,
             tick_counter: 0,
             listener_handle: None,
+            task_detail_fetch_inflight: false,
+            workflow_detail_fetch_inflight: false,
         })
     }
 
@@ -175,9 +179,33 @@ impl App {
     }
 
     /// Handle NOTIFY-triggered refresh based on which channels fired.
-    fn handle_notify_refresh(&self, batch: NotifyBatch) {
+    fn handle_notify_refresh(&mut self, batch: NotifyBatch) {
         if self.pool.is_none() {
             return;
+        }
+
+        // Keep open detail modals live-updating as NOTIFY events arrive.
+        // Guard against concurrent fetches: skip if one is already inflight.
+        if batch.task_status && self.state.show_task_detail && !self.task_detail_fetch_inflight {
+            if let Some(task) = &self.state.task_detail {
+                self.task_detail_fetch_inflight = true;
+                let ctx = self.clone_for_fetch();
+                let task_id = task.id.clone();
+                tokio::spawn(async move {
+                    ctx.fetch_task_detail(task_id).await;
+                });
+            }
+        }
+
+        if (batch.workflow_status || batch.task_status) && self.state.show_workflow_detail && !self.workflow_detail_fetch_inflight {
+            if let Some(workflow) = &self.state.workflow_detail {
+                self.workflow_detail_fetch_inflight = true;
+                let ctx = self.clone_for_fetch();
+                let workflow_id = workflow.id.clone();
+                tokio::spawn(async move {
+                    ctx.fetch_workflow_detail(workflow_id).await;
+                });
+            }
         }
 
         match self.state.current_tab {
@@ -970,7 +998,9 @@ impl App {
             Event::Mouse(mouse) => {
                 let action = match mouse.kind {
                     MouseEventKind::ScrollUp => {
-                        if self.state.show_task_detail {
+                        if self.state.search.active {
+                            Some(Action::SearchSelectUp)
+                        } else if self.state.show_task_detail {
                             Some(Action::ScrollTaskDetailUp)
                         } else if self.state.show_workflow_detail {
                             Some(Action::ScrollWorkflowDetailUp)
@@ -990,7 +1020,9 @@ impl App {
                         }
                     }
                     MouseEventKind::ScrollDown => {
-                        if self.state.show_task_detail {
+                        if self.state.search.active {
+                            Some(Action::SearchSelectDown)
+                        } else if self.state.show_task_detail {
                             Some(Action::ScrollTaskDetailDown)
                         } else if self.state.show_workflow_detail {
                             Some(Action::ScrollWorkflowDetailDown)
@@ -1009,6 +1041,13 @@ impl App {
                             }
                         }
                     }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if self.state.search.active {
+                            self.handle_search_mouse_click(mouse.column, mouse.row)
+                        } else {
+                            self.handle_mouse_scrollbar_click(mouse.column, mouse.row)
+                        }
+                    }
                     _ => None,
                 };
                 if let Some(action) = action {
@@ -1022,6 +1061,80 @@ impl App {
         Ok(())
     }
 
+    /// Map a mouse click position to a scroll action if it falls within a modal's scrollbar area.
+    fn handle_mouse_scrollbar_click(&self, col: u16, row: u16) -> Option<Action> {
+        let pos = Position::new(col, row);
+
+        // Check task detail scrollbar
+        if self.state.show_task_detail {
+            if let Some(area) = self.state.task_detail_scrollbar_area {
+                if area.contains(pos) {
+                    let max_scroll = self.state.task_detail_content_height.saturating_sub(area.height);
+                    let relative_y = row.saturating_sub(area.y);
+                    let scroll = if area.height <= 1 {
+                        0
+                    } else {
+                        ((relative_y as u32 * max_scroll as u32) / (area.height.saturating_sub(1)) as u32) as u16
+                    };
+                    return Some(Action::SetTaskDetailScroll(scroll));
+                }
+            }
+        }
+        // Check workflow detail scrollbar
+        if self.state.show_workflow_detail {
+            if let Some(area) = self.state.workflow_detail_scrollbar_area {
+                if area.contains(pos) {
+                    let max_scroll = self.state.workflow_detail_content_height.saturating_sub(area.height);
+                    let relative_y = row.saturating_sub(area.y);
+                    let scroll = if area.height <= 1 {
+                        0
+                    } else {
+                        ((relative_y as u32 * max_scroll as u32) / (area.height.saturating_sub(1)) as u32) as u16
+                    };
+                    return Some(Action::SetWorkflowDetailScroll(scroll));
+                }
+            }
+        }
+        None
+    }
+
+    /// Map search modal mouse clicks to selection/scroll actions.
+    fn handle_search_mouse_click(&self, col: u16, row: u16) -> Option<Action> {
+        let pos = Position::new(col, row);
+
+        // Prioritize scrollbar clicks so they are not shadowed by row hit-testing.
+        if let Some(area) = self.state.search.scrollbar_area {
+            if area.contains(pos) {
+                let total = self.state.search.matches.len();
+                if total == 0 {
+                    return None;
+                }
+                let view = self.state.search.results_view_height.max(1);
+                let max_scroll = total.saturating_sub(view);
+                let relative_y = row.saturating_sub(area.y) as usize;
+                let scroll = if area.height <= 1 {
+                    0
+                } else {
+                    (relative_y * max_scroll) / area.height.saturating_sub(1) as usize
+                };
+                return Some(Action::SearchSetScroll(scroll));
+            }
+        }
+
+        // Click directly on a visible search result row.
+        if let Some(area) = self.state.search.results_area {
+            if area.contains(pos) {
+                let rel_row = row.saturating_sub(area.y) as usize;
+                let idx = self.state.search.scroll_offset + rel_row;
+                if idx < self.state.search.matches.len() {
+                    return Some(Action::SearchSelectIndex(idx));
+                }
+            }
+        }
+
+        None
+    }
+
     fn handle_key_event(&mut self, key: KeyEvent) -> Result<()> {
         let action_tx = self.action_tx.clone();
 
@@ -1032,6 +1145,10 @@ impl App {
                 KeyCode::Enter => Some(Action::SearchConfirm),
                 KeyCode::Up => Some(Action::SearchSelectUp),
                 KeyCode::Down => Some(Action::SearchSelectDown),
+                KeyCode::PageUp => Some(Action::SearchSelectPageUp),
+                KeyCode::PageDown => Some(Action::SearchSelectPageDown),
+                KeyCode::Home => Some(Action::SearchSelectHome),
+                KeyCode::End => Some(Action::SearchSelectEnd),
                 KeyCode::Backspace => Some(Action::SearchBackspace),
                 KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     Some(Action::SearchInput(c))
@@ -1192,6 +1309,18 @@ impl App {
             (KeyCode::Down, _) if self.state.show_task_detail => {
                 Some(Action::ScrollTaskDetailDown)
             }
+            (KeyCode::PageUp, _) if self.state.show_task_detail => {
+                Some(Action::ScrollTaskDetailPageUp)
+            }
+            (KeyCode::PageDown, _) if self.state.show_task_detail => {
+                Some(Action::ScrollTaskDetailPageDown)
+            }
+            (KeyCode::Home, _) if self.state.show_task_detail => {
+                Some(Action::ScrollTaskDetailHome)
+            }
+            (KeyCode::End, _) if self.state.show_task_detail => {
+                Some(Action::ScrollTaskDetailEnd)
+            }
             // Copy task to clipboard (y = yank)
             (KeyCode::Char('y'), _) if self.state.show_task_detail => {
                 Some(Action::CopyTaskToClipboard)
@@ -1210,6 +1339,18 @@ impl App {
             }
             (KeyCode::Down, _) if self.state.show_workflow_detail => {
                 Some(Action::ScrollWorkflowDetailDown)
+            }
+            (KeyCode::PageUp, _) if self.state.show_workflow_detail => {
+                Some(Action::ScrollWorkflowDetailPageUp)
+            }
+            (KeyCode::PageDown, _) if self.state.show_workflow_detail => {
+                Some(Action::ScrollWorkflowDetailPageDown)
+            }
+            (KeyCode::Home, _) if self.state.show_workflow_detail => {
+                Some(Action::ScrollWorkflowDetailHome)
+            }
+            (KeyCode::End, _) if self.state.show_workflow_detail => {
+                Some(Action::ScrollWorkflowDetailEnd)
             }
             // Copy workflow to clipboard (y = yank)
             (KeyCode::Char('y'), _) if self.state.show_workflow_detail => {
@@ -1390,7 +1531,10 @@ impl App {
                 Action::ClearScreen => tui.terminal.clear()?,
                 Action::Resize(w, h) => self.handle_resize(tui, w, h)?,
                 Action::Render => self.render(tui)?,
-                Action::NextTheme => self.theme = self.theme.next(),
+                Action::NextTheme => {
+                    self.theme = self.theme.next();
+                    self.rebuild_detail_caches();
+                }
                 Action::ToggleHelp => {
                     self.state.show_help = !self.state.show_help;
                 }
@@ -1517,6 +1661,7 @@ impl App {
                     // Reset scroll and show loading state
                     self.state.task_detail_scroll = 0;
                     self.state.task_detail = None;
+                    self.state.task_detail_cached_lines.clear();
                     self.state.show_task_detail = true;
 
                     // Fetch task detail
@@ -1530,13 +1675,33 @@ impl App {
                 Action::CloseTaskDetail => {
                     self.state.show_task_detail = false;
                     self.state.task_detail = None;
+                    self.state.task_detail_cached_lines.clear();
                     self.state.task_detail_scroll = 0;
+                    self.state.task_detail_scrollbar_area = None;
+                    self.state.task_detail_content_height = 0;
                 }
                 Action::ScrollTaskDetailUp => {
                     self.state.task_detail_scroll = self.state.task_detail_scroll.saturating_sub(1);
                 }
                 Action::ScrollTaskDetailDown => {
                     self.state.task_detail_scroll = self.state.task_detail_scroll.saturating_add(1);
+                }
+                Action::ScrollTaskDetailPageUp => {
+                    let page = self.state.task_detail_visible_height.max(1);
+                    self.state.task_detail_scroll = self.state.task_detail_scroll.saturating_sub(page);
+                }
+                Action::ScrollTaskDetailPageDown => {
+                    let page = self.state.task_detail_visible_height.max(1);
+                    self.state.task_detail_scroll = self.state.task_detail_scroll.saturating_add(page);
+                }
+                Action::ScrollTaskDetailHome => {
+                    self.state.task_detail_scroll = 0;
+                }
+                Action::ScrollTaskDetailEnd => {
+                    self.state.task_detail_scroll = self.state.task_detail_content_height;
+                }
+                Action::SetTaskDetailScroll(pos) => {
+                    self.state.task_detail_scroll = pos;
                 }
                 Action::CopyTaskToClipboard => {
                     if let Some(task) = &self.state.task_detail {
@@ -1855,6 +2020,7 @@ impl App {
                     self.state.workflow_detail_scroll = 0;
                     self.state.workflow_detail = None;
                     self.state.workflow_tasks.clear();
+                    self.state.workflow_detail_cached_lines.clear();
                     self.state.show_workflow_detail = true;
 
                     if self.pool.is_some() {
@@ -1868,13 +2034,33 @@ impl App {
                     self.state.show_workflow_detail = false;
                     self.state.workflow_detail = None;
                     self.state.workflow_tasks.clear();
+                    self.state.workflow_detail_cached_lines.clear();
                     self.state.workflow_detail_scroll = 0;
+                    self.state.workflow_detail_scrollbar_area = None;
+                    self.state.workflow_detail_content_height = 0;
                 }
                 Action::ScrollWorkflowDetailUp => {
                     self.state.workflow_detail_scroll = self.state.workflow_detail_scroll.saturating_sub(1);
                 }
                 Action::ScrollWorkflowDetailDown => {
                     self.state.workflow_detail_scroll = self.state.workflow_detail_scroll.saturating_add(1);
+                }
+                Action::ScrollWorkflowDetailPageUp => {
+                    let page = self.state.workflow_detail_visible_height.max(1);
+                    self.state.workflow_detail_scroll = self.state.workflow_detail_scroll.saturating_sub(page);
+                }
+                Action::ScrollWorkflowDetailPageDown => {
+                    let page = self.state.workflow_detail_visible_height.max(1);
+                    self.state.workflow_detail_scroll = self.state.workflow_detail_scroll.saturating_add(page);
+                }
+                Action::ScrollWorkflowDetailHome => {
+                    self.state.workflow_detail_scroll = 0;
+                }
+                Action::ScrollWorkflowDetailEnd => {
+                    self.state.workflow_detail_scroll = self.state.workflow_detail_content_height;
+                }
+                Action::SetWorkflowDetailScroll(pos) => {
+                    self.state.workflow_detail_scroll = pos;
                 }
                 Action::NavigateWorkflowDetailNext => {
                     // Navigate to next workflow while modal is open
@@ -1978,6 +2164,12 @@ impl App {
                     self.handle_data_update(update);
                 }
                 Action::DataLoadError(error, source) => {
+                    // Clear inflight guards so NOTIFY-driven refreshes are not permanently blocked.
+                    match source {
+                        DataSource::TaskDetailData => self.task_detail_fetch_inflight = false,
+                        DataSource::WorkflowDetail => self.workflow_detail_fetch_inflight = false,
+                        _ => {}
+                    }
                     self.state.set_error(source, error);
                 }
 
@@ -2005,6 +2197,24 @@ impl App {
                 }
                 Action::SearchSelectDown => {
                     self.state.search.select_down();
+                }
+                Action::SearchSelectPageUp => {
+                    self.state.search.select_page_up();
+                }
+                Action::SearchSelectPageDown => {
+                    self.state.search.select_page_down();
+                }
+                Action::SearchSelectHome => {
+                    self.state.search.select_home();
+                }
+                Action::SearchSelectEnd => {
+                    self.state.search.select_end();
+                }
+                Action::SearchSetScroll(offset) => {
+                    self.state.search.set_scroll_offset(offset);
+                }
+                Action::SearchSelectIndex(idx) => {
+                    self.state.search.select_index(idx);
                 }
                 Action::SearchConfirm => {
                     self.handle_search_confirm()?;
@@ -2086,8 +2296,17 @@ impl App {
                 self.state.set_loading(DataSource::DeadWorkers, false);
             }
             DataUpdate::TaskDetailLoaded(task) => {
+                self.task_detail_fetch_inflight = false;
+                let cached_lines = {
+                    let panel = TaskDetailPanel::new(&task, 0, None);
+                    panel.build_display_lines(&self.theme)
+                };
                 self.state.task_detail = Some(task);
+                self.state.task_detail_cached_lines = cached_lines;
                 self.state.set_loading(DataSource::TaskDetailData, false);
+                if self.state.search.active && self.state.show_task_detail {
+                    self.perform_search();
+                }
             }
             DataUpdate::WorkflowSummary(summary) => {
                 self.state.workflow_summary = Some(summary);
@@ -2098,11 +2317,36 @@ impl App {
                 self.state.set_loading(DataSource::WorkflowList, false);
             }
             DataUpdate::WorkflowDetailLoaded(workflow, tasks) => {
+                self.workflow_detail_fetch_inflight = false;
+                let cached_lines = {
+                    let panel = WorkflowDetailPanel::new(&workflow, &tasks, 0, None);
+                    panel.build_display_lines(&self.theme)
+                };
                 self.state.workflow_detail = Some(workflow);
                 self.state.workflow_tasks = tasks;
+                self.state.workflow_detail_cached_lines = cached_lines;
                 self.state.set_loading(DataSource::WorkflowDetail, false);
+                if self.state.search.active && self.state.show_workflow_detail {
+                    self.perform_search();
+                }
             }
         }
+    }
+
+    fn rebuild_detail_caches(&mut self) {
+        self.state.task_detail_cached_lines = if let Some(task) = &self.state.task_detail {
+            let panel = TaskDetailPanel::new(task, 0, None);
+            panel.build_display_lines(&self.theme)
+        } else {
+            Vec::new()
+        };
+
+        self.state.workflow_detail_cached_lines = if let Some(workflow) = &self.state.workflow_detail {
+            let panel = WorkflowDetailPanel::new(workflow, &self.state.workflow_tasks, 0, None);
+            panel.build_display_lines(&self.theme)
+        } else {
+            Vec::new()
+        };
     }
 
     fn handle_resize(&mut self, tui: &mut Tui, w: u16, h: u16) -> Result<()> {
@@ -2117,13 +2361,33 @@ impl App {
         // never drift beyond the renderable maximum.
         let task_eff_scroll = Cell::new(self.state.task_detail_scroll);
         let wf_eff_scroll = Cell::new(self.state.workflow_detail_scroll);
+        let task_scrollbar_area: Cell<Option<Rect>> = Cell::new(None);
+        let task_content_height: Cell<u16> = Cell::new(0);
+        let task_visible_height: Cell<u16> = Cell::new(0);
+        let wf_scrollbar_area: Cell<Option<Rect>> = Cell::new(None);
+        let wf_content_height: Cell<u16> = Cell::new(0);
+        let wf_visible_height: Cell<u16> = Cell::new(0);
+        let search_eff_scroll = Cell::new(self.state.search.scroll_offset);
+        let search_view_height = Cell::new(self.state.search.results_view_height);
+        let search_results_area: Cell<Option<Rect>> = Cell::new(None);
+        let search_scrollbar_area: Cell<Option<Rect>> = Cell::new(None);
 
         let state = &self.state;
         let theme = &self.theme;
         let action_tx = self.action_tx.clone();
         let current_tab = state.current_tab.clone();
 
-        tui.draw(|frame| {
+        // Wrap the draw call with synchronized output so the terminal batches
+        // all cell changes and applies them atomically. Without this, terminals
+        // render cell updates sequentially, producing a visible cascade/flicker
+        // during scroll or any frame with many changed cells.
+        crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::BeginSynchronizedUpdate
+        )
+        .ok();
+
+        let draw_result = tui.draw(|frame| {
             // Split screen: main content area + status bar at bottom
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -2170,11 +2434,24 @@ impl App {
             // Render task detail panel if visible
             if state.show_task_detail {
                 if let Some(task) = &state.task_detail {
-                    let mut panel = TaskDetailPanel::new(task, state.task_detail_scroll, state.search_highlight.as_ref());
+                    let cached = if state.task_detail_cached_lines.is_empty() {
+                        None
+                    } else {
+                        Some(state.task_detail_cached_lines.as_slice())
+                    };
+                    let mut panel = TaskDetailPanel::with_cached_lines(
+                        task,
+                        state.task_detail_scroll,
+                        state.search_highlight.as_ref(),
+                        cached,
+                    );
                     if let Err(err) = panel.draw(frame, frame.area(), theme) {
                         let _ = action_tx.send(Action::Error(format!("Failed to draw task detail: {:?}", err)));
                     }
                     task_eff_scroll.set(panel.effective_scroll());
+                    task_scrollbar_area.set(panel.scrollbar_area());
+                    task_content_height.set(panel.content_height());
+                    task_visible_height.set(panel.visible_height());
                 } else {
                     // Show loading state
                     use ratatui::widgets::{Block, Borders, Clear, Paragraph};
@@ -2195,11 +2472,25 @@ impl App {
             // Render workflow detail panel if visible
             if state.show_workflow_detail {
                 if let Some(workflow) = &state.workflow_detail {
-                    let mut panel = WorkflowDetailPanel::new(workflow, &state.workflow_tasks, state.workflow_detail_scroll, state.search_highlight.as_ref());
+                    let cached = if state.workflow_detail_cached_lines.is_empty() {
+                        None
+                    } else {
+                        Some(state.workflow_detail_cached_lines.as_slice())
+                    };
+                    let mut panel = WorkflowDetailPanel::with_cached_lines(
+                        workflow,
+                        &state.workflow_tasks,
+                        state.workflow_detail_scroll,
+                        state.search_highlight.as_ref(),
+                        cached,
+                    );
                     if let Err(err) = panel.draw(frame, frame.area(), theme) {
                         let _ = action_tx.send(Action::Error(format!("Failed to draw workflow detail: {:?}", err)));
                     }
                     wf_eff_scroll.set(panel.effective_scroll());
+                    wf_scrollbar_area.set(panel.scrollbar_area());
+                    wf_content_height.set(panel.content_height());
+                    wf_visible_height.set(panel.visible_height());
                 } else {
                     // Show loading state
                     use ratatui::widgets::{Block, Borders, Clear, Paragraph};
@@ -2241,10 +2532,14 @@ impl App {
                     }
                 };
 
-                let search_modal = SearchModal::new(&state.search, context_label);
+                let mut search_modal = SearchModal::new(&state.search, context_label);
                 if let Err(err) = search_modal.draw(frame, frame.area(), theme) {
                     let _ = action_tx.send(Action::Error(format!("Failed to draw search modal: {:?}", err)));
                 }
+                search_eff_scroll.set(search_modal.effective_scroll());
+                search_view_height.set(search_modal.results_view_height());
+                search_results_area.set(search_modal.results_area());
+                search_scrollbar_area.set(search_modal.scrollbar_area());
             }
 
             // Render toast notification if present
@@ -2259,11 +2554,29 @@ impl App {
                     let _ = action_tx.send(Action::Error(format!("Failed to draw help: {:?}", err)));
                 }
             }
-        })?;
+        });
+
+        crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::EndSynchronizedUpdate
+        )
+        .ok();
+
+        draw_result?;
 
         // Write back clamped scroll so subsequent Up/Down operate from valid offsets
         self.state.task_detail_scroll = task_eff_scroll.get();
         self.state.workflow_detail_scroll = wf_eff_scroll.get();
+        self.state.task_detail_scrollbar_area = task_scrollbar_area.get();
+        self.state.task_detail_content_height = task_content_height.get();
+        self.state.task_detail_visible_height = task_visible_height.get();
+        self.state.workflow_detail_scrollbar_area = wf_scrollbar_area.get();
+        self.state.workflow_detail_content_height = wf_content_height.get();
+        self.state.workflow_detail_visible_height = wf_visible_height.get();
+        self.state.search.scroll_offset = search_eff_scroll.get();
+        self.state.search.results_view_height = search_view_height.get();
+        self.state.search.results_area = search_results_area.get();
+        self.state.search.scrollbar_area = search_scrollbar_area.get();
 
         Ok(())
     }

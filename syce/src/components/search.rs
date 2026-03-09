@@ -8,6 +8,10 @@ use ratatui::{
 pub struct SearchModal<'a> {
     state: &'a SearchState,
     context_label: &'a str,
+    effective_scroll: usize,
+    results_view_height: usize,
+    results_area: Option<Rect>,
+    scrollbar_area: Option<Rect>,
 }
 
 struct SearchLayout {
@@ -20,7 +24,27 @@ impl<'a> SearchModal<'a> {
         Self {
             state,
             context_label,
+            effective_scroll: 0,
+            results_view_height: 0,
+            results_area: None,
+            scrollbar_area: None,
         }
+    }
+
+    pub fn effective_scroll(&self) -> usize {
+        self.effective_scroll
+    }
+
+    pub fn results_view_height(&self) -> usize {
+        self.results_view_height
+    }
+
+    pub fn results_area(&self) -> Option<Rect> {
+        self.results_area
+    }
+
+    pub fn scrollbar_area(&self) -> Option<Rect> {
+        self.scrollbar_area
     }
 
     /// Calculate centered rect for the search modal
@@ -338,7 +362,7 @@ impl<'a> SearchModal<'a> {
         None
     }
 
-    pub fn draw(&self, frame: &mut Frame, area: Rect, theme: &Theme) -> Result<()> {
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) -> Result<()> {
         let (percent_x, percent_y) = Self::modal_dimensions(area);
         let popup_area = Self::centered_rect(percent_x, percent_y, area);
 
@@ -381,6 +405,9 @@ impl<'a> SearchModal<'a> {
         frame.render_widget(separator, chunks[1]);
 
         // Render results
+        self.results_area = Some(chunks[2]);
+        self.results_view_height = chunks[2].height as usize;
+
         if self.state.matches.is_empty() {
             let empty_msg = if self.state.has_query() {
                 "No matches found"
@@ -391,17 +418,15 @@ impl<'a> SearchModal<'a> {
                 .style(Style::default().fg(theme.muted).italic())
                 .alignment(Alignment::Center);
             frame.render_widget(empty, chunks[2]);
+            self.effective_scroll = 0;
+            self.scrollbar_area = None;
         } else {
             let max_visible = chunks[2].height as usize;
             let selected = self.state.selected_index;
             let layout = Self::compute_layout(chunks[2].width, &self.state.matches);
-
-            // Calculate scroll offset to keep selected item visible
-            let scroll_offset = if selected >= max_visible {
-                selected - max_visible + 1
-            } else {
-                0
-            };
+            let max_scroll = self.state.matches.len().saturating_sub(max_visible.max(1));
+            let scroll_offset = self.state.scroll_offset.min(max_scroll);
+            self.effective_scroll = scroll_offset;
 
             let visible_matches: Vec<Line> = self
                 .state
@@ -415,12 +440,60 @@ impl<'a> SearchModal<'a> {
 
             let results = Paragraph::new(visible_matches);
             frame.render_widget(results, chunks[2]);
+
+            if self.state.matches.len() > max_visible {
+                let scrollbar_track = Rect::new(
+                    chunks[2].x + chunks[2].width.saturating_sub(1),
+                    chunks[2].y,
+                    1,
+                    chunks[2].height,
+                );
+                // Use a dedicated 1-column hit area at the right edge so row clicks
+                // and scrollbar clicks don't overlap.
+                self.scrollbar_area = Some(scrollbar_track);
+                self.results_area = Some(Rect::new(
+                    chunks[2].x,
+                    chunks[2].y,
+                    chunks[2].width.saturating_sub(1),
+                    chunks[2].height,
+                ));
+
+                // Custom 1-cell thumb scrollbar to keep marker size stable.
+                let height = scrollbar_track.height as usize;
+                if height > 0 {
+                    let max_scroll = self.state.matches.len().saturating_sub(max_visible.max(1));
+                    let track_len = height.saturating_sub(2);
+                    let thumb_row = if track_len == 0 || max_scroll == 0 {
+                        0
+                    } else {
+                        let thumb_offset = (scroll_offset * track_len.saturating_sub(1)) / max_scroll;
+                        1 + thumb_offset
+                    };
+
+                    let mut lines: Vec<Line> = Vec::with_capacity(height);
+                    for i in 0..height {
+                        let (sym, style) = if i == thumb_row {
+                            ("█", Style::default().fg(theme.text).bg(theme.surface))
+                        } else if i == 0 {
+                            ("▲", Style::default().fg(theme.muted).bg(theme.surface))
+                        } else if i + 1 == height {
+                            ("▼", Style::default().fg(theme.muted).bg(theme.surface))
+                        } else {
+                            ("│", Style::default().fg(theme.muted).bg(theme.surface))
+                        };
+                        lines.push(Line::from(Span::styled(sym, style)));
+                    }
+                    frame.render_widget(Paragraph::new(lines), scrollbar_track);
+                }
+            } else {
+                self.scrollbar_area = None;
+            }
         }
 
         // Render footer with hints
         let match_count = self.state.matches.len();
         let footer_text = format!(
-            " {} match{}  |  {} navigate  Enter select  Esc close ",
+            " {} match{}  |  {} navigate  PgUp/PgDn page  Home/End jump  Enter select  Esc close ",
             match_count,
             if match_count == 1 { "" } else { "es" },
             "\u{2191}\u{2193}", // ↑↓

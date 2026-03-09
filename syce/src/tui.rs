@@ -7,7 +7,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::errors::Result;
@@ -69,8 +69,17 @@ pub struct Tui {
 }
 
 impl Tui {
+    /// Queue capacity for terminal events.
+    const EVENT_QUEUE_CAPACITY: usize = 128;
+    /// Reserve this many slots for high-priority events (key/resize/quit).
+    const EVENT_QUEUE_HEADROOM: usize = 16;
+    /// Drop low-priority frame/tick events when backlog exceeds this many items.
+    const LOW_PRIORITY_MAX_BACKLOG: usize = 4;
+    /// Throttle wheel events; touchpads can emit hundreds per second.
+    const SCROLL_EVENT_MIN_INTERVAL: Duration = Duration::from_millis(16);
+
     pub fn new() -> Result<Self> {
-        let (event_tx, event_rx) = mpsc::channel(1024);
+        let (event_tx, event_rx) = mpsc::channel(Self::EVENT_QUEUE_CAPACITY);
         Ok(Self {
             terminal: ratatui::Terminal::new(Backend::new(stdout()))?,
             task: tokio::spawn(async {}),
@@ -146,7 +155,11 @@ impl Tui {
                 break;
             }
             tick_interval.tick().await;
-            let _ = event_tx.try_send(Event::Tick);
+            if event_tx.capacity()
+                >= Self::EVENT_QUEUE_CAPACITY - Self::LOW_PRIORITY_MAX_BACKLOG
+            {
+                let _ = event_tx.try_send(Event::Tick);
+            }
         }
     }
 
@@ -161,11 +174,19 @@ impl Tui {
                 break;
             }
             render_interval.tick().await;
-            let _ = event_tx.try_send(Event::Render);
+            // Rendering is best-effort; avoid saturating the queue with stale frames.
+            if event_tx.capacity()
+                >= Self::EVENT_QUEUE_CAPACITY - Self::LOW_PRIORITY_MAX_BACKLOG
+            {
+                let _ = event_tx.try_send(Event::Render);
+            }
         }
     }
 
     fn event_reader(stop_flag: Arc<AtomicBool>, event_tx: Sender<Event>) {
+        let mut last_scroll_emit = Instant::now()
+            .checked_sub(Self::SCROLL_EVENT_MIN_INTERVAL)
+            .unwrap_or_else(Instant::now);
         while !stop_flag.load(Ordering::Relaxed) {
             match event::poll(Duration::from_millis(50)) {
                 Ok(true) => match event::read() {
@@ -173,6 +194,42 @@ impl Tui {
                         let _ = event_tx.try_send(Event::Key(key));
                     }
                     Ok(CrosstermEvent::Mouse(mouse)) => {
+                        let is_high_volume_pointer = matches!(
+                            mouse.kind,
+                            crossterm::event::MouseEventKind::Moved
+                                | crossterm::event::MouseEventKind::Drag(_)
+                        );
+                        if is_high_volume_pointer {
+                            continue;
+                        }
+
+                        let is_scroll = matches!(
+                            mouse.kind,
+                            crossterm::event::MouseEventKind::ScrollUp
+                                | crossterm::event::MouseEventKind::ScrollDown
+                                | crossterm::event::MouseEventKind::ScrollLeft
+                                | crossterm::event::MouseEventKind::ScrollRight
+                        );
+                        let is_click = matches!(
+                            mouse.kind,
+                            crossterm::event::MouseEventKind::Down(_)
+                                | crossterm::event::MouseEventKind::Up(_)
+                        );
+                        if is_scroll {
+                            // Scroll events are low priority and can be very bursty
+                            // (touchpad inertia). Drop when queue is under pressure.
+                            if event_tx.capacity() < Self::EVENT_QUEUE_HEADROOM {
+                                continue;
+                            }
+                            if last_scroll_emit.elapsed() < Self::SCROLL_EVENT_MIN_INTERVAL {
+                                continue;
+                            }
+                            last_scroll_emit = Instant::now();
+                        } else if is_click && event_tx.capacity() <= Self::EVENT_QUEUE_HEADROOM {
+                            // Keep headroom for key/resize when queue is pressured.
+                            continue;
+                        }
+
                         let _ = event_tx.try_send(Event::Mouse(mouse));
                     }
                     Ok(CrosstermEvent::Resize(x, y)) => {

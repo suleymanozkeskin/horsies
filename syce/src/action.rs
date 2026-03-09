@@ -49,6 +49,11 @@ pub enum Action {
     CloseTaskDetail,
     ScrollTaskDetailUp,
     ScrollTaskDetailDown,
+    ScrollTaskDetailPageUp,
+    ScrollTaskDetailPageDown,
+    ScrollTaskDetailHome,
+    ScrollTaskDetailEnd,
+    SetTaskDetailScroll(u16),
     CopyTaskToClipboard,
     NavigateTaskDetailNext,   // Go to next task in list while modal is open
     NavigateTaskDetailPrev,   // Go to previous task in list while modal is open
@@ -86,6 +91,11 @@ pub enum Action {
     CloseWorkflowDetail,
     ScrollWorkflowDetailUp,
     ScrollWorkflowDetailDown,
+    ScrollWorkflowDetailPageUp,
+    ScrollWorkflowDetailPageDown,
+    ScrollWorkflowDetailHome,
+    ScrollWorkflowDetailEnd,
+    SetWorkflowDetailScroll(u16),
     NavigateWorkflowDetailNext,  // Go to next workflow while modal is open
     NavigateWorkflowDetailPrev,  // Go to previous workflow while modal is open
     CopyWorkflowToClipboard,     // Copy workflow detail JSON to clipboard
@@ -114,6 +124,12 @@ pub enum Action {
     SearchClear,
     SearchSelectUp,
     SearchSelectDown,
+    SearchSelectPageUp,
+    SearchSelectPageDown,
+    SearchSelectHome,
+    SearchSelectEnd,
+    SearchSetScroll(usize),
+    SearchSelectIndex(usize),
     SearchConfirm,
 
     // NOTIFY/LISTEN actions

@@ -3,15 +3,22 @@ use std::borrow::Cow;
 use crate::{action::Action, components::Component, errors::Result, models::TaskDetail, state::SearchHighlight, theme::Theme};
 use ratatui::{
     prelude::*,
-    widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 
 pub struct TaskDetailPanel<'a> {
     task: &'a TaskDetail,
     scroll_offset: u16,
     highlight: Option<&'a SearchHighlight>,
+    cached_lines: Option<&'a [Line<'static>]>,
     /// Clamped scroll value computed during draw, readable after render.
     effective_scroll: u16,
+    /// The scrollbar track area computed during draw, for mouse hit-testing.
+    scrollbar_area: Option<Rect>,
+    /// Total content height (line count) computed during draw.
+    content_height: u16,
+    /// Visible viewport height (line count) computed during draw.
+    visible_height: u16,
 }
 
 pub struct SearchableLine {
@@ -46,12 +53,45 @@ fn line_to_string(line: &Line) -> String {
 
 impl<'a> TaskDetailPanel<'a> {
     pub fn new(task: &'a TaskDetail, scroll_offset: u16, highlight: Option<&'a SearchHighlight>) -> Self {
-        Self { task, scroll_offset, highlight, effective_scroll: 0 }
+        Self::with_cached_lines(task, scroll_offset, highlight, None)
+    }
+
+    pub fn with_cached_lines(
+        task: &'a TaskDetail,
+        scroll_offset: u16,
+        highlight: Option<&'a SearchHighlight>,
+        cached_lines: Option<&'a [Line<'static>]>,
+    ) -> Self {
+        Self {
+            task,
+            scroll_offset,
+            highlight,
+            cached_lines,
+            effective_scroll: 0,
+            scrollbar_area: None,
+            content_height: 0,
+            visible_height: 0,
+        }
     }
 
     /// Return the clamped scroll value computed during the last draw call.
     pub fn effective_scroll(&self) -> u16 {
         self.effective_scroll
+    }
+
+    /// Return the scrollbar track area computed during the last draw call.
+    pub fn scrollbar_area(&self) -> Option<Rect> {
+        self.scrollbar_area
+    }
+
+    /// Return the total content height computed during the last draw call.
+    pub fn content_height(&self) -> u16 {
+        self.content_height
+    }
+
+    /// Return the visible viewport height computed during the last draw call.
+    pub fn visible_height(&self) -> u16 {
+        self.visible_height
     }
 
     /// Calculate centered rect for the detail modal
@@ -341,6 +381,13 @@ impl<'a> TaskDetailPanel<'a> {
             })
             .collect()
     }
+
+    pub fn build_display_lines(&self, theme: &Theme) -> Vec<Line<'static>> {
+        self.build_detail_lines(theme)
+            .into_iter()
+            .map(|line| line.display)
+            .collect()
+    }
 }
 
 impl<'a> Component for TaskDetailPanel<'a> {
@@ -354,7 +401,7 @@ impl<'a> Component for TaskDetailPanel<'a> {
         // Clear the background
         frame.render_widget(Clear, popup_area);
 
-        let title = format!(" Task: {} - Esc: close | ↑↓: scroll | []: prev/next | y: copy ", self.task.id);
+        let title = format!(" Task: {} - Esc: close | ↑↓/PgUp/PgDn/Home/End: scroll | []: prev/next | y: copy ", self.task.id);
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
@@ -366,37 +413,43 @@ impl<'a> Component for TaskDetailPanel<'a> {
         let inner = block.inner(popup_area);
         frame.render_widget(block, popup_area);
 
-        let lines: Vec<Line> = self
-            .build_detail_lines(theme)
-            .into_iter()
-            .enumerate()
-            .map(|(idx, line)| {
-                // Check if this line should show the search pointer (appended to end)
-                if let Some(highlight) = &self.highlight {
-                    if highlight.matches_line(idx) {
-                        let mut spans = line.display.spans;
-                        spans.push(Span::styled(
-                            format!(" {}", highlight.pointer()),
-                            Style::default().fg(theme.accent),
-                        ));
-                        return Line::from(spans);
-                    }
-                }
-                line.display
-            })
-            .collect();
+        let owned_lines;
+        let source_lines: &[Line<'static>] = if let Some(cached) = self.cached_lines {
+            cached
+        } else {
+            owned_lines = self.build_display_lines(theme);
+            &owned_lines
+        };
 
         // Calculate total content height for scrollbar
-        let content_height = lines.len() as u16;
+        let content_height = source_lines.len() as u16;
         let visible_height = inner.height;
+        self.content_height = content_height;
+        self.visible_height = visible_height;
 
-        // Apply scroll offset (clamp to valid range)
+        // Apply scroll offset (clamp to valid range).
+        // Without Wrap, logical lines == visual lines so manual slicing is correct.
         let scroll = self.scroll_offset.min(content_height.saturating_sub(visible_height));
         self.effective_scroll = scroll;
-        let paragraph = Paragraph::new(lines)
+        let start = scroll as usize;
+        let end = (start + visible_height as usize).min(source_lines.len());
+        let mut visible_lines: Vec<Line> = source_lines[start..end].iter().cloned().collect();
+
+        // Add search pointer only for visible highlighted lines.
+        if let Some(highlight) = &self.highlight {
+            for (offset, line) in visible_lines.iter_mut().enumerate() {
+                if highlight.matches_line(start + offset) {
+                    line.spans.push(Span::styled(
+                        format!(" {}", highlight.pointer()),
+                        Style::default().fg(theme.accent),
+                    ));
+                }
+            }
+        }
+
+        let paragraph = Paragraph::new(visible_lines)
             .style(Style::default().bg(theme.background).fg(theme.text))
-            .scroll((scroll, 0))
-            .wrap(Wrap { trim: false });
+            .scroll((0, 0));
 
         frame.render_widget(paragraph, inner);
 
@@ -408,14 +461,20 @@ impl<'a> Component for TaskDetailPanel<'a> {
                 .track_symbol(Some("│"))
                 .thumb_symbol("█");
 
-            let mut scrollbar_state = ScrollbarState::new(content_height.saturating_sub(visible_height) as usize)
-                .position(scroll as usize);
+            let scrollbar_track = inner.inner(Margin { vertical: 1, horizontal: 0 });
+            self.scrollbar_area = Some(scrollbar_track);
+
+            let mut scrollbar_state = ScrollbarState::new(content_height as usize)
+                .position(scroll as usize)
+                .viewport_content_length(visible_height as usize);
 
             frame.render_stateful_widget(
                 scrollbar,
-                inner.inner(Margin { vertical: 1, horizontal: 0 }),
+                scrollbar_track,
                 &mut scrollbar_state,
             );
+        } else {
+            self.scrollbar_area = None;
         }
 
         Ok(())
