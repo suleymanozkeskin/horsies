@@ -237,9 +237,10 @@ def run_workers(
             )
             workers.append(proc)
 
-        # Wait for first worker to be ready (others follow similar startup)
+        # Wait for ALL workers to be ready before yielding.
         if workers and ready_check:
-            _wait_for_ready(workers[0], timeout=timeout, ready_check=ready_check)
+            for proc in workers:
+                _wait_for_ready(proc, timeout=timeout, ready_check=ready_check)
         elif workers:
             time.sleep(0.1)
 
