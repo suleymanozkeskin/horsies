@@ -183,9 +183,8 @@ class TestEnsureConnections:
             result = await listener._ensure_connections()
 
         assert result.is_ok()
-        # Both dispatcher and command conn should have _start_listening called
-        # Each conn gets LISTEN for 'task_done' = 2 calls total
-        assert mock_conn.execute.await_count == 2
+        # Only dispatcher connection should receive LISTEN replays.
+        assert mock_conn.execute.await_count == 1
 
     @pytest.mark.asyncio
     async def test_rolls_back_dispatcher_when_command_connect_fails(self) -> None:
@@ -209,6 +208,37 @@ class TestEnsureConnections:
         mock_unregister.assert_called_once()
         assert listener._dispatcher_conn is None
         assert listener._command_conn is None
+
+    @pytest.mark.asyncio
+    async def test_concurrent_ensure_connections_does_not_leak_dispatcher_conn(self) -> None:
+        """Concurrent callers should not create extra/leaked dispatcher connections."""
+        listener = _make_listener()
+        created: list[MagicMock] = []
+
+        async def _fake_connect(*_args: Any, **_kwargs: Any) -> MagicMock:
+            conn = _make_mock_conn(fileno=100 + len(created))
+            created.append(conn)
+            # Encourage overlap between concurrent callers.
+            await asyncio.sleep(0.01)
+            return conn
+
+        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, side_effect=_fake_connect):
+            r1, r2 = await asyncio.gather(
+                listener._ensure_connections(),
+                listener._ensure_connections(),
+            )
+
+        assert r1.is_ok()
+        assert r2.is_ok()
+        # Exactly one dispatcher + one command connection.
+        assert len(created) == 2
+        assert listener._dispatcher_conn is not None
+        assert listener._command_conn is not None
+        leaked = [
+            conn for conn in created
+            if conn not in (listener._dispatcher_conn, listener._command_conn)
+        ]
+        assert leaked == []
 
 
 # ---------------------------------------------------------------------------
@@ -690,14 +720,17 @@ class TestUnlisten:
         q: asyncio.Queue[Notify] = asyncio.Queue()
         listener._subs['task_done'] = {q}
         listener._listen_channels.add('task_done')
-        mock_conn = _make_mock_conn()
-        listener._command_conn = mock_conn
+        dispatcher_conn = _make_mock_conn()
+        command_conn = _make_mock_conn()
+        listener._dispatcher_conn = dispatcher_conn
+        listener._command_conn = command_conn
 
         await listener.unlisten('task_done', q)
 
         assert 'task_done' not in listener._subs
         assert 'task_done' not in listener._listen_channels
-        mock_conn.execute.assert_awaited_once()
+        dispatcher_conn.execute.assert_awaited_once()
+        command_conn.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_no_unlisten_when_other_subscribers_remain(self) -> None:
@@ -707,15 +740,15 @@ class TestUnlisten:
         q2: asyncio.Queue[Notify] = asyncio.Queue()
         listener._subs['task_done'] = {q1, q2}
         listener._listen_channels.add('task_done')
-        mock_conn = _make_mock_conn()
-        listener._command_conn = mock_conn
+        dispatcher_conn = _make_mock_conn()
+        listener._dispatcher_conn = dispatcher_conn
 
         await listener.unlisten('task_done', q1)
 
         assert q1 not in listener._subs['task_done']
         assert q2 in listener._subs['task_done']
         assert 'task_done' in listener._listen_channels
-        mock_conn.execute.assert_not_awaited()
+        dispatcher_conn.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_removes_channel_from_listen_channels(self) -> None:
@@ -723,8 +756,7 @@ class TestUnlisten:
         listener = _make_listener()
         listener._subs['ch'] = set()  # already empty
         listener._listen_channels.add('ch')
-        mock_conn = _make_mock_conn()
-        listener._command_conn = mock_conn
+        listener._dispatcher_conn = _make_mock_conn()
 
         await listener.unlisten('ch', None)
 
@@ -732,19 +764,47 @@ class TestUnlisten:
         assert 'ch' not in listener._listen_channels
 
     @pytest.mark.asyncio
-    async def test_no_unlisten_when_command_conn_closed(self) -> None:
-        """Should not issue UNLISTEN when command connection is closed."""
+    async def test_no_unlisten_when_dispatcher_conn_closed(self) -> None:
+        """Should not issue UNLISTEN when dispatcher connection is closed."""
         listener = _make_listener()
         listener._subs['ch'] = set()
         listener._listen_channels.add('ch')
-        mock_conn = _make_mock_conn(closed=True)
-        listener._command_conn = mock_conn
+        dispatcher_conn = _make_mock_conn(closed=True)
+        command_conn = _make_mock_conn()
+        listener._dispatcher_conn = dispatcher_conn
+        listener._command_conn = command_conn
 
         await listener.unlisten('ch', None)
 
-        mock_conn.execute.assert_not_awaited()
+        dispatcher_conn.execute.assert_not_awaited()
+        command_conn.execute.assert_not_awaited()
         # Channel still removed from tracking since no subs remain
         assert 'ch' not in listener._listen_channels
+
+    @pytest.mark.asyncio
+    async def test_last_subscriber_restarts_dispatcher(self) -> None:
+        """UNLISTEN should pause and then restart a running dispatcher task."""
+        listener = _make_listener()
+        q: asyncio.Queue[Notify] = asyncio.Queue()
+        listener._subs['task_done'] = {q}
+        listener._listen_channels.add('task_done')
+        listener._dispatcher_conn = _make_mock_conn()
+
+        async def _noop() -> None:
+            await asyncio.sleep(999)
+
+        old_dispatcher = asyncio.create_task(_noop())
+        listener._dispatcher_task = old_dispatcher
+
+        def _close_and_return_mock(coro: Any, **_kwargs: Any) -> MagicMock:
+            coro.close()
+            return MagicMock()
+
+        with patch.object(asyncio, 'create_task', side_effect=_close_and_return_mock) as mock_create_task:
+            await listener.unlisten('task_done', q)
+
+        assert old_dispatcher.cancelled()
+        mock_create_task.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -763,13 +823,16 @@ class TestUnsubscribe:
         q: asyncio.Queue[Notify] = asyncio.Queue()
         listener._subs['task_done'] = {q}
         listener._listen_channels.add('task_done')
-        mock_conn = _make_mock_conn()
-        listener._command_conn = mock_conn
+        dispatcher_conn = _make_mock_conn()
+        command_conn = _make_mock_conn()
+        listener._dispatcher_conn = dispatcher_conn
+        listener._command_conn = command_conn
 
         await listener.unsubscribe('task_done', q)
 
         assert 'task_done' not in listener._subs
-        mock_conn.execute.assert_awaited_once()
+        dispatcher_conn.execute.assert_awaited_once()
+        command_conn.execute.assert_not_awaited()
         assert 'task_done' not in listener._listen_channels
 
     @pytest.mark.asyncio
@@ -780,15 +843,15 @@ class TestUnsubscribe:
         q2: asyncio.Queue[Notify] = asyncio.Queue()
         listener._subs['task_done'] = {q1, q2}
         listener._listen_channels.add('task_done')
-        mock_conn = _make_mock_conn()
-        listener._command_conn = mock_conn
+        dispatcher_conn = _make_mock_conn()
+        listener._dispatcher_conn = dispatcher_conn
 
         await listener.unsubscribe('task_done', q1)
 
         assert q1 not in listener._subs['task_done']
         assert q2 in listener._subs['task_done']
         assert 'task_done' in listener._listen_channels
-        mock_conn.execute.assert_not_awaited()
+        dispatcher_conn.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_noop_when_queue_is_none(self) -> None:
@@ -801,12 +864,13 @@ class TestUnsubscribe:
         assert len(listener._subs['ch']) == 1
 
     @pytest.mark.asyncio
-    async def test_serializes_unsubscribe_with_health_check_probe(self) -> None:
-        """unsubscribe should wait for in-flight health query, not raise race errors."""
+    async def test_unsubscribe_is_not_blocked_by_health_check_probe(self) -> None:
+        """unsubscribe should proceed while command connection health probe is in-flight."""
         listener = _make_listener()
         started = asyncio.Event()
         release = asyncio.Event()
         listener._command_conn = _BusyCommandConnection(started, release)  # type: ignore[assignment]
+        listener._dispatcher_conn = _make_mock_conn()
 
         channel = 'task_done'
         queue: asyncio.Queue[Notify] = asyncio.Queue()
@@ -817,14 +881,10 @@ class TestUnsubscribe:
         listener._fd_activity.set()
         await asyncio.wait_for(started.wait(), timeout=1.0)
 
-        unsubscribe_task = asyncio.create_task(listener.unsubscribe(channel, queue))
-        await asyncio.sleep(0)
-        assert not unsubscribe_task.done()
-
-        release.set()
-        await asyncio.wait_for(unsubscribe_task, timeout=1.0)
+        await asyncio.wait_for(listener.unsubscribe(channel, queue), timeout=1.0)
         assert channel not in listener._listen_channels
 
+        release.set()
         health_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await health_task

@@ -53,7 +53,7 @@ class PostgresListener:
 
     Architecture:
       - dispatcher_conn: Exclusively consumes notifications from conn.notifies()
-      - command_conn: Handles LISTEN/UNLISTEN commands separately
+      - command_conn: Runs lightweight health-check SQL separately
       - Per-channel queues: Each subscriber gets independent notification delivery
 
     Usage:
@@ -90,7 +90,7 @@ class PostgresListener:
         # Two separate connections to avoid blocking issues:
         # 1. Dispatcher connection: exclusively for conn.notifies() consumption
         self._dispatcher_conn: Optional[AsyncConnection] = None
-        # 2. Command connection: for LISTEN/UNLISTEN SQL commands
+        # 2. Command connection: for lightweight probes (e.g. health checks)
         self._command_conn: Optional[AsyncConnection] = None
 
         # Set of channels we have LISTENed to on the server.
@@ -112,6 +112,8 @@ class PostgresListener:
 
         # A lock used to serialize LISTEN/UNLISTEN and subscription book-keeping.
         self._lock = asyncio.Lock()
+        # A lock used to serialize dispatcher-connection creation/replacement.
+        self._dispatcher_lock = asyncio.Lock()
         # A lock used to serialize command-connection SQL execution.
         self._command_lock = asyncio.Lock()
 
@@ -186,16 +188,18 @@ class PostgresListener:
         try:
             # Ensure dispatcher connection (for conn.notifies() consumption)
             if self._dispatcher_conn is None or self._dispatcher_conn.closed:
-                self._dispatcher_conn = await psycopg.AsyncConnection.connect(
-                    self.database_url,
-                    autocommit=True,
-                )
-                created_dispatcher = True
-                await self._start_listening(self._dispatcher_conn)
-                # Register file descriptor for activity monitoring
-                self._register_fd_monitoring()
+                async with self._dispatcher_lock:
+                    if self._dispatcher_conn is None or self._dispatcher_conn.closed:
+                        self._dispatcher_conn = await psycopg.AsyncConnection.connect(
+                            self.database_url,
+                            autocommit=True,
+                        )
+                        created_dispatcher = True
+                        await self._start_listening(self._dispatcher_conn)
+                        # Register file descriptor for activity monitoring
+                        self._register_fd_monitoring()
 
-            # Ensure command connection (for LISTEN/UNLISTEN commands)
+            # Ensure command connection (for lightweight health/probe SQL)
             if self._command_conn is None or self._command_conn.closed:
                 async with self._command_lock:
                     if self._command_conn is None or self._command_conn.closed:
@@ -204,7 +208,6 @@ class PostgresListener:
                             autocommit=True,
                         )
                         created_command = True
-                        await self._start_listening(self._command_conn)
 
             return Ok(None)
         except (OperationalError, InterfaceError, OSError) as exc:
@@ -255,6 +258,18 @@ class PostgresListener:
                 raise err.exception or RuntimeError(err.message)
         assert self._dispatcher_conn is not None
         return self._dispatcher_conn
+
+    async def _unlisten_on_dispatcher(self, channel_name: str) -> None:
+        """Issue UNLISTEN on dispatcher connection without racing notifies() iterator."""
+        dispatcher_was_running = await self._pause_dispatcher()
+        try:
+            if self._dispatcher_conn and not self._dispatcher_conn.closed:
+                await self._dispatcher_conn.execute(
+                    sql.SQL('UNLISTEN {}').format(sql.Identifier(channel_name))
+                )
+        finally:
+            if dispatcher_was_running:
+                self._start_dispatcher_if_needed()
 
     async def _close_connections(self) -> None:
         """Close raw connections and reset to None for reconnection."""
@@ -574,12 +589,7 @@ class PostgresListener:
             no_local_subs = self._remove_local_subscription(channel_name, q)
             # If nobody is listening locally, drop the server-side LISTEN.
             if no_local_subs and channel_name in self._listen_channels:
-                # Only UNLISTEN via the command connection to avoid racing dispatcher notifies iterator
-                if self._command_conn and not self._command_conn.closed:
-                    await self._execute_on_command_conn(
-                        sql.SQL('UNLISTEN {}').format(sql.Identifier(channel_name))
-                    )
-
+                await self._unlisten_on_dispatcher(channel_name)
                 self._listen_channels.discard(channel_name)
 
     async def unsubscribe(
@@ -609,10 +619,7 @@ class PostgresListener:
         async with self._lock:
             no_local_subs = self._remove_local_subscription(channel_name, q)
             if no_local_subs and channel_name in self._listen_channels:
-                if self._command_conn and not self._command_conn.closed:
-                    await self._execute_on_command_conn(
-                        sql.SQL('UNLISTEN {}').format(sql.Identifier(channel_name))
-                    )
+                await self._unlisten_on_dispatcher(channel_name)
                 self._listen_channels.discard(channel_name)
 
     async def close(self) -> None:
