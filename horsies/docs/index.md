@@ -9,7 +9,7 @@ tags: [index, navigation]
 
 Horsies is a distributed task queue library and comes with DAG like workflow support.
 
-- **PostgreSQL as the only dependency** — no Redis, no RabbitMQ
+- **Postgres based**
 - **Type-safe tasks** — tasks return results for explicit error handling
 - **Real-time dispatch** — PostgreSQL LISTEN/NOTIFY, no polling
 - **Scheduled tasks** — type-safe and human-readable patterns

@@ -23,7 +23,7 @@ export default defineConfig({
 					tag: 'meta',
 					attrs: {
 						name: 'description',
-						content: 'PostgreSQL-backed background task queue and workflow engine for Python. No Redis, no RabbitMQ — just PostgreSQL.',
+						content: 'PostgreSQL-backed background task queue and workflow engine for Python.',
 					},
 				},
 			],
