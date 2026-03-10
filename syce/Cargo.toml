@@ -1,6 +1,6 @@
 [package]
 name = "syce"
-version = "0.1.0-alpha.7"
+version = "0.1.0-alpha.8"
 edition = "2021"
 description = "Monitoring TUI for horsies task library"
 authors = ["Suleyman Ozkeskin"]
@@ -35,4 +35,4 @@ strum = { version = "0.27.2", features = ["derive"] }
 arboard = "3.4"  # Clipboard support
 
 # Theme
-catppuccin = { version = "2.6.0", features = ["ratatui"] }
+catppuccin = { version = "=2.6.0", features = ["ratatui"] }
