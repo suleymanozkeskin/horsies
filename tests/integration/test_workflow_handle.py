@@ -23,6 +23,7 @@ from horsies.core.models.workflow import (
     WorkflowTaskStatus,
     OnError,
     HandleErrorCode,
+    SubWorkflowSummary,
 )
 from horsies.core.types.result import is_ok, is_err
 from horsies.core.workflows.engine import on_workflow_task_complete
@@ -624,6 +625,190 @@ class TestWorkflowHandleResults:
         assert task_info.result.is_ok()
         assert task_info.result.unwrap() == 42
         assert task_info.completed_at is not None
+
+
+# =============================================================================
+# TestWorkflowHandleSubWorkflowFields
+# =============================================================================
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio(loop_scope='function')
+class TestWorkflowHandleSubWorkflowFields:
+    """Tests for sub_workflow_id and sub_workflow_summary fields on WorkflowTaskInfo."""
+
+    async def test_regular_task_has_none_subworkflow_fields(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """Regular TaskNode has sub_workflow_id=None and sub_workflow_summary=None."""
+        task_a = make_simple_task(app, 'subwf_regular_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+
+        spec = make_workflow_spec(
+            broker=broker, name='subwf_regular', tasks=[node_a],
+        )
+        handle = await start_ok(spec, broker)
+
+        tasks_r = await handle.tasks_async()
+        assert is_ok(tasks_r)
+        task_info = tasks_r.ok_value[0]
+        assert task_info.sub_workflow_id is None
+        assert task_info.sub_workflow_summary is None
+
+    async def test_subworkflow_node_exposes_sub_workflow_id(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """When sub_workflow_id is set (child started), tasks_async() exposes it."""
+        task_a = make_simple_task(app, 'subwf_id_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+
+        spec = make_workflow_spec(
+            broker=broker, name='subwf_id', tasks=[node_a],
+        )
+        handle = await start_ok(spec, broker)
+
+        # Insert a dummy child workflow row to satisfy FK constraint
+        child_wf_id = str(uuid.uuid4())
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflows (id, name, status, on_error, depth, created_at, updated_at)
+                VALUES (:child_id, 'child_wf', 'RUNNING', 'fail', 1, NOW(), NOW())
+            """),
+            {'child_id': child_wf_id},
+        )
+        # Simulate: engine linked a child workflow to this node
+        await session.execute(
+            text("""
+                UPDATE horsies_workflow_tasks
+                SET is_subworkflow = TRUE, sub_workflow_id = :child_id
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {'child_id': child_wf_id, 'wf_id': handle.workflow_id},
+        )
+        await session.commit()
+
+        tasks_r = await handle.tasks_async()
+        assert is_ok(tasks_r)
+        task_info = tasks_r.ok_value[0]
+        assert task_info.sub_workflow_id == child_wf_id
+        assert task_info.sub_workflow_summary is None
+
+    async def test_subworkflow_node_with_valid_summary(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """Completed subworkflow node has both sub_workflow_id and sub_workflow_summary."""
+        task_a = make_simple_task(app, 'subwf_summary_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+
+        spec = make_workflow_spec(
+            broker=broker, name='subwf_summary', tasks=[node_a],
+        )
+        handle = await start_ok(spec, broker)
+
+        child_wf_id = str(uuid.uuid4())
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflows (id, name, status, on_error, depth, created_at, updated_at)
+                VALUES (:child_id, 'child_wf', 'COMPLETED', 'fail', 1, NOW(), NOW())
+            """),
+            {'child_id': child_wf_id},
+        )
+        summary_json = (
+            '{"__dataclass__": true,'
+            ' "module": "horsies.core.models.workflow.context",'
+            ' "qualname": "SubWorkflowSummary",'
+            ' "data": {"status": "COMPLETED", "output": null,'
+            ' "total_tasks": 3, "completed_tasks": 3,'
+            ' "failed_tasks": 0, "skipped_tasks": 0,'
+            ' "error_summary": null}}'
+        )
+        await session.execute(
+            text("""
+                UPDATE horsies_workflow_tasks
+                SET is_subworkflow = TRUE,
+                    sub_workflow_id = :child_id,
+                    sub_workflow_summary = :summary
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {
+                'child_id': child_wf_id,
+                'summary': summary_json,
+                'wf_id': handle.workflow_id,
+            },
+        )
+        await session.commit()
+
+        tasks_r = await handle.tasks_async()
+        assert is_ok(tasks_r)
+        task_info = tasks_r.ok_value[0]
+        assert task_info.sub_workflow_id == child_wf_id
+        assert task_info.sub_workflow_summary is not None
+
+        summary = task_info.sub_workflow_summary
+        assert summary.status == WorkflowStatus.COMPLETED
+        assert summary.total_tasks == 3
+        assert summary.completed_tasks == 3
+        assert summary.failed_tasks == 0
+        assert summary.skipped_tasks == 0
+        assert summary.error_summary is None
+
+    async def test_subworkflow_node_with_corrupt_summary_returns_err(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """Corrupt sub_workflow_summary JSON propagates as Err(HandleOperationError)."""
+        task_a = make_simple_task(app, 'subwf_corrupt_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+
+        spec = make_workflow_spec(
+            broker=broker, name='subwf_corrupt', tasks=[node_a],
+        )
+        handle = await start_ok(spec, broker)
+
+        child_wf_id = str(uuid.uuid4())
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflows (id, name, status, on_error, depth, created_at, updated_at)
+                VALUES (:child_id, 'child_wf', 'FAILED', 'fail', 1, NOW(), NOW())
+            """),
+            {'child_id': child_wf_id},
+        )
+        await session.execute(
+            text("""
+                UPDATE horsies_workflow_tasks
+                SET is_subworkflow = TRUE,
+                    sub_workflow_id = :child_id,
+                    sub_workflow_summary = :summary
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {
+                'child_id': child_wf_id,
+                'summary': '{not valid json!!!',
+                'wf_id': handle.workflow_id,
+            },
+        )
+        await session.commit()
+
+        tasks_r = await handle.tasks_async()
+        assert is_err(tasks_r)
+        err = tasks_r.err_value
+        assert err.code == HandleErrorCode.DB_OPERATION_FAILED
+        assert 'sub_workflow_summary JSON corrupt' in err.message
 
 
 # =============================================================================

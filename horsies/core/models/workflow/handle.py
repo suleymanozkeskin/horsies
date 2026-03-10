@@ -26,6 +26,7 @@ from horsies.core.codec.serde import loads_json, task_result_from_json
 from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
 from horsies.core.types.result import Ok, Err, is_err
 
+from .context import SubWorkflowSummary
 from .enums import OkT, OutT, WorkflowStatus, WorkflowTaskStatus
 from .handle_types import HandleErrorCode, HandleOperationError, HandleResult
 from .nodes import NodeKey
@@ -71,7 +72,8 @@ GET_WORKFLOW_TASK_RESULT_BY_NODE_SQL = text("""
 """)
 
 GET_WORKFLOW_TASKS_SQL = text("""
-    SELECT node_id, task_index, task_name, status, result, started_at, completed_at
+    SELECT node_id, task_index, task_name, status, result,
+           started_at, completed_at, sub_workflow_id, sub_workflow_summary
     FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id
     ORDER BY task_index
@@ -143,6 +145,8 @@ class WorkflowTaskInfo:
     result: TaskResult[Any, TaskError] | None
     started_at: datetime | None
     completed_at: datetime | None
+    sub_workflow_id: str | None = None
+    sub_workflow_summary: SubWorkflowSummary[Any] | None = None
 
 
 def _broker_task_error(message: str) -> TaskResult[Any, TaskError]:
@@ -694,6 +698,21 @@ class WorkflowHandle(Generic[OutT]):
                             else:
                                 task_result_value = tr_r.ok_value
 
+                    summary: SubWorkflowSummary[Any] | None = None
+                    if row.sub_workflow_summary:
+                        summary_loads_r = loads_json(row.sub_workflow_summary)
+                        if is_err(summary_loads_r):
+                            return Err(HandleOperationError(
+                                code=HandleErrorCode.DB_OPERATION_FAILED,
+                                message=(
+                                    f'sub_workflow_summary JSON corrupt for node '
+                                    f'{row.node_id}: {summary_loads_r.err_value}'
+                                ),
+                                retryable=False,
+                                workflow_id=self.workflow_id,
+                            ))
+                        summary = SubWorkflowSummary.from_json(summary_loads_r.ok_value)
+
                     out.append(WorkflowTaskInfo(
                         node_id=row.node_id,
                         index=row.task_index,
@@ -702,6 +721,8 @@ class WorkflowHandle(Generic[OutT]):
                         result=task_result_value,
                         started_at=row.started_at,
                         completed_at=row.completed_at,
+                        sub_workflow_id=row.sub_workflow_id,
+                        sub_workflow_summary=summary,
                     ))
                 return Ok(out)
         except SQLAlchemyError as exc:
