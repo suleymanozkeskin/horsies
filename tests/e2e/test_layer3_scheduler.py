@@ -501,23 +501,40 @@ async def test_catch_up_missed_enqueues_missed_runs(
     # Phase 3: Restart scheduler with worker - should catch up missed runs
     with run_scheduler(SCHEDULER_INSTANCE, timeout=10.0):
         with run_worker(SCHEDULER_INSTANCE, timeout=10.0):
-            deadline = time.time() + 8.0
-            tasks_after = 0
+            # Step 1: Wait for the scheduler to process the catch-up schedule.
+            # Once next_run_at advances past the backdated value, the scheduler
+            # has committed its catch-up enqueues.
+            deadline = time.time() + 15.0
+            scheduler_processed = False
             while time.time() < deadline:
                 async with scheduler_broker.session_factory() as session:
-                    result = await session.execute(
-                        text(
-                            """
-                            SELECT COUNT(*) FROM horsies_tasks
-                            WHERE task_name = 'e2e_catch_up_task'
-                        """
-                        )
+                    state = await session.get(
+                        ScheduleStateModel, 'e2e_schedule_catch_up'
                     )
-                    tasks_after = result.scalar() or 0
-                    # We need at least 2 new tasks from catch-up (5s gap, 1s interval)
-                    if (tasks_after - tasks_before) >= 2:
-                        break
+                if (
+                    state is not None
+                    and state.next_run_at is not None
+                    and state.next_run_at > past_time
+                ):
+                    scheduler_processed = True
+                    break
                 await asyncio.sleep(0.3)
+
+            assert scheduler_processed, (
+                'Scheduler should have processed catch-up and advanced next_run_at'
+            )
+
+            # Step 2: Verify catch-up enqueued the expected tasks.
+            async with scheduler_broker.session_factory() as session:
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT COUNT(*) FROM horsies_tasks
+                        WHERE task_name = 'e2e_catch_up_task'
+                    """
+                    )
+                )
+                tasks_after = result.scalar() or 0
 
             new_tasks = tasks_after - tasks_before
             assert new_tasks >= 2, (
