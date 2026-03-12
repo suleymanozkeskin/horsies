@@ -35,7 +35,7 @@ Horsies is a distributed task queue library and comes with DAG like workflow sup
 
     __                    _
    / /_  ____  __________(_)__  _____
-  / __ \/ __ \/ ___/ ___/ / _ \/ ___/      v0.1.0a19
+  / __ \/ __ \/ ___/ ___/ / _ \/ ___/      horsies
  / / / / /_/ / /  (__  ) /  __(__  )       distributed task queue
 /_/ /_/\____/_/  /____/_/\___/____/
 

@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -euo pipefail
+
 # Test Runner Script
 # Runs all test suites in order with specified wait times between them
 # Collects results in a structured format
@@ -126,12 +128,21 @@ run_test_suite() {
 
     cd "$PROJECT_ROOT"
 
-    # Run pytest with JUnit XML output
+    # Run pytest with JUnit XML output. Capture pytest's exit code from the
+    # pipeline so summary status matches the actual test result.
     local exit_code=0
+    set +e
     uv run pytest "$test_path" \
         --tb=short \
         --junitxml="$xml_file" \
-        -q 2>&1 | tee -a "$RAW_OUTPUT" || exit_code=$?
+        -q 2>&1 | tee -a "$RAW_OUTPUT"
+    local pipeline_status=("${PIPESTATUS[@]}")
+    set -e
+
+    exit_code=${pipeline_status[0]}
+    if [[ ${#pipeline_status[@]} -gt 1 && ${pipeline_status[1]} -ne 0 && $exit_code -eq 0 ]]; then
+        exit_code=${pipeline_status[1]}
+    fi
 
     # Parse results
     local results
