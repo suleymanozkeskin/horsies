@@ -500,6 +500,21 @@ def _make_mock_app() -> MagicMock:
     return app
 
 
+def _closing_run_side_effect(
+    exc: BaseException | type[BaseException],
+) -> Any:
+    """Side effect for asyncio.run mock that closes the coroutine before raising.
+
+    Prevents 'coroutine was never awaited' RuntimeWarning.
+    """
+    def _effect(coro: Any, *args: Any, **kwargs: Any) -> None:
+        coro.close()
+        if isinstance(exc, type):
+            raise exc()
+        raise exc
+    return _effect
+
+
 def _make_mock_broker() -> MagicMock:
     """Build a mock broker with all worker-needed attributes."""
     broker = MagicMock()
@@ -786,7 +801,7 @@ class TestWorkerCommand:
         broker = _make_mock_broker()
         app.get_broker.return_value = broker
         mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        mock_run.side_effect = KeyboardInterrupt
+        mock_run.side_effect = _closing_run_side_effect(KeyboardInterrupt)
         args = _make_worker_namespace()
 
         # Act — should NOT raise SystemExit
@@ -813,7 +828,7 @@ class TestWorkerCommand:
         broker = _make_mock_broker()
         app.get_broker.return_value = broker
         mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        mock_run.side_effect = RuntimeError('worker crashed')
+        mock_run.side_effect = _closing_run_side_effect(RuntimeError('worker crashed'))
         args = _make_worker_namespace()
 
         # Act / Assert
@@ -939,7 +954,7 @@ class TestSchedulerCommand:
         # Arrange
         app = _make_mock_app()
         mock_discover.return_value = (app, 'app', 'my.mod', None)
-        mock_run.side_effect = KeyboardInterrupt
+        mock_run.side_effect = _closing_run_side_effect(KeyboardInterrupt)
         args = _make_scheduler_namespace()
 
         # Act — should NOT raise SystemExit
@@ -961,7 +976,7 @@ class TestSchedulerCommand:
         # Arrange
         app = _make_mock_app()
         mock_discover.return_value = (app, 'app', 'my.mod', None)
-        mock_run.side_effect = RuntimeError('scheduler crashed')
+        mock_run.side_effect = _closing_run_side_effect(RuntimeError('scheduler crashed'))
         args = _make_scheduler_namespace()
 
         with pytest.raises(SystemExit) as exc_info:
@@ -1251,7 +1266,7 @@ class TestWorkerCommandAdditionalBranches:
         broker = _make_mock_broker()
         app.get_broker.return_value = broker
         mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        mock_run.side_effect = KeyboardInterrupt
+        mock_run.side_effect = _closing_run_side_effect(KeyboardInterrupt)
         args = _make_worker_namespace()
 
         # Act — should not raise
@@ -1280,7 +1295,7 @@ class TestWorkerCommandAdditionalBranches:
         broker = _make_mock_broker()
         app.get_broker.return_value = broker
         mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        mock_run.side_effect = _asyncio.TimeoutError
+        mock_run.side_effect = _closing_run_side_effect(_asyncio.TimeoutError())
         args = _make_worker_namespace()
 
         # Act — should NOT raise SystemExit
@@ -1308,7 +1323,7 @@ class TestWorkerCommandAdditionalBranches:
         app.get_broker.return_value = broker
         # Use file path locator format
         mock_discover.return_value = (app, 'app', 'my_module', '/project')
-        mock_run.side_effect = KeyboardInterrupt
+        mock_run.side_effect = _closing_run_side_effect(KeyboardInterrupt)
         args = _make_worker_namespace(module='app/configs/horsies.py:app')
 
         # Act
@@ -1342,7 +1357,7 @@ class TestWorkerCommandAdditionalBranches:
         broker = _make_mock_broker()
         app.get_broker.return_value = broker
         mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        mock_run.side_effect = KeyboardInterrupt
+        mock_run.side_effect = _closing_run_side_effect(KeyboardInterrupt)
         args = _make_worker_namespace()
 
         # Act
@@ -1466,7 +1481,7 @@ class TestWorkerCommandOuterInterrupt:
         broker = _make_mock_broker()
         app.get_broker.return_value = broker
         mock_discover.return_value = (app, 'app', 'my_module', '/project')
-        mock_run.side_effect = KeyboardInterrupt
+        mock_run.side_effect = _closing_run_side_effect(KeyboardInterrupt)
         args = _make_worker_namespace(module='app/configs/horsies:app')
 
         # Act
@@ -1502,7 +1517,7 @@ class TestSchedulerCommandAdditionalBranches:
         app = _make_mock_app()
         app.get_discovered_task_modules.return_value = ['tasks/my_tasks.py']
         mock_discover.return_value = (app, 'app', 'my.mod', None)
-        mock_run.side_effect = KeyboardInterrupt
+        mock_run.side_effect = _closing_run_side_effect(KeyboardInterrupt)
         args = _make_scheduler_namespace()
 
         # Act
@@ -1543,7 +1558,7 @@ class TestWorkerCommandQueueException:
         broker = _make_mock_broker()
         app.get_broker.return_value = broker
         mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        mock_run.side_effect = KeyboardInterrupt
+        mock_run.side_effect = _closing_run_side_effect(KeyboardInterrupt)
         args = _make_worker_namespace()
 
         # Act — should NOT raise (exception is caught by except: pass)
@@ -1557,6 +1572,7 @@ class TestWorkerCommandQueueException:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+@pytest.mark.filterwarnings('ignore:coroutine.*was never awaited:RuntimeWarning')
 class TestRunWorkerCoroutine:
     """Cover the inner run_worker async body by capturing the coroutine."""
 
@@ -1686,6 +1702,7 @@ class TestRunWorkerCoroutine:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+@pytest.mark.filterwarnings('ignore:coroutine.*was never awaited:RuntimeWarning')
 class TestRunSchedulerCoroutine:
     """Cover the inner run_scheduler async body by capturing the coroutine."""
 
