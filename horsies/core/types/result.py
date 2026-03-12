@@ -19,7 +19,6 @@ from typing import (
     TypeVar,
     Union,
 )
-from warnings import warn
 
 from typing_extensions import TypeIs
 
@@ -87,22 +86,6 @@ class Ok(Generic[T]):
         Return `None`.
         """
         return None
-
-    @property
-    def value(self) -> T:
-        """
-        Return the inner value.
-
-        @deprecated Use `ok_value` or `err_value` instead. This method will be
-        removed in a future version.
-        """
-        warn(
-            'Accessing `.value` on Result type is deprecated, please use '
-            + '`.ok_value` or `.err_value` instead',
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self._value
 
     @property
     def ok_value(self) -> T:
@@ -297,22 +280,6 @@ class Err(Generic[E]):
         """
         Return the error.
         """
-        return self._value
-
-    @property
-    def value(self) -> E:
-        """
-        Return the inner value.
-
-        @deprecated Use `ok_value` or `err_value` instead. This method will be
-        removed in a future version.
-        """
-        warn(
-            'Accessing `.value` on Result type is deprecated, please use '
-            + "`.ok_value` or '.err_value' instead",
-            DeprecationWarning,
-            stacklevel=2,
-        )
         return self._value
 
     @property

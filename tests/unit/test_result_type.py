@@ -1,12 +1,11 @@
 """Unit tests for horsies.core.types.result — Ok, Err, Result and helpers.
 
 Adapted from upstream rustedpy/result test suite with additions for
-local extensions (__json__, deprecated .value, DoException explicit tests).
+local extensions (__json__, DoException explicit tests).
 """
 
 from __future__ import annotations
 
-import warnings
 from typing import Callable
 
 import pytest
@@ -195,34 +194,6 @@ class TestRepr:
         n = Err(-1)
         assert repr(n) == 'Err(-1)'
         assert n == eval(repr(n))
-
-
-# ===========================================================================
-# Deprecated .value property
-# ===========================================================================
-
-
-@pytest.mark.unit
-class TestDeprecatedValue:
-    def test_ok_value_emits_deprecation_warning(self) -> None:
-        ok = Ok(42)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
-            val = ok.value
-        assert val == 42
-        assert len(caught) == 1
-        assert issubclass(caught[0].category, DeprecationWarning)
-        assert '.ok_value' in str(caught[0].message)
-
-    def test_err_value_emits_deprecation_warning(self) -> None:
-        err = Err('oops')
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
-            val = err.value
-        assert val == 'oops'
-        assert len(caught) == 1
-        assert issubclass(caught[0].category, DeprecationWarning)
-        assert '.err_value' in str(caught[0].message)
 
 
 # ===========================================================================
