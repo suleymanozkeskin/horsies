@@ -160,10 +160,10 @@ def _child_initializer(
     # Ignore SIGINT in child processes - let the parent handle shutdown gracefully
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-    # Set log level for this child process before any logging
-    from horsies.core.logging import set_default_level
+    # Configure logging for this child process before any logging
+    from horsies.core.logging import configure_logging
 
-    set_default_level(loglevel)
+    configure_logging(loglevel)
 
     # Mark child process to adjust logging behavior during module import
     os.environ['HORSIES_CHILD_PROCESS'] = '1'

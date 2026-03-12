@@ -214,7 +214,7 @@ class TestChildInitializer:
     @patch('horsies.core.worker.child_runner.import_module')
     @patch('horsies.core.worker.child_runner.import_by_path')
     @patch('horsies.core.worker.child_runner.signal.signal')
-    @patch('horsies.core.logging.set_default_level')
+    @patch('horsies.core.logging.configure_logging')
     def test_happy_path(
         self,
         mock_set_level: MagicMock,
@@ -250,7 +250,7 @@ class TestChildInitializer:
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
     @patch('horsies.core.worker.child_runner.signal.signal')
-    @patch('horsies.core.logging.set_default_level')
+    @patch('horsies.core.logging.configure_logging')
     def test_suppress_sends_failure_propagates(
         self,
         mock_set_level: MagicMock,
@@ -280,7 +280,7 @@ class TestChildInitializer:
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
     @patch('horsies.core.worker.child_runner.signal.signal')
-    @patch('horsies.core.logging.set_default_level')
+    @patch('horsies.core.logging.configure_logging')
     def test_discovered_task_modules_failure_propagates(
         self,
         mock_set_level: MagicMock,
@@ -310,7 +310,7 @@ class TestChildInitializer:
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
     @patch('horsies.core.worker.child_runner.signal.signal')
-    @patch('horsies.core.logging.set_default_level')
+    @patch('horsies.core.logging.configure_logging')
     def test_keys_list_failure_propagates(
         self,
         mock_set_level: MagicMock,
@@ -340,7 +340,7 @@ class TestChildInitializer:
     @patch('horsies.core.worker.child_runner.import_by_path')
     @patch('horsies.core.worker.child_runner.import_module')
     @patch('horsies.core.worker.child_runner.signal.signal')
-    @patch('horsies.core.logging.set_default_level')
+    @patch('horsies.core.logging.configure_logging')
     @patch('horsies.core.worker.child_runner.os.path.samefile', return_value=False)
     def test_file_path_import_uses_import_by_path(
         self,
@@ -376,7 +376,7 @@ class TestChildInitializer:
     @patch('horsies.core.worker.child_runner.import_by_path')
     @patch('horsies.core.worker.child_runner.import_module')
     @patch('horsies.core.worker.child_runner.signal.signal')
-    @patch('horsies.core.logging.set_default_level')
+    @patch('horsies.core.logging.configure_logging')
     @patch('horsies.core.worker.child_runner.os.path.samefile', return_value=True)
     def test_file_path_import_skips_app_module(
         self,

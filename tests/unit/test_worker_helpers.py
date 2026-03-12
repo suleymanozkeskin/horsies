@@ -2512,16 +2512,17 @@ class TestPreloadModulesMain:
 
     # --- U-5f: suppress_sends exception → swallowed ---
 
-    def test_suppress_sends_exception_swallowed(
+    def test_suppress_sends_exception_stops_startup(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Exception in suppress_sends is swallowed (non-fatal)."""
+        """Exception in suppress_sends is fatal — importing without suppression
+        could fire tasks accidentally, so startup must abort."""
         worker = _make_worker()
         mocks = self._patch_preload(monkeypatch)
         mocks['app'].suppress_sends.side_effect = RuntimeError('suppress broken')
 
-        # Should not raise
-        worker._preload_modules_main()
+        with pytest.raises(RuntimeError, match='suppress broken'):
+            worker._preload_modules_main()
 
         mocks['locate_app'].assert_called_once()
 

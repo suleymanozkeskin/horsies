@@ -1,16 +1,15 @@
-# app/core/logging.py
 import logging
 import sys
 from datetime import datetime
 
-# Module-level default log level, can be changed by setup_logging()
-_default_level: int = logging.INFO
+# Library convention: NullHandler so logs are silent by default.
+# The application (or horsies CLI) configures handlers.
+logging.getLogger('horsies').addHandler(logging.NullHandler())
 
 
 class ColoredFormatter(logging.Formatter):
-    """Colored formatter for TaskLib logging"""
+    """Colored log formatter used by horsies CLI."""
 
-    # ANSI color codes
     COLORS = {
         'RESET': '\033[0m',
         'LIGHT_BLUE': '\033[94m',
@@ -43,7 +42,7 @@ class ColoredFormatter(logging.Formatter):
 
         # Pad sections to fixed widths for tabular layout
         component_padded = component_section.ljust(
-            14
+            14,
         )  # [dispatcher] = 12 chars, so 14 for padding
         level_padded = level_section.ljust(10)  # [WARNING] = 9 chars, so 10 for padding
 
@@ -65,26 +64,26 @@ class ColoredFormatter(logging.Formatter):
         return formatted
 
 
-def set_default_level(level: int) -> None:
-    """Set the default log level for new loggers."""
-    global _default_level
-    _default_level = level
+def configure_logging(level: int = logging.INFO) -> None:
+    """Configure horsies logging with colored output on stderr.
+
+    Called by the CLI entrypoint and child worker processes.
+    Library users should configure the 'horsies' logger via standard logging.
+    """
+    root = logging.getLogger('horsies')
+    root.handlers.clear()
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(ColoredFormatter())
+    root.addHandler(handler)
+    root.setLevel(level)
 
 
 def get_logger(component_name: str) -> logging.Logger:
-    """Get a logger for the specified component."""
-    logger_name = f'horsies.{component_name}'
-    logger = logging.getLogger(logger_name)
+    """Get a logger for the specified component.
 
-    # Configure logger if not already configured
-    if not logger.handlers:
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(ColoredFormatter())
-        handler.setLevel(_default_level)
-        logger.addHandler(handler)
-        logger.setLevel(_default_level)
-
-        # Prevent duplicate logs from parent loggers
-        logger.propagate = False
-
-    return logger
+    Returns a bare logger under the 'horsies' namespace.
+    No handlers are attached — the logger propagates to the
+    'horsies' root, which is configured by the CLI or by
+    the host application.
+    """
+    return logging.getLogger(f'horsies.{component_name}')

@@ -134,7 +134,7 @@ class TestResolveModuleArgument:
 
 @pytest.mark.unit
 class TestSetupLogging:
-    """Tests for setup_logging — configures logging level globally."""
+    """Tests for setup_logging — delegates to configure_logging."""
 
     def test_sets_debug_level(self) -> None:
         setup_logging('DEBUG')
@@ -1435,22 +1435,18 @@ class TestMainKeyboardInterrupt:
 
 @pytest.mark.unit
 class TestSetupLoggingHandlers:
-    """Covers handler.setLevel path (line 307)."""
+    """setup_logging replaces existing handlers via configure_logging."""
 
-    def test_existing_handler_level_is_set(self) -> None:
-        # Arrange — add a handler to the horsies root logger
+    def test_replaces_handlers_with_colored_formatter(self) -> None:
+        from horsies.core.logging import ColoredFormatter
+
+        setup_logging('DEBUG')
+
         logger = logging.getLogger('horsies')
-        handler = logging.StreamHandler()
-        handler.setLevel(logging.WARNING)
-        logger.addHandler(handler)
-        try:
-            # Act
-            setup_logging('DEBUG')
-
-            # Assert
-            assert handler.level == logging.DEBUG
-        finally:
-            logger.removeHandler(handler)
+        assert logger.level == logging.DEBUG
+        non_null = [h for h in logger.handlers if not isinstance(h, logging.NullHandler)]
+        assert len(non_null) == 1
+        assert isinstance(non_null[0].formatter, ColoredFormatter)
 
 
 # ---------------------------------------------------------------------------

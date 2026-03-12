@@ -295,23 +295,10 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
 
 def setup_logging(loglevel: str) -> None:
     """Configure logging level globally."""
-    from horsies.core.logging import set_default_level
+    from horsies.core.logging import configure_logging
 
     level = getattr(logging, loglevel.upper(), logging.INFO)
-    set_default_level(level)
-
-    root_logger = logging.getLogger('horsies')
-    root_logger.setLevel(level)
-
-    for handler in root_logger.handlers:
-        handler.setLevel(level)
-
-    for name in logging.Logger.manager.loggerDict:
-        if isinstance(name, str) and name.startswith('horsies.'):
-            lgr = logging.getLogger(name)
-            lgr.setLevel(level)
-            for handler in lgr.handlers:
-                handler.setLevel(level)
+    configure_logging(level)
 
 
 def worker_command(args: argparse.Namespace) -> None:
