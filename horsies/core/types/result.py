@@ -68,7 +68,7 @@ class Ok(Generic[T]):
         """
         Support for JSON serialization (e.g. use case: Celery / Kombu )
         """
-        return {'_tag': 'Ok', 'value': self.value}
+        return {'_tag': 'Ok', 'value': self._value}
 
     def is_ok(self) -> Literal[True]:
         return True
