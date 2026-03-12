@@ -38,7 +38,14 @@ from .core.models.workflow import (
     HandleOperationError,
     HandleResult,
 )
-from .core.workflows.engine import start_workflow, start_workflow_async
+from .core.workflows.engine import (
+    start_workflow,
+    start_workflow_async,
+    pause_workflow,
+    pause_workflow_sync,
+    resume_workflow,
+    resume_workflow_sync,
+)
 from .core.workflows.start_types import (
     WorkflowStartError,
     WorkflowStartErrorCode,
@@ -119,6 +126,10 @@ __all__ = [
     'HandleResult',
     'start_workflow',
     'start_workflow_async',
+    'pause_workflow',
+    'pause_workflow_sync',
+    'resume_workflow',
+    'resume_workflow_sync',
     'WorkflowStartError',
     'WorkflowStartErrorCode',
     'WorkflowStartResult',
