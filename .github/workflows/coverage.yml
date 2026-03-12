@@ -1,0 +1,107 @@
+name: Coverage
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: horsies
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run full suite with coverage
+        env:
+          DB_PASSWORD: testpassword
+        run: |
+          uv run coverage erase
+          uv run pytest tests/unit/ -q --tb=short --cov=horsies --cov-branch --cov-report=
+          uv run pytest tests/integration/ -q --tb=short --cov=horsies --cov-append --cov-report=
+          uv run pytest tests/e2e/test_layer1_tasks.py -q --tb=short --cov=horsies --cov-append --cov-report=
+          pkill -TERM -f "horsies worker" 2>/dev/null || true
+          sleep 5
+          uv run pytest tests/e2e/test_layer2_cluster.py -q --tb=short --cov=horsies --cov-append --cov-report=
+          pkill -TERM -f "horsies worker" 2>/dev/null || true
+          sleep 5
+          uv run pytest tests/e2e/test_layer3_scheduler.py -q --tb=short --cov=horsies --cov-append --cov-report=
+          pkill -TERM -f "horsies worker" 2>/dev/null || true
+          sleep 5
+          uv run pytest tests/e2e/test_layer4_workflow_structure.py -q --tb=short --cov=horsies --cov-append --cov-report=
+          pkill -TERM -f "horsies worker" 2>/dev/null || true
+          sleep 5
+          uv run pytest tests/e2e/test_layer5_workflow_dataflow.py -q --tb=short --cov=horsies --cov-append --cov-report=
+          pkill -TERM -f "horsies worker" 2>/dev/null || true
+          sleep 5
+          uv run pytest tests/e2e/test_layer6_workflow_advanced.py -q --tb=short --cov=horsies --cov-append --cov-report=
+          pkill -TERM -f "horsies worker" 2>/dev/null || true
+          sleep 5
+          uv run pytest tests/e2e/test_fanout_saturation.py -q --tb=short --cov=horsies --cov-append --cov-report=
+          uv run coverage json -o coverage.json
+          uv run coverage xml -o coverage.xml
+          uv run coverage report
+
+      - name: Generate coverage badge
+        run: python3 scripts/update_coverage_badge.py coverage.json .github/badges/coverage.svg
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.json
+            coverage.xml
+
+      - name: Show coverage summary
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          data = json.loads(Path("coverage.json").read_text())
+          percent = data["totals"]["percent_covered_display"]
+          with open(Path.home() / "summary.txt", "w") as fh:
+              fh.write(f"## Coverage\n\nTotal coverage: **{percent}%**\n")
+          PY
+          cat "$HOME/summary.txt" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit updated badge
+        run: |
+          if git diff --quiet -- .github/badges/coverage.svg; then
+            echo "Coverage badge unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/badges/coverage.svg
+          git commit -m "Update coverage badge [skip ci]"
+          git push
