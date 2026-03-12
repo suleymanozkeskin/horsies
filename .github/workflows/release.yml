@@ -197,29 +197,14 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
+    permissions:
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v4
-        with:
-          enable-cache: true
-
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           name: horsies-dist-${{ needs.metadata.outputs.version }}
           path: dist
 
-      - name: Verify PyPI token is configured
-        env:
-          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
-        run: |
-          if [[ -z "${PYPI_TOKEN}" ]]; then
-            echo "Missing PYPI_TOKEN GitHub Actions secret" >&2
-            exit 1
-          fi
-
       - name: Publish to PyPI
-        env:
-          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
-        run: uv publish
+        uses: pypa/gh-action-pypi-publish@release/v1
