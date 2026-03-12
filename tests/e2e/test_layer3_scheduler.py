@@ -172,48 +172,45 @@ async def test_repeating_schedule(scheduler_broker: PostgresBroker) -> None:
 
     with run_scheduler(SCHEDULER_INSTANCE, timeout=10.0):
         with run_worker(SCHEDULER_INSTANCE, timeout=10.0):
-            # Wait for at least 2 tasks to be created
-            deadline = time.time() + 8.0
-            task_count = 0
-            created_times: list[datetime] = []
-
+            # Step 1: Wait for the scheduler to fire at least 2 runs.
+            # This decouples the assertion from subprocess startup time.
+            deadline = time.time() + 15.0
+            state: ScheduleStateModel | None = None
             while time.time() < deadline:
                 async with scheduler_broker.session_factory() as session:
-                    result = await session.execute(
-                        text(
-                            """
-                            SELECT created_at FROM horsies_tasks
-                            WHERE task_name = 'e2e_scheduled_simple'
-                            ORDER BY created_at ASC
-                        """
-                        )
+                    state = await session.get(
+                        ScheduleStateModel, 'e2e_scheduled_simple_interval'
                     )
-                    rows = result.fetchall()
-                    task_count = len(rows)
-                    created_times = [row[0] for row in rows]
-
-                    if task_count >= 2:
-                        break
+                if state is not None and state.run_count >= 2:
+                    break
                 await asyncio.sleep(0.3)
 
-            assert task_count >= 2, f'Expected at least 2 tasks, got {task_count}'
+            assert state is not None and state.run_count >= 2, (
+                f'run_count should be >= 2, got {state.run_count if state else None}'
+            )
+            assert state.last_run_at is not None, 'last_run_at should be set'
 
-            # Verify tasks have increasing created_at times
+            # Step 2: Verify tasks were created with increasing timestamps.
+            async with scheduler_broker.session_factory() as session:
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT created_at FROM horsies_tasks
+                        WHERE task_name = 'e2e_scheduled_simple'
+                        ORDER BY created_at ASC
+                    """
+                    )
+                )
+                rows = result.fetchall()
+                created_times = [row[0] for row in rows]
+
+            assert len(created_times) >= 2, (
+                f'Expected at least 2 tasks, got {len(created_times)}'
+            )
             for i in range(1, len(created_times)):
                 assert (
                     created_times[i] > created_times[i - 1]
                 ), f'Task {i} created_at should be after task {i-1}'
-
-            # Verify schedule_state was updated
-            async with scheduler_broker.session_factory() as session:
-                state = await session.get(
-                    ScheduleStateModel, 'e2e_scheduled_simple_interval'
-                )
-                assert state is not None
-                assert (
-                    state.run_count >= 2
-                ), f'run_count should be >= 2, got {state.run_count}'
-                assert state.last_run_at is not None, 'last_run_at should be set'
 
 
 # =============================================================================
@@ -352,7 +349,23 @@ async def test_schedule_with_args_passes_arguments(
     """T3.8: Scheduled task receives args and produces correct result (42*2=84)."""
     with run_scheduler(SCHEDULER_INSTANCE, timeout=10.0):
         with run_worker(SCHEDULER_INSTANCE, timeout=10.0):
-            # Poll for the task to complete with correct result
+            # Step 1: Wait for the scheduler to process the schedule.
+            state: ScheduleStateModel | None = None
+            deadline = time.time() + 15.0
+            while time.time() < deadline:
+                async with scheduler_broker.session_factory() as session:
+                    state = await session.get(
+                        ScheduleStateModel, 'e2e_schedule_with_args'
+                    )
+                if state is not None and state.run_count >= 1:
+                    break
+                await asyncio.sleep(0.3)
+
+            assert state is not None and state.run_count >= 1, (
+                'Scheduler should have processed e2e_schedule_with_args'
+            )
+
+            # Step 2: Poll for the task to complete with correct result.
             deadline = time.time() + 10.0
             found_result = False
 
