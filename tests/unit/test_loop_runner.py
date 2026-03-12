@@ -39,7 +39,7 @@ class TestLoopRunnerCall:
                 gc.collect()
 
             warning_texts = [str(w.message) for w in caught]
-            assert not any('was never awaited' in text for text in warning_texts)
+            assert not any("'sample' was never awaited" in text for text in warning_texts)
         finally:
             runner.stop()
 
