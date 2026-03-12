@@ -1806,18 +1806,15 @@ class TestPreloadTaskModules:
         mock_logger.warning.assert_called_once()
         assert 'No task modules discovered' in mock_logger.warning.call_args[0][0]
 
-    def test_discover_raises_uses_empty_list(self) -> None:
-        """get_discovered_task_modules raises → fallback to empty, logs warning."""
+    def test_discover_raises_propagates(self) -> None:
+        """get_discovered_task_modules raises → error propagates to caller."""
         scheduler = self._make_scheduler()
         scheduler.app.get_discovered_task_modules = MagicMock(
             side_effect=RuntimeError('discovery broken'),
         )
 
-        with patch('horsies.core.scheduler.service.logger') as mock_logger:
+        with pytest.raises(RuntimeError, match='discovery broken'):
             scheduler._preload_task_modules()
-
-        mock_logger.warning.assert_called_once()
-        assert 'No task modules discovered' in mock_logger.warning.call_args[0][0]
 
     def test_file_path_import_calls_import_by_path(self) -> None:
         """Module ending with .py → import_by_path called."""
@@ -2167,8 +2164,8 @@ class TestCheckAndRunSchedulesOrphanDueState:
 class TestPreloadTaskModulesAdditionalPaths:
     """Cover suppress_sends exceptions and file path import failure."""
 
-    def test_suppress_sends_true_exception_swallowed(self) -> None:
-        """suppress_sends(True) raises → swallowed, imports still happen."""
+    def test_suppress_sends_true_failure_propagates(self) -> None:
+        """suppress_sends(True) raises → error propagates to caller."""
         config = ScheduleConfig(
             schedules=[
                 TaskSchedule(
@@ -2187,16 +2184,11 @@ class TestPreloadTaskModulesAdditionalPaths:
             side_effect=AttributeError('no suppress_sends'),
         )
 
-        with patch(
-            'horsies.core.scheduler.service.importlib.import_module',
-        ) as mock_import:
+        with pytest.raises(AttributeError, match='no suppress_sends'):
             scheduler._preload_task_modules()
 
-        # Import still called despite suppress_sends failure
-        mock_import.assert_called_once_with('myapp.tasks')
-
-    def test_suppress_sends_false_exception_swallowed(self) -> None:
-        """suppress_sends(False) raises in finally → swallowed."""
+    def test_suppress_sends_false_failure_propagates(self) -> None:
+        """suppress_sends(False) raises in finally → error propagates."""
         config = ScheduleConfig(
             schedules=[
                 TaskSchedule(
@@ -2212,27 +2204,19 @@ class TestPreloadTaskModulesAdditionalPaths:
             return_value=['myapp.tasks'],
         )
 
-        call_count = 0
-
         def _suppress_side_effect(value: bool) -> None:
-            nonlocal call_count
-            call_count += 1
             if not value:
-                # Fail on suppress_sends(False)
                 raise AttributeError('no suppress_sends')
 
         scheduler.app.suppress_sends = MagicMock(
             side_effect=_suppress_side_effect,
         )
 
-        with patch(
-            'horsies.core.scheduler.service.importlib.import_module',
-        ):
-            # Should not raise
-            scheduler._preload_task_modules()
-
-        # Both calls made: True + False
-        assert call_count == 2
+        with pytest.raises(AttributeError, match='no suppress_sends'):
+            with patch(
+                'horsies.core.scheduler.service.importlib.import_module',
+            ):
+                scheduler._preload_task_modules()
 
     def test_file_path_import_failure_logs_warning(self) -> None:
         """File ending with .py that fails import → warning logged, continues."""

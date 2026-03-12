@@ -185,17 +185,11 @@ def _child_initializer(
     set_current_app(app)
 
     # Suppress accidental sends while importing modules for discovery
-    try:
-        app.suppress_sends(True)
-    except Exception:
-        pass
+    app.suppress_sends(True)
 
     try:
         combined_imports = list(imports)
-        try:
-            combined_imports.extend(app.get_discovered_task_modules())
-        except Exception:
-            pass
+        combined_imports.extend(app.get_discovered_task_modules())
         combined_imports = _dedupe_paths(combined_imports)
         _debug_imports_log(f'[child {os.getpid()}] import_modules={combined_imports}')
         for m in combined_imports:
@@ -207,16 +201,9 @@ def _child_initializer(
             else:
                 import_module(m)
     finally:
-        try:
-            app.suppress_sends(False)
-        except Exception:
-            pass
+        app.suppress_sends(False)
 
-    # optional: sanity log
-    try:
-        keys = app.tasks.keys_list()
-    except Exception:
-        keys = list(app.tasks.keys())
+    keys = app.tasks.keys_list()
     _debug_imports_log(f'[child {os.getpid()}] registered_tasks={keys}')
 
     # Initialize per-process connection pool (after all imports complete)

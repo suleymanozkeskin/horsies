@@ -251,7 +251,7 @@ class TestChildInitializer:
     @patch('horsies.core.worker.child_runner.import_by_path')
     @patch('horsies.core.worker.child_runner.signal.signal')
     @patch('horsies.core.logging.set_default_level')
-    def test_suppress_sends_exception_swallowed(
+    def test_suppress_sends_failure_propagates(
         self,
         mock_set_level: MagicMock,
         mock_signal: MagicMock,
@@ -265,15 +265,15 @@ class TestChildInitializer:
         mocks = self._make_patches(suppress_raises=True)
         mock_locate_app.return_value = mocks['app']
 
-        # Should not raise despite suppress_sends failing
-        _child_initializer(
-            app_locator='mymod:app',
-            imports=[],
-            sys_path_roots=[],
-            loglevel=20,
-            database_url='postgresql://localhost/test',
-        )
-        mock_init_pool.assert_called_once()
+        with pytest.raises(RuntimeError, match='suppress failed'):
+            _child_initializer(
+                app_locator='mymod:app',
+                imports=[],
+                sys_path_roots=[],
+                loglevel=20,
+                database_url='postgresql://localhost/test',
+            )
+        mock_init_pool.assert_not_called()
 
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
@@ -281,7 +281,7 @@ class TestChildInitializer:
     @patch('horsies.core.worker.child_runner.import_by_path')
     @patch('horsies.core.worker.child_runner.signal.signal')
     @patch('horsies.core.logging.set_default_level')
-    def test_discovered_task_modules_exception_swallowed(
+    def test_discovered_task_modules_failure_propagates(
         self,
         mock_set_level: MagicMock,
         mock_signal: MagicMock,
@@ -295,14 +295,15 @@ class TestChildInitializer:
         mocks = self._make_patches(discovered_raises=True)
         mock_locate_app.return_value = mocks['app']
 
-        _child_initializer(
-            app_locator='mymod:app',
-            imports=[],
-            sys_path_roots=[],
-            loglevel=20,
-            database_url='postgresql://localhost/test',
-        )
-        mock_init_pool.assert_called_once()
+        with pytest.raises(RuntimeError, match='discovery failed'):
+            _child_initializer(
+                app_locator='mymod:app',
+                imports=[],
+                sys_path_roots=[],
+                loglevel=20,
+                database_url='postgresql://localhost/test',
+            )
+        mock_init_pool.assert_not_called()
 
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
@@ -310,7 +311,7 @@ class TestChildInitializer:
     @patch('horsies.core.worker.child_runner.import_by_path')
     @patch('horsies.core.worker.child_runner.signal.signal')
     @patch('horsies.core.logging.set_default_level')
-    def test_keys_list_fallback_to_keys(
+    def test_keys_list_failure_propagates(
         self,
         mock_set_level: MagicMock,
         mock_signal: MagicMock,
@@ -324,15 +325,14 @@ class TestChildInitializer:
         mocks = self._make_patches(keys_list_raises=True, app_tasks={'t1': 1})
         mock_locate_app.return_value = mocks['app']
 
-        _child_initializer(
-            app_locator='mymod:app',
-            imports=[],
-            sys_path_roots=[],
-            loglevel=20,
-            database_url='postgresql://localhost/test',
-        )
-        # keys() fallback should have been called
-        mocks['app'].tasks.keys.assert_called()
+        with pytest.raises(RuntimeError, match='keys_list failed'):
+            _child_initializer(
+                app_locator='mymod:app',
+                imports=[],
+                sys_path_roots=[],
+                loglevel=20,
+                database_url='postgresql://localhost/test',
+            )
 
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')

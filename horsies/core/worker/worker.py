@@ -481,30 +481,20 @@ class Worker:
             self._app = app
 
             # Suppress accidental sends while importing modules for discovery
+            app.suppress_sends(True)
             try:
-                app.suppress_sends(True)
-            except Exception:
-                pass
-
-            # Import declared modules that contain task definitions
-            combined_imports = list(self.cfg.imports)
-            try:
+                # Import declared modules that contain task definitions
+                combined_imports = list(self.cfg.imports)
                 combined_imports.extend(app.get_discovered_task_modules())
-            except Exception:
-                pass
-            combined_imports = _dedupe_paths(combined_imports)
-            _debug_imports_log(f'[preload] import_modules={combined_imports}')
-            for m in combined_imports:
-                if m.endswith('.py') or os.path.sep in m:
-                    import_by_path(os.path.abspath(m))
-                else:
-                    import_module(m)
-
-            # Re-enable sends after import completes
-            try:
+                combined_imports = _dedupe_paths(combined_imports)
+                _debug_imports_log(f'[preload] import_modules={combined_imports}')
+                for m in combined_imports:
+                    if m.endswith('.py') or os.path.sep in m:
+                        import_by_path(os.path.abspath(m))
+                    else:
+                        import_module(m)
+            finally:
                 app.suppress_sends(False)
-            except Exception:
-                pass
             _debug_imports_log(f'[preload] registered_tasks={app.list_tasks()}')
         except Exception as e:
             # Surface the error clearly and re-raise to stop startup

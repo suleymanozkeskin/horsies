@@ -507,10 +507,7 @@ class Scheduler:
 
     def _preload_task_modules(self) -> None:
         """Import discovered task modules so @app.task registrations run."""
-        try:
-            modules = self.app.get_discovered_task_modules()
-        except Exception:
-            modules = []
+        modules = self.app.get_discovered_task_modules()
 
         if not modules:
             logger.warning(
@@ -518,11 +515,7 @@ class Scheduler:
             )
             return
 
-        try:
-            self.app.suppress_sends(True)
-        except Exception:
-            pass
-
+        self.app.suppress_sends(True)
         try:
             for module in modules:
                 if module.endswith('.py') or os.path.sep in module:
@@ -540,10 +533,7 @@ class Scheduler:
                     except Exception as e:
                         logger.warning(f"Failed to import task module '{module}': {e}")
         finally:
-            try:
-                self.app.suppress_sends(False)
-            except Exception:
-                pass
+            self.app.suppress_sends(False)
 
     def _resolve_schedule_queue(self, schedule: TaskSchedule) -> str:
         """
