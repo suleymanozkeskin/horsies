@@ -6,8 +6,6 @@ import inspect
 import os
 import sys
 import tempfile
-from collections.abc import Iterator
-from io import StringIO
 from unittest import mock
 
 import pytest
@@ -23,14 +21,9 @@ from horsies.core.errors import (
     ValidationReport,
     WorkflowValidationError,
     _find_user_frame,
-    _horsies_excepthook,
     _should_use_colors,
-    _should_show_verbose,
-    _should_use_plain_errors,
-    install_error_handler,
     raise_collected,
     task_definition_error,
-    uninstall_error_handler,
     workflow_validation_error,
 )
 
@@ -499,114 +492,6 @@ class TestEnvironmentVariables:
         with mock.patch.dict(os.environ, cleaned_env, clear=True):
             with mock.patch.object(sys.stderr, 'isatty', return_value=False):
                 assert _should_use_colors() is False
-
-    def test_should_show_verbose_enabled(self) -> None:
-        with mock.patch.dict(os.environ, {'HORSIES_VERBOSE': '1'}):
-            assert _should_show_verbose() is True
-
-    def test_should_show_verbose_true_string(self) -> None:
-        with mock.patch.dict(os.environ, {'HORSIES_VERBOSE': 'true'}):
-            assert _should_show_verbose() is True
-
-    def test_should_show_verbose_yes_string(self) -> None:
-        with mock.patch.dict(os.environ, {'HORSIES_VERBOSE': 'yes'}):
-            assert _should_show_verbose() is True
-
-    def test_should_show_verbose_disabled(self) -> None:
-        with mock.patch.dict(os.environ, {'HORSIES_VERBOSE': ''}):
-            assert _should_show_verbose() is False
-
-    def test_should_use_plain_errors_enabled(self) -> None:
-        with mock.patch.dict(os.environ, {'HORSIES_PLAIN_ERRORS': '1'}):
-            assert _should_use_plain_errors() is True
-
-    def test_should_use_plain_errors_true_string(self) -> None:
-        with mock.patch.dict(os.environ, {'HORSIES_PLAIN_ERRORS': 'true'}):
-            assert _should_use_plain_errors() is True
-
-    def test_should_use_plain_errors_yes_string(self) -> None:
-        with mock.patch.dict(os.environ, {'HORSIES_PLAIN_ERRORS': 'yes'}):
-            assert _should_use_plain_errors() is True
-
-    def test_should_use_plain_errors_disabled(self) -> None:
-        with mock.patch.dict(os.environ, {'HORSIES_PLAIN_ERRORS': ''}):
-            assert _should_use_plain_errors() is False
-
-
-# =============================================================================
-# Exception Hook Tests
-# =============================================================================
-
-
-class TestExceptionHook:
-    """Tests for custom exception hook."""
-
-    @pytest.fixture(autouse=True)
-    def _restore_excepthook(self) -> Iterator[None]:
-        """Restore sys.excepthook after each test to prevent state leaks."""
-        original = sys.excepthook
-        yield
-        sys.excepthook = original
-
-    def test_install_and_uninstall(self) -> None:
-        from horsies.core.errors import _horsies_excepthook, _original_excepthook
-
-        # Ensure hook is installed
-        install_error_handler()
-        assert sys.excepthook == _horsies_excepthook
-
-        # Uninstall
-        uninstall_error_handler()
-        assert sys.excepthook == _original_excepthook
-
-        # Re-install
-        install_error_handler()
-        assert sys.excepthook == _horsies_excepthook
-
-    def test_horsies_error_prints_to_stderr(self) -> None:
-        """Hook prints Rust-style format for HorsiesError to stderr."""
-        err = HorsiesError(message='hook test error')
-        fake_stderr = StringIO()
-        with mock.patch('sys.stderr', fake_stderr):
-            with mock.patch.dict(os.environ, {
-                'HORSIES_PLAIN_ERRORS': '',
-                'HORSIES_VERBOSE': '',
-                'HORSIES_FORCE_COLOR': '',
-            }):
-                _horsies_excepthook(type(err), err, err.__traceback__)
-        output = fake_stderr.getvalue()
-        assert 'error: hook test error' in output
-
-    def test_non_horsies_error_delegates_to_original(self) -> None:
-        """Non-HorsiesError exceptions delegate to _original_excepthook."""
-        err = ValueError('not a horsies error')
-        with mock.patch('horsies.core.errors._original_excepthook') as mock_hook:
-            with mock.patch.dict(os.environ, {'HORSIES_PLAIN_ERRORS': ''}):
-                _horsies_excepthook(type(err), err, err.__traceback__)
-            mock_hook.assert_called_once_with(type(err), err, err.__traceback__)
-
-    def test_plain_errors_bypasses_custom_formatting(self) -> None:
-        """HORSIES_PLAIN_ERRORS=1 delegates to original hook for all errors."""
-        err = HorsiesError(message='plain mode')
-        with mock.patch('horsies.core.errors._original_excepthook') as mock_hook:
-            with mock.patch.dict(os.environ, {'HORSIES_PLAIN_ERRORS': '1'}):
-                _horsies_excepthook(type(err), err, err.__traceback__)
-            mock_hook.assert_called_once_with(type(err), err, err.__traceback__)
-
-    def test_verbose_mode_shows_traceback(self) -> None:
-        """HORSIES_VERBOSE=1 appends full traceback after Rust-style output."""
-        err = HorsiesError(message='verbose test')
-        fake_stderr = StringIO()
-        with mock.patch('sys.stderr', fake_stderr):
-            with mock.patch.dict(os.environ, {
-                'HORSIES_VERBOSE': '1',
-                'HORSIES_PLAIN_ERRORS': '',
-                'HORSIES_FORCE_COLOR': '',
-            }):
-                _horsies_excepthook(type(err), err, err.__traceback__)
-        output = fake_stderr.getvalue()
-        assert 'error: verbose test' in output
-        assert 'Full traceback (HORSIES_VERBOSE=1):' in output
 
 
 # =============================================================================

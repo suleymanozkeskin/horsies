@@ -466,8 +466,6 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Auto-detects source location from call stack (first frame outside horsies internals)
 - Subclasses: WorkflowValidationError, ConfigurationError, TaskDefinitionError, RegistryError
 - Environment variables:
-  - HORSIES_VERBOSE=1: show full Python traceback alongside Rust-style output
-  - HORSIES_PLAIN_ERRORS=1: fall back to default Python exception formatting
   - HORSIES_FORCE_COLOR=1: force ANSI colors even when not TTY
   - NO_COLOR: disable ANSI colors (https://no-color.org/)
 
@@ -644,7 +642,7 @@ FAQ, questions, trade-offs, why PostgreSQL, production-ready, alpha -> /horsies/
 ErrorCode, HorsiesError, WorkflowValidationError, validation -> /horsies/tasks/errors/
 ValidationReport, MultipleValidationErrors, raise_collected, error collection -> /horsies/tasks/errors/
 SourceLocation, Rust-style errors, format_rust_style, error display -> /horsies/tasks/errors/
-HORSIES_VERBOSE, HORSIES_PLAIN_ERRORS, HORSIES_FORCE_COLOR, NO_COLOR -> /horsies/tasks/errors/
+HORSIES_FORCE_COLOR, NO_COLOR -> /horsies/tasks/errors/
 horsies check, app.check, phased validation, startup validation -> /horsies/cli/
 get-docs, AI agent, local docs, offline docs -> /horsies/cli/
 agent skills, SKILL.md, tasks.md, workflows.md, configs.md, horsies/.agents/skills -> /horsies/cli/

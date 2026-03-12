@@ -6,7 +6,6 @@ import inspect
 import linecache
 import os
 import sys
-import traceback
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
@@ -114,15 +113,6 @@ def _should_use_colors() -> bool:
     # Check if stdout is a TTY
     return hasattr(sys.stderr, 'isatty') and sys.stderr.isatty()
 
-
-def _should_show_verbose() -> bool:
-    """Determine if verbose output (full traceback) should be shown."""
-    return os.environ.get('HORSIES_VERBOSE', '').lower() in ('1', 'true', 'yes')
-
-
-def _should_use_plain_errors() -> bool:
-    """Determine if plain Python errors should be used instead of Rust-style."""
-    return os.environ.get('HORSIES_PLAIN_ERRORS', '').lower() in ('1', 'true', 'yes')
 
 
 @dataclass
@@ -316,48 +306,6 @@ class _NoColors:
     YELLOW = ''
     DIM = ''
 
-
-# Store original excepthook
-_original_excepthook = sys.excepthook
-
-
-def _horsies_excepthook(
-    exc_type: type[BaseException],
-    exc_value: BaseException,
-    exc_tb: Any,
-) -> None:
-    """Custom exception hook for HorsiesError exceptions."""
-    # HORSIES_PLAIN_ERRORS=1 bypasses custom formatting entirely
-    if _should_use_plain_errors():
-        _original_excepthook(exc_type, exc_value, exc_tb)
-        return
-
-    if isinstance(exc_value, HorsiesError):
-        # Print Rust-style formatted error
-        print(exc_value.format_rust_style(), file=sys.stderr)
-
-        # Show full traceback in verbose mode
-        if _should_show_verbose():
-            print(file=sys.stderr)
-            c = _Colors if _should_use_colors() else _NoColors
-            print(
-                f'{c.DIM}Full traceback (HORSIES_VERBOSE=1):{c.RESET}',
-                file=sys.stderr,
-            )
-            traceback.print_exception(exc_type, exc_value, exc_tb, file=sys.stderr)
-    else:
-        # Use original handler for non-horsies exceptions
-        _original_excepthook(exc_type, exc_value, exc_tb)
-
-
-def install_error_handler() -> None:
-    """Install the custom exception hook for Rust-style error display."""
-    sys.excepthook = _horsies_excepthook
-
-
-def uninstall_error_handler() -> None:
-    """Restore the original exception hook."""
-    sys.excepthook = _original_excepthook
 
 
 # =============================================================================

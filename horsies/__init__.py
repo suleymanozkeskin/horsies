@@ -1,10 +1,5 @@
 """Task Library - A Python library for distributed task execution"""
 
-# Install Rust-style error handler on import
-from .core.errors import install_error_handler as _install_error_handler
-
-_install_error_handler()
-
 from .core.app import Horsies
 from .core.models.app import AppConfig
 from .core.models.broker import PostgresConfig

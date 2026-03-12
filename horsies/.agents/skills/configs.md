@@ -400,8 +400,6 @@ Downloads docs as local markdown to `DIR` (default `.horsies-docs/`). For AI age
 
 | Variable | Effect |
 |---|---|
-| `HORSIES_VERBOSE=1` | Show full Python traceback alongside Rust-style errors |
-| `HORSIES_PLAIN_ERRORS=1` | Fall back to default Python exception formatting |
 | `HORSIES_FORCE_COLOR=1` | Force ANSI colors even when not a TTY |
 | `NO_COLOR` | Disable ANSI colors (https://no-color.org/) |
 
