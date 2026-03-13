@@ -434,7 +434,7 @@ class TestCheckUndecoratedBuilders:
             self._cleanup_module(mod_name)
 
     def test_imported_function_not_flagged(self) -> None:
-        """Function defined in another module (re-exported) is not flagged."""
+        """Function defined in a truly foreign module (re-exported) is not flagged."""
         app = _make_app()
 
         def foreign_fn() -> WorkflowSpec[Any]:
@@ -453,6 +453,57 @@ class TestCheckUndecoratedBuilders:
             assert errors == []
         finally:
             self._cleanup_module(mod_name)
+
+    def test_reexported_submodule_function_detected_in_package(self) -> None:
+        """Function from a sub-module re-exported via __init__.py is detected."""
+        app = _make_app()
+
+        def build_wf() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        pkg_name = '_test_pkg_reexport'
+        # Create a package module (has __path__)
+        module = types.ModuleType(pkg_name)
+        module.__name__ = pkg_name
+        module.__path__ = ['/fake/path']  # marks it as a package
+        # Function defined in sub-module but re-exported in __init__
+        build_wf.__module__ = f'{pkg_name}.builders'
+        build_wf.__qualname__ = 'build_wf'
+        setattr(module, 'build_wf', build_wf)
+        sys.modules[pkg_name] = module
+
+        app.discover_tasks([pkg_name])
+        try:
+            errors = app._check_undecorated_builders()
+            assert len(errors) == 1
+            assert errors[0].code == ErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER
+            assert 'build_wf' in str(errors[0])
+        finally:
+            self._cleanup_module(pkg_name)
+
+    def test_reexported_foreign_function_not_detected_in_package(self) -> None:
+        """Function from a truly foreign module is not flagged even in a package."""
+        app = _make_app()
+
+        def foreign_fn() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        pkg_name = '_test_pkg_foreign'
+        module = types.ModuleType(pkg_name)
+        module.__name__ = pkg_name
+        module.__path__ = ['/fake/path']
+        # Function from an unrelated module
+        foreign_fn.__module__ = 'completely_unrelated'
+        foreign_fn.__qualname__ = 'foreign_fn'
+        setattr(module, 'foreign_fn', foreign_fn)
+        sys.modules[pkg_name] = module
+
+        app.discover_tasks([pkg_name])
+        try:
+            errors = app._check_undecorated_builders()
+            assert errors == []
+        finally:
+            self._cleanup_module(pkg_name)
 
 
 # =============================================================================

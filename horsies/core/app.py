@@ -1221,10 +1221,14 @@ class Horsies:
     ) -> dict[str, Any]:
         """Get return type hints for top-level functions in a module."""
         result: dict[str, Any] = {}
+        is_package = hasattr(module, '__path__')
         for name, obj in inspect.getmembers(module, inspect.isfunction):
-            # Only top-level functions defined in this module
-            if getattr(obj, '__module__', None) != module.__name__:
-                continue
+            # Only functions defined in this module (or its sub-modules for packages)
+            obj_module = getattr(obj, '__module__', None)
+            if obj_module != module.__name__:
+                if not (is_package and obj_module is not None
+                        and obj_module.startswith(module.__name__ + '.')):
+                    continue
             try:
                 hints = inspect.get_annotations(obj, eval_str=True)
             except Exception:
