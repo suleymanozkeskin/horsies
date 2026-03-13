@@ -1158,7 +1158,12 @@ class Horsies:
         return errors
 
     def _check_undecorated_builders(self) -> list[HorsiesError]:
-        """Detect top-level functions returning WorkflowSpec without decorator."""
+        """Detect top-level functions returning WorkflowSpec without decorator.
+
+        For package modules (those with __path__), also scans already-loaded
+        sub-modules from sys.modules so that builders defined in sub-modules
+        are not silently missed.
+        """
         errors: list[HorsiesError] = []
 
         for module_path in self._discovered_task_modules:
@@ -1166,39 +1171,58 @@ class Horsies:
             if module is None:
                 continue
 
-            try:
-                hints_by_name = self._collect_module_function_return_hints(module)
-            except Exception:
-                # If we can't resolve type hints (forward refs, etc.), skip module
+            modules_to_check = [module]
+            if hasattr(module, '__path__'):
+                prefix = module.__name__ + '.'
+                for name, mod in sys.modules.items():
+                    if name.startswith(prefix) and mod is not None:
+                        modules_to_check.append(mod)
+
+            for mod in modules_to_check:
+                errors.extend(self._check_module_for_undecorated_builders(mod))
+
+        return errors
+
+    def _check_module_for_undecorated_builders(
+        self,
+        module: Any,
+    ) -> list[HorsiesError]:
+        """Check a single module for undecorated WorkflowSpec-returning functions."""
+        errors: list[HorsiesError] = []
+
+        try:
+            hints_by_name = self._collect_module_function_return_hints(module)
+        except Exception:
+            # If we can't resolve type hints (forward refs, etc.), skip module
+            return errors
+
+        for fn_name, return_hint in hints_by_name.items():
+            fn_obj = getattr(module, fn_name)
+
+            # Skip if already decorated
+            if getattr(fn_obj, _BUILDER_ATTR, False):
                 continue
 
-            for fn_name, return_hint in hints_by_name.items():
-                fn_obj = getattr(module, fn_name)
+            # Skip if explicitly opted out
+            if getattr(fn_obj, _NO_CHECK_ATTR, False):
+                continue
 
-                # Skip if already decorated
-                if getattr(fn_obj, _BUILDER_ATTR, False):
-                    continue
-
-                # Skip if explicitly opted out
-                if getattr(fn_obj, _NO_CHECK_ATTR, False):
-                    continue
-
-                if self._hint_is_workflow_spec(return_hint):
-                    location = SourceLocation.from_function(fn_obj)
-                    errors.append(
-                        ConfigurationError(
-                            message=f"undecorated workflow builder '{fn_name}'",
-                            code=ErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER,
-                            location=location,
-                            notes=[
-                                f"function '{fn_name}' returns WorkflowSpec but is not decorated with @app.workflow_builder",
-                            ],
-                            help_text=(
-                                'add @app.workflow_builder() to register this builder for check validation;\n'
-                                f'or set {fn_name}.__horsies_no_check__ = True to suppress this warning'
-                            ),
+            if self._hint_is_workflow_spec(return_hint):
+                location = SourceLocation.from_function(fn_obj)
+                errors.append(
+                    ConfigurationError(
+                        message=f"undecorated workflow builder '{fn_name}'",
+                        code=ErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER,
+                        location=location,
+                        notes=[
+                            f"function '{fn_name}' returns WorkflowSpec but is not decorated with @app.workflow_builder",
+                        ],
+                        help_text=(
+                            'add @app.workflow_builder() to register this builder for check validation;\n'
+                            f'or set {fn_name}.__horsies_no_check__ = True to suppress this warning'
                         ),
-                    )
+                    ),
+                )
 
         return errors
 

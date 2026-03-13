@@ -505,6 +505,103 @@ class TestCheckUndecoratedBuilders:
         finally:
             self._cleanup_module(pkg_name)
 
+    def test_submodule_builder_detected_without_reexport(self) -> None:
+        """Builder in a sub-module is detected even if not re-exported in __init__."""
+        app = _make_app()
+
+        def build_pipeline() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        pkg_name = '_test_pkg_submod_scan'
+        sub_name = f'{pkg_name}.pipelines'
+
+        # Package __init__ — empty, no re-exports
+        pkg_module = types.ModuleType(pkg_name)
+        pkg_module.__name__ = pkg_name
+        pkg_module.__path__ = ['/fake/path']
+        sys.modules[pkg_name] = pkg_module
+
+        # Sub-module with an undecorated builder
+        sub_module = types.ModuleType(sub_name)
+        sub_module.__name__ = sub_name
+        build_pipeline.__module__ = sub_name
+        build_pipeline.__qualname__ = 'build_pipeline'
+        setattr(sub_module, 'build_pipeline', build_pipeline)
+        sys.modules[sub_name] = sub_module
+
+        app.discover_tasks([pkg_name])
+        try:
+            errors = app._check_undecorated_builders()
+            assert len(errors) == 1
+            assert errors[0].code == ErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER
+            assert 'build_pipeline' in str(errors[0])
+        finally:
+            self._cleanup_module(sub_name)
+            self._cleanup_module(pkg_name)
+
+    def test_decorated_builder_in_submodule_not_flagged(self) -> None:
+        """Decorated builder in a sub-module is NOT flagged."""
+        app = _make_app()
+
+        @app.workflow_builder()
+        def build_pipeline() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        pkg_name = '_test_pkg_submod_decorated'
+        sub_name = f'{pkg_name}.pipelines'
+
+        pkg_module = types.ModuleType(pkg_name)
+        pkg_module.__name__ = pkg_name
+        pkg_module.__path__ = ['/fake/path']
+        sys.modules[pkg_name] = pkg_module
+
+        sub_module = types.ModuleType(sub_name)
+        sub_module.__name__ = sub_name
+        build_pipeline.__module__ = sub_name
+        build_pipeline.__qualname__ = 'build_pipeline'
+        setattr(sub_module, 'build_pipeline', build_pipeline)
+        sys.modules[sub_name] = sub_module
+
+        app.discover_tasks([pkg_name])
+        try:
+            errors = app._check_undecorated_builders()
+            assert errors == []
+        finally:
+            self._cleanup_module(sub_name)
+            self._cleanup_module(pkg_name)
+
+    def test_flat_module_does_not_scan_submodules(self) -> None:
+        """Non-package module does not trigger sub-module scanning."""
+        app = _make_app()
+
+        def build_wf() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        mod_name = '_test_flat_mod'
+        sub_name = f'{mod_name}.child'
+
+        # Regular module (no __path__)
+        module = types.ModuleType(mod_name)
+        module.__name__ = mod_name
+        sys.modules[mod_name] = module
+
+        # A sub-module that happens to share the prefix
+        sub_module = types.ModuleType(sub_name)
+        sub_module.__name__ = sub_name
+        build_wf.__module__ = sub_name
+        build_wf.__qualname__ = 'build_wf'
+        setattr(sub_module, 'build_wf', build_wf)
+        sys.modules[sub_name] = sub_module
+
+        app.discover_tasks([mod_name])
+        try:
+            errors = app._check_undecorated_builders()
+            # Should NOT detect build_wf — mod_name is not a package
+            assert errors == []
+        finally:
+            self._cleanup_module(sub_name)
+            self._cleanup_module(mod_name)
+
 
 # =============================================================================
 # Integration: check() wiring tests
