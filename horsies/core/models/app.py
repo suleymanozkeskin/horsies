@@ -251,12 +251,12 @@ class AppConfig(BaseModel):
         Masks sensitive data like database passwords.
 
         Args:
-            logger: Logger instance to use. If None, uses root logger.
+            logger: Logger instance to use. If None, uses the library logger.
         """
         if os.getenv('HORSIES_CHILD_PROCESS') == '1':
             return
         if logger is None:
-            logger = logging.getLogger()
+            logger = logging.getLogger('horsies')
 
         formatted = self._format_for_logging()
         logger.info('AppConfig:\n%s', formatted)

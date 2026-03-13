@@ -330,8 +330,12 @@ def rehydrate_value(value: Json) -> SerdeResult[Any]:
     """
     # Pydantic model rehydration
     if isinstance(value, dict) and value.get('__pydantic_model__'):
-        module_name = cast(str, value.get('module'))
-        qualname = cast(str, value.get('qualname'))
+        module_name = value.get('module')
+        qualname = value.get('qualname')
+        if not isinstance(module_name, str) or not isinstance(qualname, str):
+            return Err(SerializationError(
+                'Malformed Pydantic payload: missing or non-string "module"/"qualname"',
+            ))
         data = value.get('data')
         cache_key = f'{module_name}:{qualname}'
 
@@ -366,8 +370,12 @@ def rehydrate_value(value: Json) -> SerdeResult[Any]:
 
     # Dataclass rehydration
     if isinstance(value, dict) and value.get('__dataclass__'):
-        module_name = cast(str, value.get('module'))
-        qualname = cast(str, value.get('qualname'))
+        module_name = value.get('module')
+        qualname = value.get('qualname')
+        if not isinstance(module_name, str) or not isinstance(qualname, str):
+            return Err(SerializationError(
+                'Malformed dataclass payload: missing or non-string "module"/"qualname"',
+            ))
         data = value.get('data')
         cache_key = f'{module_name}:{qualname}'
 

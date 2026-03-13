@@ -333,6 +333,63 @@ class Container:
 class TestDataclassRehydrationErrors:
     """Error paths during dataclass rehydration from raw tagged dicts."""
 
+    def test_rehydrate_missing_module_key_dataclass(self) -> None:
+        """Dataclass payload without 'module' key returns Err with clear message."""
+        raw = {
+            '__dataclass__': True,
+            'qualname': 'SomeClass',
+            'data': {},
+        }
+        result = rehydrate_value(raw)
+        assert is_err(result)
+        assert 'Malformed dataclass payload' in str(result.err_value)
+
+    def test_rehydrate_missing_qualname_key_dataclass(self) -> None:
+        """Dataclass payload without 'qualname' key returns Err with clear message."""
+        raw = {
+            '__dataclass__': True,
+            'module': 'some.module',
+            'data': {},
+        }
+        result = rehydrate_value(raw)
+        assert is_err(result)
+        assert 'Malformed dataclass payload' in str(result.err_value)
+
+    def test_rehydrate_non_string_module_dataclass(self) -> None:
+        """Dataclass payload with non-string 'module' returns Err."""
+        raw = {
+            '__dataclass__': True,
+            'module': 123,
+            'qualname': 'SomeClass',
+            'data': {},
+        }
+        result = rehydrate_value(raw)
+        assert is_err(result)
+        assert 'Malformed dataclass payload' in str(result.err_value)
+
+    def test_rehydrate_missing_module_key_pydantic(self) -> None:
+        """Pydantic payload without 'module' key returns Err with clear message."""
+        raw = {
+            '__pydantic_model__': True,
+            'qualname': 'SomeModel',
+            'data': {},
+        }
+        result = rehydrate_value(raw)
+        assert is_err(result)
+        assert 'Malformed Pydantic payload' in str(result.err_value)
+
+    def test_rehydrate_non_string_qualname_pydantic(self) -> None:
+        """Pydantic payload with non-string 'qualname' returns Err."""
+        raw = {
+            '__pydantic_model__': True,
+            'module': 'some.module',
+            'qualname': None,
+            'data': {},
+        }
+        result = rehydrate_value(raw)
+        assert is_err(result)
+        assert 'Malformed Pydantic payload' in str(result.err_value)
+
     def test_rehydrate_import_error(self) -> None:
         """Bad module name returns Err(SerializationError) matching 'Could not import'."""
         raw = {

@@ -689,8 +689,8 @@ class TestLogConfig:
                 config.log_config(logger=logger)
         logger.info.assert_called_once()
 
-    def test_log_config_none_logger_uses_root(self) -> None:
-        """log_config with no logger should use root logger."""
+    def test_log_config_none_logger_uses_library_logger(self) -> None:
+        """log_config with no logger should use the 'horsies' library logger."""
         config = AppConfig(broker=BROKER)
         with patch.dict('os.environ', {}, clear=False):
             env = {k: v for k, v in __import__('os').environ.items() if k != 'HORSIES_CHILD_PROCESS'}
@@ -699,7 +699,7 @@ class TestLogConfig:
                     mock_logger = MagicMock()
                     mock_get_logger.return_value = mock_logger
                     config.log_config(logger=None)
-                    mock_get_logger.assert_called_once_with()
+                    mock_get_logger.assert_called_once_with('horsies')
                     mock_logger.info.assert_called_once()
 
 
