@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from enum import Enum
 from datetime import datetime, timezone, timedelta
 from importlib import import_module
+from collections.abc import Coroutine
 from typing import Any, Optional, Literal
 import hashlib
 import sys
@@ -201,7 +202,7 @@ class Worker:
 
     def _spawn_background(
         self,
-        coro: Any,
+        coro: Coroutine[Any, Any, Any],
         *,
         name: str,
         finalizer: bool = False,

@@ -110,9 +110,10 @@ _shared_lock = threading.Lock()
 
 def _shutdown_shared_runner() -> None:
     global _shared_runner
-    if _shared_runner is not None:
-        _shared_runner.stop()
-        _shared_runner = None
+    with _shared_lock:
+        if _shared_runner is not None:
+            _shared_runner.stop()
+            _shared_runner = None
 
 
 def get_shared_runner() -> LoopRunner:

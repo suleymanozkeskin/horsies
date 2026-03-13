@@ -28,6 +28,9 @@ from horsies.core.models.tasks import TaskInfo
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.utils.loop_runner import LoopRunner
 from horsies.core.utils.url import to_psycopg_url
+
+if TYPE_CHECKING:
+    from horsies.core.app import Horsies
 from horsies.core.logging import get_logger
 
 if TYPE_CHECKING:
@@ -241,7 +244,7 @@ class PostgresBroker:
     def __init__(self, config: PostgresConfig):
         self.config = config
         self.logger = get_logger('broker')
-        self._app: Any = None  # Set by Horsies.get_broker()
+        self._app: Horsies | None = None  # Set by Horsies.get_broker()
 
         engine_cfg = self.config.model_dump(exclude={'database_url'}, exclude_none=True)
         self.async_engine = create_async_engine(self.config.database_url, **engine_cfg)
@@ -258,12 +261,12 @@ class PostgresBroker:
         self.logger.info('PostgresBroker initialized')
 
     @property
-    def app(self) -> Any:
+    def app(self) -> 'Horsies | None':
         """Get the attached Horsies app instance (if any)."""
         return self._app
 
     @app.setter
-    def app(self, value: Any) -> None:
+    def app(self, value: 'Horsies | None') -> None:
         """Set the Horsies app instance."""
         self._app = value
 

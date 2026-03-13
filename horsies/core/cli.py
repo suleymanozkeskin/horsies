@@ -357,8 +357,8 @@ def worker_command(args: argparse.Namespace) -> None:
             for q in app.config.custom_queues:
                 queue_priorities[q.name] = q.priority
                 queue_max_concurrency[q.name] = q.max_concurrency
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.error(f'Failed to parse custom queue config: {exc}')
 
     # Get discovered task modules
     discovered_modules = app.get_discovered_task_modules()
