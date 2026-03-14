@@ -28,6 +28,7 @@ These values correspond to `TaskStatus` in the API (see Task Lifecycle for termi
 | `failed_at` | TIMESTAMP | When task failed |
 | `result` | TEXT | JSON-serialized TaskResult |
 | `failed_reason` | TEXT | Human-readable failure message |
+| `error_code` | TEXT | Final `TaskError.error_code` for failed tasks (NULL for successful, non-terminal, or worker-level failures without a `TaskResult`) |
 | `claimed` | BOOLEAN | Claiming flag |
 | `claimed_by_worker_id` | VARCHAR(255) | Worker identifier |
 | `good_until` | TIMESTAMP | Task expiry deadline |
@@ -43,7 +44,37 @@ These values correspond to `TaskStatus` in the API (see Task Lifecycle for termi
 | `created_at` | TIMESTAMP | Row creation time |
 | `updated_at` | TIMESTAMP | Last update time |
 
-Indexes: `queue_name`, `status`, `claimed`, `good_until`, `next_retry_at`
+Indexes: `queue_name`, `status`, `claimed`, `good_until`, `next_retry_at`, `error_code` (partial, WHERE NOT NULL)
+
+## horsies_task_attempts
+
+Immutable per-attempt execution history. One row per finished execution attempt (success, failure, or worker crash). Written atomically in the same transaction as the task state transition.
+
+Both `error_code` and attempt history are only guaranteed from deployment of the schema changes in version `0.1.0a26` onward. No historical backfill is performed.
+
+| Column | Type | Description |
+| ------ | ---- | ----------- |
+| `id` | BIGSERIAL PK | Auto-increment |
+| `task_id` | VARCHAR(36) FK | References `horsies_tasks(id)` with `ON DELETE CASCADE` |
+| `attempt` | INT | 1-based attempt number (`retry_count + 1` at finalization time) |
+| `outcome` | VARCHAR(32) | `COMPLETED`, `FAILED`, or `WORKER_FAILURE` (CHECK constraint enforced) |
+| `will_retry` | BOOLEAN | Whether a retry was scheduled after this attempt |
+| `started_at` | TIMESTAMPTZ | When the attempt started running |
+| `finished_at` | TIMESTAMPTZ | When the attempt finished |
+| `error_code` | TEXT | `TaskError.error_code` for this attempt (NULL on success) |
+| `error_message` | TEXT | `TaskError.message` for this attempt (NULL on success) |
+| `failed_reason` | TEXT | Worker-level failure reason (NULL for domain errors and successes) |
+| `worker_id` | VARCHAR(255) | Worker that executed this attempt |
+| `worker_hostname` | VARCHAR(255) | Machine hostname |
+| `worker_pid` | INT | Process ID |
+| `worker_process_name` | VARCHAR(255) | Process identifier |
+| `created_at` | TIMESTAMPTZ | Row creation time |
+
+Constraints: `UNIQUE (task_id, attempt)`, `CHECK (outcome IN ('COMPLETED', 'FAILED', 'WORKER_FAILURE'))`
+
+Indexes: `error_code` (partial, WHERE NOT NULL), `finished_at DESC`
+
+Pre-execution aborts (`CLAIM_LOST`, `OWNERSHIP_UNCONFIRMED`, `WORKFLOW_CHECK_FAILED`, `WORKFLOW_STOPPED`) do not create attempt rows.
 
 ## horsies_heartbeats
 
@@ -144,6 +175,7 @@ The worker's reaper loop prunes old rows automatically every hour based on [Reco
 | `horsies_heartbeats` | `heartbeat_retention_hours` | 24h | `sent_at` older than threshold |
 | `horsies_worker_states` | `worker_state_retention_hours` | 7 days | `snapshot_at` older than threshold |
 | `horsies_tasks` | `terminal_record_retention_hours` | 30 days | Terminal status + oldest timestamp older than threshold |
+| `horsies_task_attempts` | — | — | Cascade-deleted when parent task row is deleted |
 | `horsies_workflows` | `terminal_record_retention_hours` | 30 days | Terminal status + oldest timestamp older than threshold |
 | `horsies_workflow_tasks` | `terminal_record_retention_hours` | 30 days | Parent workflow is terminal and older than threshold |
 

@@ -207,8 +207,8 @@ task_id: str  # UUID, stable across retries of the same send
 def get(timeout_ms: int | None = None) -> TaskResult[T, TaskError]
 async def get_async(timeout_ms: int | None = None) -> TaskResult[T, TaskError]
 
-def info(*, include_result: bool = False, include_failed_reason: bool = False) -> BrokerResult[TaskInfo | None]
-async def info_async(*, include_result: bool = False, include_failed_reason: bool = False) -> BrokerResult[TaskInfo | None]
+def info(*, include_result: bool = False, include_failed_reason: bool = False, include_attempts: bool = False) -> BrokerResult[TaskInfo | None]
+async def info_async(*, include_result: bool = False, include_failed_reason: bool = False, include_attempts: bool = False) -> BrokerResult[TaskInfo | None]
 ```
 
 ### Caching semantics
@@ -226,9 +226,24 @@ sent_at: datetime | None, enqueued_at: datetime
 claimed_at: datetime | None, started_at: datetime | None
 completed_at: datetime | None, failed_at: datetime | None
 worker_hostname: str | None, worker_pid: int | None, worker_process_name: str | None
+error_code: str | None                      # always returned (final TaskError.error_code, NULL if not failed)
 result: TaskResult[Any, TaskError] | None    # opt-in: include_result=True
 failed_reason: str | None                    # opt-in: include_failed_reason=True
+attempts: list[TaskAttemptInfo] | None       # opt-in: include_attempts=True (None when not requested, [] when empty)
 ```
+
+### `TaskAttemptInfo` fields
+
+```python
+task_id: str, attempt: int
+outcome: TaskAttemptOutcome  # COMPLETED, FAILED, WORKER_FAILURE
+will_retry: bool
+started_at: datetime, finished_at: datetime
+error_code: str | None, error_message: str | None, failed_reason: str | None
+worker_id: str | None, worker_hostname: str | None, worker_pid: int | None, worker_process_name: str | None
+```
+
+`TaskAttemptOutcome`: `COMPLETED` (success), `FAILED` (domain/library error with TaskResult), `WORKER_FAILURE` (worker crash without TaskResult).
 
 `TaskStatus`: `PENDING -> CLAIMED -> RUNNING -> COMPLETED | FAILED | CANCELLED | REQUEUED`. `is_terminal` is `True` for `COMPLETED`, `FAILED`, `CANCELLED`. `REQUEUED` is not terminal.
 
@@ -520,7 +535,7 @@ from horsies import (
     # App and config
     Horsies, AppConfig, PostgresConfig,
     # Task result types
-    TaskResult, TaskError, LibraryErrorCode, SubWorkflowError, TaskInfo,
+    TaskResult, TaskError, LibraryErrorCode, SubWorkflowError, TaskInfo, TaskAttemptInfo,
     # Retry
     RetryPolicy,
     # Send types
@@ -528,7 +543,7 @@ from horsies import (
     # Exception mapper
     ExceptionMapper,
     # Status
-    TaskStatus, TASK_TERMINAL_STATES,
+    TaskStatus, TaskAttemptOutcome, TASK_TERMINAL_STATES,
     # Broker result (for handle.info())
     BrokerResult, BrokerOperationError, BrokerErrorCode,
     # Node data flow helper

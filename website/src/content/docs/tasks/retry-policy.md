@@ -155,6 +155,10 @@ Only exact class matches count — subclasses are not matched. If you need to ha
 5. Task not claimable until `next_retry_at` passes
 6. Worker sends delayed notification to trigger claiming
 
+Each step writes an immutable attempt row to `horsies_task_attempts`. A retried failure creates an attempt with `will_retry=True` and `outcome='FAILED'`. The final attempt (whether success or terminal failure) has `will_retry=False`. During retries, `horsies_tasks.error_code` remains `NULL` — it is only set when the task reaches its final terminal state.
+
+Use `handle.info(include_attempts=True)` to inspect the full attempt timeline. See [Retrieving Results](retrieving-results#task-metadata-and-attempt-history) for details.
+
 ## Retry Count Tracking
 
 | Field | Description |
