@@ -10,6 +10,7 @@ from .core.models.tasks import (
     SubWorkflowError,
     RetryPolicy,
     TaskInfo,
+    TaskAttemptInfo,
 )
 from .core.models.queues import QueueMode, CustomQueueConfig
 from .core.models.workflow import (
@@ -64,7 +65,7 @@ from .core.models.schedule import (
 )
 from .core.models.recovery import RecoveryConfig
 from .core.models.resilience import WorkerResilienceConfig
-from .core.types.status import TaskStatus, TASK_TERMINAL_STATES
+from .core.types.status import TaskStatus, TaskAttemptOutcome, TASK_TERMINAL_STATES
 from .core.errors import ErrorCode, ValidationReport, MultipleValidationErrors
 from .core.exception_mapper import ExceptionMapper
 from .core.task_decorator import from_node, TaskHandle
@@ -92,9 +93,11 @@ __all__ = [
     'SubWorkflowError',
     'RetryPolicy',
     'TaskInfo',
+    'TaskAttemptInfo',
     'QueueMode',
     'CustomQueueConfig',
     'TaskStatus',
+    'TaskAttemptOutcome',
     'TASK_TERMINAL_STATES',
     'ErrorCode',
     'ValidationReport',

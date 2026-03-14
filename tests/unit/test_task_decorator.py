@@ -422,6 +422,7 @@ class TestTaskHandleInfo:
             't-3',
             include_result=True,
             include_failed_reason=False,
+            include_attempts=False,
         )
 
     @pytest.mark.asyncio
@@ -442,6 +443,7 @@ class TestTaskHandleInfo:
             't-4',
             include_result=False,
             include_failed_reason=True,
+            include_attempts=False,
         )
 
 

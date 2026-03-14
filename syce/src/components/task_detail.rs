@@ -209,6 +209,13 @@ impl<'a> TaskDetailPanel<'a> {
             ),
         ])));
 
+        if let Some(ref code) = self.task.error_code {
+            lines.push(DetailLine::new(Line::from(vec![
+                Span::styled("Error Code:   ", Style::default().fg(theme.muted)),
+                Span::styled(code.clone(), Style::default().fg(theme.error).bold()),
+            ])));
+        }
+
         lines.push(DetailLine::new(Line::from(vec![
             Span::styled("Priority:     ", Style::default().fg(theme.muted)),
             Span::styled(format!("{}", self.task.priority), Style::default().fg(theme.text)),
@@ -255,6 +262,13 @@ impl<'a> TaskDetailPanel<'a> {
                 Style::default().fg(theme.text),
             ),
         ])));
+        lines.push(DetailLine::new(Line::from(vec![
+            Span::styled("  Process:    ", Style::default().fg(theme.muted)),
+            Span::styled(
+                self.task.worker_process_name.clone().unwrap_or_else(|| "-".to_string()),
+                Style::default().fg(theme.text),
+            ),
+        ])));
 
         lines.push(DetailLine::new(Line::from("")));
 
@@ -295,6 +309,93 @@ impl<'a> TaskDetailPanel<'a> {
         ])));
 
         lines.push(DetailLine::new(Line::from("")));
+
+        // Attempts section
+        if !self.task.attempts.is_empty() {
+            lines.push(DetailLine::new(Line::from(vec![
+                Span::styled("Attempts", Style::default().fg(theme.accent).bold()),
+            ])));
+            for (i, attempt) in self.task.attempts.iter().enumerate() {
+                let retry_label = if attempt.will_retry { "yes" } else { "no" };
+                let outcome_color = match attempt.outcome.as_str() {
+                    "COMPLETED" => theme.success,
+                    "FAILED" => theme.error,
+                    "WORKER_FAILURE" => theme.error,
+                    _ => theme.text,
+                };
+                lines.push(DetailLine::new(Line::from(vec![
+                    Span::styled(
+                        format!("  Attempt {} | ", attempt.attempt),
+                        Style::default().fg(theme.muted),
+                    ),
+                    Span::styled(
+                        attempt.outcome.clone(),
+                        Style::default().fg(outcome_color).bold(),
+                    ),
+                    Span::styled(
+                        format!(" | retry={}", retry_label),
+                        Style::default().fg(theme.muted),
+                    ),
+                ])));
+                lines.push(DetailLine::new(Line::from(vec![
+                    Span::styled("    Started:  ", Style::default().fg(theme.muted)),
+                    Span::styled(
+                        attempt.started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                        Style::default().fg(theme.text),
+                    ),
+                ])));
+                lines.push(DetailLine::new(Line::from(vec![
+                    Span::styled("    Finished: ", Style::default().fg(theme.muted)),
+                    Span::styled(
+                        attempt.finished_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                        Style::default().fg(theme.text),
+                    ),
+                ])));
+                if let Some(ref code) = attempt.error_code {
+                    lines.push(DetailLine::new(Line::from(vec![
+                        Span::styled("    Error Code:    ", Style::default().fg(theme.muted)),
+                        Span::styled(code.clone(), Style::default().fg(theme.error)),
+                    ])));
+                }
+                if let Some(ref msg) = attempt.error_message {
+                    lines.push(DetailLine::new(Line::from(vec![
+                        Span::styled("    Error Message: ", Style::default().fg(theme.muted)),
+                        Span::styled(msg.clone(), Style::default().fg(theme.error)),
+                    ])));
+                }
+                if let Some(ref reason) = attempt.failed_reason {
+                    lines.push(DetailLine::new(Line::from(vec![
+                        Span::styled("    Failed Reason: ", Style::default().fg(theme.muted)),
+                        Span::styled(reason.clone(), Style::default().fg(theme.error)),
+                    ])));
+                }
+                // Worker info line when any worker field is present
+                let has_worker = attempt.worker_id.is_some()
+                    || attempt.worker_hostname.is_some()
+                    || attempt.worker_pid.is_some()
+                    || attempt.worker_process_name.is_some();
+                if has_worker {
+                    let parts: Vec<String> = [
+                        attempt.worker_id.clone(),
+                        attempt.worker_hostname.clone(),
+                        attempt.worker_pid.map(|p| p.to_string()),
+                        attempt.worker_process_name.clone(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                    lines.push(DetailLine::new(Line::from(vec![
+                        Span::styled("    Worker: ", Style::default().fg(theme.muted)),
+                        Span::styled(parts.join(" | "), Style::default().fg(theme.text)),
+                    ])));
+                }
+                // Blank line between attempts (except after the last one)
+                if i < self.task.attempts.len() - 1 {
+                    lines.push(DetailLine::new(Line::from("")));
+                }
+            }
+            lines.push(DetailLine::new(Line::from("")));
+        }
 
         // Arguments section
         lines.push(DetailLine::new(Line::from(vec![

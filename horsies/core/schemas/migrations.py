@@ -155,6 +155,34 @@ ADD_SUB_WORKFLOW_QUALNAME_COLUMN_SQL = text("""
     ADD COLUMN IF NOT EXISTS sub_workflow_qualname VARCHAR(512);
 """)
 
+CREATE_TASK_ATTEMPTS_TABLE_SQL = text("""
+    CREATE TABLE IF NOT EXISTS horsies_task_attempts (
+        id BIGSERIAL PRIMARY KEY,
+        task_id VARCHAR(36) NOT NULL REFERENCES horsies_tasks(id) ON DELETE CASCADE,
+        attempt INTEGER NOT NULL,
+        outcome VARCHAR(32) NOT NULL,
+        will_retry BOOLEAN NOT NULL DEFAULT FALSE,
+        started_at TIMESTAMPTZ NOT NULL,
+        finished_at TIMESTAMPTZ NOT NULL,
+        error_code TEXT,
+        error_message TEXT,
+        failed_reason TEXT,
+        worker_id VARCHAR(255),
+        worker_hostname VARCHAR(255),
+        worker_pid INTEGER,
+        worker_process_name VARCHAR(255),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT uq_horsies_task_attempts_task_attempt UNIQUE (task_id, attempt),
+        CONSTRAINT ck_horsies_task_attempts_outcome
+            CHECK (outcome IN ('COMPLETED', 'FAILED', 'WORKER_FAILURE'))
+    )
+""")
+
+ADD_ERROR_CODE_COLUMN_SQL = text("""
+    ALTER TABLE horsies_tasks
+    ADD COLUMN IF NOT EXISTS error_code TEXT;
+""")
+
 ADD_WORKFLOW_SENT_AT_COLUMN_SQL = text("""
     ALTER TABLE horsies_workflows
     ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;

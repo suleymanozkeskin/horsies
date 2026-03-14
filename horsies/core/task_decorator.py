@@ -325,6 +325,7 @@ class TaskHandle(Generic[T]):
         *,
         include_result: bool = False,
         include_failed_reason: bool = False,
+        include_attempts: bool = False,
     ) -> 'BrokerResult[TaskInfo | None]':
         """Fetch metadata for this task from the broker.
 
@@ -346,6 +347,7 @@ class TaskHandle(Generic[T]):
             self.task_id,
             include_result=include_result,
             include_failed_reason=include_failed_reason,
+            include_attempts=include_attempts,
         )
 
     async def info_async(
@@ -353,6 +355,7 @@ class TaskHandle(Generic[T]):
         *,
         include_result: bool = False,
         include_failed_reason: bool = False,
+        include_attempts: bool = False,
     ) -> 'BrokerResult[TaskInfo | None]':
         """Async version of info().
 
@@ -374,6 +377,7 @@ class TaskHandle(Generic[T]):
             self.task_id,
             include_result=include_result,
             include_failed_reason=include_failed_reason,
+            include_attempts=include_attempts,
         )
 
     def set_immediate_result(

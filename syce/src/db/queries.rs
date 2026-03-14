@@ -1,8 +1,8 @@
 use crate::errors::Result;
 use crate::models::{
     ActiveWorkerRow, AggregatedBreakdownRow, ClusterCapacitySummary, ClusterUtilizationPoint,
-    DeadWorkerRow, OverloadedWorkerAlert, SnapshotAgeBucket, StaleClaimsAlert, TaskDetail,
-    TaskStatusRow, WorkerLoadPoint, WorkerQueuesRow, WorkerUptimeRow,
+    DeadWorkerRow, OverloadedWorkerAlert, SnapshotAgeBucket, StaleClaimsAlert, TaskAttemptRow,
+    TaskDetail, TaskStatusRow, WorkerLoadPoint, WorkerQueuesRow, WorkerUptimeRow,
     WorkflowRow, WorkflowSummary, WorkflowTaskRow,
 };
 use sqlx::PgPool;
@@ -156,8 +156,9 @@ pub async fn fetch_snapshot_age_distribution(pool: &PgPool) -> Result<Vec<Snapsh
     Ok(rows)
 }
 
-/// Fetch a single task by ID for the detail view
+/// Fetch a single task by ID for the detail view, including attempt history.
 /// Source: ../../../sql/tasks/task-detail-by-id.sql
+/// Source: ../../../sql/tasks/task-attempts-by-task-id.sql
 pub async fn fetch_task_by_id(pool: &PgPool, task_id: &str) -> Result<Option<TaskDetail>> {
     let query = include_str!("../../sql/tasks/task-detail-by-id.sql");
     let task = sqlx::query_as::<_, TaskDetail>(query)
@@ -165,7 +166,18 @@ pub async fn fetch_task_by_id(pool: &PgPool, task_id: &str) -> Result<Option<Tas
         .fetch_optional(pool)
         .await?;
 
-    Ok(task)
+    let Some(mut task) = task else {
+        return Ok(None);
+    };
+
+    let attempts_query = include_str!("../../sql/tasks/task-attempts-by-task-id.sql");
+    let attempts = sqlx::query_as::<_, TaskAttemptRow>(attempts_query)
+        .bind(task_id)
+        .fetch_all(pool)
+        .await?;
+
+    task.attempts = attempts;
+    Ok(Some(task))
 }
 
 // =========== Workflow Queries ===========

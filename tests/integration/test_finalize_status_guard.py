@@ -199,7 +199,7 @@ async def test_fail_guard_blocks_when_not_running(
     now = datetime.now(timezone.utc)
     result = await session.execute(
         MARK_TASK_FAILED_SQL,
-        {'now': now, 'result_json': '{"err": {"error_code": "LATE"}}', 'id': task_id},
+        {'now': now, 'result_json': '{"err": {"error_code": "LATE"}}', 'id': task_id, 'error_code': 'LATE'},
     )
     returned_row = result.fetchone()
 

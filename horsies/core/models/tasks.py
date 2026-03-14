@@ -21,7 +21,7 @@ from enum import Enum
 if TYPE_CHECKING:
     from horsies.core.models.workflow import SubWorkflowSummary
 
-from horsies.core.types.status import TaskStatus
+from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.exception_mapper import validate_error_code_string
 
 T = TypeVar('T')  # success payload
@@ -229,6 +229,25 @@ class TaskResult(Generic[T, E]):
 
 
 @dataclass
+class TaskAttemptInfo:
+    """Metadata for a single task execution attempt."""
+
+    task_id: str
+    attempt: int
+    outcome: TaskAttemptOutcome
+    will_retry: bool
+    started_at: datetime.datetime
+    finished_at: datetime.datetime
+    error_code: str | None = None
+    error_message: str | None = None
+    failed_reason: str | None = None
+    worker_id: str | None = None
+    worker_hostname: str | None = None
+    worker_pid: int | None = None
+    worker_process_name: str | None = None
+
+
+@dataclass
 class TaskInfo:
     """Metadata for a broker-backed task."""
 
@@ -249,8 +268,10 @@ class TaskInfo:
     worker_hostname: str | None
     worker_pid: int | None
     worker_process_name: str | None
+    error_code: str | None = None
     result: TaskResult[Any, TaskError] | None = None
     failed_reason: str | None = None
+    attempts: list[TaskAttemptInfo] | None = None
 
 
 class RetryPolicy(BaseModel):

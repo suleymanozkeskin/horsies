@@ -71,6 +71,8 @@ from horsies.core.worker.sql import (  # noqa: F401
     MARK_TASK_FAILED_WORKER_SQL,
     MARK_TASK_FAILED_SQL,
     MARK_TASK_COMPLETED_SQL,
+    SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
+    UPSERT_TASK_ATTEMPT_SQL,
     GET_TASK_QUEUE_NAME_SQL,
     NOTIFY_TASK_NEW_SQL,
     NOTIFY_TASK_QUEUE_SQL,
@@ -1097,13 +1099,17 @@ class Worker:
         result_json_str: str,
         failed_reason: str | None,
     ) -> Result[TaskResult[Any, TaskError] | None, _FinalizeError]:
-        """Phase 1 of finalization: persist task terminal state/result durably."""
+        """Phase 1 of finalization: persist task terminal state/result durably.
+
+        Uses SELECT FOR UPDATE to lock the RUNNING row, extract attempt context,
+        upsert an immutable attempt row, then transition the task state — all
+        within a single transaction.
+        """
         try:
             # Note: Heartbeat thread in task process automatically dies when process completes.
             async with self.sf() as s:
+                # Pre-exec aborts: no attempt row, no state change
                 if not ok:
-                    # CLAIM_LOST: Another worker reclaimed this task - do nothing
-                    # The task is not failed; it belongs to another worker now
                     match failed_reason:
                         case (
                             'CLAIM_LOST'
@@ -1118,8 +1124,42 @@ class Worker:
                         case _:
                             pass
 
-                    # worker-level failure (rare): mark FAILED with reason
-                    res = await s.execute(
+                # Lock the RUNNING row and extract context for attempt history
+                ctx_result = await s.execute(
+                    SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL, {'id': task_id},
+                )
+                ctx_row = ctx_result.fetchone()
+                if ctx_row is None:
+                    logger.warning(
+                        f'Task {task_id} finalize aborted: status is no longer RUNNING '
+                        f'(reaper likely reclaimed). Skipping to prevent double-execution.'
+                    )
+                    return Ok(None)
+
+                attempt_num = (ctx_row.retry_count or 0) + 1
+                attempt_started_at = ctx_row.started_at or now
+                attempt_worker = {
+                    'worker_id': ctx_row.claimed_by_worker_id,
+                    'worker_hostname': ctx_row.worker_hostname,
+                    'worker_pid': ctx_row.worker_pid,
+                    'worker_process_name': ctx_row.worker_process_name,
+                }
+
+                if not ok:
+                    # Worker-level failure (rare): write WORKER_FAILURE attempt, mark FAILED
+                    await s.execute(UPSERT_TASK_ATTEMPT_SQL, {
+                        'task_id': task_id,
+                        'attempt': attempt_num,
+                        'outcome': 'WORKER_FAILURE',
+                        'will_retry': False,
+                        'started_at': attempt_started_at,
+                        'finished_at': now,
+                        'error_code': None,
+                        'error_message': None,
+                        'failed_reason': failed_reason or 'Worker failure',
+                        **attempt_worker,
+                    })
+                    await s.execute(
                         MARK_TASK_FAILED_WORKER_SQL,
                         {
                             'now': now,
@@ -1127,17 +1167,10 @@ class Worker:
                             'id': task_id,
                         },
                     )
-                    if res.fetchone() is None:
-                        logger.warning(
-                            f'Task {task_id} finalize aborted: status is no longer RUNNING '
-                            f'(reaper likely reclaimed). Skipping to prevent double-execution.'
-                        )
-                        return Ok(None)
-                    # Trigger automatically sends NOTIFY on UPDATE
                     await s.commit()
                     return Ok(None)
 
-                # Parse the TaskResult we produced
+                # --- ok=True: parse the TaskResult ---
                 _loads_r = loads_json(result_json_str)
                 if is_err(_loads_r):
                     logger.error(f'Task {task_id} result JSON is corrupt: {_loads_r.err_value}')
@@ -1148,12 +1181,30 @@ class Worker:
                             data={'task_id': task_id},
                         ),
                     )
+                    await s.execute(UPSERT_TASK_ATTEMPT_SQL, {
+                        'task_id': task_id,
+                        'attempt': attempt_num,
+                        'outcome': 'FAILED',
+                        'will_retry': False,
+                        'started_at': attempt_started_at,
+                        'finished_at': now,
+                        'error_code': LibraryErrorCode.WORKER_SERIALIZATION_ERROR.value,
+                        'error_message': f'Result JSON corrupt: {_loads_r.err_value}',
+                        'failed_reason': None,
+                        **attempt_worker,
+                    })
                     await s.execute(
                         MARK_TASK_FAILED_SQL,
-                        {'now': now, 'result_json': serialize_error_payload(_err_tr), 'id': task_id},
+                        {
+                            'now': now,
+                            'result_json': serialize_error_payload(_err_tr),
+                            'id': task_id,
+                            'error_code': LibraryErrorCode.WORKER_SERIALIZATION_ERROR.value,
+                        },
                     )
                     await s.commit()
                     return Ok(None)
+
                 _tr_r = task_result_from_json(_loads_r.ok_value)
                 if is_err(_tr_r):
                     logger.error(f'Task {task_id} result deser failed: {_tr_r.err_value}')
@@ -1164,17 +1215,38 @@ class Worker:
                             data={'task_id': task_id},
                         ),
                     )
+                    await s.execute(UPSERT_TASK_ATTEMPT_SQL, {
+                        'task_id': task_id,
+                        'attempt': attempt_num,
+                        'outcome': 'FAILED',
+                        'will_retry': False,
+                        'started_at': attempt_started_at,
+                        'finished_at': now,
+                        'error_code': LibraryErrorCode.WORKER_SERIALIZATION_ERROR.value,
+                        'error_message': f'Result deser failed: {_tr_r.err_value}',
+                        'failed_reason': None,
+                        **attempt_worker,
+                    })
                     await s.execute(
                         MARK_TASK_FAILED_SQL,
-                        {'now': now, 'result_json': serialize_error_payload(_err_tr), 'id': task_id},
+                        {
+                            'now': now,
+                            'result_json': serialize_error_payload(_err_tr),
+                            'id': task_id,
+                            'error_code': LibraryErrorCode.WORKER_SERIALIZATION_ERROR.value,
+                        },
                     )
                     await s.commit()
                     return Ok(None)
+
                 tr = _tr_r.ok_value
                 if tr.is_err():
-                    # Check if this task should be retried
                     task_error = tr.unwrap_err()
-                    match task_error.error_code if task_error else None:
+                    _raw_code = task_error.error_code if task_error else None
+                    error_code_str: str | None = (
+                        _raw_code.value if isinstance(_raw_code, LibraryErrorCode) else _raw_code
+                    )
+                    match _raw_code:
                         case 'WORKFLOW_STOPPED':
                             logger.debug(
                                 f'Task {task_id} skipped due to workflow stop, skipping finalization'
@@ -1182,10 +1254,24 @@ class Worker:
                             return Ok(None)
                         case _:
                             pass
+
                     should_retry = await self._should_retry_task(task_id, task_error, s)
                     if should_retry:
                         match await self._schedule_retry(task_id, s):
                             case 'scheduled':
+                                # Retry scheduled: write FAILED attempt with will_retry=True
+                                await s.execute(UPSERT_TASK_ATTEMPT_SQL, {
+                                    'task_id': task_id,
+                                    'attempt': attempt_num,
+                                    'outcome': 'FAILED',
+                                    'will_retry': True,
+                                    'started_at': attempt_started_at,
+                                    'finished_at': now,
+                                    'error_code': error_code_str,
+                                    'error_message': task_error.message if task_error else None,
+                                    'failed_reason': None,
+                                    **attempt_worker,
+                                })
                                 await s.commit()
                                 return Ok(None)
                             case 'reaper_reclaimed':
@@ -1202,10 +1288,27 @@ class Worker:
                                 )
                                 # Fall through to mark task FAILED with original error.
 
-                    # Mark as failed if no retry
+                    # Terminal failure: write FAILED attempt with will_retry=False
+                    await s.execute(UPSERT_TASK_ATTEMPT_SQL, {
+                        'task_id': task_id,
+                        'attempt': attempt_num,
+                        'outcome': 'FAILED',
+                        'will_retry': False,
+                        'started_at': attempt_started_at,
+                        'finished_at': now,
+                        'error_code': error_code_str,
+                        'error_message': task_error.message if task_error else None,
+                        'failed_reason': None,
+                        **attempt_worker,
+                    })
                     fail_res = await s.execute(
                         MARK_TASK_FAILED_SQL,
-                        {'now': now, 'result_json': result_json_str, 'id': task_id},
+                        {
+                            'now': now,
+                            'result_json': result_json_str,
+                            'id': task_id,
+                            'error_code': error_code_str,
+                        },
                     )
                     if fail_res.fetchone() is None:
                         logger.warning(
@@ -1214,6 +1317,19 @@ class Worker:
                         )
                         return Ok(None)
                 else:
+                    # Success: write COMPLETED attempt
+                    await s.execute(UPSERT_TASK_ATTEMPT_SQL, {
+                        'task_id': task_id,
+                        'attempt': attempt_num,
+                        'outcome': 'COMPLETED',
+                        'will_retry': False,
+                        'started_at': attempt_started_at,
+                        'finished_at': now,
+                        'error_code': None,
+                        'error_message': None,
+                        'failed_reason': None,
+                        **attempt_worker,
+                    })
                     comp_res = await s.execute(
                         MARK_TASK_COMPLETED_SQL,
                         {'now': now, 'result_json': result_json_str, 'id': task_id},

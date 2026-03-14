@@ -18,13 +18,13 @@ from horsies.core.models.workflow_pg import (
     WorkflowModel as _WorkflowModel,
     WorkflowTaskModel as _WorkflowTaskModel,
 )
-from horsies.core.types.status import TaskStatus
+from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.codec.serde import (
     loads_json,
     task_result_from_json,
 )
-from horsies.core.models.tasks import TaskInfo
+from horsies.core.models.tasks import TaskInfo, TaskAttemptInfo
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.utils.loop_runner import LoopRunner
 from horsies.core.utils.url import to_psycopg_url
@@ -67,14 +67,20 @@ from horsies.core.schemas.triggers import (
     CREATE_WORKFLOW_STATUS_NOTIFY_FUNCTION_SQL,
     CREATE_WORKFLOW_STATUS_NOTIFY_TRIGGER_SQL,
 )
+from horsies.core.worker.sql import UPSERT_TASK_ATTEMPT_SQL
 from horsies.core.schemas.indexes import (
     CREATE_HEARTBEATS_TASK_ROLE_SENT_INDEX_SQL,
+    CREATE_TASK_ATTEMPTS_ERROR_CODE_INDEX_SQL,
+    CREATE_TASK_ATTEMPTS_FINISHED_AT_INDEX_SQL,
+    CREATE_TASKS_ERROR_CODE_INDEX_SQL,
     CREATE_WORKFLOW_TASKS_DEPS_INDEX_SQL,
 )
 from horsies.core.schemas.migrations import (
+    CREATE_TASK_ATTEMPTS_TABLE_SQL,
     ADD_DEPTH_COLUMN_SQL,
     ADD_ENQUEUE_SHA_COLUMN_SQL,
     ADD_ENQUEUED_AT_COLUMN_SQL,
+    ADD_ERROR_CODE_COLUMN_SQL,
     ADD_IS_SUBWORKFLOW_COLUMN_SQL,
     ADD_JOIN_TYPE_COLUMN_SQL,
     ADD_MIN_SUCCESS_COLUMN_SQL,
@@ -172,7 +178,8 @@ GET_EXPIRED_TASKS_SQL = text("""
 
 SELECT_STALE_RUNNING_TASKS_SQL = text("""
     SELECT t2.id, t2.worker_pid, t2.worker_hostname, t2.claimed_by_worker_id,
-           t2.started_at, hb.last_heartbeat
+           t2.started_at, hb.last_heartbeat,
+           t2.retry_count, t2.worker_process_name
     FROM horsies_tasks t2
     LEFT JOIN LATERAL (
         SELECT sent_at AS last_heartbeat
@@ -193,9 +200,20 @@ MARK_STALE_TASK_FAILED_SQL = text("""
         failed_at = NOW(),
         failed_reason = :failed_reason,
         result = :result,
+        error_code = :error_code,
         updated_at = NOW()
     WHERE id = :task_id
       AND status = 'RUNNING'
+""")
+
+SELECT_TASK_ATTEMPTS_BY_TASK_ID_SQL = text("""
+    SELECT task_id, attempt, outcome, will_retry,
+           started_at, finished_at,
+           error_code, error_message, failed_reason,
+           worker_id, worker_hostname, worker_pid, worker_process_name
+    FROM horsies_task_attempts
+    WHERE task_id = :task_id
+    ORDER BY attempt DESC
 """)
 
 REQUEUE_STALE_CLAIMED_SQL = text("""
@@ -382,6 +400,15 @@ class PostgresBroker:
             await conn.execute(ADD_ENQUEUE_SHA_COLUMN_SQL)
             await conn.execute(BACKFILL_ENQUEUE_SHA_SQL)
             await conn.execute(SET_ENQUEUE_SHA_NOT_NULL_SQL)
+
+            # Migration: add error_code column for task failure observability.
+            await conn.execute(ADD_ERROR_CODE_COLUMN_SQL)
+            await conn.execute(CREATE_TASKS_ERROR_CODE_INDEX_SQL)
+
+            # Migration: create horsies_task_attempts table and indexes.
+            await conn.execute(CREATE_TASK_ATTEMPTS_TABLE_SQL)
+            await conn.execute(CREATE_TASK_ATTEMPTS_ERROR_CODE_INDEX_SQL)
+            await conn.execute(CREATE_TASK_ATTEMPTS_FINISHED_AT_INDEX_SQL)
 
             # Migration: add workflow sent_at column (immutable workflow start
             # call-site timestamp), backfill existing rows, and enforce NOT NULL.
@@ -924,10 +951,16 @@ class PostgresBroker:
                     worker_id = task_row.claimed_by_worker_id
                     started_at = task_row.started_at
                     last_heartbeat = task_row.last_heartbeat
+                    retry_count = task_row.retry_count or 0
+                    worker_process_name = task_row.worker_process_name
 
+                    failed_reason_str = (
+                        f'Worker process crashed (no runner heartbeat '
+                        f'for {stale_threshold_ms}ms = {stale_threshold_ms/1000:.1f}s)'
+                    )
                     task_error = TaskError(
                         error_code=LibraryErrorCode.WORKER_CRASHED,
-                        message=f'Worker process crashed (no runner heartbeat for {stale_threshold_ms}ms = {stale_threshold_ms/1000:.1f}s)',
+                        message=failed_reason_str,
                         data={
                             'stale_threshold_ms': stale_threshold_ms,
                             'stale_threshold_seconds': stale_threshold_seconds,
@@ -950,12 +983,35 @@ class PostgresBroker:
                         continue
                     result_json = ser_r.ok_value
 
+                    # Upsert attempt row: FAILED with WORKER_CRASHED
+                    attempt_num = retry_count + 1
+                    now_utc = datetime.now(timezone.utc)
+                    await session.execute(
+                        UPSERT_TASK_ATTEMPT_SQL,
+                        {
+                            'task_id': task_id,
+                            'attempt': attempt_num,
+                            'outcome': 'FAILED',
+                            'will_retry': False,
+                            'started_at': started_at or now_utc,
+                            'finished_at': now_utc,
+                            'error_code': LibraryErrorCode.WORKER_CRASHED.value,
+                            'error_message': task_error.message,
+                            'failed_reason': failed_reason_str,
+                            'worker_id': worker_id,
+                            'worker_hostname': worker_hostname,
+                            'worker_pid': worker_pid,
+                            'worker_process_name': worker_process_name,
+                        },
+                    )
+
                     await session.execute(
                         MARK_STALE_TASK_FAILED_SQL,
                         {
                             'task_id': task_id,
-                            'failed_reason': f'Worker process crashed (no runner heartbeat for {stale_threshold_ms}ms = {stale_threshold_ms/1000:.1f}s)',
+                            'failed_reason': failed_reason_str,
                             'result': result_json,
+                            'error_code': LibraryErrorCode.WORKER_CRASHED.value,
                         },
                     )
 
@@ -1067,6 +1123,7 @@ class PostgresBroker:
         *,
         include_result: bool = False,
         include_failed_reason: bool = False,
+        include_attempts: bool = False,
     ) -> BrokerResult[TaskInfo | None]:
         """Fetch metadata for a task by ID.
 
@@ -1095,6 +1152,7 @@ class PostgresBroker:
                     'worker_hostname',
                     'worker_pid',
                     'worker_process_name',
+                    'error_code',
                 ]
                 if include_result:
                     base_columns.append('result')
@@ -1151,6 +1209,8 @@ class PostgresBroker:
                 idx += 1
                 worker_process_name = row[idx]
                 idx += 1
+                error_code_value = row[idx]
+                idx += 1
 
                 if include_result:
                     raw_result = row[idx]
@@ -1166,6 +1226,32 @@ class PostgresBroker:
 
                 if include_failed_reason:
                     failed_reason = row[idx]
+
+                # Load attempt history if requested
+                attempts: list[TaskAttemptInfo] | None = None
+                if include_attempts:
+                    att_result = await session.execute(
+                        SELECT_TASK_ATTEMPTS_BY_TASK_ID_SQL,
+                        {'task_id': task_id},
+                    )
+                    attempts = [
+                        TaskAttemptInfo(
+                            task_id=att_row[0],
+                            attempt=att_row[1],
+                            outcome=TaskAttemptOutcome(att_row[2]),
+                            will_retry=att_row[3],
+                            started_at=att_row[4],
+                            finished_at=att_row[5],
+                            error_code=att_row[6],
+                            error_message=att_row[7],
+                            failed_reason=att_row[8],
+                            worker_id=att_row[9],
+                            worker_hostname=att_row[10],
+                            worker_pid=att_row[11],
+                            worker_process_name=att_row[12],
+                        )
+                        for att_row in att_result.fetchall()
+                    ]
 
                 return Ok(TaskInfo(
                     task_id=task_id_value,
@@ -1185,8 +1271,10 @@ class PostgresBroker:
                     worker_hostname=worker_hostname,
                     worker_pid=worker_pid,
                     worker_process_name=worker_process_name,
+                    error_code=error_code_value,
                     result=result_value,
                     failed_reason=failed_reason,
+                    attempts=attempts,
                 ))
         except Exception as exc:
             return _broker_err(
@@ -1201,6 +1289,7 @@ class PostgresBroker:
         *,
         include_result: bool = False,
         include_failed_reason: bool = False,
+        include_attempts: bool = False,
     ) -> BrokerResult[TaskInfo | None]:
         """Synchronous wrapper for get_task_info_async()."""
         try:
@@ -1209,6 +1298,7 @@ class PostgresBroker:
                 task_id,
                 include_result=include_result,
                 include_failed_reason=include_failed_reason,
+                include_attempts=include_attempts,
             )
         except Exception as exc:
             return _broker_err(

@@ -170,6 +170,7 @@ MARK_TASK_FAILED_WORKER_SQL = text("""
     SET status='FAILED',
         failed_at = :now,
         failed_reason = :reason,
+        error_code = NULL,
         updated_at = :now
     WHERE id = :id
       AND status = 'RUNNING'
@@ -181,6 +182,7 @@ MARK_TASK_FAILED_SQL = text("""
     SET status='FAILED',
         failed_at = :now,
         result = :result_json,
+        error_code = :error_code,
         updated_at = :now
     WHERE id = :id
       AND status = 'RUNNING'
@@ -192,6 +194,7 @@ MARK_TASK_COMPLETED_SQL = text("""
     SET status='COMPLETED',
         completed_at = :now,
         result = :result_json,
+        error_code = NULL,
         updated_at = :now
     WHERE id = :id
       AND status = 'RUNNING'
@@ -238,6 +241,7 @@ SCHEDULE_TASK_RETRY_SQL = text("""
         retry_count = :retry_count,
         next_retry_at = :next_retry_at,
         enqueued_at = :next_retry_at,
+        error_code = NULL,
         updated_at = now()
     WHERE id = :id
       AND status = 'RUNNING'
@@ -316,6 +320,41 @@ DELETE_EXPIRED_TASKS_SQL = text("""
           WHERE wt.task_id = t.id
             AND NOT (w.status = ANY(:wf_terminal_states))
       )
+""")
+
+SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL = text("""
+    SELECT retry_count, started_at, claimed_by_worker_id,
+           worker_hostname, worker_pid, worker_process_name
+    FROM horsies_tasks
+    WHERE id = :id AND status = 'RUNNING'
+    FOR UPDATE
+""")
+
+UPSERT_TASK_ATTEMPT_SQL = text("""
+    INSERT INTO horsies_task_attempts (
+        task_id, attempt, outcome, will_retry,
+        started_at, finished_at,
+        error_code, error_message, failed_reason,
+        worker_id, worker_hostname, worker_pid, worker_process_name
+    )
+    VALUES (
+        :task_id, :attempt, :outcome, :will_retry,
+        :started_at, :finished_at,
+        :error_code, :error_message, :failed_reason,
+        :worker_id, :worker_hostname, :worker_pid, :worker_process_name
+    )
+    ON CONFLICT (task_id, attempt) DO UPDATE SET
+        outcome = EXCLUDED.outcome,
+        will_retry = EXCLUDED.will_retry,
+        started_at = EXCLUDED.started_at,
+        finished_at = EXCLUDED.finished_at,
+        error_code = EXCLUDED.error_code,
+        error_message = EXCLUDED.error_message,
+        failed_reason = EXCLUDED.failed_reason,
+        worker_id = EXCLUDED.worker_id,
+        worker_hostname = EXCLUDED.worker_hostname,
+        worker_pid = EXCLUDED.worker_pid,
+        worker_process_name = EXCLUDED.worker_process_name
 """)
 
 _RETENTION_CLEANUP_INTERVAL_S = 3600.0

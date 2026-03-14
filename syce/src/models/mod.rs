@@ -10,7 +10,7 @@ pub use metrics::{
 };
 
 // Export task types
-pub use task::TaskDetail;
+pub use task::{TaskAttemptRow, TaskDetail};
 
 // Export workflow types
 pub use workflow::{WorkflowRow, WorkflowSummary, WorkflowTaskRow};

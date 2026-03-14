@@ -15,6 +15,23 @@ CREATE_WORKFLOW_TASKS_DEPS_INDEX_SQL = text("""
 # Composite index for latest-heartbeat lookups.
 # Also defined in TaskHeartbeatModel.__table_args__ for fresh installs via create_all;
 # the raw SQL here is the upgrade path for existing databases missing the index.
+CREATE_TASK_ATTEMPTS_ERROR_CODE_INDEX_SQL = text("""
+    CREATE INDEX IF NOT EXISTS idx_horsies_task_attempts_error_code
+    ON horsies_task_attempts (error_code)
+    WHERE error_code IS NOT NULL;
+""")
+
+CREATE_TASK_ATTEMPTS_FINISHED_AT_INDEX_SQL = text("""
+    CREATE INDEX IF NOT EXISTS idx_horsies_task_attempts_finished_at_desc
+    ON horsies_task_attempts (finished_at DESC);
+""")
+
+CREATE_TASKS_ERROR_CODE_INDEX_SQL = text("""
+    CREATE INDEX IF NOT EXISTS idx_horsies_tasks_error_code
+    ON horsies_tasks (error_code)
+    WHERE error_code IS NOT NULL;
+""")
+
 CREATE_HEARTBEATS_TASK_ROLE_SENT_INDEX_SQL = text("""
     CREATE INDEX IF NOT EXISTS idx_horsies_heartbeats_task_role_sent
     ON horsies_heartbeats (task_id, role, sent_at DESC);

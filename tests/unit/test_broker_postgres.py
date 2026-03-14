@@ -871,8 +871,8 @@ class TestMarkStaleTasksAsFailed:
         broker = _make_broker()
         stale_started_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
         stale_rows = [
-            SimpleNamespace(id='task-1', worker_pid=1234, worker_hostname='host-1', claimed_by_worker_id='worker-1', started_at=stale_started_at, last_heartbeat=None),
-            SimpleNamespace(id='task-2', worker_pid=5678, worker_hostname='host-2', claimed_by_worker_id='worker-2', started_at=stale_started_at, last_heartbeat=stale_started_at),
+            SimpleNamespace(id='task-1', worker_pid=1234, worker_hostname='host-1', claimed_by_worker_id='worker-1', started_at=stale_started_at, last_heartbeat=None, retry_count=0, worker_process_name='proc-1'),
+            SimpleNamespace(id='task-2', worker_pid=5678, worker_hostname='host-2', claimed_by_worker_id='worker-2', started_at=stale_started_at, last_heartbeat=stale_started_at, retry_count=2, worker_process_name='proc-2'),
         ]
         select_result = MagicMock()
         select_result.fetchall.return_value = stale_rows
@@ -882,8 +882,8 @@ class TestMarkStaleTasksAsFailed:
         session = AsyncMock()
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
-        # First execute call is SELECT, subsequent are UPDATEs
-        session.execute = AsyncMock(side_effect=[select_result, update_result, update_result])
+        # First execute call is SELECT, then per task: UPSERT_ATTEMPT + MARK_FAILED
+        session.execute = AsyncMock(side_effect=[select_result, update_result, update_result, update_result, update_result])
         broker.session_factory = MagicMock(return_value=session)
 
         result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
@@ -891,15 +891,15 @@ class TestMarkStaleTasksAsFailed:
         assert is_ok(result)
         assert result.ok_value == 2
         session.commit.assert_awaited_once()
-        # 1 SELECT + 2 UPDATEs
-        assert session.execute.await_count == 3
+        # 1 SELECT + 2 * (1 UPSERT_ATTEMPT + 1 MARK_FAILED)
+        assert session.execute.await_count == 5
 
     @pytest.mark.asyncio
     async def test_update_includes_worker_crashed_error_code(self) -> None:
         """Each update call should include WORKER_CRASHED in the result JSON."""
         broker = _make_broker()
         stale_rows = [
-            SimpleNamespace(id='task-1', worker_pid=100, worker_hostname='host', claimed_by_worker_id='w-1', started_at=datetime(2025, 1, 1, tzinfo=timezone.utc), last_heartbeat=None),
+            SimpleNamespace(id='task-1', worker_pid=100, worker_hostname='host', claimed_by_worker_id='w-1', started_at=datetime(2025, 1, 1, tzinfo=timezone.utc), last_heartbeat=None, retry_count=0, worker_process_name='proc-1'),
         ]
         select_result = MagicMock()
         select_result.fetchall.return_value = stale_rows
@@ -907,13 +907,21 @@ class TestMarkStaleTasksAsFailed:
         session = AsyncMock()
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(side_effect=[select_result, MagicMock()])
+        # 1 SELECT + 1 UPSERT_ATTEMPT + 1 MARK_FAILED
+        session.execute = AsyncMock(side_effect=[select_result, MagicMock(), MagicMock()])
         broker.session_factory = MagicMock(return_value=session)
 
         await broker.mark_stale_tasks_as_failed()
 
-        # Second execute call is the UPDATE
-        update_call = session.execute.call_args_list[1]
+        # Second execute call is the attempt UPSERT, third is the MARK_FAILED UPDATE
+        attempt_call = session.execute.call_args_list[1]
+        attempt_params = attempt_call[0][1]
+        assert attempt_params['task_id'] == 'task-1'
+        assert attempt_params['outcome'] == 'FAILED'
+        assert attempt_params['error_code'] == 'WORKER_CRASHED'
+        assert attempt_params['attempt'] == 1
+
+        update_call = session.execute.call_args_list[2]
         params = update_call[0][1]
         assert params['task_id'] == 'task-1'
         assert 'WORKER_CRASHED' in params['result']
@@ -1104,13 +1112,15 @@ class TestGetTaskInfoAsync:
         """Basic task (no optional includes) should return Ok(TaskInfo) with base fields."""
         broker = _make_broker()
         now = datetime.now(timezone.utc)
-        # 17 base columns: id, task_name, status, queue_name, priority,
+        # 18 base columns: id, task_name, status, queue_name, priority,
         # retry_count, max_retries, next_retry_at, sent_at, enqueued_at, claimed_at,
-        # started_at, completed_at, failed_at, worker_hostname, worker_pid, worker_process_name
+        # started_at, completed_at, failed_at, worker_hostname, worker_pid,
+        # worker_process_name, error_code
         row = (
             'task-abc', 'compute', 'RUNNING', 'default', 100,
             1, 3, None, now, now, None,
             now, None, None, 'host-1', 9999, 'worker-0',
+            None,
         )
         self._setup_task_info_session(broker, row=row)
 
@@ -1137,12 +1147,12 @@ class TestGetTaskInfoAsync:
         broker = _make_broker()
         now = datetime.now(timezone.utc)
         result_json = '{"__task_result__":true,"ok":"hello","err":null}'
-        # 17 base + 1 result column
+        # 18 base + 1 result column
         row = (
             'task-abc', 'compute', 'COMPLETED', 'default', 100,
             0, 0, None, now, now, None,
             now, now, None, 'host-1', 9999, 'worker-0',
-            result_json,
+            None, result_json,
         )
         self._setup_task_info_session(broker, row=row)
 
@@ -1160,12 +1170,12 @@ class TestGetTaskInfoAsync:
         """include_failed_reason=True should add failed_reason to Ok(TaskInfo)."""
         broker = _make_broker()
         now = datetime.now(timezone.utc)
-        # 17 base + 1 failed_reason column
+        # 18 base + 1 failed_reason column
         row = (
             'task-abc', 'compute', 'FAILED', 'default', 100,
             0, 0, None, now, now, None,
             now, None, now, 'host-1', 9999, 'worker-0',
-            'Worker crashed unexpectedly',
+            None, 'Worker crashed unexpectedly',
         )
         self._setup_task_info_session(broker, row=row)
 
@@ -1181,12 +1191,12 @@ class TestGetTaskInfoAsync:
         """include_result=True with NULL result in DB should return Ok(TaskInfo) with result=None."""
         broker = _make_broker()
         now = datetime.now(timezone.utc)
-        # 17 base + 1 result column (None)
+        # 18 base + 1 result column (None)
         row = (
             'task-abc', 'compute', 'RUNNING', 'default', 100,
             0, 0, None, now, now, None,
             now, None, None, None, None, None,
-            None,
+            None, None,
         )
         self._setup_task_info_session(broker, row=row)
 
@@ -1203,12 +1213,12 @@ class TestGetTaskInfoAsync:
         broker = _make_broker()
         now = datetime.now(timezone.utc)
         result_json = '{"__task_result__":true,"ok":null,"err":{"__task_error__":true,"error_code":"TASK_EXCEPTION","message":"fail","data":null}}'
-        # 17 base + 1 result + 1 failed_reason
+        # 18 base + 1 result + 1 failed_reason
         row = (
             'task-abc', 'compute', 'FAILED', 'default', 100,
             0, 0, None, now, now, None,
             now, None, now, 'host-1', 9999, 'worker-0',
-            result_json, 'Something broke',
+            'TASK_EXCEPTION', result_json, 'Something broke',
         )
         self._setup_task_info_session(broker, row=row)
 

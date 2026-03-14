@@ -38,3 +38,11 @@ TASK_TERMINAL_STATES: frozenset[TaskStatus] = frozenset(
         TaskStatus.CANCELLED,
     }
 )
+
+
+class TaskAttemptOutcome(str, Enum):
+    """Outcome of a single task execution attempt."""
+
+    COMPLETED = 'COMPLETED'
+    FAILED = 'FAILED'
+    WORKER_FAILURE = 'WORKER_FAILURE'

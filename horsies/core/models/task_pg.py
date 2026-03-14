@@ -5,7 +5,10 @@ from sqlalchemy import (
     String,
     Text,
     Boolean,
+    BigInteger,
+    CheckConstraint,
     DateTime,
+    ForeignKey,
     Integer,
     Index,
     Enum as SQLAlchemyEnum,
@@ -104,6 +107,7 @@ class TaskModel(Base):
     # Results and error handling
     result: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     failed_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_code: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Task claiming and lifecycle
     claimed: Mapped[bool] = mapped_column(
@@ -156,6 +160,49 @@ class TaskModel(Base):
         default=datetime.now(timezone.utc),
         server_default=text('NOW()'),
         onupdate=datetime.now(timezone.utc),
+    )
+
+
+class TaskAttemptModel(Base):
+    """Immutable per-attempt history for task executions."""
+
+    __tablename__ = 'horsies_task_attempts'
+    __table_args__ = (
+        Index('uq_horsies_task_attempts_task_attempt', 'task_id', 'attempt', unique=True),
+        CheckConstraint(
+            "outcome IN ('COMPLETED', 'FAILED', 'WORKER_FAILURE')",
+            name='ck_horsies_task_attempts_outcome',
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey('horsies_tasks.id', ondelete='CASCADE'),
+        nullable=False,
+    )
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    will_retry: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=sa_false(),
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+    finished_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+    error_code: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    failed_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    worker_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    worker_hostname: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    worker_pid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    worker_process_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=datetime.now(timezone.utc),
+        server_default=text('NOW()'),
     )
 
 
