@@ -56,7 +56,7 @@ match validate_order.send(order):
         print(f"Send failed: {send_err.code} - {send_err.message}")
 ```
 
-`timeout_ms` controls the maximum wait time. If the task does not complete within the timeout, `get()` returns `TaskResult(err=TaskError(error_code=LibraryErrorCode.WAIT_TIMEOUT, ...))`. The task may still be running.
+`timeout_ms` controls the maximum wait time. If the task does not complete within the timeout, `get()` returns `TaskResult(err=TaskError(error_code=RetrievalCode.WAIT_TIMEOUT, ...))`. The task may still be running.
 
 ## Async Usage
 

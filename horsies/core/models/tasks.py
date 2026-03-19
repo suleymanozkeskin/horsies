@@ -34,76 +34,186 @@ class _Unset:
     __slots__ = ()
 
 
-class LibraryErrorCode(str, Enum):
-    """
-    Library-defined error codes for infrastructure/runtime failures.
+class OperationalErrorCode(str, Enum):
+    """Something actually broke in execution.
 
-    These enumerate errors produced by the library runtime itself. User code
-    should define domain-specific error codes as strings (e.g., "TOO_LARGE")
-    or custom Enums for their own error categories.
-
-    Categories:
-    - Execution errors: UNHANDLED_EXCEPTION, TASK_EXCEPTION, WORKER_CRASHED
-    - Retrieval errors: WAIT_TIMEOUT, TASK_NOT_FOUND, TASK_CANCELLED, RESULT_NOT_AVAILABLE,
-      RESULT_DESERIALIZATION_ERROR
-    - Broker errors: BROKER_ERROR
-    - Worker errors: WORKER_RESOLUTION_ERROR, WORKER_SERIALIZATION_ERROR
-    - Validation errors: RETURN_TYPE_MISMATCH, PYDANTIC_HYDRATION_ERROR
-    - Lifecycle errors: SEND_SUPPRESSED
-    - Workflow errors: UPSTREAM_SKIPPED, WORKFLOW_SUCCESS_CASE_NOT_MET,
-      WORKFLOW_ENQUEUE_FAILED
+    Typical caller behavior: log, retry conditionally, inspect infra/runtime failure.
     """
 
-    # Execution errors
     UNHANDLED_EXCEPTION = 'UNHANDLED_EXCEPTION'
     TASK_EXCEPTION = 'TASK_EXCEPTION'
     WORKER_CRASHED = 'WORKER_CRASHED'
-
-    # Retrieval errors (from handle.get() / get_async() / result_for())
-    WAIT_TIMEOUT = 'WAIT_TIMEOUT'
-    TASK_NOT_FOUND = 'TASK_NOT_FOUND'
-    TASK_CANCELLED = 'TASK_CANCELLED'
-    RESULT_NOT_AVAILABLE = 'RESULT_NOT_AVAILABLE'
-    RESULT_NOT_READY = 'RESULT_NOT_READY'
-    RESULT_DESERIALIZATION_ERROR = 'RESULT_DESERIALIZATION_ERROR'
-
-    # Broker errors
     BROKER_ERROR = 'BROKER_ERROR'
-
-    # Worker errors
     WORKER_RESOLUTION_ERROR = 'WORKER_RESOLUTION_ERROR'
     WORKER_SERIALIZATION_ERROR = 'WORKER_SERIALIZATION_ERROR'
+    RESULT_DESERIALIZATION_ERROR = 'RESULT_DESERIALIZATION_ERROR'
+    WORKFLOW_ENQUEUE_FAILED = 'WORKFLOW_ENQUEUE_FAILED'
+    SUBWORKFLOW_LOAD_FAILED = 'SUBWORKFLOW_LOAD_FAILED'
 
-    # Validation errors
+
+class ContractCode(str, Enum):
+    """A code/typing/usage contract was violated.
+
+    Typical caller behavior: fix code or type assumptions, do not blindly retry.
+    """
+
     RETURN_TYPE_MISMATCH = 'RETURN_TYPE_MISMATCH'
     PYDANTIC_HYDRATION_ERROR = 'PYDANTIC_HYDRATION_ERROR'
-
-    # Lifecycle errors (internal suppression during import/check/TASKLIB_SUPPRESS_SENDS=1)
-    SEND_SUPPRESSED = 'SEND_SUPPRESSED'
-
-    # Workflow errors
-    WORKFLOW_NOT_FOUND = 'WORKFLOW_NOT_FOUND'
-    UPSTREAM_SKIPPED = 'UPSTREAM_SKIPPED'
     WORKFLOW_CTX_MISSING_ID = 'WORKFLOW_CTX_MISSING_ID'
+
+
+class RetrievalCode(str, Enum):
+    """The caller cannot get the value right now or cannot locate it.
+
+    Typical caller behavior: wait, poll again, handle missing value as normal flow.
+    """
+
+    WAIT_TIMEOUT = 'WAIT_TIMEOUT'
+    TASK_NOT_FOUND = 'TASK_NOT_FOUND'
+    WORKFLOW_NOT_FOUND = 'WORKFLOW_NOT_FOUND'
+    RESULT_NOT_AVAILABLE = 'RESULT_NOT_AVAILABLE'
+    RESULT_NOT_READY = 'RESULT_NOT_READY'
+
+
+class OutcomeCode(str, Enum):
+    """A non-bug execution outcome or control-flow result.
+
+    Typical caller behavior: branch on outcome, continue control flow.
+    """
+
+    TASK_CANCELLED = 'TASK_CANCELLED'
+    WORKFLOW_PAUSED = 'WORKFLOW_PAUSED'
+    WORKFLOW_FAILED = 'WORKFLOW_FAILED'
+    WORKFLOW_CANCELLED = 'WORKFLOW_CANCELLED'
+    UPSTREAM_SKIPPED = 'UPSTREAM_SKIPPED'
+    SUBWORKFLOW_FAILED = 'SUBWORKFLOW_FAILED'
     WORKFLOW_SUCCESS_CASE_NOT_MET = 'WORKFLOW_SUCCESS_CASE_NOT_MET'
-    WORKFLOW_ENQUEUE_FAILED = 'WORKFLOW_ENQUEUE_FAILED'
+
+
+type BuiltInTaskCode = (
+    OperationalErrorCode
+    | ContractCode
+    | RetrievalCode
+    | OutcomeCode
+)
+
+BUILTIN_CODE_REGISTRY: dict[str, BuiltInTaskCode] = {}
+"""Maps every built-in error code string to its canonical enum member.
+
+Used by ``TaskError._coerce_error_code`` for round-trip coercion and by
+``horsies check`` for reserved-code collision detection.
+"""
+for _family in (
+    OperationalErrorCode,
+    ContractCode,
+    RetrievalCode,
+    OutcomeCode,
+):
+    for _member in _family:
+        if _member.value in BUILTIN_CODE_REGISTRY:
+            _existing = BUILTIN_CODE_REGISTRY[_member.value]
+            raise RuntimeError(
+                f'Duplicate built-in error code {_member.value!r}: '
+                f'{type(_existing).__name__}.{_existing.name} and '
+                f'{type(_member).__name__}.{_member.name}',
+            )
+        BUILTIN_CODE_REGISTRY[_member.value] = _member
 
 
 class TaskError(BaseModel):
     """
     The error payload for a TaskResult.
+
     A task error can be returned by:
-    - a task function (e.g. `return TaskResult(err=TaskError(...))`)
+    - a task function (e.g. ``return TaskResult(err=TaskError(...))``)
     - library failure (e.g. execution error, serialization error, etc.)
+
+    ``error_code`` carries one of four built-in families
+    (``OperationalErrorCode``, ``ContractCode``, ``RetrievalCode``,
+    ``OutcomeCode``) or a plain user-defined ``str``.
+
+    **Construction rule**: built-in code values must be passed as enum
+    members, not raw strings.  ``TaskError(error_code="BROKER_ERROR")``
+    raises ``ValueError``.  Use ``OperationalErrorCode.BROKER_ERROR``
+    instead.
+
+    **Rehydration**: use ``TaskError.from_persisted(data)`` or
+    ``TaskError.from_persisted_json(raw)`` to restore payloads from
+    JSON / DB storage.  Those paths coerce reserved strings back to
+    enum members.
+
+    **Important**: ``model_validate()`` and ``model_validate_json()``
+    are not supported for rehydrating persisted payloads that contain
+    built-in error code strings.  They enforce the strict construction
+    rule and will reject reserved strings.  Always use
+    ``from_persisted()`` / ``from_persisted_json()`` for stored data.
     """
 
     model_config = {'arbitrary_types_allowed': True}
 
     exception: Optional[dict[str, Any] | BaseException] = None
-    # Library internal errors use LibraryErrorCode; user errors use str.
-    error_code: Optional[Union[LibraryErrorCode, str]] = None
+    error_code: Optional[Union[BuiltInTaskCode, str]] = None
     data: Optional[Any] = None
     message: Optional[str] = None
+
+    @field_validator('error_code', mode='before')
+    @classmethod
+    def _reject_reserved_strings(cls, value: object) -> object:
+        """Reject string values that match reserved built-in codes.
+
+        Built-in codes must be passed as enum members from the four
+        families, not as raw strings or user-defined str-Enum subclasses.
+        Rehydration from persisted data should use ``from_persisted()``
+        or ``from_persisted_json()`` which coerce instead of rejecting.
+        """
+        # Allow built-in BuiltInTaskCode enum members (they are str subclasses).
+        # Reject any other str-like value that matches a reserved code,
+        # including plain str, str subclasses, and foreign str-Enum types.
+        _BUILTIN_FAMILIES = (
+            OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode,
+        )
+        if isinstance(value, _BUILTIN_FAMILIES):
+            return value
+        if isinstance(value, str) and value in BUILTIN_CODE_REGISTRY:
+            builtin = BUILTIN_CODE_REGISTRY[value]
+            raise ValueError(
+                f"'{value}' is a reserved built-in error code "
+                f"({type(builtin).__name__}.{builtin.name}). "
+                f"Pass the enum member directly, or use "
+                f"TaskError.from_persisted() for stored payloads.",
+            )
+        return value
+
+    @classmethod
+    def from_persisted(cls, data: dict[str, Any]) -> 'TaskError':
+        """Restore a TaskError from a persisted dict payload.
+
+        Coerces reserved built-in strings back to enum members, then
+        validates all fields through Pydantic.  Malformed payloads
+        raise ``ValidationError`` just like ``model_validate()``.
+        """
+        coerced = dict(data)
+        raw_code = coerced.get('error_code')
+        if isinstance(raw_code, str) and raw_code in BUILTIN_CODE_REGISTRY:
+            coerced['error_code'] = BUILTIN_CODE_REGISTRY[raw_code]
+        # Use model_construct only for the coerced error_code, then validate.
+        # We pass the already-coerced enum member so _reject_reserved_strings
+        # sees an Enum, not a plain str.
+        return cls.model_validate(coerced)
+
+    @classmethod
+    def from_persisted_json(cls, raw: str) -> 'TaskError':
+        """Restore a TaskError from a persisted JSON string.
+
+        Coerces reserved built-in strings back to enum members, then
+        validates all fields through Pydantic.
+        """
+        import json
+
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError(f'Expected dict, got {type(data).__name__}')
+        return cls.from_persisted(data)
 
 
 class SubWorkflowError(TaskError):
@@ -307,7 +417,7 @@ class RetryPolicy(BaseModel):
     backoff_strategy: Literal['fixed', 'exponential'] = 'fixed'
     jitter: bool = True
     auto_retry_for: Annotated[
-        list[Union[str, LibraryErrorCode]],
+        list[Union[str, BuiltInTaskCode]],
         Field(min_length=1),
     ]
 
@@ -338,7 +448,7 @@ class RetryPolicy(BaseModel):
     def validate_error_code_fields(self) -> Self:
         """Validate that auto_retry_for entries are valid error code strings."""
         for entry in self.auto_retry_for:
-            code = entry.value if isinstance(entry, LibraryErrorCode) else entry
+            code = entry.value if isinstance(entry, Enum) else entry
             err = validate_error_code_string(code, field_name='auto_retry_for')
             if err is not None:
                 raise ValueError(err)
@@ -350,7 +460,7 @@ class RetryPolicy(BaseModel):
         cls,
         intervals: list[int],
         *,
-        auto_retry_for: list[Union[str, LibraryErrorCode]],
+        auto_retry_for: list[Union[str, BuiltInTaskCode]],
         jitter: bool = True,
     ) -> 'RetryPolicy':
         """Create a fixed backoff policy where intervals length defines max_retries."""
@@ -368,7 +478,7 @@ class RetryPolicy(BaseModel):
         base_seconds: int,
         *,
         max_retries: int,
-        auto_retry_for: list[Union[str, LibraryErrorCode]],
+        auto_retry_for: list[Union[str, BuiltInTaskCode]],
         jitter: bool = True,
     ) -> 'RetryPolicy':
         """Create an exponential backoff policy using a single base interval.

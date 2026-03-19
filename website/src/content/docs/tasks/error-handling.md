@@ -191,7 +191,7 @@ This pattern only runs when the downstream task actually executes. With `join="a
 Prefer explicit returns over raising exceptions:
 
 ```python
-from horsies import LibraryErrorCode, Ok, Err
+from horsies import RetrievalCode, Ok, Err
 from instance import my_task
 
 def process_task() -> str | None:
@@ -207,11 +207,11 @@ def process_task() -> str | None:
     if result.is_err():
         error = result.err_value
         match error.error_code:
-            case LibraryErrorCode.WAIT_TIMEOUT:
+            case RetrievalCode.WAIT_TIMEOUT:
                 # Task may still be running
                 # check status again using task id if you need absolute decisions
                 return None
-            case LibraryErrorCode.TASK_NOT_FOUND:
+            case RetrievalCode.TASK_NOT_FOUND:
                 return None
             case _:
                 # Pass to centralized handler

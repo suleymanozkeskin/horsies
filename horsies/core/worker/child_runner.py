@@ -27,7 +27,7 @@ from horsies.core.codec.serde import (
     SerializationError,
     task_result_from_json,
 )
-from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
+from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode
 from horsies.core.types.result import is_err
 
 
@@ -39,7 +39,7 @@ def _serialization_error_response(
     logger.error(f'Serialization error for task {task_name}: {error}')
     tr: TaskResult[None, TaskError] = TaskResult(
         err=TaskError(
-            error_code=LibraryErrorCode.WORKER_SERIALIZATION_ERROR,
+            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
             message=str(error),
             data={'task_name': task_name},
         ),
@@ -593,7 +593,7 @@ def _run_task_entry(
             logger.error(f'Failed to resolve task {task_name}: {e}')
             tr: TaskResult[Any, TaskError] = TaskResult(
                 err=TaskError(
-                    error_code=LibraryErrorCode.WORKER_RESOLUTION_ERROR,
+                    error_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR,
                     message=f'Failed to resolve {task_name}: {type(e).__name__}: {e}',
                     data={'task_name': task_name},
                 )
@@ -718,7 +718,7 @@ def _run_task_entry(
         if out is None:
             tr: TaskResult[Any, TaskError] = TaskResult(
                 err=TaskError(
-                    error_code=LibraryErrorCode.TASK_EXCEPTION,
+                    error_code=OperationalErrorCode.TASK_EXCEPTION,
                     message=f'Task {task_name} returned None instead of TaskResult or value',
                     data={'task_name': task_name},
                 ),
@@ -736,7 +736,7 @@ def _run_task_entry(
         # If the task raised an exception, we wrap it in a TaskError
         tr = TaskResult(
             err=TaskError(
-                error_code=LibraryErrorCode.TASK_EXCEPTION,
+                error_code=OperationalErrorCode.TASK_EXCEPTION,
                 message=f'{type(e).__name__}: {e}',
                 data={'task_name': task_name},
                 exception=e,  # pydantic will accept and we flatten on serialization if needed elsewhere

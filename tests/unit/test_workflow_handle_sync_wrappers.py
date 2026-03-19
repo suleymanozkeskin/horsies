@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
+from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.models.workflow.handle_types import HandleErrorCode
 from horsies.core.types.result import is_ok, is_err
@@ -184,7 +184,7 @@ class TestSyncTaskResultCallFoldStrategy:
             result = handle.get(timeout_ms=100)
 
         assert result.is_err()
-        assert result.unwrap_err().error_code == LibraryErrorCode.BROKER_ERROR
+        assert result.unwrap_err().error_code == OperationalErrorCode.BROKER_ERROR
         assert 'Loop runner failed' in (result.unwrap_err().message or '')
 
     def test_result_for_loop_runner_failure_returns_broker_error(self) -> None:
@@ -204,7 +204,7 @@ class TestSyncTaskResultCallFoldStrategy:
             result = handle.result_for(mock_node)
 
         assert result.is_err()
-        assert result.unwrap_err().error_code == LibraryErrorCode.BROKER_ERROR
+        assert result.unwrap_err().error_code == OperationalErrorCode.BROKER_ERROR
 
     def test_get_unexpected_exception_returns_broker_error(self) -> None:
         """get() returns TaskResult(err=BROKER_ERROR) on unexpected exception."""
@@ -219,7 +219,7 @@ class TestSyncTaskResultCallFoldStrategy:
             result = handle.get(timeout_ms=100)
 
         assert result.is_err()
-        assert result.unwrap_err().error_code == LibraryErrorCode.BROKER_ERROR
+        assert result.unwrap_err().error_code == OperationalErrorCode.BROKER_ERROR
         assert 'Unexpected error' in (result.unwrap_err().message or '')
 
     def test_fold_sync_call_propagates_task_result(self) -> None:

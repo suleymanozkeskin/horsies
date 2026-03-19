@@ -70,19 +70,36 @@ TaskResult(err=TaskError(...))    # failure
 
 ### Runtime return-type validation
 
-The task wrapper validates the returned value against declared `T` using Pydantic's `TypeAdapter`. A mismatch produces `TaskResult(err=TaskError(error_code=LibraryErrorCode.RETURN_TYPE_MISMATCH))` — does not raise. Returning `None` instead of `TaskResult` produces `TASK_EXCEPTION`.
+The task wrapper validates the returned value against declared `T` using Pydantic's `TypeAdapter`. A mismatch produces `TaskResult(err=TaskError(error_code=ContractCode.RETURN_TYPE_MISMATCH))` — does not raise. Returning `None` instead of `TaskResult` produces `TASK_EXCEPTION`.
 
 ## `TaskError`
 
 ```python
 class TaskError(BaseModel):
-    error_code: LibraryErrorCode | str | None = None
+    error_code: BuiltInTaskCode | str | None = None
     message: str | None = None
     data: Any | None = None
     exception: dict[str, Any] | BaseException | None = None
 ```
 
 All fields optional. Domain errors typically set `error_code` + `message`. `data` carries structured context. `exception` populated by the library for unhandled exceptions.
+
+**Construction rule**: reserved built-in code values must be passed as enum members, not raw strings.
+
+```python
+TaskError(error_code=OperationalErrorCode.BROKER_ERROR)  # OK
+TaskError(error_code="MY_CUSTOM_CODE")                   # OK
+TaskError(error_code="BROKER_ERROR")                     # ValueError — reserved
+```
+
+**Rehydration from stored payloads**: use `from_persisted()` / `from_persisted_json()` instead of `model_validate()`:
+
+```python
+TaskError.from_persisted({"error_code": "BROKER_ERROR", "message": "..."})
+TaskError.from_persisted_json(raw_json)
+```
+
+These coerce reserved strings back to enum members. `model_validate()` / `model_validate_json()` are not supported for persisted payloads containing built-in strings.
 
 ### `SubWorkflowError`
 
@@ -96,43 +113,62 @@ match result.err:
         ...  # regular task error
 ```
 
-## `LibraryErrorCode`
+## Error Code Families
 
-All values grouped by category:
+The old flat `LibraryErrorCode` enum has been split into 4 families. The umbrella type alias is `BuiltInTaskCode`.
 
-**Execution (task ran, something went wrong):**
+### `OperationalErrorCode`
+
+Infra-level failures during task execution, brokering, or worker processing:
+
 - `UNHANDLED_EXCEPTION` — uncaught exception wrapped by library
 - `TASK_EXCEPTION` — task returned `None` or raised a checked exception
 - `WORKER_CRASHED` — worker process died during execution
-
-**Retrieval (from `handle.get()`):**
-- `WAIT_TIMEOUT` — `get()` timed out; task may still be running, not cached, re-pollable
-- `TASK_NOT_FOUND` — task ID does not exist
-- `TASK_CANCELLED` — task was cancelled
-- `RESULT_NOT_AVAILABLE` — result cache never set
-- `RESULT_NOT_READY` — result not ready yet
-- `RESULT_DESERIALIZATION_ERROR` — stored result JSON is corrupt
-
-**Broker:**
 - `BROKER_ERROR` — DB/broker failure during result retrieval
-
-**Worker:**
 - `WORKER_RESOLUTION_ERROR` — task name not found in registry
 - `WORKER_SERIALIZATION_ERROR` — failed to serialize/deserialize arguments
+- `RESULT_DESERIALIZATION_ERROR` — stored result JSON is corrupt
+- `WORKFLOW_ENQUEUE_FAILED` — workflow node failed during enqueue
+- `SUBWORKFLOW_LOAD_FAILED` — sub-workflow definition could not be loaded
 
-**Validation:**
+### `ContractCode`
+
+Violations of the declared API contract between task author and library:
+
 - `RETURN_TYPE_MISMATCH` — returned value doesn't match declared type
 - `PYDANTIC_HYDRATION_ERROR` — return value could not be rehydrated to declared type
-
-**Lifecycle:**
-- `SEND_SUPPRESSED` — send called during worker import/discovery
-
-**Workflow:**
-- `WORKFLOW_NOT_FOUND` — workflow ID does not exist
-- `UPSTREAM_SKIPPED` — upstream task was skipped
 - `WORKFLOW_CTX_MISSING_ID` — workflow context missing required ID
+
+### `RetrievalCode`
+
+Results from `handle.get()` / `handle.result_for()` when data is not (yet) available:
+
+- `WAIT_TIMEOUT` — `get()` timed out; task may still be running, not cached, re-pollable
+- `TASK_NOT_FOUND` — task ID does not exist
+- `WORKFLOW_NOT_FOUND` — workflow ID does not exist
+- `RESULT_NOT_AVAILABLE` — result cache never set
+- `RESULT_NOT_READY` — result not ready yet
+
+### `OutcomeCode`
+
+Terminal lifecycle outcomes for tasks and workflows:
+
+- `TASK_CANCELLED` — task was cancelled
+- `WORKFLOW_PAUSED` — workflow is paused
+- `WORKFLOW_FAILED` — workflow has failed
+- `WORKFLOW_CANCELLED` — workflow was cancelled
+- `UPSTREAM_SKIPPED` — upstream task was skipped
+- `SUBWORKFLOW_FAILED` — sub-workflow has failed
 - `WORKFLOW_SUCCESS_CASE_NOT_MET` — success condition not satisfied
-- `WORKFLOW_ENQUEUE_FAILED` — workflow node failed during enqueue
+
+### Reserved Built-In Codes
+
+All built-in code string values are globally reserved. User-defined error codes must be plain `str` and must not collide with any built-in value.
+
+- `BUILTIN_CODE_REGISTRY` (from `horsies.core.models.tasks`) maps every reserved string to its canonical enum member
+- `horsies check` reports `E212` (`CHECK_RESERVED_CODE_COLLISION`) when `exception_mapper` values or `default_unhandled_error_code` collide with a reserved code
+- The library default `UNHANDLED_EXCEPTION` for `default_unhandled_error_code` is intentionally built-in and is not flagged
+- User-defined `str, Enum` types degrade to plain `str` after JSON round-trip — only built-in families preserve enum identity
 
 ## `TaskFunction[P, T]`
 
@@ -316,7 +352,7 @@ Always use the class methods:
 RetryPolicy.fixed(
     intervals: list[int],                              # seconds, e.g. [60, 300, 900]
     *,
-    auto_retry_for: list[str | LibraryErrorCode],      # required
+    auto_retry_for: list[str | BuiltInTaskCode],        # required
     jitter: bool = True,
 )
 
@@ -325,7 +361,7 @@ RetryPolicy.exponential(
     base_seconds: int,
     *,
     max_retries: int,
-    auto_retry_for: list[str | LibraryErrorCode],      # required
+    auto_retry_for: list[str | BuiltInTaskCode],        # required
     jitter: bool = True,
 )
 ```
@@ -344,7 +380,7 @@ RetryPolicy.exponential(
 ### `auto_retry_for` valid values
 
 - User-defined domain codes: `"RATE_LIMITED"`, `"DEADLOCK"`, `"SERVICE_UNAVAILABLE"`
-- `LibraryErrorCode` members: `LibraryErrorCode.UNHANDLED_EXCEPTION`, etc.
+- `BuiltInTaskCode` members: `OperationalErrorCode.UNHANDLED_EXCEPTION`, `RetrievalCode.WAIT_TIMEOUT`, etc.
 - Plain strings matching `^[A-Z][A-Z0-9_]*$`
 
 Retries only trigger when the error code on the stored result matches and `retry_count < max_retries`.
@@ -505,7 +541,7 @@ def t() -> TaskResult[str, TaskError]: ...
 
 ```python
 result = handle.get(timeout_ms=5000)
-if result.is_err() and result.err_value.error_code == LibraryErrorCode.WAIT_TIMEOUT:
+if result.is_err() and result.err_value.error_code == RetrievalCode.WAIT_TIMEOUT:
     # Task may still be running. NOT cached — calling get() again will re-poll.
     check_again_later(handle.task_id)
 ```
@@ -535,7 +571,9 @@ from horsies import (
     # App and config
     Horsies, AppConfig, PostgresConfig,
     # Task result types
-    TaskResult, TaskError, LibraryErrorCode, SubWorkflowError, TaskInfo, TaskAttemptInfo,
+    TaskResult, TaskError, SubWorkflowError, TaskInfo, TaskAttemptInfo,
+    # Error code families
+    BuiltInTaskCode, OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode,
     # Retry
     RetryPolicy,
     # Send types

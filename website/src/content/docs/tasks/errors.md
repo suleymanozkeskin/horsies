@@ -2,7 +2,7 @@
 title: Errors Reference
 summary: Exhaustive reference of all error codes and types in horsies.
 related: [error-handling, ../../concepts/result-handling]
-tags: [errors, TaskError, LibraryErrorCode, ErrorCode, reference]
+tags: [errors, TaskError, BuiltInTaskCode, ErrorCode, reference]
 ---
 
 # Errors Reference
@@ -11,7 +11,7 @@ Horsies has two error systems: **runtime errors** returned in `TaskResult`, and 
 
 ## Runtime Errors (TaskResult)
 
-Runtime errors are returned via `TaskResult[T, TaskError]`. The `TaskError.error_code` field contains either a `LibraryErrorCode` or a user-defined string.
+Runtime errors are returned via `TaskResult[T, TaskError]`. The `TaskError.error_code` field contains either a `BuiltInTaskCode` member or a user-defined string.
 
 When a task reaches a terminal `FAILED` state with a `TaskResult(err=TaskError(...))`, the `error_code` is persisted to `horsies_tasks.error_code` for queryability. This column is `NULL` for successful tasks, non-terminal tasks, and worker-level failures that never produced a `TaskResult`. Access it via `TaskInfo.error_code` from `handle.info()`.
 
@@ -21,26 +21,42 @@ Each execution attempt is also recorded in `horsies_task_attempts` with per-atte
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `error_code` | `LibraryErrorCode \| str \| None` | Library or domain error code |
+| `error_code` | `BuiltInTaskCode \| str \| None` | Library or domain error code |
 | `message` | `str \| None` | Human-readable description |
 | `data` | `Any \| None` | Additional context (task_id, etc.) |
 | `exception` | `dict[str, Any] \| BaseException \| None` | Original exception if applicable |
 
-### LibraryErrorCode
+### BuiltInTaskCode (4-Family Split)
 
-All library-defined error codes. User code should handle these explicitly.
+All library-defined error codes are grouped into four families. The umbrella type alias `BuiltInTaskCode` is the union of all four enums. User code should handle these explicitly.
 
-#### Execution Errors
+#### OperationalErrorCode
 
-Errors from task execution.
+Errors from task execution, broker, and worker internals.
 
 | Code | Description | Auto-Retry? |
 | ---- | ----------- | ----------- |
 | `UNHANDLED_EXCEPTION` | Uncaught exception in task code, wrapped to `UNHANDLED_EXCEPTION` by library  | Yes, if in `auto_retry_for` |
 | `TASK_EXCEPTION` | Task raised exception or returned invalid value | Yes, if in `auto_retry_for` |
 | `WORKER_CRASHED` | Worker process died during execution | Yes, if in `auto_retry_for` |
+| `BROKER_ERROR` | Database or broker failure during operation | No |
+| `WORKER_RESOLUTION_ERROR` | Failed to resolve task by name | No |
+| `WORKER_SERIALIZATION_ERROR` | Failed to serialize/deserialize task data | No |
+| `RESULT_DESERIALIZATION_ERROR` | Stored result JSON is corrupt or could not be deserialized | No |
+| `WORKFLOW_ENQUEUE_FAILED` | Workflow node failed after READY->ENQUEUED transition during enqueue/build | No |
+| `SUBWORKFLOW_LOAD_FAILED` | Subworkflow definition could not be loaded | No |
 
-#### Retrieval Errors
+#### ContractCode
+
+Errors from type/schema validation and structural contracts.
+
+| Code | Description | Auto-Retry? |
+| ---- | ----------- | ----------- |
+| `RETURN_TYPE_MISMATCH` | Task return type doesn't match declaration | No |
+| `PYDANTIC_HYDRATION_ERROR` | Task succeeded but its return value could not be rehydrated to the declared type | No |
+| `WORKFLOW_CTX_MISSING_ID` | Workflow context is missing required ID | No |
+
+#### RetrievalCode
 
 Errors from `handle.get()` / `get_async()`. These indicate issues retrieving the result, not task execution failures.
 
@@ -48,44 +64,23 @@ Errors from `handle.get()` / `get_async()`. These indicate issues retrieving the
 | ---- | ----------- | ----------- |
 | `WAIT_TIMEOUT` | `get()` timed out; task may still be running | No |
 | `TASK_NOT_FOUND` | Task ID doesn't exist in database | No |
-| `TASK_CANCELLED` | Task was cancelled before completion | No |
+| `WORKFLOW_NOT_FOUND` | Workflow ID doesn't exist in database | No |
 | `RESULT_NOT_AVAILABLE` | Result cache was never set | No |
 | `RESULT_NOT_READY` | Result not yet available; task is still running | No |
-| `RESULT_DESERIALIZATION_ERROR` | Stored result JSON is corrupt or could not be deserialized | No |
 
-#### Broker Errors
+#### OutcomeCode
 
-Errors from broker/database operations.
-
-| Code | Description | Auto-Retry? |
-| ---- | ----------- | ----------- |
-| `BROKER_ERROR` | Database or broker failure during operation | No |
-
-#### Worker Errors
-
-Errors from worker internals.
+Terminal outcome codes for tasks and workflows.
 
 | Code | Description | Auto-Retry? |
 | ---- | ----------- | ----------- |
-| `WORKER_RESOLUTION_ERROR` | Failed to resolve task by name | No |
-| `WORKER_SERIALIZATION_ERROR` | Failed to serialize/deserialize task data | No |
-
-#### Validation Errors
-
-Errors from type/schema validation.
-
-| Code | Description | Auto-Retry? |
-| ---- | ----------- | ----------- |
-| `RETURN_TYPE_MISMATCH` | Task return type doesn't match declaration | No |
-| `PYDANTIC_HYDRATION_ERROR` | Task succeeded but its return value could not be rehydrated to the declared type | No |
-
-#### Lifecycle Errors
-
-Errors from task lifecycle management.
-
-| Code | Description | Auto-Retry? |
-| ---- | ----------- | ----------- |
-| `SEND_SUPPRESSED` | Task send was suppressed due to prevent import side effects | No |
+| `TASK_CANCELLED` | Task was cancelled before completion | No |
+| `WORKFLOW_PAUSED` | Workflow was paused | No |
+| `WORKFLOW_FAILED` | Workflow failed | No |
+| `WORKFLOW_CANCELLED` | Workflow was cancelled | No |
+| `UPSTREAM_SKIPPED` | Upstream task in workflow was skipped | No |
+| `SUBWORKFLOW_FAILED` | Subworkflow failed | No |
+| `WORKFLOW_SUCCESS_CASE_NOT_MET` | Workflow success condition was not satisfied | No |
 
 ### Send Errors (TaskSendResult)
 
@@ -115,15 +110,12 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 
 #### Workflow Errors
 
-Errors specific to workflow execution.
+Workflow-specific error codes are distributed across the four families above:
 
-| Code | Description | Auto-Retry? |
-| ---- | ----------- | ----------- |
-| `UPSTREAM_SKIPPED` | Upstream task in workflow was skipped | No |
-| `WORKFLOW_CTX_MISSING_ID` | Workflow context is missing required ID | No |
-| `WORKFLOW_SUCCESS_CASE_NOT_MET` | Workflow success condition was not satisfied | No |
-| `WORKFLOW_NOT_FOUND` | Workflow ID doesn't exist in database | No |
-| `WORKFLOW_ENQUEUE_FAILED` | Workflow node failed after READY→ENQUEUED transition during enqueue/build | No |
+- **OperationalErrorCode**: `WORKFLOW_ENQUEUE_FAILED`, `SUBWORKFLOW_LOAD_FAILED`
+- **ContractCode**: `WORKFLOW_CTX_MISSING_ID`
+- **RetrievalCode**: `WORKFLOW_NOT_FOUND`
+- **OutcomeCode**: `WORKFLOW_PAUSED`, `WORKFLOW_FAILED`, `WORKFLOW_CANCELLED`, `UPSTREAM_SKIPPED`, `SUBWORKFLOW_FAILED`, `WORKFLOW_SUCCESS_CASE_NOT_MET`
 
 ### User-Defined Error Codes
 
@@ -161,7 +153,7 @@ def call_api(url: str) -> TaskResult[dict, TaskError]:
 
 Startup errors are **blocking exceptions** raised during app initialization, workflow validation, or task registration. If a startup error occurs, the worker or scheduler will fail to start and will not accept tasks.
 
-These errors use `ErrorCode` (not `LibraryErrorCode`) and indicate structural or configuration issues that must be resolved before the application can run.
+These errors use `ErrorCode` (not `BuiltInTaskCode`) and indicate structural or configuration issues that must be resolved before the application can run.
 
 ### Validating with `horsies check`
 
@@ -170,6 +162,46 @@ Use the `horsies check` command to validate your configuration, task registry, a
 ```bash
 horsies check myapp.instance:app
 ```
+
+### Reserved Built-In Code Enforcement
+
+All string values used by the built-in error code families (`OperationalErrorCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`) are **reserved**. User-defined error codes must not collide with these values.
+
+**Runtime enforcement**: `TaskError(error_code="BROKER_ERROR")` raises `ValueError` at construction time. Built-in codes must be passed as enum members:
+
+```python
+TaskError(error_code=OperationalErrorCode.BROKER_ERROR)  # correct
+TaskError(error_code="BROKER_ERROR")                     # ValueError
+```
+
+To restore `TaskError` from stored JSON/DB payloads, use `TaskError.from_persisted(data)` or `TaskError.from_persisted_json(raw)`. These coerce reserved strings back to enum members. Do not use `model_validate()` or `model_validate_json()` for persisted payloads containing built-in code strings.
+
+`horsies check` detects reserved-code collisions in statically visible configuration:
+
+- **`exception_mapper` values** — if any mapped error code string matches a reserved built-in code, `horsies check` reports `E212`.
+- **`default_unhandled_error_code`** — if set to a reserved built-in code other than the library default `UNHANDLED_EXCEPTION`, `horsies check` reports `E212`.
+
+The library default `UNHANDLED_EXCEPTION` is intentionally a built-in code and is not flagged.
+
+Example collision that `horsies check` catches:
+
+```python
+app = Horsies(
+    config=AppConfig(
+        broker=PostgresConfig(database_url='postgresql+psycopg://...'),
+        # E212: 'BROKER_ERROR' collides with OperationalErrorCode.BROKER_ERROR
+        exception_mapper={ValueError: 'BROKER_ERROR'},
+    ),
+)
+```
+
+Use a custom string that does not match any built-in code:
+
+```python
+exception_mapper={ValueError: 'VALIDATION_FAILED'}  # OK — not reserved
+```
+
+The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGISTRY` from `horsies.core.models.tasks`.
 
 ### ErrorCode Categories
 
@@ -240,6 +272,7 @@ horsies check myapp.instance:app
 | E209 | `CONFIG_INVALID_EXCEPTION_MAPPER` | Invalid exception mapper |
 | E210 | `MODULE_EXEC_ERROR` | Module raised an error during import |
 | E211 | `BROKER_INIT_FAILED` | Broker failed to initialize |
+| E212 | `CHECK_RESERVED_CODE_COLLISION` | User config value collides with a reserved built-in error code |
 
 ### Registry (E300-E399)
 

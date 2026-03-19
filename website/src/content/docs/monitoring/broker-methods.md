@@ -48,7 +48,7 @@ Sync variant: `get_result(...)` (runs the async version in a background loop).
 result = await broker.get_result_async("task-uuid-here", timeout_ms=5000)
 if result.is_ok():
     print(f"Result: {result.ok_value}")
-elif result.err_value.error_code == LibraryErrorCode.WAIT_TIMEOUT:
+elif result.err_value.error_code == RetrievalCode.WAIT_TIMEOUT:
     print("Still running, try again later")
 
 # Sync

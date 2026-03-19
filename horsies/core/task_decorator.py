@@ -52,7 +52,14 @@ if TYPE_CHECKING:
         SubWorkflowNode,
     )
 
-from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
+from horsies.core.models.tasks import (
+    TaskResult,
+    TaskError,
+    BuiltInTaskCode,
+    OperationalErrorCode,
+    ContractCode,
+    RetrievalCode,
+)
 from horsies.core.models.workflow import WorkflowContextMissingIdError
 from horsies.core.exception_mapper import (
     ExceptionMapper,
@@ -177,7 +184,7 @@ class TaskHandle(Generic[T]):
     def _error_result(
         self,
         *,
-        error_code: LibraryErrorCode,
+        error_code: BuiltInTaskCode,
         message: str,
         data: dict[str, Any],
         exception: BaseException | None = None,
@@ -212,7 +219,7 @@ class TaskHandle(Generic[T]):
             match self._cached_result:
                 case None:
                     return self._error_result(
-                        error_code=LibraryErrorCode.RESULT_NOT_AVAILABLE,
+                        error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
                         message='Result cache is empty after fetch',
                         data={'task_id': self.task_id},
                     )
@@ -231,7 +238,7 @@ class TaskHandle(Generic[T]):
                 is_wait_timeout = (
                     result.is_err()
                     and err_value is not None
-                    and err_value.error_code == LibraryErrorCode.WAIT_TIMEOUT
+                    and err_value.error_code == RetrievalCode.WAIT_TIMEOUT
                 )
                 if not is_wait_timeout:
                     self._cached_result = result
@@ -239,7 +246,7 @@ class TaskHandle(Generic[T]):
                 return result
             except Exception as exc:
                 return self._error_result(
-                    error_code=LibraryErrorCode.BROKER_ERROR,
+                    error_code=OperationalErrorCode.BROKER_ERROR,
                     message='Broker error while retrieving task result',
                     data={'task_id': self.task_id},
                     exception=exc,
@@ -249,7 +256,7 @@ class TaskHandle(Generic[T]):
             match self._cached_result:
                 case None:
                     return self._error_result(
-                        error_code=LibraryErrorCode.RESULT_NOT_AVAILABLE,
+                        error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
                         message='Result not available - task may not have been executed',
                         data={'task_id': self.task_id},
                     )
@@ -274,7 +281,7 @@ class TaskHandle(Generic[T]):
             match self._cached_result:
                 case None:
                     return self._error_result(
-                        error_code=LibraryErrorCode.RESULT_NOT_AVAILABLE,
+                        error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
                         message='Result cache is empty after fetch',
                         data={'task_id': self.task_id},
                     )
@@ -293,7 +300,7 @@ class TaskHandle(Generic[T]):
                 is_wait_timeout = (
                     result.is_err()
                     and err_value is not None
-                    and err_value.error_code == LibraryErrorCode.WAIT_TIMEOUT
+                    and err_value.error_code == RetrievalCode.WAIT_TIMEOUT
                 )
                 if not is_wait_timeout:
                     self._cached_result = result
@@ -303,7 +310,7 @@ class TaskHandle(Generic[T]):
                 raise
             except Exception as exc:
                 return self._error_result(
-                    error_code=LibraryErrorCode.BROKER_ERROR,
+                    error_code=OperationalErrorCode.BROKER_ERROR,
                     message='Broker error while retrieving task result',
                     data={'task_id': self.task_id},
                     exception=exc,
@@ -313,7 +320,7 @@ class TaskHandle(Generic[T]):
             match self._cached_result:
                 case None:
                     return self._error_result(
-                        error_code=LibraryErrorCode.RESULT_NOT_AVAILABLE,
+                        error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
                         message='Result not available - task may not have been executed',
                         data={'task_id': self.task_id},
                     )
@@ -693,7 +700,7 @@ def create_task_wrapper(
             if result is None:
                 return TaskResult(
                     err=TaskError(
-                        error_code=LibraryErrorCode.TASK_EXCEPTION,
+                        error_code=OperationalErrorCode.TASK_EXCEPTION,
                         message=f'Task {fn.__name__} returned None instead of TaskResult',
                         data={'task_name': task_name},
                     )
@@ -715,7 +722,7 @@ def create_task_wrapper(
                 return TaskResult(
                     err=TaskError(
                         exception=ve,
-                        error_code=LibraryErrorCode.RETURN_TYPE_MISMATCH,
+                        error_code=ContractCode.RETURN_TYPE_MISMATCH,
                         message=f'Task {fn.__name__} returned TaskResult({variant}={actual_value!r}) but expected type {expected_type}',
                         data={
                             'variant': variant,
@@ -735,7 +742,7 @@ def create_task_wrapper(
             error_result: TaskResult[T, TaskError] = TaskResult(
                 err=TaskError(
                     exception=e,
-                    error_code=LibraryErrorCode.WORKFLOW_CTX_MISSING_ID,
+                    error_code=ContractCode.WORKFLOW_CTX_MISSING_ID,
                     message=str(e),
                     data={'task_name': task_name},
                 )
@@ -750,10 +757,15 @@ def create_task_wrapper(
                 task_default=default_unhandled_error_code,
                 global_default=app.config.default_unhandled_error_code,
             )
+            from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
+
+            resolved_code: BuiltInTaskCode | str = BUILTIN_CODE_REGISTRY.get(
+                error_code, error_code,
+            )
             error_result: TaskResult[T, TaskError] = TaskResult(
                 err=TaskError(
                     exception=e,
-                    error_code=error_code,
+                    error_code=resolved_code,
                     message=f'Unhandled exception in task {fn.__name__}: {type(e).__name__}: {str(e)}',
                     data={'exception_type': type(e).__name__},
                 )

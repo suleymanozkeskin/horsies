@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from horsies.core.models.tasks import LibraryErrorCode, TaskError, TaskResult
+from horsies.core.models.tasks import OperationalErrorCode, TaskError, TaskResult
 from horsies.core.types.result import Err, Ok
 from horsies.core.workflows import engine
 from horsies.core.workflows.engine import (
@@ -1060,7 +1060,7 @@ class TestGetDependencyResults:
         results = await get_dependency_results(session, 'wf-1', [0])
         assert 0 in results
         assert results[0].is_err()
-        assert results[0].err.error_code == LibraryErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert results[0].err.error_code == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
 
     @pytest.mark.asyncio
     async def test_task_result_from_json_fails_injects_deser_error(self) -> None:
@@ -1082,7 +1082,7 @@ class TestGetDependencyResults:
             results = await get_dependency_results(session, 'wf-1', [0])
         assert 0 in results
         assert results[0].is_err()
-        assert results[0].err.error_code == LibraryErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert results[0].err.error_code == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
 
 
 # ── 8. get_dependency_results_with_names ─────────────────────────────
@@ -1112,7 +1112,7 @@ class TestGetDependencyResultsWithNames:
         results = await get_dependency_results_with_names(session, 'wf-1', ['node-0'])
         assert 0 in results.by_index
         assert results.by_index[0].is_err()
-        assert results.by_index[0].err.error_code == LibraryErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert results.by_index[0].err.error_code == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
 
     @pytest.mark.asyncio
     async def test_task_result_from_json_fails(self) -> None:

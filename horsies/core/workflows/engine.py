@@ -70,6 +70,8 @@ from horsies.core.workflows.sql import (
 
 logger = get_logger('workflow.engine')
 
+from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode
+
 if TYPE_CHECKING:
     from horsies.core.brokers.postgres import PostgresBroker
     from horsies.core.models.tasks import TaskResult, TaskError
@@ -113,7 +115,7 @@ async def _fail_enqueued_task(
     task_index: int,
     message: str,
     broker: 'PostgresBroker | None' = None,
-    error_code: str = 'WORKFLOW_ENQUEUE_FAILED',
+    error_code: 'OperationalErrorCode | str' = OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
 ) -> None:
     """Mark an ENQUEUED workflow task as FAILED when pre-enqueue parsing fails.
 
@@ -211,7 +213,7 @@ async def enqueue_workflow_task(
             task_index,
             f'Corrupt kwargs JSON for task {task_index}',
             broker,
-            error_code='WORKER_SERIALIZATION_ERROR',
+            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
         )
         return None
     kwargs: dict[str, Any] = raw_kwargs if isinstance(raw_kwargs, dict) else {}
@@ -229,7 +231,7 @@ async def enqueue_workflow_task(
                     task_index,
                     f'Corrupt args_from JSON for task {task_index}',
                     broker,
-                    error_code='WORKER_SERIALIZATION_ERROR',
+                    error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
                 )
                 return None
         else:
@@ -244,7 +246,7 @@ async def enqueue_workflow_task(
                     task_index,
                     f'args_from has non-int values for task {task_index}',
                     broker,
-                    error_code='WORKER_SERIALIZATION_ERROR',
+                    error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
                 )
                 return None
             for kwarg_name, dep_index in args_from_typed.items():
@@ -269,7 +271,7 @@ async def enqueue_workflow_task(
                             session, workflow_id, task_index,
                             f'Failed to serialize dep_result for kwarg {kwarg_name!r} (task {task_index})',
                             broker,
-                            error_code='WORKER_SERIALIZATION_ERROR',
+                            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
                         )
                         return None
                     kwargs[kwarg_name] = {
@@ -304,7 +306,7 @@ async def enqueue_workflow_task(
         await _fail_enqueued_task(
             session, workflow_id, task_index,
             f'Failed to serialize kwargs for task {task_index}', broker,
-            error_code='WORKER_SERIALIZATION_ERROR',
+            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
         )
         return None
 
@@ -417,7 +419,7 @@ async def enqueue_subworkflow_task(
         await _fail_enqueued_task(
             session, workflow_id, task_index,
             f'Workflow {workflow_id} not found during subworkflow enqueue', broker,
-            error_code='WORKFLOW_ENQUEUE_FAILED',
+            error_code=OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
         )
         return None
 
@@ -443,7 +445,7 @@ async def enqueue_subworkflow_task(
         from horsies.core.models.tasks import TaskError, TaskResult
 
         error = TaskError(
-            error_code='SUBWORKFLOW_LOAD_FAILED',
+            error_code=OperationalErrorCode.SUBWORKFLOW_LOAD_FAILED,
             message=f'Failed to load subworkflow definition for {workflow_name}:{task_index}',
             data={'module': sub_workflow_module, 'qualname': sub_workflow_qualname},
         )
@@ -484,7 +486,7 @@ async def enqueue_subworkflow_task(
             task_index,
             f'Corrupt kwargs JSON for subworkflow task {task_index}',
             broker,
-            error_code='WORKER_SERIALIZATION_ERROR',
+            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
         )
         return None
     kwargs: dict[str, Any] = raw_kwargs if isinstance(raw_kwargs, dict) else {}
@@ -500,7 +502,7 @@ async def enqueue_subworkflow_task(
                     task_index,
                     f'Corrupt args_from JSON for subworkflow task {task_index}',
                     broker,
-                    error_code='WORKER_SERIALIZATION_ERROR',
+                    error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
                 )
                 return None
         else:
@@ -515,7 +517,7 @@ async def enqueue_subworkflow_task(
                     task_index,
                     f'args_from has non-int values for subworkflow task {task_index}',
                     broker,
-                    error_code='WORKER_SERIALIZATION_ERROR',
+                    error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
                 )
                 return None
             for kwarg_name, dep_index in args_from_typed.items():
@@ -540,7 +542,7 @@ async def enqueue_subworkflow_task(
                             session, workflow_id, task_index,
                             f'Failed to serialize dep_result for kwarg {kwarg_name!r} (subworkflow task {task_index})',
                             broker,
-                            error_code='WORKER_SERIALIZATION_ERROR',
+                            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
                         )
                         return None
                     kwargs[kwarg_name] = {
@@ -596,7 +598,7 @@ async def enqueue_subworkflow_task(
                 f'(workflow {workflow_name}:{task_index})'
             ),
             broker,
-            error_code='WORKFLOW_ENQUEUE_FAILED',
+            error_code=OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
         )
         return None
 
@@ -677,7 +679,7 @@ async def enqueue_subworkflow_task(
                         f'{str(exc)[:200]}'
                     ),
                     broker,
-                    error_code='WORKFLOW_ENQUEUE_FAILED',
+                    error_code=OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
                 )
                 return None
             child_kwargs_json = _ser(dumps_json(child_sub.kwargs), 'child sub kwargs')
@@ -685,7 +687,7 @@ async def enqueue_subworkflow_task(
                 await _fail_enqueued_task(
                     session, workflow_id, task_index,
                     f'Failed to serialize kwargs for child sub {child_sub.name}', broker,
-                    error_code='WORKER_SERIALIZATION_ERROR',
+                    error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
                 )
                 return None
             await session.execute(
@@ -729,7 +731,7 @@ async def enqueue_subworkflow_task(
                         f'{str(exc)[:200]}'
                     ),
                     broker,
-                    error_code='WORKFLOW_ENQUEUE_FAILED',
+                    error_code=OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
                 )
                 return None
             child_task_options_json: str | None = getattr(
@@ -749,7 +751,7 @@ async def enqueue_subworkflow_task(
                 await _fail_enqueued_task(
                     session, workflow_id, task_index,
                     f'Failed to serialize kwargs for child task {child_task.name}', broker,
-                    error_code='WORKER_SERIALIZATION_ERROR',
+                    error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
                 )
                 return None
             await session.execute(
@@ -1176,7 +1178,7 @@ async def get_dependency_results(
     - COMPLETED/FAILED: returns actual TaskResult from stored result
     - SKIPPED: returns sentinel TaskResult with UPSTREAM_SKIPPED error
     """
-    from horsies.core.models.tasks import LibraryErrorCode, TaskError, TaskResult
+    from horsies.core.models.tasks import TaskError, TaskResult
 
     if not dependency_indices:
         return {}
@@ -1200,7 +1202,7 @@ async def get_dependency_results(
             # Inject sentinel TaskResult for SKIPPED dependencies
             results[task_index] = TaskResult(
                 err=TaskError(
-                    error_code=LibraryErrorCode.UPSTREAM_SKIPPED,
+                    error_code=OutcomeCode.UPSTREAM_SKIPPED,
                     message='Upstream dependency was SKIPPED',
                     data={'dependency_index': task_index},
                 )
@@ -1210,7 +1212,7 @@ async def get_dependency_results(
             if deser is None:
                 results[task_index] = TaskResult(
                     err=TaskError(
-                        error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                        error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                         message=f'Dependency result JSON corrupt (task_index={task_index})',
                         data={'workflow_id': workflow_id, 'task_index': task_index, 'stage': 'json_parse', 'status': status},
                     ),
@@ -1220,7 +1222,7 @@ async def get_dependency_results(
             if is_err(parsed_tr):
                 results[task_index] = TaskResult(
                     err=TaskError(
-                        error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                        error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                         message=f'Dependency result deser failed (task_index={task_index}): {parsed_tr.err_value}',
                         data={'workflow_id': workflow_id, 'task_index': task_index, 'stage': 'task_result_parse', 'status': status},
                     ),
@@ -1245,7 +1247,7 @@ async def get_dependency_results_with_names(
     - COMPLETED/FAILED: returns actual TaskResult from stored result
     - SKIPPED: returns sentinel TaskResult with UPSTREAM_SKIPPED error
     """
-    from horsies.core.models.tasks import TaskError, LibraryErrorCode, TaskResult
+    from horsies.core.models.tasks import TaskError, TaskResult
 
     dep_results = DependencyResults()
 
@@ -1272,7 +1274,7 @@ async def get_dependency_results_with_names(
             # Inject sentinel TaskResult for SKIPPED dependencies
             task_result: TaskResult[Any, TaskError] = TaskResult(
                 err=TaskError(
-                    error_code=LibraryErrorCode.UPSTREAM_SKIPPED,
+                    error_code=OutcomeCode.UPSTREAM_SKIPPED,
                     message='Upstream dependency was SKIPPED',
                     data={'dependency_index': task_index},
                 )
@@ -1282,7 +1284,7 @@ async def get_dependency_results_with_names(
             if deser is None:
                 task_result = TaskResult(
                     err=TaskError(
-                        error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                        error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                         message=f'Dependency result JSON corrupt (task_index={task_index})',
                         data={'workflow_id': workflow_id, 'task_index': task_index, 'stage': 'json_parse', 'status': status},
                     ),
@@ -1292,7 +1294,7 @@ async def get_dependency_results_with_names(
                 if is_err(parsed_tr):
                     task_result = TaskResult(
                         err=TaskError(
-                            error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                             message=f'Dependency result deser failed (task_index={task_index}): {parsed_tr.err_value}',
                             data={'workflow_id': workflow_id, 'task_index': task_index, 'stage': 'task_result_parse', 'status': status},
                         ),
@@ -1514,7 +1516,7 @@ async def on_subworkflow_complete(
         parent_node_status = 'FAILED'
         # Create SubWorkflowError
         error = SubWorkflowError(
-            error_code='SUBWORKFLOW_FAILED',
+            error_code=OutcomeCode.SUBWORKFLOW_FAILED,
             message=f'Subworkflow {child_workflow_id} failed with status {child_status}',
             sub_workflow_id=child_workflow_id,
             sub_workflow_summary=child_summary,
@@ -1538,7 +1540,7 @@ async def on_subworkflow_complete(
         # Create a TaskResult for the failure handler
         failure_result: TaskResult[Any, TaskError] = TaskResult(
             err=SubWorkflowError(
-                error_code='SUBWORKFLOW_FAILED',
+                error_code=OutcomeCode.SUBWORKFLOW_FAILED,
                 message=f'Subworkflow {child_workflow_id} failed',
                 sub_workflow_id=child_workflow_id,
                 sub_workflow_summary=child_summary,
@@ -1640,7 +1642,7 @@ async def get_workflow_failure_error(
     If success_policy is set but no case satisfied, returns WORKFLOW_SUCCESS_CASE_NOT_MET.
     Otherwise, returns the first failed required task's error.
     """
-    from horsies.core.models.tasks import LibraryErrorCode, TaskError
+    from horsies.core.models.tasks import TaskError
 
     if success_policy_data is None:
         # Default: get first failed task's error
@@ -1695,7 +1697,7 @@ async def get_workflow_failure_error(
     return _ser(
         dumps_json(
             TaskError(
-                error_code=LibraryErrorCode.WORKFLOW_SUCCESS_CASE_NOT_MET,
+                error_code=OutcomeCode.WORKFLOW_SUCCESS_CASE_NOT_MET,
                 message='No success case was satisfied',
             )
         ),

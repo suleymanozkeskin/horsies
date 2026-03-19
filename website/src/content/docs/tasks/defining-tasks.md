@@ -69,7 +69,7 @@ Unhandled exceptions are wrapped automatically:
 def might_crash() -> TaskResult[str, TaskError]:
     raise ValueError("Something went wrong")
     # Becomes TaskResult(err=TaskError(
-    #     error_code=LibraryErrorCode.UNHANDLED_EXCEPTION,
+    #     error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
     #     message="Unhandled exception in task might_crash: ...",
     # ))
 ```

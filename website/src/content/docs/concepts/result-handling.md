@@ -54,7 +54,7 @@ match divide.send(10, 2):
 
 | Field | Type | Purpose |
 |-------|------|---------|
-| `error_code` | `str` or `LibraryErrorCode` | Identifies the error type |
+| `error_code` | `str` or `BuiltInTaskCode` | Identifies the error type |
 | `message` | `str` | Human-readable description |
 | `data` | `Any` | Additional context (dict, list, etc.) |
 | `exception` | `BaseException` or `dict` | Original exception if applicable |
@@ -67,19 +67,33 @@ return TaskResult(err=TaskError(
 ))
 ```
 
-## Library Error Codes
+## Built-In Error Codes
 
-When the library itself encounters an error (not your task code), it uses `LibraryErrorCode`:
+When the library itself encounters an error (not your task code), it uses one of four error code families. The umbrella type alias `BuiltInTaskCode` covers all of them.
 
-### Execution Errors
+### OperationalErrorCode
 
 | Code | When |
 | ---- | ---- |
 | `UNHANDLED_EXCEPTION` | Task raised an uncaught exception |
 | `TASK_EXCEPTION` | Task function threw an exception |
 | `WORKER_CRASHED` | Worker process died (detected via heartbeat) |
+| `BROKER_ERROR` | Broker failed while retrieving the result |
+| `WORKER_RESOLUTION_ERROR` | Worker couldn't find the task in registry |
+| `WORKER_SERIALIZATION_ERROR` | Result couldn't be serialized |
+| `RESULT_DESERIALIZATION_ERROR` | Stored result JSON is corrupt or could not be deserialized |
+| `WORKFLOW_ENQUEUE_FAILED` | Workflow node failed during enqueue/build |
+| `SUBWORKFLOW_LOAD_FAILED` | Subworkflow definition could not be loaded |
 
-### Retrieval Errors
+### ContractCode
+
+| Code | When |
+| ---- | ---- |
+| `RETURN_TYPE_MISMATCH` | Returned value doesn't match declared type |
+| `PYDANTIC_HYDRATION_ERROR` | Task succeeded but return value could not be rehydrated to declared type |
+| `WORKFLOW_CTX_MISSING_ID` | Workflow context is missing required ID |
+
+### RetrievalCode
 
 Returned by `handle.get()` for issues retrieving results:
 
@@ -87,37 +101,21 @@ Returned by `handle.get()` for issues retrieving results:
 | ---- | ---- |
 | `WAIT_TIMEOUT` | Timeout elapsed while waiting for result (task may still be running) |
 | `TASK_NOT_FOUND` | Task ID doesn't exist in database |
-| `TASK_CANCELLED` | Task was cancelled before completion |
+| `WORKFLOW_NOT_FOUND` | Workflow ID doesn't exist in database |
 | `RESULT_NOT_AVAILABLE` | Result cache is empty for an immediate/sync handle |
-| `RESULT_DESERIALIZATION_ERROR` | Stored result JSON is corrupt or could not be deserialized |
+| `RESULT_NOT_READY` | Result not yet available; task is still running |
 
-### Broker Errors
-
-Returned when result retrieval fails due to broker or database issues:
+### OutcomeCode
 
 | Code | When |
 | ---- | ---- |
-| `BROKER_ERROR` | Broker failed while retrieving the result |
-
-### Worker Errors
-
-| Code | When |
-| ---- | ---- |
-| `WORKER_RESOLUTION_ERROR` | Worker couldn't find the task in registry |
-| `WORKER_SERIALIZATION_ERROR` | Result couldn't be serialized |
-
-### Validation Errors
-
-| Code | When |
-| ---- | ---- |
-| `RETURN_TYPE_MISMATCH` | Returned value doesn't match declared type |
-| `PYDANTIC_HYDRATION_ERROR` | Task succeeded but return value could not be rehydrated to declared type |
-
-### Lifecycle Errors
-
-| Code | When |
-| ---- | ---- |
-| `SEND_SUPPRESSED` | Task send was suppressed during import |
+| `TASK_CANCELLED` | Task was cancelled before completion |
+| `WORKFLOW_PAUSED` | Workflow was paused |
+| `WORKFLOW_FAILED` | Workflow failed |
+| `WORKFLOW_CANCELLED` | Workflow was cancelled |
+| `UPSTREAM_SKIPPED` | Upstream task in workflow was skipped |
+| `SUBWORKFLOW_FAILED` | Subworkflow failed |
+| `WORKFLOW_SUCCESS_CASE_NOT_MET` | Workflow success condition was not satisfied |
 
 ## Domain Errors vs Library Errors
 
@@ -135,7 +133,7 @@ def transfer_funds(amount: float) -> TaskResult[str, TaskError]:
     return TaskResult(ok="Transfer complete")
 ```
 
-**Library errors**: Something went wrong in the infrastructure.
+**Built-in errors**: Something went wrong in the infrastructure.
 
 ```python
 # If your task raises an exception:

@@ -17,7 +17,7 @@ from typing import Protocol
 
 from horsies.core.models.task_pg import TaskModel
 from horsies.core.types.status import TaskStatus
-from horsies.core.models.tasks import LibraryErrorCode, TaskResult, TaskError
+from horsies.core.models.tasks import OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode, TaskResult, TaskError
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.errors import ConfigurationError
@@ -175,7 +175,7 @@ def test_exception_becomes_error() -> None:
         result = unwrap_send(basic_tasks.exception_task.send()).get(timeout_ms=5000)
         assert result.is_err()
         assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.UNHANDLED_EXCEPTION
+        assert result.err.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
         assert result.err.message is not None
         assert 'ValueError' in result.err.message
 
@@ -188,7 +188,7 @@ def test_return_type_mismatch() -> None:
         result = unwrap_send(basic_tasks.type_mismatch_task.send()).get(timeout_ms=5000)
         assert result.is_err()
         assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.RETURN_TYPE_MISMATCH
+        assert result.err.error_code == ContractCode.RETURN_TYPE_MISMATCH
 
 
 @pytest.mark.e2e
@@ -438,7 +438,7 @@ async def test_retry_precedence_exception_name_collision_no_retry(
         result = handle.get(timeout_ms=10000)
         assert result.is_err()
         assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.UNHANDLED_EXCEPTION
+        assert result.err.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
 
         async with broker.session_factory() as session:
             task = await session.get(TaskModel, handle.task_id)
@@ -747,7 +747,7 @@ def test_worker_resolution_error(broker: PostgresBroker) -> None:
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
         result = broker.get_result(task_id, timeout_ms=5000)
-        assert_err(result, expected_code=LibraryErrorCode.WORKER_RESOLUTION_ERROR)
+        assert_err(result, expected_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR)
 
 
 @pytest.mark.e2e
@@ -757,7 +757,7 @@ def test_unserializable_result() -> None:
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
         result = unwrap_send(basic_tasks.unserializable_result_task.send()).get(timeout_ms=5000)
-        assert_err(result, expected_code=LibraryErrorCode.WORKER_SERIALIZATION_ERROR)
+        assert_err(result, expected_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR)
 
 
 @pytest.mark.e2e
@@ -765,7 +765,7 @@ def test_task_not_found(broker: PostgresBroker) -> None:
     """L1.7.3: Non-existent task_id returns TASK_NOT_FOUND."""
     fake_id = '00000000-0000-0000-0000-000000000000'
     result = broker.get_result(fake_id, timeout_ms=1000)
-    assert_err(result, expected_code=LibraryErrorCode.TASK_NOT_FOUND)
+    assert_err(result, expected_code=RetrievalCode.TASK_NOT_FOUND)
 
 
 @pytest.mark.e2e
@@ -782,7 +782,7 @@ def test_wait_timeout(broker: PostgresBroker) -> None:
 
     # Wait with very short timeout - task never completes
     result = broker.get_result(task_id, timeout_ms=500)
-    assert_err(result, expected_code=LibraryErrorCode.WAIT_TIMEOUT)
+    assert_err(result, expected_code=RetrievalCode.WAIT_TIMEOUT)
 
 
 @pytest.mark.e2e
@@ -792,19 +792,19 @@ def test_return_none_from_task() -> None:
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
         result = unwrap_send(basic_tasks.return_none_task.send()).get(timeout_ms=5000)
-        assert_err(result, expected_code=LibraryErrorCode.TASK_EXCEPTION)
+        assert_err(result, expected_code=OperationalErrorCode.TASK_EXCEPTION)
         assert result.err is not None
         assert 'None' in (result.err.message or '')
 
 
 @pytest.mark.e2e
 def test_library_error_code_in_user_task() -> None:
-    """L1.7.6: Task returning LibraryErrorCode is preserved correctly."""
+    """L1.7.6: Task returning OperationalErrorCode is preserved correctly."""
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
         result = unwrap_send(basic_tasks.error_code_task.send()).get(timeout_ms=5000)
-        assert_err(result, expected_code=LibraryErrorCode.TASK_EXCEPTION)
+        assert_err(result, expected_code=OperationalErrorCode.TASK_EXCEPTION)
         assert result.err is not None
         assert result.err.message == 'boom'
 
@@ -836,7 +836,7 @@ async def test_argument_deserialization_error(broker: PostgresBroker) -> None:
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
         result = broker.get_result(task_id, timeout_ms=5000)
-        assert_err(result, expected_code=LibraryErrorCode.WORKER_SERIALIZATION_ERROR)
+        assert_err(result, expected_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR)
 
 
 @pytest.mark.e2e
@@ -872,7 +872,7 @@ async def test_malformed_pydantic_args(broker: PostgresBroker) -> None:
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
         result = broker.get_result(task_id, timeout_ms=5000)
-        assert_err(result, expected_code=LibraryErrorCode.WORKER_SERIALIZATION_ERROR)
+        assert_err(result, expected_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR)
 
 
 @pytest.mark.e2e
@@ -896,7 +896,7 @@ async def test_task_cancelled(broker: PostgresBroker) -> None:
         await session.commit()
 
     result = broker.get_result(task_id, timeout_ms=1000)
-    assert_err(result, expected_code=LibraryErrorCode.TASK_CANCELLED)
+    assert_err(result, expected_code=OutcomeCode.TASK_CANCELLED)
     assert result.err is not None
     assert result.err.data is not None
     assert result.err.data['task_id'] == task_id
@@ -1137,4 +1137,4 @@ async def test_pydantic_hydration_error(broker: PostgresBroker) -> None:
         await session.commit()
 
     result = broker.get_result(task_id, timeout_ms=1000)
-    assert_err(result, expected_code=LibraryErrorCode.PYDANTIC_HYDRATION_ERROR)
+    assert_err(result, expected_code=ContractCode.PYDANTIC_HYDRATION_ERROR)

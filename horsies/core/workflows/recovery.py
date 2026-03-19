@@ -265,7 +265,7 @@ async def recover_stuck_workflows(
         task_status = row.task_status  # uppercase: COMPLETED, FAILED, or CANCELLED
         raw_task_result = row.task_result
 
-        from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
+        from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode, RetrievalCode, OutcomeCode
 
         # Deserialize TaskResult from tasks.result, or build a synthetic one
         if raw_task_result is not None:
@@ -280,7 +280,7 @@ async def recover_stuck_workflows(
                 )
                 result = TaskResult(
                     err=TaskError(
-                        error_code=LibraryErrorCode.WORKER_CRASHED,
+                        error_code=OperationalErrorCode.WORKER_CRASHED,
                         message='Stored task result is corrupt and could not be deserialized',
                         data={'task_id': task_id, 'task_status': task_status, 'recovery': 'case_1_7'},
                     ),
@@ -288,13 +288,13 @@ async def recover_stuck_workflows(
         else:
             # No result stored (e.g. crash before result, DB issue, or cancellation)
             if task_status == 'CANCELLED':
-                error_code = LibraryErrorCode.TASK_CANCELLED
+                error_code = OutcomeCode.TASK_CANCELLED
                 message = 'Task was cancelled before producing a result'
             elif task_status == 'COMPLETED':
-                error_code = LibraryErrorCode.RESULT_NOT_AVAILABLE
+                error_code = RetrievalCode.RESULT_NOT_AVAILABLE
                 message = 'Task completed but result is missing'
             else:
-                error_code = LibraryErrorCode.WORKER_CRASHED
+                error_code = OperationalErrorCode.WORKER_CRASHED
                 message = (
                     'Worker crashed during task execution '
                     f'(task_status={task_status}, no result stored)'

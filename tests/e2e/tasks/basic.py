@@ -7,7 +7,7 @@ from typing import Any, cast
 
 from pydantic import BaseModel
 
-from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
+from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode
 
 from tests.e2e.tasks.instance import app
 
@@ -116,7 +116,7 @@ def return_none_task() -> TaskResult[int, TaskError]:
 @app.task(task_name='e2e_error_code')
 def error_code_task() -> TaskResult[str, TaskError]:
     return TaskResult(
-        err=TaskError(error_code=LibraryErrorCode.TASK_EXCEPTION, message='boom')
+        err=TaskError(error_code=OperationalErrorCode.TASK_EXCEPTION, message='boom')
     )
 
 

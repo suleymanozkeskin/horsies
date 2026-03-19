@@ -357,13 +357,13 @@ Tasks with `allow_failed_deps=True` receive the `TaskResult` from dependencies:
 - **SKIPPED deps**: Receive a sentinel `TaskResult` with `error_code=UPSTREAM_SKIPPED`
 
 ```python
-from horsies import LibraryErrorCode
+from horsies import OutcomeCode, RetrievalCode
 
 @app.task(task_name="recovery_handler")
 def recovery_handler(input_result: TaskResult[Data, TaskError]) -> TaskResult[...]:
     if input_result.is_err():
         err = input_result.err_value
-        if err.error_code == LibraryErrorCode.UPSTREAM_SKIPPED:
+        if err.error_code == OutcomeCode.UPSTREAM_SKIPPED:
             # Dependency was skipped (upstream failure)
             return TaskResult(ok={"status": "skipped_upstream"})
         # Handle actual failure
@@ -377,7 +377,7 @@ When a dependency is SKIPPED (due to upstream failure), tasks with `allow_failed
 
 ```python
 TaskResult(err=TaskError(
-    error_code=LibraryErrorCode.UPSTREAM_SKIPPED,
+    error_code=OutcomeCode.UPSTREAM_SKIPPED,
     message="Upstream dependency was SKIPPED",
     data={"dependency_index": <index>},
 ))
@@ -903,7 +903,7 @@ result = handle.result_for(node)  # `RESULT_NOT_READY` is still possible dependi
 
 # Option 2: Check if result is ready
 result = handle.result_for(node)
-if result.is_err() and result.err_value.error_code == LibraryErrorCode.RESULT_NOT_READY:
+if result.is_err() and result.err_value.error_code == RetrievalCode.RESULT_NOT_READY:
     # Handle not-ready case: poll, wait, or skip, decide for your use case
     do_something()
 ```

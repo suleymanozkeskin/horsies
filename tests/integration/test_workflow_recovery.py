@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.serde import loads_json, task_result_from_json
-from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
+from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode, RetrievalCode, OutcomeCode
 from horsies.core.models.workflow import (
     TaskNode,
     SubWorkflowNode,
@@ -749,7 +749,7 @@ class TestWorkflowRecovery:
         task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
         assert task_result.is_err()
         assert task_result.err is not None
-        assert task_result.err.error_code == LibraryErrorCode.TASK_CANCELLED
+        assert task_result.err.error_code == OutcomeCode.TASK_CANCELLED
 
     async def test_recover_completed_task_missing_result(
         self,
@@ -813,7 +813,7 @@ class TestWorkflowRecovery:
         task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
         assert task_result.is_err()
         assert task_result.err is not None
-        assert task_result.err.error_code == LibraryErrorCode.RESULT_NOT_AVAILABLE
+        assert task_result.err.error_code == RetrievalCode.RESULT_NOT_AVAILABLE
 
     # ── Case 0: PENDING tasks with all deps terminal ──
 
@@ -1287,7 +1287,7 @@ class TestWorkflowRecovery:
         task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
         assert task_result.is_err()
         assert task_result.err is not None
-        assert task_result.err.error_code == LibraryErrorCode.WORKER_CRASHED
+        assert task_result.err.error_code == OperationalErrorCode.WORKER_CRASHED
 
     # ── Case 2+3: Success policy failure branch ──
 

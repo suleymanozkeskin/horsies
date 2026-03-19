@@ -23,7 +23,15 @@ from horsies.core.logging import get_logger
 from horsies.core.utils.loop_runner import get_shared_runner, LoopRunnerError
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.codec.serde import loads_json, task_result_from_json
-from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
+from horsies.core.models.tasks import (
+    TaskResult,
+    TaskError,
+    BuiltInTaskCode,
+    OperationalErrorCode,
+    ContractCode,
+    RetrievalCode,
+    OutcomeCode,
+)
 from horsies.core.types.result import Ok, Err, is_err
 
 from .context import SubWorkflowSummary
@@ -153,7 +161,7 @@ def _broker_task_error(message: str) -> TaskResult[Any, TaskError]:
     """Build a TaskResult with BROKER_ERROR for fold-strategy methods."""
     return TaskResult(
         err=TaskError(
-            error_code=LibraryErrorCode.BROKER_ERROR,
+            error_code=OperationalErrorCode.BROKER_ERROR,
             message=message,
         ),
     )
@@ -317,9 +325,9 @@ class WorkflowHandle(Generic[OutT]):
                     handle_err = status_r.err_value
                     match handle_err.code:
                         case HandleErrorCode.WORKFLOW_NOT_FOUND:
-                            error_code: LibraryErrorCode = LibraryErrorCode.WORKFLOW_NOT_FOUND
+                            error_code: BuiltInTaskCode = RetrievalCode.WORKFLOW_NOT_FOUND
                         case _:
-                            error_code = LibraryErrorCode.BROKER_ERROR
+                            error_code = OperationalErrorCode.BROKER_ERROR
                     return cast(
                         'TaskResult[OutT, TaskError]',
                         TaskResult(
@@ -343,7 +351,7 @@ class WorkflowHandle(Generic[OutT]):
                         'TaskResult[OutT, TaskError]',
                         TaskResult(
                             err=TaskError(
-                                error_code='WORKFLOW_PAUSED',
+                                error_code=OutcomeCode.WORKFLOW_PAUSED,
                                 message='Workflow is paused awaiting intervention',
                             )
                         ),
@@ -356,7 +364,7 @@ class WorkflowHandle(Generic[OutT]):
                         'TaskResult[OutT, TaskError]',
                         TaskResult(
                             err=TaskError(
-                                error_code=LibraryErrorCode.WAIT_TIMEOUT,
+                                error_code=RetrievalCode.WAIT_TIMEOUT,
                                 message=f'Workflow did not complete within {timeout_ms}ms',
                             )
                         ),
@@ -421,7 +429,7 @@ class WorkflowHandle(Generic[OutT]):
                     if is_err(loads_r):
                         return cast('TaskResult[OutT, TaskError]', TaskResult(
                             err=TaskError(
-                                error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                                 message=f'Workflow result JSON corrupt: {loads_r.err_value}',
                             ),
                         ))
@@ -429,7 +437,7 @@ class WorkflowHandle(Generic[OutT]):
                     if is_err(tr_r):
                         return cast('TaskResult[OutT, TaskError]', TaskResult(
                             err=TaskError(
-                                error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                                 message=f'Workflow result deser failed: {tr_r.err_value}',
                             ),
                         ))
@@ -464,7 +472,7 @@ class WorkflowHandle(Generic[OutT]):
                             'TaskResult[OutT, TaskError]',
                             TaskResult(
                                 err=TaskError(
-                                    error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                                    error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                                     message=f'Workflow error payload corrupt: {loads_r.err_value}',
                                     data={'workflow_id': self.workflow_id},
                                 )
@@ -473,24 +481,25 @@ class WorkflowHandle(Generic[OutT]):
                     error_data = loads_r.ok_value
                     if isinstance(error_data, dict):
                         # Safely extract known TaskError fields with type narrowing
-                        raw_code = error_data.get('error_code')
-                        raw_msg = error_data.get('message')
                         return cast(
                             'TaskResult[OutT, TaskError]',
                             TaskResult(
-                                err=TaskError(
-                                    error_code=str(raw_code) if raw_code is not None else None,
-                                    message=str(raw_msg) if raw_msg is not None else None,
-                                    data=error_data.get('data'),
-                                )
+                                err=TaskError.from_persisted(error_data),
                             ),
                         )
                 status_str = row.status if row else 'FAILED'
+                _TERMINAL_STATUS_CODES: dict[str, OutcomeCode] = {
+                    'FAILED': OutcomeCode.WORKFLOW_FAILED,
+                    'CANCELLED': OutcomeCode.WORKFLOW_CANCELLED,
+                }
+                fallback_code: OutcomeCode | str = _TERMINAL_STATUS_CODES.get(
+                    status_str, f'WORKFLOW_{status_str}',
+                )
                 return cast(
                     'TaskResult[OutT, TaskError]',
                     TaskResult(
                         err=TaskError(
-                            error_code=f'WORKFLOW_{status_str}',
+                            error_code=fallback_code,
                             message=f'Workflow {status_str.lower()}',
                         )
                     ),
@@ -520,13 +529,13 @@ class WorkflowHandle(Generic[OutT]):
             TaskResult[T, TaskError] where T matches the node's type.
             - If task completed: returns the task's result (success or error)
             - If task not completed: returns TaskResult with
-              error_code=LibraryErrorCode.RESULT_NOT_READY
+              error_code=RetrievalCode.RESULT_NOT_READY
             - If node has no node_id: returns TaskResult with
-              error_code=LibraryErrorCode.WORKFLOW_CTX_MISSING_ID
+              error_code=ContractCode.WORKFLOW_CTX_MISSING_ID
 
         Example:
             result = handle.result_for(node)
-            if result.is_err() and result.err.error_code == LibraryErrorCode.RESULT_NOT_READY:
+            if result.is_err() and result.err.error_code == RetrievalCode.RESULT_NOT_READY:
                 # Task hasn't completed yet - wait or check later
                 pass
         """
@@ -547,7 +556,7 @@ class WorkflowHandle(Generic[OutT]):
                 'TaskResult[OkT, TaskError]',
                 TaskResult(
                     err=TaskError(
-                        error_code=LibraryErrorCode.WORKFLOW_CTX_MISSING_ID,
+                        error_code=ContractCode.WORKFLOW_CTX_MISSING_ID,
                         message=(
                             'TaskNode node_id is not set. Ensure WorkflowSpec assigns '
                             'node_id or provide an explicit node_id.'
@@ -568,7 +577,7 @@ class WorkflowHandle(Generic[OutT]):
                         'TaskResult[OkT, TaskError]',
                         TaskResult(
                             err=TaskError(
-                                error_code=LibraryErrorCode.RESULT_NOT_READY,
+                                error_code=RetrievalCode.RESULT_NOT_READY,
                                 message=(
                                     f"Task '{node_id}' has not completed yet "
                                     f"in workflow '{self.workflow_id}'"
@@ -581,7 +590,7 @@ class WorkflowHandle(Generic[OutT]):
                 if is_err(loads_r):
                     return cast('TaskResult[OkT, TaskError]', TaskResult(
                         err=TaskError(
-                            error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                             message=f'Result JSON corrupt for node {node_id}: {loads_r.err_value}',
                         ),
                     ))
@@ -589,7 +598,7 @@ class WorkflowHandle(Generic[OutT]):
                 if is_err(tr_r):
                     return cast('TaskResult[OkT, TaskError]', TaskResult(
                         err=TaskError(
-                            error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                             message=f'Result deser failed for node {node_id}: {tr_r.err_value}',
                         ),
                     ))
@@ -634,7 +643,7 @@ class WorkflowHandle(Generic[OutT]):
                     if is_err(loads_r):
                         out[row.node_id] = TaskResult(
                             err=TaskError(
-                                error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                                 message=f'Result JSON corrupt for node {row.node_id}: {loads_r.err_value}',
                             ),
                         )
@@ -643,7 +652,7 @@ class WorkflowHandle(Generic[OutT]):
                     if is_err(tr_r):
                         out[row.node_id] = TaskResult(
                             err=TaskError(
-                                error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                                 message=f'Result deser failed for node {row.node_id}: {tr_r.err_value}',
                             ),
                         )
@@ -682,7 +691,7 @@ class WorkflowHandle(Generic[OutT]):
                         if is_err(loads_r):
                             task_result_value = TaskResult(
                                 err=TaskError(
-                                    error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                                    error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                                     message=f'Result JSON corrupt: {loads_r.err_value}',
                                 ),
                             )
@@ -691,7 +700,7 @@ class WorkflowHandle(Generic[OutT]):
                             if is_err(tr_r):
                                 task_result_value = TaskResult(
                                     err=TaskError(
-                                        error_code=LibraryErrorCode.RESULT_DESERIALIZATION_ERROR,
+                                        error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                                         message=f'Result deser failed: {tr_r.err_value}',
                                     ),
                                 )

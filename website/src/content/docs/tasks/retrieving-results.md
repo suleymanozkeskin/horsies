@@ -14,7 +14,7 @@ Retrieve task outcomes through `TaskHandle.get()` / `get_async()`. For error han
 ### Basic Retrieval
 
 ```python
-from horsies import LibraryErrorCode
+from horsies import RetrievalCode
 from instance import my_task
 
 send_result = my_task.send(10, 20)
@@ -28,7 +28,7 @@ result = handle.get()
 if result.is_err():
     error = result.err_value
     match error.error_code:
-        case LibraryErrorCode.WAIT_TIMEOUT:
+        case RetrievalCode.WAIT_TIMEOUT:
             print(f"Timeout waiting for {handle.task_id}")
         case _:
             print(f"Error: {error.error_code} - {error.message}")
@@ -52,12 +52,12 @@ result = await handle.get_async()
 Specify maximum wait time in milliseconds:
 
 ```python
-from horsies import LibraryErrorCode
+from horsies import RetrievalCode
 
 # Wait up to 5 seconds
 result = handle.get(timeout_ms=5000)
 
-if result.is_err() and result.err_value.error_code == LibraryErrorCode.WAIT_TIMEOUT:
+if result.is_err() and result.err_value.error_code == RetrievalCode.WAIT_TIMEOUT:
     # Task didn't complete in time - may still be running
     print("Timed out, task may still complete later")
 ```

@@ -278,7 +278,7 @@ async def resume_async(self) -> HandleResult[bool]
 - `COMPLETED` → returns output task's `TaskResult` (or `TaskResult(ok={node_id: TaskResult, ...})` if no `output`).
 - `FAILED` / `CANCELLED` → returns `TaskResult(err=TaskError(...))`.
 - `PAUSED` → returns immediately with `TaskResult(err=TaskError(error_code='WORKFLOW_PAUSED'))`.
-- Timeout → returns `TaskResult(err=TaskError(error_code=LibraryErrorCode.WAIT_TIMEOUT))`.
+- Timeout → returns `TaskResult(err=TaskError(error_code=RetrievalCode.WAIT_TIMEOUT))`.
 
 ### `result_for()` semantics
 

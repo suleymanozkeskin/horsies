@@ -23,7 +23,7 @@ def flaky_task() -> TaskResult[str, TaskError]:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `auto_retry_for` | `list[str \| LibraryErrorCode]` | (required) | Error codes that trigger automatic retries |
+| `auto_retry_for` | `list[str \| BuiltInTaskCode]` | (required) | Error codes that trigger automatic retries |
 | `max_retries` | `int` | 3 | Number of retry attempts (1-20) |
 | `intervals` | `list[int]` | [60, 300, 900] | Delay intervals in seconds |
 | `backoff_strategy` | `str` | "fixed" | "fixed" or "exponential" |

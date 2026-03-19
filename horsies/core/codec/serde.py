@@ -21,7 +21,7 @@ from horsies.core.models.tasks import (
     TaskOptions,
     TaskResult,
     TaskError,
-    LibraryErrorCode,
+    ContractCode,
 )
 from horsies.core.types.result import Ok, Err, Result, is_err
 from importlib import import_module
@@ -545,9 +545,9 @@ def task_result_from_json(j: Json) -> SerdeResult[TaskResult[Any, TaskError]]:
     if err is not None:
         if isinstance(err, dict) and err.get('__task_error__'):
             err = {k: v for k, v in err.items() if k != '__task_error__'}
-        # Bug fix: ValidationError from model_validate was previously unhandled
+        # Rehydrate from persisted payload (coerces reserved strings to enum members).
         try:
-            task_err = TaskError.model_validate(err)
+            task_err = TaskError.from_persisted(err) if isinstance(err, dict) else TaskError.model_validate(err)
         except (ValidationError, Exception) as exc:
             return Err(SerializationError(
                 f'Failed to validate TaskError from JSON: {exc}',
@@ -563,7 +563,7 @@ def task_result_from_json(j: Json) -> SerdeResult[TaskResult[Any, TaskError]]:
         logger.warning(f'PYDANTIC_HYDRATION_ERROR: {ok_result.err_value}')
         return Ok(TaskResult(
             err=TaskError(
-                error_code=LibraryErrorCode.PYDANTIC_HYDRATION_ERROR,
+                error_code=ContractCode.PYDANTIC_HYDRATION_ERROR,
                 message=str(ok_result.err_value),
                 data={},
             ),

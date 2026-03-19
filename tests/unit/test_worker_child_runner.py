@@ -25,7 +25,7 @@ from unittest.mock import MagicMock, patch, call
 import pytest
 
 from horsies.core.codec.serde import SerializationError
-from horsies.core.models.tasks import LibraryErrorCode, TaskError, TaskResult
+from horsies.core.models.tasks import OperationalErrorCode, TaskError, TaskResult
 from horsies.core.types.result import Err, Ok
 from horsies.core.worker.child_runner import (
     _debug_imports_log,
@@ -128,7 +128,7 @@ class TestSerializationErrorResponse:
         parsed = _parse_task_result(payload)
         err_data = parsed.get('err') or parsed.get('error')
         assert err_data is not None
-        assert err_data['error_code'] == LibraryErrorCode.WORKER_SERIALIZATION_ERROR.value
+        assert err_data['error_code'] == OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value
 
     def test_includes_task_name_in_data(self) -> None:
         error = SerializationError('corrupt')
@@ -832,7 +832,7 @@ class TestRunTaskEntryErrorPaths:
         assert 'KeyError' in (reason or '')
         parsed = _parse_task_result(payload)
         err = parsed.get('err') or parsed.get('error')
-        assert err['error_code'] == LibraryErrorCode.WORKER_RESOLUTION_ERROR.value
+        assert err['error_code'] == OperationalErrorCode.WORKER_RESOLUTION_ERROR.value
 
     def test_args_json_invalid(
         self,
@@ -849,7 +849,7 @@ class TestRunTaskEntryErrorPaths:
         assert reason is not None and 'SerializationError' in reason
         parsed = _parse_task_result(payload)
         err = parsed.get('err') or parsed.get('error')
-        assert err['error_code'] == LibraryErrorCode.WORKER_SERIALIZATION_ERROR.value
+        assert err['error_code'] == OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value
 
     def test_args_json_not_a_list(
         self,
@@ -911,7 +911,7 @@ class TestRunTaskEntryErrorPaths:
         assert reason == 'Task returned None'
         parsed = _parse_task_result(payload)
         err = parsed.get('err') or parsed.get('error')
-        assert err['error_code'] == LibraryErrorCode.TASK_EXCEPTION.value
+        assert err['error_code'] == OperationalErrorCode.TASK_EXCEPTION.value
 
     def test_task_raises_exception(
         self,
@@ -931,7 +931,7 @@ class TestRunTaskEntryErrorPaths:
         assert reason is None  # exception path sets reason=None
         parsed = _parse_task_result(payload)
         err = parsed.get('err') or parsed.get('error')
-        assert err['error_code'] == LibraryErrorCode.TASK_EXCEPTION.value
+        assert err['error_code'] == OperationalErrorCode.TASK_EXCEPTION.value
         assert 'ValueError' in err['message']
         assert 'boom' in err['message']
 

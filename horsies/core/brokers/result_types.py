@@ -6,7 +6,7 @@ The library uses two distinct error systems:
 
 1. ``TaskResult[T, TaskError]`` -- user-facing task execution outcomes.
    Returned by ``get_result_async`` / ``get_result``.  Carries domain
-   error codes (``LibraryErrorCode``) and user-defined error codes.
+   error codes (``BuiltInTaskCode`` families) and user-defined error codes.
 
 2. ``BrokerResult[T]`` (this module) -- infrastructure operation outcomes.
    Returned by broker methods (``enqueue_async``, ``get_task_info_async``,

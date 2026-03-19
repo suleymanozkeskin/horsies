@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from horsies.core.exception_mapper import ExceptionMapper, resolve_exception_error_code
-from horsies.core.models.tasks import LibraryErrorCode, TaskError
+from horsies.core.models.tasks import OperationalErrorCode, TaskError
 from horsies.core.worker.worker import Worker
 
 
@@ -146,14 +146,14 @@ class TestShouldRetryTask:
 
     @pytest.mark.asyncio
     async def test_library_error_code_enum_matches(self) -> None:
-        """LibraryErrorCode enum .value matches string in auto_retry_for."""
+        """OperationalErrorCode enum .value matches string in auto_retry_for."""
         row = _make_row(
             retry_count=0,
             max_retries=3,
             task_options=_task_options_json(["UNHANDLED_EXCEPTION"]),
         )
         session = _mock_session(row)
-        error = TaskError(error_code=LibraryErrorCode.UNHANDLED_EXCEPTION)
+        error = TaskError(error_code=OperationalErrorCode.UNHANDLED_EXCEPTION)
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 

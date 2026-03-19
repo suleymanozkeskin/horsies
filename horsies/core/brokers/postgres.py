@@ -642,7 +642,7 @@ class PostgresBroker:
 
         Broker failures (e.g., database errors) are returned as BROKER_ERROR.
         """
-        from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
+        from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode, RetrievalCode, OutcomeCode
 
         try:
             await self._ensure_initialized()
@@ -661,7 +661,7 @@ class PostgresBroker:
                     self.logger.error(f'Task {task_id} not found')
                     return TaskResult(
                         err=TaskError(
-                            error_code=LibraryErrorCode.TASK_NOT_FOUND,
+                            error_code=RetrievalCode.TASK_NOT_FOUND,
                             message=f'Task {task_id} not found in database',
                             data={'task_id': task_id},
                         )
@@ -671,14 +671,14 @@ class PostgresBroker:
                     _lr = loads_json(row.result)
                     if is_err(_lr):
                         return TaskResult(err=TaskError(
-                            error_code=LibraryErrorCode.BROKER_ERROR,
+                            error_code=OperationalErrorCode.BROKER_ERROR,
                             message=f'Result JSON corrupt: {_lr.err_value}',
                             data={'task_id': task_id},
                         ))
                     _trr = task_result_from_json(_lr.ok_value)
                     if is_err(_trr):
                         return TaskResult(err=TaskError(
-                            error_code=LibraryErrorCode.BROKER_ERROR,
+                            error_code=OperationalErrorCode.BROKER_ERROR,
                             message=f'Result deser failed: {_trr.err_value}',
                             data={'task_id': task_id},
                         ))
@@ -687,7 +687,7 @@ class PostgresBroker:
                     self.logger.info(f'Task {task_id} was cancelled')
                     return TaskResult(
                         err=TaskError(
-                            error_code=LibraryErrorCode.TASK_CANCELLED,
+                            error_code=OutcomeCode.TASK_CANCELLED,
                             message=f'Task {task_id} was cancelled before completion',
                             data={'task_id': task_id},
                         )
@@ -725,7 +725,7 @@ class PostgresBroker:
                         if remaining_timeout <= 0:
                             return TaskResult(
                                 err=TaskError(
-                                    error_code=LibraryErrorCode.WAIT_TIMEOUT,
+                                    error_code=RetrievalCode.WAIT_TIMEOUT,
                                     message=f'Timed out waiting for task {task_id} after {timeout_ms}ms. Task may still be running.',
                                     data={'task_id': task_id, 'timeout_ms': timeout_ms},
                                 )
@@ -766,7 +766,7 @@ class PostgresBroker:
                         if row is None:
                             return TaskResult(
                                 err=TaskError(
-                                    error_code=LibraryErrorCode.TASK_NOT_FOUND,
+                                    error_code=RetrievalCode.TASK_NOT_FOUND,
                                     message=f'Task {task_id} not found in database',
                                     data={'task_id': task_id},
                                 )
@@ -778,14 +778,14 @@ class PostgresBroker:
                             _lr = loads_json(row.result)
                             if is_err(_lr):
                                 return TaskResult(err=TaskError(
-                                    error_code=LibraryErrorCode.BROKER_ERROR,
+                                    error_code=OperationalErrorCode.BROKER_ERROR,
                                     message=f'Result JSON corrupt: {_lr.err_value}',
                                     data={'task_id': task_id},
                                 ))
                             _trr = task_result_from_json(_lr.ok_value)
                             if is_err(_trr):
                                 return TaskResult(err=TaskError(
-                                    error_code=LibraryErrorCode.BROKER_ERROR,
+                                    error_code=OperationalErrorCode.BROKER_ERROR,
                                     message=f'Result deser failed: {_trr.err_value}',
                                     data={'task_id': task_id},
                                 ))
@@ -794,7 +794,7 @@ class PostgresBroker:
                             self.logger.error(f'Task {task_id} was cancelled')
                             return TaskResult(
                                 err=TaskError(
-                                    error_code=LibraryErrorCode.TASK_CANCELLED,
+                                    error_code=OutcomeCode.TASK_CANCELLED,
                                     message=f'Task {task_id} was cancelled before completion',
                                     data={'task_id': task_id},
                                 )
@@ -811,7 +811,7 @@ class PostgresBroker:
             self.logger.exception('Broker error while retrieving task result')
             return TaskResult(
                 err=TaskError(
-                    error_code=LibraryErrorCode.BROKER_ERROR,
+                    error_code=OperationalErrorCode.BROKER_ERROR,
                     message='Broker error while retrieving task result',
                     data={'task_id': task_id, 'timeout_ms': timeout_ms},
                     exception=exc,
@@ -928,7 +928,7 @@ class PostgresBroker:
         Creates a proper TaskResult with WORKER_CRASHED error code for each stale task.
         """
         try:
-            from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
+            from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode
             from horsies.core.codec.serde import dumps_json
 
             # Convert milliseconds to seconds for PostgreSQL INTERVAL
@@ -959,7 +959,7 @@ class PostgresBroker:
                         f'for {stale_threshold_ms}ms = {stale_threshold_ms/1000:.1f}s)'
                     )
                     task_error = TaskError(
-                        error_code=LibraryErrorCode.WORKER_CRASHED,
+                        error_code=OperationalErrorCode.WORKER_CRASHED,
                         message=failed_reason_str,
                         data={
                             'stale_threshold_ms': stale_threshold_ms,
@@ -995,7 +995,7 @@ class PostgresBroker:
                             'will_retry': False,
                             'started_at': started_at or now_utc,
                             'finished_at': now_utc,
-                            'error_code': LibraryErrorCode.WORKER_CRASHED.value,
+                            'error_code': OperationalErrorCode.WORKER_CRASHED.value,
                             'error_message': task_error.message,
                             'failed_reason': failed_reason_str,
                             'worker_id': worker_id,
@@ -1011,7 +1011,7 @@ class PostgresBroker:
                             'task_id': task_id,
                             'failed_reason': failed_reason_str,
                             'result': result_json,
-                            'error_code': LibraryErrorCode.WORKER_CRASHED.value,
+                            'error_code': OperationalErrorCode.WORKER_CRASHED.value,
                         },
                     )
 
@@ -1101,7 +1101,7 @@ class PostgresBroker:
         Returns:
             TaskResult - success, task error, retrieval error, or broker error
         """
-        from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
+        from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode
 
         try:
             return self._loop_runner.call(self.get_result_async, task_id, timeout_ms)
@@ -1110,7 +1110,7 @@ class PostgresBroker:
         except Exception as exc:
             return TaskResult(
                 err=TaskError(
-                    error_code=LibraryErrorCode.BROKER_ERROR,
+                    error_code=OperationalErrorCode.BROKER_ERROR,
                     message='Broker error while retrieving task result',
                     data={'task_id': task_id, 'timeout_ms': timeout_ms},
                     exception=exc,

@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
+from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode
 from horsies.core.models.workflow import (
     TaskNode,
     WorkflowHandle,
@@ -289,7 +289,7 @@ class TestWorkflowHandleGet:
 
         result = await handle.get_async(timeout_ms=1000)
         assert result.is_err()
-        assert result.unwrap_err().error_code == 'WORKFLOW_PAUSED'
+        assert result.unwrap_err().error_code is OutcomeCode.WORKFLOW_PAUSED
 
     async def test_get_timeout(
         self,
@@ -320,7 +320,7 @@ class TestWorkflowHandleGet:
         # Don't complete any tasks - workflow stays RUNNING
         result = await handle.get_async(timeout_ms=500)  # Short timeout
         assert result.is_err()
-        assert 'WAIT_TIMEOUT' in str(result.unwrap_err().error_code)
+        assert result.unwrap_err().error_code is RetrievalCode.WAIT_TIMEOUT
 
     async def test_get_cancelled_returns_cancelled_error(
         self,
@@ -347,7 +347,7 @@ class TestWorkflowHandleGet:
 
         result = await handle.get_async(timeout_ms=1000)
         assert result.is_err()
-        assert result.unwrap_err().error_code == 'WORKFLOW_CANCELLED'
+        assert result.unwrap_err().error_code is OutcomeCode.WORKFLOW_CANCELLED
 
     async def test_get_nonexistent_workflow_returns_not_found(
         self,
@@ -362,7 +362,7 @@ class TestWorkflowHandleGet:
 
         result = await handle.get_async(timeout_ms=500)
         assert result.is_err()
-        assert result.unwrap_err().error_code == LibraryErrorCode.WORKFLOW_NOT_FOUND
+        assert result.unwrap_err().error_code == RetrievalCode.WORKFLOW_NOT_FOUND
 
 
 # =============================================================================
@@ -458,7 +458,7 @@ class TestWorkflowHandleResults:
         result = await handle.result_for_async(node_a)
 
         assert result.is_err()
-        assert result.unwrap_err().error_code == LibraryErrorCode.RESULT_NOT_READY
+        assert result.unwrap_err().error_code == RetrievalCode.RESULT_NOT_READY
 
     async def test_result_for_missing_node_id_returns_error(
         self,
@@ -483,7 +483,7 @@ class TestWorkflowHandleResults:
 
         result = await handle.result_for_async(orphan_node)
         assert result.is_err()
-        assert result.unwrap_err().error_code == LibraryErrorCode.WORKFLOW_CTX_MISSING_ID
+        assert result.unwrap_err().error_code == ContractCode.WORKFLOW_CTX_MISSING_ID
         assert 'node_id is not set' in (result.unwrap_err().message or '')
 
     async def test_results_empty_when_no_tasks_completed(
@@ -1621,7 +1621,7 @@ class TestWorkflowHandleInfraErrors:
             result = await handle.get_async(timeout_ms=500)
 
         assert result.is_err()
-        assert result.unwrap_err().error_code == LibraryErrorCode.BROKER_ERROR
+        assert result.unwrap_err().error_code == OperationalErrorCode.BROKER_ERROR
 
     async def test_cancel_db_error_returns_err_db_operation_failed(
         self,
@@ -1720,7 +1720,7 @@ class TestWorkflowHandleInfraErrors:
         # Fold-strategy: get returns typed error
         get_r = await handle.get_async(timeout_ms=500)
         assert get_r.is_err()
-        assert get_r.unwrap_err().error_code == LibraryErrorCode.WORKFLOW_NOT_FOUND
+        assert get_r.unwrap_err().error_code == RetrievalCode.WORKFLOW_NOT_FOUND
 
 
 # =============================================================================
@@ -1861,6 +1861,6 @@ class TestListenerFallbackContract:
 
         assert result.is_err()
         err = result.unwrap_err()
-        assert err.error_code == LibraryErrorCode.BROKER_ERROR
+        assert err.error_code == OperationalErrorCode.BROKER_ERROR
         assert isinstance(err.exception, TypeError)
         assert 'test bug' in str(err.exception)

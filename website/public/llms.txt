@@ -74,19 +74,24 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .ok_value -> T (raises on err), .err_value -> E (raises on ok)
 
 ### TaskError
-- error_code: str | LibraryErrorCode | None
+- error_code: str | BuiltInTaskCode | None
 - message: str | None
 - data: Any | None
 - exception: dict[str, Any] | BaseException | None
 
-### LibraryErrorCode (enum)
-- Execution: UNHANDLED_EXCEPTION, TASK_EXCEPTION, WORKER_CRASHED
-- Retrieval: WAIT_TIMEOUT, TASK_NOT_FOUND, TASK_CANCELLED, RESULT_NOT_AVAILABLE, RESULT_NOT_READY, RESULT_DESERIALIZATION_ERROR
-- Broker: BROKER_ERROR
-- Worker: WORKER_RESOLUTION_ERROR, WORKER_SERIALIZATION_ERROR
-- Validation: RETURN_TYPE_MISMATCH, PYDANTIC_HYDRATION_ERROR
-- Lifecycle: SEND_SUPPRESSED (also in TaskSendErrorCode; .send() returns Err(TaskSendError(SEND_SUPPRESSED)))
-- Workflow: UPSTREAM_SKIPPED, WORKFLOW_CTX_MISSING_ID, WORKFLOW_SUCCESS_CASE_NOT_MET
+### BuiltInTaskCode (type alias = OperationalErrorCode | ContractCode | RetrievalCode | OutcomeCode)
+- OperationalErrorCode: UNHANDLED_EXCEPTION, TASK_EXCEPTION, WORKER_CRASHED, BROKER_ERROR, WORKER_RESOLUTION_ERROR, WORKER_SERIALIZATION_ERROR, RESULT_DESERIALIZATION_ERROR, WORKFLOW_ENQUEUE_FAILED, SUBWORKFLOW_LOAD_FAILED
+- ContractCode: RETURN_TYPE_MISMATCH, PYDANTIC_HYDRATION_ERROR, WORKFLOW_CTX_MISSING_ID
+- RetrievalCode: WAIT_TIMEOUT, TASK_NOT_FOUND, WORKFLOW_NOT_FOUND, RESULT_NOT_AVAILABLE, RESULT_NOT_READY
+- OutcomeCode: TASK_CANCELLED, WORKFLOW_PAUSED, WORKFLOW_FAILED, WORKFLOW_CANCELLED, UPSTREAM_SKIPPED, SUBWORKFLOW_FAILED, WORKFLOW_SUCCESS_CASE_NOT_MET
+- All built-in code string values are globally reserved; user-defined error codes must not collide
+- BUILTIN_CODE_REGISTRY: dict[str, BuiltInTaskCode] maps every reserved string to its enum member
+- horsies check reports E212 when exception_mapper or default_unhandled_error_code collides with a reserved code
+- User-defined error codes are plain str only (user enums degrade to str after round-trip)
+- Strict construction: TaskError(error_code="BROKER_ERROR") raises ValueError (reserved string)
+- Use enum members: TaskError(error_code=OperationalErrorCode.BROKER_ERROR) — accepted
+- Rehydration: TaskError.from_persisted(dict) / TaskError.from_persisted_json(str) — coerces reserved strings to enums
+- model_validate() / model_validate_json() enforce strict rules — not for rehydrating stored payloads
 
 ### SubWorkflowError (extends TaskError)
 - sub_workflow_id: str
@@ -449,13 +454,14 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Task definition (E100-E103):
   - E100 TASK_NO_RETURN_TYPE, E101 TASK_INVALID_RETURN_TYPE
   - E102 TASK_INVALID_OPTIONS, E103 TASK_INVALID_QUEUE
-- Config/broker (E200-E210):
+- Config/broker (E200-E212):
   - E200 CONFIG_INVALID_QUEUE_MODE, E201 CONFIG_INVALID_CLUSTER_CAP
   - E202 CONFIG_INVALID_PREFETCH, E203 BROKER_INVALID_URL
   - E204 CONFIG_INVALID_RECOVERY, E205 CONFIG_INVALID_SCHEDULE
   - E206 CLI_INVALID_ARGS, E207 WORKER_INVALID_LOCATOR
   - E208 CONFIG_INVALID_RESILIENCE, E209 CONFIG_INVALID_EXCEPTION_MAPPER
-  - E210 MODULE_EXEC_ERROR
+  - E210 MODULE_EXEC_ERROR, E211 BROKER_INIT_FAILED
+  - E212 CHECK_RESERVED_CODE_COLLISION (exception_mapper/default_unhandled_error_code collides with built-in code)
 - Registry (E300-E301):
   - E300 TASK_NOT_REGISTERED, E301 TASK_DUPLICATE_NAME
 
@@ -602,7 +608,7 @@ RecoveryConfig, stale, requeue, crash recovery -> /horsies/configuration/recover
 @app.task, decorator, task definition, define task -> /horsies/tasks/defining-tasks/
 send, send_async, enqueue, dispatch, produce, TaskSendResult, TaskSendError, retry_send -> /horsies/tasks/sending-tasks/
 TaskResult, is_ok, is_err, ok_value, err_value -> /horsies/tasks/error-handling/
-LibraryErrorCode, TaskError, TaskSendErrorCode, error codes, UNHANDLED_EXCEPTION -> /horsies/tasks/errors/
+BuiltInTaskCode, OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode, TaskError, TaskSendErrorCode, error codes, UNHANDLED_EXCEPTION -> /horsies/tasks/errors/
 TaskHandle, get, get_async, timeout, result -> /horsies/tasks/retrieving-results/
 RetryPolicy, retry, backoff, exponential, fixed, auto_retry_for -> /horsies/tasks/retry-policy/
 PENDING, CLAIMED, RUNNING, COMPLETED, FAILED, task status -> /horsies/concepts/task-lifecycle/

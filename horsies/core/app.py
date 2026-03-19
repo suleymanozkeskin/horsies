@@ -12,7 +12,7 @@ from typing import (
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskOptions, RetryPolicy
+from horsies.core.models.tasks import TaskError, TaskOptions, RetryPolicy, OperationalErrorCode
 from horsies.core.task_decorator import create_task_wrapper, effective_priority
 from horsies.core.models.workflow import (
     TaskNode,
@@ -413,6 +413,8 @@ class Horsies:
 
     def _check_runtime_policy_safety(self) -> list[HorsiesError]:
         """Validate runtime retry/mapping policies after task imports."""
+        from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
+
         errors: list[HorsiesError] = []
 
         # Re-validate global settings so post-construction mutations fail startup.
@@ -429,6 +431,25 @@ class Horsies:
                 )
             )
 
+        # Check exception_mapper values for reserved built-in code collisions.
+        if isinstance(self.config.exception_mapper, dict):
+            for exc_cls, code_str in self.config.exception_mapper.items():
+                if isinstance(code_str, str) and code_str in BUILTIN_CODE_REGISTRY:
+                    builtin = BUILTIN_CODE_REGISTRY[code_str]
+                    errors.append(
+                        _no_location(
+                            ConfigurationError(
+                                message=(
+                                    f"exception_mapper value '{code_str}' collides with "
+                                    f'reserved built-in {type(builtin).__name__}.{builtin.name}'
+                                ),
+                                code=ErrorCode.CHECK_RESERVED_CODE_COLLISION,
+                                notes=['app config', f'key: {exc_cls.__name__}'],
+                                help_text='use a different UPPER_SNAKE_CASE code that does not match a built-in library code',
+                            )
+                        )
+                    )
+
         global_default_error = validate_error_code_string(
             self.config.default_unhandled_error_code,
             field_name='default_unhandled_error_code',
@@ -441,6 +462,30 @@ class Horsies:
                         code=ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
                         notes=['app config'],
                         help_text='use UPPER_SNAKE_CASE error codes',
+                    )
+                )
+            )
+
+        # Check global default_unhandled_error_code for reserved collision.
+        # The library default 'UNHANDLED_EXCEPTION' is intentionally a built-in code
+        # and should not be flagged as a collision.
+        global_default = self.config.default_unhandled_error_code
+        if (
+            isinstance(global_default, str)
+            and global_default in BUILTIN_CODE_REGISTRY
+            and global_default != OperationalErrorCode.UNHANDLED_EXCEPTION.value
+        ):
+            builtin = BUILTIN_CODE_REGISTRY[global_default]
+            errors.append(
+                _no_location(
+                    ConfigurationError(
+                        message=(
+                            f"default_unhandled_error_code '{global_default}' collides with "
+                            f'reserved built-in {type(builtin).__name__}.{builtin.name}'
+                        ),
+                        code=ErrorCode.CHECK_RESERVED_CODE_COLLISION,
+                        notes=['app config'],
+                        help_text='use a different UPPER_SNAKE_CASE code that does not match a built-in library code',
                     )
                 )
             )
@@ -463,6 +508,48 @@ class Horsies:
                             )
                         )
                     )
+                elif (
+                    isinstance(task_default, str)
+                    and task_default in BUILTIN_CODE_REGISTRY
+                    and task_default != OperationalErrorCode.UNHANDLED_EXCEPTION.value
+                ):
+                    builtin = BUILTIN_CODE_REGISTRY[task_default]
+                    errors.append(
+                        _no_location(
+                            ConfigurationError(
+                                message=(
+                                    f"default_unhandled_error_code '{task_default}' collides with "
+                                    f'reserved built-in {type(builtin).__name__}.{builtin.name}'
+                                ),
+                                code=ErrorCode.CHECK_RESERVED_CODE_COLLISION,
+                                notes=[f"task '{task_name}'"],
+                                help_text='use a different UPPER_SNAKE_CASE code that does not match a built-in library code',
+                            )
+                        )
+                    )
+
+            # Check per-task exception_mapper for reserved collisions.
+            task_mapper = getattr(task, 'exception_mapper', None)
+            if isinstance(task_mapper, dict):
+                for exc_cls, code_str in task_mapper.items():
+                    if isinstance(code_str, str) and code_str in BUILTIN_CODE_REGISTRY:
+                        builtin = BUILTIN_CODE_REGISTRY[code_str]
+                        errors.append(
+                            _no_location(
+                                ConfigurationError(
+                                    message=(
+                                        f"exception_mapper value '{code_str}' collides with "
+                                        f'reserved built-in {type(builtin).__name__}.{builtin.name}'
+                                    ),
+                                    code=ErrorCode.CHECK_RESERVED_CODE_COLLISION,
+                                    notes=[
+                                        f"task '{task_name}'",
+                                        f'key: {exc_cls.__name__}' if isinstance(exc_cls, type) else f'key: {exc_cls!r}',
+                                    ],
+                                    help_text='use a different UPPER_SNAKE_CASE code that does not match a built-in library code',
+                                )
+                            )
+                        )
 
             task_options_json = getattr(task, 'task_options_json', None)
             if not isinstance(task_options_json, str) or not task_options_json:

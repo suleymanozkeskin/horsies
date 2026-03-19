@@ -18,7 +18,9 @@ import pytest
 
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
 from horsies.core.models.tasks import (
-    LibraryErrorCode,
+    OperationalErrorCode,
+    OutcomeCode,
+    RetrievalCode,
     TaskError,
     TaskInfo,
     TaskResult,
@@ -578,7 +580,7 @@ class TestGetResultAsync:
 
         assert result.is_err()
         err = result.unwrap_err()
-        assert err.error_code == LibraryErrorCode.TASK_NOT_FOUND
+        assert err.error_code == RetrievalCode.TASK_NOT_FOUND
         assert 'missing-id' in (err.message or '')
 
     @pytest.mark.asyncio
@@ -621,7 +623,7 @@ class TestGetResultAsync:
 
         assert result.is_err()
         err = result.unwrap_err()
-        assert err.error_code == LibraryErrorCode.UNHANDLED_EXCEPTION
+        assert err.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
         assert err.message == 'boom'
 
     @pytest.mark.asyncio
@@ -640,7 +642,7 @@ class TestGetResultAsync:
 
         assert result.is_err()
         err = result.unwrap_err()
-        assert err.error_code == LibraryErrorCode.TASK_CANCELLED
+        assert err.error_code == OutcomeCode.TASK_CANCELLED
 
     @pytest.mark.asyncio
     async def test_generic_exception_returns_broker_error(self) -> None:
@@ -656,7 +658,7 @@ class TestGetResultAsync:
 
         assert result.is_err()
         err = result.unwrap_err()
-        assert err.error_code == LibraryErrorCode.BROKER_ERROR
+        assert err.error_code == OperationalErrorCode.BROKER_ERROR
         assert err.exception is not None
 
     @pytest.mark.asyncio
@@ -1049,7 +1051,7 @@ class TestSyncFacades:
 
         assert result.is_err()
         err = result.unwrap_err()
-        assert err.error_code == LibraryErrorCode.BROKER_ERROR
+        assert err.error_code == OperationalErrorCode.BROKER_ERROR
         assert err.exception is not None
         assert isinstance(err.exception, RuntimeError)
         assert 'Broker error while retrieving task result' in err.message

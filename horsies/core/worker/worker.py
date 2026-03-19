@@ -26,7 +26,7 @@ from horsies.core.codec.serde import (
     loads_json,
     task_result_from_json,
 )
-from horsies.core.models.tasks import TaskResult, TaskError, LibraryErrorCode
+from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode, BuiltInTaskCode
 from horsies.core.logging import get_logger
 from horsies.core.worker.current import set_current_app
 from horsies.core.models.resilience import WorkerResilienceConfig
@@ -141,7 +141,7 @@ class _RetryBackoff:
 
 @dataclass(frozen=True)
 class _FinalizeError:
-    error_code: LibraryErrorCode | str
+    error_code: BuiltInTaskCode | str
     message: str
     stage: str
     task_id: str
@@ -1076,7 +1076,7 @@ class Worker:
         message: str,
         retryable: bool,
         data: dict[str, Any] | None = None,
-        error_code: LibraryErrorCode | str = LibraryErrorCode.BROKER_ERROR,
+        error_code: BuiltInTaskCode | str = OperationalErrorCode.BROKER_ERROR,
     ) -> _FinalizeError:
         return _FinalizeError(
             error_code=error_code,
@@ -1176,7 +1176,7 @@ class Worker:
                     logger.error(f'Task {task_id} result JSON is corrupt: {_loads_r.err_value}')
                     _err_tr: TaskResult[None, TaskError] = TaskResult(
                         err=TaskError(
-                            error_code=LibraryErrorCode.WORKER_SERIALIZATION_ERROR,
+                            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
                             message=f'Result JSON corrupt: {_loads_r.err_value}',
                             data={'task_id': task_id},
                         ),
@@ -1188,7 +1188,7 @@ class Worker:
                         'will_retry': False,
                         'started_at': attempt_started_at,
                         'finished_at': now,
-                        'error_code': LibraryErrorCode.WORKER_SERIALIZATION_ERROR.value,
+                        'error_code': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
                         'error_message': f'Result JSON corrupt: {_loads_r.err_value}',
                         'failed_reason': None,
                         **attempt_worker,
@@ -1199,7 +1199,7 @@ class Worker:
                             'now': now,
                             'result_json': serialize_error_payload(_err_tr),
                             'id': task_id,
-                            'error_code': LibraryErrorCode.WORKER_SERIALIZATION_ERROR.value,
+                            'error_code': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
                         },
                     )
                     await s.commit()
@@ -1210,7 +1210,7 @@ class Worker:
                     logger.error(f'Task {task_id} result deser failed: {_tr_r.err_value}')
                     _err_tr = TaskResult(
                         err=TaskError(
-                            error_code=LibraryErrorCode.WORKER_SERIALIZATION_ERROR,
+                            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
                             message=f'Result deser failed: {_tr_r.err_value}',
                             data={'task_id': task_id},
                         ),
@@ -1222,7 +1222,7 @@ class Worker:
                         'will_retry': False,
                         'started_at': attempt_started_at,
                         'finished_at': now,
-                        'error_code': LibraryErrorCode.WORKER_SERIALIZATION_ERROR.value,
+                        'error_code': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
                         'error_message': f'Result deser failed: {_tr_r.err_value}',
                         'failed_reason': None,
                         **attempt_worker,
@@ -1233,7 +1233,7 @@ class Worker:
                             'now': now,
                             'result_json': serialize_error_payload(_err_tr),
                             'id': task_id,
-                            'error_code': LibraryErrorCode.WORKER_SERIALIZATION_ERROR.value,
+                            'error_code': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
                         },
                     )
                     await s.commit()
@@ -1244,7 +1244,7 @@ class Worker:
                     task_error = tr.unwrap_err()
                     _raw_code = task_error.error_code if task_error else None
                     error_code_str: str | None = (
-                        _raw_code.value if isinstance(_raw_code, LibraryErrorCode) else _raw_code
+                        _raw_code.value if isinstance(_raw_code, Enum) else _raw_code
                     )
                     match _raw_code:
                         case 'WORKFLOW_STOPPED':
@@ -1673,7 +1673,7 @@ class Worker:
         # Match error code against auto_retry_for (enum value or string)
         code = (
             error.error_code.value
-            if isinstance(error.error_code, LibraryErrorCode)
+            if isinstance(error.error_code, Enum)
             else error.error_code
         )
         if code and code in auto_retry_for:

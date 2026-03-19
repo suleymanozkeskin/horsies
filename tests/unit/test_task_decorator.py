@@ -13,7 +13,14 @@ import pytest
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
 from horsies.core.errors import ConfigurationError, ErrorCode, TaskDefinitionError
 from horsies.core.exception_mapper import ExceptionMapper
-from horsies.core.models.tasks import LibraryErrorCode, TaskError, TaskOptions, TaskResult
+from horsies.core.models.tasks import (
+    ContractCode,
+    OperationalErrorCode,
+    RetrievalCode,
+    TaskError,
+    TaskOptions,
+    TaskResult,
+)
 from horsies.core.models.workflow import WorkflowContextMissingIdError
 from horsies.core.task_decorator import (
     FromNodeMarker,
@@ -125,14 +132,14 @@ class TestTaskHandleErrorResult:
         handle: TaskHandle[int] = TaskHandle('task-1')
 
         result = handle._error_result(
-            error_code=LibraryErrorCode.BROKER_ERROR,
+            error_code=OperationalErrorCode.BROKER_ERROR,
             message='boom',
             data={'key': 'val'},
         )
 
         assert result.is_err()
         assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.BROKER_ERROR
+        assert result.err.error_code == OperationalErrorCode.BROKER_ERROR
         assert result.err.message == 'boom'
         assert handle._result_fetched is True
         assert handle._cached_result is result
@@ -169,7 +176,7 @@ class TestTaskHandleGet:
 
         assert result.is_err()
         assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.RESULT_NOT_AVAILABLE
+        assert result.err.error_code == RetrievalCode.RESULT_NOT_AVAILABLE
 
     def test_no_broker_mode_no_cache_returns_result_not_available(self) -> None:
         """Without broker mode and no cached result, returns RESULT_NOT_AVAILABLE."""
@@ -179,7 +186,7 @@ class TestTaskHandleGet:
 
         assert result.is_err()
         assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.RESULT_NOT_AVAILABLE
+        assert result.err.error_code == RetrievalCode.RESULT_NOT_AVAILABLE
 
     def test_broker_mode_success(self) -> None:
         """Broker mode: successful get_result is cached and returned."""
@@ -211,7 +218,7 @@ class TestTaskHandleGet:
 
         assert result.is_err()
         assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.BROKER_ERROR
+        assert result.err.error_code == OperationalErrorCode.BROKER_ERROR
         assert result.err.exception is not None
 
     def test_wait_timeout_not_cached(self) -> None:
@@ -220,7 +227,7 @@ class TestTaskHandleGet:
         broker = MagicMock()
         timeout_result: TaskResult[int, TaskError] = TaskResult(
             err=TaskError(
-                error_code=LibraryErrorCode.WAIT_TIMEOUT,
+                error_code=RetrievalCode.WAIT_TIMEOUT,
                 message='timed out',
                 data={},
             ),
@@ -234,7 +241,7 @@ class TestTaskHandleGet:
         first = handle.get(timeout_ms=1000)
         assert first.is_err()
         assert first.err is not None
-        assert first.err.error_code == LibraryErrorCode.WAIT_TIMEOUT
+        assert first.err.error_code == RetrievalCode.WAIT_TIMEOUT
         assert handle._result_fetched is False
 
         second = handle.get(timeout_ms=5000)
@@ -278,7 +285,7 @@ class TestTaskHandleGetAsync:
 
         assert result.is_err()
         assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.RESULT_NOT_AVAILABLE
+        assert result.err.error_code == RetrievalCode.RESULT_NOT_AVAILABLE
 
     @pytest.mark.asyncio
     async def test_no_broker_mode_returns_result_not_available(self) -> None:
@@ -289,7 +296,7 @@ class TestTaskHandleGetAsync:
 
         assert result.is_err()
         assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.RESULT_NOT_AVAILABLE
+        assert result.err.error_code == RetrievalCode.RESULT_NOT_AVAILABLE
 
     @pytest.mark.asyncio
     async def test_broker_mode_success(self) -> None:
@@ -322,7 +329,7 @@ class TestTaskHandleGetAsync:
 
         assert result.is_err()
         assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.BROKER_ERROR
+        assert result.err.error_code == OperationalErrorCode.BROKER_ERROR
 
     @pytest.mark.asyncio
     async def test_cancelled_error_propagates(self) -> None:
@@ -344,7 +351,7 @@ class TestTaskHandleGetAsync:
         broker = MagicMock()
         timeout_result: TaskResult[str, TaskError] = TaskResult(
             err=TaskError(
-                error_code=LibraryErrorCode.WAIT_TIMEOUT,
+                error_code=RetrievalCode.WAIT_TIMEOUT,
                 message='timed out',
                 data={},
             ),
@@ -360,7 +367,7 @@ class TestTaskHandleGetAsync:
         first = await handle.get_async(timeout_ms=1000)
         assert first.is_err()
         assert first.err is not None
-        assert first.err.error_code == LibraryErrorCode.WAIT_TIMEOUT
+        assert first.err.error_code == RetrievalCode.WAIT_TIMEOUT
         assert handle._result_fetched is False
 
         second = await handle.get_async(timeout_ms=5000)
@@ -595,7 +602,7 @@ class TestCreateTaskWrapperExecution:
 
         assert result.is_err()
         assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.TASK_EXCEPTION
+        assert result.err.error_code == OperationalErrorCode.TASK_EXCEPTION
         assert 'returned None' in (result.err.message or '')
 
     def test_return_type_mismatch_produces_error(self) -> None:
@@ -610,7 +617,7 @@ class TestCreateTaskWrapperExecution:
 
         assert result.is_err()
         assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.RETURN_TYPE_MISMATCH
+        assert result.err.error_code == ContractCode.RETURN_TYPE_MISMATCH
 
     def test_keyboard_interrupt_propagates(self) -> None:
         """KeyboardInterrupt re-raises for graceful worker shutdown."""
@@ -635,7 +642,7 @@ class TestCreateTaskWrapperExecution:
 
         assert result.is_err()
         assert result.err is not None
-        assert result.err.error_code == LibraryErrorCode.WORKFLOW_CTX_MISSING_ID
+        assert result.err.error_code == ContractCode.WORKFLOW_CTX_MISSING_ID
 
     def test_generic_exception_uses_exception_mapper(self) -> None:
         """Unhandled exception resolved via exception_mapper chain."""
