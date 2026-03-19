@@ -1,5 +1,9 @@
 """Task Library - A Python library for distributed task execution"""
 
+from importlib.metadata import version as _pkg_version
+
+__version__: str = _pkg_version("horsies")
+
 from .core.app import Horsies
 from .core.models.app import AppConfig
 from .core.models.broker import PostgresConfig
@@ -83,6 +87,8 @@ from .core.brokers.result_types import (
 from .core.types.result import Result, Ok, Err, is_ok, is_err
 
 __all__ = [
+    # Version
+    '__version__',
     # Core
     'Horsies',
     'AppConfig',
