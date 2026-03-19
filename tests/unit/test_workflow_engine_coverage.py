@@ -23,6 +23,7 @@ from horsies.core.workflows.engine import (
     _load_workflow_def_from_path,
     _resolve_workflow_def_nodes,
     _ser,
+    _validate_args_from_map,
     check_workflow_completion,
     enqueue_subworkflow_task,
     enqueue_workflow_task,
@@ -123,6 +124,30 @@ class TestDeserJson:
         assert _deser_json('{"a": 1}', 'ctx') == {'a': 1}
 
 
+# ── 2b. _validate_args_from_map ─────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestValidateArgsFromMap:
+    def test_valid_map_returns_typed(self) -> None:
+        assert _validate_args_from_map({'x': 0, 'y': 1}) == {'x': 0, 'y': 1}
+
+    def test_empty_map_returns_empty(self) -> None:
+        assert _validate_args_from_map({}) == {}
+
+    def test_non_int_value_returns_none(self) -> None:
+        assert _validate_args_from_map({'x': 'not_int'}) is None
+
+    def test_float_value_returns_none(self) -> None:
+        assert _validate_args_from_map({'x': 1.5}) is None
+
+    def test_none_value_returns_none(self) -> None:
+        assert _validate_args_from_map({'x': None}) is None
+
+    def test_mixed_valid_and_invalid_returns_none(self) -> None:
+        assert _validate_args_from_map({'x': 0, 'y': 'bad'}) is None
+
+
 # ── 3. enqueue_workflow_task ─────────────────────────────────────────
 
 
@@ -188,6 +213,21 @@ class TestEnqueueWorkflowTask:
     @pytest.mark.asyncio
     async def test_corrupt_args_from_string_fails_task(self) -> None:
         row = self._base_row(args_from='{broken')
+
+        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
+            if stmt is ENQUEUE_WORKFLOW_TASK_SQL:
+                return _one_result(row)
+            return _one_result(SimpleNamespace())
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=_dispatch)
+        result = await enqueue_workflow_task(session, 'wf-1', 0, {})
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_args_from_non_int_values_fails_task(self) -> None:
+        """Regression: args_from with non-int values must fail early, not propagate."""
+        row = self._base_row(args_from={'x': 'not_an_int'})
 
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_WORKFLOW_TASK_SQL:
@@ -358,6 +398,37 @@ class TestEnqueueSubworkflowTask:
     @pytest.mark.asyncio
     async def test_corrupt_args_from_string_fails(self) -> None:
         row = self._base_row(args_from='{broken')
+
+        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
+            if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
+                return _one_result(row)
+            if stmt is GET_WORKFLOW_NAME_SQL:
+                return _one_result(SimpleNamespace(name='test_wf'))
+            return _one_result(SimpleNamespace())
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=_dispatch)
+        broker = MagicMock()
+
+        with patch(
+            'horsies.core.workflows.registry.get_subworkflow_node',
+            return_value=None,
+        ), patch(
+            'horsies.core.workflows.engine._load_workflow_def_from_path',
+            return_value=MagicMock(),
+        ), patch(
+            'horsies.core.workflows.engine._fail_enqueued_task',
+            new=AsyncMock(),
+        ):
+            result = await enqueue_subworkflow_task(
+                session, broker, 'wf-1', 0, {}, 0, 'root-wf',
+            )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_args_from_non_int_values_fails_task(self) -> None:
+        """Regression: args_from with non-int values must fail early in subworkflow path."""
+        row = self._base_row(args_from={'x': 'not_an_int'})
 
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:

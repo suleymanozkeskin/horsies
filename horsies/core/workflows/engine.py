@@ -96,6 +96,17 @@ def _deser_json(raw: str | None, context: str, fallback: Any = None) -> Any:
     return r.ok_value
 
 
+def _validate_args_from_map(raw: dict[str, Any]) -> dict[str, int] | None:
+    """Validate args_from shape: all keys str, all values int.
+
+    Returns the validated dict on success, None if any entry has wrong types.
+    """
+    for key, val in raw.items():
+        if not isinstance(key, str) or not isinstance(val, int):
+            return None
+    return cast(dict[str, int], raw)
+
+
 async def _fail_enqueued_task(
     session: Any,
     workflow_id: str,
@@ -225,8 +236,17 @@ async def enqueue_workflow_task(
             args_from_map = args_from_raw
 
         if isinstance(args_from_map, dict):
-            # Cast to proper type - args_from stores {kwarg_name: task_index}
-            args_from_typed = cast(dict[str, int], args_from_map)
+            args_from_typed = _validate_args_from_map(args_from_map)
+            if args_from_typed is None:
+                await _fail_enqueued_task(
+                    session,
+                    workflow_id,
+                    task_index,
+                    f'args_from has non-int values for task {task_index}',
+                    broker,
+                    error_code='WORKER_SERIALIZATION_ERROR',
+                )
+                return None
             for kwarg_name, dep_index in args_from_typed.items():
                 if kwarg_name in kwargs:
                     await _fail_enqueued_task(
@@ -487,7 +507,17 @@ async def enqueue_subworkflow_task(
             args_from_map = args_from_raw
 
         if isinstance(args_from_map, dict):
-            args_from_typed = cast(dict[str, int], args_from_map)
+            args_from_typed = _validate_args_from_map(args_from_map)
+            if args_from_typed is None:
+                await _fail_enqueued_task(
+                    session,
+                    workflow_id,
+                    task_index,
+                    f'args_from has non-int values for subworkflow task {task_index}',
+                    broker,
+                    error_code='WORKER_SERIALIZATION_ERROR',
+                )
+                return None
             for kwarg_name, dep_index in args_from_typed.items():
                 if kwarg_name in kwargs:
                     await _fail_enqueued_task(
