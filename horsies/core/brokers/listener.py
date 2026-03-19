@@ -407,9 +407,12 @@ class PostgresListener:
                         try:
                             q.put_nowait(notification)
                         except asyncio.QueueFull:
-                            # Drop notification if queue is full (prevents blocking other subscribers)
-                            # Consider increasing queue size if this happens frequently
-                            pass
+                            logger.warning(
+                                'Notification dropped on channel %r: subscriber queue full '
+                                '(maxsize=%d). Consumer may fall back to polling.',
+                                notification.channel,
+                                _SUBSCRIBER_QUEUE_MAXSIZE,
+                            )
 
             except OperationalError:
                 # Likely a disconnect. Back off a bit, then force reconnect and re-LISTEN.

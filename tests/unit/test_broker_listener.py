@@ -527,8 +527,11 @@ class TestDispatcher:
         assert (await q2.get()) is notification
 
     @pytest.mark.asyncio
-    async def test_queue_full_drops_silently(self) -> None:
-        """When subscriber queue is full, dispatcher should drop without error."""
+    async def test_queue_full_drops_without_blocking_others(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """When subscriber queue is full, dispatcher should drop with a warning
+        but still deliver to other subscribers."""
         listener = _make_listener()
         # Queue with maxsize=0 means unlimited, so use maxsize=1
         q_full: asyncio.Queue[Notify] = asyncio.Queue(maxsize=1)
@@ -548,14 +551,24 @@ class TestDispatcher:
         mock_conn.notifies.return_value = _fake_notifies()
         listener._dispatcher_conn = mock_conn
 
-        with pytest.raises(asyncio.CancelledError):
-            await listener._dispatcher()
+        import logging
 
-        # Full queue still has the old item
+        _logger = logging.getLogger('horsies.listener')
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.WARNING, logger='horsies.listener'):
+                with pytest.raises(asyncio.CancelledError):
+                    await listener._dispatcher()
+        finally:
+            _logger.propagate = False
+
+        # Full queue still has the old item (new notification was dropped)
         assert q_full.qsize() == 1
         assert (await q_full.get()).payload == 'old'
         # ok queue got the new notification
         assert q_ok.qsize() == 1
+        # Warning was logged for the drop
+        assert any('queue full' in rec.message for rec in caplog.records)
 
     @pytest.mark.asyncio
     async def test_cancelled_error_unregisters_fd_and_re_raises(self) -> None:
