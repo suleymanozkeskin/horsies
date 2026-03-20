@@ -545,9 +545,8 @@ def task_result_from_json(j: Json) -> SerdeResult[TaskResult[Any, TaskError]]:
     if err is not None:
         if isinstance(err, dict) and err.get('__task_error__'):
             err = {k: v for k, v in err.items() if k != '__task_error__'}
-        # Rehydrate from persisted payload (coerces reserved strings to enum members).
         try:
-            task_err = TaskError.from_persisted(err) if isinstance(err, dict) else TaskError.model_validate(err)
+            task_err = TaskError.model_validate(err)
         except (ValidationError, Exception) as exc:
             return Err(SerializationError(
                 f'Failed to validate TaskError from JSON: {exc}',
@@ -579,7 +578,7 @@ def task_result_from_json(j: Json) -> SerdeResult[TaskResult[Any, TaskError]]:
 # Hardcoded to avoid infinite recursion in error handlers.
 FALLBACK_ERROR_JSON = (
     '{"__task_result__":true,"ok":null,"err":'
-    '{"error_code":"WORKER_SERIALIZATION_ERROR",'
+    '{"error_code":{"__builtin_task_code__":"WORKER_SERIALIZATION_ERROR"},'
     '"message":"secondary serialization failure","data":null}}'
 )
 

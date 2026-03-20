@@ -480,12 +480,27 @@ class WorkflowHandle(Generic[OutT]):
                         )
                     error_data = loads_r.ok_value
                     if isinstance(error_data, dict):
-                        # Safely extract known TaskError fields with type narrowing
+                        try:
+                            validated_err = TaskError.model_validate(error_data)
+                        except Exception as exc:
+                            logger.warning(
+                                'Workflow %s error payload validation failed: %s',
+                                self.workflow_id,
+                                exc,
+                            )
+                            return cast(
+                                'TaskResult[OutT, TaskError]',
+                                TaskResult(
+                                    err=TaskError(
+                                        error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                                        message=f'Workflow error payload validation failed: {exc}',
+                                        data={'workflow_id': self.workflow_id},
+                                    ),
+                                ),
+                            )
                         return cast(
                             'TaskResult[OutT, TaskError]',
-                            TaskResult(
-                                err=TaskError.from_persisted(error_data),
-                            ),
+                            TaskResult(err=validated_err),
                         )
                 status_str = row.status if row else 'FAILED'
                 _TERMINAL_STATUS_CODES: dict[str, OutcomeCode] = {

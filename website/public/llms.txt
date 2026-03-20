@@ -87,11 +87,11 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - All built-in code string values are globally reserved; user-defined error codes must not collide
 - BUILTIN_CODE_REGISTRY: dict[str, BuiltInTaskCode] maps every reserved string to its enum member
 - horsies check reports E212 when exception_mapper or default_unhandled_error_code collides with a reserved code
-- User-defined error codes are plain str only (user enums degrade to str after round-trip)
+- User-defined error codes are plain str only (foreign str,Enum types rejected)
 - Strict construction: TaskError(error_code="BROKER_ERROR") raises ValueError (reserved string)
 - Use enum members: TaskError(error_code=OperationalErrorCode.BROKER_ERROR) — accepted
-- Rehydration: TaskError.from_persisted(dict) / TaskError.from_persisted_json(str) — coerces reserved strings to enums
-- model_validate() / model_validate_json() enforce strict rules — not for rehydrating stored payloads
+- Serialization: built-in codes use tagged format {"__builtin_task_code__": "VALUE"}, user strings as-is
+- Deserialization: standard model_validate() / model_validate_json() work everywhere — including nested models
 
 ### SubWorkflowError (extends TaskError)
 - sub_workflow_id: str

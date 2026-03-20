@@ -14,7 +14,7 @@ from typing import (
     Union,
     overload,
 )
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator, Field
+from pydantic import BaseModel, ConfigDict, field_validator, field_serializer, model_validator, Field
 from pydantic.types import PositiveInt
 from enum import Enum
 
@@ -120,33 +120,32 @@ for _family in (
         BUILTIN_CODE_REGISTRY[_member.value] = _member
 
 
-class TaskError(BaseModel):
-    """
-    The error payload for a TaskResult.
+_BUILTIN_FAMILIES = (
+    OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode,
+)
 
-    A task error can be returned by:
-    - a task function (e.g. ``return TaskResult(err=TaskError(...))``)
-    - library failure (e.g. execution error, serialization error, etc.)
+
+class TaskError(BaseModel):
+    """The error payload for a TaskResult.
 
     ``error_code`` carries one of four built-in families
     (``OperationalErrorCode``, ``ContractCode``, ``RetrievalCode``,
     ``OutcomeCode``) or a plain user-defined ``str``.
 
-    **Construction rule**: built-in code values must be passed as enum
+    **Construction**: built-in code values must be passed as enum
     members, not raw strings.  ``TaskError(error_code="BROKER_ERROR")``
     raises ``ValueError``.  Use ``OperationalErrorCode.BROKER_ERROR``
-    instead.
+    instead.  User-defined error codes must be plain ``str``, not
+    ``str, Enum`` subclasses.
 
-    **Rehydration**: use ``TaskError.from_persisted(data)`` or
-    ``TaskError.from_persisted_json(raw)`` to restore payloads from
-    JSON / DB storage.  Those paths coerce reserved strings back to
-    enum members.
+    **Serialization**: built-in codes are serialized as tagged dicts
+    ``{"__builtin_task_code__": "BROKER_ERROR"}`` so they round-trip
+    through ``model_validate()`` / ``model_validate_json()`` without
+    ambiguity.  User strings are serialized as plain strings.
 
-    **Important**: ``model_validate()`` and ``model_validate_json()``
-    are not supported for rehydrating persisted payloads that contain
-    built-in error code strings.  They enforce the strict construction
-    rule and will reject reserved strings.  Always use
-    ``from_persisted()`` / ``from_persisted_json()`` for stored data.
+    **Deserialization**: use standard ``model_validate()`` /
+    ``model_validate_json()`` everywhere — including nested models.
+    No special rehydration methods needed.
     """
 
     model_config = {'arbitrary_types_allowed': True}
@@ -158,62 +157,72 @@ class TaskError(BaseModel):
 
     @field_validator('error_code', mode='before')
     @classmethod
-    def _reject_reserved_strings(cls, value: object) -> object:
-        """Reject string values that match reserved built-in codes.
+    def _validate_error_code(cls, value: object) -> object:
+        """Validate and coerce error_code values.
 
-        Built-in codes must be passed as enum members from the four
-        families, not as raw strings or user-defined str-Enum subclasses.
-        Rehydration from persisted data should use ``from_persisted()``
-        or ``from_persisted_json()`` which coerce instead of rejecting.
+        Accepts:
+        - BuiltInTaskCode enum members (pass through)
+        - Tagged dict ``{"__builtin_task_code__": "..."}`` (coerce to enum)
+        - Plain ``str`` not in reserved set (pass through)
+        - ``None`` (pass through)
+
+        Rejects:
+        - Plain ``str`` matching a reserved built-in code
+        - Foreign ``str, Enum`` types (user enums must use ``.value``)
         """
-        # Allow built-in BuiltInTaskCode enum members (they are str subclasses).
-        # Reject any other str-like value that matches a reserved code,
-        # including plain str, str subclasses, and foreign str-Enum types.
-        _BUILTIN_FAMILIES = (
-            OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode,
-        )
         if isinstance(value, _BUILTIN_FAMILIES):
             return value
-        if isinstance(value, str) and value in BUILTIN_CODE_REGISTRY:
-            builtin = BUILTIN_CODE_REGISTRY[value]
-            raise ValueError(
-                f"'{value}' is a reserved built-in error code "
-                f"({type(builtin).__name__}.{builtin.name}). "
-                f"Pass the enum member directly, or use "
-                f"TaskError.from_persisted() for stored payloads.",
-            )
+        if value is None:
+            return value
+        if isinstance(value, dict):
+            if '__builtin_task_code__' not in value:
+                raise ValueError(
+                    'error_code dict must contain "__builtin_task_code__" key',
+                )
+            raw = value['__builtin_task_code__']
+            if not isinstance(raw, str):
+                raise ValueError(
+                    f'"__builtin_task_code__" must be str, got {type(raw).__name__}',
+                )
+            member = BUILTIN_CODE_REGISTRY.get(raw)
+            if member is None:
+                raise ValueError(
+                    f'Unknown built-in task code: {raw!r}',
+                )
+            return member
+        if isinstance(value, str):
+            # Reject foreign str,Enum types — user codes must be plain str
+            if isinstance(value, Enum) and not isinstance(value, _BUILTIN_FAMILIES):
+                raise ValueError(
+                    f'User error codes must be plain str, not '
+                    f'{type(value).__name__}. '
+                    f'Use the string value instead.',
+                )
+            if value in BUILTIN_CODE_REGISTRY:
+                builtin = BUILTIN_CODE_REGISTRY[value]
+                raise ValueError(
+                    f"'{value}' is a reserved built-in error code "
+                    f'({type(builtin).__name__}.{builtin.name}). '
+                    f'Pass the enum member directly.',
+                )
+            return value
         return value
 
+    @field_serializer('error_code', when_used='always')
     @classmethod
-    def from_persisted(cls, data: dict[str, Any]) -> 'TaskError':
-        """Restore a TaskError from a persisted dict payload.
+    def _serialize_error_code(
+        cls,
+        value: BuiltInTaskCode | str | None,
+        _info: Any,
+    ) -> dict[str, str] | str | None:
+        """Serialize error_code with tagged format for built-in codes.
 
-        Coerces reserved built-in strings back to enum members, then
-        validates all fields through Pydantic.  Malformed payloads
-        raise ``ValidationError`` just like ``model_validate()``.
+        Built-in enum members become ``{"__builtin_task_code__": "VALUE"}``
+        so round-trip identity is preserved.  User strings stay as-is.
         """
-        coerced = dict(data)
-        raw_code = coerced.get('error_code')
-        if isinstance(raw_code, str) and raw_code in BUILTIN_CODE_REGISTRY:
-            coerced['error_code'] = BUILTIN_CODE_REGISTRY[raw_code]
-        # Use model_construct only for the coerced error_code, then validate.
-        # We pass the already-coerced enum member so _reject_reserved_strings
-        # sees an Enum, not a plain str.
-        return cls.model_validate(coerced)
-
-    @classmethod
-    def from_persisted_json(cls, raw: str) -> 'TaskError':
-        """Restore a TaskError from a persisted JSON string.
-
-        Coerces reserved built-in strings back to enum members, then
-        validates all fields through Pydantic.
-        """
-        import json
-
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            raise ValueError(f'Expected dict, got {type(data).__name__}')
-        return cls.from_persisted(data)
+        if isinstance(value, _BUILTIN_FAMILIES):
+            return {'__builtin_task_code__': value.value}
+        return value
 
 
 class SubWorkflowError(TaskError):

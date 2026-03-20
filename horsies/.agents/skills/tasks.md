@@ -84,7 +84,7 @@ class TaskError(BaseModel):
 
 All fields optional. Domain errors typically set `error_code` + `message`. `data` carries structured context. `exception` populated by the library for unhandled exceptions.
 
-**Construction rule**: reserved built-in code values must be passed as enum members, not raw strings.
+**Construction rule**: reserved built-in code values must be passed as enum members, not raw strings. User-defined codes must be plain `str`, not `str, Enum` subclasses.
 
 ```python
 TaskError(error_code=OperationalErrorCode.BROKER_ERROR)  # OK
@@ -92,14 +92,9 @@ TaskError(error_code="MY_CUSTOM_CODE")                   # OK
 TaskError(error_code="BROKER_ERROR")                     # ValueError — reserved
 ```
 
-**Rehydration from stored payloads**: use `from_persisted()` / `from_persisted_json()` instead of `model_validate()`:
+**Serialization**: built-in codes serialize as tagged dicts `{"__builtin_task_code__": "BROKER_ERROR"}` so round-trip identity is preserved. User strings serialize as plain strings.
 
-```python
-TaskError.from_persisted({"error_code": "BROKER_ERROR", "message": "..."})
-TaskError.from_persisted_json(raw_json)
-```
-
-These coerce reserved strings back to enum members. `model_validate()` / `model_validate_json()` are not supported for persisted payloads containing built-in strings.
+**Deserialization**: use standard `model_validate()` / `model_validate_json()` everywhere. No special rehydration methods needed — works for nested models too.
 
 ### `SubWorkflowError`
 

@@ -167,14 +167,15 @@ horsies check myapp.instance:app
 
 All string values used by the built-in error code families (`OperationalErrorCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`) are **reserved**. User-defined error codes must not collide with these values.
 
-**Runtime enforcement**: `TaskError(error_code="BROKER_ERROR")` raises `ValueError` at construction time. Built-in codes must be passed as enum members:
+**Runtime enforcement**: `TaskError(error_code="BROKER_ERROR")` raises `ValueError` at construction time. Built-in codes must be passed as enum members. User-defined codes must be plain `str`, not `str, Enum` subclasses:
 
 ```python
 TaskError(error_code=OperationalErrorCode.BROKER_ERROR)  # correct
-TaskError(error_code="BROKER_ERROR")                     # ValueError
+TaskError(error_code="MY_CUSTOM_CODE")                   # correct — user string
+TaskError(error_code="BROKER_ERROR")                     # ValueError — reserved
 ```
 
-To restore `TaskError` from stored JSON/DB payloads, use `TaskError.from_persisted(data)` or `TaskError.from_persisted_json(raw)`. These coerce reserved strings back to enum members. Do not use `model_validate()` or `model_validate_json()` for persisted payloads containing built-in code strings.
+**Serialization**: built-in codes are serialized as tagged dicts `{"__builtin_task_code__": "BROKER_ERROR"}` so round-trip identity is preserved through standard `model_validate()` / `model_validate_json()`. User strings are serialized as plain strings. This tagged format eliminates wire-format ambiguity between built-in and user codes, allowing `model_validate()` to work correctly everywhere — including nested models.
 
 `horsies check` detects reserved-code collisions in statically visible configuration:
 

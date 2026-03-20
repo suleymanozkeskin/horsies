@@ -1,17 +1,23 @@
 # tests/unit/test_error_code_families.py
-"""Tests for the error code family refactor.
+"""Tests for the error code family design.
 
 Covers:
-- Round-trip coercion (built-in enum identity survives JSON serialization)
-- Unknown user string passthrough
-- Reserved built-in string coercion
+- Tagged serialization format for built-in codes
+- Round-trip identity (built-in enum identity survives JSON serialization)
+- User string passthrough (non-reserved strings stay as plain str)
+- Strict construction (reserved strings and foreign enums rejected)
+- Nested model round-trip (the regression case)
 - Family-level and member-level match behavior
 - Collision guard on duplicate built-in values
 - horsies check reserved-code collision detection
 """
 from __future__ import annotations
 
+import json
+from enum import Enum as _Enum
+
 import pytest
+from pydantic import BaseModel, ValidationError
 
 from horsies.core.models.tasks import (
     BUILTIN_CODE_REGISTRY,
@@ -28,12 +34,79 @@ pytestmark = [pytest.mark.unit]
 
 
 # ---------------------------------------------------------------------------
+# Tagged serialization format
+# ---------------------------------------------------------------------------
+
+
+class TestTaggedSerialization:
+    """Built-in codes serialize as tagged dicts, user strings stay as plain strings."""
+
+    def test_builtin_code_serializes_as_tagged_dict(self) -> None:
+        te = TaskError(error_code=OperationalErrorCode.BROKER_ERROR, message='err')
+        data = te.model_dump(mode='json')
+        assert data['error_code'] == {'__builtin_task_code__': 'BROKER_ERROR'}
+
+    def test_user_string_serializes_as_plain_string(self) -> None:
+        te = TaskError(error_code='MY_CUSTOM_CODE', message='custom')
+        data = te.model_dump(mode='json')
+        assert data['error_code'] == 'MY_CUSTOM_CODE'
+
+    def test_none_serializes_as_null(self) -> None:
+        te = TaskError(error_code=None, message='none')
+        data = te.model_dump(mode='json')
+        assert data['error_code'] is None
+
+    @pytest.mark.parametrize(
+        'code',
+        [
+            OperationalErrorCode.WORKER_CRASHED,
+            ContractCode.PYDANTIC_HYDRATION_ERROR,
+            RetrievalCode.WAIT_TIMEOUT,
+            OutcomeCode.WORKFLOW_PAUSED,
+        ],
+        ids=lambda c: f'{type(c).__name__}.{c.name}',
+    )
+    def test_all_families_use_tagged_format(self, code: BuiltInTaskCode) -> None:
+        te = TaskError(error_code=code, message='test')
+        data = te.model_dump(mode='json')
+        assert data['error_code'] == {'__builtin_task_code__': code.value}
+
+    def test_model_dump_json_produces_tagged_format(self) -> None:
+        te = TaskError(error_code=OutcomeCode.TASK_CANCELLED, message='cancelled')
+        raw = te.model_dump_json()
+        parsed = json.loads(raw)
+        assert parsed['error_code'] == {'__builtin_task_code__': 'TASK_CANCELLED'}
+
+    def test_model_dump_python_mode_also_uses_tagged_format(self) -> None:
+        """model_dump() produces tagged dicts too (when_used='always').
+
+        All serialization paths are safe: model_dump(), model_dump(mode='json'),
+        model_dump_json(), and json.dumps(model_dump()).
+        """
+        te = TaskError(error_code=OutcomeCode.WORKFLOW_PAUSED, message='test')
+        python_dict = te.model_dump()
+        assert python_dict['error_code'] == {'__builtin_task_code__': 'WORKFLOW_PAUSED'}
+
+        # json.dumps(model_dump()) → model_validate_json() is safe
+        via_json_dumps = json.dumps(python_dict)
+        restored = TaskError.model_validate_json(via_json_dumps)
+        assert restored.error_code is OutcomeCode.WORKFLOW_PAUSED
+
+    def test_model_dump_python_mode_user_string_stays_plain(self) -> None:
+        """User strings stay as plain strings in python-mode dump."""
+        te = TaskError(error_code='MY_CUSTOM', message='test')
+        python_dict = te.model_dump()
+        assert python_dict['error_code'] == 'MY_CUSTOM'
+        assert type(python_dict['error_code']) is str
+
+
+# ---------------------------------------------------------------------------
 # Round-trip coercion: built-in enum identity survives JSON round-trip
 # ---------------------------------------------------------------------------
 
 
 class TestRoundTripCoercion:
-    """Built-in enum members must survive serialization via from_persisted path."""
+    """Built-in enum members must survive JSON serialization via model_validate."""
 
     @pytest.mark.parametrize(
         'code',
@@ -52,7 +125,7 @@ class TestRoundTripCoercion:
     ) -> None:
         original = TaskError(error_code=code, message='test')
         serialized = original.model_dump_json()
-        restored = TaskError.from_persisted_json(serialized)
+        restored = TaskError.model_validate_json(serialized)
 
         assert restored.error_code is code
         assert isinstance(restored.error_code, type(code))
@@ -67,12 +140,12 @@ class TestRoundTripCoercion:
         ],
         ids=lambda c: f'{type(c).__name__}.{c.name}',
     )
-    def test_enum_identity_survives_dict_roundtrip(
+    def test_enum_identity_survives_dict_json_roundtrip(
         self, code: BuiltInTaskCode,
     ) -> None:
         original = TaskError(error_code=code, message='test')
-        as_dict = original.model_dump()
-        restored = TaskError.from_persisted(as_dict)
+        as_dict = original.model_dump(mode='json')
+        restored = TaskError.model_validate(as_dict)
 
         assert restored.error_code is code
         assert isinstance(restored.error_code, type(code))
@@ -107,12 +180,12 @@ class TestUserStringPassthrough:
 
 
 # ---------------------------------------------------------------------------
-# Reserved built-in string coercion
+# Strict construction
 # ---------------------------------------------------------------------------
 
 
 class TestStrictConstruction:
-    """TaskError(...) rejects reserved built-in strings passed as plain str."""
+    """TaskError(...) rejects reserved built-in strings and foreign enums."""
 
     def test_reserved_string_rejected(self) -> None:
         with pytest.raises(ValueError, match='reserved built-in error code'):
@@ -131,20 +204,9 @@ class TestStrictConstruction:
             TaskError(error_code='RESULT_NOT_READY')
 
     def test_dynamically_constructed_reserved_string_rejected(self) -> None:
-        """Even dynamically constructed reserved strings are rejected."""
         code = 'WORKFLOW' + '_' + 'PAUSED'
         with pytest.raises(ValueError, match='reserved built-in error code'):
             TaskError(error_code=code)
-
-    def test_model_validate_json_rejects_reserved_strings(self) -> None:
-        """model_validate_json is NOT the rehydration path — it enforces strict rules.
-
-        Use from_persisted_json() for stored payloads instead.
-        """
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError):
-            TaskError.model_validate_json('{"error_code":"WORKFLOW_PAUSED"}')
 
     def test_enum_member_accepted(self) -> None:
         te = TaskError(error_code=OutcomeCode.WORKFLOW_PAUSED, message='ok')
@@ -156,8 +218,6 @@ class TestStrictConstruction:
         assert type(te.error_code) is str
 
     def test_str_subclass_with_reserved_value_rejected(self) -> None:
-        """str subclasses carrying reserved values are also rejected."""
-
         class Sneaky(str):
             pass
 
@@ -165,67 +225,106 @@ class TestStrictConstruction:
             TaskError(error_code=Sneaky('BROKER_ERROR'))
 
     def test_user_str_enum_with_reserved_value_rejected(self) -> None:
-        """User-defined str,Enum with a reserved value is also rejected."""
-        from enum import Enum as _Enum
-
         class UserCode(str, _Enum):
             COLLIDES = 'BROKER_ERROR'
 
-        with pytest.raises(ValueError, match='reserved built-in error code'):
+        with pytest.raises(ValueError, match='User error codes must be plain str'):
             TaskError(error_code=UserCode.COLLIDES)
 
+    def test_user_str_enum_with_nonreserved_value_rejected(self) -> None:
+        """Foreign str,Enum types are always rejected, even for non-reserved values."""
 
-class TestPersistedRehydration:
-    """TaskError.from_persisted() coerces reserved strings to enum members."""
+        class UserCode(str, _Enum):
+            CUSTOM = 'MY_CUSTOM_CODE'
 
-    def test_persisted_outcome_rehydrates(self) -> None:
-        restored = TaskError.from_persisted(
-            {'error_code': 'WORKFLOW_PAUSED', 'message': 'paused'},
-        )
-        assert restored.error_code is OutcomeCode.WORKFLOW_PAUSED
+        with pytest.raises(ValueError, match='User error codes must be plain str'):
+            TaskError(error_code=UserCode.CUSTOM)
 
-    def test_persisted_operational_rehydrates(self) -> None:
-        restored = TaskError.from_persisted(
-            {'error_code': 'BROKER_ERROR', 'message': 'err'},
-        )
-        assert restored.error_code is OperationalErrorCode.BROKER_ERROR
-
-    def test_persisted_contract_rehydrates(self) -> None:
-        restored = TaskError.from_persisted(
-            {'error_code': 'RETURN_TYPE_MISMATCH', 'message': 'mismatch'},
-        )
-        assert restored.error_code is ContractCode.RETURN_TYPE_MISMATCH
-
-    def test_persisted_retrieval_rehydrates(self) -> None:
-        restored = TaskError.from_persisted(
-            {'error_code': 'RESULT_NOT_READY', 'message': 'not ready'},
-        )
-        assert restored.error_code is RetrievalCode.RESULT_NOT_READY
-
-    def test_persisted_user_string_stays_str(self) -> None:
-        restored = TaskError.from_persisted(
-            {'error_code': 'MY_CUSTOM_CODE', 'message': 'custom'},
-        )
-        assert restored.error_code == 'MY_CUSTOM_CODE'
-        assert type(restored.error_code) is str
-
-    def test_from_persisted_json(self) -> None:
-        import json
-
-        data = {'error_code': 'WORKFLOW_PAUSED', 'message': 'paused'}
-        restored = TaskError.from_persisted_json(json.dumps(data))
-        assert restored.error_code is OutcomeCode.WORKFLOW_PAUSED
-
-    def test_from_persisted_validates_fields(self) -> None:
-        """from_persisted() still validates field types via Pydantic."""
-        from pydantic import ValidationError
-
+    def test_unknown_tagged_dict_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            TaskError.from_persisted({'error_code': 123, 'message': ['not-a-string']})
+            TaskError.model_validate(
+                {'error_code': {'__builtin_task_code__': 'NOT_A_REAL_CODE'}},
+            )
 
-    def test_from_persisted_rejects_non_dict(self) -> None:
-        with pytest.raises(ValueError, match='Expected dict'):
-            TaskError.from_persisted_json('"not a dict"')
+    def test_non_tagged_dict_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            TaskError.model_validate(
+                {'error_code': {'some_other_key': 'value'}},
+            )
+
+
+# ---------------------------------------------------------------------------
+# Nested model round-trip (regression case)
+# ---------------------------------------------------------------------------
+
+
+class TestNestedModelRoundTrip:
+    """TaskError nested inside user Pydantic models must survive round-trip.
+
+    This was the regression introduced by the original two-path design:
+    generic Pydantic model_validate() used to hit the strict validator,
+    failing on valid persisted data.
+    """
+
+    def test_nested_taskerror_roundtrips_via_model_validate(self) -> None:
+        class Payload(BaseModel):
+            error: TaskError
+
+        original = Payload(
+            error=TaskError(
+                error_code=OutcomeCode.WORKFLOW_PAUSED, message='paused',
+            ),
+        )
+        data = original.model_dump(mode='json')
+        restored = Payload.model_validate(data)
+
+        assert restored.error.error_code is OutcomeCode.WORKFLOW_PAUSED
+
+    def test_nested_taskerror_roundtrips_via_model_validate_json(self) -> None:
+        class Payload(BaseModel):
+            error: TaskError
+
+        original = Payload(
+            error=TaskError(
+                error_code=OperationalErrorCode.BROKER_ERROR, message='err',
+            ),
+        )
+        raw = original.model_dump_json()
+        restored = Payload.model_validate_json(raw)
+
+        assert restored.error.error_code is OperationalErrorCode.BROKER_ERROR
+
+    def test_nested_user_string_roundtrips(self) -> None:
+        class Payload(BaseModel):
+            error: TaskError
+
+        original = Payload(
+            error=TaskError(error_code='MY_CODE', message='custom'),
+        )
+        raw = original.model_dump_json()
+        restored = Payload.model_validate_json(raw)
+
+        assert restored.error.error_code == 'MY_CODE'
+        assert type(restored.error.error_code) is str
+
+    def test_deeply_nested_taskerror_roundtrips(self) -> None:
+        class Inner(BaseModel):
+            error: TaskError
+
+        class Outer(BaseModel):
+            inner: Inner
+
+        original = Outer(
+            inner=Inner(
+                error=TaskError(
+                    error_code=RetrievalCode.TASK_NOT_FOUND, message='gone',
+                ),
+            ),
+        )
+        raw = original.model_dump_json()
+        restored = Outer.model_validate_json(raw)
+
+        assert restored.inner.error.error_code is RetrievalCode.TASK_NOT_FOUND
 
 
 # ---------------------------------------------------------------------------
@@ -263,9 +362,9 @@ class TestMatchBehavior:
         assert matched_family == 'operational'
 
     def test_family_match_after_roundtrip(self) -> None:
-        """Family-level match must work even after persisted rehydration."""
+        """Family-level match must work after JSON round-trip."""
         te = TaskError(error_code=RetrievalCode.WAIT_TIMEOUT, message='timeout')
-        restored = TaskError.from_persisted_json(te.model_dump_json())
+        restored = TaskError.model_validate_json(te.model_dump_json())
 
         matched_family: str | None = None
         match restored.error_code:
@@ -339,7 +438,6 @@ class TestCheckReservedCodeCollision:
     """horsies check must flag statically visible reserved-code collisions."""
 
     def test_exception_mapper_collision_detected(self) -> None:
-        """Global exception_mapper with a reserved built-in value → error."""
         from horsies.core.app import Horsies
         from horsies.core.models.app import AppConfig
         from horsies.core.models.broker import PostgresConfig
@@ -361,7 +459,6 @@ class TestCheckReservedCodeCollision:
         assert 'OperationalErrorCode' in collision_errors[0].message
 
     def test_global_default_collision_detected(self) -> None:
-        """Global default_unhandled_error_code with non-default reserved value → error."""
         from horsies.core.app import Horsies
         from horsies.core.models.app import AppConfig
         from horsies.core.models.broker import PostgresConfig
@@ -382,7 +479,6 @@ class TestCheckReservedCodeCollision:
         assert 'BROKER_ERROR' in collision_errors[0].message
 
     def test_default_unhandled_exception_not_flagged(self) -> None:
-        """The library default 'UNHANDLED_EXCEPTION' must not be flagged."""
         from horsies.core.app import Horsies
         from horsies.core.models.app import AppConfig
         from horsies.core.models.broker import PostgresConfig
@@ -391,7 +487,6 @@ class TestCheckReservedCodeCollision:
         app = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(database_url='postgresql+psycopg://x/y'),
-                # default_unhandled_error_code defaults to 'UNHANDLED_EXCEPTION'
             ),
         )
         errors = app._check_runtime_policy_safety()
@@ -402,7 +497,6 @@ class TestCheckReservedCodeCollision:
         assert len(collision_errors) == 0
 
     def test_custom_string_not_flagged(self) -> None:
-        """Non-reserved user strings in exception_mapper must not be flagged."""
         from horsies.core.app import Horsies
         from horsies.core.models.app import AppConfig
         from horsies.core.models.broker import PostgresConfig
