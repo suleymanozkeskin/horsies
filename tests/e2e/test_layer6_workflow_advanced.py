@@ -878,7 +878,7 @@ async def test_workflow_recovers_after_worker_crash(
         assert row is not None and row[0] is not None, 'C task should have a result'
         result_data = json.loads(row[0])
         error_code = result_data.get('err', {}).get('error_code', '')
-        assert error_code == 'WORKER_CRASHED', (
+        assert error_code == {'__builtin_task_code__': 'WORKER_CRASHED'}, (
             f"C should have WORKER_CRASHED error, got {error_code}"
         )
 

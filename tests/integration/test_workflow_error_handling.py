@@ -1157,7 +1157,7 @@ class TestEnqueuedFailureConversion:
         assert isinstance(stored, dict)
         err = stored.get('err')
         assert isinstance(err, dict)
-        assert err.get('error_code') == 'WORKFLOW_ENQUEUE_FAILED'
+        assert err.get('error_code') == {'__builtin_task_code__': 'WORKFLOW_ENQUEUE_FAILED'}
         msg = err.get('message')
         assert isinstance(msg, str)
         assert 'args_from key' in msg
@@ -1231,7 +1231,7 @@ class TestEnqueuedFailureConversion:
         assert isinstance(stored, dict)
         err = stored.get('err')
         assert isinstance(err, dict)
-        assert err.get('error_code') == 'WORKFLOW_ENQUEUE_FAILED'
+        assert err.get('error_code') == {'__builtin_task_code__': 'WORKFLOW_ENQUEUE_FAILED'}
         msg = err.get('message')
         assert isinstance(msg, str)
         assert 'Subworkflow build failed' in msg
@@ -1791,7 +1791,7 @@ class TestAllowFailedDeps:
         injected = loads_json(kwargs['input_result']['data']).unwrap()
 
         assert 'err' in injected
-        assert injected['err']['error_code'] == 'UPSTREAM_SKIPPED'
+        assert injected['err']['error_code'] == {'__builtin_task_code__': 'UPSTREAM_SKIPPED'}
 
     async def test_allow_failed_deps_without_args_from(
         self,
@@ -2157,7 +2157,7 @@ class TestSuccessPolicy:
 
         # A failed first, but B (required) was SKIPPED not FAILED
         # So we get the sentinel error
-        assert error_data['error_code'] == 'WORKFLOW_SUCCESS_CASE_NOT_MET'
+        assert error_data['error_code'] == {'__builtin_task_code__': 'WORKFLOW_SUCCESS_CASE_NOT_MET'}
 
 
 # =============================================================================

@@ -537,7 +537,7 @@ async def test_stale_running_marked_failed_on_crash(
         assert task.result is not None, 'FAILED task should have a result JSON'
         result_data = json.loads(task.result)
         error_code = result_data.get('err', {}).get('error_code', '')
-        assert error_code == 'WORKER_CRASHED', (
+        assert error_code == {'__builtin_task_code__': 'WORKER_CRASHED'}, (
             f'Expected error_code WORKER_CRASHED, got {error_code!r}'
         )
 

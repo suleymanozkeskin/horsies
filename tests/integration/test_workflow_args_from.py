@@ -366,7 +366,7 @@ class TestArgsFromInjection:
         # Parse the injected TaskResult
         injected_data = loads_json(kwargs['input_result']['data']).unwrap()
         assert 'err' in injected_data
-        assert injected_data['err']['error_code'] == 'UPSTREAM_SKIPPED'
+        assert injected_data['err']['error_code'] == {'__builtin_task_code__': 'UPSTREAM_SKIPPED'}
         assert injected_data['err']['data']['dependency_index'] == 1  # B's index
 
     async def test_failed_dep_passes_original_error_not_skipped_sentinel(
