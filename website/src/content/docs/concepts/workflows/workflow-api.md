@@ -174,7 +174,11 @@ app = Horsies(config)
 # Zero-parameter builder — called automatically during check
 @app.workflow_builder()
 def build_etl_pipeline() -> WorkflowSpec:
-    return app.workflow("etl", tasks=[...])
+    return app.workflow(
+        name="etl",
+        tasks=[...],
+        definition_key="myapp.etl.v1",
+    )
 
 # Parameterized builder — provide cases= for check to exercise
 @app.workflow_builder(cases=[
@@ -182,7 +186,11 @@ def build_etl_pipeline() -> WorkflowSpec:
     {"region": "eu-west"},
 ])
 def build_regional_pipeline(region: str) -> WorkflowSpec:
-    return app.workflow(f"pipeline-{region}", tasks=[...])
+    return app.workflow(
+        name=f"pipeline-{region}",
+        tasks=[...],
+        definition_key=f"myapp.pipeline.{region}.v1",
+    )
 ```
 
 | Parameter | Type | Required | Description |
@@ -194,7 +202,7 @@ def build_regional_pipeline(region: str) -> WorkflowSpec:
 | Code | When |
 |------|------|
 | E027 | Parameterized builder missing `cases=` |
-| E029 | Builder raises an exception or does not return a `WorkflowSpec` |
+| E029 | Builder raises an exception, returns non-`WorkflowSpec`, or returns a spec missing required validation like `definition_key` |
 | E030 | Function returns `WorkflowSpec` but lacks `@app.workflow_builder` |
 
 For the guarantee model and CI usage, see [Startup Validation](../../configuration/app-config#startup-validation-appcheck).

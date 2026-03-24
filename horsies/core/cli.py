@@ -182,6 +182,8 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
         # import_file_path adds parent directory to sys.path
         try:
             module = import_file_path(file_path)
+        except HorsiesError:
+            raise
         except ImportError as e:
             raise ConfigurationError(
                 message=f'failed to import module: {file_path}',
@@ -205,6 +207,8 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
         # Dotted module path - use standard import
         try:
             module = importlib.import_module(module_path)
+        except HorsiesError:
+            raise
         except ModuleNotFoundError as e:
             raise ConfigurationError(
                 message=f'module not found: {module_path}',

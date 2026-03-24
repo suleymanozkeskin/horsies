@@ -103,12 +103,14 @@ save = save_result.node()(result=from_node(process))
 spec = app.workflow(
     name="etl_pipeline",
     tasks=[fetch, process, save],
+    definition_key="myapp.etl_pipeline.v1",
     on_error=OnError.FAIL,
     output=save,
 )
 ```
 
 Best for dynamic workflows where node kwargs depend on runtime inputs.
+`definition_key` is required for top-level workflows built with `app.workflow()` and is used for persistence/runtime identity.
 
 ### Class-based — `WorkflowDefinition`
 
@@ -119,6 +121,7 @@ from horsies import TaskNode, WorkflowDefinition, OnError
 
 class ETLPipeline(WorkflowDefinition[SaveResult]):
     name = "etl_pipeline"
+    definition_key = "myapp.etl_pipeline.v1"
 
     fetch = TaskNode(fn=fetch_data)
     process = TaskNode(fn=process_data, waits_for=[fetch], args_from={"data": fetch})

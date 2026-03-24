@@ -52,15 +52,10 @@ class WorkflowModel(Base):
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # -------------------------------------------------------------------------
-    # Workflow definition identity (for import-based recovery/conditions)
+    # Workflow definition identity
     # -------------------------------------------------------------------------
 
-    workflow_def_module: Mapped[Optional[str]] = mapped_column(
-        String(512), nullable=True
-    )
-    workflow_def_qualname: Mapped[Optional[str]] = mapped_column(
-        String(512), nullable=True
-    )
+    definition_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     # -------------------------------------------------------------------------
     # Subworkflow support: parent-child relationship
@@ -208,12 +203,9 @@ class WorkflowTaskModel(Base):
     # Child workflow definition name (for SubWorkflowNode)
     sub_workflow_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
-    # Import path for subworkflow definition (fallback if registry not loaded)
-    sub_workflow_module: Mapped[Optional[str]] = mapped_column(
-        String(512), nullable=True
-    )
-    sub_workflow_qualname: Mapped[Optional[str]] = mapped_column(
-        String(512), nullable=True
+    # Stable definition_key for subworkflow definition lookup
+    sub_definition_key: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True
     )
 
     # Summary of subworkflow execution (serialized SubWorkflowSummary)

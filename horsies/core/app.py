@@ -305,8 +305,10 @@ class Horsies:
         Phase 1: Config — already validated at construction (implicit pass).
         Phase 2: Task module imports — import each module, collect errors.
         Phase 3: Workflow validation — happens during imports (WorkflowSpec construction).
-        Phase 3.1: Workflow builder execution — run registered builders under send suppression.
-        Phase 3.2: Undecorated builder detection — fail-closed on missing decorators.
+        Phase 3.1: WorkflowDefinition class validation — imported definitions must
+            declare definition_key.
+        Phase 3.2: Workflow builder execution — run registered builders under send suppression.
+        Phase 3.3: Undecorated builder detection — fail-closed on missing decorators.
         Phase 3.5: Policy safety checks — runtime retry/mapping validation.
         Phase 4 (if live): Broker connectivity — async SELECT 1.
 
@@ -324,12 +326,17 @@ class Horsies:
         if all_errors:
             return all_errors
 
-        # Phase 3.1: execute registered workflow builders under send suppression
+        # Phase 3.1: validate imported WorkflowDefinition subclasses
+        all_errors.extend(self._check_workflow_definitions())
+        if all_errors:
+            return all_errors
+
+        # Phase 3.2: execute registered workflow builders under send suppression
         all_errors.extend(self._check_workflow_builders())
         if all_errors:
             return all_errors
 
-        # Phase 3.2: detect undecorated top-level WorkflowSpec-returning functions
+        # Phase 3.3: detect undecorated top-level WorkflowSpec-returning functions
         all_errors.extend(self._check_undecorated_builders())
         if all_errors:
             return all_errors
@@ -409,6 +416,37 @@ class Horsies:
                     )
         finally:
             self.suppress_sends(prev_suppress)
+        return errors
+
+    def _check_workflow_definitions(self) -> list[HorsiesError]:
+        """Validate imported WorkflowDefinition subclasses."""
+        from horsies.core.models.workflow.definition import WorkflowDefinition
+
+        errors: list[HorsiesError] = []
+        seen: set[type[Any]] = set()
+
+        for module_path in self._discovered_task_modules:
+            module = self._resolve_imported_module(module_path)
+            if module is None:
+                continue
+
+            modules_to_check = [module]
+            if hasattr(module, '__path__'):
+                prefix = module.__name__ + '.'
+                for name, mod in sys.modules.items():
+                    if name.startswith(prefix) and mod is not None:
+                        modules_to_check.append(mod)
+
+            for mod in modules_to_check:
+                for workflow_def in self._collect_module_workflow_definitions(mod):
+                    if workflow_def in seen:
+                        continue
+                    seen.add(workflow_def)
+                    try:
+                        workflow_def._require_definition_key()
+                    except HorsiesError as exc:
+                        errors.append(exc)
+
         return errors
 
     def _check_runtime_policy_safety(self) -> list[HorsiesError]:
@@ -918,8 +956,7 @@ class Horsies:
         output: TaskNode[OutT] | SubWorkflowNode[OutT],
         success_policy: SuccessPolicy | None = None,
         *,
-        workflow_def_module: str | None = None,
-        workflow_def_qualname: str | None = None,
+        definition_key: str | None = None,
         workflow_def_cls: type[Any] | None = None,
     ) -> WorkflowSpec[OutT]: ...
 
@@ -932,8 +969,7 @@ class Horsies:
         *,
         output: TaskNode[OutT] | SubWorkflowNode[OutT],
         success_policy: SuccessPolicy | None = None,
-        workflow_def_module: str | None = None,
-        workflow_def_qualname: str | None = None,
+        definition_key: str | None = None,
         workflow_def_cls: type[Any] | None = None,
     ) -> WorkflowSpec[OutT]: ...
 
@@ -946,8 +982,7 @@ class Horsies:
         output: None = None,
         success_policy: SuccessPolicy | None = None,
         *,
-        workflow_def_module: str | None = None,
-        workflow_def_qualname: str | None = None,
+        definition_key: str | None = None,
         workflow_def_cls: type[Any] | None = None,
     ) -> WorkflowSpec[WorkflowTerminalResults]: ...
 
@@ -959,8 +994,7 @@ class Horsies:
         output: TaskNode[OutT] | SubWorkflowNode[OutT] | None = None,
         success_policy: SuccessPolicy | None = None,
         *,
-        workflow_def_module: str | None = None,
-        workflow_def_qualname: str | None = None,
+        definition_key: str | None = None,
         workflow_def_cls: type[Any] | None = None,
     ) -> WorkflowSpec[OutT] | WorkflowSpec[WorkflowTerminalResults]:
         """
@@ -1047,11 +1081,11 @@ class Horsies:
             output=output,
             success_policy=success_policy,
             broker=self.get_broker(),
-            workflow_def_module=workflow_def_module,
-            workflow_def_qualname=workflow_def_qualname,
+            definition_key=definition_key,
             workflow_def_cls=workflow_def_cls,
             resend_on_transient_err=self.config.resend_on_transient_err,
         )
+        spec._require_definition_key()
         if output is None:
             return cast('WorkflowSpec[WorkflowTerminalResults]', spec)
         return spec
@@ -1225,6 +1259,8 @@ class Horsies:
                         ),
                     ),
                 )
+            else:
+                result._require_definition_key()
         except MultipleValidationErrors as exc:
             errors.extend(exc.report.errors)
         except HorsiesError as exc:
@@ -1312,6 +1348,35 @@ class Horsies:
                 )
 
         return errors
+
+    @staticmethod
+    def _collect_module_workflow_definitions(
+        module: Any,
+    ) -> list[type[Any]]:
+        """Collect WorkflowDefinition subclasses defined in a module/package."""
+        from horsies.core.models.workflow.definition import WorkflowDefinition
+
+        definitions: list[type[Any]] = []
+        is_package = hasattr(module, '__path__')
+        for _name, obj in inspect.getmembers(module, inspect.isclass):
+            if obj is WorkflowDefinition:
+                continue
+            try:
+                if not issubclass(obj, WorkflowDefinition):
+                    continue
+            except TypeError:
+                continue
+
+            obj_module = getattr(obj, '__module__', None)
+            if obj_module != module.__name__:
+                if not (
+                    is_package
+                    and obj_module is not None
+                    and obj_module.startswith(module.__name__ + '.')
+                ):
+                    continue
+            definitions.append(obj)
+        return definitions
 
     @staticmethod
     def _resolve_imported_module(module_path: str) -> Any | None:

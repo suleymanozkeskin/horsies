@@ -109,14 +109,9 @@ class WorkflowSpec(Generic[OutT]):
     - If None (default): any task failure → workflow FAILED
     """
 
-    workflow_def_module: str | None = None
+    definition_key: str | None = None
     """
-    - Module path of WorkflowDefinition class (for import fallback in workers)
-    """
-
-    workflow_def_qualname: str | None = None
-    """
-    - Qualified name of WorkflowDefinition class (for import fallback in workers)
+    - Stable workflow definition key for runtime lookup and persistence
     """
 
     workflow_def_cls: type[Any] | None = field(default=None, repr=False)
@@ -199,6 +194,8 @@ class WorkflowSpec(Generic[OutT]):
         for error in self._collect_from_node_marker_kwargs_errors():
             report.add(error)
         for error in self._collect_kwargs_args_from_overlap_errors():
+            report.add(error)
+        for error in self._collect_subworkflow_definition_key_errors():
             report.add(error)
         for error in self._collect_subworkflow_default_build_with_param_errors():
             report.add(error)
@@ -317,15 +314,14 @@ class WorkflowSpec(Generic[OutT]):
                 optional=new_optional,
             )
 
-        # Read ContextVar for workflow_def_* if not explicitly provided.
+        # Read ContextVar for definition_key if not explicitly provided.
         # Covers build_with() returning WorkflowSpec(...) directly.
-        if self.workflow_def_module is None:
+        if self.definition_key is None:
             from .definition import _workflow_def_context  # noqa: F811
             ctx = _workflow_def_context.get()
             if ctx is not None:
-                module, qualname, wf_cls = ctx
-                object.__setattr__(self, 'workflow_def_module', module)
-                object.__setattr__(self, 'workflow_def_qualname', qualname)
+                definition_key, wf_cls = ctx
+                object.__setattr__(self, 'definition_key', definition_key)
                 object.__setattr__(self, 'workflow_def_cls', wf_cls)
 
         # Read construction token for fresh-spec-per-call enforcement.
@@ -855,6 +851,28 @@ class WorkflowSpec(Generic[OutT]):
 
         return errors
 
+    def _collect_subworkflow_definition_key_errors(self) -> list[WorkflowValidationError]:
+        """Reject SubWorkflowNodes whose WorkflowDefinition has no definition_key."""
+        errors: list[WorkflowValidationError] = []
+        for node in self.tasks:
+            if not isinstance(node, SubWorkflowNode):
+                continue
+            definition_key = node.workflow_def.__dict__.get('definition_key')
+            if isinstance(definition_key, str) and definition_key.strip():
+                continue
+            errors.append(
+                WorkflowValidationError(
+                    message='Subworkflow definition is missing definition_key',
+                    code=ErrorCode.WORKFLOW_NO_DEFINITION_KEY,
+                    notes=[
+                        f"subworkflow '{node.name}' uses definition '{node.workflow_def.__qualname__}'",
+                        "WorkflowDefinition subclasses must declare a stable 'definition_key'",
+                    ],
+                    help_text="add definition_key = 'your.workflow.v1' to the child workflow definition",
+                )
+            )
+        return errors
+
     def _collect_invalid_kwargs_errors(self) -> list[WorkflowValidationError]:
         """Validate kwargs/args_from keys match function parameter names."""
         errors: list[WorkflowValidationError] = []
@@ -1279,6 +1297,20 @@ class WorkflowSpec(Generic[OutT]):
             from horsies.core.workflows.registry import register_workflow_spec
 
             register_workflow_spec(self)
+
+    def _require_definition_key(self) -> str:
+        """Require a stable non-empty definition key for top-level workflows."""
+        definition_key = self.definition_key
+        if not isinstance(definition_key, str) or not definition_key.strip():
+            raise WorkflowValidationError(
+                message='WorkflowSpec is missing definition_key',
+                code=ErrorCode.WORKFLOW_NO_DEFINITION_KEY,
+                notes=[
+                    f"workflow '{self.name}' has no stable definition_key",
+                ],
+                help_text="set definition_key='your.workflow.v1' when creating the workflow",
+            )
+        return definition_key
 
     def start(self, workflow_id: str | None = None) -> WorkflowStartResult[WorkflowHandle[OutT]]:
         """Start workflow execution.

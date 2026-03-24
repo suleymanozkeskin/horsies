@@ -519,6 +519,8 @@ class TestErrorCode:
             ErrorCode.WORKFLOW_INVALID_JOIN,
             ErrorCode.WORKFLOW_UNRESOLVED_QUEUE,
             ErrorCode.WORKFLOW_UNRESOLVED_PRIORITY,
+            ErrorCode.WORKFLOW_NO_DEFINITION_KEY,
+            ErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY,
             ErrorCode.WORKFLOW_SUBWORKFLOW_APP_MISSING,
             ErrorCode.WORKFLOW_INVALID_KWARG_KEY,
             ErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS,

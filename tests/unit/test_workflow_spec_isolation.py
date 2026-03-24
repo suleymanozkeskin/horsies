@@ -365,6 +365,7 @@ class _MetaStampWorkflow(WorkflowDefinition[int]):
     """Test workflow defined purely for metaclass stamp verification."""
 
     name = 'meta_stamp_test'
+    definition_key = 'tests.unit.meta_stamp.v1'
 
     step_a = _meta_node_a
     step_b = _meta_node_b
@@ -461,6 +462,7 @@ class TestCopyOnBuild:
 
         class MyWorkflow(WorkflowDefinition[Any]):
             name = 'copy_on_build_test'
+            definition_key = 'tests.unit.copy_on_build.v1'
             fetch = TaskNode(fn=fn_a)
             process = TaskNode(fn=fn_b, waits_for=[fetch])
 
@@ -484,6 +486,7 @@ class TestCopyOnBuild:
 
         class MyWorkflow(WorkflowDefinition[Any]):
             name = 'double_build_test'
+            definition_key = 'tests.unit.double_build.v1'
             step = TaskNode(fn=fn_a)
 
         mock_app = _MockApp()

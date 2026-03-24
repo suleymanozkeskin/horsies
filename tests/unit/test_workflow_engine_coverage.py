@@ -20,7 +20,7 @@ from horsies.core.workflows.engine import (
     _build_workflow_context_data,
     _deser_json,
     _handle_workflow_task_failure,
-    _load_workflow_def_from_path,
+    _load_workflow_def_from_key,
     _resolve_workflow_def_nodes,
     _ser,
     _validate_args_from_map,
@@ -326,8 +326,7 @@ class TestEnqueueSubworkflowTask:
             task_kwargs=None,
             args_from=None,
             node_id='node-0',
-            sub_workflow_module='some.module',
-            sub_workflow_qualname='ChildWorkflow',
+            sub_definition_key='test.child.v1',
         )
         defaults.update(overrides)
         return SimpleNamespace(**defaults)
@@ -384,7 +383,7 @@ class TestEnqueueSubworkflowTask:
             'horsies.core.workflows.registry.get_subworkflow_node',
             return_value=None,
         ), patch(
-            'horsies.core.workflows.engine._load_workflow_def_from_path',
+            'horsies.core.workflows.engine._load_workflow_def_from_key',
             return_value=MagicMock(),
         ), patch(
             'horsies.core.workflows.engine._fail_enqueued_task',
@@ -414,7 +413,7 @@ class TestEnqueueSubworkflowTask:
             'horsies.core.workflows.registry.get_subworkflow_node',
             return_value=None,
         ), patch(
-            'horsies.core.workflows.engine._load_workflow_def_from_path',
+            'horsies.core.workflows.engine._load_workflow_def_from_key',
             return_value=MagicMock(),
         ), patch(
             'horsies.core.workflows.engine._fail_enqueued_task',
@@ -445,7 +444,7 @@ class TestEnqueueSubworkflowTask:
             'horsies.core.workflows.registry.get_subworkflow_node',
             return_value=None,
         ), patch(
-            'horsies.core.workflows.engine._load_workflow_def_from_path',
+            'horsies.core.workflows.engine._load_workflow_def_from_key',
             return_value=MagicMock(),
         ), patch(
             'horsies.core.workflows.engine._fail_enqueued_task',
@@ -478,7 +477,7 @@ class TestEnqueueSubworkflowTask:
             'horsies.core.workflows.registry.get_subworkflow_node',
             return_value=None,
         ), patch(
-            'horsies.core.workflows.engine._load_workflow_def_from_path',
+            'horsies.core.workflows.engine._load_workflow_def_from_key',
             return_value=MagicMock(),
         ), patch(
             'horsies.core.workflows.engine._fail_enqueued_task',
@@ -508,7 +507,7 @@ class TestEnqueueSubworkflowTask:
             'horsies.core.workflows.registry.get_subworkflow_node',
             return_value=None,
         ), patch(
-            'horsies.core.workflows.engine._load_workflow_def_from_path',
+            'horsies.core.workflows.engine._load_workflow_def_from_key',
             return_value=MagicMock(),
         ), patch(
             'horsies.core.workflows.engine.dumps_json',
@@ -549,7 +548,7 @@ class TestEnqueueSubworkflowTask:
             'horsies.core.workflows.registry.get_subworkflow_node',
             return_value=None,
         ), patch(
-            'horsies.core.workflows.engine._load_workflow_def_from_path',
+            'horsies.core.workflows.engine._load_workflow_def_from_key',
             return_value=mock_wf_def,
         ), patch(
             'horsies.core.workflows.engine._fail_enqueued_task',
@@ -595,8 +594,7 @@ class TestEnqueueSubworkflowTask:
         mock_spec.success_policy = None
         mock_spec.output = None
         mock_spec.on_error = MagicMock(value='fail')
-        mock_spec.workflow_def_module = 'test'
-        mock_spec.workflow_def_qualname = 'Test'
+        mock_spec.definition_key = 'test.child.v1'
         mock_spec.name = 'child_wf'
 
         mock_wf_def = MagicMock()
@@ -609,7 +607,7 @@ class TestEnqueueSubworkflowTask:
             'horsies.core.workflows.registry.get_subworkflow_node',
             return_value=None,
         ), patch(
-            'horsies.core.workflows.engine._load_workflow_def_from_path',
+            'horsies.core.workflows.engine._load_workflow_def_from_key',
             return_value=mock_wf_def,
         ), patch(
             'horsies.core.workflows.engine.validate_workflow_generic_output_match',
@@ -662,8 +660,7 @@ class TestEnqueueSubworkflowTask:
         mock_spec.success_policy = None
         mock_spec.output = None
         mock_spec.on_error = MagicMock(value='fail')
-        mock_spec.workflow_def_module = 'test'
-        mock_spec.workflow_def_qualname = 'Test'
+        mock_spec.definition_key = 'test.child.v1'
         mock_spec.name = 'child_wf'
 
         mock_wf_def = MagicMock()
@@ -684,7 +681,7 @@ class TestEnqueueSubworkflowTask:
             'horsies.core.workflows.registry.get_subworkflow_node',
             return_value=None,
         ), patch(
-            'horsies.core.workflows.engine._load_workflow_def_from_path',
+            'horsies.core.workflows.engine._load_workflow_def_from_key',
             return_value=mock_wf_def,
         ), patch(
             'horsies.core.workflows.engine.validate_workflow_generic_output_match',
@@ -735,8 +732,7 @@ class TestEnqueueSubworkflowTask:
         mock_spec.success_policy = None
         mock_spec.output = None
         mock_spec.on_error = MagicMock(value='fail')
-        mock_spec.workflow_def_module = 'test'
-        mock_spec.workflow_def_qualname = 'Test'
+        mock_spec.definition_key = 'test.child.v1'
         mock_spec.name = 'child_wf'
 
         mock_wf_def = MagicMock()
@@ -748,7 +744,7 @@ class TestEnqueueSubworkflowTask:
             'horsies.core.workflows.registry.get_subworkflow_node',
             return_value=None,
         ), patch(
-            'horsies.core.workflows.engine._load_workflow_def_from_path',
+            'horsies.core.workflows.engine._load_workflow_def_from_key',
             return_value=mock_wf_def,
         ), patch(
             'horsies.core.workflows.engine.validate_workflow_generic_output_match',
@@ -809,8 +805,7 @@ class TestEnqueueSubworkflowTask:
         mock_spec.success_policy = None
         mock_spec.output = None
         mock_spec.on_error = MagicMock(value='fail')
-        mock_spec.workflow_def_module = 'test'
-        mock_spec.workflow_def_qualname = 'Test'
+        mock_spec.definition_key = 'test.child.v1'
         mock_spec.name = 'child_wf'
 
         mock_wf_def = MagicMock()
@@ -822,7 +817,7 @@ class TestEnqueueSubworkflowTask:
             'horsies.core.workflows.registry.get_subworkflow_node',
             return_value=None,
         ), patch(
-            'horsies.core.workflows.engine._load_workflow_def_from_path',
+            'horsies.core.workflows.engine._load_workflow_def_from_key',
             return_value=mock_wf_def,
         ), patch(
             'horsies.core.workflows.engine.validate_workflow_generic_output_match',
@@ -879,8 +874,7 @@ class TestEnqueueSubworkflowTask:
         mock_spec.success_policy = None
         mock_spec.output = None
         mock_spec.on_error = MagicMock(value='fail')
-        mock_spec.workflow_def_module = 'test'
-        mock_spec.workflow_def_qualname = 'Test'
+        mock_spec.definition_key = 'test.child.v1'
         mock_spec.name = 'child_wf'
 
         mock_wf_def = MagicMock()
@@ -900,7 +894,7 @@ class TestEnqueueSubworkflowTask:
             'horsies.core.workflows.registry.get_subworkflow_node',
             return_value=None,
         ), patch(
-            'horsies.core.workflows.engine._load_workflow_def_from_path',
+            'horsies.core.workflows.engine._load_workflow_def_from_key',
             return_value=mock_wf_def,
         ), patch(
             'horsies.core.workflows.engine.validate_workflow_generic_output_match',
@@ -1477,34 +1471,27 @@ class TestOnChildWorkflowComplete:
         mock_proc.assert_not_awaited()
 
 
-# ── 15. _load_workflow_def_from_path ─────────────────────────────────
+# ── 15. _load_workflow_def_from_key ──────────────────────────────────
 
 
 @pytest.mark.unit
-class TestLoadWorkflowDefFromPath:
-    def test_attr_not_found_returns_none(self) -> None:
+class TestLoadWorkflowDefFromKey:
+    def test_registry_miss_returns_none(self) -> None:
         with patch(
-            'importlib.import_module',
-            return_value=SimpleNamespace(),
+            'horsies.core.workflows.registry.get_workflow_definition',
+            return_value=None,
         ):
-            result = _load_workflow_def_from_path('some.module', 'NonExistent')
+            result = _load_workflow_def_from_key('missing.workflow.v1')
         assert result is None
 
-    def test_not_workflow_def_subclass_returns_none(self) -> None:
-        """Object exists but is not a WorkflowDefinition subclass."""
-
-        class NotAWorkflow:
-            pass
-
-        mock_module = SimpleNamespace(NotAWorkflow=NotAWorkflow)
-        with patch('importlib.import_module', return_value=mock_module):
-            result = _load_workflow_def_from_path('some.module', 'NotAWorkflow')
-        assert result is None
-
-    def test_import_error_returns_none(self) -> None:
-        with patch('importlib.import_module', side_effect=ImportError('no module')):
-            result = _load_workflow_def_from_path('bad.module', 'Anything')
-        assert result is None
+    def test_registry_hit_returns_workflow_def(self) -> None:
+        workflow_def = MagicMock()
+        with patch(
+            'horsies.core.workflows.registry.get_workflow_definition',
+            return_value=workflow_def,
+        ):
+            result = _load_workflow_def_from_key('some.workflow.v1')
+        assert result is workflow_def
 
 
 # ── 16. _resolve_workflow_def_nodes ──────────────────────────────────

@@ -11,11 +11,11 @@ CHECK_WORKFLOW_EXISTS_SQL = text(
 )
 INSERT_WORKFLOW_SQL = text("""
     INSERT INTO horsies_workflows (id, name, status, on_error, output_task_index,
-                             success_policy, workflow_def_module, workflow_def_qualname,
+                             success_policy, definition_key,
                              depth, root_workflow_id,
                              sent_at, created_at, started_at, updated_at)
     VALUES (:id, :name, 'RUNNING', :on_error, :output_idx,
-            :success_policy, :wf_module, :wf_qualname,
+            :success_policy, :definition_key,
             0, :id,
             :sent_at, NOW(), NOW(), NOW())
     ON CONFLICT (id) DO NOTHING
@@ -27,11 +27,11 @@ INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL = text("""
      queue_name, priority, dependencies, args_from, workflow_ctx_from,
      allow_failed_deps, join_type, min_success, task_options, status,
      is_subworkflow, sub_workflow_name,
-     sub_workflow_module, sub_workflow_qualname, created_at)
+     sub_definition_key, created_at)
     VALUES (:id, :wf_id, :idx, :node_id, :name, :args, :kwargs, :queue, :priority,
             :deps, :args_from, :ctx_from, :allow_failed, :join_type, :min_success,
             :task_options, :status, TRUE, :sub_wf_name,
-            :sub_wf_module, :sub_wf_qualname, NOW())
+            :sub_def_key, NOW())
 """)
 INSERT_WORKFLOW_TASK_SQL = text("""
     INSERT INTO horsies_workflow_tasks
@@ -128,8 +128,7 @@ ENQUEUE_SUBWORKFLOW_TASK_SQL = text("""
       AND w.id = wt.workflow_id
       AND w.status = 'RUNNING'
     RETURNING wt.id, wt.sub_workflow_name, wt.task_args, wt.task_kwargs,
-              wt.args_from, wt.node_id, wt.sub_workflow_module,
-              wt.sub_workflow_qualname
+              wt.args_from, wt.node_id, wt.sub_definition_key
 """)
 GET_WORKFLOW_NAME_SQL = text("""SELECT name FROM horsies_workflows WHERE id = :wf_id""")
 MARK_WORKFLOW_TASK_FAILED_SQL = text("""
@@ -140,11 +139,11 @@ MARK_WORKFLOW_TASK_FAILED_SQL = text("""
 INSERT_CHILD_WORKFLOW_SQL = text("""
     INSERT INTO horsies_workflows
     (id, name, status, on_error, output_task_index, success_policy,
-     workflow_def_module, workflow_def_qualname,
+     definition_key,
      parent_workflow_id, parent_task_index, depth, root_workflow_id,
      sent_at, created_at, started_at, updated_at)
     VALUES (:id, :name, 'RUNNING', :on_error, :output_idx, :success_policy,
-            :wf_module, :wf_qualname,
+            :definition_key,
             :parent_wf_id, :parent_idx, :depth, :root_wf_id,
             :sent_at, NOW(), NOW(), NOW())
 """)

@@ -208,7 +208,9 @@ def check(self, *, live: bool = False) -> list[HorsiesError]
 | 1. Config | `AppConfig`, `RecoveryConfig`, `ScheduleConfig` consistency | Validated at construction (implicit pass) |
 | 2. Task imports | Imports all discovered task modules, collects import/registration errors | Errors stop progression to Phases 4-6 |
 | 3. Workflows | `WorkflowSpec` DAG validation (triggered during module imports) | Collected alongside Phase 2 |
-| 4. Workflow builders | Executes `@app.workflow_builder` functions, validates returned specs, detects undecorated builders | Errors stop progression to Phases 5-6 |
+| 3.1 Workflow definitions | Imported `WorkflowDefinition` subclasses declare a valid `definition_key` | Errors stop progression to Phases 3.2-6 |
+| 3.2 Workflow builders | Executes `@app.workflow_builder` functions, validates returned specs | Errors stop progression to Phases 3.3-6 |
+| 3.3 Undecorated builders | Detects top-level functions returning `WorkflowSpec` without `@app.workflow_builder` | Errors stop progression to Phases 5-6 |
 | 5. Runtime policy safety | Validates retry/exception-mapper policy metadata after imports | Errors stop progression to Phase 6 |
 | 6. Broker (if `live=True`) | Connects to PostgreSQL and runs `SELECT 1` | Only runs if Phases 2-5 pass |
 
@@ -229,7 +231,7 @@ Register workflow builder functions for check-phase validation. For full API ref
 
 `horsies check` has two validation paths with different guarantee levels:
 
-**Strong guarantee (decorated builders):** Functions registered with `@app.workflow_builder` are executed during check. Every `WorkflowSpec` they produce is fully validated — DAG structure, kwargs against function signatures, `args_from` type compatibility, missing required params, and more. For the exercised builder cases, this catches structural workflow validity errors before runtime.
+**Strong guarantee (decorated builders):** Functions registered with `@app.workflow_builder` are executed during check. Every `WorkflowSpec` they produce is fully validated — DAG structure, kwargs against function signatures, `args_from` type compatibility, missing required params, `definition_key`, and more. For the exercised builder cases, this catches structural workflow validity errors before runtime.
 
 **Best-effort (undecorated builder detection):** Check also scans discovered task modules for top-level functions whose return type annotation is `WorkflowSpec` but lack the `@app.workflow_builder` decorator. These produce E030 check errors. This detection is heuristic:
 

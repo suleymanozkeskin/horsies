@@ -47,6 +47,15 @@ broker = PostgresBroker(config.broker)
 app._broker = broker
 
 
+def _workflow(*, name: str, tasks: list[TaskNode], **kwargs: object) -> object:
+    return app.workflow(
+        name=name,
+        tasks=tasks,
+        definition_key=f'tests.e2e.tasks.instance_recovery.{name}.v1',
+        **kwargs,
+    )
+
+
 @app.task(task_name='e2e_recovery_healthcheck', queue_name='default')
 def healthcheck() -> TaskResult[str, TaskError]:
     return TaskResult(ok='ready')
@@ -105,7 +114,7 @@ _node_f = TaskNode(
 # Register tasks for worker subprocess discovery
 app.discover_tasks(['tests.e2e.tasks.instance_recovery'])
 
-spec_recovery_crash = app.workflow(
+spec_recovery_crash = _workflow(
     name='e2e_recovery_crash',
     tasks=[_node_a, _node_b, _node_c, _node_d, _node_e, _node_f],
 )

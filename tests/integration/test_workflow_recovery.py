@@ -27,10 +27,26 @@ from .conftest import make_simple_task, make_failing_task, make_workflow_spec, s
 from horsies.core.models.workflow import SuccessPolicy, SuccessCase
 
 
+def _workflow(
+    app: Horsies,
+    *,
+    name: str,
+    tasks: list[Any],
+    **kwargs: Any,
+) -> Any:
+    return app.workflow(
+        name=name,
+        tasks=tasks,
+        definition_key=f'tests.integration.{name}.v1',
+        **kwargs,
+    )
+
+
 class RecoveryChildWorkflow(WorkflowDefinition[int]):
     """Minimal child workflow for subworkflow recovery tests."""
 
     name = 'recovery_child_workflow'
+    definition_key = 'tests.recovery_child.v1'
 
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> WorkflowSpec:
@@ -978,7 +994,7 @@ class TestWorkflowRecovery:
             waits_for=[node_a],
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='recover_sub_no_broker',
             tasks=[node_a, node_child],
             output=node_child,
@@ -1034,7 +1050,7 @@ class TestWorkflowRecovery:
             waits_for=[node_a],
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='recover_sub_with_broker',
             tasks=[node_a, node_child],
             output=node_child,
@@ -1092,7 +1108,7 @@ class TestWorkflowRecovery:
             workflow_def=RecoveryChildWorkflow,
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='recover_child_done',
             tasks=[node_child],
             output=node_child,
@@ -1175,7 +1191,7 @@ class TestWorkflowRecovery:
             workflow_def=RecoveryChildWorkflow,
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='recover_child_cancelled',
             tasks=[node_child],
             output=node_child,

@@ -38,10 +38,26 @@ from .conftest import make_simple_task, start_ok
 # =============================================================================
 
 
+def _workflow(
+    app: Horsies,
+    *,
+    name: str,
+    tasks: list[Any],
+    **kwargs: Any,
+) -> Any:
+    return app.workflow(
+        name=name,
+        tasks=tasks,
+        definition_key=f'tests.integration.{name}.v1',
+        **kwargs,
+    )
+
+
 class KwargsChildWorkflow(WorkflowDefinition[int]):
     """Child workflow that verifies it receives kwargs, not positional args."""
 
     name = 'kwargs_child_workflow'
+    definition_key = 'tests.kwargs_child.v1'
 
     # Track last received params for test assertions
     last_params: dict[str, Any] = {}
@@ -108,7 +124,7 @@ class TestKwargsOnlyWrites:
         task_fn = make_simple_task(app, 'kwargs_simple')
 
         node = TaskNode(fn=task_fn, kwargs={'value': 42})
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='kwargs_write_test',
             tasks=[node],
             output=node,
@@ -147,7 +163,7 @@ class TestKwargsOnlyWrites:
             kwargs={'value': 99},
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='kwargs_subwf_write_test',
             tasks=[node_child],
             output=node_child,
@@ -187,7 +203,7 @@ class TestKwargsOnlyWrites:
         node.args = (5,)  # Force positional args
 
         with pytest.raises(WorkflowValidationError) as exc:
-            app.workflow(
+            _workflow(app, 
                 name='kwargs_guard_test',
                 tasks=[node],
                 output=node,
@@ -226,7 +242,7 @@ class TestOldRowBackwardCompat:
 
         # Create workflow with kwargs (new-style)
         node = TaskNode(fn=task_fn, kwargs={'value': 10})
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='old_compat_test',
             tasks=[node],
             output=node,
@@ -327,7 +343,7 @@ class TestSubworkflowKwargsOnly:
             args_from={'value': node_a},
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='kwargs_subwf_params_test',
             tasks=[node_a, node_child],
             output=node_child,
@@ -398,7 +414,7 @@ class TestRecoveryKwargsCompat:
         task_fn = make_simple_task(app, 'recovery_kwargs')
 
         node = TaskNode(fn=task_fn, kwargs={'value': 5})
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='recovery_kwargs_test',
             tasks=[node],
             output=node,
@@ -449,7 +465,7 @@ class TestRecoveryKwargsCompat:
         task_fn = make_simple_task(app, 'recovery_ready_kwargs')
 
         node = TaskNode(fn=task_fn, kwargs={'value': 3})
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='recovery_ready_kwargs_test',
             tasks=[node],
             output=node,

@@ -33,8 +33,7 @@ def _make_spec(name: str = 'test-wf') -> Any:
     spec.output = None
     spec.success_policy = None
     spec.on_error.value = 'FAIL_WORKFLOW'
-    spec.workflow_def_module = None
-    spec.workflow_def_qualname = None
+    spec.definition_key = None
     return spec
 
 

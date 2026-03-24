@@ -46,10 +46,26 @@ from .conftest import make_simple_task, start_ok
 # ---------------------------------------------------------------------------
 
 
+def _workflow(
+    app: Horsies,
+    *,
+    name: str,
+    tasks: list[Any],
+    **kwargs: Any,
+) -> Any:
+    return app.workflow(
+        name=name,
+        tasks=tasks,
+        definition_key=f'tests.integration.{name}.v1',
+        **kwargs,
+    )
+
+
 class PausingChildWorkflow(WorkflowDefinition[int]):
     """Child workflow with a dependency chain and PAUSE error policy."""
 
     name = 'pausing_child_workflow'
+    definition_key = 'tests.pausing_child.v1'
 
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
@@ -117,7 +133,7 @@ class TestCascadeResumeMissingCompletionCheck:
             workflow_def=PausingChildWorkflow,
         )
 
-        parent_spec = app.workflow(
+        parent_spec = _workflow(app, 
             name='cascade_resume_parent',
             tasks=[node_a, node_child],
             output=node_child,

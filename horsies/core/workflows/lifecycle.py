@@ -151,6 +151,8 @@ async def start_workflow_async(
 
     # ── Zone 1: Prevalidation (never retried) ────────────────────────
     try:
+        spec._require_definition_key()
+
         # Validate output type matches declared generic (E025)
         if spec.workflow_def_cls is not None:
             validate_workflow_generic_output_match(spec.workflow_def_cls, spec)
@@ -260,8 +262,7 @@ async def start_workflow_async(
                         'success_policy': _ser_or_raise(dumps_json(success_policy_json), 'success_policy')
                         if success_policy_json
                         else None,
-                        'wf_module': spec.workflow_def_module,
-                        'wf_qualname': spec.workflow_def_qualname,
+                        'definition_key': spec.definition_key,
                         'sent_at': workflow_sent_at,
                     },
                 )
@@ -337,8 +338,7 @@ async def start_workflow_async(
                                 'task_options': None,
                                 'status': 'PENDING' if dep_indices else 'READY',
                                 'sub_wf_name': node.workflow_def.name,
-                                'sub_wf_module': node.workflow_def.__module__,
-                                'sub_wf_qualname': node.workflow_def.__qualname__,
+                                'sub_def_key': node.workflow_def._require_definition_key(),
                             },
                         )
                     else:

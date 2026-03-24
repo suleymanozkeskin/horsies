@@ -110,14 +110,9 @@ ADD_ROOT_WORKFLOW_ID_COLUMN_SQL = text("""
     ADD COLUMN IF NOT EXISTS root_workflow_id VARCHAR(36);
 """)
 
-ADD_WORKFLOW_DEF_MODULE_COLUMN_SQL = text("""
+ADD_DEFINITION_KEY_COLUMN_SQL = text("""
     ALTER TABLE horsies_workflows
-    ADD COLUMN IF NOT EXISTS workflow_def_module VARCHAR(512);
-""")
-
-ADD_WORKFLOW_DEF_QUALNAME_COLUMN_SQL = text("""
-    ALTER TABLE horsies_workflows
-    ADD COLUMN IF NOT EXISTS workflow_def_qualname VARCHAR(512);
+    ADD COLUMN IF NOT EXISTS definition_key VARCHAR(255);
 """)
 
 ADD_IS_SUBWORKFLOW_COLUMN_SQL = text("""
@@ -145,14 +140,29 @@ ADD_SUB_WORKFLOW_SUMMARY_COLUMN_SQL = text("""
     ADD COLUMN IF NOT EXISTS sub_workflow_summary TEXT;
 """)
 
-ADD_SUB_WORKFLOW_MODULE_COLUMN_SQL = text("""
+ADD_SUB_DEFINITION_KEY_COLUMN_SQL = text("""
     ALTER TABLE horsies_workflow_tasks
-    ADD COLUMN IF NOT EXISTS sub_workflow_module VARCHAR(512);
+    ADD COLUMN IF NOT EXISTS sub_definition_key VARCHAR(255);
 """)
 
-ADD_SUB_WORKFLOW_QUALNAME_COLUMN_SQL = text("""
+DROP_WORKFLOW_DEF_MODULE_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflows
+    DROP COLUMN IF EXISTS workflow_def_module;
+""")
+
+DROP_WORKFLOW_DEF_QUALNAME_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflows
+    DROP COLUMN IF EXISTS workflow_def_qualname;
+""")
+
+DROP_SUB_WORKFLOW_MODULE_COLUMN_SQL = text("""
     ALTER TABLE horsies_workflow_tasks
-    ADD COLUMN IF NOT EXISTS sub_workflow_qualname VARCHAR(512);
+    DROP COLUMN IF EXISTS sub_workflow_module;
+""")
+
+DROP_SUB_WORKFLOW_QUALNAME_COLUMN_SQL = text("""
+    ALTER TABLE horsies_workflow_tasks
+    DROP COLUMN IF EXISTS sub_workflow_qualname;
 """)
 
 CREATE_TASK_ATTEMPTS_TABLE_SQL = text("""

@@ -399,17 +399,8 @@ async def enqueue_subworkflow_task(
     task_kwargs_json = row.task_kwargs
     args_from_raw = row.args_from
     _node_id = row.node_id  # Unused but kept for row unpacking clarity
-    sub_workflow_module = row.sub_workflow_module
-    sub_workflow_qualname = row.sub_workflow_qualname
-    # 2. Try to get workflow_def from registry (fast path) or import fallback
-    #
-    # Registry lookup succeeds when:
-    #   - Parent workflow module is imported in worker
-    #   - WorkflowSpec.build(app) was called (registers nodes)
-    # This typically works in tests but rarely in production workers.
-    #
-    # Fallback import path (sub_workflow_module/qualname stored in DB) handles
-    # the common case where registry is empty.
+    sub_definition_key = row.sub_definition_key
+    # 2. Load the child workflow definition by its explicit definition_key.
     workflow_name_result = await session.execute(
         GET_WORKFLOW_NAME_SQL,
         {'wf_id': workflow_id},
@@ -425,29 +416,19 @@ async def enqueue_subworkflow_task(
 
     workflow_name = workflow_name_row.name
 
-    from horsies.core.workflows.registry import get_subworkflow_node
-
-    subworkflow_node = get_subworkflow_node(workflow_name, task_index)
-
     workflow_def: type[WorkflowDefinition[Any]] | None = None
-    if subworkflow_node is not None:
-        # Registry hit: use cached workflow_def
-        workflow_def = subworkflow_node.workflow_def
-    elif sub_workflow_module and sub_workflow_qualname:
-        # Registry miss: load child workflow def via import path (stored in DB)
-        workflow_def = _load_workflow_def_from_path(
-            sub_workflow_module, sub_workflow_qualname
-        )
+    if sub_definition_key:
+        workflow_def = _load_workflow_def_from_key(sub_definition_key)
 
     if workflow_def is None:
         # Critical: Revert ENQUEUED → FAILED to prevent stuck task
-        # This can happen if the subworkflow module cannot be imported
+        # This can happen if the child definition_key is not registered.
         from horsies.core.models.tasks import TaskError, TaskResult
 
         error = TaskError(
             error_code=OperationalErrorCode.SUBWORKFLOW_LOAD_FAILED,
             message=f'Failed to load subworkflow definition for {workflow_name}:{task_index}',
-            data={'module': sub_workflow_module, 'qualname': sub_workflow_qualname},
+            data={'definition_key': sub_definition_key},
         )
         await session.execute(
             MARK_WORKFLOW_TASK_FAILED_SQL,
@@ -638,8 +619,7 @@ async def enqueue_subworkflow_task(
             'success_policy': _ser(dumps_json(child_success_policy_json), 'child success_policy')
             if child_success_policy_json
             else None,
-            'wf_module': child_spec.workflow_def_module,
-            'wf_qualname': child_spec.workflow_def_qualname,
+            'definition_key': child_spec.definition_key,
             'parent_wf_id': workflow_id,
             'parent_idx': task_index,
             'depth': parent_depth + 1,
@@ -713,8 +693,7 @@ async def enqueue_subworkflow_task(
                     'task_options': None,
                     'status': 'PENDING' if child_dep_indices else 'READY',
                     'sub_wf_name': child_sub.workflow_def.name,
-                    'sub_wf_module': child_sub.workflow_def.__module__,
-                    'sub_wf_qualname': child_sub.workflow_def.__qualname__,
+                    'sub_def_key': child_sub.workflow_def._require_definition_key(),
                 },
             )
         else:
@@ -1835,32 +1814,13 @@ async def _handle_workflow_task_failure(
     return True  # Default: continue
 
 
-def _load_workflow_def_from_path(
-    module_path: str,
-    qualname: str,
+def _load_workflow_def_from_key(
+    definition_key: str,
 ) -> 'type[WorkflowDefinition[Any]] | None':
-    """
-    Load a SubWorkflowNode via module path fallback when registry is missing.
-    Returns a SubWorkflowNode instance if found, otherwise None.
-    """
-    try:
-        import importlib
+    """Resolve a workflow definition through the explicit definition_key registry."""
+    from horsies.core.workflows.registry import get_workflow_definition
 
-        module = importlib.import_module(module_path)
-        obj: Any = module
-        for attr in qualname.split('.'):
-            obj = getattr(obj, attr, None)
-            if obj is None:
-                return None
-
-        if isinstance(obj, type) and issubclass(obj, WorkflowDefinition):
-            wf_def = cast('type[WorkflowDefinition[Any]]', obj)
-            return wf_def
-    except Exception as exc:
-        logger.error(f'Failed to load subworkflow def {module_path}:{qualname}: {exc}')
-        return None
-
-    return None
+    return get_workflow_definition(definition_key)
 
 
 def _resolve_workflow_def_nodes(

@@ -15,6 +15,8 @@ This page demonstrates workflow composition using an **order processing** exampl
 
 We cover two approaches: **declarative** (class-based) and **imperative** (function-scoped). Both produce equivalent `WorkflowSpec` objects.
 
+For both approaches, workflows need a stable `definition_key`. In class-based workflows you declare it on the `WorkflowDefinition`; in imperative workflows you pass it to `app.workflow(...)`.
+
 ## Order Processing Workflow
 
 ```text
@@ -141,6 +143,7 @@ class OrderProcessingWorkflow(WorkflowDefinition[NotificationResult]):
     """Process an order from validation to shipment notification."""
 
     name = "order_processing"
+    definition_key = "myapp.order_processing.v1"
 
     validate = _validate_node
     inventory = _inventory_node
@@ -255,6 +258,7 @@ def start_order_processing(order: Order) -> None:
             shipment_node,
             notify_node,
         ],
+        definition_key="myapp.order_processing.v1",
         output=notify_node,
         on_error=OnError.FAIL,
     )

@@ -15,6 +15,15 @@ from horsies.core.models.workflow import TaskNode, SuccessPolicy, SuccessCase
 from tests.e2e.tasks.instance import app
 
 
+def _workflow(*, name: str, tasks: list[Any], **kwargs: Any) -> Any:
+    return app.workflow(
+        name=name,
+        tasks=tasks,
+        definition_key=f'tests.e2e.tasks.workflows.{name}.v1',
+        **kwargs,
+    )
+
+
 # =============================================================================
 # Task Definitions
 # =============================================================================
@@ -59,7 +68,7 @@ node_linear_a = TaskNode(fn=step_task, kwargs={"step": 'A'})
 node_linear_b = TaskNode(fn=step_task, kwargs={"step": 'B'}, waits_for=[node_linear_a])
 node_linear_c = TaskNode(fn=step_task, kwargs={"step": 'C'}, waits_for=[node_linear_b])
 
-spec_linear = app.workflow(
+spec_linear = _workflow(
     name='e2e_linear',
     tasks=[node_linear_a, node_linear_b, node_linear_c],
 )
@@ -83,7 +92,7 @@ node_fanout_d = TaskNode(
     waits_for=[node_fanout_root],
 )
 
-spec_fanout = app.workflow(
+spec_fanout = _workflow(
     name='e2e_fanout',
     tasks=[node_fanout_root, node_fanout_b, node_fanout_c, node_fanout_d],
 )
@@ -100,7 +109,7 @@ node_fanin_agg = TaskNode(
     fn=step_task, kwargs={"step": 'AGG'}, waits_for=[node_fanin_a, node_fanin_b, node_fanin_c]
 )
 
-spec_fanin = app.workflow(
+spec_fanin = _workflow(
     name='e2e_fanin',
     tasks=[node_fanin_a, node_fanin_b, node_fanin_c, node_fanin_agg],
 )
@@ -123,7 +132,7 @@ node_diamond_d = TaskNode(
     fn=step_task, kwargs={"step": 'D'}, waits_for=[node_diamond_b, node_diamond_c]
 )
 
-spec_diamond = app.workflow(
+spec_diamond = _workflow(
     name='e2e_diamond',
     tasks=[node_diamond_a, node_diamond_b, node_diamond_c, node_diamond_d],
 )
@@ -155,7 +164,7 @@ node_complex_g = TaskNode(
     fn=step_task, kwargs={"step": 'G'}, waits_for=[node_complex_e, node_complex_f]
 )
 
-spec_complex = app.workflow(
+spec_complex = _workflow(
     name='e2e_complex_dag',
     tasks=[
         node_complex_a,
@@ -179,7 +188,7 @@ node_output_step2 = TaskNode(
 )
 node_output_final = TaskNode(fn=final_result_task, waits_for=[node_output_step2])
 
-spec_output = app.workflow(
+spec_output = _workflow(
     name='e2e_output',
     tasks=[node_output_step1, node_output_step2, node_output_final],
     output=node_output_final,
@@ -192,7 +201,7 @@ spec_output = app.workflow(
 
 node_single = TaskNode(fn=step_task, kwargs={"step": 'ONLY'})
 
-spec_single_node = app.workflow(
+spec_single_node = _workflow(
     name='e2e_single_node',
     tasks=[node_single],
 )
@@ -206,7 +215,7 @@ node_lfm_a = TaskNode(fn=step_task, kwargs={"step": 'A'})
 node_lfm_b = TaskNode(fn=fail_task, kwargs={"error_code": 'MID_FAIL'}, waits_for=[node_lfm_a])
 node_lfm_c = TaskNode(fn=step_task, kwargs={"step": 'C'}, waits_for=[node_lfm_b])
 
-spec_linear_fail_mid = app.workflow(
+spec_linear_fail_mid = _workflow(
     name='e2e_linear_fail_mid',
     tasks=[node_lfm_a, node_lfm_b, node_lfm_c],
 )
@@ -229,7 +238,7 @@ node_fof_d = TaskNode(
     waits_for=[node_fof_root],
 )
 
-spec_fanout_one_fail = app.workflow(
+spec_fanout_one_fail = _workflow(
     name='e2e_fanout_one_fail',
     tasks=[node_fof_root, node_fof_b, node_fof_c, node_fof_d],
 )
@@ -247,7 +256,7 @@ node_fif_agg = TaskNode(
     waits_for=[node_fif_a, node_fif_b, node_fif_c],
 )
 
-spec_fanin_one_fail = app.workflow(
+spec_fanin_one_fail = _workflow(
     name='e2e_fanin_one_fail',
     tasks=[node_fif_a, node_fif_b, node_fif_c, node_fif_agg],
 )
@@ -267,7 +276,7 @@ node_slow_c = TaskNode(
     waits_for=[node_slow_b],
 )
 
-spec_slow_linear = app.workflow(
+spec_slow_linear = _workflow(
     name='e2e_slow_linear',
     tasks=[node_slow_a, node_slow_b, node_slow_c],
 )
@@ -485,7 +494,7 @@ node_df_b = TaskNode(
     args_from={'input_result': node_df_a},
 )
 
-spec_args_from_single = app.workflow(
+spec_args_from_single = _workflow(
     name='e2e_args_from_single',
     tasks=[node_df_a, node_df_b],
 )
@@ -504,7 +513,7 @@ node_df_multi_c = TaskNode(
     args_from={'first': node_df_multi_a, 'second': node_df_multi_b},
 )
 
-spec_args_from_multi = app.workflow(
+spec_args_from_multi = _workflow(
     name='e2e_args_from_multi',
     tasks=[node_df_multi_a, node_df_multi_b, node_df_multi_c],
 )
@@ -522,7 +531,7 @@ node_ctx_b = TaskNode(
     workflow_ctx_from=[node_ctx_a],
 )
 
-spec_ctx_single = app.workflow(
+spec_ctx_single = _workflow(
     name='e2e_ctx_single',
     tasks=[node_ctx_a, node_ctx_b],
 )
@@ -541,7 +550,7 @@ node_ctx_multi_c = TaskNode(
     workflow_ctx_from=[node_ctx_multi_a, node_ctx_multi_b],
 )
 
-spec_ctx_multi = app.workflow(
+spec_ctx_multi = _workflow(
     name='e2e_ctx_multi',
     tasks=[node_ctx_multi_a, node_ctx_multi_b, node_ctx_multi_c],
 )
@@ -560,7 +569,7 @@ node_failed_b = TaskNode(
     allow_failed_deps=True,
 )
 
-spec_failed_propagation = app.workflow(
+spec_failed_propagation = _workflow(
     name='e2e_failed_propagation',
     tasks=[node_failed_a, node_failed_b],
     # Use success_policy: workflow succeeds if terminal task B completes
@@ -589,7 +598,7 @@ node_skipped_c = TaskNode(
     allow_failed_deps=True,
 )
 
-spec_skipped_propagation = app.workflow(
+spec_skipped_propagation = _workflow(
     name='e2e_skipped_propagation',
     tasks=[node_skipped_a, node_skipped_b, node_skipped_c],
     # Use success_policy: workflow succeeds if terminal task C completes
@@ -614,7 +623,7 @@ node_join_ctx_c = TaskNode(
     join='any',
 )
 
-spec_join_ctx_gating = app.workflow(
+spec_join_ctx_gating = _workflow(
     name='e2e_join_ctx_gating',
     tasks=[node_join_ctx_a, node_join_ctx_b, node_join_ctx_c],
 )
@@ -643,7 +652,7 @@ node_mixed_d = TaskNode(
     workflow_ctx_from=[node_mixed_c],
 )
 
-spec_mixed_dataflow = app.workflow(
+spec_mixed_dataflow = _workflow(
     name='e2e_mixed_dataflow',
     tasks=[node_mixed_a, node_mixed_b, node_mixed_c, node_mixed_d],
 )
@@ -666,7 +675,7 @@ node_chain_c = TaskNode(
     args_from={'input_result': node_chain_b},
 )
 
-spec_args_from_chain = app.workflow(
+spec_args_from_chain = _workflow(
     name='e2e_args_from_chain',
     tasks=[node_chain_a, node_chain_b, node_chain_c],
 )
@@ -684,7 +693,7 @@ node_fail_np_b = TaskNode(
     # allow_failed_deps=False (default): B should be SKIPPED
 )
 
-spec_args_from_fail_workflow = app.workflow(
+spec_args_from_fail_workflow = _workflow(
     name='e2e_args_from_fail_workflow',
     tasks=[node_fail_np_a, node_fail_np_b],
 )
@@ -702,7 +711,7 @@ node_dict_b = TaskNode(
     args_from={'input_result': node_dict_a},
 )
 
-spec_args_from_dict = app.workflow(
+spec_args_from_dict = _workflow(
     name='e2e_args_from_dict',
     tasks=[node_dict_a, node_dict_b],
 )
@@ -721,7 +730,7 @@ node_dual_b = TaskNode(
     workflow_ctx_from=[node_dual_a],
 )
 
-spec_dual_injection = app.workflow(
+spec_dual_injection = _workflow(
     name='e2e_dual_injection',
     tasks=[node_dual_a, node_dual_b],
 )
@@ -809,7 +818,7 @@ node_quorum_d = TaskNode(
     min_success=2,
 )
 
-spec_quorum_ctx_gating = app.workflow(
+spec_quorum_ctx_gating = _workflow(
     name='e2e_quorum_ctx_gating',
     tasks=[node_quorum_a, node_quorum_b, node_quorum_c, node_quorum_d],
 )
@@ -831,7 +840,7 @@ node_pause_d = TaskNode(
     fn=slow_mark_task, kwargs={"value": 'D', 'delay_ms': 100}, waits_for=[node_pause_c]
 )
 
-spec_pausable = app.workflow(
+spec_pausable = _workflow(
     name='e2e_pausable',
     tasks=[node_pause_a, node_pause_b, node_pause_c, node_pause_d],
 )
@@ -844,7 +853,7 @@ spec_pausable = app.workflow(
 node_sp_a = TaskNode(fn=mark_task, kwargs={"value": 'required_A'})
 node_sp_b_fail = TaskNode(fn=fail_task, kwargs={"error_code": 'OPTIONAL_FAIL'})
 
-spec_success_policy_satisfied = app.workflow(
+spec_success_policy_satisfied = _workflow(
     name='e2e_success_policy_satisfied',
     tasks=[node_sp_a, node_sp_b_fail],
     success_policy=SuccessPolicy(
@@ -861,7 +870,7 @@ spec_success_policy_satisfied = app.workflow(
 node_sp_req_a = TaskNode(fn=mark_task, kwargs={"value": 'required_A'})
 node_sp_req_b_fail = TaskNode(fn=fail_task, kwargs={"error_code": 'REQUIRED_FAIL'})
 
-spec_success_policy_not_met = app.workflow(
+spec_success_policy_not_met = _workflow(
     name='e2e_success_policy_not_met',
     tasks=[node_sp_req_a, node_sp_req_b_fail],
     success_policy=SuccessPolicy(
@@ -877,7 +886,7 @@ spec_success_policy_not_met = app.workflow(
 node_sp_multi_a_fail = TaskNode(fn=fail_task, kwargs={"error_code": 'CASE1_FAIL'})
 node_sp_multi_b = TaskNode(fn=mark_task, kwargs={"value": 'case2_ok'})
 
-spec_success_policy_multi = app.workflow(
+spec_success_policy_multi = _workflow(
     name='e2e_success_policy_multi',
     tasks=[node_sp_multi_a_fail, node_sp_multi_b],
     success_policy=SuccessPolicy(
@@ -922,7 +931,7 @@ node_qi_d = TaskNode(
     min_success=3,
 )
 
-spec_quorum_impossible = app.workflow(
+spec_quorum_impossible = _workflow(
     name='e2e_quorum_impossible',
     tasks=[node_qi_a, node_qi_b, node_qi_c, node_qi_d],
 )
@@ -940,7 +949,7 @@ node_jaf_c = TaskNode(
     join='any',
 )
 
-spec_join_any_all_fail = app.workflow(
+spec_join_any_all_fail = _workflow(
     name='e2e_join_any_all_fail',
     tasks=[node_jaf_a, node_jaf_b, node_jaf_c],
 )
@@ -956,7 +965,7 @@ node_oep_a = TaskNode(fn=step_task, kwargs={"step": 'A'})
 node_oep_b = TaskNode(fn=fail_task, kwargs={"error_code": 'PAUSE_FAIL'}, waits_for=[node_oep_a])
 node_oep_c = TaskNode(fn=step_task, kwargs={"step": 'C'}, waits_for=[node_oep_b])
 
-spec_on_error_pause = app.workflow(
+spec_on_error_pause = _workflow(
     name='e2e_on_error_pause',
     tasks=[node_oep_a, node_oep_b, node_oep_c],
     on_error=OnError.PAUSE,

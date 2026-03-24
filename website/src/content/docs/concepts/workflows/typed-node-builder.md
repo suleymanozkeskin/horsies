@@ -154,6 +154,7 @@ _score_b = compute_score.node(node_id='score_b')(
 
 class ScoreWorkflow(WorkflowDefinition[int]):
     name = 'score_workflow'
+    definition_key = 'myapp.score_workflow.v1'
 
     score_a = _score_a
     score_b = _score_b

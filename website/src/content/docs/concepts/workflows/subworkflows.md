@@ -55,6 +55,7 @@ class DataPipeline(WorkflowDefinition[bool]):
     The generic parameter [bool] indicates the workflow output type.
     """
     name = "data_pipeline"
+    definition_key = "myapp.data_pipeline.v1"
 
     fetch = TaskNode(fn=fetch_data, kwargs={'url': "https://api.example.com"})
     transform = TaskNode(
@@ -74,6 +75,7 @@ class DataPipeline(WorkflowDefinition[bool]):
 
 **Key points:**
 - `name` is required and must be unique
+- `definition_key` is required — a stable string key used for persistence and runtime lookup (e.g. `"myapp.data_pipeline.v1"`)
 - Nodes are class attributes (order doesn't matter, DAG is built from `waits_for`)
 - `Meta.output` defines which node's result becomes the workflow result
 
@@ -107,6 +109,7 @@ node_b = TaskNode(fn=task_b, waits_for=[node_a])
 spec = app.workflow(
     name="simple_workflow",
     tasks=[node_a, node_b],
+    definition_key="myapp.simple_workflow.v1",
     output=node_b,
 )
 start_result = await spec.start_async()
@@ -125,6 +128,7 @@ Use class-based `WorkflowDefinition` for anything beyond trivial DAGs.
 ```python
 class DiamondDAG(WorkflowDefinition[str]):
     name = "diamond"
+    definition_key = "myapp.diamond.v1"
 
     #     ┌→ B ─┐
     # A ──┤     ├→ D
@@ -166,6 +170,7 @@ def multiply(
 
 class MathWorkflow(WorkflowDefinition[int]):
     name = "math"
+    definition_key = "myapp.math.v1"
 
     add_node = TaskNode(fn=add, kwargs={'a': 5, 'b': 3})
     multiply_node = TaskNode(
@@ -212,6 +217,7 @@ def aggregate(
 
 class AggregationWorkflow(WorkflowDefinition[Summary]):
     name = "aggregation"
+    definition_key = "myapp.aggregation.v1"
 
     node_a = TaskNode(fn=produce_int)
     node_b = TaskNode(fn=produce_str)
@@ -252,6 +258,7 @@ A **SubWorkflowNode** runs an entire workflow as a single node in the parent DAG
 # Child workflow
 class ChildPipeline(WorkflowDefinition[int]):
     name = "child_pipeline"
+    definition_key = "myapp.child_pipeline.v1"
 
     step1 = TaskNode(fn=produce_int, kwargs={'value': 5})
     step2 = TaskNode(fn=double, waits_for=[step1], args_from={"value": step1})
@@ -263,6 +270,7 @@ class ChildPipeline(WorkflowDefinition[int]):
 # Parent workflow
 class ParentWorkflow(WorkflowDefinition[int]):
     name = "parent_workflow"
+    definition_key = "myapp.parent_workflow.v1"
 
     child = SubWorkflowNode(workflow_def=ChildPipeline)
 
@@ -286,6 +294,7 @@ When the child workflow needs runtime parameters:
 ```python
 class DataProcessor(WorkflowDefinition[ProcessedData]):
     name = "data_processor"
+    definition_key = "myapp.data_processor.v1"
 
     # These will be set by build_with()
     fetch: TaskNode[RawData]
@@ -309,8 +318,6 @@ class DataProcessor(WorkflowDefinition[ProcessedData]):
             name=cls.name,
             tasks=[fetch, clean, process],
             output=process,
-            workflow_def_module=cls.__module__,
-            workflow_def_qualname=cls.__qualname__,
         )
 
     class Meta:
@@ -320,6 +327,7 @@ class DataProcessor(WorkflowDefinition[ProcessedData]):
 # Use in parent with kwargs
 class MultiSourceAggregation(WorkflowDefinition[Report]):
     name = "multi_source"
+    definition_key = "myapp.multi_source_aggregation.v1"
 
     source1 = SubWorkflowNode(
         workflow_def=DataProcessor,
@@ -369,6 +377,7 @@ def report_health(
 
 class MonitoredPipeline(WorkflowDefinition[HealthReport]):
     name = "monitored"
+    definition_key = "myapp.monitored_pipeline.v1"
 
     child = SubWorkflowNode(workflow_def=ChildPipeline)
     reporter = TaskNode(
@@ -414,6 +423,7 @@ def process_child_result(
 
 class ParentWithDataFlow(WorkflowDefinition[ParentOutput]):
     name = "parent_data_flow"
+    definition_key = "myapp.parent_data_flow.v1"
 
     child = SubWorkflowNode(workflow_def=ChildPipeline)
     processor = TaskNode(
@@ -459,6 +469,7 @@ def recovery_handler(
 
 class RecoveryWorkflow(WorkflowDefinition[Data]):
     name = "recovery"
+    definition_key = "myapp.recovery.v1"
 
     primary = TaskNode(fn=fetch_data)
     recovery = TaskNode(
@@ -482,6 +493,7 @@ from horsies import OnError
 # Set on_error in the WorkflowDefinition's Meta class
 class MyWorkflow(WorkflowDefinition[OutputType]):
     name = "my_workflow"
+    definition_key = "myapp.my_workflow.v1"
     # ... nodes ...
 
     class Meta:
@@ -586,6 +598,7 @@ from horsies import SuccessPolicy, SuccessCase
 
 class DeliveryWorkflow(WorkflowDefinition[str]):
     name = "delivery"
+    definition_key = "myapp.delivery.v1"
 
     pickup = TaskNode(fn=pickup_package)
     deliver_door = TaskNode(fn=deliver_to_door, waits_for=[pickup])
@@ -662,6 +675,8 @@ At `WorkflowSpec` creation, these are validated:
 | `args_from` references task not in `waits_for` | `WORKFLOW_INVALID_ARGS_FROM` |
 | `workflow_ctx_from` references task not in `waits_for` | `WORKFLOW_INVALID_CTX_FROM` |
 | `workflow_ctx_from` set but function lacks param | `WORKFLOW_CTX_PARAM_MISSING` |
+| Workflow spec or definition missing `definition_key` | `WORKFLOW_NO_DEFINITION_KEY` |
+| Two workflow definitions share the same `definition_key` | `WORKFLOW_DUPLICATE_DEFINITION_KEY` |
 
 ---
 
@@ -673,6 +688,7 @@ At `WorkflowSpec` creation, these are validated:
 # Use class-based definitions for reusability
 class MyWorkflow(WorkflowDefinition[Output]):
     name = "my_workflow"
+    definition_key = "myapp.my_workflow.v1"
     ...
 
 # Use args_from for direct data flow
@@ -769,7 +785,9 @@ node_b = TaskNode(
 
 ### Subworkflow Not Found in Worker
 
-**Cause**: Worker process doesn't have the workflow module imported.
+**Cause**: Worker process doesn't have the workflow definition module imported, so `definition_key` is not registered.
+
+Every `WorkflowDefinition` subclass auto-registers its `definition_key` at import time via the metaclass. If the module isn't imported in the worker, the registry is empty and subworkflow resolution fails with `SUBWORKFLOW_LOAD_FAILED`.
 
 **Fix**: Ensure the workflow definition module is discovered by the app:
 ```python
@@ -887,6 +905,7 @@ def aggregate_sources(
 class DataSourcePipeline(WorkflowDefinition[ProcessedData]):
     """Reusable pipeline for fetching and processing a single data source."""
     name = "data_source_pipeline"
+    definition_key = "myapp.data_source_pipeline.v1"
 
     fetch: TaskNode[RawData]
     process: TaskNode[ProcessedData]
@@ -909,8 +928,6 @@ class DataSourcePipeline(WorkflowDefinition[ProcessedData]):
             name=cls.name,
             tasks=[fetch, process],
             output=process,
-            workflow_def_module=cls.__module__,
-            workflow_def_qualname=cls.__qualname__,
         )
 
     class Meta:
@@ -945,6 +962,7 @@ class MultiSourcePipeline(WorkflowDefinition[AggregatedReport]):
     - Uses SubWorkflowSummary for partial success visibility
     """
     name = "multi_source_pipeline"
+    definition_key = "myapp.multi_source_pipeline.v1"
 
     source1 = source1_node
     source2 = source2_node

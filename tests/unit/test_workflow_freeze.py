@@ -114,6 +114,15 @@ class SnapshotPayload:
     items: list[int]
 
 
+_definition_key_counter = 0
+
+
+def _definition_key(label: str) -> str:
+    global _definition_key_counter
+    _definition_key_counter += 1
+    return f'tests.unit.test_workflow_freeze.{label}.v{_definition_key_counter}'
+
+
 def _make_spec(
     *,
     with_deps: bool = False,
@@ -204,10 +213,10 @@ class TestFrozenSpecRejectsAttributeWrite:
         with pytest.raises(AttributeError, match='frozen WorkflowSpec'):
             spec.tasks = []  # type: ignore[assignment]
 
-    def test_spec_workflow_def_module(self) -> None:
+    def test_spec_definition_key(self) -> None:
         spec = _make_spec()
         with pytest.raises(AttributeError, match='frozen WorkflowSpec'):
-            spec.workflow_def_module = 'some.module'
+            spec.definition_key = 'some.workflow.v1'
 
 
 class TestFrozenSpecRejectsAttributeDelete:
@@ -471,10 +480,11 @@ class TestCachedSpecRejection:
     def test_cached_spec_rejected(self) -> None:
         """Prebuilt spec returned from build_with() raises WorkflowValidationError."""
         prebuilt = WorkflowSpec(name='cached', tasks=[TaskNode(fn=fn_a)])
-        assert prebuilt.workflow_def_module is None
+        assert prebuilt.definition_key is None
 
         class CachedWorkflow(WorkflowDefinition[Any]):
             name = 'cached'
+            definition_key = _definition_key('cached')
             fetch = TaskNode(fn=fn_a)
 
             @classmethod
@@ -491,6 +501,7 @@ class TestCachedSpecRejection:
 
         class WorkflowA(WorkflowDefinition[Any]):
             name = 'a'
+            definition_key = _definition_key('workflow_a')
             fetch = TaskNode(fn=fn_a)
 
             @classmethod
@@ -500,6 +511,7 @@ class TestCachedSpecRejection:
 
         class WorkflowB(WorkflowDefinition[Any]):
             name = 'b'
+            definition_key = _definition_key('workflow_b')
             fetch = TaskNode(fn=fn_a)
 
             @classmethod
@@ -525,6 +537,7 @@ class TestCachedSpecRejection:
 
         class SelfCachingWorkflow(WorkflowDefinition[Any]):
             name = 'self_caching'
+            definition_key = _definition_key('self_caching')
             fetch = TaskNode(fn=fn_a)
 
             @classmethod

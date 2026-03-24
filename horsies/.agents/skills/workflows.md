@@ -21,6 +21,8 @@ spec = app.workflow(
     on_error: OnError = OnError.FAIL,
     output: TaskNode[OutT] | SubWorkflowNode[OutT] | None = None,
     success_policy: SuccessPolicy | None = None,
+    *,
+    definition_key: str,  # required stable key
 ) -> WorkflowSpec[OutT] | WorkflowSpec[WorkflowTerminalResults]
 ```
 
@@ -28,6 +30,7 @@ spec = app.workflow(
 - When `output=None`: returns `WorkflowSpec[WorkflowTerminalResults]` — `handle.get()` returns `TaskResult[dict[str, TaskResult | None], TaskError]` where `.ok` is `{node_id: TaskResult | None, ...}`.
 - Resolves queue/priority for each `TaskNode` using app config; raises E014/E015 if unregistered.
 - Attaches broker and `resend_on_transient_err` from app config automatically.
+- `definition_key` is required for top-level workflows built with `app.workflow()` and is used for persistence/runtime lookup.
 
 Best for dynamic workflows where node kwargs depend on runtime inputs.
 
@@ -36,6 +39,7 @@ Best for dynamic workflows where node kwargs depend on runtime inputs.
 ```python
 class ETLPipeline(WorkflowDefinition[SaveResult]):
     name = "etl_pipeline"
+    definition_key = "myapp.etl_pipeline.v1"
 
     fetch = TaskNode(fn=fetch_data)
     process = TaskNode(fn=process_data, waits_for=[fetch], args_from={"data": fetch})
@@ -50,6 +54,7 @@ spec = ETLPipeline.build(app)
 ```
 
 - `node_id` auto-assigned from attribute name (`fetch`, `process`, `save`).
+- `definition_key` is required — a stable string key for persistence and runtime lookup. Auto-registered by the metaclass at import time.
 - Generic parameter `WorkflowDefinition[T]` types the output node result.
 - Nodes are collected in definition order by the metaclass.
 - Spec and all nodes are **frozen** (immutable) after construction.
@@ -63,6 +68,7 @@ Override `build_with()` to accept runtime parameters:
 ```python
 class ChildPipeline(WorkflowDefinition[ProcessedData]):
     name = "child_pipeline"
+    definition_key = "myapp.child_pipeline.v1"
 
     @classmethod
     def build_with(cls, app: Horsies, source_url: str, *_a: Any, **_kw: Any) -> WorkflowSpec:
@@ -77,7 +83,7 @@ spec = ChildPipeline.build_with(app, source_url="https://...")
 
 Requirements:
 - Must return a **fresh** `WorkflowSpec` per call (not cached).
-- `workflow_def_module` and `workflow_def_qualname` are auto-populated via ContextVar; manual setting is unnecessary.
+- `definition_key` is auto-populated via ContextVar when returning a `WorkflowSpec` from `build_with()`; manual setting is unnecessary.
 - Signature must accept `*_args` and `**_kwargs` beyond declared params (E023 otherwise).
 
 ### `@app.workflow_builder` decorator
@@ -509,6 +515,8 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | E013 | `WORKFLOW_INVALID_JOIN` | `quorum` without valid `min_success` |
 | E014 | `WORKFLOW_UNRESOLVED_QUEUE` | Queue not registered |
 | E015 | `WORKFLOW_UNRESOLVED_PRIORITY` | Priority unresolvable |
+| E016 | `WORKFLOW_NO_DEFINITION_KEY` | Workflow definition/spec missing `definition_key` |
+| E017 | `WORKFLOW_DUPLICATE_DEFINITION_KEY` | Two definitions share the same `definition_key` |
 | E018 | `WORKFLOW_SUBWORKFLOW_APP_MISSING` | No app when subworkflow enqueues |
 | E019 | `WORKFLOW_INVALID_KWARG_KEY` | `kwargs` key not in function signature |
 | E020 | `WORKFLOW_MISSING_REQUIRED_PARAMS` | Required param not in kwargs or args_from |

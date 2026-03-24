@@ -24,7 +24,11 @@ from horsies.core.models.workflow import (
     OnError,
 )
 from horsies.core.workflows.engine import on_workflow_task_complete
-from horsies.core.workflows.registry import unregister_workflow_spec
+from horsies.core.workflows.registry import (
+    register_workflow_definition,
+    unregister_workflow_definition,
+    unregister_workflow_spec,
+)
 
 from .conftest import make_simple_task, start_ok
 
@@ -32,6 +36,21 @@ from .conftest import make_simple_task, start_ok
 # =============================================================================
 # Helpers
 # =============================================================================
+
+
+def _workflow(
+    app: Horsies,
+    *,
+    name: str,
+    tasks: list[Any],
+    **kwargs: Any,
+) -> Any:
+    return app.workflow(
+        name=name,
+        tasks=tasks,
+        definition_key=f'tests.integration.{name}.v1',
+        **kwargs,
+    )
 
 
 def _decode_task_result(value: Any) -> TaskResult[Any, TaskError] | None:
@@ -63,6 +82,7 @@ class ImportableChildWorkflow(WorkflowDefinition[int]):
     """Child workflow used for registry fallback tests."""
 
     name = 'importable_child_workflow'
+    definition_key = 'tests.importable_child.v1'
 
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
@@ -83,6 +103,7 @@ class ParamChildWorkflow(WorkflowDefinition[int]):
     """Child workflow that uses build_with parameters."""
 
     name = 'param_child_workflow'
+    definition_key = 'tests.param_child.v1'
 
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
@@ -113,6 +134,7 @@ class MultiParamChildWorkflow(WorkflowDefinition[int]):
     """Child workflow that accepts two build_with parameters."""
 
     name = 'multi_param_child_workflow'
+    definition_key = 'tests.multi_param_child.v1'
 
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
@@ -135,6 +157,7 @@ class MultiParamChildWorkflow(WorkflowDefinition[int]):
 
 class StartChildWorkflow(WorkflowDefinition[int]):
     name = 'child_workflow_start'
+    definition_key = 'tests.start_child.v1'
 
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
@@ -153,6 +176,7 @@ class StartChildWorkflow(WorkflowDefinition[int]):
 
 class SummaryChildWorkflow(WorkflowDefinition[int]):
     name = 'summary_child_workflow'
+    definition_key = 'tests.summary_child.v1'
 
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
@@ -173,6 +197,7 @@ class MiddleWorkflow(WorkflowDefinition[int]):
     """Intermediate workflow containing a SubWorkflowNode for 3-level nesting."""
 
     name = 'middle_workflow'
+    definition_key = 'tests.middle_workflow.v1'
 
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
@@ -300,7 +325,7 @@ class TestSubworkflowIntegration:
             waits_for=[node_a],
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_workflow_start',
             tasks=[node_a, node_child],
             output=node_child,
@@ -343,7 +368,7 @@ class TestSubworkflowIntegration:
             waits_for=[node_a],
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_workflow_fallback',
             tasks=[node_a, node_child],
             output=node_child,
@@ -377,7 +402,7 @@ class TestSubworkflowIntegration:
             args_from={'value': node_a},
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_workflow_params',
             tasks=[node_a, node_child],
             output=node_child,
@@ -420,7 +445,7 @@ class TestSubworkflowIntegration:
             workflow_def=StartChildWorkflow,
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_workflow_failure',
             tasks=[node_child],
             output=node_child,
@@ -475,7 +500,7 @@ class TestSubworkflowIntegration:
             workflow_def=StartChildWorkflow,
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_workflow_pause_on_fail',
             tasks=[node_child],
             output=node_child,
@@ -508,7 +533,7 @@ class TestSubworkflowIntegration:
             workflow_def=StartChildWorkflow,
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_workflow_output',
             tasks=[node_child],
             output=node_child,
@@ -555,7 +580,7 @@ class TestSubworkflowIntegration:
             kwargs={'value': 1},
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_parallel_subworkflows',
             tasks=[node_child1, node_child2, node_post],
             output=node_post,
@@ -604,7 +629,7 @@ class TestSubworkflowIntegration:
             workflow_def=StartChildWorkflow,
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_depth_test',
             tasks=[node_child],
             output=node_child,
@@ -642,7 +667,7 @@ class TestSubworkflowIntegration:
             workflow_def=StartChildWorkflow,
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_root_id_test',
             tasks=[node_child],
             output=node_child,
@@ -672,7 +697,7 @@ class TestSubworkflowIntegration:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """When both registry and import fallback fail, node is FAILED with SUBWORKFLOW_LOAD_FAILED."""
+        """When the stored definition_key cannot be resolved, node fails cleanly."""
         session, broker, app = setup
 
         parent_task = make_simple_task(app, 'load_fail_parent_task')
@@ -683,7 +708,7 @@ class TestSubworkflowIntegration:
             waits_for=[node_a],
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_load_failure',
             tasks=[node_a, node_child],
             output=node_child,
@@ -691,36 +716,35 @@ class TestSubworkflowIntegration:
 
         handle = await start_ok(spec, broker)
 
-        # Remove from registry
-        unregister_workflow_spec(spec.name)
+        unregister_workflow_definition(ImportableChildWorkflow.definition_key)
+        try:
+            await session.execute(
+                text("""
+                    UPDATE horsies_workflow_tasks
+                    SET sub_definition_key = 'missing.workflow.v1'
+                    WHERE workflow_id = :wf_id AND task_index = 1
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+            await session.commit()
 
-        # Corrupt stored module/qualname so import fallback also fails
-        await session.execute(
-            text("""
-                UPDATE horsies_workflow_tasks
-                SET sub_workflow_module = 'nonexistent.module',
-                    sub_workflow_qualname = 'BadWorkflow'
-                WHERE workflow_id = :wf_id AND task_index = 1
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        await session.commit()
+            # Complete dependency → triggers subworkflow load → fails
+            await self._complete_task(
+                session, broker, handle.workflow_id, 0, TaskResult(ok=1),
+            )
 
-        # Complete dependency → triggers subworkflow load → fails
-        await self._complete_task(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=1),
-        )
+            # Subworkflow node should be FAILED
+            row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+            assert row is not None
+            status, _, result_json = row
+            assert status == 'FAILED'
 
-        # Subworkflow node should be FAILED
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
-        assert row is not None
-        status, _, result_json = row
-        assert status == 'FAILED'
-
-        tr = _decode_task_result(result_json)
-        assert tr is not None and tr.is_err()
-        assert tr.err is not None
-        assert tr.err.error_code == 'SUBWORKFLOW_LOAD_FAILED'
+            tr = _decode_task_result(result_json)
+            assert tr is not None and tr.is_err()
+            assert tr.err is not None
+            assert tr.err.error_code == 'SUBWORKFLOW_LOAD_FAILED'
+        finally:
+            register_workflow_definition(ImportableChildWorkflow)
 
     async def test_parallel_child_one_fails_downstream_skipped(
         self,
@@ -743,7 +767,7 @@ class TestSubworkflowIntegration:
             kwargs={'value': 1},
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_parallel_one_fails',
             tasks=[node_child1, node_child2, node_post],
             output=node_post,
@@ -784,7 +808,7 @@ class TestSubworkflowIntegration:
             allow_failed_deps=True,
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_allow_failed',
             tasks=[node_a, node_child],
             output=node_child,
@@ -823,7 +847,7 @@ class TestSubworkflowIntegration:
             join='any',
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_join_any',
             tasks=[node_a, node_b, node_child],
             output=node_child,
@@ -864,7 +888,7 @@ class TestSubworkflowIntegration:
             kwargs={'value': 1},
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_mid_chain',
             tasks=[node_a, node_child, node_post],
             output=node_post,
@@ -918,7 +942,7 @@ class TestSubworkflowIntegration:
             allow_failed_deps=True,
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_summary_failed',
             tasks=[node_child, node_post],
         )
@@ -972,7 +996,7 @@ class TestSubworkflowIntegration:
             args_from={'first': node_a, 'second': node_b},
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_multi_args',
             tasks=[node_a, node_b, node_child],
             output=node_child,
@@ -1006,7 +1030,7 @@ class TestSubworkflowIntegration:
             workflow_def=MiddleWorkflow,
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_deep_nest',
             tasks=[node_middle],
             output=node_middle,
@@ -1073,7 +1097,7 @@ class TestSubworkflowIntegration:
             waits_for=[node_a],
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_broker_missing',
             tasks=[node_a, node_child],
             output=node_child,
@@ -1121,10 +1145,12 @@ class TestSubworkflowValidation:
         # CycleB defined first (empty body → metaclass sets _workflow_nodes = [])
         class CycleB(WorkflowDefinition[int]):
             name = 'cycle_b'
+            definition_key = 'tests.cycle_b.v1'
 
         # CycleA references CycleB via class attribute → metaclass picks this up naturally
         class CycleA(WorkflowDefinition[int]):
             name = 'cycle_a'
+            definition_key = 'tests.cycle_a.v1'
             sub_b: SubWorkflowNode[int] = SubWorkflowNode(workflow_def=CycleB)
 
         # Back-reference: CycleB → CycleA. Must override _workflow_nodes because
@@ -1135,7 +1161,7 @@ class TestSubworkflowValidation:
         parent_node: SubWorkflowNode[int] = SubWorkflowNode(workflow_def=CycleA)
 
         with pytest.raises(WorkflowValidationError) as exc:
-            app.workflow(
+            _workflow(app, 
                 name='parent_cyclic',
                 tasks=[parent_node],
                 output=parent_node,
@@ -1155,7 +1181,7 @@ class TestSubworkflowValidation:
         )
 
         with pytest.raises(WorkflowValidationError) as exc:
-            app.workflow(
+            _workflow(app, 
                 name='args_from_no_dep',
                 tasks=[node_a, node_child],
                 output=node_child,
@@ -1197,7 +1223,7 @@ class TestSubworkflowRecovery:
             workflow_def=StartChildWorkflow,
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_recovery_test',
             tasks=[node_child],
             output=node_child,
@@ -1263,7 +1289,7 @@ class TestSubworkflowRecovery:
             waits_for=[node_a],
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_ready_recovery',
             tasks=[node_a, node_child],
             output=node_child,
@@ -1310,7 +1336,7 @@ class TestSubworkflowRecovery:
             workflow_def=StartChildWorkflow,
         )
 
-        spec = app.workflow(
+        spec = _workflow(app, 
             name='parent_recovery_failed_child',
             tasks=[node_child],
             output=node_child,

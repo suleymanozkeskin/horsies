@@ -358,6 +358,7 @@ def make_workflow_spec(
         on_error=on_error,
         output=output,
         success_policy=success_policy,
+        definition_key=f'tests.integration.{name}.v1',
         broker=broker,
     )
     return spec

@@ -1171,6 +1171,7 @@ class TestEnqueuedFailureConversion:
 
         class BrokenChild(WorkflowDefinition[int]):
             name = 'broken_child_for_enqueue'
+            definition_key = 'tests.broken_child_enqueue.v1'
 
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> WorkflowSpec[int]:
@@ -1187,6 +1188,7 @@ class TestEnqueuedFailureConversion:
             name='enq_sub_build_exception',
             tasks=[node_a, node_sub],
             on_error=OnError.FAIL,
+            definition_key='tests.integration.enq_sub_build_exception.v1',
         )
         handle = await start_ok(spec, broker)
 
@@ -1862,7 +1864,12 @@ class TestValidationGuards:
         # Direct construction - queue is None
         from horsies.core.models.workflow import WorkflowSpec
 
-        spec = WorkflowSpec(name='unresolved', tasks=[node_a], broker=broker)
+        spec = WorkflowSpec(
+            name='unresolved',
+            tasks=[node_a],
+            definition_key='tests.integration.unresolved.v1',
+            broker=broker,
+        )
 
         r = await start_workflow_async(spec, broker)
         assert is_err(r)
@@ -1885,7 +1892,12 @@ class TestValidationGuards:
 
         from horsies.core.models.workflow import WorkflowSpec
 
-        spec = WorkflowSpec(name='unresolved_prio', tasks=[node_a], broker=broker)
+        spec = WorkflowSpec(
+            name='unresolved_prio',
+            tasks=[node_a],
+            definition_key='tests.integration.unresolved_prio.v1',
+            broker=broker,
+        )
 
         r = await start_workflow_async(spec, broker)
         assert is_err(r)
@@ -2191,7 +2203,11 @@ class TestWorkflowStartErrors:
         node = TaskNode(fn=task_fn, kwargs={'value': 1})
         node.queue = 'default'
         node.priority = 100
-        spec = WorkflowSpec(name='no_broker', tasks=[node])
+        spec = WorkflowSpec(
+            name='no_broker',
+            tasks=[node],
+            definition_key='tests.integration.no_broker.v1',
+        )
 
         r = await spec.start_async()
         assert is_err(r)
@@ -2208,7 +2224,12 @@ class TestWorkflowStartErrors:
         session, broker, app = setup
         task_a = make_simple_task(app, 'val_q')
         node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        spec = WorkflowSpec(name='val_q_wf', tasks=[node_a], broker=broker)
+        spec = WorkflowSpec(
+            name='val_q_wf',
+            tasks=[node_a],
+            definition_key='tests.integration.val_q_wf.v1',
+            broker=broker,
+        )
 
         r = await start_workflow_async(spec, broker)
         assert is_err(r)
@@ -2217,6 +2238,24 @@ class TestWorkflowStartErrors:
         assert r.err_value.retryable is False
         assert r.err_value.workflow_name == 'val_q_wf'
         assert r.err_value.workflow_id  # always populated
+
+    async def test_start_missing_definition_key(
+        self,
+        setup: _SetupTuple,
+    ) -> None:
+        """Missing definition_key returns Err(VALIDATION_FAILED)."""
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'missing_def_key')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a.queue = 'default'
+        node_a.priority = 100
+        spec = WorkflowSpec(name='missing_def_key_wf', tasks=[node_a], broker=broker)
+
+        r = await start_workflow_async(spec, broker)
+        assert is_err(r)
+        assert r.err_value.code == WorkflowStartErrorCode.VALIDATION_FAILED
+        assert 'definition_key' in r.err_value.message
+        assert r.err_value.retryable is False
 
     async def test_start_unresolved_priority(
         self,
@@ -2227,7 +2266,12 @@ class TestWorkflowStartErrors:
         task_a = make_simple_task(app, 'val_p')
         node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         node_a.queue = 'default'
-        spec = WorkflowSpec(name='val_p_wf', tasks=[node_a], broker=broker)
+        spec = WorkflowSpec(
+            name='val_p_wf',
+            tasks=[node_a],
+            definition_key='tests.integration.val_p_wf.v1',
+            broker=broker,
+        )
 
         r = await start_workflow_async(spec, broker)
         assert is_err(r)

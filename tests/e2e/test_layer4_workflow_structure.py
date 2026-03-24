@@ -561,6 +561,7 @@ async def test_workflow_task_expires_before_claim(broker: PostgresBroker) -> Non
     spec_expiring = app.workflow(
         name='e2e_expiring_task',
         tasks=[node_expiring],
+        definition_key='tests.e2e.expiring_task.v1',
     )
 
     # Start workflow (this enqueues the root task immediately)
@@ -611,6 +612,7 @@ async def test_workflow_task_completes_before_expiry(broker: PostgresBroker) -> 
     spec_valid = app.workflow(
         name='e2e_valid_expiry',
         tasks=[node_valid],
+        definition_key='tests.e2e.valid_expiry.v1',
     )
 
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):

@@ -24,7 +24,12 @@ from horsies.core.cli import (
     setup_logging,
     worker_command,
 )
-from horsies.core.errors import ConfigurationError, ErrorCode, HorsiesError
+from horsies.core.errors import (
+    ConfigurationError,
+    ErrorCode,
+    HorsiesError,
+    WorkflowValidationError,
+)
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.types.result import Err, Ok
 
@@ -246,6 +251,22 @@ class TestDiscoverAppErrors:
             discover_app('broken.module:app')
         assert exc_info.value.code == ErrorCode.MODULE_EXEC_ERROR
         assert 'error while importing' in exc_info.value.message
+
+    @patch('horsies.core.cli.setup_sys_path_from_cwd', return_value=None)
+    @patch('horsies.core.cli.importlib.import_module')
+    def test_horsies_error_during_import_is_preserved(
+        self,
+        mock_import: MagicMock,
+        _mock_sys: MagicMock,
+    ) -> None:
+        mock_import.side_effect = WorkflowValidationError(
+            message='duplicate definition_key',
+            code=ErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY,
+        )
+
+        with pytest.raises(WorkflowValidationError) as exc_info:
+            discover_app('broken.module:app')
+        assert exc_info.value.code == ErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY
 
     @patch('horsies.core.cli.setup_sys_path_from_cwd', return_value=None)
     def test_ambiguous_dotted_py_pattern_raises(self, _mock_sys: MagicMock) -> None:

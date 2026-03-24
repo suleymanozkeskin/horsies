@@ -565,6 +565,7 @@ class TestResolveWorkflowDefOkType:
 
         class MyWorkflow(WorkflowDefinition[int]):
             name = "test_wf"
+            definition_key = 'tests.unit.typing_utils.test_wf.v1'
 
         # Act
         result = _resolve_workflow_def_ok_type(MyWorkflow)

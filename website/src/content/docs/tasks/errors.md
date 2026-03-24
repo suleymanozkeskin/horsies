@@ -232,6 +232,8 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 | E013 | `WORKFLOW_INVALID_JOIN` | Invalid join configuration |
 | E014 | `WORKFLOW_UNRESOLVED_QUEUE` | Queue name not resolved |
 | E015 | `WORKFLOW_UNRESOLVED_PRIORITY` | Priority not resolved |
+| E016 | `WORKFLOW_NO_DEFINITION_KEY` | Workflow definition/spec missing `definition_key` |
+| E017 | `WORKFLOW_DUPLICATE_DEFINITION_KEY` | Two definitions share the same `definition_key` |
 | E018 | `WORKFLOW_SUBWORKFLOW_APP_MISSING` | Subworkflow app reference missing |
 | E019 | `WORKFLOW_INVALID_KWARG_KEY` | Unknown kwargs or args_from key for callable |
 | E020 | `WORKFLOW_MISSING_REQUIRED_PARAMS` | Missing required parameters for task or subworkflow |
@@ -304,7 +306,11 @@ Access fields programmatically when catching the exception:
 from horsies.core.errors import HorsiesError
 
 try:
-    spec = app.workflow("order_flow", tasks=[node_a, node_b])
+    spec = app.workflow(
+        name="order_flow",
+        tasks=[node_a, node_b],
+        definition_key="myapp.order_flow.v1",
+    )
 except HorsiesError as e:
     e.code       # ErrorCode.WORKFLOW_CYCLE_DETECTED
     e.message    # "cycle detected in workflow DAG"

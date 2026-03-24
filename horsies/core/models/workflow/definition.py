@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from horsies.core.app import Horsies
 
 
-_workflow_def_context: ContextVar[tuple[str, str, type[Any]] | None] = ContextVar(
+_workflow_def_context: ContextVar[tuple[str, type[Any]] | None] = ContextVar(
     '_workflow_def_context', default=None,
 )
 
@@ -110,7 +110,7 @@ class WorkflowDefinitionMeta(type):
         ) -> WorkflowSpec[Any]:
             call_token = str(uuid_module.uuid4())
             ctx_token = _workflow_def_context.set(
-                (klass.__module__, klass.__qualname__, klass),
+                (klass._require_definition_key(), klass),
             )
             call_token_reset = _build_call_token.set(call_token)
             try:
@@ -134,6 +134,12 @@ class WorkflowDefinitionMeta(type):
             return spec
 
         cls.build_with = _wrapped_build_with  # type: ignore[attr-defined]
+
+        definition_key = getattr(cls, 'definition_key', None)
+        if isinstance(definition_key, str) and definition_key.strip():
+            from horsies.core.workflows.registry import register_workflow_definition
+
+            register_workflow_definition(cast('type[WorkflowDefinition[Any]]', cls))
 
         return cls
 
@@ -173,6 +179,7 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
 
     # Class attributes to be defined by subclasses
     name: ClassVar[str]
+    definition_key: ClassVar[str]
 
     # Populated by metaclass
     _workflow_nodes: ClassVar[list[tuple[str, TaskNode[Any] | SubWorkflowNode[Any]]]]
@@ -218,6 +225,7 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
                 f"WorkflowDefinition '{cls.__name__}' has no TaskNode attributes",
                 code=ErrorCode.WORKFLOW_NO_NODES,
             )
+        definition_key = cls._require_definition_key()
 
         # Copy-on-build: shallow-copy class-level nodes so app.workflow()
         # enrichment (queue/priority) never mutates class-level originals.
@@ -295,8 +303,7 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
                 output=output,
                 on_error=on_error,
                 success_policy=success_policy,
-                workflow_def_module=cls.__module__,
-                workflow_def_qualname=cls.__qualname__,
+                definition_key=definition_key,
                 workflow_def_cls=cls,
             )
         else:
@@ -307,8 +314,7 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
                     tasks=tasks,
                     on_error=on_error,
                     success_policy=success_policy,
-                    workflow_def_module=cls.__module__,
-                    workflow_def_qualname=cls.__qualname__,
+                    definition_key=definition_key,
                     workflow_def_cls=cls,
                 ),
             )
@@ -329,3 +335,16 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
         """
         _ = params
         return cls.build(app)
+
+    @classmethod
+    def _require_definition_key(cls) -> str:
+        definition_key = cls.__dict__.get('definition_key')
+        if not isinstance(definition_key, str) or not definition_key.strip():
+            raise WorkflowValidationError(
+                (
+                    f"WorkflowDefinition '{cls.__name__}' must define a non-empty "
+                    "'definition_key' class attribute"
+                ),
+                code=ErrorCode.WORKFLOW_NO_DEFINITION_KEY,
+            )
+        return definition_key

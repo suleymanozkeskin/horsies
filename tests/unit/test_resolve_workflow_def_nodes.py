@@ -95,6 +95,13 @@ class MockFnWithCtx(TaskFunction[Any, Any]):
 fn_a = MockFn(task_name='task_a')
 fn_b = MockFn(task_name='task_b')
 fn_ctx = MockFnWithCtx(task_name='task_ctx')
+_definition_key_counter = 0
+
+
+def _definition_key(label: str) -> str:
+    global _definition_key_counter
+    _definition_key_counter += 1
+    return f'tests.unit.resolve_workflow_def_nodes.{label}.v{_definition_key_counter}'
 
 
 def _fresh_workflow_class() -> type[WorkflowDefinition[Any]]:
@@ -107,6 +114,7 @@ def _fresh_workflow_class() -> type[WorkflowDefinition[Any]]:
 
     class FreshWorkflow(WorkflowDefinition[int]):
         name = 'fresh-wf'
+        definition_key = _definition_key('fresh')
         fetch = TaskNode(fn=fn_a)
         process = TaskNode(fn=fn_b, waits_for=[fetch])
 
@@ -211,6 +219,7 @@ class TestResolveWorkflowDefNodes:
 
         class EmptyWorkflow(WorkflowDefinition[int]):
             name = 'empty'
+            definition_key = _definition_key('empty')
 
         result = _resolve_workflow_def_nodes(EmptyWorkflow)
 
@@ -221,6 +230,7 @@ class TestResolveWorkflowDefNodes:
 
         class CtxWorkflow(WorkflowDefinition[int]):
             name = 'ctx-wf'
+            definition_key = _definition_key('ctx')
             fetch = TaskNode(fn=fn_a)
             process = TaskNode(
                 fn=fn_ctx,
@@ -245,6 +255,7 @@ class TestResolveWorkflowDefNodes:
 
         class PreStamped(WorkflowDefinition[int]):
             name = 'pre-stamped'
+            definition_key = _definition_key('pre_stamped')
             fetch = TaskNode(fn=fn_a, node_id='custom-id')
 
         # Manually stamp index to simulate a prior build()

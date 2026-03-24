@@ -18,7 +18,8 @@ from horsies.core.errors import (
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.workflow import WorkflowSpec
+from horsies.core.models.workflow import TaskNode, WorkflowDefinition, WorkflowSpec
+from horsies.core.models.workflow.definition import WorkflowDefinitionMeta
 
 pytestmark = pytest.mark.unit
 
@@ -653,3 +654,44 @@ class TestCheckIntegration:
         assert len(errors) >= 1
         # Builder should NOT have been called
         assert call_count == 0
+
+    def test_missing_definition_key_surfaces_in_check(self) -> None:
+        """Imported WorkflowDefinition without definition_key fails check()."""
+        app = _make_app()
+        mod_name = '_test_missing_definition_key_mod'
+        module = types.ModuleType(mod_name)
+        module.__name__ = mod_name
+
+        missing_def = WorkflowDefinitionMeta(
+            'MissingDefinitionKeyWorkflow',
+            (WorkflowDefinition,),
+            {
+                '__module__': mod_name,
+                'name': 'missing_definition_key',
+                'step': TaskNode(fn=mock.MagicMock(task_name='task_a')),
+            },
+        )
+        setattr(module, 'MissingDefinitionKeyWorkflow', missing_def)
+        sys.modules[mod_name] = module
+        app.discover_tasks([mod_name])
+        try:
+            errors = app.check(live=False)
+            assert len(errors) == 1
+            assert errors[0].code == ErrorCode.WORKFLOW_NO_DEFINITION_KEY
+        finally:
+            sys.modules.pop(mod_name, None)
+
+    def test_builder_returning_raw_spec_without_definition_key_fails_check(self) -> None:
+        """Builders returning a raw WorkflowSpec without definition_key fail check()."""
+        app = _make_app()
+
+        @app.workflow_builder()
+        def missing_key_builder() -> WorkflowSpec[Any]:
+            return WorkflowSpec(
+                name='missing_key_builder',
+                tasks=[TaskNode(fn=mock.MagicMock(task_name='task_a'))],
+            )
+
+        errors = app.check(live=False)
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.WORKFLOW_NO_DEFINITION_KEY
