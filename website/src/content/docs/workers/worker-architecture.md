@@ -171,7 +171,7 @@ Workers recover from transient infrastructure failures without operator interven
 
 - **Database outages**: Worker retries on connection loss during startup, claiming, and result writes. No crash, no manual restart.
 - **Silent NOTIFY channels**: If the PostgreSQL NOTIFY mechanism stops delivering (broken listener connection, dropped trigger), the worker falls back to periodic polling so tasks are still picked up.
-- **Broken process pool**: If child processes crash, the process pool is recreated. Tasks still in CLAIMED status are requeued back to PENDING. Tasks already in RUNNING status are eventually marked FAILED by the [recovery reaper](../heartbeats-recovery) and only retried if the task has `max_retries > 0`.
+- **Broken process pool**: If child processes crash, the process pool is recreated. Tasks still in CLAIMED status are requeued back to PENDING. Tasks already in RUNNING status are handled by the [recovery reaper](../heartbeats-recovery): if the task has a retry policy with `WORKER_CRASHED` in `auto_retry_for` and retries remaining, the task is scheduled for retry; otherwise it is marked FAILED.
 
 ### Configuration
 

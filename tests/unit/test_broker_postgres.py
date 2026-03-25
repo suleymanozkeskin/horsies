@@ -869,65 +869,305 @@ class TestMarkStaleTasksAsFailed:
 
     @pytest.mark.asyncio
     async def test_stale_tasks_marked_failed_and_committed(self) -> None:
-        """Found stale tasks should be marked FAILED and committed."""
+        """Found stale tasks (no retry policy) should be marked FAILED per-task."""
         broker = _make_broker()
         stale_started_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
-        stale_rows = [
-            SimpleNamespace(id='task-1', worker_pid=1234, worker_hostname='host-1', claimed_by_worker_id='worker-1', started_at=stale_started_at, last_heartbeat=None, retry_count=0, worker_process_name='proc-1'),
-            SimpleNamespace(id='task-2', worker_pid=5678, worker_hostname='host-2', claimed_by_worker_id='worker-2', started_at=stale_started_at, last_heartbeat=stale_started_at, retry_count=2, worker_process_name='proc-2'),
+        db_now = datetime(2025, 1, 1, 0, 10, tzinfo=timezone.utc)
+        # Phase 1 scan returns rows with .id for candidate collection
+        scan_rows = [
+            SimpleNamespace(id='task-1'),
+            SimpleNamespace(id='task-2'),
         ]
-        select_result = MagicMock()
-        select_result.fetchall.return_value = stale_rows
+        scan_result = MagicMock()
+        scan_result.fetchall.return_value = scan_rows
 
-        update_result = MagicMock()
+        scan_session = AsyncMock()
+        scan_session.__aenter__ = AsyncMock(return_value=scan_session)
+        scan_session.__aexit__ = AsyncMock(return_value=None)
+        scan_session.execute = AsyncMock(return_value=scan_result)
 
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        # First execute call is SELECT, then per task: UPSERT_ATTEMPT + MARK_FAILED
-        session.execute = AsyncMock(side_effect=[select_result, update_result, update_result, update_result, update_result])
-        broker.session_factory = MagicMock(return_value=session)
+        # Phase 2: per-task sessions — SELECT FOR UPDATE returns fresh row, then UPSERT + MARK_FAILED
+        def _make_task_session(task_id: str, retry_count: int = 0) -> AsyncMock:
+            ctx_row = SimpleNamespace(
+                id=task_id, worker_pid=1234, worker_hostname='host-1',
+                claimed_by_worker_id='worker-1', started_at=stale_started_at,
+                retry_count=retry_count, worker_process_name='proc-1',
+                max_retries=0, task_options=None, good_until=None, db_now=db_now,
+                queue_name='default',
+            )
+            ctx_result = MagicMock()
+            ctx_result.fetchone.return_value = ctx_row
+            ts = AsyncMock()
+            ts.__aenter__ = AsyncMock(return_value=ts)
+            ts.__aexit__ = AsyncMock(return_value=None)
+            # 1st execute: SELECT FOR UPDATE, 2nd: UPSERT_ATTEMPT, 3rd: MARK_FAILED
+            ts.execute = AsyncMock(side_effect=[ctx_result, MagicMock(), MagicMock()])
+            return ts
+
+        task_sessions = [_make_task_session('task-1'), _make_task_session('task-2', retry_count=2)]
+        broker.session_factory = MagicMock(side_effect=[scan_session, *task_sessions])
 
         result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
 
         assert is_ok(result)
         assert result.ok_value == 2
-        session.commit.assert_awaited_once()
-        # 1 SELECT + 2 * (1 UPSERT_ATTEMPT + 1 MARK_FAILED)
-        assert session.execute.await_count == 5
+        for ts in task_sessions:
+            ts.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_update_includes_worker_crashed_error_code(self) -> None:
         """Each update call should include WORKER_CRASHED in the result JSON."""
         broker = _make_broker()
-        stale_rows = [
-            SimpleNamespace(id='task-1', worker_pid=100, worker_hostname='host', claimed_by_worker_id='w-1', started_at=datetime(2025, 1, 1, tzinfo=timezone.utc), last_heartbeat=None, retry_count=0, worker_process_name='proc-1'),
-        ]
-        select_result = MagicMock()
-        select_result.fetchall.return_value = stale_rows
+        db_now = datetime(2025, 1, 1, 0, 10, tzinfo=timezone.utc)
+        scan_rows = [SimpleNamespace(id='task-1')]
+        scan_result = MagicMock()
+        scan_result.fetchall.return_value = scan_rows
 
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        # 1 SELECT + 1 UPSERT_ATTEMPT + 1 MARK_FAILED
-        session.execute = AsyncMock(side_effect=[select_result, MagicMock(), MagicMock()])
-        broker.session_factory = MagicMock(return_value=session)
+        scan_session = AsyncMock()
+        scan_session.__aenter__ = AsyncMock(return_value=scan_session)
+        scan_session.__aexit__ = AsyncMock(return_value=None)
+        scan_session.execute = AsyncMock(return_value=scan_result)
+
+        ctx_row = SimpleNamespace(
+            id='task-1', worker_pid=100, worker_hostname='host',
+            claimed_by_worker_id='w-1',
+            started_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            retry_count=0, worker_process_name='proc-1',
+            max_retries=0, task_options=None, good_until=None, db_now=db_now,
+            queue_name='default',
+        )
+        ctx_result = MagicMock()
+        ctx_result.fetchone.return_value = ctx_row
+
+        task_session = AsyncMock()
+        task_session.__aenter__ = AsyncMock(return_value=task_session)
+        task_session.__aexit__ = AsyncMock(return_value=None)
+        task_session.execute = AsyncMock(side_effect=[ctx_result, MagicMock(), MagicMock()])
+
+        broker.session_factory = MagicMock(side_effect=[scan_session, task_session])
 
         await broker.mark_stale_tasks_as_failed()
 
-        # Second execute call is the attempt UPSERT, third is the MARK_FAILED UPDATE
-        attempt_call = session.execute.call_args_list[1]
+        # Per-task session: [0]=SELECT FOR UPDATE, [1]=UPSERT_ATTEMPT, [2]=MARK_FAILED
+        attempt_call = task_session.execute.call_args_list[1]
         attempt_params = attempt_call[0][1]
         assert attempt_params['task_id'] == 'task-1'
         assert attempt_params['outcome'] == 'FAILED'
         assert attempt_params['error_code'] == 'WORKER_CRASHED'
         assert attempt_params['attempt'] == 1
 
-        update_call = session.execute.call_args_list[2]
+        update_call = task_session.execute.call_args_list[2]
         params = update_call[0][1]
         assert params['task_id'] == 'task-1'
         assert 'WORKER_CRASHED' in params['result']
         assert 'Worker process crashed' in params['failed_reason']
+
+    @pytest.mark.asyncio
+    async def test_stale_task_with_retry_policy_schedules_retry(self) -> None:
+        """Stale task with WORKER_CRASHED in auto_retry_for should be retried."""
+        import json
+        broker = _make_broker()
+        db_now = datetime(2025, 1, 1, 0, 10, tzinfo=timezone.utc)
+        task_options_json = json.dumps({
+            'task_name': 'my_task',
+            'retry_policy': {
+                'max_retries': 3,
+                'intervals': [60, 300, 900],
+                'backoff_strategy': 'fixed',
+                'jitter': False,
+                'auto_retry_for': ['WORKER_CRASHED'],
+            },
+        })
+        scan_rows = [SimpleNamespace(id='task-retry-1')]
+        scan_result = MagicMock()
+        scan_result.fetchall.return_value = scan_rows
+
+        scan_session = AsyncMock()
+        scan_session.__aenter__ = AsyncMock(return_value=scan_session)
+        scan_session.__aexit__ = AsyncMock(return_value=None)
+        scan_session.execute = AsyncMock(return_value=scan_result)
+
+        ctx_row = SimpleNamespace(
+            id='task-retry-1', worker_pid=100, worker_hostname='host',
+            claimed_by_worker_id='w-1',
+            started_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            retry_count=0, worker_process_name='proc-1',
+            max_retries=3, task_options=task_options_json,
+            good_until=None, db_now=db_now, queue_name='default',
+        )
+        ctx_result = MagicMock()
+        ctx_result.fetchone.return_value = ctx_row
+
+        # [0]=SELECT FOR UPDATE, [1]=UPSERT_ATTEMPT, [2]=SCHEDULE_STALE_TASK_RETRY
+        retry_result = MagicMock()
+        retry_result.fetchone.return_value = SimpleNamespace(id='task-retry-1')
+        task_session = AsyncMock()
+        task_session.__aenter__ = AsyncMock(return_value=task_session)
+        task_session.__aexit__ = AsyncMock(return_value=None)
+        task_session.execute = AsyncMock(side_effect=[ctx_result, MagicMock(), retry_result])
+
+        # notify session (best-effort pg_notify after retry commit)
+        notify_session = AsyncMock()
+        notify_session.__aenter__ = AsyncMock(return_value=notify_session)
+        notify_session.__aexit__ = AsyncMock(return_value=None)
+
+        broker.session_factory = MagicMock(side_effect=[scan_session, task_session, notify_session])
+
+        result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
+
+        assert is_ok(result)
+        assert result.ok_value == 1
+        task_session.commit.assert_awaited_once()
+
+        # [1] = UPSERT_ATTEMPT with will_retry=True
+        attempt_call = task_session.execute.call_args_list[1]
+        attempt_params = attempt_call[0][1]
+        assert attempt_params['will_retry'] is True
+        assert attempt_params['error_code'] == 'WORKER_CRASHED'
+
+    @pytest.mark.asyncio
+    async def test_stale_task_retries_exhausted_marks_failed(self) -> None:
+        """Stale task with retry policy but retries exhausted should be marked FAILED."""
+        import json
+        broker = _make_broker()
+        db_now = datetime(2025, 1, 1, 0, 10, tzinfo=timezone.utc)
+        task_options_json = json.dumps({
+            'task_name': 'my_task',
+            'retry_policy': {
+                'max_retries': 3,
+                'intervals': [60, 300, 900],
+                'backoff_strategy': 'fixed',
+                'jitter': False,
+                'auto_retry_for': ['WORKER_CRASHED'],
+            },
+        })
+        scan_rows = [SimpleNamespace(id='task-exhausted')]
+        scan_result = MagicMock()
+        scan_result.fetchall.return_value = scan_rows
+
+        scan_session = AsyncMock()
+        scan_session.__aenter__ = AsyncMock(return_value=scan_session)
+        scan_session.__aexit__ = AsyncMock(return_value=None)
+        scan_session.execute = AsyncMock(return_value=scan_result)
+
+        ctx_row = SimpleNamespace(
+            id='task-exhausted', worker_pid=100, worker_hostname='host',
+            claimed_by_worker_id='w-1',
+            started_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            retry_count=3, worker_process_name='proc-1',
+            max_retries=3, task_options=task_options_json,
+            good_until=None, db_now=db_now, queue_name='default',
+        )
+        ctx_result = MagicMock()
+        ctx_result.fetchone.return_value = ctx_row
+
+        task_session = AsyncMock()
+        task_session.__aenter__ = AsyncMock(return_value=task_session)
+        task_session.__aexit__ = AsyncMock(return_value=None)
+        # [0]=SELECT FOR UPDATE, [1]=UPSERT_ATTEMPT, [2]=MARK_FAILED
+        task_session.execute = AsyncMock(side_effect=[ctx_result, MagicMock(), MagicMock()])
+
+        broker.session_factory = MagicMock(side_effect=[scan_session, task_session])
+
+        result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
+
+        assert is_ok(result)
+        assert result.ok_value == 1
+
+        # [1] = UPSERT_ATTEMPT with will_retry=False (exhausted)
+        attempt_call = task_session.execute.call_args_list[1]
+        attempt_params = attempt_call[0][1]
+        assert attempt_params['will_retry'] is False
+
+    @pytest.mark.asyncio
+    async def test_concurrent_finalize_skips_no_longer_running(self) -> None:
+        """If worker finalized between scan and per-task lock, reaper skips the task."""
+        broker = _make_broker()
+        scan_rows = [SimpleNamespace(id='task-raced')]
+        scan_result = MagicMock()
+        scan_result.fetchall.return_value = scan_rows
+
+        scan_session = AsyncMock()
+        scan_session.__aenter__ = AsyncMock(return_value=scan_session)
+        scan_session.__aexit__ = AsyncMock(return_value=None)
+        scan_session.execute = AsyncMock(return_value=scan_result)
+
+        # SELECT FOR UPDATE returns None — task is no longer RUNNING
+        ctx_result = MagicMock()
+        ctx_result.fetchone.return_value = None
+        task_session = AsyncMock()
+        task_session.__aenter__ = AsyncMock(return_value=task_session)
+        task_session.__aexit__ = AsyncMock(return_value=None)
+        task_session.execute = AsyncMock(return_value=ctx_result)
+
+        broker.session_factory = MagicMock(side_effect=[scan_session, task_session])
+
+        result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
+
+        assert is_ok(result)
+        assert result.ok_value == 0
+        task_session.commit.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# TestExpirePendingTasks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestExpirePendingTasks:
+    """Tests for expire_pending_tasks."""
+
+    @pytest.mark.asyncio
+    async def test_no_expired_returns_zero(self) -> None:
+        """When UPDATE matches no rows, return 0."""
+        broker = _make_broker()
+        update_result = MagicMock(rowcount=0)
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(return_value=update_result)
+        broker.session_factory = MagicMock(return_value=session)
+
+        result = await broker.expire_pending_tasks()
+        assert is_ok(result)
+        assert result.ok_value == 0
+
+    @pytest.mark.asyncio
+    async def test_expired_tasks_transitioned(self) -> None:
+        """When UPDATE matches rows, return count and verify TASK_EXPIRED in params."""
+        broker = _make_broker()
+        update_result = MagicMock(rowcount=3)
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(return_value=update_result)
+        broker.session_factory = MagicMock(return_value=session)
+
+        result = await broker.expire_pending_tasks()
+        assert is_ok(result)
+        assert result.ok_value == 3
+        session.commit.assert_awaited_once()
+
+        # Verify the params include TASK_EXPIRED error code
+        call_params = session.execute.call_args[0][1]
+        assert call_params['error_code'] == 'TASK_EXPIRED'
+        assert 'TASK_EXPIRED' in call_params['result']
+
+    @pytest.mark.asyncio
+    async def test_db_error_returns_err(self) -> None:
+        """DB exception is wrapped in BrokerOperationError."""
+        broker = _make_broker()
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(side_effect=Exception('db down'))
+        broker.session_factory = MagicMock(return_value=session)
+
+        result = await broker.expire_pending_tasks()
+        assert not is_ok(result)
 
 
 # ---------------------------------------------------------------------------

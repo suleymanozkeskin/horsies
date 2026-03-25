@@ -149,6 +149,7 @@ Results from `handle.get()` / `handle.result_for()` when data is not (yet) avail
 Terminal lifecycle outcomes for tasks and workflows:
 
 - `TASK_CANCELLED` — task was cancelled
+- `TASK_EXPIRED` — task was never claimed before `good_until` deadline passed
 - `WORKFLOW_PAUSED` — workflow is paused
 - `WORKFLOW_FAILED` — workflow has failed
 - `WORKFLOW_CANCELLED` — workflow was cancelled
@@ -276,7 +277,7 @@ worker_id: str | None, worker_hostname: str | None, worker_pid: int | None, work
 
 `TaskAttemptOutcome`: `COMPLETED` (success), `FAILED` (domain/library error with TaskResult), `WORKER_FAILURE` (worker crash without TaskResult).
 
-`TaskStatus`: `PENDING -> CLAIMED -> RUNNING -> COMPLETED | FAILED | CANCELLED | REQUEUED`. `is_terminal` is `True` for `COMPLETED`, `FAILED`, `CANCELLED`. `REQUEUED` is not terminal.
+`TaskStatus`: `PENDING -> CLAIMED -> RUNNING -> COMPLETED | FAILED | CANCELLED | EXPIRED`. `is_terminal` is `True` for `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED`. `EXPIRED` means the task was never claimed before `good_until` passed.
 
 ## `TaskSendResult` / `TaskSendError`
 

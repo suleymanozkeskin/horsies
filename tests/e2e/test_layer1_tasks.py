@@ -561,7 +561,7 @@ def test_custom_mode_requires_queue_name() -> None:
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
 async def test_task_expires_before_claim(broker: PostgresBroker) -> None:
-    """L1.6.1: Task with past good_until is never claimed."""
+    """L1.6.1: Task with past good_until is never claimed or executed."""
     # Submit task that expires in 500ms
     expiry = datetime.now(timezone.utc) + timedelta(milliseconds=500)
     task_id = broker.enqueue(
@@ -582,12 +582,13 @@ async def test_task_expires_before_claim(broker: PostgresBroker) -> None:
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
         # Observe for a short window and ensure the expired task is never claimed.
+        # The reaper may transition it to EXPIRED — both PENDING and EXPIRED are valid.
         deadline = time.time() + 2.0
         while time.time() < deadline:
             async with broker.session_factory() as session:
                 task = await session.get(TaskModel, task_id)
                 assert task is not None
-                assert task.status == TaskStatus.PENDING  # Never claimed
+                assert task.status in (TaskStatus.PENDING, TaskStatus.EXPIRED)
             await asyncio.sleep(0.1)
 
 
@@ -639,7 +640,8 @@ async def test_good_until_already_past(broker: PostgresBroker) -> None:
         async with broker.session_factory() as session:
             task = await session.get(TaskModel, task_id)
             assert task is not None
-            assert task.status == TaskStatus.PENDING  # Dead on arrival
+            # Dead on arrival — never claimed; reaper may have transitioned to EXPIRED
+            assert task.status in (TaskStatus.PENDING, TaskStatus.EXPIRED)
 
 
 @pytest.mark.e2e

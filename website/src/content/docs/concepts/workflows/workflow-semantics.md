@@ -94,7 +94,7 @@ Workflow tasks use the same retry mechanism as standalone tasks:
 If a worker crashes mid-task, recovery behaves as follows:
 
 - **CLAIMED task** (never started): requeued safely.
-- **RUNNING task** (started): marked `FAILED` with `WORKER_CRASHED`.
+- **RUNNING task** (started): retried if the task has `WORKER_CRASHED` in `auto_retry_for` and retries remaining; otherwise marked `FAILED` with `WORKER_CRASHED`.
 - **Workflow reconciliation**: if `tasks.status` is terminal but the corresponding
   `workflow_tasks.status` is still non-terminal, recovery triggers the normal
   completion path to update `workflow_tasks`, propagate to dependents, and finalize

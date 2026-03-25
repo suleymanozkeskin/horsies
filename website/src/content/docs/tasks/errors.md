@@ -75,6 +75,7 @@ Terminal outcome codes for tasks and workflows.
 | Code | Description | Auto-Retry? |
 | ---- | ----------- | ----------- |
 | `TASK_CANCELLED` | Task was cancelled before completion | No |
+| `TASK_EXPIRED` | Task was never claimed before `good_until` deadline passed | No |
 | `WORKFLOW_PAUSED` | Workflow was paused | No |
 | `WORKFLOW_FAILED` | Workflow failed | No |
 | `WORKFLOW_CANCELLED` | Workflow was cancelled | No |

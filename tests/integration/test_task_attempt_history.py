@@ -6,8 +6,10 @@ Covers attempt-row creation at every terminal-state path:
 3. Retryable domain failure → FAILED attempt with will_retry=True
 4. Worker-level failure → WORKER_FAILURE attempt
 5. Stale runner cleanup → FAILED attempt with WORKER_CRASHED
+5b. Stale runner cleanup with retry policy → FAILED attempt, will_retry=True, task PENDING
 6. Replay idempotency → no duplicate rows on re-finalization
 7. Pre-exec aborts → no attempt row written
+8. Expired PENDING → EXPIRED status with TASK_EXPIRED result, no attempt row
 """
 
 from __future__ import annotations
@@ -434,6 +436,84 @@ async def test_stale_cleanup_writes_failed_attempt_worker_crashed(
 
 
 # ---------------------------------------------------------------------------
+# 5b. Stale runner cleanup with retry policy → FAILED attempt, will_retry=True
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_stale_cleanup_with_retry_policy_schedules_retry(
+    broker: PostgresBroker,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """mark_stale_tasks_as_failed retries when WORKER_CRASHED is in auto_retry_for."""
+    task_id = str(uuid.uuid4())
+    sent_at, sha = compute_test_enqueue_sha(task_name='stale_retry_test')
+    stale_started_at = datetime.now(timezone.utc) - timedelta(minutes=30)
+    task_options = json.dumps({
+        'task_name': 'stale_retry_test',
+        'retry_policy': {
+            'max_retries': 3,
+            'intervals': [60, 300, 900],
+            'backoff_strategy': 'fixed',
+            'jitter': False,
+            'auto_retry_for': ['WORKER_CRASHED'],
+        },
+    })
+    await session.execute(
+        text("""
+            INSERT INTO horsies_tasks
+                (id, task_name, queue_name, priority, args, kwargs,
+                 status, sent_at, created_at, updated_at, claimed, retry_count,
+                 max_retries, started_at, enqueue_sha, task_options,
+                 claimed_by_worker_id, worker_hostname, worker_pid,
+                 worker_process_name)
+            VALUES
+                (:id, 'stale_retry_test', 'default', 100, '[]', '{}',
+                 'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
+                 3, :stale_started_at, :enqueue_sha, :task_options,
+                 'w-stale-retry', 'stale-host', 9999, 'stale-proc')
+        """),
+        {
+            'id': task_id,
+            'sent_at': sent_at,
+            'enqueue_sha': sha,
+            'stale_started_at': stale_started_at,
+            'task_options': task_options,
+        },
+    )
+    await session.commit()
+
+    result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=1_000)
+
+    assert is_ok(result)
+    assert result.ok_value >= 1
+
+    # Task should now be PENDING (retried), not FAILED
+    row = (
+        await session.execute(
+            text('SELECT status, retry_count, next_retry_at, error_code FROM horsies_tasks WHERE id = :id'),
+            {'id': task_id},
+        )
+    ).fetchone()
+    assert row is not None
+    assert row[0] == 'PENDING', f'Expected PENDING after retry, got {row[0]}'
+    assert row[1] == 1, f'Expected retry_count=1, got {row[1]}'
+    assert row[2] is not None, 'next_retry_at should be set'
+    assert row[3] is None, 'error_code should be cleared on retry'
+
+    # Attempt row should say will_retry=True
+    attempts = await _get_attempts(session, task_id)
+    assert len(attempts) == 1
+    att = attempts[0]
+    assert att['attempt'] == 1
+    assert att['outcome'] == 'FAILED'
+    assert att['will_retry'] is True
+    assert att['error_code'] == 'WORKER_CRASHED'
+    assert att['worker_id'] == 'w-stale-retry'
+
+
+# ---------------------------------------------------------------------------
 # 6. Replay idempotency → no duplicate attempt rows
 # ---------------------------------------------------------------------------
 
@@ -583,3 +663,60 @@ async def test_attempt_number_reflects_retry_count(
     assert len(attempts) == 1
     assert attempts[0]['attempt'] == 3
     assert attempts[0]['outcome'] == 'COMPLETED'
+
+
+# ---------------------------------------------------------------------------
+# 8. Expired PENDING task → EXPIRED status with TASK_EXPIRED result
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_expire_pending_task_transitions_to_expired(
+    broker: PostgresBroker,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """expire_pending_tasks transitions PENDING + past good_until to EXPIRED."""
+    task_id = str(uuid.uuid4())
+    sent_at, sha = compute_test_enqueue_sha(task_name='expire_test')
+    past_good_until = datetime.now(timezone.utc) - timedelta(minutes=10)
+    await session.execute(
+        text("""
+            INSERT INTO horsies_tasks
+                (id, task_name, queue_name, priority, args, kwargs,
+                 status, sent_at, created_at, updated_at, claimed, retry_count,
+                 max_retries, enqueue_sha, good_until)
+            VALUES
+                (:id, 'expire_test', 'default', 100, '[]', '{}',
+                 'PENDING', :sent_at, NOW(), NOW(), FALSE, 0,
+                 0, :enqueue_sha, :good_until)
+        """),
+        {
+            'id': task_id,
+            'sent_at': sent_at,
+            'enqueue_sha': sha,
+            'good_until': past_good_until,
+        },
+    )
+    await session.commit()
+
+    result = await broker.expire_pending_tasks()
+
+    assert is_ok(result)
+    assert result.ok_value >= 1
+
+    row = (
+        await session.execute(
+            text('SELECT status, error_code, result FROM horsies_tasks WHERE id = :id'),
+            {'id': task_id},
+        )
+    ).fetchone()
+    assert row is not None
+    assert row[0] == 'EXPIRED', f'Expected EXPIRED, got {row[0]}'
+    assert row[1] == 'TASK_EXPIRED'
+    assert row[2] is not None
+    assert 'TASK_EXPIRED' in row[2]
+
+    # No attempt row should exist (task never started)
+    attempts = await _get_attempts(session, task_id)
+    assert len(attempts) == 0

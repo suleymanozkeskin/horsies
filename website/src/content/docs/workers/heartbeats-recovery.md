@@ -76,14 +76,13 @@ When a CLAIMED task has no recent claimer heartbeat:
 - Another worker will claim it
 - No data corruption risk
 
-### Stale RUNNING → FAILED
+### Stale RUNNING Recovery
 
 When a RUNNING task has no recent runner heartbeat:
 
-- **Not safe to requeue**: Code was executing
-- Marked as FAILED with `WORKER_CRASHED` error
-- May have partial side effects
-- Requires manual review
+- **Not safe to blindly requeue**: Code was executing, may have partial side effects
+- If the task has a retry policy with `WORKER_CRASHED` in `auto_retry_for` and retries remaining: scheduled for retry (returns to PENDING with `next_retry_at`)
+- Otherwise: marked as FAILED with `WORKER_CRASHED` error
 
 ### Workflow Task Recovery
 

@@ -83,7 +83,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - OperationalErrorCode: UNHANDLED_EXCEPTION, TASK_EXCEPTION, WORKER_CRASHED, BROKER_ERROR, WORKER_RESOLUTION_ERROR, WORKER_SERIALIZATION_ERROR, RESULT_DESERIALIZATION_ERROR, WORKFLOW_ENQUEUE_FAILED, SUBWORKFLOW_LOAD_FAILED
 - ContractCode: RETURN_TYPE_MISMATCH, PYDANTIC_HYDRATION_ERROR, WORKFLOW_CTX_MISSING_ID
 - RetrievalCode: WAIT_TIMEOUT, TASK_NOT_FOUND, WORKFLOW_NOT_FOUND, RESULT_NOT_AVAILABLE, RESULT_NOT_READY
-- OutcomeCode: TASK_CANCELLED, WORKFLOW_PAUSED, WORKFLOW_FAILED, WORKFLOW_CANCELLED, UPSTREAM_SKIPPED, SUBWORKFLOW_FAILED, WORKFLOW_SUCCESS_CASE_NOT_MET
+- OutcomeCode: TASK_CANCELLED, TASK_EXPIRED, WORKFLOW_PAUSED, WORKFLOW_FAILED, WORKFLOW_CANCELLED, UPSTREAM_SKIPPED, SUBWORKFLOW_FAILED, WORKFLOW_SUCCESS_CASE_NOT_MET
 - All built-in code string values are globally reserved; user-defined error codes must not collide
 - BUILTIN_CODE_REGISTRY: dict[str, BuiltInTaskCode] maps every reserved string to its enum member
 - horsies check reports E212 when exception_mapper or default_unhandled_error_code collides with a reserved code
@@ -180,9 +180,9 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .failed_reason -> str | None (opt-in via include_failed_reason)
 
 ### TaskStatus (enum)
-- PENDING -> CLAIMED -> RUNNING -> COMPLETED | FAILED | CANCELLED | REQUEUED
+- PENDING -> CLAIMED -> RUNNING -> COMPLETED | FAILED | CANCELLED | EXPIRED (never claimed before good_until)
 - .is_terminal -> bool
-- TASK_TERMINAL_STATES: frozenset = {COMPLETED, FAILED, CANCELLED}
+- TASK_TERMINAL_STATES: frozenset = {COMPLETED, FAILED, CANCELLED, EXPIRED}
 
 ### NodeFactory[P, T] (typed node builder)
 - Returned by task_function.node(**workflow_opts)
@@ -520,7 +520,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - slugify(value: str) -> str: convert string to valid node_id ([A-Za-z0-9_\-:.]+)
 
 ### Terminal State Constants
-- TASK_TERMINAL_STATES: frozenset[TaskStatus] = {COMPLETED, FAILED, CANCELLED}
+- TASK_TERMINAL_STATES: frozenset[TaskStatus] = {COMPLETED, FAILED, CANCELLED, EXPIRED}
 - WORKFLOW_TERMINAL_STATES: frozenset[WorkflowStatus] = {COMPLETED, FAILED, CANCELLED}
 - WORKFLOW_TASK_TERMINAL_STATES: frozenset[WorkflowTaskStatus] = {COMPLETED, FAILED, SKIPPED}
 

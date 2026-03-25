@@ -249,6 +249,24 @@ SCHEDULE_TASK_RETRY_SQL = text("""
     RETURNING id
 """)
 
+SCHEDULE_STALE_TASK_RETRY_SQL = text("""
+    UPDATE horsies_tasks
+    SET status = 'PENDING',
+        retry_count = :retry_count,
+        next_retry_at = :next_retry_at,
+        enqueued_at = :next_retry_at,
+        claimed = FALSE,
+        claimed_at = NULL,
+        claimed_by_worker_id = NULL,
+        claim_expires_at = NULL,
+        error_code = NULL,
+        updated_at = now()
+    WHERE id = :id
+      AND status = 'RUNNING'
+      AND (good_until IS NULL OR :next_retry_at < good_until)
+    RETURNING id
+""")
+
 NOTIFY_DELAYED_SQL = text("""
     SELECT pg_notify(:channel, :payload)
 """)

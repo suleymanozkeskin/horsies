@@ -15,10 +15,9 @@ tags: [concepts, tasks, states]
 | `COMPLETED` | Task finished successfully |
 | `FAILED` | Task failed (error returned or exception) |
 | `CANCELLED` | Task was cancelled before execution |
-| `REQUEUED` | Task was requeued after failure (for retry) |
+| `EXPIRED` | Task was never claimed before `good_until` deadline passed |
 
-**Terminal states:** `COMPLETED`, `FAILED`, `CANCELLED`.
-`REQUEUED` is transitional and returns the task to `PENDING`.
+**Terminal states:** `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED`.
 
 ## Status Enum
 
@@ -32,7 +31,7 @@ tags: [concepts, tasks, states]
 | `COMPLETED` | `"COMPLETED"` | Yes |
 | `FAILED` | `"FAILED"` | Yes |
 | `CANCELLED` | `"CANCELLED"` | Yes |
-| `REQUEUED` | `"REQUEUED"` | No |
+| `EXPIRED` | `"EXPIRED"` | Yes |
 
 Use `is_terminal` or `TASK_TERMINAL_STATES` to check terminal status programmatically:
 
@@ -45,7 +44,7 @@ status.is_terminal  # True
 TaskStatus.RUNNING.is_terminal  # False
 
 # Frozenset for use in queries or filters
-TASK_TERMINAL_STATES  # frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED})
+TASK_TERMINAL_STATES  # frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.EXPIRED})
 ```
 
 ## State Transitions
@@ -54,31 +53,29 @@ TASK_TERMINAL_STATES  # frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, Task
 
 ```
                     ┌──────────────┐
-                    │   PENDING    │
-                    └──────┬───────┘
-                           │ Worker claims
-                           ▼
-                    ┌──────────────┐
-         timeout    │   CLAIMED    │
-        (requeue)◄──┤              │
-                    └──────┬───────┘
-                           │ Execution starts
-                           ▼
-                    ┌──────────────┐
-                    │   RUNNING    │
-                    └──────┬───────┘
-                           │
-              ┌────────────┼────────────┐
-              │            │            │
-              ▼            ▼            ▼
-       ┌──────────┐ ┌──────────┐ ┌──────────┐
-       │COMPLETED │ │  FAILED  │ │ REQUEUED │
-       └──────────┘ └──────────┘ └────┬─────┘
-                                      │
-                                      ▼
-                               ┌──────────────┐
-                               │   PENDING    │
-                               └──────────────┘
+              ┌─────│   PENDING    │─────┐
+              │     └──────┬───────┘     │
+              │            │ Worker      │ good_until
+              │            │ claims      │ passed
+              │            ▼             ▼
+              │     ┌──────────────┐ ┌──────────┐
+    timeout   │     │   CLAIMED    │ │ EXPIRED  │
+   (requeue)◄─┼─────┤              │ └──────────┘
+              │     └──────┬───────┘
+              │            │ Execution starts
+              │            ▼
+              │     ┌──────────────┐
+              │     │   RUNNING    │
+              │     └──────┬───────┘
+              │            │
+              │ ┌──────────┼────────────┐
+              │ │          │            │
+              │ ▼          ▼            ▼
+              │ ┌──────────┐ ┌──────────┐  (retry)
+              │ │COMPLETED │ │  FAILED  │────┐
+              │ └──────────┘ └──────────┘    │
+              │                              │
+              └──────────────────────────────┘
 ```
 
 ## Transition Details
@@ -110,11 +107,17 @@ TASK_TERMINAL_STATES  # frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, Task
 - Worker process crashes (detected via missing heartbeats)
 - Sets `failed_at=NOW()`, stores error in `result`
 
-### FAILED → PENDING (via REQUEUED)
+### RUNNING → PENDING (retry)
 
 - Only if retry policy configured and retries remaining
 - Sets `status=PENDING`, increments `retry_count`
 - Sets `next_retry_at` based on retry policy intervals
+
+### PENDING → EXPIRED
+
+- Task has `good_until` set and deadline has passed without being claimed
+- Reaper transitions to EXPIRED with `TASK_EXPIRED` outcome code
+- No attempt row is written (task never started)
 
 ### CLAIMED → PENDING (stale recovery)
 
@@ -149,8 +152,8 @@ Missing heartbeats trigger automatic recovery. See [Heartbeats & Recovery](../..
 
 Tasks can have a `good_until` deadline:
 
-- If task isn't claimed before `good_until`, it's skipped
-- Expired tasks remain in PENDING but are never claimed
+- If task isn't claimed before `good_until`, it becomes unclaimable
+- The reaper periodically transitions unclaimed expired tasks to `EXPIRED` with a `TASK_EXPIRED` result
 - Useful for time-sensitive operations
 
 ```python

@@ -23,7 +23,7 @@ class TaskStatus(Enum):
 
     FAILED = 'FAILED'  # It has failed to be executed.
     CANCELLED = 'CANCELLED'  # It has been cancelled.
-    REQUEUED = 'REQUEUED'  # It has been requeued after a failure.
+    EXPIRED = 'EXPIRED'  # It was never claimed before good_until passed.
 
     @property
     def is_terminal(self) -> bool:
@@ -36,6 +36,7 @@ TASK_TERMINAL_STATES: frozenset[TaskStatus] = frozenset(
         TaskStatus.COMPLETED,
         TaskStatus.FAILED,
         TaskStatus.CANCELLED,
+        TaskStatus.EXPIRED,
     }
 )
 

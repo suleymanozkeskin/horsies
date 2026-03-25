@@ -135,8 +135,8 @@ impl<'a> TaskDetailPanel<'a> {
             theme.error
         } else if status.eq_ignore_ascii_case("CANCELLED") {
             theme.muted
-        } else if status.eq_ignore_ascii_case("REQUEUED") {
-            Color::Magenta
+        } else if status.eq_ignore_ascii_case("EXPIRED") {
+            Color::DarkGray
         } else {
             theme.text
         }

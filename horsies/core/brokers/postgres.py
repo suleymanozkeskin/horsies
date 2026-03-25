@@ -67,7 +67,7 @@ from horsies.core.schemas.triggers import (
     CREATE_WORKFLOW_STATUS_NOTIFY_FUNCTION_SQL,
     CREATE_WORKFLOW_STATUS_NOTIFY_TRIGGER_SQL,
 )
-from horsies.core.worker.sql import UPSERT_TASK_ATTEMPT_SQL
+from horsies.core.worker.sql import UPSERT_TASK_ATTEMPT_SQL, SCHEDULE_STALE_TASK_RETRY_SQL
 from horsies.core.schemas.indexes import (
     CREATE_HEARTBEATS_TASK_ROLE_SENT_INDEX_SQL,
     CREATE_TASK_ATTEMPTS_ERROR_CODE_INDEX_SQL,
@@ -181,7 +181,9 @@ GET_EXPIRED_TASKS_SQL = text("""
 SELECT_STALE_RUNNING_TASKS_SQL = text("""
     SELECT t2.id, t2.worker_pid, t2.worker_hostname, t2.claimed_by_worker_id,
            t2.started_at, hb.last_heartbeat,
-           t2.retry_count, t2.worker_process_name
+           t2.retry_count, t2.worker_process_name,
+           t2.max_retries, t2.task_options, t2.good_until,
+           clock_timestamp() AS db_now
     FROM horsies_tasks t2
     LEFT JOIN LATERAL (
         SELECT sent_at AS last_heartbeat
@@ -196,6 +198,16 @@ SELECT_STALE_RUNNING_TASKS_SQL = text("""
     FOR UPDATE OF t2 SKIP LOCKED
 """)
 
+SELECT_STALE_TASK_FOR_UPDATE_SQL = text("""
+    SELECT id, worker_pid, worker_hostname, claimed_by_worker_id,
+           started_at, retry_count, worker_process_name,
+           max_retries, task_options, good_until, queue_name,
+           clock_timestamp() AS db_now
+    FROM horsies_tasks
+    WHERE id = :id AND status = 'RUNNING'
+    FOR UPDATE
+""")
+
 MARK_STALE_TASK_FAILED_SQL = text("""
     UPDATE horsies_tasks
     SET status = 'FAILED',
@@ -206,6 +218,18 @@ MARK_STALE_TASK_FAILED_SQL = text("""
         updated_at = NOW()
     WHERE id = :task_id
       AND status = 'RUNNING'
+""")
+
+EXPIRE_PENDING_TASKS_SQL = text("""
+    UPDATE horsies_tasks
+    SET status = 'EXPIRED',
+        failed_at = NOW(),
+        result = :result,
+        error_code = :error_code,
+        updated_at = NOW()
+    WHERE status = 'PENDING'
+      AND good_until IS NOT NULL
+      AND good_until < NOW()
 """)
 
 SELECT_TASK_ATTEMPTS_BY_TASK_ID_SQL = text("""
@@ -224,6 +248,7 @@ REQUEUE_STALE_CLAIMED_SQL = text("""
         claimed = FALSE,
         claimed_at = NULL,
         claimed_by_worker_id = NULL,
+        claim_expires_at = NULL,
         updated_at = NOW()
     FROM (
         SELECT t2.id, hb.last_heartbeat, t2.claimed_at
@@ -307,7 +332,7 @@ class PostgresBroker:
 
         Creates triggers that send NOTIFY messages on:
         - INSERT: Sends task_new + task_queue_{queue_name} notifications
-        - UPDATE to COMPLETED/FAILED: Sends task_done notification
+        - UPDATE to terminal status (COMPLETED/FAILED/CANCELLED/EXPIRED): Sends task_done notification
 
         This enables real-time task processing without polling.
         """
@@ -670,7 +695,7 @@ class PostgresBroker:
                             data={'task_id': task_id},
                         )
                     )
-                if row.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+                if row.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.EXPIRED):
                     self.logger.info(f'Task {task_id} already completed')
                     _lr = loads_json(row.result)
                     if is_err(_lr):
@@ -775,7 +800,7 @@ class PostgresBroker:
                                     data={'task_id': task_id},
                                 )
                             )
-                        if row.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+                        if row.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.EXPIRED):
                             self.logger.debug(
                                 f'Task {task_id} completed, polling database'
                             )
@@ -926,105 +951,254 @@ class PostgresBroker:
         self,
         stale_threshold_ms: int = 300_000,
     ) -> BrokerResult[int]:
-        """
-        Clean up crashed worker tasks by marking them as FAILED.
+        """Clean up crashed worker tasks: retry if policy allows, otherwise mark FAILED.
 
-        Creates a proper TaskResult with WORKER_CRASHED error code for each stale task.
+        Two-phase approach:
+        1. Lightweight scan: identify stale task IDs (no lock hold after scan).
+        2. Per-task processing: re-acquire FOR UPDATE lock, re-read fresh state,
+           then upsert attempt + transition — all within one transaction per task.
+
+        This avoids holding row locks across the entire batch while still
+        preventing races with concurrent worker finalizers.
         """
         try:
             from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode
             from horsies.core.codec.serde import dumps_json
+            from horsies.core.utils.retry import (
+                check_retry_eligibility,
+                calculate_retry_delay,
+                parse_retry_policy,
+            )
 
-            # Convert milliseconds to seconds for PostgreSQL INTERVAL
             stale_threshold_seconds = stale_threshold_ms / 1000.0
 
+            # Phase 1: lightweight scan to collect candidate task IDs.
+            # FOR UPDATE SKIP LOCKED prevents picking up rows already being finalized,
+            # but we release locks immediately — the IDs are just candidates.
             async with self.session_factory() as session:
                 stale_tasks_result = await session.execute(
                     SELECT_STALE_RUNNING_TASKS_SQL,
                     {'stale_threshold': stale_threshold_seconds},
                 )
+                candidate_ids = [row.id for row in stale_tasks_result.fetchall()]
+                await session.rollback()
 
-                stale_tasks = stale_tasks_result.fetchall()
-                if not stale_tasks:
-                    return Ok(0)
+            if not candidate_ids:
+                return Ok(0)
 
-                for task_row in stale_tasks:
-                    task_id = task_row.id
-                    worker_pid = task_row.worker_pid
-                    worker_hostname = task_row.worker_hostname
-                    worker_id = task_row.claimed_by_worker_id
-                    started_at = task_row.started_at
-                    last_heartbeat = task_row.last_heartbeat
-                    retry_count = task_row.retry_count or 0
-                    worker_process_name = task_row.worker_process_name
+            # Phase 2: process each candidate in its own transaction.
+            # Re-acquire FOR UPDATE per task to get fresh state and prevent races.
+            processed = 0
+            for task_id in candidate_ids:
+                try:
+                    async with self.session_factory() as session:
+                        # Lock the row and re-read current state (fresh db_now).
+                        # If the row is no longer RUNNING, a worker finalized it
+                        # between scan and now — skip it.
+                        ctx_result = await session.execute(
+                            SELECT_STALE_TASK_FOR_UPDATE_SQL,
+                            {'id': task_id},
+                        )
+                        ctx_row = ctx_result.fetchone()
+                        if ctx_row is None:
+                            # Task no longer RUNNING — worker or another reaper handled it.
+                            await session.rollback()
+                            continue
 
-                    failed_reason_str = (
-                        f'Worker process crashed (no runner heartbeat '
-                        f'for {stale_threshold_ms}ms = {stale_threshold_ms/1000:.1f}s)'
-                    )
-                    task_error = TaskError(
-                        error_code=OperationalErrorCode.WORKER_CRASHED,
-                        message=failed_reason_str,
-                        data={
-                            'stale_threshold_ms': stale_threshold_ms,
-                            'stale_threshold_seconds': stale_threshold_seconds,
-                            'worker_pid': worker_pid,
-                            'worker_hostname': worker_hostname,
-                            'worker_id': worker_id,
-                            'started_at': started_at.isoformat() if started_at else None,
-                            'last_heartbeat': last_heartbeat.isoformat()
-                            if last_heartbeat
-                            else None,
-                            'detected_at': datetime.now(timezone.utc).isoformat(),
-                        },
-                    )
-                    task_result: TaskResult[None, TaskError] = TaskResult(err=task_error)
-                    ser_r = dumps_json(task_result)
-                    # Library-constructed TaskError with string primitives — can't fail,
-                    # but if it somehow does, skip this task rather than abort the entire cleanup.
-                    if is_err(ser_r):
-                        self.logger.error(f'Failed to serialize crash result for task {task_id}: {ser_r.err_value}')
-                        continue
-                    result_json = ser_r.ok_value
+                        retry_count = ctx_row.retry_count or 0
+                        max_retries = ctx_row.max_retries or 0
+                        started_at = ctx_row.started_at
+                        worker_pid = ctx_row.worker_pid
+                        worker_hostname = ctx_row.worker_hostname
+                        worker_id = ctx_row.claimed_by_worker_id
+                        worker_process_name = ctx_row.worker_process_name
+                        task_options_json: str | None = ctx_row.task_options
+                        good_until: datetime | None = ctx_row.good_until
+                        db_now: datetime = ctx_row.db_now
 
-                    # Upsert attempt row: FAILED with WORKER_CRASHED
-                    attempt_num = retry_count + 1
-                    now_utc = datetime.now(timezone.utc)
-                    await session.execute(
-                        UPSERT_TASK_ATTEMPT_SQL,
-                        {
-                            'task_id': task_id,
-                            'attempt': attempt_num,
-                            'outcome': 'FAILED',
-                            'will_retry': False,
-                            'started_at': started_at or now_utc,
-                            'finished_at': now_utc,
-                            'error_code': OperationalErrorCode.WORKER_CRASHED.value,
-                            'error_message': task_error.message,
-                            'failed_reason': failed_reason_str,
+                        failed_reason_str = (
+                            f'Worker process crashed (no runner heartbeat '
+                            f'for {stale_threshold_ms}ms = {stale_threshold_ms/1000:.1f}s)'
+                        )
+                        attempt_num = retry_count + 1
+                        now_utc = datetime.now(timezone.utc)
+                        attempt_worker = {
                             'worker_id': worker_id,
                             'worker_hostname': worker_hostname,
                             'worker_pid': worker_pid,
                             'worker_process_name': worker_process_name,
-                        },
-                    )
+                        }
 
-                    await session.execute(
-                        MARK_STALE_TASK_FAILED_SQL,
-                        {
-                            'task_id': task_id,
-                            'failed_reason': failed_reason_str,
-                            'result': result_json,
-                            'error_code': OperationalErrorCode.WORKER_CRASHED.value,
-                        },
-                    )
+                        should_retry = check_retry_eligibility(
+                            retry_count=retry_count,
+                            max_retries=max_retries,
+                            task_options_json=task_options_json,
+                            error_code=OperationalErrorCode.WORKER_CRASHED,
+                            good_until=good_until,
+                            db_now=db_now,
+                        )
 
-                await session.commit()
-                return Ok(len(stale_tasks))
+                        if should_retry:
+                            retry_policy_data = parse_retry_policy(task_options_json) or {}
+                            new_retry_count = retry_count + 1
+                            delay_seconds = calculate_retry_delay(new_retry_count, retry_policy_data)
+                            next_retry_at = db_now + timedelta(seconds=delay_seconds)
+
+                            # Guard: don't schedule retry past good_until
+                            if good_until is not None:
+                                _gu = good_until.replace(tzinfo=timezone.utc) if good_until.tzinfo is None else good_until
+                                _nra = next_retry_at.replace(tzinfo=timezone.utc) if next_retry_at.tzinfo is None else next_retry_at
+                                if _nra >= _gu:
+                                    should_retry = False
+
+                        if should_retry:
+                            await session.execute(UPSERT_TASK_ATTEMPT_SQL, {
+                                'task_id': task_id,
+                                'attempt': attempt_num,
+                                'outcome': 'FAILED',
+                                'will_retry': True,
+                                'started_at': started_at or now_utc,
+                                'finished_at': now_utc,
+                                'error_code': OperationalErrorCode.WORKER_CRASHED.value,
+                                'error_message': failed_reason_str,
+                                'failed_reason': failed_reason_str,
+                                **attempt_worker,
+                            })
+                            res = await session.execute(
+                                SCHEDULE_STALE_TASK_RETRY_SQL,
+                                {
+                                    'id': task_id,
+                                    'retry_count': new_retry_count,
+                                    'next_retry_at': next_retry_at,
+                                },
+                            )
+                            if res.fetchone() is None:
+                                # good_until SQL guard rejected — rollback attempt too.
+                                await session.rollback()
+                                continue
+                            await session.commit()
+                            self.logger.info(
+                                'Reaper scheduled retry #%d for stale task %s at %s',
+                                new_retry_count, task_id, next_retry_at,
+                            )
+
+                            # Best-effort: notify workers so they wake at next_retry_at
+                            # rather than waiting for the next poll cycle.
+                            queue_name = ctx_row.queue_name or 'default'
+                            try:
+                                async with self.session_factory() as notify_session:
+                                    await notify_session.execute(
+                                        text("SELECT pg_notify(:ch, :p)"),
+                                        {
+                                            'ch': f'task_queue_{queue_name}',
+                                            'p': f'retry:{task_id}',
+                                        },
+                                    )
+                                    await notify_session.commit()
+                            except Exception:
+                                pass  # Non-fatal; polling will pick it up
+                        else:
+                            task_error = TaskError(
+                                error_code=OperationalErrorCode.WORKER_CRASHED,
+                                message=failed_reason_str,
+                                data={
+                                    'stale_threshold_ms': stale_threshold_ms,
+                                    'stale_threshold_seconds': stale_threshold_seconds,
+                                    'worker_pid': worker_pid,
+                                    'worker_hostname': worker_hostname,
+                                    'worker_id': worker_id,
+                                    'started_at': started_at.isoformat() if started_at else None,
+                                    'detected_at': now_utc.isoformat(),
+                                },
+                            )
+                            task_result: TaskResult[None, TaskError] = TaskResult(err=task_error)
+                            ser_r = dumps_json(task_result)
+                            if is_err(ser_r):
+                                self.logger.error(
+                                    'Failed to serialize crash result for task %s: %s',
+                                    task_id, ser_r.err_value,
+                                )
+                                await session.rollback()
+                                continue
+                            result_json = ser_r.ok_value
+
+                            await session.execute(UPSERT_TASK_ATTEMPT_SQL, {
+                                'task_id': task_id,
+                                'attempt': attempt_num,
+                                'outcome': 'FAILED',
+                                'will_retry': False,
+                                'started_at': started_at or now_utc,
+                                'finished_at': now_utc,
+                                'error_code': OperationalErrorCode.WORKER_CRASHED.value,
+                                'error_message': task_error.message,
+                                'failed_reason': failed_reason_str,
+                                **attempt_worker,
+                            })
+                            await session.execute(
+                                MARK_STALE_TASK_FAILED_SQL,
+                                {
+                                    'task_id': task_id,
+                                    'failed_reason': failed_reason_str,
+                                    'result': result_json,
+                                    'error_code': OperationalErrorCode.WORKER_CRASHED.value,
+                                },
+                            )
+                            await session.commit()
+
+                        processed += 1
+                except Exception as task_exc:
+                    self.logger.error(
+                        'Reaper failed to process stale task %s: %s', task_id, task_exc,
+                    )
+                    continue
+
+            return Ok(processed)
         except Exception as exc:
             return _broker_err(
                 BrokerErrorCode.CLEANUP_FAILED,
                 f'mark_stale_tasks_as_failed failed: {exc}',
+                exc,
+            )
+
+    async def expire_pending_tasks(self) -> BrokerResult[int]:
+        """Transition PENDING tasks whose good_until deadline has passed to EXPIRED.
+
+        Only affects tasks that were never claimed. Writes a TaskResult with
+        TASK_EXPIRED outcome code so callers have a meaningful result payload.
+        No attempt row is written (the task never started).
+        """
+        try:
+            from horsies.core.models.tasks import TaskResult, TaskError, OutcomeCode
+            from horsies.core.codec.serde import dumps_json
+
+            task_error = TaskError(
+                error_code=OutcomeCode.TASK_EXPIRED,
+                message='Task expired: good_until deadline passed before execution started',
+            )
+            task_result: TaskResult[None, TaskError] = TaskResult(err=task_error)
+            ser_r = dumps_json(task_result)
+            if is_err(ser_r):
+                return _broker_err(
+                    BrokerErrorCode.CLEANUP_FAILED,
+                    f'expire_pending_tasks: failed to serialize TASK_EXPIRED result: {ser_r.err_value}',
+                    ser_r.err_value,
+                )
+            result_json = ser_r.ok_value
+
+            async with self.session_factory() as session:
+                res = await session.execute(
+                    EXPIRE_PENDING_TASKS_SQL,
+                    {
+                        'result': result_json,
+                        'error_code': OutcomeCode.TASK_EXPIRED.value,
+                    },
+                )
+                await session.commit()
+                return Ok(getattr(res, 'rowcount', 0) or 0)
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.CLEANUP_FAILED,
+                f'expire_pending_tasks failed: {exc}',
                 exc,
             )
 

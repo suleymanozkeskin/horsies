@@ -22,13 +22,13 @@ class TestTaskStatusTerminal:
         assert TaskStatus.COMPLETED.is_terminal is True
         assert TaskStatus.FAILED.is_terminal is True
         assert TaskStatus.CANCELLED.is_terminal is True
+        assert TaskStatus.EXPIRED.is_terminal is True
 
     def test_non_terminal_members(self) -> None:
         """is_terminal returns False for each non-terminal member."""
         assert TaskStatus.PENDING.is_terminal is False
         assert TaskStatus.CLAIMED.is_terminal is False
         assert TaskStatus.RUNNING.is_terminal is False
-        assert TaskStatus.REQUEUED.is_terminal is False
 
     def test_frozenset_contents(self) -> None:
         """Frozenset contains exactly the expected terminal states."""
@@ -36,6 +36,7 @@ class TestTaskStatusTerminal:
             TaskStatus.COMPLETED,
             TaskStatus.FAILED,
             TaskStatus.CANCELLED,
+            TaskStatus.EXPIRED,
         })
 
     def test_exhaustiveness(self) -> None:

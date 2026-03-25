@@ -150,7 +150,7 @@ impl<'a> Dashboard<'a> {
                 "completed" => theme.success,
                 "failed" => theme.error,
                 "cancelled" => theme.muted,
-                "requeued" => Color::Magenta,
+                "expired" => Color::DarkGray,
                 _ => theme.text,
             }
         };

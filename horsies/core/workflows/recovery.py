@@ -89,7 +89,7 @@ GET_CRASHED_WORKER_TASKS_SQL = text("""
       AND wt.task_id IS NOT NULL
       AND wt.is_subworkflow = FALSE
       AND w.status = 'RUNNING'
-      AND UPPER(t.status) IN ('COMPLETED', 'FAILED', 'CANCELLED')
+      AND UPPER(t.status) IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
 """)
 
 GET_TERMINAL_WORKFLOW_CANDIDATES_SQL = text("""
@@ -262,7 +262,7 @@ async def recover_stuck_workflows(
         workflow_id = row.workflow_id
         task_index = row.task_index
         task_id = row.task_id
-        task_status = row.task_status  # uppercase: COMPLETED, FAILED, or CANCELLED
+        task_status = row.task_status  # uppercase: COMPLETED, FAILED, CANCELLED, or EXPIRED
         raw_task_result = row.task_result
 
         from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode, RetrievalCode, OutcomeCode
@@ -290,6 +290,9 @@ async def recover_stuck_workflows(
             if task_status == 'CANCELLED':
                 error_code = OutcomeCode.TASK_CANCELLED
                 message = 'Task was cancelled before producing a result'
+            elif task_status == 'EXPIRED':
+                error_code = OutcomeCode.TASK_EXPIRED
+                message = 'Task expired before execution started (good_until passed)'
             elif task_status == 'COMPLETED':
                 error_code = RetrievalCode.RESULT_NOT_AVAILABLE
                 message = 'Task completed but result is missing'

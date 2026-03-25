@@ -62,9 +62,9 @@ When a task is CLAIMED but the claimer heartbeat stops:
 
 When a **regular** task is RUNNING but the runner heartbeat stops:
 
-- **Not safe to requeue**: User code was executing
-- Task is marked as FAILED with `WORKER_CRASHED` error
-- Could have partial side effects
+- **Not safe to blindly requeue**: User code was executing, could have partial side effects
+- If the task has a retry policy with `WORKER_CRASHED` in `auto_retry_for` and retries remaining: scheduled for retry (returns to PENDING with `next_retry_at`)
+- Otherwise: marked as FAILED with `WORKER_CRASHED` error
 
 For **workflow** tasks, the recovery loop also detects when `workflow_tasks` is stuck non-terminal while the underlying task is already terminal, and triggers the normal completion path. See [Heartbeats & Recovery](../../workers/heartbeats-recovery) for details.
 

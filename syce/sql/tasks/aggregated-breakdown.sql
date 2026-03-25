@@ -8,7 +8,7 @@
 -- - completed_count (bigint)
 -- - failed_count (bigint)
 -- - cancelled_count (bigint)
--- - requeued_count (bigint)
+-- - expired_count (bigint)
 -- - claimed_task_ids (text[], nullable)
 -- - running_task_ids (text[], nullable)
 WITH base AS (
@@ -35,7 +35,7 @@ agg AS (
     COUNT(*) FILTER (WHERE status = 'COMPLETED')    AS completed_count,
     COUNT(*) FILTER (WHERE status = 'FAILED')       AS failed_count,
     COUNT(*) FILTER (WHERE status = 'CANCELLED')   AS cancelled_count,
-    COUNT(*) FILTER (WHERE status = 'REQUEUED')    AS requeued_count
+    COUNT(*) FILTER (WHERE status = 'EXPIRED')    AS expired_count
   FROM base
   GROUP BY ROLLUP (claimed_by_worker_id)
 )
@@ -50,7 +50,7 @@ SELECT
   completed_count,
   failed_count,
   cancelled_count,
-  requeued_count,
+  expired_count,
   CASE WHEN g = 1 THEN NULL ELSE claimed_task_ids END   AS claimed_task_ids,
   CASE WHEN g = 1 THEN NULL ELSE running_task_ids END   AS running_task_ids
 

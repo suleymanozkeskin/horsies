@@ -124,13 +124,13 @@ elif result.ok_value is not None:
 
 ### `mark_stale_tasks_as_failed(stale_threshold_ms: int = 300_000) -> BrokerResult[int]`
 
-Mark RUNNING tasks as FAILED when no heartbeat has been received within the threshold. Sets the result to a `TaskResult` with `WORKER_CRASHED` error code.
+Handle RUNNING tasks with no heartbeat within the threshold. Tasks with a retry policy listing `WORKER_CRASHED` in `auto_retry_for` (and retries remaining) are scheduled for retry; all others are marked FAILED with `WORKER_CRASHED` error code.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `stale_threshold_ms` | `int` | `300_000` (5 min) | Milliseconds without heartbeat to consider crashed |
 
-**Returns:** `Ok(int)` — number of tasks marked as failed.
+**Returns:** `Ok(int)` — number of tasks processed (retried or failed).
 
 ```python
 result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)

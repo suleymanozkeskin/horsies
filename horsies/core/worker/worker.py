@@ -1804,38 +1804,12 @@ class Worker:
         return 'scheduled'
 
     def _calculate_retry_delay(
-        self, retry_attempt: int, retry_policy_data: dict[str, Any]
+        self, retry_attempt: int, retry_policy_data: dict[str, Any],
     ) -> float:
         """Calculate the delay in seconds for a retry attempt."""
-        # Default retry policy values (these match RetryPolicy defaults)
-        intervals = retry_policy_data.get(
-            'intervals', [60, 300, 900]
-        )  # 1min, 5min, 15min
-        backoff_strategy = retry_policy_data.get('backoff_strategy', 'fixed')
-        jitter = retry_policy_data.get('jitter', True)
+        from horsies.core.utils.retry import calculate_retry_delay
 
-        # Calculate base delay based on strategy
-        if backoff_strategy == 'fixed':
-            # Fixed strategy: use intervals directly, clamped to last interval
-            # if retry_attempt exceeds length (possible after DB deserialization, old data)
-            clamped_index = min(retry_attempt - 1, len(intervals) - 1)
-            base_delay = intervals[clamped_index]
-
-        elif backoff_strategy == 'exponential':
-            # Exponential strategy: use intervals[0] as base and apply exponential multiplier
-            base_interval = intervals[0] if intervals else 60
-            base_delay = base_interval * (2 ** (retry_attempt - 1))
-
-        else:
-            # Fallback (shouldn't happen due to Literal type validation)
-            base_delay = intervals[0] if intervals else 60
-
-        # Apply jitter (±25% randomization)
-        if jitter:
-            jitter_range = base_delay * 0.25
-            base_delay += random.uniform(-jitter_range, jitter_range)
-
-        return float(max(1.0, base_delay))
+        return calculate_retry_delay(retry_attempt, retry_policy_data)
 
     async def _schedule_delayed_notification(
         self, delay_seconds: float, channel: str, payload: str
@@ -2112,6 +2086,21 @@ class Worker:
                                         f'({mark_failed_permanent_failures}/{_REAPER_MAX_PERMANENT_FAILURES} '
                                         f'before disable): {err.message}',
                                     )
+
+                    # Expire PENDING tasks past good_until deadline
+                    try:
+                        match await temp_broker.expire_pending_tasks():
+                            case Ok(expired):
+                                if expired > 0:
+                                    logger.info(
+                                        f'Reaper expired {expired} PENDING task(s) past good_until',
+                                    )
+                            case Err(err):
+                                logger.warning(
+                                    f'Reaper expire_pending_tasks failed: {err.message}',
+                                )
+                    except Exception as expire_err:
+                        logger.error(f'Reaper expire_pending_tasks error: {expire_err}')
 
                     # Recover stuck workflows
                     try:

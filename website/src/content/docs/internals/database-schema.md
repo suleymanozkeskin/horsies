@@ -17,7 +17,7 @@ Primary task storage table.
 | `priority` | INT | 1-100, lower = higher priority |
 | `args` | TEXT | JSON-serialized positional args |
 | `kwargs` | TEXT | JSON-serialized keyword args |
-| `status` | VARCHAR | PENDING/CLAIMED/RUNNING/COMPLETED/FAILED/CANCELLED/REQUEUED (stored as VARCHAR via `native_enum=False`) |
+| `status` | VARCHAR | PENDING/CLAIMED/RUNNING/COMPLETED/FAILED/CANCELLED/EXPIRED (stored as VARCHAR via `native_enum=False`) |
 
 These values correspond to `TaskStatus` in the API (see Task Lifecycle for terminal states).
 | `sent_at` | TIMESTAMP | Immutable call-site timestamp (when `.send()`/`.schedule()` was called) |
@@ -142,7 +142,7 @@ BEGIN
         PERFORM pg_notify('task_new', NEW.id);
         PERFORM pg_notify('task_queue_' || NEW.queue_name, NEW.id);
     ELSIF TG_OP = 'UPDATE' AND OLD.status != NEW.status THEN
-        IF NEW.status IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN
+        IF NEW.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED') THEN
             PERFORM pg_notify('task_done', NEW.id);
         END IF;
     END IF;
@@ -179,7 +179,7 @@ The worker's reaper loop prunes old rows automatically every hour based on [Reco
 | `horsies_workflows` | `terminal_record_retention_hours` | 30 days | Terminal status + oldest timestamp older than threshold |
 | `horsies_workflow_tasks` | `terminal_record_retention_hours` | 30 days | Parent workflow is terminal and older than threshold |
 
-Terminal statuses: COMPLETED, FAILED, CANCELLED. Set any retention field to `None` to disable cleanup for that category. See [Recovery Config](../../configuration/recovery-config#retention-cleanup) for configuration details.
+Terminal statuses: COMPLETED, FAILED, CANCELLED, EXPIRED. Set any retention field to `None` to disable cleanup for that category. See [Recovery Config](../../configuration/recovery-config#retention-cleanup) for configuration details.
 
 ## File Location
 

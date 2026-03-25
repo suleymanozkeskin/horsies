@@ -544,10 +544,11 @@ async def _get_expiry_task_status(
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
 async def test_workflow_task_expires_before_claim(broker: PostgresBroker) -> None:
-    """L4.7.1: Workflow task with past good_until is never claimed.
+    """L4.7.1: Workflow task with past good_until is never claimed or executed.
 
     Creates a workflow with a task that expires before worker can claim it.
-    Verifies the expired task stays in PENDING status (never claimed).
+    Verifies the expired task is never claimed — it stays PENDING or the reaper
+    transitions it to EXPIRED.
     """
     # Create workflow spec with short-lived task (expires in 500ms)
     expiry = datetime.now(timezone.utc) + timedelta(milliseconds=500)
@@ -576,24 +577,25 @@ async def test_workflow_task_expires_before_claim(broker: PostgresBroker) -> Non
     # Start worker AFTER task has expired
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
         # Observe for a short window and ensure worker never claims expired task.
+        # Reaper may transition it to EXPIRED — both PENDING and EXPIRED are valid.
         observe_deadline = asyncio.get_event_loop().time() + 2.0
         while asyncio.get_event_loop().time() < observe_deadline:
             status, _ = await _get_expiry_task_status(
                 broker.session_factory, handle.workflow_id, 0,
             )
-            assert (
-                status == 'PENDING'
-            ), f"Expired task should remain PENDING (never claimed), got {status}"
+            assert status in (
+                'PENDING', 'EXPIRED',
+            ), f"Expired task should be PENDING or EXPIRED (never claimed), got {status}"
             await asyncio.sleep(0.1)
 
-        # Final verification: task is still PENDING with good_until set
+        # Final verification: task was never claimed
         status, good_until_val = await _get_expiry_task_status(
             broker.session_factory, handle.workflow_id, 0,
         )
         assert good_until_val is not None, 'good_until should be set on task'
-        assert (
-            status == 'PENDING'
-        ), f'Expired task should remain PENDING (never claimed), got {status}'
+        assert status in (
+            'PENDING', 'EXPIRED',
+        ), f'Expired task should be PENDING or EXPIRED (never claimed), got {status}'
 
 
 @pytest.mark.e2e
