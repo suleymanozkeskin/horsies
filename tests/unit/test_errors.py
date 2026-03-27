@@ -187,7 +187,7 @@ class TestHorsiesError:
             code=ErrorCode.WORKFLOW_CYCLE_DETECTED,
         )
         formatted = err.format_rust_style(use_colors=False)
-        assert 'error[E007]:' in formatted
+        assert 'error[HRS-007]:' in formatted
         assert 'cycle detected' in formatted
 
     def test_format_rust_style_with_location(self) -> None:
@@ -348,7 +348,7 @@ class TestWorkflowValidationError:
         )
         formatted = err.format_rust_style(use_colors=False)
 
-        assert 'error[E008]:' in formatted
+        assert 'error[HRS-008]:' in formatted
         assert 'args_from references task not in waits_for' in formatted
         assert "= note: task 'process'" in formatted
         assert '= help:' in formatted
@@ -382,7 +382,7 @@ class TestTaskDefinitionError:
             code=ErrorCode.TASK_INVALID_RETURN_TYPE,
         )
         formatted = err.format_rust_style(use_colors=False)
-        assert 'error[E101]:' in formatted
+        assert 'error[HRS-101]:' in formatted
         assert 'invalid return type' in formatted
 
 
@@ -413,7 +413,7 @@ class TestRegistryError:
             code=ErrorCode.TASK_DUPLICATE_NAME,
         )
         formatted = err.format_rust_style(use_colors=False)
-        assert 'error[E301]:' in formatted
+        assert 'error[HRS-301]:' in formatted
         assert 'duplicate name' in formatted
 
 
@@ -536,9 +536,9 @@ class TestErrorCode:
             ErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER,
         ]
         for code in workflow_codes:
-            # E001-E099 range
-            num = int(code.value[1:])
-            assert 1 <= num <= 99, f'{code} should be in E001-E099 range'
+            # HRS-001-HRS-099 range
+            num = int(code.value[4:])
+            assert 1 <= num <= 99, f'{code} should be in HRS-001-HRS-099 range'
 
     def test_task_error_codes_in_range(self) -> None:
         task_codes = [
@@ -548,9 +548,9 @@ class TestErrorCode:
             ErrorCode.TASK_INVALID_QUEUE,
         ]
         for code in task_codes:
-            # E100-E199 range
-            num = int(code.value[1:])
-            assert 100 <= num <= 199, f'{code} should be in E100-E199 range'
+            # HRS-100-HRS-199 range
+            num = int(code.value[4:])
+            assert 100 <= num <= 199, f'{code} should be in HRS-100-HRS-199 range'
 
     def test_config_broker_error_codes_in_range(self) -> None:
         config_codes = [
@@ -566,9 +566,9 @@ class TestErrorCode:
             ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
         ]
         for code in config_codes:
-            # E200-E299 range
-            num = int(code.value[1:])
-            assert 200 <= num <= 299, f'{code} should be in E200-E299 range'
+            # HRS-200-HRS-299 range
+            num = int(code.value[4:])
+            assert 200 <= num <= 299, f'{code} should be in HRS-200-HRS-299 range'
 
     def test_registry_error_codes_in_range(self) -> None:
         registry_codes = [
@@ -576,16 +576,16 @@ class TestErrorCode:
             ErrorCode.TASK_DUPLICATE_NAME,
         ]
         for code in registry_codes:
-            # E300-E399 range
-            num = int(code.value[1:])
-            assert 300 <= num <= 399, f'{code} should be in E300-E399 range'
+            # HRS-300-HRS-399 range
+            num = int(code.value[4:])
+            assert 300 <= num <= 399, f'{code} should be in HRS-300-HRS-399 range'
 
     def test_error_code_is_string_enum(self) -> None:
-        """ErrorCode values are strings like 'E001'."""
+        """ErrorCode values are strings like 'HRS-001'."""
         for code in ErrorCode:
             assert isinstance(code.value, str)
-            assert code.value[0] == 'E'
-            assert code.value[1:].isdigit()
+            assert code.value.startswith('HRS-')
+            assert code.value[4:].isdigit()
 
 
 # =============================================================================

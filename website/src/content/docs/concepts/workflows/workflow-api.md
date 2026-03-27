@@ -201,8 +201,8 @@ def build_regional_pipeline(region: str) -> WorkflowSpec:
 
 | Code | When |
 |------|------|
-| E027 | Parameterized builder missing `cases=` |
-| E029 | Builder raises an exception, returns non-`WorkflowSpec`, or returns a spec missing required validation like `definition_key` |
-| E030 | Function returns `WorkflowSpec` but lacks `@app.workflow_builder` |
+| HRS-027 | Parameterized builder missing `cases=` |
+| HRS-029 | Builder raises an exception, returns non-`WorkflowSpec`, or returns a spec missing required validation like `definition_key` |
+| HRS-030 | Function returns `WorkflowSpec` but lacks `@app.workflow_builder` |
 
 For the guarantee model and CI usage, see [Startup Validation](../../configuration/app-config#startup-validation-appcheck).

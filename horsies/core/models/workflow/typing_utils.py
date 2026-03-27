@@ -210,7 +210,7 @@ def validate_workflow_generic_output_match(
     WorkflowDefinition[AggregatedReport] but Meta.output points to
     a TaskNode[str].
 
-    Raises WorkflowValidationError (E025) on mismatch.
+    Raises WorkflowValidationError (HRS-025) on mismatch.
     Skips validation when either side is unresolvable or Any.
     """
     if spec.output is None:

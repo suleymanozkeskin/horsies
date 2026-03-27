@@ -120,14 +120,14 @@ Queue configuration is validated at multiple points:
 **At task send time**: Queue name re-validated against current configuration
 
 ```python
-# This raises ConfigurationError (E103) at definition time:
+# This raises ConfigurationError (HRS-103) at definition time:
 @app.task("bad_task", queue_name="nonexistent")
 def bad_task() -> TaskResult[str, TaskError]:
     ...
 ```
 
 ```text
-error[E103]: invalid queue_name 'nonexistent'
+error[HRS-103]: invalid queue_name 'nonexistent'
   --> /app/tasks.py:12
    |
 12 | @app.task("bad_task", queue_name="nonexistent")

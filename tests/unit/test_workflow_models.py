@@ -859,7 +859,7 @@ class TestWorkflowSpecValidation:
         assert exc.value.code == ErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH
 
     def test_subworkflow_inherited_default_build_with_requires_override(self) -> None:
-        """Inherited default build_with must still reject runtime params (E022)."""
+        """Inherited default build_with must still reject runtime params (HRS-022)."""
         fn_a = MockTaskWrapper(task_name='task_a')
 
         class BaseChildWorkflow(WorkflowDefinition[int]):
@@ -915,7 +915,7 @@ class TestWorkflowSpecValidation:
         assert len(spec.tasks) == 1
 
     def test_subworkflow_inherited_custom_build_with_missing_param_rejected(self) -> None:
-        """Inherited custom build_with keeps required-param validation (E020)."""
+        """Inherited custom build_with keeps required-param validation (HRS-020)."""
         fn_a = MockTaskWrapper(task_name='task_a')
 
         class BaseChildWorkflow(WorkflowDefinition[int]):
@@ -957,7 +957,7 @@ class TestWorkflowSpecValidation:
         assert exc.value.code == ErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS
 
     def test_subworkflow_inherited_custom_build_with_invalid_kwarg_rejected(self) -> None:
-        """Inherited custom build_with keeps kwarg-key validation (E019)."""
+        """Inherited custom build_with keeps kwarg-key validation (HRS-019)."""
         fn_a = MockTaskWrapper(task_name='task_a')
 
         class BaseChildWorkflow(WorkflowDefinition[int]):
@@ -1102,7 +1102,7 @@ class TestWorkflowSpecValidation:
         assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_kwargs_args_from_overlap_rejected(self) -> None:
-        """Overlapping kwargs and args_from keys raises E021."""
+        """Overlapping kwargs and args_from keys raises HRS-021."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapperWithParams(task_name='task_b')
 
@@ -1188,7 +1188,7 @@ class TestWorkflowSpecValidation:
         assert len(spec.tasks) == 2
 
     def test_subworkflow_kwargs_args_from_overlap_rejected(self) -> None:
-        """SubWorkflowNode with overlapping kwargs and args_from raises E021."""
+        """SubWorkflowNode with overlapping kwargs and args_from raises HRS-021."""
         fn_a = MockTaskWrapper(task_name='task_a')
 
         class ChildWorkflow(WorkflowDefinition[int]):
@@ -1437,7 +1437,7 @@ class TestWorkflowSpecValidation:
         WorkflowSpec(name='subworkflow_kwargs_ok', tasks=[child_node])
 
     def test_output_not_in_workflow(self) -> None:
-        """output task not in tasks raises E011."""
+        """output task not in tasks raises HRS-011."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_external = MockTaskWrapper(task_name='external')
 
@@ -1503,7 +1503,7 @@ class TestWorkflowSpecValidation:
         assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_NODE_ID
 
     def test_success_policy_empty_cases_raises(self) -> None:
-        """SuccessPolicy with empty cases list raises E012."""
+        """SuccessPolicy with empty cases list raises HRS-012."""
         fn_a = MockTaskWrapper(task_name='task_a')
         node_a = TaskNode(fn=fn_a)
 
@@ -1515,7 +1515,7 @@ class TestWorkflowSpecValidation:
         assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
 
     def test_success_policy_empty_required_raises(self) -> None:
-        """SuccessCase with empty required list raises E012."""
+        """SuccessCase with empty required list raises HRS-012."""
         fn_a = MockTaskWrapper(task_name='task_a')
         node_a = TaskNode(fn=fn_a)
 
@@ -1527,7 +1527,7 @@ class TestWorkflowSpecValidation:
         assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
 
     def test_success_policy_invalid_task_raises(self) -> None:
-        """SuccessCase referencing task not in workflow raises E012."""
+        """SuccessCase referencing task not in workflow raises HRS-012."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
@@ -2178,13 +2178,13 @@ class TestWorkflowDefinition:
 
 
 # =============================================================================
-# Workflow Output Type Mismatch Tests (E025)
+# Workflow Output Type Mismatch Tests (HRS-025)
 # =============================================================================
 
 
 @pytest.mark.unit
 class TestWorkflowOutputTypeMismatch:
-    """Tests for _validate_workflow_generic_output_match (E025)."""
+    """Tests for _validate_workflow_generic_output_match (HRS-025)."""
 
     @staticmethod
     def _make_app() -> Any:
@@ -2220,7 +2220,7 @@ class TestWorkflowOutputTypeMismatch:
         assert spec.output is not None
 
     def test_mismatched_output_type_rejected(self) -> None:
-        """WorkflowDefinition[int] with TaskNode producing str raises E025."""
+        """WorkflowDefinition[int] with TaskNode producing str raises HRS-025."""
         fn_str = MockTaskWrapper(task_name='producer_str', task_ok_type=str)
         app = self._make_app()
 
@@ -2783,7 +2783,7 @@ class TestSuccessPolicyOptionalValidation:
     """Tests for success_policy optional task validation."""
 
     def test_optional_task_not_in_workflow_raises(self) -> None:
-        """success_policy.optional referencing task not in workflow raises E012."""
+        """success_policy.optional referencing task not in workflow raises HRS-012."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_external = MockTaskWrapper(task_name='external')
 

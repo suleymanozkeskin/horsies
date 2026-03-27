@@ -14,7 +14,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - In source checkouts, skills live under: `horsies/.agents/skills/`
 - `SKILL.md` -> quick orientation and routing
 - `tasks.md` -> task APIs, send/retry flows, serialization, error handling
-- `workflows.md` -> DAG construction, WorkflowHandle semantics, E001-E031 validation
+- `workflows.md` -> DAG construction, WorkflowHandle semantics, HRS-001-HRS-031 validation
 - `configs.md` -> AppConfig, queues, recovery/resilience, scheduling, CLI/runtime settings
 - These are markdown guidance files (no bundled scripts) designed for on-demand agent loading
 
@@ -86,7 +86,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - OutcomeCode: TASK_CANCELLED, TASK_EXPIRED, WORKFLOW_PAUSED, WORKFLOW_FAILED, WORKFLOW_CANCELLED, UPSTREAM_SKIPPED, SUBWORKFLOW_FAILED, WORKFLOW_SUCCESS_CASE_NOT_MET
 - All built-in code string values are globally reserved; user-defined error codes must not collide
 - BUILTIN_CODE_REGISTRY: dict[str, BuiltInTaskCode] maps every reserved string to its enum member
-- horsies check reports E212 when exception_mapper or default_unhandled_error_code collides with a reserved code
+- horsies check reports HRS-212 when exception_mapper or default_unhandled_error_code collides with a reserved code
 - User-defined error codes are plain str only (foreign str,Enum types rejected)
 - Strict construction: TaskError(error_code="BROKER_ERROR") raises ValueError (reserved string)
 - Use enum members: TaskError(error_code=OperationalErrorCode.BROKER_ERROR) — accepted
@@ -311,9 +311,9 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Zero-arg builders: auto-invoked during check with no arguments
 - Parameterized builders: requires cases= kwarg dicts covering each required parameter
 - Builders run under send suppression (no tasks enqueued); returned WorkflowSpec is fully validated
-- E027: parameterized builder missing cases=
-- E029: builder raised exception or returned non-WorkflowSpec
-- E030: function returns WorkflowSpec but lacks @app.workflow_builder
+- HRS-027: parameterized builder missing cases=
+- HRS-029: builder raised exception or returned non-WorkflowSpec
+- HRS-030: function returns WorkflowSpec but lacks @app.workflow_builder
 
 ### start_workflow / start_workflow_async
 - start_workflow(spec, broker, workflow_id=None, *, resend_on_transient_err=False) -> WorkflowStartResult[WorkflowHandle[T]]
@@ -421,12 +421,12 @@ making web request, local will cost you less tokens and greater knowledgebase at
   - Phase 1: Config validation (implicit at AppConfig construction)
   - Phase 2: Task module imports — imports each module, collects import/definition errors
   - Phase 3: Workflow validation — triggered during imports (WorkflowSpec DAG construction)
-  - Phase 4: Workflow builders — executes @app.workflow_builder functions, validates returned specs, detects undecorated builders (E030)
+  - Phase 4: Workflow builders — executes @app.workflow_builder functions, validates returned specs, detects undecorated builders (HRS-030)
   - Phase 5: Runtime policy safety — validates retry/exception-mapper policy metadata
   - Phase 6 (--live only): Broker connectivity — async SELECT 1 against PostgreSQL
 - Guarantee model:
   - Strong: @app.workflow_builder decorated functions are fully executed and validated for exercised builder cases
-  - Best-effort: undecorated builder detection (E030) is heuristic — only scans directly discovered modules
+  - Best-effort: undecorated builder detection (HRS-030) is heuristic — only scans directly discovered modules
 - Returns list[HorsiesError]; empty = all passed
 - Errors are collected within each phase; check returns early before later phases when earlier phases fail
 - Worker and scheduler also run check() at startup before accepting work
@@ -435,35 +435,35 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### Error Types and Reporting
 
-#### ErrorCode (enum, startup/validation errors E001-E399)
-- Workflow validation (E001-E030):
-  - E001 WORKFLOW_NO_NAME, E002 WORKFLOW_NO_NODES
-  - E003 WORKFLOW_INVALID_NODE_ID, E004 WORKFLOW_DUPLICATE_NODE_ID
-  - E005 WORKFLOW_NO_ROOT_TASKS, E006 WORKFLOW_INVALID_DEPENDENCY
-  - E007 WORKFLOW_CYCLE_DETECTED, E008 WORKFLOW_INVALID_ARGS_FROM
-  - E009 WORKFLOW_INVALID_CTX_FROM, E010 WORKFLOW_CTX_PARAM_MISSING
-  - E011 WORKFLOW_INVALID_OUTPUT, E012 WORKFLOW_INVALID_SUCCESS_POLICY
-  - E013 WORKFLOW_INVALID_JOIN, E014 WORKFLOW_UNRESOLVED_QUEUE, E015 WORKFLOW_UNRESOLVED_PRIORITY
-  - E018 WORKFLOW_SUBWORKFLOW_APP_MISSING, E019 WORKFLOW_INVALID_KWARG_KEY
-  - E020 WORKFLOW_MISSING_REQUIRED_PARAMS, E021 WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
-  - E022 WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH, E023 WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING
-  - E024 WORKFLOW_ARGS_FROM_TYPE_MISMATCH, E025 WORKFLOW_OUTPUT_TYPE_MISMATCH
-  - E026 WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
-  - E027 WORKFLOW_CHECK_CASES_REQUIRED, E028 WORKFLOW_CHECK_CASE_INVALID
-  - E029 WORKFLOW_CHECK_BUILDER_EXCEPTION, E030 WORKFLOW_CHECK_UNDECORATED_BUILDER
-- Task definition (E100-E103):
-  - E100 TASK_NO_RETURN_TYPE, E101 TASK_INVALID_RETURN_TYPE
-  - E102 TASK_INVALID_OPTIONS, E103 TASK_INVALID_QUEUE
-- Config/broker (E200-E212):
-  - E200 CONFIG_INVALID_QUEUE_MODE, E201 CONFIG_INVALID_CLUSTER_CAP
-  - E202 CONFIG_INVALID_PREFETCH, E203 BROKER_INVALID_URL
-  - E204 CONFIG_INVALID_RECOVERY, E205 CONFIG_INVALID_SCHEDULE
-  - E206 CLI_INVALID_ARGS, E207 WORKER_INVALID_LOCATOR
-  - E208 CONFIG_INVALID_RESILIENCE, E209 CONFIG_INVALID_EXCEPTION_MAPPER
-  - E210 MODULE_EXEC_ERROR, E211 BROKER_INIT_FAILED
-  - E212 CHECK_RESERVED_CODE_COLLISION (exception_mapper/default_unhandled_error_code collides with built-in code)
-- Registry (E300-E301):
-  - E300 TASK_NOT_REGISTERED, E301 TASK_DUPLICATE_NAME
+#### ErrorCode (enum, startup/validation errors HRS-001-HRS-399)
+- Workflow validation (HRS-001-HRS-030):
+  - HRS-001 WORKFLOW_NO_NAME, HRS-002 WORKFLOW_NO_NODES
+  - HRS-003 WORKFLOW_INVALID_NODE_ID, HRS-004 WORKFLOW_DUPLICATE_NODE_ID
+  - HRS-005 WORKFLOW_NO_ROOT_TASKS, HRS-006 WORKFLOW_INVALID_DEPENDENCY
+  - HRS-007 WORKFLOW_CYCLE_DETECTED, HRS-008 WORKFLOW_INVALID_ARGS_FROM
+  - HRS-009 WORKFLOW_INVALID_CTX_FROM, HRS-010 WORKFLOW_CTX_PARAM_MISSING
+  - HRS-011 WORKFLOW_INVALID_OUTPUT, HRS-012 WORKFLOW_INVALID_SUCCESS_POLICY
+  - HRS-013 WORKFLOW_INVALID_JOIN, HRS-014 WORKFLOW_UNRESOLVED_QUEUE, HRS-015 WORKFLOW_UNRESOLVED_PRIORITY
+  - HRS-018 WORKFLOW_SUBWORKFLOW_APP_MISSING, HRS-019 WORKFLOW_INVALID_KWARG_KEY
+  - HRS-020 WORKFLOW_MISSING_REQUIRED_PARAMS, HRS-021 WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
+  - HRS-022 WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH, HRS-023 WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING
+  - HRS-024 WORKFLOW_ARGS_FROM_TYPE_MISMATCH, HRS-025 WORKFLOW_OUTPUT_TYPE_MISMATCH
+  - HRS-026 WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
+  - HRS-027 WORKFLOW_CHECK_CASES_REQUIRED, HRS-028 WORKFLOW_CHECK_CASE_INVALID
+  - HRS-029 WORKFLOW_CHECK_BUILDER_EXCEPTION, HRS-030 WORKFLOW_CHECK_UNDECORATED_BUILDER
+- Task definition (HRS-100-HRS-103):
+  - HRS-100 TASK_NO_RETURN_TYPE, HRS-101 TASK_INVALID_RETURN_TYPE
+  - HRS-102 TASK_INVALID_OPTIONS, HRS-103 TASK_INVALID_QUEUE
+- Config/broker (HRS-200-HRS-212):
+  - HRS-200 CONFIG_INVALID_QUEUE_MODE, HRS-201 CONFIG_INVALID_CLUSTER_CAP
+  - HRS-202 CONFIG_INVALID_PREFETCH, HRS-203 BROKER_INVALID_URL
+  - HRS-204 CONFIG_INVALID_RECOVERY, HRS-205 CONFIG_INVALID_SCHEDULE
+  - HRS-206 CLI_INVALID_ARGS, HRS-207 WORKER_INVALID_LOCATOR
+  - HRS-208 CONFIG_INVALID_RESILIENCE, HRS-209 CONFIG_INVALID_EXCEPTION_MAPPER
+  - HRS-210 MODULE_EXEC_ERROR, HRS-211 BROKER_INIT_FAILED
+  - HRS-212 CHECK_RESERVED_CODE_COLLISION (exception_mapper/default_unhandled_error_code collides with built-in code)
+- Registry (HRS-300-HRS-301):
+  - HRS-300 TASK_NOT_REGISTERED, HRS-301 TASK_DUPLICATE_NAME
 
 #### HorsiesError (base exception)
 - Rust-style formatted error display (like rustc compiler errors)

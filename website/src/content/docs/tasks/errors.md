@@ -180,8 +180,8 @@ TaskError(error_code="BROKER_ERROR")                     # ValueError — reserv
 
 `horsies check` detects reserved-code collisions in statically visible configuration:
 
-- **`exception_mapper` values** — if any mapped error code string matches a reserved built-in code, `horsies check` reports `E212`.
-- **`default_unhandled_error_code`** — if set to a reserved built-in code other than the library default `UNHANDLED_EXCEPTION`, `horsies check` reports `E212`.
+- **`exception_mapper` values** — if any mapped error code string matches a reserved built-in code, `horsies check` reports `HRS-212`.
+- **`default_unhandled_error_code`** — if set to a reserved built-in code other than the library default `UNHANDLED_EXCEPTION`, `horsies check` reports `HRS-212`.
 
 The library default `UNHANDLED_EXCEPTION` is intentionally a built-in code and is not flagged.
 
@@ -191,7 +191,7 @@ Example collision that `horsies check` catches:
 app = Horsies(
     config=AppConfig(
         broker=PostgresConfig(database_url='postgresql+psycopg://...'),
-        # E212: 'BROKER_ERROR' collides with OperationalErrorCode.BROKER_ERROR
+        # HRS-212: 'BROKER_ERROR' collides with OperationalErrorCode.BROKER_ERROR
         exception_mapper={ValueError: 'BROKER_ERROR'},
     ),
 )
@@ -209,88 +209,88 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 
 | Range | Category | Description |
 | ----- | -------- | ----------- |
-| E001-E099 | Workflow Validation | Invalid workflow specification |
-| E100-E199 | Task Definition | Invalid task decorator usage |
-| E200-E299 | Configuration | Invalid app/broker configuration |
-| E300-E399 | Registry | Task registration failures |
+| HRS-001-HRS-099 | Workflow Validation | Invalid workflow specification |
+| HRS-100-HRS-199 | Task Definition | Invalid task decorator usage |
+| HRS-200-HRS-299 | Configuration | Invalid app/broker configuration |
+| HRS-300-HRS-399 | Registry | Task registration failures |
 
-### Workflow Validation (E001-E099)
-
-| Code | Name | Description |
-| ---- | ---- | ----------- |
-| E001 | `WORKFLOW_NO_NAME` | Workflow has no name |
-| E002 | `WORKFLOW_NO_NODES` | Workflow has no nodes |
-| E003 | `WORKFLOW_INVALID_NODE_ID` | Invalid node ID reference |
-| E004 | `WORKFLOW_DUPLICATE_NODE_ID` | Duplicate node ID |
-| E005 | `WORKFLOW_NO_ROOT_TASKS` | No root tasks in workflow |
-| E006 | `WORKFLOW_INVALID_DEPENDENCY` | Invalid dependency reference |
-| E007 | `WORKFLOW_CYCLE_DETECTED` | Cycle detected in workflow DAG |
-| E008 | `WORKFLOW_INVALID_ARGS_FROM` | Invalid args_from reference |
-| E009 | `WORKFLOW_INVALID_CTX_FROM` | Invalid ctx_from reference |
-| E010 | `WORKFLOW_CTX_PARAM_MISSING` | Context parameter missing |
-| E011 | `WORKFLOW_INVALID_OUTPUT` | Invalid output specification |
-| E012 | `WORKFLOW_INVALID_SUCCESS_POLICY` | Invalid success policy |
-| E013 | `WORKFLOW_INVALID_JOIN` | Invalid join configuration |
-| E014 | `WORKFLOW_UNRESOLVED_QUEUE` | Queue name not resolved |
-| E015 | `WORKFLOW_UNRESOLVED_PRIORITY` | Priority not resolved |
-| E016 | `WORKFLOW_NO_DEFINITION_KEY` | Workflow definition/spec missing `definition_key` |
-| E017 | `WORKFLOW_DUPLICATE_DEFINITION_KEY` | Two definitions share the same `definition_key` |
-| E018 | `WORKFLOW_SUBWORKFLOW_APP_MISSING` | Subworkflow app reference missing |
-| E019 | `WORKFLOW_INVALID_KWARG_KEY` | Unknown kwargs or args_from key for callable |
-| E020 | `WORKFLOW_MISSING_REQUIRED_PARAMS` | Missing required parameters for task or subworkflow |
-| E021 | `WORKFLOW_KWARGS_ARGS_FROM_OVERLAP` | kwargs and args_from share one or more keys |
-| E022 | `WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH` | Subworkflow params passed but build_with is not overridden |
-| E023 | `WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING` | Subworkflow build_with binding error (duplicate param binding) |
-| E024 | `WORKFLOW_ARGS_FROM_TYPE_MISMATCH` | args_from source result type doesn't match target parameter |
-| E025 | `WORKFLOW_OUTPUT_TYPE_MISMATCH` | Output node type doesn't match WorkflowSpec generic |
-| E026 | `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED` | Positional args are not supported for workflow nodes |
-| E027 | `WORKFLOW_CHECK_CASES_REQUIRED` | Parameterized workflow builder missing test cases |
-| E028 | `WORKFLOW_CHECK_CASE_INVALID` | Workflow builder test case is invalid |
-| E029 | `WORKFLOW_CHECK_BUILDER_EXCEPTION` | Workflow builder raised an exception or returned non-WorkflowSpec |
-| E030 | `WORKFLOW_CHECK_UNDECORATED_BUILDER` | Function returns WorkflowSpec but lacks @app.workflow_builder |
-| E031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails JSON serialization |
-
-### Task Definition (E100-E199)
+### Workflow Validation (HRS-001-HRS-099)
 
 | Code | Name | Description |
 | ---- | ---- | ----------- |
-| E100 | `TASK_NO_RETURN_TYPE` | Task function missing return type |
-| E101 | `TASK_INVALID_RETURN_TYPE` | Return type is not TaskResult |
-| E102 | `TASK_INVALID_OPTIONS` | Invalid task options |
-| E103 | `TASK_INVALID_QUEUE` | Invalid queue specification |
-| E104 | `TASK_PREDECORATED_NOT_SUPPORTED` | Task function is already decorated by another app instance |
+| HRS-001 | `WORKFLOW_NO_NAME` | Workflow has no name |
+| HRS-002 | `WORKFLOW_NO_NODES` | Workflow has no nodes |
+| HRS-003 | `WORKFLOW_INVALID_NODE_ID` | Invalid node ID reference |
+| HRS-004 | `WORKFLOW_DUPLICATE_NODE_ID` | Duplicate node ID |
+| HRS-005 | `WORKFLOW_NO_ROOT_TASKS` | No root tasks in workflow |
+| HRS-006 | `WORKFLOW_INVALID_DEPENDENCY` | Invalid dependency reference |
+| HRS-007 | `WORKFLOW_CYCLE_DETECTED` | Cycle detected in workflow DAG |
+| HRS-008 | `WORKFLOW_INVALID_ARGS_FROM` | Invalid args_from reference |
+| HRS-009 | `WORKFLOW_INVALID_CTX_FROM` | Invalid ctx_from reference |
+| HRS-010 | `WORKFLOW_CTX_PARAM_MISSING` | Context parameter missing |
+| HRS-011 | `WORKFLOW_INVALID_OUTPUT` | Invalid output specification |
+| HRS-012 | `WORKFLOW_INVALID_SUCCESS_POLICY` | Invalid success policy |
+| HRS-013 | `WORKFLOW_INVALID_JOIN` | Invalid join configuration |
+| HRS-014 | `WORKFLOW_UNRESOLVED_QUEUE` | Queue name not resolved |
+| HRS-015 | `WORKFLOW_UNRESOLVED_PRIORITY` | Priority not resolved |
+| HRS-016 | `WORKFLOW_NO_DEFINITION_KEY` | Workflow definition/spec missing `definition_key` |
+| HRS-017 | `WORKFLOW_DUPLICATE_DEFINITION_KEY` | Two definitions share the same `definition_key` |
+| HRS-018 | `WORKFLOW_SUBWORKFLOW_APP_MISSING` | Subworkflow app reference missing |
+| HRS-019 | `WORKFLOW_INVALID_KWARG_KEY` | Unknown kwargs or args_from key for callable |
+| HRS-020 | `WORKFLOW_MISSING_REQUIRED_PARAMS` | Missing required parameters for task or subworkflow |
+| HRS-021 | `WORKFLOW_KWARGS_ARGS_FROM_OVERLAP` | kwargs and args_from share one or more keys |
+| HRS-022 | `WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH` | Subworkflow params passed but build_with is not overridden |
+| HRS-023 | `WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING` | Subworkflow build_with binding error (duplicate param binding) |
+| HRS-024 | `WORKFLOW_ARGS_FROM_TYPE_MISMATCH` | args_from source result type doesn't match target parameter |
+| HRS-025 | `WORKFLOW_OUTPUT_TYPE_MISMATCH` | Output node type doesn't match WorkflowSpec generic |
+| HRS-026 | `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED` | Positional args are not supported for workflow nodes |
+| HRS-027 | `WORKFLOW_CHECK_CASES_REQUIRED` | Parameterized workflow builder missing test cases |
+| HRS-028 | `WORKFLOW_CHECK_CASE_INVALID` | Workflow builder test case is invalid |
+| HRS-029 | `WORKFLOW_CHECK_BUILDER_EXCEPTION` | Workflow builder raised an exception or returned non-WorkflowSpec |
+| HRS-030 | `WORKFLOW_CHECK_UNDECORATED_BUILDER` | Function returns WorkflowSpec but lacks @app.workflow_builder |
+| HRS-031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails JSON serialization |
 
-### Configuration (E200-E299)
+### Task Definition (HRS-100-HRS-199)
 
 | Code | Name | Description |
 | ---- | ---- | ----------- |
-| E200 | `CONFIG_INVALID_QUEUE_MODE` | Invalid queue mode |
-| E201 | `CONFIG_INVALID_CLUSTER_CAP` | Invalid cluster capacity |
-| E202 | `CONFIG_INVALID_PREFETCH` | Invalid prefetch setting |
-| E203 | `BROKER_INVALID_URL` | Invalid broker URL |
-| E204 | `CONFIG_INVALID_RECOVERY` | Invalid recovery configuration |
-| E205 | `CONFIG_INVALID_SCHEDULE` | Invalid schedule configuration |
-| E206 | `CLI_INVALID_ARGS` | Invalid CLI arguments |
-| E207 | `WORKER_INVALID_LOCATOR` | Invalid worker locator |
-| E208 | `CONFIG_INVALID_RESILIENCE` | Invalid resilience configuration |
-| E209 | `CONFIG_INVALID_EXCEPTION_MAPPER` | Invalid exception mapper |
-| E210 | `MODULE_EXEC_ERROR` | Module raised an error during import |
-| E211 | `BROKER_INIT_FAILED` | Broker failed to initialize |
-| E212 | `CHECK_RESERVED_CODE_COLLISION` | User config value collides with a reserved built-in error code |
+| HRS-100 | `TASK_NO_RETURN_TYPE` | Task function missing return type |
+| HRS-101 | `TASK_INVALID_RETURN_TYPE` | Return type is not TaskResult |
+| HRS-102 | `TASK_INVALID_OPTIONS` | Invalid task options |
+| HRS-103 | `TASK_INVALID_QUEUE` | Invalid queue specification |
+| HRS-104 | `TASK_PREDECORATED_NOT_SUPPORTED` | Task function is already decorated by another app instance |
 
-### Registry (E300-E399)
+### Configuration (HRS-200-HRS-299)
 
 | Code | Name | Description |
 | ---- | ---- | ----------- |
-| E300 | `TASK_NOT_REGISTERED` | Task not found in registry |
-| E301 | `TASK_DUPLICATE_NAME` | Duplicate task name |
+| HRS-200 | `CONFIG_INVALID_QUEUE_MODE` | Invalid queue mode |
+| HRS-201 | `CONFIG_INVALID_CLUSTER_CAP` | Invalid cluster capacity |
+| HRS-202 | `CONFIG_INVALID_PREFETCH` | Invalid prefetch setting |
+| HRS-203 | `BROKER_INVALID_URL` | Invalid broker URL |
+| HRS-204 | `CONFIG_INVALID_RECOVERY` | Invalid recovery configuration |
+| HRS-205 | `CONFIG_INVALID_SCHEDULE` | Invalid schedule configuration |
+| HRS-206 | `CLI_INVALID_ARGS` | Invalid CLI arguments |
+| HRS-207 | `WORKER_INVALID_LOCATOR` | Invalid worker locator |
+| HRS-208 | `CONFIG_INVALID_RESILIENCE` | Invalid resilience configuration |
+| HRS-209 | `CONFIG_INVALID_EXCEPTION_MAPPER` | Invalid exception mapper |
+| HRS-210 | `MODULE_EXEC_ERROR` | Module raised an error during import |
+| HRS-211 | `BROKER_INIT_FAILED` | Broker failed to initialize |
+| HRS-212 | `CHECK_RESERVED_CODE_COLLISION` | User config value collides with a reserved built-in error code |
+
+### Registry (HRS-300-HRS-399)
+
+| Code | Name | Description |
+| ---- | ---- | ----------- |
+| HRS-300 | `TASK_NOT_REGISTERED` | Task not found in registry |
+| HRS-301 | `TASK_DUPLICATE_NAME` | Duplicate task name |
 
 ### HorsiesError Structure
 
 Startup errors provide Rust-style formatting automatically. When raised, they display with source location and context:
 
 ```text
-error[E007]: cycle detected in workflow DAG
+error[HRS-007]: cycle detected in workflow DAG
   --> /app/workflows/order.py:12
    |
 12 | node_b = TaskNode(fn=process, waits_for=[node_a])

@@ -115,7 +115,7 @@ process_node = process_user.node(node_id='process')(
 #          waits_for=[fetch_node], kwargs={'threshold': 70})
 ```
 
-`from_node()` accepts `TaskNode` or `SubWorkflowNode`. Passing anything else raises `WorkflowValidationError` (E008).
+`from_node()` accepts `TaskNode` or `SubWorkflowNode`. Passing anything else raises `WorkflowValidationError` (HRS-008).
 
 ### Mixed with args_from
 

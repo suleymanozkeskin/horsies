@@ -63,7 +63,7 @@ class TestIntervalSchedule:
         assert schedule.total_seconds() == expected
 
     def test_empty_raises_configuration_error(self) -> None:
-        """No time units raises ConfigurationError E205."""
+        """No time units raises ConfigurationError HRS-205."""
         with pytest.raises(ConfigurationError) as exc_info:
             IntervalSchedule()
 
@@ -173,7 +173,7 @@ class TestWeeklySchedule:
         assert schedule.type == 'weekly'
 
     def test_duplicate_days_raises_configuration_error(self) -> None:
-        """Duplicate days raises ConfigurationError E205."""
+        """Duplicate days raises ConfigurationError HRS-205."""
         with pytest.raises(ConfigurationError) as exc_info:
             WeeklySchedule(
                 days=[Weekday.MONDAY, Weekday.MONDAY],
@@ -316,7 +316,7 @@ class TestScheduleConfig:
         assert config.check_interval_seconds == 1
 
     def test_duplicate_names_raises_configuration_error(self) -> None:
-        """Duplicate schedule names raises ConfigurationError E205."""
+        """Duplicate schedule names raises ConfigurationError HRS-205."""
         with pytest.raises(ConfigurationError) as exc_info:
             ScheduleConfig(
                 schedules=[

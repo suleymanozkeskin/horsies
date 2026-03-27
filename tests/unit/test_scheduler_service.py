@@ -64,7 +64,7 @@ class TestSchedulerInit:
     """Tests for Scheduler initialization."""
 
     def test_missing_config_raises_configuration_error(self) -> None:
-        """App without schedule config raises ConfigurationError E205."""
+        """App without schedule config raises ConfigurationError HRS-205."""
         app = _make_app(schedule_config=None)
 
         with pytest.raises(ConfigurationError) as exc_info:
@@ -137,7 +137,7 @@ class TestValidateScheduleSignature:
         scheduler._validate_schedule_signature(schedule)
 
     def test_missing_required_raises_configuration_error(self) -> None:
-        """Missing required param raises ConfigurationError E205."""
+        """Missing required param raises ConfigurationError HRS-205."""
         def needs_value(value: int) -> str:
             return str(value)
 
@@ -459,7 +459,7 @@ class TestValidateSchedules:
     """Tests for Scheduler._validate_schedules."""
 
     def test_unregistered_task_raises_registry_error(self) -> None:
-        """Schedule referencing unregistered task raises RegistryError E300."""
+        """Schedule referencing unregistered task raises RegistryError HRS-300."""
         config = ScheduleConfig(
             schedules=[
                 TaskSchedule(
@@ -498,7 +498,7 @@ class TestValidateSchedules:
         scheduler._validate_schedules()
 
     def test_invalid_queue_raises_configuration_error(self) -> None:
-        """Invalid queue configuration raises ConfigurationError E205."""
+        """Invalid queue configuration raises ConfigurationError HRS-205."""
         def no_params() -> str:
             return 'ok'
 

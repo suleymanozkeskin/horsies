@@ -117,7 +117,7 @@ class WorkflowSpec(Generic[OutT]):
     workflow_def_cls: type[Any] | None = field(default=None, repr=False)
     """
     - Reference to the WorkflowDefinition subclass that built this spec.
-    - Used by start APIs for output type mismatch validation (E025).
+    - Used by start APIs for output type mismatch validation (HRS-025).
     - None when spec is built directly via app.workflow() without a definition class.
     """
 

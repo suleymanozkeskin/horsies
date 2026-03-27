@@ -1478,7 +1478,7 @@ class TestNodeFactoryPositionalRejection:
     """Tests for NodeFactory rejecting positional .node()() calls (D.1)."""
 
     def test_positional_args_raise_workflow_validation_error(self) -> None:
-        """Positional args in .node()() raise WorkflowValidationError(E026)."""
+        """Positional args in .node()() raise WorkflowValidationError(HRS-026)."""
         from horsies.core.errors import WorkflowValidationError
 
         task_fn = _make_task_fn()
@@ -1658,7 +1658,7 @@ class TestNodeFactoryFromNodeConflicts:
     """Tests for conflict detection between from_node() and explicit args_from."""
 
     def test_marker_conflicts_with_explicit_args_from_raises(self) -> None:
-        """Same key in from_node() and explicit args_from raises E021."""
+        """Same key in from_node() and explicit args_from raises HRS-021."""
         from horsies.core.errors import WorkflowValidationError
         from horsies.core.models.workflow import TaskNode
 

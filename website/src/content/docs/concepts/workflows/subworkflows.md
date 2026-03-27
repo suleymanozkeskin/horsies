@@ -287,7 +287,7 @@ class ParentWorkflow(WorkflowDefinition[int]):
 
 **Important:** Passing `kwargs` or `args_from` to a `SubWorkflowNode` requires overriding `build_with()`.
 The default implementation ignores all parameters. If you pass params without overriding, validation
-fails with `E022` (`WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH`).
+fails with `HRS-022` (`WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH`).
 
 When the child workflow needs runtime parameters:
 

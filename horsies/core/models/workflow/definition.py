@@ -93,7 +93,7 @@ class WorkflowDefinitionMeta(type):
                 raw_build_with = cast(Any, cls.build_with)  # type: ignore[attr-defined]
                 unwrapped = getattr(raw_build_with, '__func__', raw_build_with)
 
-        # Store true original for signature/default-build_with checks (E019-E023).
+        # Store true original for signature/default-build_with checks (HRS-019-HRS-023).
         cls._original_build_with = unwrapped  # type: ignore[attr-defined]
 
         original_fn = cast(

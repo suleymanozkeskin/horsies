@@ -153,7 +153,7 @@ class TestCheckWorkflowBuilders:
         assert call_count == 1
 
     def test_zero_arg_builder_exception_wrapped_as_e029(self) -> None:
-        """Unexpected exception from builder is wrapped with E029."""
+        """Unexpected exception from builder is wrapped with HRS-029."""
         app = _make_app()
 
         @app.workflow_builder()
@@ -166,7 +166,7 @@ class TestCheckWorkflowBuilders:
         assert 'kaboom' in str(errors[0])
 
     def test_builder_returning_non_workflow_spec_wrapped_as_e029(self) -> None:
-        """Builder returning non-WorkflowSpec is reported as E029."""
+        """Builder returning non-WorkflowSpec is reported as HRS-029."""
         app = _make_app()
 
         @app.workflow_builder()
@@ -194,7 +194,7 @@ class TestCheckWorkflowBuilders:
         assert errors[0].code == ErrorCode.WORKFLOW_CYCLE_DETECTED
 
     def test_parameterized_builder_without_cases_e027(self) -> None:
-        """Parameterized builder missing cases= fails with E027."""
+        """Parameterized builder missing cases= fails with HRS-027."""
         app = _make_app()
 
         @app.workflow_builder()
@@ -221,7 +221,7 @@ class TestCheckWorkflowBuilders:
         assert invocations == [{'x': 1}, {'x': 2}]
 
     def test_case_with_unknown_keys_e028(self) -> None:
-        """Case with keys not in builder signature fails with E028."""
+        """Case with keys not in builder signature fails with HRS-028."""
         app = _make_app()
 
         @app.workflow_builder(cases=[{'x': 1, 'bogus': 2}])
@@ -234,7 +234,7 @@ class TestCheckWorkflowBuilders:
         assert 'bogus' in str(errors[0])
 
     def test_case_missing_required_keys_e028(self) -> None:
-        """Case missing required keys fails with E028."""
+        """Case missing required keys fails with HRS-028."""
         app = _make_app()
 
         @app.workflow_builder(cases=[{'x': 1}])
@@ -247,7 +247,7 @@ class TestCheckWorkflowBuilders:
         assert 'y' in str(errors[0])
 
     def test_case_not_a_dict_e028(self) -> None:
-        """Non-dict case fails with E028."""
+        """Non-dict case fails with HRS-028."""
         app = _make_app()
 
         @app.workflow_builder(cases=["not_a_dict"])  # type: ignore[list-item]
@@ -259,7 +259,7 @@ class TestCheckWorkflowBuilders:
         assert errors[0].code == ErrorCode.WORKFLOW_CHECK_CASE_INVALID
 
     def test_case_exception_wrapped_as_e029(self) -> None:
-        """Exception during case execution is wrapped with E029."""
+        """Exception during case execution is wrapped with HRS-029."""
         app = _make_app()
 
         @app.workflow_builder(cases=[{'x': 1}])
@@ -349,7 +349,7 @@ class TestCheckUndecoratedBuilders:
         sys.modules.pop(name, None)
 
     def test_undecorated_workflow_spec_function_detected(self) -> None:
-        """Top-level function returning WorkflowSpec triggers E030."""
+        """Top-level function returning WorkflowSpec triggers HRS-030."""
         app = _make_app()
 
         def build_wf() -> WorkflowSpec[Any]:
@@ -385,7 +385,7 @@ class TestCheckUndecoratedBuilders:
             self._cleanup_module(mod_name)
 
     def test_no_check_opt_out_suppresses_detection(self) -> None:
-        """__horsies_no_check__ = True suppresses E030."""
+        """__horsies_no_check__ = True suppresses HRS-030."""
         app = _make_app()
 
         def build_wf() -> WorkflowSpec[Any]:

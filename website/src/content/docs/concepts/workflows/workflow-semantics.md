@@ -829,7 +829,7 @@ def my_task(workflow_meta: WorkflowMeta | None = None) -> TaskResult[str, TaskEr
 Put static values in `kwargs` instead.
 
 **Important:** `kwargs` and `args_from` keys must be disjoint. If the same key appears in both,
-validation fails with `E021` (`WORKFLOW_KWARGS_ARGS_FROM_OVERLAP`).
+validation fails with `HRS-021` (`WORKFLOW_KWARGS_ARGS_FROM_OVERLAP`).
 
 For type-safe node construction with static arguments, see [Typed Node Builder](typed-node-builder).
 

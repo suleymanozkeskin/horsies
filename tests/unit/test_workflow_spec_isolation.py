@@ -65,7 +65,7 @@ class MockFn(TaskFunction[Any, Any]):
 
 @dataclass
 class MockFnWithCtx(TaskFunction[Any, Any]):
-    """MockFn that accepts workflow_ctx (passes E010 validator)."""
+    """MockFn that accepts workflow_ctx (passes HRS-010 validator)."""
 
     task_name: str
     task_ok_type: Any = Any

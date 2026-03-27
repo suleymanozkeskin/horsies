@@ -233,12 +233,12 @@ Register workflow builder functions for check-phase validation. For full API ref
 
 **Strong guarantee (decorated builders):** Functions registered with `@app.workflow_builder` are executed during check. Every `WorkflowSpec` they produce is fully validated — DAG structure, kwargs against function signatures, `args_from` type compatibility, missing required params, `definition_key`, and more. For the exercised builder cases, this catches structural workflow validity errors before runtime.
 
-**Best-effort (undecorated builder detection):** Check also scans discovered task modules for top-level functions whose return type annotation is `WorkflowSpec` but lack the `@app.workflow_builder` decorator. These produce E030 check errors. This detection is heuristic:
+**Best-effort (undecorated builder detection):** Check also scans discovered task modules for top-level functions whose return type annotation is `WorkflowSpec` but lack the `@app.workflow_builder` decorator. These produce HRS-030 check errors. This detection is heuristic:
 
 - It only scans modules directly listed in `discover_tasks()`, not sub-modules of discovered packages.
 - Functions re-exported in `__init__.py` from sub-modules may not be detected.
 
-E030 is a safety net, not an absolute proof that no undecorated builders exist.
+HRS-030 is a safety net, not an absolute proof that no undecorated builders exist.
 
 ### CI Playbook
 
@@ -248,7 +248,7 @@ For deterministic, high-confidence workflow validity in CI:
 2. For parameterized builders, provide `cases=` that cover all meaningful branches and shapes.
 3. Ensure all builder modules are imported by the app used in `horsies check` (no hidden or dynamic registration paths).
 4. Run `horsies check` in CI and fail the pipeline on any errors.
-5. Treat E030 as additional lint signal, not the primary guarantee mechanism.
+5. Treat HRS-030 as additional lint signal, not the primary guarantee mechanism.
 
 ## Logging Configuration
 

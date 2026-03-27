@@ -661,7 +661,7 @@ class TestWorkflowCtx:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """workflow_ctx_from referencing a node not in waits_for raises E009."""
+        """workflow_ctx_from referencing a node not in waits_for raises HRS-009."""
         _session, broker, app = setup
         task_a = make_simple_task(app, 'e009_a')
 
@@ -879,7 +879,7 @@ class TestWorkflowCtx:
 
         # Build a workflow where node_b has workflow_ctx_from but the function
         # does NOT declare workflow_ctx. Normally WorkflowSpec validation rejects
-        # this (E010), so we bypass validation by manually injecting
+        # this (HRS-010), so we bypass validation by manually injecting
         # __horsies_workflow_ctx__ into the task's kwargs at the DB level.
         node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b: TaskNode[int] = TaskNode(

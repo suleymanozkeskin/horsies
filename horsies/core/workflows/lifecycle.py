@@ -153,7 +153,7 @@ async def start_workflow_async(
     try:
         spec._require_definition_key()
 
-        # Validate output type matches declared generic (E025)
+        # Validate output type matches declared generic (HRS-025)
         if spec.workflow_def_cls is not None:
             validate_workflow_generic_output_match(spec.workflow_def_cls, spec)
 

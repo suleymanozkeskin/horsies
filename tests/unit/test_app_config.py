@@ -858,7 +858,7 @@ class TestFormatSchedulePattern:
 
 @pytest.mark.unit
 class TestGetBrokerErrorHandling:
-    """Regression tests for Horsies.get_broker() error wrapping (E211)."""
+    """Regression tests for Horsies.get_broker() error wrapping (HRS-211)."""
 
     def test_non_horsies_error_wrapped_as_broker_init_failed(self) -> None:
         """Non-HorsiesError exceptions are wrapped with BROKER_INIT_FAILED."""
