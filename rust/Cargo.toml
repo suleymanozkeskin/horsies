@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "horsies",
+    "macros",
+    "examples",
+    "tests/support",
+    "tests/worker",
+    "tests/queue_mismatch",
+]
+
+[workspace.lints.rust]
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+clone_on_ref_ptr = "warn"
+manual_let_else = "warn"
+semicolon_if_nothing_returned = "warn"
+needless_pass_by_value = "warn"

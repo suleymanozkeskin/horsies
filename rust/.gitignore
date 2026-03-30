@@ -1,0 +1,30 @@
+# Build artifacts
+/target/
+Cargo.lock
+
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.claude
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.collie/
+artifacts/
+ask-for-review/
+ask-review/
+
+# Showcase (not part of horsies-rust)
+horsies-showcase/
+
+# Coverage
+*.profraw
+*.profdata

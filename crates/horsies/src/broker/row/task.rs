@@ -1,0 +1,220 @@
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+use sqlx::FromRow;
+
+use crate::core::{TaskInfo, TaskStatus};
+
+use crate::broker::error::BrokerError;
+
+/// Minimal row returned by the claim CTE (just the ID).
+#[derive(Debug, FromRow)]
+pub struct ClaimedId {
+    pub id: String,
+}
+
+/// Row returned by SET_RUNNING_SQL — includes the DB-assigned started_at.
+#[derive(Debug, FromRow)]
+pub struct SetRunningRow {
+    pub id: String,
+    pub started_at: DateTime<Utc>,
+}
+
+/// Task columns loaded after claiming.
+#[derive(Debug, Clone, FromRow)]
+pub struct ClaimedTaskRow {
+    pub id: String,
+    pub task_name: String,
+    pub args: Option<String>,
+    pub kwargs: Option<String>,
+    pub retry_count: i32,
+    pub max_retries: i32,
+    pub task_options: Option<String>,
+    pub queue_name: String,
+    pub good_until: Option<DateTime<Utc>>,
+}
+
+/// Columns fetched for result retrieval.
+#[derive(Debug, FromRow)]
+pub struct TaskResultRow {
+    pub id: String,
+    pub status: String,
+    pub result: Option<String>,
+    pub failed_reason: Option<String>,
+}
+
+/// Columns fetched for task info.
+#[derive(Debug, FromRow)]
+pub struct TaskInfoRow {
+    pub id: String,
+    pub task_name: String,
+    pub status: String,
+    pub queue_name: String,
+    pub priority: i32,
+    pub retry_count: i32,
+    pub max_retries: i32,
+    pub next_retry_at: Option<DateTime<Utc>>,
+    pub sent_at: Option<DateTime<Utc>>,
+    pub enqueued_at: DateTime<Utc>,
+    pub claimed_at: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub failed_at: Option<DateTime<Utc>>,
+    pub worker_hostname: Option<String>,
+    pub worker_pid: Option<i32>,
+    pub worker_process_name: Option<String>,
+    pub error_code: Option<String>,
+    pub failed_reason: Option<String>,
+    pub result: Option<String>,
+}
+
+impl TaskInfoRow {
+    /// Convert into the core `TaskInfo` type.
+    pub fn into_task_info(self) -> Result<TaskInfo, BrokerError> {
+        let status = parse_task_status(&self.status)?;
+        Ok(TaskInfo {
+            task_id: self.id,
+            task_name: self.task_name,
+            status,
+            queue_name: self.queue_name,
+            priority: self.priority,
+            retry_count: self.retry_count as u32,
+            max_retries: self.max_retries as u32,
+            next_retry_at: self.next_retry_at,
+            sent_at: self.sent_at,
+            enqueued_at: self.enqueued_at,
+            claimed_at: self.claimed_at,
+            started_at: self.started_at,
+            completed_at: self.completed_at,
+            failed_at: self.failed_at,
+            worker_hostname: self.worker_hostname,
+            worker_pid: self.worker_pid.map(|p| p as u32),
+            worker_process_name: self.worker_process_name,
+            error_code: self.error_code,
+            failed_reason: self.failed_reason,
+            result: self.result.and_then(|s| serde_json::from_str(&s).ok()),
+            attempts: None,
+        })
+    }
+}
+
+/// Parse a status string from the database into `TaskStatus`.
+pub fn parse_task_status(s: &str) -> Result<TaskStatus, BrokerError> {
+    match s {
+        "PENDING" => Ok(TaskStatus::Pending),
+        "CLAIMED" => Ok(TaskStatus::Claimed),
+        "RUNNING" => Ok(TaskStatus::Running),
+        "COMPLETED" => Ok(TaskStatus::Completed),
+        "FAILED" => Ok(TaskStatus::Failed),
+        "CANCELLED" => Ok(TaskStatus::Cancelled),
+        "EXPIRED" => Ok(TaskStatus::Expired),
+        _ => Err(BrokerError::InvalidStatus(s.to_owned())),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task attempt row types
+// ---------------------------------------------------------------------------
+
+/// Context row from SELECT_RUNNING_TASK_CONTEXT_SQL (locked with FOR UPDATE).
+#[derive(Debug, FromRow)]
+pub struct TaskRunningContextRow {
+    pub retry_count: i32,
+    pub started_at: Option<DateTime<Utc>>,
+    pub claimed_by_worker_id: Option<String>,
+    pub worker_hostname: Option<String>,
+    pub worker_pid: Option<i32>,
+    pub worker_process_name: Option<String>,
+}
+
+/// Row returned by SELECT_TASK_ATTEMPTS_SQL.
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct TaskAttemptRow {
+    pub task_id: String,
+    pub attempt: i32,
+    pub outcome: String,
+    pub will_retry: bool,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: DateTime<Utc>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub failed_reason: Option<String>,
+    pub worker_id: Option<String>,
+    pub worker_hostname: Option<String>,
+    pub worker_pid: Option<i32>,
+    pub worker_process_name: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Monitoring / observability row types
+// ---------------------------------------------------------------------------
+
+/// Row returned by the stale-tasks monitoring query.
+///
+/// Represents a RUNNING task whose worker has not sent a heartbeat within
+/// the configured threshold, indicating the worker may have crashed.
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct StaleTaskRow {
+    pub id: String,
+    pub task_name: String,
+    pub worker_hostname: Option<String>,
+    pub worker_pid: Option<i32>,
+    pub worker_process_name: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub last_heartbeat: Option<DateTime<Utc>>,
+}
+
+/// Row returned by the worker-stats monitoring query.
+///
+/// Aggregates RUNNING task counts per worker for load visibility.
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct WorkerStatsRow {
+    pub worker_hostname: Option<String>,
+    pub worker_pid: Option<i32>,
+    pub worker_process_name: Option<String>,
+    pub active_tasks: i64,
+    pub oldest_task_start: Option<DateTime<Utc>>,
+    pub latest_heartbeat: Option<DateTime<Utc>>,
+}
+
+/// Row returned by the expired-tasks monitoring query.
+///
+/// Represents a PENDING task whose `good_until` deadline has passed,
+/// meaning it will never be claimed by a worker.
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct ExpiredTaskRow {
+    pub id: String,
+    pub task_name: String,
+    pub queue_name: String,
+    pub priority: i32,
+    pub sent_at: Option<DateTime<Utc>>,
+    pub good_until: Option<DateTime<Utc>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_all_status_variants() {
+        assert_eq!(parse_task_status("PENDING").unwrap(), TaskStatus::Pending);
+        assert_eq!(parse_task_status("CLAIMED").unwrap(), TaskStatus::Claimed);
+        assert_eq!(parse_task_status("RUNNING").unwrap(), TaskStatus::Running);
+        assert_eq!(
+            parse_task_status("COMPLETED").unwrap(),
+            TaskStatus::Completed
+        );
+        assert_eq!(parse_task_status("FAILED").unwrap(), TaskStatus::Failed);
+        assert_eq!(
+            parse_task_status("CANCELLED").unwrap(),
+            TaskStatus::Cancelled
+        );
+        assert_eq!(parse_task_status("EXPIRED").unwrap(), TaskStatus::Expired);
+    }
+
+    #[test]
+    fn parse_invalid_status() {
+        assert!(parse_task_status("UNKNOWN").is_err());
+        assert!(parse_task_status("pending").is_err());
+        assert!(parse_task_status("").is_err());
+    }
+}

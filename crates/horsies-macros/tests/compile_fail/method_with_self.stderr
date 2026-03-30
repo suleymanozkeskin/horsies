@@ -1,0 +1,13 @@
+error: task functions must be free functions, not methods
+ --> tests/compile_fail/method_with_self.rs:8:21
+  |
+8 |     async fn handle(&self, _: ()) -> Result<String, TaskError> {
+  |                     ^^^^^
+
+warning: unused import: `horsies::TaskError`
+ --> tests/compile_fail/method_with_self.rs:2:5
+  |
+2 | use horsies::TaskError;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

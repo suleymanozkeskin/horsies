@@ -1,0 +1,575 @@
+use serde::{de::DeserializeOwned, Serialize};
+
+/// Serialize a task's success value and verify it round-trips through the
+/// declared output type.
+///
+/// This mirrors Python's producer-side runtime return-contract validation:
+/// the value must not only serialize, it must deserialize back into the same
+/// declared `T`. If round-trip validation fails, return a structured
+/// `RETURN_TYPE_MISMATCH` error instead of persisting a value that later
+/// readers cannot hydrate through the declared type contract.
+#[doc(hidden)]
+pub fn encode_validated_task_output<T>(value: &T) -> crate::core::task::result::TaskResult<Vec<u8>>
+where
+    T: Serialize + DeserializeOwned,
+{
+    let bytes = match crate::core::codec::to_json_bytes(value) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return crate::core::task::result::TaskResult::Err(crate::core::task::TaskError::builtin(
+                crate::core::task::OperationalErrorCode::WorkerSerializationError,
+                format!("failed to serialize task result: {}", e),
+            ));
+        }
+    };
+
+    if let Err(e) = crate::core::codec::from_json_bytes::<T>(&bytes) {
+        let actual_value =
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_else(|_| {
+                serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned())
+            });
+
+        return crate::core::task::result::TaskResult::Err(crate::core::task::TaskError {
+            error_code: Some(crate::core::task::TaskErrorCode::from(
+                crate::core::task::ContractCode::ReturnTypeMismatch,
+            )),
+            message: Some(format!(
+                "task returned a value that does not match its declared output type {}",
+                std::any::type_name::<T>(),
+            )),
+            cause: None,
+            data: Some(serde_json::json!({
+                "expected_type": std::any::type_name::<T>(),
+                "actual_value": actual_value,
+                "validation_error": e.to_string(),
+            })),
+        });
+    }
+
+    crate::core::task::result::TaskResult::Ok(bytes)
+}
+
+/// Create an async [`RegisteredTask`] from an async function.
+///
+/// Wraps the serde boundary: deserializes a single argument from JSON bytes,
+/// calls the function, serializes the result back to JSON bytes.
+///
+/// The task function must:
+/// - Accept a single argument of type `$args_type` (use a struct for multiple fields)
+/// - Return `Result<T, TaskError>` where `T: Serialize + DeserializeOwned`
+///
+/// # Examples
+///
+/// ```ignore
+/// use serde::{Serialize, Deserialize};
+/// use horsies::task::TaskError;
+///
+/// #[derive(Serialize, Deserialize)]
+/// struct AddArgs { a: i32, b: i32 }
+///
+/// async fn add(args: AddArgs) -> Result<i32, TaskError> {
+///     Ok(args.a + args.b)
+/// }
+///
+/// app.register("add", async_task_fn!(add, AddArgs));
+/// ```
+///
+/// For no arguments, use `()`:
+/// ```ignore
+/// async fn heartbeat(_: ()) -> Result<String, TaskError> {
+///     Ok("alive".to_owned())
+/// }
+/// app.register("heartbeat", async_task_fn!(heartbeat, ()));
+/// ```
+#[macro_export]
+macro_rules! async_task_fn {
+    ($fn_name:path, $args_type:ty) => {{
+        struct __AsyncTaskWrapper;
+
+        impl $crate::core::task::fn_trait::AsyncTaskFn for __AsyncTaskWrapper {
+            fn execute(
+                &self,
+                args: &[u8],
+            ) -> ::std::pin::Pin<
+                Box<
+                    dyn ::std::future::Future<
+                            Output = $crate::core::task::fn_trait::RawTaskResult,
+                        > + Send
+                        + '_,
+                >,
+            > {
+                let args = args.to_vec();
+                Box::pin(async move {
+                    let envelope: serde_json::Value = match $crate::core::codec::from_json_bytes(&args) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return $crate::core::task::result::TaskResult::Err(
+                                $crate::core::task::TaskError::builtin(
+                                    $crate::core::task::OperationalErrorCode::WorkerSerializationError,
+                                    format!("failed to parse args/kwargs envelope: {}", e),
+                                ),
+                            );
+                        }
+                    };
+
+                    let kwargs_value = envelope
+                        .get("kwargs")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                    let args_value = envelope
+                        .get("args")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+
+                    let args_array = match args_value {
+                        serde_json::Value::Array(arr) => arr,
+                        serde_json::Value::Null => Vec::new(),
+                        other => vec![other],
+                    };
+
+                    let candidate = if let serde_json::Value::Object(map) = &kwargs_value {
+                        if !map.is_empty() {
+                            kwargs_value
+                        } else if args_array.len() == 1 {
+                            args_array[0].clone()
+                        } else if args_array.is_empty() {
+                            serde_json::Value::Null
+                        } else {
+                            return $crate::core::task::result::TaskResult::Err(
+                                $crate::core::task::TaskError::builtin(
+                                    $crate::core::task::OperationalErrorCode::WorkerSerializationError,
+                                    "args payload must contain exactly one item when kwargs is empty",
+                                ),
+                            );
+                        }
+                    } else if args_array.len() == 1 {
+                        args_array[0].clone()
+                    } else if args_array.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        return $crate::core::task::result::TaskResult::Err(
+                            $crate::core::task::TaskError::builtin(
+                                $crate::core::task::OperationalErrorCode::WorkerSerializationError,
+                                "args payload must contain exactly one item when kwargs is empty",
+                            ),
+                        );
+                    };
+
+                    let deserialized: $args_type = match serde_json::from_value(candidate.clone()) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return $crate::core::task::result::TaskResult::Err($crate::core::task::TaskError {
+                                error_code: Some($crate::core::task::TaskErrorCode::from(
+                                    $crate::core::task::ContractCode::ArgumentTypeMismatch,
+                                )),
+                                message: Some(format!(
+                                    "task args do not match declared input type {}",
+                                    std::any::type_name::<$args_type>(),
+                                )),
+                                cause: None,
+                                data: Some(serde_json::json!({
+                                    "expected_type": std::any::type_name::<$args_type>(),
+                                    "actual_value": candidate,
+                                    "validation_error": e.to_string(),
+                                })),
+                            });
+                        }
+                    };
+                    match $fn_name(deserialized).await {
+                        Ok(value) => $crate::core::task::macros::encode_validated_task_output(&value),
+                        Err(task_error) => $crate::core::task::result::TaskResult::Err(task_error),
+                    }
+                })
+            }
+        }
+
+        $crate::core::task::fn_trait::RegisteredTask::Async {
+            task: ::std::sync::Arc::new(__AsyncTaskWrapper),
+            meta: $crate::core::task::fn_trait::TaskMeta::default(),
+        }
+    }};
+}
+
+/// Create a blocking [`RegisteredTask`] from a synchronous function.
+///
+/// Same serde boundary as [`async_task_fn!`], but for CPU-bound work
+/// that runs on tokio's blocking thread pool.
+///
+/// # Examples
+///
+/// ```ignore
+/// use serde::{Serialize, Deserialize};
+/// use horsies::task::TaskError;
+///
+/// #[derive(Serialize, Deserialize)]
+/// struct ResizeArgs { path: String, width: u32 }
+///
+/// fn resize(args: ResizeArgs) -> Result<String, TaskError> {
+///     Ok(format!("resized {} to {}px", args.path, args.width))
+/// }
+///
+/// app.register("resize", blocking_task_fn!(resize, ResizeArgs));
+/// ```
+#[macro_export]
+macro_rules! blocking_task_fn {
+    ($fn_name:path, $args_type:ty) => {{
+        struct __BlockingTaskWrapper;
+
+        impl $crate::core::task::fn_trait::BlockingTaskFn for __BlockingTaskWrapper {
+            fn execute(&self, args: &[u8]) -> $crate::core::task::fn_trait::RawTaskResult {
+                let envelope: serde_json::Value = match $crate::core::codec::from_json_bytes(args) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return $crate::core::task::result::TaskResult::Err(
+                            $crate::core::task::TaskError::builtin(
+                                $crate::core::task::OperationalErrorCode::WorkerSerializationError,
+                                format!("failed to parse args/kwargs envelope: {}", e),
+                            ),
+                        );
+                    }
+                };
+
+                let kwargs_value = envelope
+                    .get("kwargs")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                let args_value = envelope
+                    .get("args")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+
+                let args_array = match args_value {
+                    serde_json::Value::Array(arr) => arr,
+                    serde_json::Value::Null => Vec::new(),
+                    other => vec![other],
+                };
+
+                let candidate = if let serde_json::Value::Object(map) = &kwargs_value {
+                    if !map.is_empty() {
+                        kwargs_value
+                    } else if args_array.len() == 1 {
+                        args_array[0].clone()
+                    } else if args_array.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        return $crate::core::task::result::TaskResult::Err(
+                            $crate::core::task::TaskError::builtin(
+                                $crate::core::task::OperationalErrorCode::WorkerSerializationError,
+                                "args payload must contain exactly one item when kwargs is empty",
+                            ),
+                        );
+                    }
+                } else if args_array.len() == 1 {
+                    args_array[0].clone()
+                } else if args_array.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    return $crate::core::task::result::TaskResult::Err(
+                        $crate::core::task::TaskError::builtin(
+                            $crate::core::task::OperationalErrorCode::WorkerSerializationError,
+                            "args payload must contain exactly one item when kwargs is empty",
+                        ),
+                    );
+                };
+
+                let deserialized: $args_type = match serde_json::from_value(candidate.clone()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return $crate::core::task::result::TaskResult::Err($crate::core::task::TaskError {
+                            error_code: Some($crate::core::task::TaskErrorCode::from(
+                                $crate::core::task::ContractCode::ArgumentTypeMismatch,
+                            )),
+                            message: Some(format!(
+                                "task args do not match declared input type {}",
+                                std::any::type_name::<$args_type>(),
+                            )),
+                            cause: None,
+                            data: Some(serde_json::json!({
+                                "expected_type": std::any::type_name::<$args_type>(),
+                                "actual_value": candidate,
+                                "validation_error": e.to_string(),
+                            })),
+                        });
+                    }
+                };
+                match $fn_name(deserialized) {
+                    Ok(value) => $crate::core::task::macros::encode_validated_task_output(&value),
+                    Err(task_error) => $crate::core::task::result::TaskResult::Err(task_error),
+                }
+            }
+        }
+
+        $crate::core::task::fn_trait::RegisteredTask::Blocking {
+            task: ::std::sync::Arc::new(__BlockingTaskWrapper),
+            meta: $crate::core::task::fn_trait::TaskMeta::default(),
+        }
+    }};
+}
+
+/// Create an async [`RegisteredTask`] that deserializes from a kwargs envelope.
+///
+/// Expects the input JSON to contain a `"kwargs"` field whose value
+/// deserializes into `$args_type`. This is used by workflow `args_from`
+/// where dependency results are injected as keyword arguments.
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(Serialize, Deserialize)]
+/// struct MyArgs { name: String, count: i32 }
+///
+/// async fn process(args: MyArgs) -> Result<String, TaskError> {
+///     Ok(format!("{}: {}", args.name, args.count))
+/// }
+///
+/// app.register("process", async_task_fn_kwargs!(process, MyArgs));
+/// ```
+#[macro_export]
+macro_rules! async_task_fn_kwargs {
+    ($fn_name:path, $args_type:ty) => {{
+        $crate::async_task_fn!($fn_name, $args_type)
+    }};
+}
+
+/// Create a blocking [`RegisteredTask`] that deserializes from a kwargs envelope.
+///
+/// Blocking equivalent of [`async_task_fn_kwargs!`].
+#[macro_export]
+macro_rules! blocking_task_fn_kwargs {
+    ($fn_name:path, $args_type:ty) => {{
+        $crate::blocking_task_fn!($fn_name, $args_type)
+    }};
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::core::task::fn_trait::RegisteredTask;
+    use crate::core::task::TaskError;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize)]
+    struct AddArgs {
+        a: i32,
+        b: i32,
+    }
+
+    async fn add(args: AddArgs) -> Result<i32, TaskError> {
+        Ok(args.a + args.b)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn multiply(args: AddArgs) -> Result<i32, TaskError> {
+        Ok(args.a * args.b)
+    }
+
+    async fn heartbeat(_: ()) -> Result<String, TaskError> {
+        Ok("alive".to_owned())
+    }
+
+    struct BadRoundTrip;
+
+    impl Serialize for BadRoundTrip {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.serialize_str("not-an-integer")
+        }
+    }
+
+    impl<'de> Deserialize<'de> for BadRoundTrip {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let _ = i64::deserialize(deserializer)?;
+            Ok(Self)
+        }
+    }
+
+    async fn bad_round_trip(_: ()) -> Result<BadRoundTrip, TaskError> {
+        Ok(BadRoundTrip)
+    }
+
+    #[test]
+    fn async_task_fn_macro_compiles() {
+        let task = async_task_fn!(add, AddArgs);
+        assert!(task.is_async());
+    }
+
+    #[test]
+    fn validated_output_rejects_non_round_trippable_value() {
+        let task = async_task_fn!(bad_round_trip, ());
+        let RegisteredTask::Async { task, .. } = task else {
+            panic!("expected async task");
+        };
+
+        let envelope = serde_json::json!({"args": []});
+        let args = serde_json::to_vec(&envelope).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let result = rt.block_on(task.execute(&args));
+
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.error_code,
+            Some(crate::core::task::TaskErrorCode::from(
+                crate::core::task::ContractCode::ReturnTypeMismatch,
+            )),
+        );
+        let data = err.data.expect("expected mismatch diagnostics");
+        assert_eq!(data["expected_type"], std::any::type_name::<BadRoundTrip>());
+    }
+
+    #[test]
+    fn blocking_task_fn_macro_compiles() {
+        let task = blocking_task_fn!(multiply, AddArgs);
+        assert!(task.is_blocking());
+    }
+
+    #[tokio::test]
+    async fn async_task_fn_executes() {
+        let task = async_task_fn!(add, AddArgs);
+        let envelope = serde_json::json!({"args": [AddArgs { a: 3, b: 5 }], "kwargs": {}});
+        let args = serde_json::to_vec(&envelope).unwrap();
+        match &task {
+            crate::core::task::fn_trait::RegisteredTask::Async { task: f, .. } => {
+                let result = f.execute(&args).await.unwrap();
+                let value: i32 = serde_json::from_slice(&result).unwrap();
+                assert_eq!(value, 8);
+            }
+            _ => panic!("expected async task"),
+        }
+    }
+
+    #[test]
+    fn blocking_task_fn_executes() {
+        let task = blocking_task_fn!(multiply, AddArgs);
+        let envelope = serde_json::json!({"args": [AddArgs { a: 4, b: 7 }], "kwargs": {}});
+        let args = serde_json::to_vec(&envelope).unwrap();
+        match &task {
+            crate::core::task::fn_trait::RegisteredTask::Blocking { task: f, .. } => {
+                let result = f.execute(&args).unwrap();
+                let value: i32 = serde_json::from_slice(&result).unwrap();
+                assert_eq!(value, 28);
+            }
+            _ => panic!("expected blocking task"),
+        }
+    }
+
+    #[test]
+    fn bad_args_returns_serialization_error() {
+        let task = blocking_task_fn!(multiply, AddArgs);
+        match &task {
+            crate::core::task::fn_trait::RegisteredTask::Blocking { task: f, .. } => {
+                let result = f.execute(b"not json");
+                assert!(result.is_err());
+                let err = result.unwrap_err();
+                assert!(err
+                    .message
+                    .unwrap()
+                    .contains("failed to parse args/kwargs envelope"));
+            }
+            _ => panic!("expected blocking task"),
+        }
+    }
+
+    #[test]
+    fn typed_args_mismatch_returns_argument_type_mismatch() {
+        let task = blocking_task_fn!(multiply, AddArgs);
+        let envelope = serde_json::json!({"args": [{"a": "oops", "b": 7}], "kwargs": {}});
+        let args = serde_json::to_vec(&envelope).unwrap();
+
+        match &task {
+            crate::core::task::fn_trait::RegisteredTask::Blocking { task: f, .. } => {
+                let result = f.execute(&args);
+                assert!(result.is_err());
+                let err = result.unwrap_err();
+                assert_eq!(
+                    err.error_code,
+                    Some(crate::core::task::TaskErrorCode::from(
+                        crate::core::task::ContractCode::ArgumentTypeMismatch,
+                    )),
+                );
+                let data = err.data.expect("expected mismatch diagnostics");
+                assert_eq!(data["expected_type"], std::any::type_name::<AddArgs>());
+            }
+            _ => panic!("expected blocking task"),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_args_task() {
+        let task = async_task_fn!(heartbeat, ());
+        let envelope = serde_json::json!({"args": [], "kwargs": {}});
+        let args = serde_json::to_vec(&envelope).unwrap();
+        match &task {
+            crate::core::task::fn_trait::RegisteredTask::Async { task: f, .. } => {
+                let result = f.execute(&args).await.unwrap();
+                let value: String = serde_json::from_slice(&result).unwrap();
+                assert_eq!(value, "alive");
+            }
+            _ => panic!("expected async task"),
+        }
+    }
+
+    // -- kwargs macro tests --
+
+    #[tokio::test]
+    async fn async_kwargs_macro_executes() {
+        let task = async_task_fn_kwargs!(add, AddArgs);
+        let envelope = serde_json::json!({"kwargs": {"a": 10, "b": 20}});
+        let args = serde_json::to_vec(&envelope).unwrap();
+        match &task {
+            crate::core::task::fn_trait::RegisteredTask::Async { task: f, .. } => {
+                let result = f.execute(&args).await.unwrap();
+                let value: i32 = serde_json::from_slice(&result).unwrap();
+                assert_eq!(value, 30);
+            }
+            _ => panic!("expected async task"),
+        }
+    }
+
+    #[test]
+    fn blocking_kwargs_macro_executes() {
+        let task = blocking_task_fn_kwargs!(multiply, AddArgs);
+        let envelope = serde_json::json!({"kwargs": {"a": 6, "b": 7}});
+        let args = serde_json::to_vec(&envelope).unwrap();
+        match &task {
+            crate::core::task::fn_trait::RegisteredTask::Blocking { task: f, .. } => {
+                let result = f.execute(&args).unwrap();
+                let value: i32 = serde_json::from_slice(&result).unwrap();
+                assert_eq!(value, 42);
+            }
+            _ => panic!("expected blocking task"),
+        }
+    }
+
+    #[test]
+    fn kwargs_macro_bad_envelope_returns_error() {
+        let task = blocking_task_fn_kwargs!(multiply, AddArgs);
+        match &task {
+            crate::core::task::fn_trait::RegisteredTask::Blocking { task: f, .. } => {
+                let result = f.execute(b"not json");
+                assert!(result.is_err());
+            }
+            _ => panic!("expected blocking task"),
+        }
+    }
+
+    #[test]
+    fn kwargs_macro_missing_kwargs_field() {
+        let task = blocking_task_fn_kwargs!(multiply, AddArgs);
+        // Envelope without "kwargs" — should try to deserialize empty object
+        let args = serde_json::to_vec(&serde_json::json!({"args": []})).unwrap();
+        match &task {
+            crate::core::task::fn_trait::RegisteredTask::Blocking { task: f, .. } => {
+                let result = f.execute(&args);
+                // AddArgs requires a and b, so empty kwargs should fail
+                assert!(result.is_err());
+            }
+            _ => panic!("expected blocking task"),
+        }
+    }
+}

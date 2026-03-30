@@ -1,0 +1,13 @@
+error: unknown attribute `timeout`; expected one of: queue, retry_policy, good_until, auto_retry_for
+ --> tests/compile_fail/unknown_attribute.rs:4:15
+  |
+4 | #[task("bad", timeout = 5000)]
+  |               ^^^^^^^
+
+warning: unused import: `horsies::TaskError`
+ --> tests/compile_fail/unknown_attribute.rs:2:5
+  |
+2 | use horsies::TaskError;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

@@ -1,0 +1,13 @@
+error: task functions must accept exactly one argument (use a struct for multiple fields)
+ --> tests/compile_fail/multiple_args.rs:5:14
+  |
+5 | async fn bad(a: i32, b: i32) -> Result<i32, TaskError> {
+  |              ^^^^^^^^^^^^^^
+
+warning: unused import: `horsies::TaskError`
+ --> tests/compile_fail/multiple_args.rs:2:5
+  |
+2 | use horsies::TaskError;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

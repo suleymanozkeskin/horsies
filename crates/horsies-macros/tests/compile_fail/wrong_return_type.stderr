@@ -1,0 +1,5 @@
+error: task functions must return Result<T, TaskError>
+ --> tests/compile_fail/wrong_return_type.rs:4:24
+  |
+4 | async fn bad(_: ()) -> String {
+  |                        ^^^^^^

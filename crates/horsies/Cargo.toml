@@ -1,0 +1,44 @@
+[package]
+name = "horsies"
+version = "0.1.0-alpha.1"
+edition = "2021"
+description = "Unified public API for the horsies task queue and workflow engine"
+license = "MIT"
+repository = "https://github.com/suleymanozkeskin/horsies-rust"
+readme = "../README.md"
+keywords = ["task-queue", "workflow", "distributed", "postgresql", "async"]
+categories = ["asynchronous", "database"]
+
+[dependencies]
+horsies-macros = { version = "0.1.0-alpha.1", path = "../macros" }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "signal", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_plain = "1"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+uuid = { version = "1", features = ["v4", "v5"] }
+thiserror = "2"
+miette = { version = "7", features = ["fancy"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "json", "migrate"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+sha2 = "0.10"
+log = "0.4"
+rand = "0.8"
+gethostname = "0.4"
+clap = { version = "4", features = ["derive"] }
+owo-colors = "4"
+toml = "0.8"
+sysinfo = "0.32"
+tempfile = "3"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "migrate"] }
+serial_test = "3"
+futures = "0.3"
