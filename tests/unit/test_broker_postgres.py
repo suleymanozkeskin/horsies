@@ -901,7 +901,11 @@ class TestMarkStaleTasksAsFailed:
             ts.__aenter__ = AsyncMock(return_value=ts)
             ts.__aexit__ = AsyncMock(return_value=None)
             # 1st execute: SELECT FOR UPDATE, 2nd: UPSERT_ATTEMPT, 3rd: MARK_FAILED
-            ts.execute = AsyncMock(side_effect=[ctx_result, MagicMock(), MagicMock()])
+            mark_failed_result = MagicMock()
+            mark_failed_result.fetchone.return_value = SimpleNamespace(id=task_id)
+            ts.execute = AsyncMock(
+                side_effect=[ctx_result, MagicMock(), mark_failed_result]
+            )
             return ts
 
         task_sessions = [_make_task_session('task-1'), _make_task_session('task-2', retry_count=2)]
@@ -942,7 +946,11 @@ class TestMarkStaleTasksAsFailed:
         task_session = AsyncMock()
         task_session.__aenter__ = AsyncMock(return_value=task_session)
         task_session.__aexit__ = AsyncMock(return_value=None)
-        task_session.execute = AsyncMock(side_effect=[ctx_result, MagicMock(), MagicMock()])
+        mark_failed_result = MagicMock()
+        mark_failed_result.fetchone.return_value = SimpleNamespace(id='task-1')
+        task_session.execute = AsyncMock(
+            side_effect=[ctx_result, MagicMock(), mark_failed_result]
+        )
 
         broker.session_factory = MagicMock(side_effect=[scan_session, task_session])
 
@@ -1004,7 +1012,9 @@ class TestMarkStaleTasksAsFailed:
         task_session = AsyncMock()
         task_session.__aenter__ = AsyncMock(return_value=task_session)
         task_session.__aexit__ = AsyncMock(return_value=None)
-        task_session.execute = AsyncMock(side_effect=[ctx_result, MagicMock(), retry_result])
+        task_session.execute = AsyncMock(
+            side_effect=[ctx_result, MagicMock(), retry_result]
+        )
 
         # notify session (best-effort pg_notify after retry commit)
         notify_session = AsyncMock()
@@ -1065,7 +1075,11 @@ class TestMarkStaleTasksAsFailed:
         task_session.__aenter__ = AsyncMock(return_value=task_session)
         task_session.__aexit__ = AsyncMock(return_value=None)
         # [0]=SELECT FOR UPDATE, [1]=UPSERT_ATTEMPT, [2]=MARK_FAILED
-        task_session.execute = AsyncMock(side_effect=[ctx_result, MagicMock(), MagicMock()])
+        mark_failed_result = MagicMock()
+        mark_failed_result.fetchone.return_value = SimpleNamespace(id='task-exhausted')
+        task_session.execute = AsyncMock(
+            side_effect=[ctx_result, MagicMock(), mark_failed_result]
+        )
 
         broker.session_factory = MagicMock(side_effect=[scan_session, task_session])
 
@@ -1106,6 +1120,36 @@ class TestMarkStaleTasksAsFailed:
 
         assert is_ok(result)
         assert result.ok_value == 0
+        task_session.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fresh_heartbeat_between_scan_and_phase2_skips_task(self) -> None:
+        """A candidate is skipped when phase 2 revalidation no longer sees it as stale."""
+        broker = _make_broker()
+        scan_rows = [SimpleNamespace(id='task-fresh')]
+        scan_result = MagicMock()
+        scan_result.fetchall.return_value = scan_rows
+
+        scan_session = AsyncMock()
+        scan_session.__aenter__ = AsyncMock(return_value=scan_session)
+        scan_session.__aexit__ = AsyncMock(return_value=None)
+        scan_session.execute = AsyncMock(return_value=scan_result)
+
+        ctx_result = MagicMock()
+        ctx_result.fetchone.return_value = None
+        task_session = AsyncMock()
+        task_session.__aenter__ = AsyncMock(return_value=task_session)
+        task_session.__aexit__ = AsyncMock(return_value=None)
+        task_session.execute = AsyncMock(return_value=ctx_result)
+
+        broker.session_factory = MagicMock(side_effect=[scan_session, task_session])
+
+        result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
+
+        assert is_ok(result)
+        assert result.ok_value == 0
+        select_params = task_session.execute.call_args_list[0][0][1]
+        assert select_params['stale_threshold'] == 300.0
         task_session.commit.assert_not_awaited()
 
 

@@ -440,8 +440,8 @@ class TestHeartbeatWorker:
         assert len(cursor.queries) >= 1
         assert 'horsies_heartbeats' in cursor.queries[0][0]
 
-    def test_stops_on_send_failure(self) -> None:
-        """Heartbeat thread exits when send_heartbeat raises."""
+    def test_continues_after_send_failure(self) -> None:
+        """Heartbeat thread keeps trying after a transient send failure."""
         stop = threading.Event()
 
         call_count = 0
@@ -454,8 +454,12 @@ class TestHeartbeatWorker:
                 cursor = _FakeCursor()
                 conn = _FakeConn(cursor)
                 return _FakePool(conn)
-            # Subsequent calls fail
-            raise RuntimeError('db down')
+            if call_count == 2:
+                raise RuntimeError('db down')
+            stop.set()
+            cursor = _FakeCursor()
+            conn = _FakeConn(cursor)
+            return _FakePool(conn)
 
         with patch(
             'horsies.core.worker.child_runner._get_worker_pool',
@@ -469,8 +473,7 @@ class TestHeartbeatWorker:
                 heartbeat_interval_ms=50,  # Short interval for fast test
             )
 
-        # Thread should have exited after the second (failed) heartbeat
-        assert call_count >= 2
+        assert call_count >= 3
 
 
 # ===================================================================

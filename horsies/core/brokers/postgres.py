@@ -199,25 +199,47 @@ SELECT_STALE_RUNNING_TASKS_SQL = text("""
 """)
 
 SELECT_STALE_TASK_FOR_UPDATE_SQL = text("""
-    SELECT id, worker_pid, worker_hostname, claimed_by_worker_id,
-           started_at, retry_count, worker_process_name,
-           max_retries, task_options, good_until, queue_name,
+    SELECT t.id, t.worker_pid, t.worker_hostname, t.claimed_by_worker_id,
+           t.started_at, hb.last_heartbeat, t.retry_count, t.worker_process_name,
+           t.max_retries, t.task_options, t.good_until, t.queue_name,
            clock_timestamp() AS db_now
-    FROM horsies_tasks
-    WHERE id = :id AND status = 'RUNNING'
-    FOR UPDATE
+    FROM horsies_tasks t
+    LEFT JOIN LATERAL (
+        SELECT sent_at AS last_heartbeat
+        FROM horsies_heartbeats h
+        WHERE h.task_id = t.id AND h.role = 'runner'
+        ORDER BY sent_at DESC
+        LIMIT 1
+    ) hb ON TRUE
+    WHERE t.id = :id
+      AND t.status = 'RUNNING'
+      AND t.started_at IS NOT NULL
+      AND COALESCE(hb.last_heartbeat, t.started_at) < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL)
+    FOR UPDATE OF t
 """)
 
 MARK_STALE_TASK_FAILED_SQL = text("""
-    UPDATE horsies_tasks
+    UPDATE horsies_tasks AS t
     SET status = 'FAILED',
         failed_at = NOW(),
         failed_reason = :failed_reason,
         result = :result,
         error_code = :error_code,
         updated_at = NOW()
-    WHERE id = :task_id
-      AND status = 'RUNNING'
+    WHERE t.id = :task_id
+      AND t.status = 'RUNNING'
+      AND t.started_at IS NOT NULL
+      AND COALESCE(
+          (
+              SELECT h.sent_at
+              FROM horsies_heartbeats h
+              WHERE h.task_id = t.id AND h.role = 'runner'
+              ORDER BY h.sent_at DESC
+              LIMIT 1
+          ),
+          t.started_at
+      ) < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL)
+    RETURNING t.id
 """)
 
 EXPIRE_PENDING_TASKS_SQL = text("""
@@ -997,7 +1019,10 @@ class PostgresBroker:
                         # between scan and now — skip it.
                         ctx_result = await session.execute(
                             SELECT_STALE_TASK_FOR_UPDATE_SQL,
-                            {'id': task_id},
+                            {
+                                'id': task_id,
+                                'stale_threshold': stale_threshold_seconds,
+                            },
                         )
                         ctx_row = ctx_result.fetchone()
                         if ctx_row is None:
@@ -1070,6 +1095,7 @@ class PostgresBroker:
                                     'id': task_id,
                                     'retry_count': new_retry_count,
                                     'next_retry_at': next_retry_at,
+                                    'stale_threshold': stale_threshold_seconds,
                                 },
                             )
                             if res.fetchone() is None:
@@ -1134,15 +1160,19 @@ class PostgresBroker:
                                 'failed_reason': failed_reason_str,
                                 **attempt_worker,
                             })
-                            await session.execute(
+                            mark_failed_res = await session.execute(
                                 MARK_STALE_TASK_FAILED_SQL,
                                 {
                                     'task_id': task_id,
                                     'failed_reason': failed_reason_str,
                                     'result': result_json,
                                     'error_code': OperationalErrorCode.WORKER_CRASHED.value,
+                                    'stale_threshold': stale_threshold_seconds,
                                 },
                             )
+                            if mark_failed_res.fetchone() is None:
+                                await session.rollback()
+                                continue
                             await session.commit()
 
                         processed += 1

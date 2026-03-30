@@ -234,8 +234,10 @@ def _heartbeat_worker(
     """
     # Convert to seconds only for threading.Event.wait()
     heartbeat_interval_seconds = heartbeat_interval_ms / 1000.0
+    consecutive_failures = 0
 
     def send_heartbeat() -> bool:
+        nonlocal consecutive_failures
         try:
             pool = _get_worker_pool()
             with pool.connection() as conn:
@@ -254,9 +256,22 @@ def _heartbeat_worker(
                 )
                 conn.commit()
                 cursor.close()
+            if consecutive_failures > 0:
+                logger.info(
+                    'Runner heartbeat recovered for task %s after %d failed attempt(s)',
+                    task_id,
+                    consecutive_failures,
+                )
+                consecutive_failures = 0
             return True
         except Exception as e:
-            logger.error(f'Heartbeat failed for task {task_id}: {e}')
+            consecutive_failures += 1
+            logger.error(
+                'Runner heartbeat failed for task %s (attempt %d): %s',
+                task_id,
+                consecutive_failures,
+                e,
+            )
             return False
 
     # Send an immediate heartbeat so freshly RUNNING tasks aren't considered stale
@@ -268,8 +283,7 @@ def _heartbeat_worker(
             break  # stop_event was set
 
         # Use pooled connection for heartbeat
-        if not send_heartbeat():
-            break
+        send_heartbeat()
 
 
 def _is_retryable_db_error(exc: BaseException) -> bool:

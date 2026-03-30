@@ -250,7 +250,7 @@ SCHEDULE_TASK_RETRY_SQL = text("""
 """)
 
 SCHEDULE_STALE_TASK_RETRY_SQL = text("""
-    UPDATE horsies_tasks
+    UPDATE horsies_tasks AS t
     SET status = 'PENDING',
         retry_count = :retry_count,
         next_retry_at = :next_retry_at,
@@ -261,10 +261,21 @@ SCHEDULE_STALE_TASK_RETRY_SQL = text("""
         claim_expires_at = NULL,
         error_code = NULL,
         updated_at = now()
-    WHERE id = :id
-      AND status = 'RUNNING'
-      AND (good_until IS NULL OR :next_retry_at < good_until)
-    RETURNING id
+    WHERE t.id = :id
+      AND t.status = 'RUNNING'
+      AND t.started_at IS NOT NULL
+      AND COALESCE(
+          (
+              SELECT h.sent_at
+              FROM horsies_heartbeats h
+              WHERE h.task_id = t.id AND h.role = 'runner'
+              ORDER BY h.sent_at DESC
+              LIMIT 1
+          ),
+          t.started_at
+      ) < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL)
+      AND (t.good_until IS NULL OR :next_retry_at < t.good_until)
+    RETURNING t.id
 """)
 
 NOTIFY_DELAYED_SQL = text("""
