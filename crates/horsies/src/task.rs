@@ -427,8 +427,17 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
             if let Some(deadline) = opts.good_until {
                 node = node.good_until(deadline);
             }
-            if let Ok(json) = serde_json::to_string(opts) {
-                node = node.task_options(json);
+            match serde_json::to_string(opts) {
+                Ok(json) => {
+                    node = node.task_options(json);
+                }
+                Err(e) => {
+                    tracing::error!(
+                        task_name = %self.task_name,
+                        error = %e,
+                        "failed to serialize task options for workflow node; node-level task_options omitted",
+                    );
+                }
             }
         }
 

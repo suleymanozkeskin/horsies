@@ -186,7 +186,9 @@ async fn check_and_enqueue(
         let schedule_result =
             process_schedule(broker, schedule, now, check_interval_seconds, app_config).await;
 
-        let _ = state::release_schedule_lock(lock_conn, &schedule.name).await;
+        if let Err(e) = state::release_schedule_lock(lock_conn, &schedule.name).await {
+            tracing::error!(schedule = %schedule.name, error = %e, "failed to release schedule lock");
+        }
 
         if let Err(e) = schedule_result {
             tracing::error!(schedule = %schedule.name, error = %e, "schedule processing failed");

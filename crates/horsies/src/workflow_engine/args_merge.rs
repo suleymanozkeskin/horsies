@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use sqlx::PgPool;
 
 use crate::core::task::result::TaskResult;
-use crate::core::{OutcomeCode, RetrievalCode, TaskError};
+use crate::core::{OperationalErrorCode, OutcomeCode, RetrievalCode, TaskError};
 
 use crate::workflow_engine::error::WorkflowError;
 
@@ -32,10 +32,10 @@ pub fn merge_args_from_sync(
     };
 
     let mut kwargs: serde_json::Map<String, serde_json::Value> = match existing_kwargs {
-        Some(json) => serde_json::from_str(json).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "failed to parse existing kwargs in sync merge, using empty map");
-            serde_json::Map::new()
-        }),
+        Some(json) => serde_json::from_str(json).map_err(|e| {
+            tracing::error!(error = %e, "failed to parse existing kwargs in sync merge");
+            e
+        })?,
         None => serde_json::Map::new(),
     };
 
@@ -97,10 +97,10 @@ pub async fn merge_args_from_async(
         .collect();
 
     let mut kwargs: serde_json::Map<String, serde_json::Value> = match existing_kwargs {
-        Some(json) => serde_json::from_str(json).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "failed to parse existing kwargs in async merge, using empty map");
-            serde_json::Map::new()
-        }),
+        Some(json) => serde_json::from_str(json).map_err(|e| {
+            tracing::error!(error = %e, "failed to parse existing kwargs in async merge");
+            e
+        })?,
         None => serde_json::Map::new(),
     };
 
@@ -121,7 +121,7 @@ fn wrap_dep_result(dep_idx: i32, dep: Option<&DepResult>) -> serde_json::Value {
                 // Result already stored as TaskResult JSON; pass through as Value.
                 serde_json::from_str(json).unwrap_or_else(|e| {
                     tracing::warn!(dep_idx, error = %e, "failed to parse dep result JSON");
-                    serde_json::Value::Null
+                    dep_parse_error_value(dep_idx, e)
                 })
             } else if d.status == "COMPLETED" || d.status == "FAILED" {
                 let err = TaskError::builtin(
@@ -129,20 +129,14 @@ fn wrap_dep_result(dep_idx: i32, dep: Option<&DepResult>) -> serde_json::Value {
                     format!("upstream task at index {} has no stored result", dep_idx),
                 );
                 let wrapped: TaskResult<serde_json::Value> = TaskResult::Err(err);
-                serde_json::to_value(&wrapped).unwrap_or_else(|e| {
-                    tracing::warn!(dep_idx, error = %e, "failed to serialize wrapped error");
-                    serde_json::Value::Null
-                })
+                task_result_to_value(dep_idx, wrapped, "failed to serialize wrapped missing-result error")
             } else {
                 let err = TaskError::builtin(
                     OutcomeCode::UpstreamSkipped,
                     format!("upstream task at index {} did not complete", dep_idx),
                 );
                 let wrapped: TaskResult<serde_json::Value> = TaskResult::Err(err);
-                serde_json::to_value(&wrapped).unwrap_or_else(|e| {
-                    tracing::warn!(dep_idx, error = %e, "failed to serialize wrapped error");
-                    serde_json::Value::Null
-                })
+                task_result_to_value(dep_idx, wrapped, "failed to serialize wrapped upstream-skipped error")
             }
         }
         None => {
@@ -151,12 +145,38 @@ fn wrap_dep_result(dep_idx: i32, dep: Option<&DepResult>) -> serde_json::Value {
                 format!("upstream task at index {} did not complete", dep_idx),
             );
             let wrapped: TaskResult<serde_json::Value> = TaskResult::Err(err);
-            serde_json::to_value(&wrapped).unwrap_or_else(|e| {
-                tracing::warn!(dep_idx, error = %e, "failed to serialize wrapped error");
-                serde_json::Value::Null
-            })
+            task_result_to_value(dep_idx, wrapped, "failed to serialize wrapped missing-dependency error")
         }
     }
+}
+
+fn task_result_to_value(
+    dep_idx: i32,
+    wrapped: TaskResult<serde_json::Value>,
+    context: &str,
+) -> serde_json::Value {
+    serde_json::to_value(&wrapped).unwrap_or_else(|e| {
+        tracing::warn!(dep_idx, error = %e, context, "dependency result wrapping failed");
+        serde_json::json!({
+            "__type": "err",
+            "value": {
+                "message": context,
+            }
+        })
+    })
+}
+
+fn dep_parse_error_value(dep_idx: i32, error: serde_json::Error) -> serde_json::Value {
+    let err = TaskError::builtin(
+        OperationalErrorCode::ResultDeserializationError,
+        format!("failed to parse upstream task result at index {}: {}", dep_idx, error),
+    );
+    let wrapped: TaskResult<serde_json::Value> = TaskResult::Err(err);
+    task_result_to_value(
+        dep_idx,
+        wrapped,
+        "failed to serialize dependency parse error wrapper",
+    )
 }
 
 #[cfg(test)]
@@ -258,5 +278,37 @@ mod tests {
         assert_eq!(parsed["existing"], true);
         assert_eq!(parsed["dep_val"]["__type"], "ok");
         assert_eq!(parsed["dep_val"]["value"], "hello");
+    }
+
+    #[test]
+    fn merge_invalid_existing_kwargs_is_error() {
+        let args_from = Some(json!({"dep_val": 0}));
+        let err = merge_args_from_sync(Some(r#"{"existing": true"#), &args_from, &HashMap::new())
+            .unwrap_err();
+        assert!(matches!(err, WorkflowError::Serialization(_)));
+    }
+
+    #[test]
+    fn merge_corrupt_dep_result_wraps_parse_error() {
+        let mut deps = HashMap::new();
+        deps.insert(
+            0,
+            DepResult {
+                status: "COMPLETED".to_owned(),
+                result: Some("{not-json".to_owned()),
+            },
+        );
+
+        let args_from = Some(json!({"answer": 0}));
+        let result = merge_args_from_sync(None, &args_from, &deps)
+            .unwrap()
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let answer = &parsed["answer"];
+        assert_eq!(answer["__type"], "err");
+        assert!(answer["value"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("failed to parse upstream task result"));
     }
 }

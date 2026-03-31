@@ -12,6 +12,7 @@ use crate::broker::{ClaimedTaskRow, NotifyListener, PostgresBroker};
 use crate::core::config::app::AppConfig;
 use crate::core::registry::task::TaskRegistry;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
+use crate::core::task::error::{OperationalErrorCode, TaskError};
 
 use crate::worker::backoff::RetryBackoff;
 use crate::worker::config::WorkerConfig;
@@ -366,7 +367,12 @@ impl Worker {
     async fn shutdown(&self) {
         tracing::info!("shutting down, waiting for in-flight tasks");
         self.tracker.close();
-        let _ = tokio::time::timeout(Duration::from_secs(30), self.tracker.wait()).await;
+        if tokio::time::timeout(Duration::from_secs(30), self.tracker.wait())
+            .await
+            .is_err()
+        {
+            tracing::warn!("worker shutdown timed out with in-flight tasks still running");
+        }
         tracing::info!("worker stopped");
     }
 
@@ -617,8 +623,19 @@ impl Worker {
                 let task_id = row.id.clone();
                 let worker_id = self.worker_id.clone();
                 self.tracker.spawn(async move {
-                    if let Err(e) = broker.unclaim_task(&task_id, &worker_id).await {
-                        tracing::error!(task_id = %task_id, error = %e, "failed to unclaim task");
+                    if let Err(e) = execution::unclaim_task_with_retry(
+                        &broker,
+                        &task_id,
+                        &worker_id,
+                        "no semaphore permit available",
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            task_id = %task_id,
+                            error = %e,
+                            "failed to unclaim task after dispatch backpressure",
+                        );
                     }
                 });
             }
@@ -638,21 +655,34 @@ impl Worker {
                 // Fail the task immediately. Task is CLAIMED (not RUNNING),
                 // so use a direct UPDATE that accepts CLAIMED status.
                 let broker = Arc::clone(&self.broker);
+                let workflow_registry = Arc::clone(&self.workflow_registry);
                 let task_id = row.id.clone();
                 let task_name = row.task_name.clone();
+                let worker_id = self.worker_id.clone();
+                let hostname = self.hostname.clone();
                 self.tracker.spawn(async move {
                     let reason = format!("task '{}' not registered", task_name);
-                    let _ = sqlx::query(
-                        "UPDATE horsies_tasks SET status = 'FAILED', \
-                         failed_at = NOW(), failed_reason = $2, \
-                         error_code = 'WORKER_RESOLUTION_ERROR', \
-                         claimed = FALSE, updated_at = NOW() \
-                         WHERE id = $1 AND status IN ('CLAIMED', 'RUNNING')",
+                    let task_error = TaskError::builtin(
+                        OperationalErrorCode::WorkerResolutionError,
+                        reason.clone(),
+                    );
+                    if let Some(work) = execution::finalize_pre_execution_failure(
+                        Arc::clone(&broker),
+                        row,
+                        worker_id,
+                        hostname,
+                        task_error,
                     )
-                    .bind(&task_id)
-                    .bind(&reason)
-                    .execute(broker.pool())
-                    .await;
+                    .await
+                    {
+                        execution::run_phase2(broker.pool(), &workflow_registry, work).await;
+                    } else {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            reason,
+                            "task resolution failure aborted before terminal state was persisted",
+                        );
+                    }
                     drop(permit);
                 });
                 return;
@@ -696,6 +726,7 @@ mod tests {
     };
 
     use chrono::Utc;
+    use futures::FutureExt;
     use crate::broker::{ClaimedTaskRow, NotifyListener, PostgresBroker};
     use crate::async_task_fn;
     use crate::core::config::recovery::RecoveryConfig;
@@ -705,6 +736,7 @@ mod tests {
     use serial_test::serial;
     use sqlx::PgPool;
     use std::future::Future;
+    use std::panic::{resume_unwind, AssertUnwindSafe};
     use std::pin::Pin;
     use std::sync::Arc;
     use uuid::Uuid;
@@ -934,6 +966,74 @@ mod tests {
         .unwrap()
     }
 
+    async fn fetch_only_workflow_task_state(pool: &PgPool, workflow_id: &str) -> (String, Option<String>) {
+        sqlx::query_as(
+            "SELECT status, task_id
+             FROM horsies_workflow_tasks
+             WHERE workflow_id = $1
+             LIMIT 1",
+        )
+        .bind(workflow_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn fetch_attempt_count(pool: &PgPool, task_id: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = $1")
+            .bind(task_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn install_fail_workflow_task_running_trigger(pool: &PgPool) -> (String, String) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let function_name = format!("horsies_test_fail_wf_running_{}", suffix);
+        let trigger_name = format!("horsies_test_fail_wf_running_trigger_{}", suffix);
+
+        sqlx::query(&format!(
+            "CREATE OR REPLACE FUNCTION {function_name}() RETURNS trigger AS $$
+             BEGIN
+                 IF NEW.status = 'RUNNING' THEN
+                     RAISE EXCEPTION 'forced workflow_task RUNNING failure';
+                 END IF;
+                 RETURN NEW;
+             END;
+             $$ LANGUAGE plpgsql"
+        ))
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(&format!(
+            "CREATE TRIGGER {trigger_name}
+             BEFORE UPDATE ON horsies_workflow_tasks
+             FOR EACH ROW
+             WHEN (OLD.status IS DISTINCT FROM NEW.status)
+             EXECUTE FUNCTION {function_name}()"
+        ))
+        .execute(pool)
+        .await
+        .unwrap();
+
+        (function_name, trigger_name)
+    }
+
+    async fn remove_test_trigger(pool: &PgPool, function_name: &str, trigger_name: &str) {
+        sqlx::query(&format!(
+            "DROP TRIGGER IF EXISTS {trigger_name} ON horsies_workflow_tasks"
+        ))
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(&format!("DROP FUNCTION IF EXISTS {function_name}()"))
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
     #[test]
     fn worker_sync_api_compiles() {
         let _: fn(&Worker) = |w| w.request_stop();
@@ -997,6 +1097,8 @@ mod tests {
 
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    static EXECUTION_COUNT: AtomicU32 = AtomicU32::new(0);
+
     fn transient_error() -> crate::broker::BrokerError {
         crate::broker::BrokerError::ConnectionFailed("simulated transient".to_owned())
     }
@@ -1029,6 +1131,11 @@ mod tests {
 
     async fn callback_success_task(_: ()) -> Result<String, TaskError> {
         Ok("workflow-done".to_owned())
+    }
+
+    async fn counted_success_task(_: ()) -> Result<String, TaskError> {
+        EXECUTION_COUNT.fetch_add(1, Ordering::SeqCst);
+        Ok("counted".to_owned())
     }
 
     async fn panic_task(_: ()) -> Result<String, TaskError> {
@@ -1293,6 +1400,136 @@ mod tests {
         let (workflow_status, workflow_result) = fetch_workflow_state(&pool, &workflow_id).await;
         assert_eq!(workflow_status, "RUNNING");
         assert_eq!(workflow_result, None);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn finalize_prestart_workflow_update_failure_aborts_before_user_code() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+
+        let task_id = Uuid::new_v4().to_string();
+        insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
+        link_task_to_workflow(&pool, &task_id, Some(0)).await;
+        EXECUTION_COUNT.store(0, Ordering::SeqCst);
+
+        let (function_name, trigger_name) = install_fail_workflow_task_running_trigger(&pool).await;
+        let result = AssertUnwindSafe(async {
+            run_finalize(
+                &broker,
+                async_task_fn!(counted_success_task, ()),
+                claimed_task_row(&task_id, "default", 0, 0, None),
+            )
+            .await;
+
+            assert_eq!(
+                EXECUTION_COUNT.load(Ordering::SeqCst),
+                0,
+                "user code must not run when workflow_task RUNNING sync fails",
+            );
+
+            let broker_error_code = OperationalErrorCode::BrokerError.to_string();
+            let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
+            assert_eq!(status, "FAILED");
+            assert_eq!(error_code.as_deref(), Some(broker_error_code.as_str()));
+
+            let persisted: TaskResult<serde_json::Value> =
+                serde_json::from_str(result.as_deref().unwrap()).unwrap();
+            let persisted_error = persisted.unwrap_err();
+            assert_eq!(
+                persisted_error.error_code,
+                Some(OperationalErrorCode::BrokerError.into())
+            );
+            assert!(persisted_error.message.as_deref().is_some_and(|message| {
+                message.contains("failed to update workflow task to RUNNING")
+            }));
+
+            let attempt_count = fetch_attempt_count(&pool, &task_id).await;
+            assert_eq!(attempt_count, 1);
+        })
+        .catch_unwind()
+        .await;
+
+        remove_test_trigger(&pool, &function_name, &trigger_name).await;
+
+        if let Err(panic) = result {
+            resume_unwind(panic);
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn finalize_paused_workflow_requeues_without_running_user_code() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+
+        let task_id = Uuid::new_v4().to_string();
+        insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
+        let workflow_id = link_task_to_workflow(&pool, &task_id, Some(0)).await;
+        sqlx::query("UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = $1")
+            .bind(&workflow_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        EXECUTION_COUNT.store(0, Ordering::SeqCst);
+
+        run_finalize(
+            &broker,
+            async_task_fn!(counted_success_task, ()),
+            claimed_task_row(&task_id, "default", 0, 0, None),
+        )
+        .await;
+
+        assert_eq!(EXECUTION_COUNT.load(Ordering::SeqCst), 0);
+
+        let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
+        assert_eq!(status, "PENDING");
+        assert_eq!(result, None);
+        assert_eq!(error_code, None);
+        let (workflow_task_status, workflow_task_id) =
+            fetch_only_workflow_task_state(&pool, &workflow_id).await;
+        assert_eq!(workflow_task_status, "READY");
+        assert_eq!(workflow_task_id, None);
+        assert_eq!(fetch_attempt_count(&pool, &task_id).await, 0);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn finalize_cancelled_workflow_skips_without_running_user_code() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+
+        let task_id = Uuid::new_v4().to_string();
+        insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
+        let workflow_id = link_task_to_workflow(&pool, &task_id, Some(0)).await;
+        sqlx::query("UPDATE horsies_workflows SET status = 'CANCELLED' WHERE id = $1")
+            .bind(&workflow_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        EXECUTION_COUNT.store(0, Ordering::SeqCst);
+
+        run_finalize(
+            &broker,
+            async_task_fn!(counted_success_task, ()),
+            claimed_task_row(&task_id, "default", 0, 0, None),
+        )
+        .await;
+
+        assert_eq!(EXECUTION_COUNT.load(Ordering::SeqCst), 0);
+
+        let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
+        assert_eq!(status, "CANCELLED");
+        assert_eq!(result, None);
+        assert_eq!(error_code, None);
+        assert_eq!(
+            fetch_workflow_task_status(&pool, &workflow_id, &task_id).await,
+            "SKIPPED"
+        );
+        assert_eq!(fetch_attempt_count(&pool, &task_id).await, 0);
     }
 
     #[tokio::test]

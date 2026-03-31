@@ -40,6 +40,13 @@ pub(crate) use self::parse::parse_workflow_ctx;
 pub(crate) enum OwnershipOutcome {
     /// Task transitioned to RUNNING at the given timestamp.
     Running(chrono::DateTime<Utc>),
+    /// Task transitioned to RUNNING, but pre-execution bookkeeping failed.
+    ///
+    /// The task should fail closed without executing user code.
+    PreExecutionFailure {
+        started_at: chrono::DateTime<Utc>,
+        task_error: TaskError,
+    },
     /// Ownership lost or workflow stopped — skip execution.
     Aborted,
 }
@@ -202,11 +209,15 @@ pub(crate) async fn confirm_ownership_and_set_running(
             .execute(broker.pool())
             .await
             {
-                tracing::error!(
-                    task_id = %task_id,
-                    error = %e,
-                    "failed to update workflow task to RUNNING",
+                let task_error = TaskError::builtin(
+                    OperationalErrorCode::BrokerError,
+                    format!("failed to update workflow task to RUNNING: {}", e),
                 );
+                tracing::error!(task_id = %task_id, error = %e, "failed to update workflow task to RUNNING");
+                return OwnershipOutcome::PreExecutionFailure {
+                    started_at,
+                    task_error,
+                };
             }
             OwnershipOutcome::Running(started_at)
         }
@@ -218,24 +229,12 @@ pub(crate) async fn confirm_ownership_and_set_running(
                         workflow_status = %wf_status,
                         "skipping task - workflow is stopped",
                     );
-                    let skip_result = TaskResult::<serde_json::Value>::Err(TaskError {
-                        error_code: Some(crate::core::task::error::TaskErrorCode::User(
-                            "WORKFLOW_STOPPED".to_owned(),
-                        )),
-                        message: Some(format!("Task skipped - workflow is {}", wf_status)),
-                        cause: None,
-                        data: None,
-                    });
-                    let result_json =
-                        serde_json::to_string(&skip_result).unwrap_or_else(|_| "{}".to_owned());
-                    if let Err(e) = broker
-                        .mark_task_skipped_for_workflow(task_id, wf_status, &result_json)
-                        .await
-                    {
+                    if let Err(e) = handle_workflow_stop_with_retry(broker, task_id, wf_status).await {
                         tracing::error!(
                             task_id = %task_id,
                             error = %e,
-                            "failed to mark task as skipped for workflow stop",
+                            workflow_status = %wf_status,
+                            "failed to handle workflow stop before task start",
                         );
                     }
                 }
@@ -247,12 +246,103 @@ pub(crate) async fn confirm_ownership_and_set_running(
         }
         Err(e) => {
             tracing::error!(task_id = %task_id, error = %e, "failed to set RUNNING, requeueing");
-            if let Err(ue) = broker.unclaim_task(task_id, worker_id).await {
-                tracing::error!(task_id = %task_id, error = %ue, "failed to unclaim task");
+            if let Err(ue) = unclaim_task_with_retry(broker, task_id, worker_id, "set RUNNING failed").await {
+                tracing::error!(task_id = %task_id, error = %ue, "failed to unclaim task after RUNNING transition error");
             }
             OwnershipOutcome::Aborted
         }
     }
+}
+
+const PRESTART_DB_RETRY_ATTEMPTS: u32 = 3;
+
+async fn handle_workflow_stop_with_retry(
+    broker: &PostgresBroker,
+    task_id: &str,
+    workflow_status: &str,
+) -> Result<(), crate::broker::BrokerError> {
+    let mut last_err: Option<crate::broker::BrokerError> = None;
+
+    for attempt in 1..=PRESTART_DB_RETRY_ATTEMPTS {
+        match broker
+            .handle_workflow_stop_before_start(task_id, workflow_status)
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                let retryable = err.is_retryable() && attempt < PRESTART_DB_RETRY_ATTEMPTS;
+                tracing::warn!(
+                    task_id = %task_id,
+                    workflow_status = %workflow_status,
+                    attempt,
+                    max = PRESTART_DB_RETRY_ATTEMPTS,
+                    retryable,
+                    error = %err,
+                    "failed to handle workflow stop before task start",
+                );
+                last_err = Some(err);
+                if !retryable {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs_f64(phase_retry_delay(attempt))).await;
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        crate::broker::BrokerError::ConnectionFailed(
+            "workflow stop handling failed without a captured broker error".to_owned(),
+        )
+    }))
+}
+
+pub(crate) async fn unclaim_task_with_retry(
+    broker: &PostgresBroker,
+    task_id: &str,
+    worker_id: &str,
+    context: &str,
+) -> Result<bool, crate::broker::BrokerError> {
+    let mut last_err: Option<crate::broker::BrokerError> = None;
+
+    for attempt in 1..=PRESTART_DB_RETRY_ATTEMPTS {
+        match broker.unclaim_task(task_id, worker_id).await {
+            Ok(applied) => {
+                if !applied {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        worker_id = %worker_id,
+                        context,
+                        "unclaim skipped: task no longer CLAIMED by worker",
+                    );
+                }
+                return Ok(applied);
+            }
+            Err(err) => {
+                let retryable = err.is_retryable() && attempt < PRESTART_DB_RETRY_ATTEMPTS;
+                tracing::warn!(
+                    task_id = %task_id,
+                    worker_id = %worker_id,
+                    context,
+                    attempt,
+                    max = PRESTART_DB_RETRY_ATTEMPTS,
+                    retryable,
+                    error = %err,
+                    "failed to unclaim task",
+                );
+                last_err = Some(err);
+                if !retryable {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs_f64(phase_retry_delay(attempt))).await;
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        crate::broker::BrokerError::ConnectionFailed(
+            "unclaim failed without a captured broker error".to_owned(),
+        )
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -444,10 +534,18 @@ pub(crate) async fn schedule_retry_for_task(
                 let delay = (next_retry_at - Utc::now()).to_std().unwrap_or_default();
                 tokio::time::sleep(delay).await;
                 let notify_sql = format!("SELECT pg_notify('task_queue_{}', $1)", queue);
-                let _ = sqlx::query(&notify_sql)
+                if let Err(e) = sqlx::query(&notify_sql)
                     .bind(&notify_task_id)
                     .execute(&pool)
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        task_id = %notify_task_id,
+                        queue = %queue,
+                        error = %e,
+                        "delayed retry NOTIFY failed; worker polling fallback will recover",
+                    );
+                }
             });
             ScheduleRetryOutcome::Scheduled
         }
@@ -911,18 +1009,105 @@ async fn load_persisted_task_result(
 
 pub(crate) async fn notify_worker_capacity(pool: &sqlx::PgPool, queue_name: &str, task_id: &str) {
     let payload = format!("capacity:{}", task_id);
-    let _ = sqlx::query("SELECT pg_notify($1, $2)")
+    if let Err(e) = sqlx::query("SELECT pg_notify($1, $2)")
         .bind("task_new")
         .bind(&payload)
         .execute(pool)
-        .await;
+        .await
+    {
+        tracing::warn!(
+            task_id = %task_id,
+            channel = "task_new",
+            error = %e,
+            "capacity NOTIFY failed; worker polling fallback will recover",
+        );
+    }
 
     let channel = format!("task_queue_{}", queue_name);
-    let _ = sqlx::query("SELECT pg_notify($1, $2)")
+    if let Err(e) = sqlx::query("SELECT pg_notify($1, $2)")
         .bind(&channel)
         .bind(&payload)
         .execute(pool)
-        .await;
+        .await
+    {
+        tracing::warn!(
+            task_id = %task_id,
+            channel = %channel,
+            error = %e,
+            "queue-specific capacity NOTIFY failed; worker polling fallback will recover",
+        );
+    }
+}
+
+pub(crate) async fn finalize_pre_execution_failure(
+    broker: Arc<PostgresBroker>,
+    row: ClaimedTaskRow,
+    worker_id: String,
+    hostname: String,
+    task_error: TaskError,
+) -> Option<Phase2Work> {
+    let task_id = row.id.clone();
+    let queue_name = row.queue_name.clone();
+    let pid = std::process::id() as i32;
+
+    let task_started_at = match confirm_ownership_and_set_running(
+        &broker, &task_id, &worker_id, pid, &hostname,
+    )
+    .await
+    {
+        OwnershipOutcome::Running(started_at) => started_at,
+        OwnershipOutcome::PreExecutionFailure {
+            started_at,
+            task_error,
+        } => {
+            return match retry_phase1(
+                &broker,
+                &task_id,
+                TaskResult::Err(task_error),
+                &row,
+                started_at,
+                &worker_id,
+                &hostname,
+            )
+            .await
+            {
+                Some(FinalizeOutcome::Terminal {
+                    result_json,
+                    is_success,
+                }) => Some(Phase2Work {
+                    task_id,
+                    result_json,
+                    is_success,
+                    queue_name,
+                }),
+                Some(FinalizeOutcome::Retried) | None => None,
+            };
+        }
+        OwnershipOutcome::Aborted => return None,
+    };
+
+    match retry_phase1(
+        &broker,
+        &task_id,
+        TaskResult::Err(task_error),
+        &row,
+        task_started_at,
+        &worker_id,
+        &hostname,
+    )
+    .await
+    {
+        Some(FinalizeOutcome::Terminal {
+            result_json,
+            is_success,
+        }) => Some(Phase2Work {
+            task_id,
+            result_json,
+            is_success,
+            queue_name,
+        }),
+        Some(FinalizeOutcome::Retried) | None => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -961,6 +1146,33 @@ pub(crate) async fn execute_and_finalize(
     .await
     {
         OwnershipOutcome::Running(started_at) => started_at,
+        OwnershipOutcome::PreExecutionFailure {
+            started_at,
+            task_error,
+        } => {
+            return match retry_phase1(
+                &broker,
+                &task_id,
+                TaskResult::Err(task_error),
+                &row,
+                started_at,
+                &worker_id,
+                &hostname,
+            )
+            .await
+            {
+                Some(FinalizeOutcome::Terminal {
+                    result_json,
+                    is_success,
+                }) => Some(Phase2Work {
+                    task_id,
+                    result_json,
+                    is_success,
+                    queue_name,
+                }),
+                Some(FinalizeOutcome::Retried) | None => None,
+            };
+        }
         OwnershipOutcome::Aborted => return None,
     };
 

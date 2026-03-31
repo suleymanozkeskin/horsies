@@ -238,13 +238,6 @@ SELECT w.status FROM horsies_workflows w \
 JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id \
 WHERE wt.task_id = $1";
 
-/// Mark a task as SKIPPED when its workflow is PAUSED/CANCELLED.
-/// Sets the workflow_task to SKIPPED and the task to COMPLETED with a result.
-const MARK_TASK_SKIPPED_SQL: &str = "\
-UPDATE horsies_workflow_tasks \
-SET status = 'SKIPPED' \
-WHERE task_id = $1 AND status IN ('ENQUEUED', 'READY')";
-
 /// Find tasks from a batch that belong to PAUSED or CANCELLED workflows.
 /// Returns (task_id, workflow_status) to allow split handling.
 const FIND_NON_RUNNABLE_WORKFLOW_TASKS_SQL: &str = "\
@@ -1457,33 +1450,51 @@ impl PostgresBroker {
         Ok(row.map(|r| r.0))
     }
 
-    /// Mark a task as SKIPPED because its parent workflow is PAUSED or CANCELLED.
+    /// Handle a workflow stop discovered after the task was claimed but before it started.
     ///
-    /// Sets the workflow_task status to SKIPPED and the task itself to COMPLETED
-    /// with a WORKFLOW_STOPPED error result, matching Python's
-    /// `_mark_task_skipped_for_workflow_stop()`.
-    pub async fn mark_task_skipped_for_workflow(
+    /// Mirrors Python's child-runner preflight behavior:
+    /// - `PAUSED`: unclaim task → `PENDING`, reset `workflow_task` → `READY`
+    /// - `CANCELLED`: cancel task → `CANCELLED`, mark `workflow_task` → `SKIPPED`
+    pub async fn handle_workflow_stop_before_start(
         &self,
         task_id: &str,
         workflow_status: &str,
-        result_json: &str,
     ) -> Result<(), BrokerError> {
-        // Mark workflow_task as SKIPPED.
-        sqlx::query(MARK_TASK_SKIPPED_SQL)
-            .bind(task_id)
-            .execute(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
+        let mut tx = self.pool.begin().await.map_err(BrokerError::Database)?;
+        let task_ids = vec![task_id.to_owned()];
 
-        // Mark the task as COMPLETED with the WORKFLOW_STOPPED result.
-        sqlx::query(COMPLETE_SQL)
-            .bind(task_id)
-            .bind(result_json)
-            .execute(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
+        match workflow_status {
+            "PAUSED" => {
+                sqlx::query(UNCLAIM_TASKS_SQL)
+                    .bind(&task_ids)
+                    .execute(tx.as_mut())
+                    .await
+                    .map_err(BrokerError::Database)?;
 
-        tracing::info!(task_id, workflow_status, "task skipped - workflow stopped");
+                sqlx::query(RESET_WORKFLOW_TASKS_SQL)
+                    .bind(&task_ids)
+                    .execute(tx.as_mut())
+                    .await
+                    .map_err(BrokerError::Database)?;
+            }
+            "CANCELLED" => {
+                sqlx::query(CANCEL_CANCELLED_WORKFLOW_HORSIES_TASKS_SQL)
+                    .bind(&task_ids)
+                    .execute(tx.as_mut())
+                    .await
+                    .map_err(BrokerError::Database)?;
+
+                sqlx::query(SKIP_CANCELLED_WORKFLOW_TASKS_SQL)
+                    .bind(&task_ids)
+                    .execute(tx.as_mut())
+                    .await
+                    .map_err(BrokerError::Database)?;
+            }
+            _ => return Ok(()),
+        }
+
+        tx.commit().await.map_err(BrokerError::Database)?;
+        tracing::info!(task_id, workflow_status, "handled workflow stop before task start");
         Ok(())
     }
 
