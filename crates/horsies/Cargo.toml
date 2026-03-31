@@ -1,6 +1,6 @@
 [package]
 name = "horsies"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition = "2021"
 description = "Unified public API for the horsies task queue and workflow engine"
 license = "MIT"
@@ -10,7 +10,7 @@ keywords = ["task-queue", "workflow", "distributed", "postgresql", "async"]
 categories = ["asynchronous", "database"]
 
 [dependencies]
-horsies-macros = { version = "0.1.0-alpha.1", path = "../macros" }
+horsies-macros = { version = "0.1.0-alpha.2", path = "../macros" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "signal", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
