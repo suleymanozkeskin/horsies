@@ -1,9 +1,9 @@
 use crate::errors::Result;
 use crate::models::{
     ActiveWorkerRow, AggregatedBreakdownRow, ClusterCapacitySummary, ClusterUtilizationPoint,
-    DeadWorkerRow, OverloadedWorkerAlert, SnapshotAgeBucket, StaleClaimsAlert, TaskAttemptRow,
-    TaskDetail, TaskStatusRow, WorkerLoadPoint, WorkerQueuesRow, WorkerUptimeRow,
-    WorkflowRow, WorkflowSummary, WorkflowTaskRow,
+    DeadWorkerRow, DistinctFilterRow, FilterValue, OverloadedWorkerAlert, SnapshotAgeBucket,
+    StaleClaimsAlert, TaskAttemptRow, TaskDetail, TaskListRow, TaskStatusRow, WorkerLoadPoint,
+    WorkerQueuesRow, WorkerUptimeRow, WorkflowRow, WorkflowSummary, WorkflowTaskRow,
 };
 use sqlx::PgPool;
 
@@ -147,6 +147,66 @@ pub async fn fetch_filtered_task_aggregation(
     let rows = sqlx::query_as::<_, AggregatedBreakdownRow>(query)
         .bind(statuses)
         .bind(retried_only)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows)
+}
+
+/// Fetch distinct task_names, queue_names, and error_codes with counts.
+/// Returns three categorized lists parsed from a single UNION ALL query.
+pub async fn fetch_distinct_filter_values(
+    pool: &PgPool,
+    worker_id: Option<&str>,
+    statuses: &[&str],
+    retried_only: bool,
+) -> Result<(Vec<FilterValue>, Vec<FilterValue>, Vec<FilterValue>)> {
+    let query = include_str!("../../sql/tasks/distinct-filter-values.sql");
+    let rows = sqlx::query_as::<_, DistinctFilterRow>(query)
+        .bind(worker_id)
+        .bind(statuses)
+        .bind(retried_only)
+        .fetch_all(pool)
+        .await?;
+
+    let mut task_names = Vec::new();
+    let mut queues = Vec::new();
+    let mut errors = Vec::new();
+
+    for row in rows {
+        let fv = FilterValue {
+            value: row.value,
+            count: row.count,
+        };
+        match row.kind.as_str() {
+            "task_name" => task_names.push(fv),
+            "queue" => queues.push(fv),
+            "error" => errors.push(fv),
+            _ => {}
+        }
+    }
+
+    Ok((task_names, queues, errors))
+}
+
+/// Task list for a specific worker with composable filters (Layer 2 drill-down).
+/// Source: ../../sql/tasks/task-list-by-worker.sql
+pub async fn fetch_task_list_by_worker(
+    pool: &PgPool,
+    worker_id: Option<&str>,
+    statuses: &[&str],
+    retried_only: bool,
+    name_filter: &[String],
+    queue_filter: &[String],
+    error_filter: &[String],
+) -> Result<Vec<TaskListRow>> {
+    let query = include_str!("../../sql/tasks/task-list-by-worker.sql");
+    let rows = sqlx::query_as::<_, TaskListRow>(query)
+        .bind(worker_id)
+        .bind(statuses)
+        .bind(retried_only)
+        .bind(name_filter)
+        .bind(queue_filter)
+        .bind(error_filter)
         .fetch_all(pool)
         .await?;
     Ok(rows)

@@ -13,8 +13,8 @@ use crate::{
     tui::NotifyBatch,
     components::{
         dashboard::Dashboard, error_modal::ErrorModal, help::HelpOverlay, maintenance::Maintenance,
-        search::SearchModal, status_bar::StatusBar, task_detail::TaskDetailPanel, tasks::Tasks,
-        workers::Workers, workflow_detail::WorkflowDetailPanel, workflows::Workflows, Component,
+        search::SearchModal, status_bar::StatusBar, task_detail::TaskDetailPanel, task_list::TaskList,
+        tasks::Tasks, workers::Workers, workflow_detail::WorkflowDetailPanel, workflows::Workflows, Component,
     },
     db::queries,
     state::AppState,
@@ -801,6 +801,77 @@ impl FetchContext {
         }
     }
 
+    /// Fetch task list for a specific worker (Layer 2 drill-down)
+    async fn fetch_task_list(
+        &self,
+        worker_id: Option<String>,
+        status_filter: Vec<&'static str>,
+        retried_only: bool,
+        name_filter: Vec<String>,
+        queue_filter: Vec<String>,
+        error_filter: Vec<String>,
+    ) {
+        let Some(pool) = &self.pool else {
+            return;
+        };
+
+        let action_tx = &self.action_tx;
+
+        App::send_action(action_tx, Action::StartLoading(DataSource::TaskListData)).ok();
+
+        // Also fetch distinct values for the sidebar
+        match queries::fetch_distinct_filter_values(
+            pool,
+            worker_id.as_deref(),
+            &status_filter,
+            retried_only,
+        )
+        .await
+        {
+            Ok((names, queues, errors)) => {
+                App::send_action(
+                    action_tx,
+                    Action::DataLoaded(DataUpdate::DistinctFilterValues(names, queues, errors)),
+                )
+                .ok();
+            }
+            Err(e) => {
+                App::send_action(
+                    action_tx,
+                    Action::DataLoadError(format!("{}", e), DataSource::TaskListData),
+                )
+                .ok();
+            }
+        }
+
+        match queries::fetch_task_list_by_worker(
+            pool,
+            worker_id.as_deref(),
+            &status_filter,
+            retried_only,
+            &name_filter,
+            &queue_filter,
+            &error_filter,
+        )
+        .await
+        {
+            Ok(rows) => {
+                App::send_action(
+                    action_tx,
+                    Action::DataLoaded(DataUpdate::TaskListLoaded(rows)),
+                )
+                .ok();
+            }
+            Err(e) => {
+                App::send_action(
+                    action_tx,
+                    Action::DataLoadError(format!("{}", e), DataSource::TaskListData),
+                )
+                .ok();
+            }
+        }
+    }
+
     /// Fetch maintenance tab data (snapshot age distribution)
     async fn fetch_maintenance_data(&self) {
         let Some(pool) = &self.pool else {
@@ -1166,6 +1237,21 @@ impl App {
             return Ok(());
         }
 
+        // If sidebar section is focused, intercept navigation keys
+        if self.state.sidebar_section != crate::state::SidebarSection::None {
+            let action = match key.code {
+                KeyCode::Esc => Some(Action::ExitSidebarSection),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::SidebarCursorUp),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::SidebarCursorDown),
+                KeyCode::Enter | KeyCode::Char(' ') => Some(Action::SidebarToggleFilter),
+                _ => None,
+            };
+            if let Some(action) = action {
+                Self::send_action(&action_tx, action)?;
+            }
+            return Ok(());
+        }
+
         let action = match (key.code, key.modifiers) {
             // Global keybindings
             (KeyCode::Char('/'), _) => Some(Action::OpenSearch),
@@ -1181,6 +1267,10 @@ impl App {
                     Some(Action::CloseTaskDetail)
                 } else if self.state.show_help {
                     Some(Action::ToggleHelp)
+                } else if self.state.sidebar_section != crate::state::SidebarSection::None {
+                    Some(Action::ExitSidebarSection)
+                } else if self.state.task_list_active {
+                    Some(Action::ExitTaskListView)
                 } else if self.state.expanded_worker_index.is_some() {
                     self.state.collapse_expanded();
                     None // Just collapse, no action needed
@@ -1247,7 +1337,29 @@ impl App {
                 Some(Action::CycleTimeWindowForward)
             }
 
-            // Task status filter keys (only in Tasks tab, not in modals)
+            // ===== Task List (Layer 2) keybindings =====
+            (KeyCode::Up | KeyCode::Char('k'), _) if self.state.current_tab == Tab::Tasks && self.state.task_list_active && !self.state.show_task_detail => {
+                Some(Action::NavigateTaskListUp)
+            }
+            (KeyCode::Down | KeyCode::Char('j'), _) if self.state.current_tab == Tab::Tasks && self.state.task_list_active && !self.state.show_task_detail => {
+                Some(Action::NavigateTaskListDown)
+            }
+            (KeyCode::Enter, _) if self.state.current_tab == Tab::Tasks && self.state.task_list_active && !self.state.show_task_detail => {
+                // Open task detail for selected task in list
+                self.state.get_selected_task_list_id().map(Action::OpenTaskDetail)
+            }
+            // Sidebar section keys in Layer 2
+            (KeyCode::Char('m'), _) if self.state.current_tab == Tab::Tasks && self.state.task_list_active && !self.state.show_task_detail => {
+                Some(Action::EnterSidebarSection(crate::state::SidebarSection::TaskNames))
+            }
+            (KeyCode::Char('u'), _) if self.state.current_tab == Tab::Tasks && self.state.task_list_active && !self.state.show_task_detail => {
+                Some(Action::EnterSidebarSection(crate::state::SidebarSection::Queues))
+            }
+            (KeyCode::Char('d'), _) if self.state.current_tab == Tab::Tasks && self.state.task_list_active && !self.state.show_task_detail => {
+                Some(Action::EnterSidebarSection(crate::state::SidebarSection::Errors))
+            }
+
+            // ===== Task status/retried filter keys (both layers) =====
             (KeyCode::Char('p'), _) if self.state.current_tab == Tab::Tasks && !self.state.show_task_detail => {
                 Some(Action::ToggleTaskStatusFilter(TaskStatus::Pending))
             }
@@ -1279,15 +1391,15 @@ impl App {
                 Some(Action::ToggleRetriedFilter)
             }
 
-            // Task navigation (Tasks tab) - handle expanded state
-            (KeyCode::Up | KeyCode::Char('k'), _) if self.state.current_tab == Tab::Tasks && !self.state.show_task_detail => {
+            // Task navigation (Tasks tab Layer 1) - handle expanded state
+            (KeyCode::Up | KeyCode::Char('k'), _) if self.state.current_tab == Tab::Tasks && !self.state.task_list_active && !self.state.show_task_detail => {
                 if self.state.expanded_worker_index.is_some() {
                     Some(Action::NavigateTaskIdUp)
                 } else {
                     Some(Action::NavigateTaskUp)
                 }
             }
-            (KeyCode::Down | KeyCode::Char('j'), _) if self.state.current_tab == Tab::Tasks && !self.state.show_task_detail => {
+            (KeyCode::Down | KeyCode::Char('j'), _) if self.state.current_tab == Tab::Tasks && !self.state.task_list_active && !self.state.show_task_detail => {
                 if self.state.expanded_worker_index.is_some() {
                     Some(Action::NavigateTaskIdDown)
                 } else {
@@ -1295,15 +1407,17 @@ impl App {
                 }
             }
 
-            // Enter in Tasks tab - expand row or open task detail
-            (KeyCode::Enter, _) if self.state.current_tab == Tab::Tasks && !self.state.show_task_detail => {
-                if self.state.expanded_worker_index.is_some() {
-                    // Already expanded - open task detail for selected task ID
-                    self.state.get_selected_task_id().map(Action::OpenTaskDetail)
-                } else {
-                    // Not expanded - expand the row
-                    Some(Action::ToggleTaskRow)
-                }
+            // Enter in Tasks tab Layer 1 - drill into worker (or TOTAL for all)
+            (KeyCode::Enter, _) if self.state.current_tab == Tab::Tasks && !self.state.task_list_active && !self.state.show_task_detail => {
+                self.state.selected_task_index
+                    .and_then(|idx| self.state.task_aggregation.get(idx))
+                    .map(|row| {
+                        if row.worker_id == "TOTAL" {
+                            Action::EnterTaskListView(None)
+                        } else {
+                            Action::EnterTaskListView(Some(row.worker_id.clone()))
+                        }
+                    })
             }
 
             // Task detail scroll (when task detail modal is open)
@@ -1490,12 +1604,27 @@ impl App {
                         && self.pool.is_some()
                         && self.tick_counter % tasks_interval == 0
                     {
-                        let app_clone = self.clone_for_fetch();
-                        let filter = self.state.task_status_filter.to_sql_values();
-                        let retried_only = self.state.retried_only_filter;
-                        tokio::spawn(async move {
-                            app_clone.fetch_tasks_data(filter, retried_only).await;
-                        });
+                        if self.state.task_list_active {
+                            // Layer 2: refresh task list
+                            let app_clone = self.clone_for_fetch();
+                            let worker_id = self.state.task_list_worker_id.clone();
+                            let filter = self.state.task_status_filter.to_sql_values();
+                            let retried_only = self.state.retried_only_filter;
+                            let name_f = self.state.selected_task_names_sql();
+                            let queue_f = self.state.selected_queues_sql();
+                            let error_f = self.state.selected_errors_sql();
+                            tokio::spawn(async move {
+                                app_clone.fetch_task_list(worker_id, filter, retried_only, name_f, queue_f, error_f).await;
+                            });
+                        } else {
+                            // Layer 1: refresh aggregation
+                            let app_clone = self.clone_for_fetch();
+                            let filter = self.state.task_status_filter.to_sql_values();
+                            let retried_only = self.state.retried_only_filter;
+                            tokio::spawn(async move {
+                                app_clone.fetch_tasks_data(filter, retried_only).await;
+                            });
+                        }
                     }
 
                     // Auto-refresh maintenance (always slow, data doesn't change often)
@@ -1805,70 +1934,46 @@ impl App {
                     self.state.show_error_modal = false;
                 }
 
-                // Task status filter actions
+                // Task status filter actions (work in both Layer 1 and Layer 2)
                 Action::ToggleTaskStatusFilter(status) => {
                     self.state.task_status_filter.toggle(status);
-                    // Collapse any expanded row when filter changes
                     self.state.collapse_expanded();
-                    // Refetch with new filter
-                    if self.pool.is_some() {
-                        let fetch_ctx = self.clone_for_fetch();
-                        let filter = self.state.task_status_filter.to_sql_values();
-                        let retried_only = self.state.retried_only_filter;
-                        tokio::spawn(async move {
-                            fetch_ctx.fetch_tasks_data(filter, retried_only).await;
-                        });
-                    }
+                    Self::send_action(&self.action_tx, Action::RefreshTasks)?;
                 }
                 Action::SelectAllTaskStatuses => {
-                    // Toggle: if all selected, clear; otherwise select all
                     if self.state.task_status_filter.selected.len() == TaskStatus::all().len() {
                         self.state.task_status_filter.clear();
                         self.state.collapse_expanded();
-                        self.state.task_aggregation.clear();
+                        if !self.state.task_list_active {
+                            self.state.task_aggregation.clear();
+                        } else {
+                            self.state.task_list_rows.clear();
+                        }
                     } else {
                         self.state.task_status_filter.select_all();
                         self.state.collapse_expanded();
-                        if self.pool.is_some() {
-                            let fetch_ctx = self.clone_for_fetch();
-                            let filter = self.state.task_status_filter.to_sql_values();
-                            let retried_only = self.state.retried_only_filter;
-                            tokio::spawn(async move {
-                                fetch_ctx.fetch_tasks_data(filter, retried_only).await;
-                            });
-                        }
+                        Self::send_action(&self.action_tx, Action::RefreshTasks)?;
                     }
                 }
                 Action::ClearTaskStatuses => {
-                    // Toggle: if none selected, select all; otherwise clear
                     if self.state.task_status_filter.selected.is_empty() {
                         self.state.task_status_filter.select_all();
                         self.state.collapse_expanded();
-                        if self.pool.is_some() {
-                            let fetch_ctx = self.clone_for_fetch();
-                            let filter = self.state.task_status_filter.to_sql_values();
-                            let retried_only = self.state.retried_only_filter;
-                            tokio::spawn(async move {
-                                fetch_ctx.fetch_tasks_data(filter, retried_only).await;
-                            });
-                        }
+                        Self::send_action(&self.action_tx, Action::RefreshTasks)?;
                     } else {
                         self.state.task_status_filter.clear();
                         self.state.collapse_expanded();
-                        self.state.task_aggregation.clear();
+                        if !self.state.task_list_active {
+                            self.state.task_aggregation.clear();
+                        } else {
+                            self.state.task_list_rows.clear();
+                        }
                     }
                 }
                 Action::ToggleRetriedFilter => {
                     self.state.retried_only_filter = !self.state.retried_only_filter;
                     self.state.collapse_expanded();
-                    if self.pool.is_some() {
-                        let fetch_ctx = self.clone_for_fetch();
-                        let filter = self.state.task_status_filter.to_sql_values();
-                        let retried_only = self.state.retried_only_filter;
-                        tokio::spawn(async move {
-                            fetch_ctx.fetch_tasks_data(filter, retried_only).await;
-                        });
-                    }
+                    Self::send_action(&self.action_tx, Action::RefreshTasks)?;
                 }
                 Action::ToggleTaskRow => {
                     self.state.toggle_expand_selected();
@@ -1880,11 +1985,71 @@ impl App {
                     self.state.select_task_id_down();
                 }
 
+                // Task list drill-down (Layer 2) actions
+                Action::EnterTaskListView(worker_id) => {
+                    self.state.enter_task_list(worker_id.clone());
+                    if self.pool.is_some() {
+                        let fetch_ctx = self.clone_for_fetch();
+                        let filter = self.state.task_status_filter.to_sql_values();
+                        let retried_only = self.state.retried_only_filter;
+                        let name_f = self.state.selected_task_names_sql();
+                        let queue_f = self.state.selected_queues_sql();
+                        let error_f = self.state.selected_errors_sql();
+                        let wid = worker_id;
+                        tokio::spawn(async move {
+                            fetch_ctx.fetch_task_list(wid, filter, retried_only, name_f, queue_f, error_f).await;
+                        });
+                    }
+                }
+                Action::ExitTaskListView => {
+                    self.state.exit_task_list();
+                }
+                Action::NavigateTaskListUp => {
+                    self.state.select_task_list_up();
+                }
+                Action::NavigateTaskListDown => {
+                    self.state.select_task_list_down();
+                }
+                Action::RefreshTaskList => {
+                    if self.pool.is_some() {
+                        let fetch_ctx = self.clone_for_fetch();
+                        let worker_id = self.state.task_list_worker_id.clone();
+                        let filter = self.state.task_status_filter.to_sql_values();
+                        let retried_only = self.state.retried_only_filter;
+                        let name_f = self.state.selected_task_names_sql();
+                        let queue_f = self.state.selected_queues_sql();
+                        let error_f = self.state.selected_errors_sql();
+                        tokio::spawn(async move {
+                            fetch_ctx.fetch_task_list(worker_id, filter, retried_only, name_f, queue_f, error_f).await;
+                        });
+                    }
+                }
+                Action::EnterSidebarSection(section) => {
+                    self.state.enter_sidebar_section(section);
+                }
+                Action::ExitSidebarSection => {
+                    self.state.exit_sidebar_section();
+                }
+                Action::SidebarCursorUp => {
+                    self.state.sidebar_cursor_up();
+                }
+                Action::SidebarCursorDown => {
+                    self.state.sidebar_cursor_down();
+                }
+                Action::SidebarToggleFilter => {
+                    if self.state.toggle_sidebar_filter() {
+                        // Selection changed, refetch task list
+                        Self::send_action(&self.action_tx, Action::RefreshTasks)?;
+                    }
+                }
+
                 // Page/Home/End navigation (dispatched per active tab)
                 Action::NavigatePageUp => {
                     match self.state.current_tab {
                         Tab::Tasks => {
-                            if self.state.expanded_worker_index.is_some() {
+                            if self.state.task_list_active {
+                                self.state.select_task_list_page_up(PAGE_SIZE);
+                            } else if self.state.expanded_worker_index.is_some() {
                                 self.state.select_task_id_page_up(PAGE_SIZE);
                             } else {
                                 self.state.select_task_page_up(PAGE_SIZE);
@@ -1909,7 +2074,9 @@ impl App {
                 Action::NavigatePageDown => {
                     match self.state.current_tab {
                         Tab::Tasks => {
-                            if self.state.expanded_worker_index.is_some() {
+                            if self.state.task_list_active {
+                                self.state.select_task_list_page_down(PAGE_SIZE);
+                            } else if self.state.expanded_worker_index.is_some() {
                                 self.state.select_task_id_page_down(PAGE_SIZE);
                             } else {
                                 self.state.select_task_page_down(PAGE_SIZE);
@@ -1933,7 +2100,13 @@ impl App {
                 }
                 Action::NavigateHome => {
                     match self.state.current_tab {
-                        Tab::Tasks => self.state.select_task_home(),
+                        Tab::Tasks => {
+                            if self.state.task_list_active {
+                                self.state.select_task_list_home();
+                            } else {
+                                self.state.select_task_home();
+                            }
+                        }
                         Tab::Workers => {
                             self.state.select_worker_home();
                             if self.pool.is_some() {
@@ -1952,7 +2125,13 @@ impl App {
                 }
                 Action::NavigateEnd => {
                     match self.state.current_tab {
-                        Tab::Tasks => self.state.select_task_end(),
+                        Tab::Tasks => {
+                            if self.state.task_list_active {
+                                self.state.select_task_list_end();
+                            } else {
+                                self.state.select_task_end();
+                            }
+                        }
                         Tab::Workers => {
                             self.state.select_worker_end();
                             if self.pool.is_some() {
@@ -2003,12 +2182,25 @@ impl App {
                 }
                 Action::RefreshTasks => {
                     if self.pool.is_some() {
-                        let fetch_ctx = self.clone_for_fetch();
-                        let filter = self.state.task_status_filter.to_sql_values();
-                        let retried_only = self.state.retried_only_filter;
-                        tokio::spawn(async move {
-                            fetch_ctx.fetch_tasks_data(filter, retried_only).await;
-                        });
+                        if self.state.task_list_active {
+                            let fetch_ctx = self.clone_for_fetch();
+                            let worker_id = self.state.task_list_worker_id.clone();
+                            let filter = self.state.task_status_filter.to_sql_values();
+                            let retried_only = self.state.retried_only_filter;
+                            let name_f = self.state.selected_task_names_sql();
+                            let queue_f = self.state.selected_queues_sql();
+                            let error_f = self.state.selected_errors_sql();
+                            tokio::spawn(async move {
+                                fetch_ctx.fetch_task_list(worker_id, filter, retried_only, name_f, queue_f, error_f).await;
+                            });
+                        } else {
+                            let fetch_ctx = self.clone_for_fetch();
+                            let filter = self.state.task_status_filter.to_sql_values();
+                            let retried_only = self.state.retried_only_filter;
+                            tokio::spawn(async move {
+                                fetch_ctx.fetch_tasks_data(filter, retried_only).await;
+                            });
+                        }
                     }
                 }
                 Action::RefreshMaintenance => {
@@ -2330,6 +2522,13 @@ impl App {
                     self.perform_search();
                 }
             }
+            DataUpdate::TaskListLoaded(rows) => {
+                self.state.set_task_list_rows(rows);
+                self.state.set_loading(DataSource::TaskListData, false);
+            }
+            DataUpdate::DistinctFilterValues(names, queues, errors) => {
+                self.state.set_distinct_values(names, queues, errors);
+            }
             DataUpdate::WorkflowSummary(summary) => {
                 self.state.workflow_summary = Some(summary);
                 self.state.set_loading(DataSource::WorkflowSummary, false);
@@ -2430,8 +2629,13 @@ impl App {
                     workers.draw(frame, chunks[0], theme)
                 }
                 Tab::Tasks => {
-                    let mut tasks = Tasks::new(state);
-                    tasks.draw(frame, chunks[0], theme)
+                    if state.task_list_active {
+                        let mut task_list = TaskList::new(state);
+                        task_list.draw(frame, chunks[0], theme)
+                    } else {
+                        let mut tasks = Tasks::new(state);
+                        tasks.draw(frame, chunks[0], theme)
+                    }
                 }
                 Tab::Maintenance => {
                     let mut maintenance = Maintenance::new(state);

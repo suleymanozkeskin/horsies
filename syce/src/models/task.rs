@@ -2,6 +2,21 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
+/// A distinct value with its count, used by the filter sidebar.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct DistinctFilterRow {
+    pub kind: String,
+    pub value: String,
+    pub count: i64,
+}
+
+/// A named value with count for display in the sidebar.
+#[derive(Debug, Clone)]
+pub struct FilterValue {
+    pub value: String,
+    pub count: i64,
+}
+
 /// Full task details for the detail view
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct TaskDetail {
@@ -39,6 +54,22 @@ impl TaskDetail {
     pub fn to_clipboard_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_else(|_| format!("{:?}", self))
     }
+}
+
+/// Lightweight task row for the drill-down task list view (Layer 2).
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct TaskListRow {
+    pub id: String,
+    pub task_name: String,
+    pub queue_name: String,
+    pub status: String,
+    pub error_code: Option<String>,
+    pub retry_count: i32,
+    pub max_retries: i32,
+    pub enqueued_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub failed_at: Option<DateTime<Utc>>,
 }
 
 /// A single task execution attempt from horsies_task_attempts.

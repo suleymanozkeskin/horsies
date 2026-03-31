@@ -10,11 +10,13 @@ use crate::{action::Action, theme::Theme, tui::Event};
 
 pub mod dashboard;
 pub mod error_modal;
+pub mod filter_sidebar;
 pub mod help;
 pub mod maintenance;
 pub mod search;
 pub mod status_bar;
 pub mod task_detail;
+pub mod task_list;
 pub mod tasks;
 pub mod workers;
 pub mod workflow_detail;

@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use strum::Display;
 
+use crate::state::SidebarSection;
 use crate::tui::NotifyBatch;
 
 /// State of the PostgreSQL NOTIFY listener connection.
@@ -17,9 +18,9 @@ pub enum ListenerState {
 
 use crate::models::{
     ActiveWorkerRow, AggregatedBreakdownRow, ClusterCapacitySummary, ClusterUtilizationPoint,
-    DeadWorkerRow, OverloadedWorkerAlert, SnapshotAgeBucket, StaleClaimsAlert, TaskDetail,
-    TaskStatusRow, WorkerLoadPoint, WorkerQueuesRow, WorkerUptimeRow, WorkflowRow,
-    WorkflowSummary, WorkflowTaskRow,
+    DeadWorkerRow, FilterValue, OverloadedWorkerAlert, SnapshotAgeBucket, StaleClaimsAlert,
+    TaskDetail, TaskListRow, TaskStatusRow, WorkerLoadPoint, WorkerQueuesRow, WorkerUptimeRow,
+    WorkflowRow, WorkflowSummary, WorkflowTaskRow,
 };
 
 #[derive(Debug, Clone, Display)]
@@ -64,6 +65,19 @@ pub enum Action {
     ClearTaskStatuses,
     ToggleRetriedFilter,
     ToggleTaskRow,  // Expand/collapse selected worker row
+
+    // Task list drill-down (Layer 2)
+    EnterTaskListView(Option<String>),  // Drill into worker_id (None = all workers)
+    ExitTaskListView,              // Back to aggregation
+    NavigateTaskListUp,
+    NavigateTaskListDown,
+    RefreshTaskList,
+    // Sidebar filter navigation
+    EnterSidebarSection(SidebarSection),
+    ExitSidebarSection,
+    SidebarCursorUp,
+    SidebarCursorDown,
+    SidebarToggleFilter,           // Toggle selected value at cursor
     NavigateTaskIdUp,
     NavigateTaskIdDown,
 
@@ -422,6 +436,8 @@ pub enum DataUpdate {
     SnapshotAge(Vec<SnapshotAgeBucket>),
     DeadWorkers(Vec<DeadWorkerRow>),
     TaskDetailLoaded(TaskDetail),
+    TaskListLoaded(Vec<TaskListRow>),
+    DistinctFilterValues(Vec<FilterValue>, Vec<FilterValue>, Vec<FilterValue>),
     // Workflow data updates
     WorkflowSummary(WorkflowSummary),
     WorkflowList(Vec<WorkflowRow>),
@@ -440,6 +456,7 @@ pub enum DataSource {
     SnapshotAge,
     DeadWorkers,
     TaskDetailData,
+    TaskListData,
     // Workflow data sources
     WorkflowSummary,
     WorkflowList,

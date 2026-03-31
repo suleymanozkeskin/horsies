@@ -1,14 +1,24 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::action::{DataSource, ListenerState, SearchMatch, Tab, TaskStatusFilter, TimeWindow, WorkflowStatusFilter};
 use crate::models::{
     ActiveWorkerRow, AggregatedBreakdownRow, ClusterCapacitySummary, ClusterUtilizationPoint,
-    DeadWorkerRow, OverloadedWorkerAlert, SnapshotAgeBucket, StaleClaimsAlert, TaskDetail,
-    TaskStatusRow, WorkerLoadPoint, WorkerQueuesRow, WorkerUptimeRow, WorkflowRow,
-    WorkflowSummary, WorkflowTaskRow,
+    DeadWorkerRow, FilterValue, OverloadedWorkerAlert, SnapshotAgeBucket, StaleClaimsAlert,
+    TaskDetail, TaskListRow, TaskStatusRow, WorkerLoadPoint, WorkerQueuesRow, WorkerUptimeRow,
+    WorkflowRow, WorkflowSummary, WorkflowTaskRow,
 };
 use ratatui::prelude::Rect;
 use ratatui::text::Line;
+
+/// Which section of the sidebar is currently focused
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SidebarSection {
+    #[default]
+    None,
+    TaskNames,
+    Queues,
+    Errors,
+}
 
 /// Search state for the reusable search modal
 #[derive(Debug, Clone, Default)]
@@ -348,6 +358,26 @@ pub struct AppState {
     pub task_status_filter: TaskStatusFilter,    // Multi-select status filter
     pub retried_only_filter: bool,              // Show only tasks with retry_count > 0
 
+    // Task list drill-down (Layer 2)
+    pub task_list_active: bool,
+    pub task_list_worker_id: Option<String>,
+    pub task_list_rows: Vec<TaskListRow>,
+    pub task_list_selected: Option<usize>,
+
+    // Distinct filter values (populated from DB)
+    pub distinct_task_names: Vec<FilterValue>,
+    pub distinct_queues: Vec<FilterValue>,
+    pub distinct_errors: Vec<FilterValue>,
+
+    // Selected filter values (empty = no filter / show all)
+    pub selected_task_names: HashSet<String>,
+    pub selected_queues: HashSet<String>,
+    pub selected_errors: HashSet<String>,
+
+    // Which sidebar section is focused and cursor position within it
+    pub sidebar_section: SidebarSection,
+    pub sidebar_cursor: usize,
+
     // Maintenance tab data
     pub snapshot_age_dist: Vec<SnapshotAgeBucket>,
 
@@ -408,6 +438,18 @@ impl AppState {
             selected_task_id_index: None,
             task_status_filter: TaskStatusFilter::default(),
             retried_only_filter: false,
+            task_list_active: false,
+            task_list_worker_id: None,
+            task_list_rows: vec![],
+            task_list_selected: None,
+            distinct_task_names: vec![],
+            distinct_queues: vec![],
+            distinct_errors: vec![],
+            selected_task_names: HashSet::new(),
+            selected_queues: HashSet::new(),
+            selected_errors: HashSet::new(),
+            sidebar_section: SidebarSection::None,
+            sidebar_cursor: 0,
             snapshot_age_dist: vec![],
             workflow_summary: None,
             workflow_list: vec![],
@@ -834,6 +876,216 @@ impl AppState {
             }
             _ => false,
         }
+    }
+
+    // =========== Task list (Layer 2) methods ===========
+
+    /// Enter drill-down view for a specific worker (or all workers if None)
+    pub fn enter_task_list(&mut self, worker_id: Option<String>) {
+        self.task_list_active = true;
+        self.task_list_worker_id = worker_id;
+        self.task_list_rows.clear();
+        self.task_list_selected = None;
+        self.distinct_task_names.clear();
+        self.distinct_queues.clear();
+        self.distinct_errors.clear();
+        self.selected_task_names.clear();
+        self.selected_queues.clear();
+        self.selected_errors.clear();
+        self.sidebar_section = SidebarSection::None;
+        self.sidebar_cursor = 0;
+        self.collapse_expanded();
+    }
+
+    /// Exit drill-down view back to aggregation
+    pub fn exit_task_list(&mut self) {
+        self.task_list_active = false;
+        self.task_list_worker_id = None;
+        self.task_list_rows.clear();
+        self.task_list_selected = None;
+        self.distinct_task_names.clear();
+        self.distinct_queues.clear();
+        self.distinct_errors.clear();
+        self.selected_task_names.clear();
+        self.selected_queues.clear();
+        self.selected_errors.clear();
+        self.sidebar_section = SidebarSection::None;
+    }
+
+    /// Update task list rows and keep selection valid
+    pub fn set_task_list_rows(&mut self, rows: Vec<TaskListRow>) {
+        self.task_list_rows = rows;
+        self.ensure_task_list_selection();
+    }
+
+    /// Ensure task list selection is valid
+    fn ensure_task_list_selection(&mut self) {
+        if self.task_list_rows.is_empty() {
+            self.task_list_selected = None;
+            return;
+        }
+        match self.task_list_selected {
+            Some(idx) if idx >= self.task_list_rows.len() => {
+                self.task_list_selected = Some(self.task_list_rows.len() - 1);
+            }
+            None => {
+                self.task_list_selected = Some(0);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn select_task_list_up(&mut self) {
+        if self.task_list_rows.is_empty() {
+            return;
+        }
+        self.task_list_selected = match self.task_list_selected {
+            Some(idx) if idx > 0 => Some(idx - 1),
+            Some(_) => Some(0),
+            None => Some(0),
+        };
+    }
+
+    pub fn select_task_list_down(&mut self) {
+        if self.task_list_rows.is_empty() {
+            return;
+        }
+        let max_idx = self.task_list_rows.len().saturating_sub(1);
+        self.task_list_selected = match self.task_list_selected {
+            Some(idx) if idx < max_idx => Some(idx + 1),
+            Some(idx) => Some(idx),
+            None => Some(0),
+        };
+    }
+
+    pub fn select_task_list_page_up(&mut self, page_size: usize) {
+        if self.task_list_rows.is_empty() {
+            return;
+        }
+        self.task_list_selected = match self.task_list_selected {
+            Some(idx) => Some(idx.saturating_sub(page_size)),
+            None => Some(0),
+        };
+    }
+
+    pub fn select_task_list_page_down(&mut self, page_size: usize) {
+        if self.task_list_rows.is_empty() {
+            return;
+        }
+        let max_idx = self.task_list_rows.len().saturating_sub(1);
+        self.task_list_selected = match self.task_list_selected {
+            Some(idx) => Some((idx + page_size).min(max_idx)),
+            None => Some(0),
+        };
+    }
+
+    pub fn select_task_list_home(&mut self) {
+        if !self.task_list_rows.is_empty() {
+            self.task_list_selected = Some(0);
+        }
+    }
+
+    pub fn select_task_list_end(&mut self) {
+        if !self.task_list_rows.is_empty() {
+            self.task_list_selected = Some(self.task_list_rows.len().saturating_sub(1));
+        }
+    }
+
+    /// Get selected task ID in the task list view
+    pub fn get_selected_task_list_id(&self) -> Option<String> {
+        self.task_list_selected
+            .and_then(|idx| self.task_list_rows.get(idx))
+            .map(|row| row.id.clone())
+    }
+
+    /// Toggle a value in the named selection set. Returns true if a change occurred.
+    pub fn toggle_sidebar_filter(&mut self) -> bool {
+        let (values, selected) = match self.sidebar_section {
+            SidebarSection::TaskNames => (&self.distinct_task_names, &mut self.selected_task_names),
+            SidebarSection::Queues => (&self.distinct_queues, &mut self.selected_queues),
+            SidebarSection::Errors => (&self.distinct_errors, &mut self.selected_errors),
+            SidebarSection::None => return false,
+        };
+        let Some(fv) = values.get(self.sidebar_cursor) else {
+            return false;
+        };
+        if selected.contains(&fv.value) {
+            selected.remove(&fv.value);
+        } else {
+            selected.insert(fv.value.clone());
+        }
+        true
+    }
+
+    /// Get the length of the current sidebar section's value list
+    pub fn sidebar_section_len(&self) -> usize {
+        match self.sidebar_section {
+            SidebarSection::TaskNames => self.distinct_task_names.len(),
+            SidebarSection::Queues => self.distinct_queues.len(),
+            SidebarSection::Errors => self.distinct_errors.len(),
+            SidebarSection::None => 0,
+        }
+    }
+
+    /// Move sidebar cursor up within current section
+    pub fn sidebar_cursor_up(&mut self) {
+        if self.sidebar_cursor > 0 {
+            self.sidebar_cursor -= 1;
+        }
+    }
+
+    /// Move sidebar cursor down within current section
+    pub fn sidebar_cursor_down(&mut self) {
+        let max = self.sidebar_section_len().saturating_sub(1);
+        if self.sidebar_cursor < max {
+            self.sidebar_cursor += 1;
+        }
+    }
+
+    /// Enter a sidebar section
+    pub fn enter_sidebar_section(&mut self, section: SidebarSection) {
+        self.sidebar_section = section;
+        self.sidebar_cursor = 0;
+    }
+
+    /// Exit the current sidebar section
+    pub fn exit_sidebar_section(&mut self) {
+        self.sidebar_section = SidebarSection::None;
+        self.sidebar_cursor = 0;
+    }
+
+    /// Check if any distinct-value filter is active
+    pub fn has_task_list_filters(&self) -> bool {
+        !self.selected_task_names.is_empty()
+            || !self.selected_queues.is_empty()
+            || !self.selected_errors.is_empty()
+    }
+
+    /// Get selected task names as Vec for SQL bind
+    pub fn selected_task_names_sql(&self) -> Vec<String> {
+        self.selected_task_names.iter().cloned().collect()
+    }
+
+    /// Get selected queues as Vec for SQL bind
+    pub fn selected_queues_sql(&self) -> Vec<String> {
+        self.selected_queues.iter().cloned().collect()
+    }
+
+    /// Get selected errors as Vec for SQL bind
+    pub fn selected_errors_sql(&self) -> Vec<String> {
+        self.selected_errors.iter().cloned().collect()
+    }
+
+    /// Update distinct filter values from DB
+    pub fn set_distinct_values(
+        &mut self,
+        task_names: Vec<FilterValue>,
+        queues: Vec<FilterValue>,
+        errors: Vec<FilterValue>,
+    ) {
+        self.distinct_task_names = task_names;
+        self.distinct_queues = queues;
+        self.distinct_errors = errors;
     }
 
     // =========== Workflow navigation methods ===========

@@ -1,6 +1,6 @@
 use crate::{
-    action::{Action, TaskStatus},
-    components::Component,
+    action::Action,
+    components::{filter_sidebar, Component},
     errors::Result,
     state::AppState,
     theme::Theme,
@@ -21,70 +21,6 @@ enum TableRowKind {
 impl<'a> Tasks<'a> {
     pub fn new(state: &'a AppState) -> Self {
         Self { state }
-    }
-
-    /// Render the filter bar at the top
-    fn render_filter_bar(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let filter = &self.state.task_status_filter;
-
-        let mut spans = vec![
-            Span::styled(" Filter: ", Style::default().fg(theme.muted)),
-        ];
-
-        for status in TaskStatus::all() {
-            let is_selected = filter.is_selected(&status);
-            let key = match status {
-                TaskStatus::Pending => "p",
-                TaskStatus::Claimed => "c",
-                TaskStatus::Running => "r",
-                TaskStatus::Completed => "o",
-                TaskStatus::Failed => "f",
-                TaskStatus::Cancelled => "x",
-                TaskStatus::Expired => "e",
-            };
-
-            let style = if is_selected {
-                Style::default().fg(theme.background).bg(self.status_color(&status, theme)).bold()
-            } else {
-                Style::default().fg(theme.muted)
-            };
-
-            spans.push(Span::styled(format!("[{}]{} ", key, status.label()), style));
-        }
-
-        spans.push(Span::styled(" | ", Style::default().fg(theme.border)));
-        spans.push(Span::styled("[a]ll [n]one ", Style::default().fg(theme.muted)));
-
-        // Retried-only filter toggle
-        spans.push(Span::styled("| ", Style::default().fg(theme.border)));
-        let retried_style = if self.state.retried_only_filter {
-            Style::default().fg(theme.background).bg(Color::Yellow).bold()
-        } else {
-            Style::default().fg(theme.muted)
-        };
-        spans.push(Span::styled("[i]Retried ", retried_style));
-
-        let block = Block::default()
-            .borders(Borders::BOTTOM)
-            .border_style(theme.toolbar_border_style());
-
-        let paragraph = Paragraph::new(Line::from(spans))
-            .style(theme.toolbar_style())
-            .block(block);
-
-        frame.render_widget(paragraph, area);
-    }
-
-    fn status_color(&self, status: &TaskStatus, theme: &Theme) -> Color {
-        match status {
-            TaskStatus::Pending => Color::Yellow,
-            TaskStatus::Claimed => Color::Cyan,
-            TaskStatus::Running => Color::Blue,
-            TaskStatus::Completed => theme.success,
-            TaskStatus::Failed => theme.error,
-            TaskStatus::Cancelled => theme.muted,
-            TaskStatus::Expired => Color::DarkGray,
-        }
     }
 
     /// Build the list of displayable rows (workers + expanded task IDs)
@@ -128,10 +64,10 @@ impl<'a> Tasks<'a> {
         None
     }
 
-    /// Render the worker task aggregation table with expandable rows
+    /// Render the worker task aggregation table
     fn render_aggregation_table(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let block = Block::default()
-            .title("Task Distribution by Worker")
+            .title(" Task Distribution by Worker ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme.border))
             .style(Style::default().bg(theme.background));
@@ -181,7 +117,6 @@ impl<'a> Tasks<'a> {
                         let is_selected = self.state.selected_task_index == Some(*index);
                         let is_expanded = self.state.is_row_expanded(*index);
 
-                        // Row prefix (expand indicator)
                         let prefix = if *is_total {
                             "  "
                         } else if is_expanded {
@@ -228,14 +163,12 @@ impl<'a> Tasks<'a> {
                     TableRowKind::TaskId { task_id, tid_index } => {
                         let is_tid_selected = self.state.selected_task_id_index == Some(*tid_index);
 
-                        // Check for search highlight on this task (appended to end)
                         let pointer: &str = self.state.search_highlight.as_ref()
                             .filter(|h| h.matches(task_id))
                             .map_or("", |h| h.pointer());
 
                         let indicator = if is_tid_selected { "→" } else { " " };
 
-                        // Retry indicator
                         let retry_count = self.state.get_expanded_retry_count(*tid_index);
                         let retry_suffix = if retry_count > 0 {
                             format!(" (retry: {})", retry_count)
@@ -252,7 +185,6 @@ impl<'a> Tasks<'a> {
                             Style::default().fg(theme.muted)
                         };
 
-                        // Task ID row spans across with indentation, retry suffix, pointer appended at end
                         let cell_content = match (retry_suffix.is_empty(), pointer.is_empty()) {
                             (true, true) => format!("    {} {}", indicator, task_id),
                             (false, true) => format!("    {} {}{}", indicator, task_id, retry_suffix),
@@ -278,40 +210,34 @@ impl<'a> Tasks<'a> {
             })
             .collect();
 
-        // Column constraints
         let widths = [
-            Constraint::Min(40),        // Worker ID (UUID + prefix)
-            Constraint::Length(8),      // Total
-            Constraint::Length(8),      // Pending
-            Constraint::Length(8),      // Claimed
-            Constraint::Length(8),      // Running
-            Constraint::Length(10),     // Completed
-            Constraint::Length(8),      // Failed
-            Constraint::Length(10),     // Cancelled
-            Constraint::Length(9),      // Expired
-            Constraint::Length(9),      // Retried
+            Constraint::Min(30),        // Worker ID
+            Constraint::Length(7),       // Total
+            Constraint::Length(8),       // Pending
+            Constraint::Length(8),       // Claimed
+            Constraint::Length(8),       // Running
+            Constraint::Length(10),      // Completed
+            Constraint::Length(8),       // Failed
+            Constraint::Length(10),      // Cancelled
+            Constraint::Length(9),       // Expired
+            Constraint::Length(9),       // Retried
         ];
 
         let table = Table::new(rows, widths)
             .header(header)
             .block(block)
-            .row_highlight_style(Style::default()) // We handle highlighting manually per-row
+            .row_highlight_style(Style::default())
             .column_spacing(1);
 
-        // Use TableState for scrolling
         let mut table_state = TableState::default();
         table_state.select(selected_idx);
 
         frame.render_stateful_widget(table, area, &mut table_state);
     }
 
-    /// Render help hints at the bottom
+    /// Render help hints
     fn render_help_hints(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let hints = if self.state.expanded_worker_index.is_some() {
-            " ↑↓/jk Navigate | PgUp/PgDn Page | Enter: View details | Esc: Collapse"
-        } else {
-            " ↑↓/jk Navigate | PgUp/PgDn Page | Home/End Jump | Enter: Expand | p/c/r/o/f: Filter"
-        };
+        let hints = " ↑↓/jk Navigate | PgUp/PgDn Page | Home/End Jump | Enter: Drill in";
 
         let block = Block::default()
             .borders(Borders::TOP)
@@ -331,18 +257,27 @@ impl<'a> Component for Tasks<'a> {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) -> Result<()> {
-        let chunks = Layout::default()
+        // Vertical: main content + help hints
+        let v_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2),  // Filter bar (with border)
-                Constraint::Min(10),    // Main table
-                Constraint::Length(2),  // Help hints (with border)
+                Constraint::Min(8),     // Main area
+                Constraint::Length(2),   // Help hints
             ])
             .split(area);
 
-        self.render_filter_bar(frame, chunks[0], theme);
-        self.render_aggregation_table(frame, chunks[1], theme);
-        self.render_help_hints(frame, chunks[2], theme);
+        // Horizontal: sidebar + table
+        let h_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(18),  // Sidebar (scales with terminal width)
+                Constraint::Percentage(82),  // Table
+            ])
+            .split(v_chunks[0]);
+
+        filter_sidebar::render(frame, h_chunks[0], self.state, theme, false);
+        self.render_aggregation_table(frame, h_chunks[1], theme);
+        self.render_help_hints(frame, v_chunks[1], theme);
 
         Ok(())
     }
