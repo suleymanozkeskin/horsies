@@ -211,6 +211,56 @@ class TestEnqueueWorkflowTask:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_corrupt_task_options_json_fails_task(self) -> None:
+        """Regression for #10: corrupt task_options must fail the task instead
+        of silently falling back to {} (which loses retry policy / good_until)."""
+        row = self._base_row(task_options='not{json')
+
+        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
+            if stmt is ENQUEUE_WORKFLOW_TASK_SQL:
+                return _one_result(row)
+            return _one_result(SimpleNamespace())
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=_dispatch)
+
+        with patch(
+            'horsies.core.workflows.engine._fail_enqueued_task',
+            new=AsyncMock(),
+        ) as mock_fail:
+            result = await enqueue_workflow_task(session, 'wf-1', 0, {})
+
+        assert result is None
+        mock_fail.assert_called_once()
+        call_kwargs = mock_fail.call_args
+        assert call_kwargs[1].get('error_code') == OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+
+    @pytest.mark.asyncio
+    async def test_task_options_non_dict_fails_task(self) -> None:
+        """Regression for #10: valid JSON but non-object task_options must fail
+        (e.g. a bare string or array is not a valid options payload)."""
+        row = self._base_row(task_options='"just_a_string"')
+
+        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
+            if stmt is ENQUEUE_WORKFLOW_TASK_SQL:
+                return _one_result(row)
+            return _one_result(SimpleNamespace())
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=_dispatch)
+
+        with patch(
+            'horsies.core.workflows.engine._fail_enqueued_task',
+            new=AsyncMock(),
+        ) as mock_fail:
+            result = await enqueue_workflow_task(session, 'wf-1', 0, {})
+
+        assert result is None
+        mock_fail.assert_called_once()
+        call_kwargs = mock_fail.call_args
+        assert call_kwargs[1].get('error_code') == OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+
+    @pytest.mark.asyncio
     async def test_corrupt_args_from_string_fails_task(self) -> None:
         row = self._base_row(args_from='{broken')
 

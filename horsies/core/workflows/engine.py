@@ -191,18 +191,37 @@ async def enqueue_workflow_task(
     good_until_str: str | None = None
     good_until_dt: datetime | None = None
     if task_options_str:
-        options_data = _deser_json(task_options_str, 'task_options', fallback={})
-        if isinstance(options_data, dict):
-            retry_policy = options_data.get('retry_policy')
-            if isinstance(retry_policy, dict):
-                max_retries = retry_policy.get('max_retries', 3)
-            good_until_raw = options_data.get('good_until')
-            if good_until_raw is not None:
-                good_until_str = str(good_until_raw)
-                try:
-                    good_until_dt = datetime.fromisoformat(good_until_str)
-                except (ValueError, TypeError):
-                    pass  # SHA will use None; good_until_str still passed to DB
+        options_data = _deser_json(task_options_str, 'task_options')
+        if options_data is None:
+            await _fail_enqueued_task(
+                session,
+                workflow_id,
+                task_index,
+                f'Corrupt task_options JSON for task {task_index}',
+                broker,
+                error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            )
+            return None
+        if not isinstance(options_data, dict):
+            await _fail_enqueued_task(
+                session,
+                workflow_id,
+                task_index,
+                f'Invalid task_options payload for task {task_index}: expected object',
+                broker,
+                error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            )
+            return None
+        retry_policy = options_data.get('retry_policy')
+        if isinstance(retry_policy, dict):
+            max_retries = retry_policy.get('max_retries', 3)
+        good_until_raw = options_data.get('good_until')
+        if good_until_raw is not None:
+            good_until_str = str(good_until_raw)
+            try:
+                good_until_dt = datetime.fromisoformat(good_until_str)
+            except (ValueError, TypeError):
+                pass  # SHA will use None; good_until_str still passed to DB
 
     # Start with static kwargs — corrupt kwargs is fatal for this task
     raw_kwargs = _deser_json(row.task_kwargs, 'workflow task kwargs')
@@ -719,9 +738,31 @@ async def enqueue_subworkflow_task(
             if child_task.good_until is not None:
                 child_base_options: dict[str, Any] = {}
                 if child_task_options_json:
-                    parsed = _deser_json(child_task_options_json, 'child task_options', fallback={})
-                    if isinstance(parsed, dict):
-                        child_base_options = parsed
+                    parsed = _deser_json(child_task_options_json, 'child task_options')
+                    if parsed is None:
+                        await _fail_enqueued_task(
+                            session,
+                            workflow_id,
+                            task_index,
+                            f'Corrupt child task_options for {child_task.name}',
+                            broker,
+                            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+                        )
+                        return None
+                    if not isinstance(parsed, dict):
+                        await _fail_enqueued_task(
+                            session,
+                            workflow_id,
+                            task_index,
+                            (
+                                f'Invalid child task_options payload for {child_task.name}: '
+                                'expected object'
+                            ),
+                            broker,
+                            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+                        )
+                        return None
+                    child_base_options = parsed
                 child_base_options['good_until'] = child_task.good_until.isoformat()
                 child_task_options_json = _ser(dumps_json(child_base_options), 'child task_options')
 

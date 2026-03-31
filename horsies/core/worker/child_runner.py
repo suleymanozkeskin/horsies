@@ -388,7 +388,7 @@ def _handle_workflow_stop_before_start(
             return (False, '', 'WORKFLOW_CHECK_FAILED')
 
 
-def _update_workflow_task_running_with_retry(task_id: str) -> None:
+def _update_workflow_task_running_with_retry(task_id: str) -> bool:
     backoff_seconds = (0.0, 0.25, 0.75)
     total_attempts = len(backoff_seconds)
     for attempt_index, delay in enumerate(backoff_seconds):
@@ -411,7 +411,7 @@ def _update_workflow_task_running_with_retry(task_id: str) -> None:
                     (task_id,),
                 )
                 conn.commit()
-            return
+            return True
         except Exception as exc:
             retryable = _is_retryable_db_error(exc)
             is_last_attempt = attempt_index == total_attempts - 1
@@ -420,7 +420,7 @@ def _update_workflow_task_running_with_retry(task_id: str) -> None:
                     logger.error(
                         f'Failed to update workflow_tasks to RUNNING for task {task_id}: {exc}'
                     )
-                    return
+                    return False
                 case (True, False):
                     logger.warning(
                         f'Retrying workflow_tasks RUNNING update for task {task_id}: {exc}'
@@ -430,12 +430,13 @@ def _update_workflow_task_running_with_retry(task_id: str) -> None:
                     logger.error(
                         f'Failed to update workflow_tasks to RUNNING for task {task_id}: {exc}'
                     )
-                    return
+                    return False
                 case _:
                     logger.error(
                         f'Failed to update workflow_tasks to RUNNING for task {task_id}: {exc}'
                     )
-                    return
+                    return False
+    return False
 
 
 def _preflight_workflow_check(
@@ -523,7 +524,22 @@ def _confirm_ownership_and_set_running(
 
             conn.commit()
 
-        _update_workflow_task_running_with_retry(task_id)
+        if not _update_workflow_task_running_with_retry(task_id):
+            tr: TaskResult[Any, TaskError] = TaskResult(
+                err=TaskError(
+                    error_code=OperationalErrorCode.BROKER_ERROR,
+                    message=(
+                        'Failed to update workflow task to RUNNING before task execution; '
+                        'aborting before user code starts'
+                    ),
+                    data={'task_id': task_id},
+                )
+            )
+            return (
+                True,
+                serialize_error_payload(tr),
+                'Failed to update workflow task to RUNNING',
+            )
         return None
     except Exception as e:
         logger.error(f'Failed to transition task {task_id} to RUNNING: {e}')

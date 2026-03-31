@@ -566,8 +566,9 @@ class TestUpdateWorkflowTaskRunningWithRetry:
             'horsies.core.worker.child_runner._get_worker_pool',
             return_value=pool,
         ):
-            _update_workflow_task_running_with_retry('task-1')
+            result = _update_workflow_task_running_with_retry('task-1')
 
+        assert result is True
         assert conn.commits == 1
         assert len(cursor.queries) == 1
 
@@ -592,24 +593,26 @@ class TestUpdateWorkflowTaskRunningWithRetry:
             'horsies.core.worker.child_runner._get_worker_pool',
             side_effect=_pool_factory,
         ), patch('horsies.core.worker.child_runner.time.sleep'):
-            _update_workflow_task_running_with_retry('task-1')
+            result = _update_workflow_task_running_with_retry('task-1')
 
+        assert result is True
         assert call_count == 2
         assert conn.commits == 1
 
     def test_retryable_error_exhausts_all_attempts(self) -> None:
-        """OperationalError on all attempts → logs error, returns."""
+        """OperationalError on all attempts → returns False."""
         from psycopg import OperationalError
 
         with patch(
             'horsies.core.worker.child_runner._get_worker_pool',
             side_effect=OperationalError('permanent'),
         ), patch('horsies.core.worker.child_runner.time.sleep'):
-            # Should not raise
-            _update_workflow_task_running_with_retry('task-1')
+            result = _update_workflow_task_running_with_retry('task-1')
+
+        assert result is False
 
     def test_non_retryable_error_fails_immediately(self) -> None:
-        """Non-retryable error (e.g. ValueError) does not retry."""
+        """Non-retryable error (e.g. ValueError) → returns False without retry."""
         call_count = 0
 
         def _pool_factory() -> Any:
@@ -621,8 +624,9 @@ class TestUpdateWorkflowTaskRunningWithRetry:
             'horsies.core.worker.child_runner._get_worker_pool',
             side_effect=_pool_factory,
         ):
-            _update_workflow_task_running_with_retry('task-1')
+            result = _update_workflow_task_running_with_retry('task-1')
 
+        assert result is False
         assert call_count == 1  # No retries for non-retryable
 
     def test_retryable_sleeps_with_backoff(self) -> None:
@@ -1322,6 +1326,65 @@ class TestOwnershipLostWorkflowBranch:
         ok, _, reason = result
         assert ok is False
         assert reason == 'WORKFLOW_STOPPED'
+
+
+# ===================================================================
+# M2. Regression: workflow_task RUNNING sync failure aborts execution
+# ===================================================================
+
+
+@pytest.mark.unit
+class TestWorkflowTaskRunningSyncFailureAborts:
+    """Regression for #3: when _update_workflow_task_running_with_retry
+    returns False, _confirm_ownership_and_set_running must abort with
+    BROKER_ERROR instead of proceeding to user code."""
+
+    def test_running_sync_failure_returns_broker_error(self) -> None:
+        """Task aborted with BROKER_ERROR when workflow_task RUNNING update fails."""
+        from horsies.core.worker.child_runner import (
+            _confirm_ownership_and_set_running,
+        )
+
+        # Ownership UPDATE succeeds (RETURNING id)
+        cursor = _FakeCursor(fetchone_return=_FakeRow(id='task-1'))
+        conn = _FakeConn(cursor)
+        pool = _FakePool(conn)
+
+        with patch(
+            'horsies.core.worker.child_runner._get_worker_pool',
+            return_value=pool,
+        ), patch(
+            'horsies.core.worker.child_runner._update_workflow_task_running_with_retry',
+            return_value=False,
+        ):
+            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+
+        assert result is not None
+        ok, payload, reason = result
+        assert ok is True  # True = task has a result payload to finalize
+        assert 'BROKER_ERROR' in payload
+        assert reason == 'Failed to update workflow task to RUNNING'
+
+    def test_running_sync_success_returns_none(self) -> None:
+        """When workflow_task RUNNING update succeeds, returns None (proceed)."""
+        from horsies.core.worker.child_runner import (
+            _confirm_ownership_and_set_running,
+        )
+
+        cursor = _FakeCursor(fetchone_return=_FakeRow(id='task-1'))
+        conn = _FakeConn(cursor)
+        pool = _FakePool(conn)
+
+        with patch(
+            'horsies.core.worker.child_runner._get_worker_pool',
+            return_value=pool,
+        ), patch(
+            'horsies.core.worker.child_runner._update_workflow_task_running_with_retry',
+            return_value=True,
+        ):
+            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+
+        assert result is None  # None = proceed to user code
 
 
 # ===================================================================
