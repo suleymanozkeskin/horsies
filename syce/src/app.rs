@@ -231,8 +231,9 @@ impl App {
                 if batch.task_status {
                     let ctx = self.clone_for_fetch();
                     let filter = self.state.task_status_filter.to_sql_values();
+                    let retried_only = self.state.retried_only_filter;
                     tokio::spawn(async move {
-                        ctx.fetch_tasks_data(filter).await;
+                        ctx.fetch_tasks_data(filter, retried_only).await;
                     });
                 }
             }
@@ -765,7 +766,7 @@ impl FetchContext {
     }
 
     /// Fetch tasks tab data (aggregated breakdown) with optional status filter
-    async fn fetch_tasks_data(&self, status_filter: Vec<&'static str>) {
+    async fn fetch_tasks_data(&self, status_filter: Vec<&'static str>, retried_only: bool) {
         let Some(pool) = &self.pool else {
             return;
         };
@@ -776,10 +777,10 @@ impl FetchContext {
         App::send_action(action_tx, Action::StartLoading(DataSource::TaskAggregation)).ok();
 
         let result = if status_filter.is_empty() {
-            // No filter = fetch all
-            queries::fetch_task_aggregation(pool).await
+            // No status filter = fetch all (retried_only still applies)
+            queries::fetch_task_aggregation(pool, retried_only).await
         } else {
-            queries::fetch_filtered_task_aggregation(pool, &status_filter).await
+            queries::fetch_filtered_task_aggregation(pool, &status_filter, retried_only).await
         };
 
         match result {
@@ -1274,6 +1275,9 @@ impl App {
             (KeyCode::Char('n'), _) if self.state.current_tab == Tab::Tasks && !self.state.show_task_detail => {
                 Some(Action::ClearTaskStatuses)
             }
+            (KeyCode::Char('i'), _) if self.state.current_tab == Tab::Tasks && !self.state.show_task_detail => {
+                Some(Action::ToggleRetriedFilter)
+            }
 
             // Task navigation (Tasks tab) - handle expanded state
             (KeyCode::Up | KeyCode::Char('k'), _) if self.state.current_tab == Tab::Tasks && !self.state.show_task_detail => {
@@ -1488,8 +1492,9 @@ impl App {
                     {
                         let app_clone = self.clone_for_fetch();
                         let filter = self.state.task_status_filter.to_sql_values();
+                        let retried_only = self.state.retried_only_filter;
                         tokio::spawn(async move {
-                            app_clone.fetch_tasks_data(filter).await;
+                            app_clone.fetch_tasks_data(filter, retried_only).await;
                         });
                     }
 
@@ -1570,8 +1575,9 @@ impl App {
                                 self.state.ensure_task_selection();
                                 let fetch_ctx = self.clone_for_fetch();
                                 let filter = self.state.task_status_filter.to_sql_values();
+                                let retried_only = self.state.retried_only_filter;
                                 tokio::spawn(async move {
-                                    fetch_ctx.fetch_tasks_data(filter).await;
+                                    fetch_ctx.fetch_tasks_data(filter, retried_only).await;
                                 });
                             }
                             Tab::Maintenance => {
@@ -1808,8 +1814,9 @@ impl App {
                     if self.pool.is_some() {
                         let fetch_ctx = self.clone_for_fetch();
                         let filter = self.state.task_status_filter.to_sql_values();
+                        let retried_only = self.state.retried_only_filter;
                         tokio::spawn(async move {
-                            fetch_ctx.fetch_tasks_data(filter).await;
+                            fetch_ctx.fetch_tasks_data(filter, retried_only).await;
                         });
                     }
                 }
@@ -1825,8 +1832,9 @@ impl App {
                         if self.pool.is_some() {
                             let fetch_ctx = self.clone_for_fetch();
                             let filter = self.state.task_status_filter.to_sql_values();
+                            let retried_only = self.state.retried_only_filter;
                             tokio::spawn(async move {
-                                fetch_ctx.fetch_tasks_data(filter).await;
+                                fetch_ctx.fetch_tasks_data(filter, retried_only).await;
                             });
                         }
                     }
@@ -1839,14 +1847,27 @@ impl App {
                         if self.pool.is_some() {
                             let fetch_ctx = self.clone_for_fetch();
                             let filter = self.state.task_status_filter.to_sql_values();
+                            let retried_only = self.state.retried_only_filter;
                             tokio::spawn(async move {
-                                fetch_ctx.fetch_tasks_data(filter).await;
+                                fetch_ctx.fetch_tasks_data(filter, retried_only).await;
                             });
                         }
                     } else {
                         self.state.task_status_filter.clear();
                         self.state.collapse_expanded();
                         self.state.task_aggregation.clear();
+                    }
+                }
+                Action::ToggleRetriedFilter => {
+                    self.state.retried_only_filter = !self.state.retried_only_filter;
+                    self.state.collapse_expanded();
+                    if self.pool.is_some() {
+                        let fetch_ctx = self.clone_for_fetch();
+                        let filter = self.state.task_status_filter.to_sql_values();
+                        let retried_only = self.state.retried_only_filter;
+                        tokio::spawn(async move {
+                            fetch_ctx.fetch_tasks_data(filter, retried_only).await;
+                        });
                     }
                 }
                 Action::ToggleTaskRow => {
@@ -1984,8 +2005,9 @@ impl App {
                     if self.pool.is_some() {
                         let fetch_ctx = self.clone_for_fetch();
                         let filter = self.state.task_status_filter.to_sql_values();
+                        let retried_only = self.state.retried_only_filter;
                         tokio::spawn(async move {
-                            fetch_ctx.fetch_tasks_data(filter).await;
+                            fetch_ctx.fetch_tasks_data(filter, retried_only).await;
                         });
                     }
                 }

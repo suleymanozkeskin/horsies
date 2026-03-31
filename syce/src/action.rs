@@ -62,6 +62,7 @@ pub enum Action {
     ToggleTaskStatusFilter(TaskStatus),
     SelectAllTaskStatuses,
     ClearTaskStatuses,
+    ToggleRetriedFilter,
     ToggleTaskRow,  // Expand/collapse selected worker row
     NavigateTaskIdUp,
     NavigateTaskIdDown,

@@ -117,8 +117,11 @@ pub struct AggregatedBreakdownRow {
     pub failed_count: i64,
     pub cancelled_count: i64,
     pub expired_count: i64,
+    pub retried_count: i64,
     pub claimed_task_ids: Option<Vec<String>>,
     pub running_task_ids: Option<Vec<String>>,
+    pub claimed_retry_counts: Option<Vec<i32>>,
+    pub running_retry_counts: Option<Vec<i32>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

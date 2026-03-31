@@ -55,6 +55,15 @@ impl<'a> Tasks<'a> {
         spans.push(Span::styled(" | ", Style::default().fg(theme.border)));
         spans.push(Span::styled("[a]ll [n]one ", Style::default().fg(theme.muted)));
 
+        // Retried-only filter toggle
+        spans.push(Span::styled("| ", Style::default().fg(theme.border)));
+        let retried_style = if self.state.retried_only_filter {
+            Style::default().fg(theme.background).bg(Color::Yellow).bold()
+        } else {
+            Style::default().fg(theme.muted)
+        };
+        spans.push(Span::styled("[i]Retried ", retried_style));
+
         let block = Block::default()
             .borders(Borders::BOTTOM)
             .border_style(theme.toolbar_border_style());
@@ -153,6 +162,7 @@ impl<'a> Tasks<'a> {
             Cell::from("Failed"),
             Cell::from("Cancelled"),
             Cell::from("Expired"),
+            Cell::from("Retried"),
         ])
         .style(header_style)
         .height(1);
@@ -195,6 +205,12 @@ impl<'a> Tasks<'a> {
                         };
 
                         let worker_display = format!("{}{}", prefix, &agg_row.worker_id);
+                        let retried_cell = if agg_row.retried_count > 0 {
+                            Cell::from(agg_row.retried_count.to_string())
+                                .style(Style::default().fg(Color::Yellow))
+                        } else {
+                            Cell::from(agg_row.retried_count.to_string())
+                        };
                         Row::new(vec![
                             Cell::from(worker_display),
                             Cell::from(agg_row.total_count.to_string()),
@@ -205,6 +221,7 @@ impl<'a> Tasks<'a> {
                             Cell::from(agg_row.failed_count.to_string()),
                             Cell::from(agg_row.cancelled_count.to_string()),
                             Cell::from(agg_row.expired_count.to_string()),
+                            retried_cell,
                         ])
                         .style(style)
                     }
@@ -218,6 +235,14 @@ impl<'a> Tasks<'a> {
 
                         let indicator = if is_tid_selected { "→" } else { " " };
 
+                        // Retry indicator
+                        let retry_count = self.state.get_expanded_retry_count(*tid_index);
+                        let retry_suffix = if retry_count > 0 {
+                            format!(" (retry: {})", retry_count)
+                        } else {
+                            String::new()
+                        };
+
                         let style = if is_tid_selected {
                             Style::default()
                                 .bg(theme.accent)
@@ -227,15 +252,17 @@ impl<'a> Tasks<'a> {
                             Style::default().fg(theme.muted)
                         };
 
-                        // Task ID row spans across with indentation, pointer appended at end
-                        let cell_content = if pointer.is_empty() {
-                            format!("    {} {}", indicator, task_id)
-                        } else {
-                            format!("    {} {} {}", indicator, task_id, pointer)
+                        // Task ID row spans across with indentation, retry suffix, pointer appended at end
+                        let cell_content = match (retry_suffix.is_empty(), pointer.is_empty()) {
+                            (true, true) => format!("    {} {}", indicator, task_id),
+                            (false, true) => format!("    {} {}{}", indicator, task_id, retry_suffix),
+                            (true, false) => format!("    {} {} {}", indicator, task_id, pointer),
+                            (false, false) => format!("    {} {}{} {}", indicator, task_id, retry_suffix, pointer),
                         };
 
                         Row::new(vec![
                             Cell::from(cell_content),
+                            Cell::from(""),
                             Cell::from(""),
                             Cell::from(""),
                             Cell::from(""),
@@ -262,6 +289,7 @@ impl<'a> Tasks<'a> {
             Constraint::Length(8),      // Failed
             Constraint::Length(10),     // Cancelled
             Constraint::Length(9),      // Expired
+            Constraint::Length(9),      // Retried
         ];
 
         let table = Table::new(rows, widths)

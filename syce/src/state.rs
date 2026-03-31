@@ -346,6 +346,7 @@ pub struct AppState {
     pub expanded_worker_index: Option<usize>,    // Which worker row is expanded
     pub selected_task_id_index: Option<usize>,   // Which task ID is selected within expanded row
     pub task_status_filter: TaskStatusFilter,    // Multi-select status filter
+    pub retried_only_filter: bool,              // Show only tasks with retry_count > 0
 
     // Maintenance tab data
     pub snapshot_age_dist: Vec<SnapshotAgeBucket>,
@@ -406,6 +407,7 @@ impl AppState {
             expanded_worker_index: None,
             selected_task_id_index: None,
             task_status_filter: TaskStatusFilter::default(),
+            retried_only_filter: false,
             snapshot_age_dist: vec![],
             workflow_summary: None,
             workflow_list: vec![],
@@ -739,6 +741,31 @@ impl AppState {
         } else {
             let running_idx = target_idx - claimed_len;
             row.running_task_ids.as_ref()?.get(running_idx).map(|s| s.as_str())
+        }
+    }
+
+    /// Get the retry count for an expanded task ID at a specific index
+    pub fn get_expanded_retry_count(&self, target_idx: usize) -> i32 {
+        let Some(row_idx) = self.expanded_worker_index else {
+            return 0;
+        };
+        let Some(row) = self.task_aggregation.get(row_idx) else {
+            return 0;
+        };
+
+        let claimed_len = row.claimed_retry_counts.as_ref().map_or(0, |v| v.len());
+
+        if target_idx < claimed_len {
+            row.claimed_retry_counts
+                .as_ref()
+                .and_then(|v| v.get(target_idx).copied())
+                .unwrap_or(0)
+        } else {
+            let running_idx = target_idx - claimed_len;
+            row.running_retry_counts
+                .as_ref()
+                .and_then(|v| v.get(running_idx).copied())
+                .unwrap_or(0)
         }
     }
 

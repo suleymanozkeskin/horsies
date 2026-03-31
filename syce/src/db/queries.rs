@@ -124,23 +124,29 @@ pub async fn fetch_dead_workers(pool: &PgPool) -> Result<Vec<DeadWorkerRow>> {
 
 /// Worker task aggregation per worker (with TOTAL)
 /// Source: ../../sql/tasks/aggregated-breakdown.sql
-pub async fn fetch_task_aggregation(pool: &PgPool) -> Result<Vec<AggregatedBreakdownRow>> {
-    let _query = include_str!("../../sql/tasks/aggregated-breakdown.sql");
-    let rows = sqlx::query_as::<_, AggregatedBreakdownRow>(_query)
+pub async fn fetch_task_aggregation(
+    pool: &PgPool,
+    retried_only: bool,
+) -> Result<Vec<AggregatedBreakdownRow>> {
+    let query = include_str!("../../sql/tasks/aggregated-breakdown.sql");
+    let rows = sqlx::query_as::<_, AggregatedBreakdownRow>(query)
+        .bind(retried_only)
         .fetch_all(pool)
         .await?;
     Ok(rows)
 }
 
 /// Worker task aggregation filtered by status
-/// Source: ../../../sql/tasks/filtered-aggregation.sql
+/// Source: ../../sql/tasks/filtered-aggregation.sql
 pub async fn fetch_filtered_task_aggregation(
     pool: &PgPool,
     statuses: &[&str],
+    retried_only: bool,
 ) -> Result<Vec<AggregatedBreakdownRow>> {
     let query = include_str!("../../sql/tasks/filtered-aggregation.sql");
     let rows = sqlx::query_as::<_, AggregatedBreakdownRow>(query)
         .bind(statuses)
+        .bind(retried_only)
         .fetch_all(pool)
         .await?;
     Ok(rows)
