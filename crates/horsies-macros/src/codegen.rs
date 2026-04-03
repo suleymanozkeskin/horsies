@@ -7,10 +7,10 @@ use crate::parse::TaskAttrs;
 /// Generate the original function + companion descriptor module.
 pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Result<TokenStream> {
     // --- Validate the function signature ---
-    validate_signature(&func, blocking)?;
+    let signature = validate_signature(&func, blocking)?;
 
     // --- Extract types from signature ---
-    let (args_type, output_type) = extract_types(&func)?;
+    let (args_type, output_type) = extract_types(&func, &signature)?;
 
     // --- Build the generated code ---
     let fn_name = &func.sig.ident;
@@ -21,10 +21,17 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
     let task_options_body = build_task_options_body(&attrs);
 
     // Macro call: async_task_fn! or blocking_task_fn!
-    let macro_call = if blocking {
+    let registered_task = if signature.accepts_runtime() {
+        build_runtime_registered_task(&signature, fn_name, &args_type, blocking)
+    } else if blocking {
         quote! { horsies::blocking_task_fn!(super::#fn_name, #args_type) }
     } else {
         quote! { horsies::async_task_fn!(super::#fn_name, #args_type) }
+    };
+    let runtime_capture = if signature.accepts_runtime() {
+        quote! { let __horsies_runtime = app.task_runtime(); }
+    } else {
+        quote! {}
     };
 
     // Separate cfg attributes (applied to both fn and module) from
@@ -80,9 +87,10 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
                 horsies::TaskFunction<#args_type, #output_type>,
                 horsies::HorsiesError,
             > {
+                #runtime_capture
                 let builder = app.task::<#args_type, #output_type>(
                     #task_name_str,
-                    #macro_call,
+                    #registered_task,
                 )?;
                 #queue_chain
                 #opts_chain
@@ -92,8 +100,21 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
     })
 }
 
+#[derive(Clone)]
+enum SignatureShape {
+    ArgsOnly,
+    RuntimeOnly,
+    RuntimeAndArgs,
+}
+
+impl SignatureShape {
+    fn accepts_runtime(&self) -> bool {
+        matches!(self, Self::RuntimeOnly | Self::RuntimeAndArgs)
+    }
+}
+
 /// Validate the function signature matches task requirements.
-fn validate_signature(func: &ItemFn, blocking: bool) -> syn::Result<()> {
+fn validate_signature(func: &ItemFn, blocking: bool) -> syn::Result<SignatureShape> {
     let sig = &func.sig;
 
     // Reject methods (self receiver).
@@ -122,7 +143,8 @@ fn validate_signature(func: &ItemFn, blocking: bool) -> syn::Result<()> {
         ));
     }
 
-    // Must have exactly one argument.
+    // Task signatures may be either `(args)`, `(TaskRuntime)`, or
+    // `(TaskRuntime, args)`.
     let typed_args: Vec<_> = sig
         .inputs
         .iter()
@@ -132,12 +154,25 @@ fn validate_signature(func: &ItemFn, blocking: bool) -> syn::Result<()> {
         })
         .collect();
 
-    if typed_args.len() != 1 {
-        return Err(syn::Error::new_spanned(
-            &sig.inputs,
-            "task functions must accept exactly one argument (use a struct for multiple fields)",
-        ));
-    }
+    let signature = match typed_args.as_slice() {
+        [arg] if is_task_runtime_type(&arg.ty) => SignatureShape::RuntimeOnly,
+        [arg] if !is_task_runtime_type(&arg.ty) => SignatureShape::ArgsOnly,
+        [runtime, _args] if is_task_runtime_type(&runtime.ty) => SignatureShape::RuntimeAndArgs,
+        [_first, second] => {
+            let message = if is_task_runtime_type(&second.ty) {
+                "task functions may inject TaskRuntime only as the first argument"
+            } else {
+                "task functions may accept either (args) or (TaskRuntime, args)"
+            };
+            return Err(syn::Error::new_spanned(&sig.inputs, message));
+        }
+        _ => {
+            return Err(syn::Error::new_spanned(
+                &sig.inputs,
+                "task functions must accept either one argument (args) or two arguments (TaskRuntime, args)",
+            ));
+        }
+    };
 
     // Async check: #[task] requires async, #[blocking_task] requires non-async.
     if !blocking && sig.asyncness.is_none() {
@@ -175,24 +210,27 @@ fn validate_signature(func: &ItemFn, blocking: bool) -> syn::Result<()> {
         validate_error_type(ty)?;
     }
 
-    Ok(())
+    Ok(signature)
 }
 
 /// Extract the args type and output type from the function signature.
-fn extract_types(func: &ItemFn) -> syn::Result<(Type, Type)> {
+fn extract_types(func: &ItemFn, signature: &SignatureShape) -> syn::Result<(Type, Type)> {
     let sig = &func.sig;
 
-    // Args type: from the single typed argument.
-    let arg = sig
+    let typed_args: Vec<_> = sig
         .inputs
         .iter()
-        .find_map(|a| match a {
-            FnArg::Typed(t) => Some(t),
+        .filter_map(|a| match a {
+            FnArg::Typed(t) => Some(t.clone()),
             _ => None,
         })
-        .expect("validated: exactly one typed arg");
+        .collect();
 
-    let args_type = (*arg.ty).clone();
+    let args_type = match signature {
+        SignatureShape::ArgsOnly => (*typed_args[0].ty).clone(),
+        SignatureShape::RuntimeOnly => syn::parse_quote!(()),
+        SignatureShape::RuntimeAndArgs => (*typed_args[1].ty).clone(),
+    };
 
     // Output type: extract T from Result<T, TaskError>.
     let output_type = match &sig.output {
@@ -201,6 +239,119 @@ fn extract_types(func: &ItemFn) -> syn::Result<(Type, Type)> {
     };
 
     Ok((args_type, output_type))
+}
+
+fn is_task_runtime_type(ty: &Type) -> bool {
+    let Type::Path(tp) = ty else {
+        return false;
+    };
+    tp.path
+        .segments
+        .last()
+        .map(|segment| segment.ident == "TaskRuntime")
+        .unwrap_or(false)
+}
+
+fn build_runtime_registered_task(
+    signature: &SignatureShape,
+    fn_name: &syn::Ident,
+    args_type: &Type,
+    blocking: bool,
+) -> TokenStream {
+    let call_expr = match signature {
+        SignatureShape::RuntimeOnly => {
+            if blocking {
+                quote! { super::#fn_name(runtime) }
+            } else {
+                quote! { super::#fn_name(runtime).await }
+            }
+        }
+        SignatureShape::RuntimeAndArgs => {
+            if blocking {
+                quote! { super::#fn_name(runtime, deserialized) }
+            } else {
+                quote! { super::#fn_name(runtime, deserialized).await }
+            }
+        }
+        SignatureShape::ArgsOnly => {
+            unreachable!("runtime wrapper only built for runtime signatures")
+        }
+    };
+
+    if blocking {
+        quote! {{
+            struct __BlockingTaskWrapper {
+                runtime: horsies::TaskRuntime,
+            }
+
+            impl horsies::core::task::fn_trait::BlockingTaskFn for __BlockingTaskWrapper {
+                fn execute(&self, args: &[u8]) -> horsies::core::task::fn_trait::RawTaskResult {
+                    let runtime = self.runtime.clone();
+                    let deserialized: #args_type = match horsies::core::task::macros::decode_task_input(args) {
+                        Ok(v) => v,
+                        Err(task_error) => {
+                            return horsies::TaskResult::Err(task_error);
+                        }
+                    };
+
+                    match #call_expr {
+                        Ok(value) => horsies::core::task::macros::encode_validated_task_output(&value),
+                        Err(task_error) => horsies::TaskResult::Err(task_error),
+                    }
+                }
+            }
+
+            horsies::core::task::fn_trait::RegisteredTask::Blocking {
+                task: ::std::sync::Arc::new(__BlockingTaskWrapper {
+                    runtime: __horsies_runtime.clone(),
+                }),
+                meta: horsies::core::task::fn_trait::TaskMeta::default(),
+            }
+        }}
+    } else {
+        quote! {{
+            struct __AsyncTaskWrapper {
+                runtime: horsies::TaskRuntime,
+            }
+
+            impl horsies::core::task::fn_trait::AsyncTaskFn for __AsyncTaskWrapper {
+                fn execute(
+                    &self,
+                    args: &[u8],
+                ) -> ::std::pin::Pin<
+                    Box<
+                        dyn ::std::future::Future<
+                                Output = horsies::core::task::fn_trait::RawTaskResult,
+                            > + Send
+                            + '_,
+                    >,
+                > {
+                    let args = args.to_vec();
+                    let runtime = self.runtime.clone();
+                    Box::pin(async move {
+                        let deserialized: #args_type = match horsies::core::task::macros::decode_task_input(&args) {
+                            Ok(v) => v,
+                            Err(task_error) => {
+                                return horsies::TaskResult::Err(task_error);
+                            }
+                        };
+
+                        match #call_expr {
+                            Ok(value) => horsies::core::task::macros::encode_validated_task_output(&value),
+                            Err(task_error) => horsies::TaskResult::Err(task_error),
+                        }
+                    })
+                }
+            }
+
+            horsies::core::task::fn_trait::RegisteredTask::Async {
+                task: ::std::sync::Arc::new(__AsyncTaskWrapper {
+                    runtime: __horsies_runtime.clone(),
+                }),
+                meta: horsies::core::task::fn_trait::TaskMeta::default(),
+            }
+        }}
+    }
 }
 
 /// Check if a type looks like `Result<...>`.

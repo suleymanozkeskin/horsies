@@ -15,6 +15,7 @@ pub(crate) mod workflow_engine;
 // Facade-level modules.
 mod error;
 mod lazy_broker;
+mod runtime;
 mod task;
 mod workflow;
 
@@ -32,9 +33,11 @@ use crate::core::{Horsies as CoreHorsies, RegisteredWorkflowSpec};
 // ---------------------------------------------------------------------------
 
 pub use error::{AppError, AppResult};
+pub use runtime::TaskRuntime;
 pub use task::{TaskFunction, TaskRegistrationBuilder};
 pub use workflow::{
     WorkflowBuilderRegistration, WorkflowFunction, WorkflowRegistrationBuilder, WorkflowStarter,
+    WorkflowTemplate,
 };
 
 // horsies-macros
@@ -42,7 +45,6 @@ pub use horsies_macros::{blocking_task, task};
 
 // core re-exports
 pub use crate::core::RegisteredTask;
-pub use crate::core::{AppConfig, HorsiesError};
 pub use crate::core::{
     mask_database_url, resolve_node_task_options, AnyNode, AppConfigError, BackoffStrategy,
     BuiltInTaskCode, ContractCode, CustomQueueConfig, CustomQueueConfigError, DailySchedule,
@@ -61,6 +63,7 @@ pub use crate::core::{
     WorkflowStatus, WorkflowTaskStatus, TASK_TERMINAL_STATES, WF_TASK_TERMINAL_VALUES,
     WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };
+pub use crate::core::{AppConfig, HorsiesError};
 
 // broker re-exports
 pub use crate::broker::{
@@ -80,10 +83,20 @@ pub use crate::worker::{
 };
 
 // workflow engine re-exports
+#[deprecated(
+    since = "0.1.0-alpha.2",
+    note = "advanced plumbing only; prefer WorkflowFunction::start(), WorkflowTemplate::start(...), app.start(spec), or WorkflowStarter"
+)]
+pub use crate::workflow_engine::start_workflow;
+#[deprecated(
+    since = "0.1.0-alpha.2",
+    note = "advanced plumbing only; prefer WorkflowFunction::start(), WorkflowTemplate::start(...), app.start(spec), or WorkflowStarter"
+)]
+pub use crate::workflow_engine::BoundWorkflowSpec;
 pub use crate::workflow_engine::{
     cancel_workflow, get_workflow_result, on_workflow_task_complete, pause_workflow,
-    recover_stuck_workflows, resume_workflow, start_workflow, BoundWorkflowSpec, WorkflowError,
-    WorkflowHandle, WorkflowSpecExt, WorkflowTaskInfo,
+    recover_stuck_workflows, resume_workflow, WorkflowError, WorkflowHandle, WorkflowSpecExt,
+    WorkflowTaskInfo,
 };
 
 use crate::lazy_broker::LazyBroker;
@@ -261,15 +274,15 @@ impl Horsies {
         spec: WorkflowSpec,
     ) -> WorkflowStartResult<WorkflowHandle<T>> {
         let workflow_name = spec.name.clone();
-        let wf = self.register_workflow_spec::<T>(spec).map_err(|err| {
-            WorkflowStartError {
+        let wf = self
+            .register_workflow_spec::<T>(spec)
+            .map_err(|err| WorkflowStartError {
                 code: WorkflowStartErrorCode::ValidationFailed,
                 message: err.to_string(),
                 retryable: false,
                 workflow_name,
                 workflow_id: String::new(),
-            }
-        })?;
+            })?;
         wf.start().await
     }
 
@@ -293,6 +306,14 @@ impl Horsies {
         )
     }
 
+    /// Create a [`TaskRuntime`] for task-time dynamic workflow starts.
+    ///
+    /// The generated `#[horsies::task]` wrappers capture this automatically
+    /// when a task signature includes `TaskRuntime`.
+    pub fn task_runtime(&self) -> TaskRuntime {
+        TaskRuntime::new(self.workflow_starter())
+    }
+
     pub fn register_workflow<T: DeserializeOwned + Clone>(
         &mut self,
         registered: RegisteredWorkflowSpec,
@@ -308,6 +329,29 @@ impl Horsies {
         ))
     }
 
+    pub fn register_workflow_definition<D>(
+        &mut self,
+    ) -> Result<WorkflowFunction<D::Output>, HorsiesError>
+    where
+        D: WorkflowDefinition<Params = ()>,
+        D::Output: DeserializeOwned + Clone,
+    {
+        let registered = D::build_registered()?;
+        self.register_workflow::<D::Output>(registered)
+    }
+
+    pub fn workflow_template<D>(&self) -> WorkflowTemplate<D::Params, D::Output>
+    where
+        D: WorkflowDefinition + 'static,
+        D::Output: DeserializeOwned + Clone,
+    {
+        WorkflowTemplate::from_definition::<D>(self.workflow_starter())
+    }
+
+    #[deprecated(
+        since = "0.1.0-alpha.2",
+        note = "advanced validation-only builder registration; prefer WorkflowDefinition for reusable workflows and workflow_template(...) for parameterized reusable workflows"
+    )]
     pub fn workflow_builder<P, F>(
         &mut self,
         name: &str,
@@ -328,6 +372,10 @@ impl Horsies {
         ))
     }
 
+    #[deprecated(
+        since = "0.1.0-alpha.2",
+        note = "advanced validation-only builder registration; prefer WorkflowDefinition for reusable workflows"
+    )]
     pub fn workflow_builder0<F>(
         &mut self,
         name: &str,
@@ -450,6 +498,11 @@ impl Horsies {
         self.core
     }
 
+    /// Advanced decomposition API.
+    ///
+    /// This exposes broker and registry plumbing directly. Prefer
+    /// `WorkflowFunction`, `WorkflowTemplate`, `app.start(spec)`, or
+    /// `WorkflowStarter` unless you specifically need low-level control.
     pub async fn into_parts(
         self,
     ) -> AppResult<(
@@ -657,6 +710,21 @@ mod tests {
         Ok(42)
     }
 
+    #[horsies::task("macro_rt_sum")]
+    async fn macro_rt_sum(
+        rt: crate::TaskRuntime,
+        args: MacroAddArgs,
+    ) -> Result<i32, horsies::TaskError> {
+        let _ = rt;
+        Ok(args.a + args.b)
+    }
+
+    #[horsies::task("macro_rt_no_args")]
+    async fn macro_rt_no_args(rt: crate::TaskRuntime) -> Result<String, horsies::TaskError> {
+        let _ = rt;
+        Ok("runtime".into())
+    }
+
     #[test]
     fn proc_macro_sequential_registration() {
         let mut app = Horsies::new(valid_config()).unwrap();
@@ -666,6 +734,40 @@ mod tests {
         assert_eq!(a.task_name(), "macro_a");
         assert_eq!(b.task_name(), "macro_b");
         assert_eq!(c.task_name(), "macro_c");
+    }
+
+    #[tokio::test]
+    async fn proc_macro_runtime_injection_with_args_executes() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+        macro_rt_sum::register(&mut app).unwrap();
+
+        let task = app.registry().get("macro_rt_sum").unwrap().clone();
+        let RegisteredTask::Async { task, .. } = task else {
+            panic!("expected async task");
+        };
+
+        let envelope = serde_json::json!({"args": [MacroAddArgs { a: 2, b: 5 }], "kwargs": {}});
+        let args = serde_json::to_vec(&envelope).unwrap();
+        let result = task.execute(&args).await.unwrap();
+        let value: i32 = serde_json::from_slice(&result).unwrap();
+        assert_eq!(value, 7);
+    }
+
+    #[tokio::test]
+    async fn proc_macro_runtime_injection_without_user_args_executes() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+        macro_rt_no_args::register(&mut app).unwrap();
+
+        let task = app.registry().get("macro_rt_no_args").unwrap().clone();
+        let RegisteredTask::Async { task, .. } = task else {
+            panic!("expected async task");
+        };
+
+        let envelope = serde_json::json!({"args": [], "kwargs": {}});
+        let args = serde_json::to_vec(&envelope).unwrap();
+        let result = task.execute(&args).await.unwrap();
+        let value: String = serde_json::from_slice(&result).unwrap();
+        assert_eq!(value, "runtime");
     }
 
     #[horsies::task(

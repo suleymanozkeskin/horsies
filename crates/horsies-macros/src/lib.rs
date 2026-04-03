@@ -15,6 +15,22 @@ mod parse;
 /// }
 /// ```
 ///
+/// Tasks that need to start a dynamic workflow at runtime may inject
+/// `horsies::TaskRuntime` as the first parameter:
+///
+/// ```ignore
+/// #[horsies::task("scrape_detail")]
+/// async fn scrape_detail(
+///     rt: horsies::TaskRuntime,
+///     input: ScrapeInput,
+/// ) -> Result<(), TaskError> {
+///     if let Some(spec) = build_enrichment_spec(&input)? {
+///         rt.start::<()>(spec).await?;
+///     }
+///     Ok(())
+/// }
+/// ```
+///
 /// Generates a companion `#[doc(hidden)]` module with a `register()`
 /// function. Register via:
 ///

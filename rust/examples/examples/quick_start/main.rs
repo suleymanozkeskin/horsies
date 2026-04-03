@@ -7,7 +7,7 @@
 //! - One app object for everything
 //! - Task registration with `.task().queue().register()`
 //! - Typed `TaskFunction` with `.send()` / `.schedule()`
-//! - Workflow construction with `.workflow().build()`
+//! - Reusable workflow registration via `WorkflowDefinition`
 //! - Workflow start with `.start()` / `.retry_start()`
 //! - `app.check()` for offline validation
 //!
@@ -45,8 +45,7 @@ fn config() -> AppConfig {
             },
         ]),
         broker: PostgresConfig {
-            database_url: std::env::var("DATABASE_URL")
-                .expect("DATABASE_URL must be set"),
+            database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             pool_pre_ping: true,
             pool_size: 30,
             max_overflow: 30,
@@ -74,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tasks = tasks::register(&mut app)?;
 
     // ── 3. Register workflow ─────────────────────────────────────────
-    let order_workflow = workflows::register(&mut app, &tasks)?;
+    let order_workflow = workflows::register(&mut app)?;
 
     // ── 4. Validate ──────────────────────────────────────────────────
     app.check()?;

@@ -4,8 +4,7 @@
 //! app with real task functions, real `AppConfig`, and real `WorkerConfig`.
 
 use horsies::{
-    AppConfig, CustomQueueConfig, PostgresConfig, QueueMode, RecoveryConfig,
-    WorkerResilienceConfig,
+    AppConfig, CustomQueueConfig, PostgresConfig, QueueMode, RecoveryConfig, WorkerResilienceConfig,
 };
 
 // ---------------------------------------------------------------------------

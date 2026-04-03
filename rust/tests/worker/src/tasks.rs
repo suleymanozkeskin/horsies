@@ -1,9 +1,12 @@
 /// E2E test task definitions.
 ///
 /// Mirrors Python's `tests/e2e/tasks/basic.py`, `retry.py`, `workflows.py`.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use horsies::{async_task_fn, Horsies, TaskError, TaskErrorCode, TaskOptions};
+use horsies::{
+    async_task_fn, task, Horsies, TaskError, TaskErrorCode, TaskNode, TaskOptions, TaskRuntime,
+    WorkflowSpecBuilder,
+};
 
 // =============================================================================
 // Input types
@@ -112,6 +115,69 @@ async fn wf_fail(input: FailInput) -> Result<serde_json::Value, TaskError> {
         &input.error_code,
         format!("Failed: {}", input.error_code),
     ))
+}
+
+// =============================================================================
+// Dynamic workflow start from inside a task (TaskRuntime injection)
+// =============================================================================
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DynamicStartInput {
+    pub value: i64,
+}
+
+#[task("e2e_dynamic_rt_start")]
+async fn dynamic_rt_start(rt: TaskRuntime, input: DynamicStartInput) -> Result<String, TaskError> {
+    let mut builder = WorkflowSpecBuilder::new("e2e_dynamic_rt_child");
+    builder.definition_key("tests.e2e_dynamic_rt_child.v1");
+
+    let produce = builder.task(
+        TaskNode::<serde_json::Value>::new("e2e_wf_produce_int")
+            .node_id("produce")
+            .kwargs_json(serde_json::json!({ "value": input.value }).to_string()),
+    );
+    let doubled = builder.task(
+        TaskNode::<serde_json::Value>::new("e2e_wf_double")
+            .node_id("double")
+            .args_from("input_result", produce),
+    );
+    builder.output(doubled);
+
+    let spec = builder
+        .build()
+        .map_err(|err| TaskError::user("WF_BUILD_FAILED", err.to_string()))?;
+    let handle = rt
+        .start::<serde_json::Value>(spec)
+        .await
+        .map_err(|err| TaskError::user("WF_START_FAILED", err.message))?;
+    Ok(handle.workflow_id().to_owned())
+}
+
+#[task("e2e_dynamic_rt_start_no_args")]
+async fn dynamic_rt_start_no_args(rt: TaskRuntime) -> Result<String, TaskError> {
+    let mut builder = WorkflowSpecBuilder::new("e2e_dynamic_rt_child_no_args");
+    builder.definition_key("tests.e2e_dynamic_rt_child_no_args.v1");
+
+    let produce = builder.task(
+        TaskNode::<serde_json::Value>::new("e2e_wf_produce_int")
+            .node_id("produce")
+            .kwargs_json(serde_json::json!({ "value": 21 }).to_string()),
+    );
+    let doubled = builder.task(
+        TaskNode::<serde_json::Value>::new("e2e_wf_double")
+            .node_id("double")
+            .args_from("input_result", produce),
+    );
+    builder.output(doubled);
+
+    let spec = builder
+        .build()
+        .map_err(|err| TaskError::user("WF_BUILD_FAILED", err.to_string()))?;
+    let handle = rt
+        .start::<serde_json::Value>(spec)
+        .await
+        .map_err(|err| TaskError::user("WF_START_FAILED", err.message))?;
+    Ok(handle.workflow_id().to_owned())
 }
 
 // =============================================================================
@@ -306,9 +372,8 @@ pub struct ReadDictInput {
 
 async fn wf_read_dict(input: ReadDictInput) -> Result<serde_json::Value, TaskError> {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let tr: horsies::TaskResult<serde_json::Value> =
-        serde_json::from_value(input.input_result)
-            .map_err(|e| TaskError::user("DESER_ERROR", format!("{}", e)))?;
+    let tr: horsies::TaskResult<serde_json::Value> = serde_json::from_value(input.input_result)
+        .map_err(|e| TaskError::user("DESER_ERROR", format!("{}", e)))?;
     match tr {
         horsies::TaskResult::Ok(v) => {
             // Return the dict with an added field proving we read it.
@@ -500,9 +565,8 @@ async fn wf_ctx_sum(input: CtxSumInput) -> Result<i64, TaskError> {
     if let Some(by_id) = ctx_json.get("results_by_id").and_then(|v| v.as_object()) {
         for (_node_id, result_val) in by_id {
             // Parse as TaskResult<Value>
-            if let Ok(horsies::TaskResult::Ok(v)) = serde_json::from_value::<
-                horsies::TaskResult<serde_json::Value>,
-            >(result_val.clone())
+            if let Ok(horsies::TaskResult::Ok(v)) =
+                serde_json::from_value::<horsies::TaskResult<serde_json::Value>>(result_val.clone())
             {
                 if let Some(n) = v.as_i64() {
                     total += n;
@@ -567,9 +631,8 @@ pub struct DoubleInput {
 async fn wf_double(input: DoubleInput) -> Result<i64, TaskError> {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     // Parse the injected TaskResult.
-    let tr: horsies::TaskResult<serde_json::Value> =
-        serde_json::from_value(input.input_result)
-            .map_err(|e| TaskError::user("DESER_ERROR", format!("{}", e)))?;
+    let tr: horsies::TaskResult<serde_json::Value> = serde_json::from_value(input.input_result)
+        .map_err(|e| TaskError::user("DESER_ERROR", format!("{}", e)))?;
     match tr {
         horsies::TaskResult::Ok(v) => {
             let n = v.as_i64().unwrap_or(0);
@@ -629,6 +692,8 @@ pub fn register(app: &mut Horsies) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     app.register("e2e_wf_final_result", async_task_fn!(wf_final_result, ()))?;
     app.register("e2e_wf_fail", async_task_fn!(wf_fail, FailInput))?;
+    dynamic_rt_start::register(app)?;
+    dynamic_rt_start_no_args::register(app)?;
 
     // Complex result + error code
     app.register(

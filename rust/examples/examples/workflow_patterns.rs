@@ -35,8 +35,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create Horsies app and register task functions + workflow specs.
     let mut app = Horsies::new(config)?;
-    common::tasks::workflows::register(&mut app)?;
-    common::tasks::workflows::register_workflow_specs(&mut app)?;
+    let workflow_tasks = common::tasks::workflows::register(&mut app)?;
+    common::tasks::workflows::register_workflow_specs(&mut app, &workflow_tasks)?;
 
     println!("Registered 6 tasks and 3 workflow specs.\n");
 

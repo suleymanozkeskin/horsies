@@ -589,9 +589,7 @@ async fn test_workflow_cancellation() {
     }
 
     // Cancel the workflow.
-    horsies::cancel_workflow(&pool, &wf_id)
-        .await
-        .unwrap();
+    horsies::cancel_workflow(&pool, &wf_id).await.unwrap();
 
     let status: String = sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
         .bind(&wf_id)

@@ -289,10 +289,9 @@ impl WorkflowSpecRegistry {
     /// This is the engine-facing entry point for dynamic specs built via
     /// `spec_builder` that bypass `register_workflow()`.
     pub fn resolve_spec_task_options(&self, spec: &mut crate::core::workflow::spec::WorkflowSpec) {
-        crate::core::workflow::node::resolve_node_task_options(
-            &mut spec.tasks,
-            &|task_name| self.task_options_map.get(task_name).cloned(),
-        );
+        crate::core::workflow::node::resolve_node_task_options(&mut spec.tasks, &|task_name| {
+            self.task_options_map.get(task_name).cloned()
+        });
     }
 }
 

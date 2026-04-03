@@ -460,11 +460,11 @@ fn compute_config_hash(schedule: &TaskSchedule) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{TimeZone, Utc};
     use crate::core::config::{
         CustomQueueConfig, IntervalSchedule, PostgresConfig, QueueMode, RecoveryConfig,
         SchedulePattern, WorkerResilienceConfig,
     };
+    use chrono::{TimeZone, Utc};
 
     fn default_app_config() -> AppConfig {
         AppConfig {

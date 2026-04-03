@@ -194,7 +194,7 @@ pub mod custom_queues {
 // ---------------------------------------------------------------------------
 pub mod workflows {
     use horsies::{
-        async_task_fn, Horsies, OnError, TaskError, TaskNode, TaskResult, WorkflowSpecBuilder,
+        async_task_fn, Horsies, OnError, TaskError, TaskFunction, TaskResult, WorkflowSpecBuilder,
     };
     use serde::{Deserialize, Serialize};
 
@@ -292,28 +292,64 @@ pub mod workflows {
         }
     }
 
+    pub struct WorkflowTasks {
+        pub fetch_data: TaskFunction<String, FetchResult>,
+        pub transform_data: TaskFunction<TransformArgs, TransformResult>,
+        pub process_chunk: TaskFunction<ChunkArgs, i32>,
+        pub aggregate: TaskFunction<AggregateArgs, AggregateResult>,
+        pub failing_fetch: TaskFunction<String, FetchResult>,
+        pub recovery_task: TaskFunction<RecoveryArgs, String>,
+    }
+
     /// Register all workflow task functions on the given app.
-    pub fn register(app: &mut Horsies) -> Result<(), Box<dyn std::error::Error>> {
-        app.register("fetch_data", async_task_fn!(fetch_data, String))?;
-        app.register(
-            "transform_data",
-            async_task_fn!(transform_data, TransformArgs),
-        )?;
-        app.register("process_chunk", async_task_fn!(process_chunk, ChunkArgs))?;
-        app.register("aggregate", async_task_fn!(aggregate, AggregateArgs))?;
-        app.register("failing_fetch", async_task_fn!(failing_fetch, String))?;
-        app.register("recovery_task", async_task_fn!(recovery_task, RecoveryArgs))?;
-        Ok(())
+    pub fn register(app: &mut Horsies) -> Result<WorkflowTasks, Box<dyn std::error::Error>> {
+        Ok(WorkflowTasks {
+            fetch_data: app
+                .task::<String, FetchResult>("fetch_data", async_task_fn!(fetch_data, String))?
+                .register()?,
+            transform_data: app
+                .task::<TransformArgs, TransformResult>(
+                    "transform_data",
+                    async_task_fn!(transform_data, TransformArgs),
+                )?
+                .register()?,
+            process_chunk: app
+                .task::<ChunkArgs, i32>("process_chunk", async_task_fn!(process_chunk, ChunkArgs))?
+                .register()?,
+            aggregate: app
+                .task::<AggregateArgs, AggregateResult>(
+                    "aggregate",
+                    async_task_fn!(aggregate, AggregateArgs),
+                )?
+                .register()?,
+            failing_fetch: app
+                .task::<String, FetchResult>(
+                    "failing_fetch",
+                    async_task_fn!(failing_fetch, String),
+                )?
+                .register()?,
+            recovery_task: app
+                .task::<RecoveryArgs, String>(
+                    "recovery_task",
+                    async_task_fn!(recovery_task, RecoveryArgs),
+                )?
+                .register()?,
+        })
     }
 
     /// Register the three workflow specs on the given app.
-    pub fn register_workflow_specs(app: &mut Horsies) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn register_workflow_specs(
+        app: &mut Horsies,
+        tasks: &WorkflowTasks,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Pattern 1: Linear Chain (fetch -> transform)
         {
             let mut b = WorkflowSpecBuilder::new("linear_chain");
-            let fetch = b.task(TaskNode::<FetchResult>::new("fetch_data").args(r#""source_a""#));
+            let fetch = b.task(tasks.fetch_data.node_with("source_a".to_owned())?);
             let transform = b.task(
-                TaskNode::<TransformResult>::new("transform_data")
+                tasks
+                    .transform_data
+                    .node()
                     .waits_for(fetch)
                     .args_from("input_result", fetch),
             );
@@ -325,24 +361,32 @@ pub mod workflows {
         // Pattern 2: Fan-Out + Fan-In
         {
             let mut b = WorkflowSpecBuilder::new("fan_in_out");
-            let fetch = b.task(TaskNode::<FetchResult>::new("fetch_data").args(r#""source_b""#));
+            let fetch = b.task(tasks.fetch_data.node_with("source_b".to_owned())?);
             let ca = b.task(
-                TaskNode::<i32>::new("process_chunk")
+                tasks
+                    .process_chunk
+                    .node()
                     .waits_for(fetch)
                     .args_from("input_result", fetch),
             );
             let cb = b.task(
-                TaskNode::<i32>::new("process_chunk")
+                tasks
+                    .process_chunk
+                    .node()
                     .waits_for(fetch)
                     .args_from("input_result", fetch),
             );
             let cc = b.task(
-                TaskNode::<i32>::new("process_chunk")
+                tasks
+                    .process_chunk
+                    .node()
                     .waits_for(fetch)
                     .args_from("input_result", fetch),
             );
             let agg = b.task(
-                TaskNode::<AggregateResult>::new("aggregate")
+                tasks
+                    .aggregate
+                    .node()
                     .waits_for_all(&[ca, cb, cc])
                     .args_from("chunk_a", ca)
                     .args_from("chunk_b", cb)
@@ -356,9 +400,11 @@ pub mod workflows {
         // Pattern 3: Error Recovery
         {
             let mut b = WorkflowSpecBuilder::new("error_recovery");
-            let fail = b.task(TaskNode::<FetchResult>::new("failing_fetch").args(r#""will_fail""#));
+            let fail = b.task(tasks.failing_fetch.node_with("will_fail".to_owned())?);
             let recover = b.task(
-                TaskNode::<String>::new("recovery_task")
+                tasks
+                    .recovery_task
+                    .node()
                     .waits_for(fail)
                     .args_from("input_result", fail)
                     .allow_failed_deps(true),

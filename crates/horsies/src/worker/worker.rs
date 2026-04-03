@@ -725,14 +725,14 @@ mod tests {
         run_phase2, FinalizeStage, FINALIZE_MAX_RETRIES,
     };
 
-    use chrono::Utc;
-    use futures::FutureExt;
-    use crate::broker::{ClaimedTaskRow, NotifyListener, PostgresBroker};
     use crate::async_task_fn;
+    use crate::broker::{ClaimedTaskRow, NotifyListener, PostgresBroker};
     use crate::core::config::recovery::RecoveryConfig;
     use crate::core::registry::WorkflowSpecRegistry;
     use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask, TaskMeta};
     use crate::core::task::{OperationalErrorCode, TaskError, TaskErrorCode, TaskResult};
+    use chrono::Utc;
+    use futures::FutureExt;
     use serial_test::serial;
     use sqlx::PgPool;
     use std::future::Future;
@@ -966,7 +966,10 @@ mod tests {
         .unwrap()
     }
 
-    async fn fetch_only_workflow_task_state(pool: &PgPool, workflow_id: &str) -> (String, Option<String>) {
+    async fn fetch_only_workflow_task_state(
+        pool: &PgPool,
+        workflow_id: &str,
+    ) -> (String, Option<String>) {
         sqlx::query_as(
             "SELECT status, task_id
              FROM horsies_workflow_tasks

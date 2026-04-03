@@ -757,9 +757,7 @@ async fn test_recovery_preserves_results() {
     .unwrap();
 
     // Run recovery.
-    let _report = horsies::recover_stuck_workflows(&pool, &reg)
-        .await
-        .unwrap();
+    let _report = horsies::recover_stuck_workflows(&pool, &reg).await.unwrap();
 
     // Verify recovered back to COMPLETED.
     let final_status: String =
@@ -817,9 +815,7 @@ async fn test_recovery_preserves_failed_state() {
     .unwrap();
 
     // Run recovery.
-    let _ = horsies::recover_stuck_workflows(&pool, &reg)
-        .await
-        .unwrap();
+    let _ = horsies::recover_stuck_workflows(&pool, &reg).await.unwrap();
 
     // Should be back to FAILED (not COMPLETED).
     let final_status: String =

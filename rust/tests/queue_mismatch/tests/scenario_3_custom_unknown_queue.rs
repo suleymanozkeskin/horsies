@@ -63,14 +63,13 @@ async fn check_also_catches_unknown_queue_via_raw_register() {
 
     let err = app.register(
         "analytics_task",
-        async_task_fn!(tasks::ping, ())
-            .with_task_options(TaskOptions {
-                task_name: "analytics_task".to_owned(),
-                queue_name: Some("analytics".to_owned()),
-                good_until: None,
-                auto_retry_for: None,
-                retry_policy: None,
-            }),
+        async_task_fn!(tasks::ping, ()).with_task_options(TaskOptions {
+            task_name: "analytics_task".to_owned(),
+            queue_name: Some("analytics".to_owned()),
+            good_until: None,
+            auto_retry_for: None,
+            retry_policy: None,
+        }),
     );
 
     // register() itself should catch this eagerly.

@@ -80,25 +80,46 @@ match add_task.send(args).await {
 
 ## Define and Start a Workflow
 
-### Static (reusable, pre-registered)
+### Reusable definition (primary path)
 
 ```rust
-use horsies::{Horsies, TaskNode};
+use horsies::{
+    Horsies, HorsiesError, TaskNode, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
+};
 
 let mut app = Horsies::new(config)?;
-let mut wf = app.workflow::<Processed>("my_pipeline");
-wf.definition_key("myapp.pipeline.v1");
-let fetch = wf.task(TaskNode::<RawData>::new("fetch_data"));
-let process = wf.task(
-    TaskNode::<Processed>::new("process_data")
-        .waits_for(fetch)
-        .args_from("data", fetch),
-);
-wf.output(process);
 
-let workflow = wf.build()?;
+struct Pipeline;
+
+impl WorkflowDefinition for Pipeline {
+    type Output = Processed;
+    type Params = ();
+
+    fn name() -> &'static str { "my_pipeline" }
+    fn definition_key() -> &'static str { "myapp.pipeline.v1" }
+
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        let fetch = builder.task(TaskNode::<RawData>::new("fetch_data").node_id("fetch"));
+        let process = builder.task(
+            TaskNode::<Processed>::new("process_data")
+                .waits_for(fetch)
+                .args_from("data", fetch)
+                .node_id("process"),
+        );
+        Ok(WorkflowDefConfig::new().output(process))
+    }
+}
+
+let workflow = app.register_workflow_definition::<Pipeline>()?;
 let handle = workflow.start().await?;
 let result = handle.get(Some(Duration::from_secs(60))).await?;
+```
+
+### Parameterized reusable definition
+
+```rust
+let regional = app.workflow_template::<RegionalPipeline>();
+let handle = regional.start("eu-west".to_owned()).await?;
 ```
 
 ### Dynamic (runtime-built spec)
@@ -113,16 +134,24 @@ let spec = WorkflowSpecBuilder::new("enrichment")
 let handle = app.start::<Output>(spec).await?;
 ```
 
-### Inside a worker (after app is consumed)
+### Inside a worker (dynamic workflow start)
 
 ```rust
-// Before consuming:
-let starter = app.workflow_starter();
-app.run_worker_with(config).await?;
+use horsies::{task, TaskError, TaskRuntime};
 
-// Inside a task:
-let handle = starter.start::<Output>(spec).await?;
+#[task("scrape_detail")]
+async fn scrape_detail(rt: TaskRuntime, input: ScrapeInput) -> Result<(), TaskError> {
+    if let Some(spec) = build_enrichment_spec(&input)? {
+        let handle = rt.start::<Output>(spec).await?;
+        tracing::info!(workflow_id = %handle.workflow_id(), "started enrichment workflow");
+    }
+    Ok(())
+}
 ```
+
+`TaskRuntime` is the primary path for starting dynamic workflows from inside a
+running task. `WorkflowStarter` still exists as the lower-level launcher when
+you need to work with runtime plumbing directly.
 
 ### Retry a failed start
 

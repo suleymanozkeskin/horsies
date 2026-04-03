@@ -49,20 +49,74 @@ let result = handle.get(Some(Duration::from_secs(30))).await?;
 
 ### Build and start a workflow
 
-Static workflows (reusable, pre-registered):
+Reusable workflows should be defined with `WorkflowDefinition` and registered once:
 
 ```rust
-let mut wf = app.workflow::<Processed>("pipeline");
-wf.definition_key("myapp.pipeline.v1");
-let fetch = wf.task(fetch_data.node());
-let process = wf.task(process_data.node().waits_for(fetch).args_from("data", fetch));
-wf.output(process);
+use horsies::{
+    HorsiesError, TaskNode, WorkflowDefConfig, WorkflowDefinition, WorkflowFunction,
+    WorkflowSpecBuilder,
+};
 
-let pipeline = wf.build()?;
-let handle = pipeline.start().await?;
+struct Pipeline;
+
+impl WorkflowDefinition for Pipeline {
+    type Output = Processed;
+    type Params = ();
+
+    fn name() -> &'static str { "pipeline" }
+    fn definition_key() -> &'static str { "myapp.pipeline.v1" }
+
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        let fetch = builder.task(TaskNode::<RawData>::new("fetch_data").node_id("fetch"));
+        let process = builder.task(
+            TaskNode::<Processed>::new("process_data")
+                .waits_for(fetch)
+                .args_from("data", fetch)
+                .node_id("process"),
+        );
+        Ok(WorkflowDefConfig::new().output(process))
+    }
+}
+
+let workflow: WorkflowFunction<Processed> = app.register_workflow_definition::<Pipeline>()?;
+let handle = workflow.start().await?;
 ```
 
-Dynamic workflows (runtime-built):
+Parameterized reusable workflows should use `WorkflowDefinition::build_with(...)` plus `app.workflow_template::<...>()`:
+
+```rust
+struct RegionalPipeline;
+
+impl WorkflowDefinition for RegionalPipeline {
+    type Output = Processed;
+    type Params = String;
+
+    fn name() -> &'static str { "regional_pipeline" }
+    fn definition_key() -> &'static str { "myapp.regional_pipeline.v1" }
+
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        let step = builder.task(TaskNode::<Processed>::new("run_region").node_id("run_region"));
+        Ok(WorkflowDefConfig::new().output(step))
+    }
+
+    fn build_with(region: Self::Params) -> Result<WorkflowSpec, HorsiesError> {
+        let mut builder = WorkflowSpecBuilder::new(format!("regional_{region}"));
+        builder.definition_key(format!("myapp.regional_pipeline.{region}.v1"));
+        let step = builder.task(
+            TaskNode::<Processed>::new("run_region")
+                .node_id("run_region")
+                .args_json(serde_json::to_string(&region).unwrap()),
+        );
+        builder.output(step);
+        builder.build()
+    }
+}
+
+let regional = app.workflow_template::<RegionalPipeline>();
+let handle = regional.start("eu-west".to_owned()).await?;
+```
+
+Ad hoc dynamic workflows can still use `app.start()`:
 
 ```rust
 let spec = WorkflowSpecBuilder::new("enrichment")
@@ -74,15 +128,28 @@ let spec = WorkflowSpecBuilder::new("enrichment")
 let handle = app.start::<Output>(spec).await?;
 ```
 
-Starting workflows inside a worker (after app is consumed):
+Starting an ad hoc workflow from inside a running task should use `TaskRuntime`:
 
 ```rust
-let starter = app.workflow_starter();
-app.run_worker_with(config).await?;
+use horsies::{task, TaskError, TaskRuntime, WorkflowSpecBuilder};
 
-// Inside a task:
-let handle = starter.start::<Output>(spec).await?;
+#[task("scrape_detail")]
+async fn scrape_detail(
+    rt: TaskRuntime,
+    input: ScrapeInput,
+) -> Result<(), TaskError> {
+    if let Some(spec) = build_enrichment_spec(&input)? {
+        let handle = rt.start::<Output>(spec).await?;
+        tracing::info!(workflow_id = %handle.workflow_id(), "started enrichment workflow");
+    }
+    Ok(())
+}
 ```
+
+`TaskRuntime` is captured automatically by `#[task]` / `#[blocking_task]` when
+it appears as the first parameter. `WorkflowStarter` remains available as the
+lower-level building block, but it is no longer the primary ergonomic story for
+in-task dynamic workflow starts.
 
 ### Validate and run
 

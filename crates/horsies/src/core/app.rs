@@ -635,8 +635,7 @@ impl Horsies {
                         .with_note(format!("task '{}'", task_name));
 
                         if let Some(note) = err.notes.first() {
-                            wrapped =
-                                wrapped.with_note(format!("underlying error: {}", note));
+                            wrapped = wrapped.with_note(format!("underlying error: {}", note));
                         } else {
                             wrapped = wrapped.with_note(format!("underlying error: {}", err));
                         }
@@ -962,7 +961,10 @@ impl<'a> WorkflowRegistrationBuilder<'a> {
     }
 
     /// Set a custom success policy.
-    pub fn success_policy(&mut self, policy: crate::core::workflow::policy::SuccessPolicy) -> &mut Self {
+    pub fn success_policy(
+        &mut self,
+        policy: crate::core::workflow::policy::SuccessPolicy,
+    ) -> &mut Self {
         self.builder.success_policy(policy);
         self
     }
@@ -1316,8 +1318,14 @@ mod tests {
             serde_json::from_str(node_0.task_options_json.as_ref().unwrap()).unwrap();
         assert!(opts_json.get("retry_policy").is_some());
         assert!(opts_json.get("auto_retry_for").is_some());
-        assert!(opts_json.get("task_name").is_none(), "task_name should be excluded");
-        assert!(opts_json.get("queue_name").is_none(), "queue_name should be excluded");
+        assert!(
+            opts_json.get("task_name").is_none(),
+            "task_name should be excluded"
+        );
+        assert!(
+            opts_json.get("queue_name").is_none(),
+            "queue_name should be excluded"
+        );
 
         // plain_task has no retry options, so task_options_json stays None.
         assert!(
@@ -1344,9 +1352,7 @@ mod tests {
         // Build a workflow with EXPLICIT task_options on the node (override).
         let custom_opts = r#"{"retry_policy":{"max_retries":1,"intervals":[10],"backoff_strategy":"fixed","jitter":false}}"#;
         let mut builder = WorkflowSpecBuilder::new("pipeline_explicit");
-        builder.task(
-            TaskNode::<()>::new("retryable_task").task_options(custom_opts),
-        );
+        builder.task(TaskNode::<()>::new("retryable_task").task_options(custom_opts));
         let spec = builder.build().unwrap();
 
         app.register_workflow_spec(spec).unwrap();

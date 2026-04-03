@@ -507,7 +507,7 @@ impl WorkflowSpecBuilder {
                         report.add(
                             HorsiesError::new("kwargs_json must be a JSON object")
                                 .with_code(ErrorCode::WorkflowInvalidKwargKey)
-                                .with_help("pass a JSON object string to .kwargs(...)"),
+                                .with_help("pass a JSON object string to .kwargs_json(...)"),
                         );
                     }
                     Err(e) => {

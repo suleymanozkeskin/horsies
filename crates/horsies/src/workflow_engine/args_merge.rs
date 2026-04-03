@@ -129,14 +129,22 @@ fn wrap_dep_result(dep_idx: i32, dep: Option<&DepResult>) -> serde_json::Value {
                     format!("upstream task at index {} has no stored result", dep_idx),
                 );
                 let wrapped: TaskResult<serde_json::Value> = TaskResult::Err(err);
-                task_result_to_value(dep_idx, wrapped, "failed to serialize wrapped missing-result error")
+                task_result_to_value(
+                    dep_idx,
+                    wrapped,
+                    "failed to serialize wrapped missing-result error",
+                )
             } else {
                 let err = TaskError::builtin(
                     OutcomeCode::UpstreamSkipped,
                     format!("upstream task at index {} did not complete", dep_idx),
                 );
                 let wrapped: TaskResult<serde_json::Value> = TaskResult::Err(err);
-                task_result_to_value(dep_idx, wrapped, "failed to serialize wrapped upstream-skipped error")
+                task_result_to_value(
+                    dep_idx,
+                    wrapped,
+                    "failed to serialize wrapped upstream-skipped error",
+                )
             }
         }
         None => {
@@ -145,7 +153,11 @@ fn wrap_dep_result(dep_idx: i32, dep: Option<&DepResult>) -> serde_json::Value {
                 format!("upstream task at index {} did not complete", dep_idx),
             );
             let wrapped: TaskResult<serde_json::Value> = TaskResult::Err(err);
-            task_result_to_value(dep_idx, wrapped, "failed to serialize wrapped missing-dependency error")
+            task_result_to_value(
+                dep_idx,
+                wrapped,
+                "failed to serialize wrapped missing-dependency error",
+            )
         }
     }
 }
@@ -169,7 +181,10 @@ fn task_result_to_value(
 fn dep_parse_error_value(dep_idx: i32, error: serde_json::Error) -> serde_json::Value {
     let err = TaskError::builtin(
         OperationalErrorCode::ResultDeserializationError,
-        format!("failed to parse upstream task result at index {}: {}", dep_idx, error),
+        format!(
+            "failed to parse upstream task result at index {}: {}",
+            dep_idx, error
+        ),
     );
     let wrapped: TaskResult<serde_json::Value> = TaskResult::Err(err);
     task_result_to_value(

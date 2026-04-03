@@ -216,15 +216,29 @@ impl<T> TaskNode<T> {
     }
 
     /// Set serialized positional arguments.
-    pub fn args(mut self, args_json: impl Into<String>) -> Self {
+    pub fn args_json(mut self, args_json: impl Into<String>) -> Self {
         self.args_json = Some(args_json.into());
         self
     }
 
     /// Set serialized keyword arguments.
-    pub fn kwargs(mut self, kwargs_json: impl Into<String>) -> Self {
+    pub fn kwargs_json(mut self, kwargs_json: impl Into<String>) -> Self {
         self.kwargs_json = Some(kwargs_json.into());
         self
+    }
+
+    /// Set serialized positional arguments.
+    ///
+    /// Prefer [`TaskNode::args_json`] in new code.
+    pub fn args(self, args_json: impl Into<String>) -> Self {
+        self.args_json(args_json)
+    }
+
+    /// Set serialized keyword arguments.
+    ///
+    /// Prefer [`TaskNode::kwargs_json`] in new code.
+    pub fn kwargs(self, kwargs_json: impl Into<String>) -> Self {
+        self.kwargs_json(kwargs_json)
     }
 
     /// Add a dependency on another node (by its `NodeRef`).
@@ -369,10 +383,7 @@ impl<T> TaskNode<T> {
 ///
 /// The `lookup` closure should return `Some(json_string)` with the
 /// serialized retry-relevant options, or `None` if the task has no options.
-pub fn resolve_node_task_options(
-    nodes: &mut [AnyNode],
-    lookup: &dyn Fn(&str) -> Option<String>,
-) {
+pub fn resolve_node_task_options(nodes: &mut [AnyNode], lookup: &dyn Fn(&str) -> Option<String>) {
     for node in nodes.iter_mut() {
         if node.is_subworkflow {
             continue;
@@ -461,8 +472,8 @@ mod tests {
     #[test]
     fn task_node_chainable_setters() {
         let node: TaskNode<i32> = TaskNode::new("add")
-            .args(r#"[1, 2]"#)
-            .kwargs(r#"{"mode": "fast"}"#)
+            .args_json(r#"[1, 2]"#)
+            .kwargs_json(r#"{"mode": "fast"}"#)
             .node_id("add_step")
             .queue("high")
             .priority(10)
@@ -514,7 +525,7 @@ mod tests {
     fn task_node_into_any_node() {
         let dep = NodeRef { index: 0 };
         let node: TaskNode<String> = TaskNode::new("process")
-            .args(r#""hello""#)
+            .args_json(r#""hello""#)
             .waits_for(dep)
             .args_from("input", dep)
             .node_id("process:1")
@@ -535,6 +546,16 @@ mod tests {
         assert_eq!(any.join, JoinType::Any);
         assert_eq!(any.index, 1);
         assert!(!any.is_subworkflow);
+    }
+
+    #[test]
+    fn task_node_compatibility_setters_delegate_to_json_variants() {
+        let node: TaskNode<String> = TaskNode::new("process")
+            .args(r#""hello""#)
+            .kwargs(r#"{"mode":"fast"}"#);
+
+        assert_eq!(node.args_json.as_deref(), Some(r#""hello""#));
+        assert_eq!(node.kwargs_json.as_deref(), Some(r#"{"mode":"fast"}"#));
     }
 
     #[test]

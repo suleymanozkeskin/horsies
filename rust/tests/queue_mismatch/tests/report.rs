@@ -253,7 +253,11 @@ async fn print_report() {
         let check = app.check();
         println!(
             "  check():    {}",
-            if check.is_ok() { "PASSED" } else { "FAILED — GAP!" }
+            if check.is_ok() {
+                "PASSED"
+            } else {
+                "FAILED — GAP!"
+            }
         );
         let mut wc = WorkerConfig::default();
         wc.queues = vec!["fast".to_owned(), "slow".to_owned()];
@@ -291,7 +295,11 @@ async fn print_report() {
         let check = app.check();
         println!(
             "  check():    {}",
-            if check.is_ok() { "PASSED" } else { "FAILED — GAP!" }
+            if check.is_ok() {
+                "PASSED"
+            } else {
+                "FAILED — GAP!"
+            }
         );
         let wc = WorkerConfig::default();
         let worker = app.run_worker_with(wc).await;

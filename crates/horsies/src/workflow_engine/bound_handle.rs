@@ -54,9 +54,14 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
             .await
             .map_err(|e| self.wrap_error(&WorkflowError::Broker(e)))?;
 
-        crate::workflow_engine::query::get_workflow_result::<T>(&self.pool, listener, &self.workflow_id, timeout)
-            .await
-            .map_err(|e| self.wrap_error(&e))
+        crate::workflow_engine::query::get_workflow_result::<T>(
+            &self.pool,
+            listener,
+            &self.workflow_id,
+            timeout,
+        )
+        .await
+        .map_err(|e| self.wrap_error(&e))
     }
 
     /// Get the current workflow status.
@@ -78,9 +83,13 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
         &self,
         node_id: &str,
     ) -> HandleResult<TaskResult<V>> {
-        crate::workflow_engine::query::get_workflow_result_for(&self.pool, &self.workflow_id, node_id)
-            .await
-            .map_err(|e| self.wrap_error(&e))
+        crate::workflow_engine::query::get_workflow_result_for(
+            &self.pool,
+            &self.workflow_id,
+            node_id,
+        )
+        .await
+        .map_err(|e| self.wrap_error(&e))
     }
 
     /// Get a single node's result using a typed `NodeKey<V>`.
@@ -112,7 +121,12 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
 
     /// Resume the workflow (PAUSED -> RUNNING).
     pub async fn resume(&self) -> HandleResult<bool> {
-        crate::workflow_engine::lifecycle::resume_workflow(&self.pool, &self.workflow_id, &self.registry).await
+        crate::workflow_engine::lifecycle::resume_workflow(
+            &self.pool,
+            &self.workflow_id,
+            &self.registry,
+        )
+        .await
     }
 
     fn wrap_error(&self, e: &WorkflowError) -> HandleOperationError {

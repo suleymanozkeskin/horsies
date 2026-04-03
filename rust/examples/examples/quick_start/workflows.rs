@@ -1,11 +1,13 @@
 //! Workflow definitions for the shipping example.
 
-use horsies::{Horsies, HorsiesError, OnError, WorkflowFunction};
+use horsies::{
+    Horsies, HorsiesError, OnError, TaskNode, WorkflowDefConfig, WorkflowDefinition,
+    WorkflowFunction, WorkflowSpecBuilder,
+};
 
 use super::models::*;
-use super::tasks::Tasks;
 
-/// Register the order processing workflow using the unified app builder API.
+/// Reusable order-processing workflow definition.
 ///
 /// The workflow DAG:
 ///
@@ -24,75 +26,80 @@ use super::tasks::Tasks;
 ///            v
 ///      send_notification
 /// ```
-pub fn register(
-    app: &mut Horsies,
-    tasks: &Tasks,
-) -> Result<WorkflowFunction<NotificationResult>, HorsiesError> {
-    let mut wf = app.workflow::<NotificationResult>("order_processing");
-    wf.definition_key("quickstart.order_processing.v1");
-    wf.on_error(OnError::Fail);
+pub struct OrderProcessingWorkflow;
 
-    // Root task — validates the order
-    let validate = wf.task(tasks.validate_order.node().node_id("validate"));
+impl WorkflowDefinition for OrderProcessingWorkflow {
+    type Output = NotificationResult;
+    type Params = ();
 
-    // Fan-out: three parallel checks, all depend on validate
-    let inventory = wf.task(
-        tasks
-            .check_inventory
-            .node()
-            .node_id("inventory")
-            .waits_for(validate)
-            .args_from("order", validate),
-    );
-    let cost = wf.task(
-        tasks
-            .calculate_shipping_cost
-            .node()
-            .node_id("shipping_cost")
-            .waits_for(validate)
-            .args_from("order", validate),
-    );
-    let address = wf.task(
-        tasks
-            .check_address
-            .node()
-            .node_id("address")
-            .waits_for(validate)
-            .args_from("order", validate),
-    );
+    fn name() -> &'static str {
+        "order_processing"
+    }
 
-    // Fan-in: reserve waits for all three parallel checks
-    let reserve = wf.task(
-        tasks
-            .reserve_inventory
-            .node()
-            .node_id("reserve")
-            .waits_for(inventory)
-            .waits_for(cost)
-            .waits_for(address)
-            .args_from("inventory", inventory)
-            .args_from("cost", cost)
-            .args_from("address", address),
-    );
+    fn definition_key() -> &'static str {
+        "quickstart.order_processing.v1"
+    }
 
-    // Sequential: shipment then notification
-    let shipment = wf.task(
-        tasks
-            .create_shipment
-            .node()
-            .node_id("shipment")
-            .waits_for(reserve)
-            .args_from("reservation", reserve),
-    );
-    let notify = wf.task(
-        tasks
-            .send_notification
-            .node()
-            .node_id("notify")
-            .waits_for(shipment)
-            .args_from("shipment", shipment),
-    );
+    fn on_error() -> OnError {
+        OnError::Fail
+    }
 
-    wf.output(notify);
-    wf.build()
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        // Root task — validates the order
+        let validate =
+            builder.task(TaskNode::<ValidatedOrder>::new("validate_order").node_id("validate"));
+
+        // Fan-out: three parallel checks, all depend on validate
+        let inventory = builder.task(
+            TaskNode::<InventoryStatus>::new("check_inventory")
+                .node_id("inventory")
+                .waits_for(validate)
+                .args_from("order", validate),
+        );
+        let cost = builder.task(
+            TaskNode::<ShippingCost>::new("calculate_shipping_cost")
+                .node_id("shipping_cost")
+                .waits_for(validate)
+                .args_from("order", validate),
+        );
+        let address = builder.task(
+            TaskNode::<AddressValidation>::new("check_address")
+                .node_id("address")
+                .waits_for(validate)
+                .args_from("order", validate),
+        );
+
+        // Fan-in: reserve waits for all three parallel checks
+        let reserve = builder.task(
+            TaskNode::<Reservation>::new("reserve_inventory")
+                .node_id("reserve")
+                .waits_for(inventory)
+                .waits_for(cost)
+                .waits_for(address)
+                .args_from("inventory", inventory)
+                .args_from("cost", cost)
+                .args_from("address", address),
+        );
+
+        // Sequential: shipment then notification
+        let shipment = builder.task(
+            TaskNode::<Shipment>::new("create_shipment")
+                .node_id("shipment")
+                .waits_for(reserve)
+                .args_from("reservation", reserve),
+        );
+        let notify = builder.task(
+            TaskNode::<NotificationResult>::new("send_notification")
+                .node_id("notify")
+                .waits_for(shipment)
+                .args_from("shipment", shipment),
+        );
+
+        Ok(WorkflowDefConfig::new().output(notify))
+    }
+}
+
+/// Register the reusable order-processing workflow on the app.
+pub fn register(app: &mut Horsies) -> Result<WorkflowFunction<NotificationResult>, HorsiesError> {
+    app.register_workflow_definition::<OrderProcessingWorkflow>()
 }

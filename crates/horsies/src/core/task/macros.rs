@@ -1,5 +1,81 @@
 use serde::{de::DeserializeOwned, Serialize};
 
+/// Deserialize a task's declared input type from the worker envelope.
+///
+/// The envelope is the internal JSON shape produced by the worker:
+/// `{ "args": [...], "kwargs": { ... } }`.
+///
+/// This helper keeps attribute-macro generated wrappers and the low-level
+/// `async_task_fn!` / `blocking_task_fn!` macros on exactly the same
+/// deserialization path.
+#[doc(hidden)]
+pub fn decode_task_input<T>(args: &[u8]) -> Result<T, crate::core::task::TaskError>
+where
+    T: DeserializeOwned,
+{
+    let envelope: serde_json::Value = crate::core::codec::from_json_bytes(args).map_err(|e| {
+        crate::core::task::TaskError::builtin(
+            crate::core::task::OperationalErrorCode::WorkerSerializationError,
+            format!("failed to parse args/kwargs envelope: {}", e),
+        )
+    })?;
+
+    let kwargs_value = envelope
+        .get("kwargs")
+        .cloned()
+        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+    let args_value = envelope
+        .get("args")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    let args_array = match args_value {
+        serde_json::Value::Array(arr) => arr,
+        serde_json::Value::Null => Vec::new(),
+        other => vec![other],
+    };
+
+    let candidate = if let serde_json::Value::Object(map) = &kwargs_value {
+        if !map.is_empty() {
+            kwargs_value
+        } else if args_array.len() == 1 {
+            args_array[0].clone()
+        } else if args_array.is_empty() {
+            serde_json::Value::Null
+        } else {
+            return Err(crate::core::task::TaskError::builtin(
+                crate::core::task::OperationalErrorCode::WorkerSerializationError,
+                "args payload must contain exactly one item when kwargs is empty",
+            ));
+        }
+    } else if args_array.len() == 1 {
+        args_array[0].clone()
+    } else if args_array.is_empty() {
+        serde_json::Value::Null
+    } else {
+        return Err(crate::core::task::TaskError::builtin(
+            crate::core::task::OperationalErrorCode::WorkerSerializationError,
+            "args payload must contain exactly one item when kwargs is empty",
+        ));
+    };
+
+    serde_json::from_value(candidate.clone()).map_err(|e| crate::core::task::TaskError {
+        error_code: Some(crate::core::task::TaskErrorCode::from(
+            crate::core::task::ContractCode::ArgumentTypeMismatch,
+        )),
+        message: Some(format!(
+            "task args do not match declared input type {}",
+            std::any::type_name::<T>(),
+        )),
+        cause: None,
+        data: Some(serde_json::json!({
+            "expected_type": std::any::type_name::<T>(),
+            "actual_value": candidate,
+            "validation_error": e.to_string(),
+        })),
+    })
+}
+
 /// Serialize a task's success value and verify it round-trips through the
 /// declared output type.
 ///
@@ -16,10 +92,12 @@ where
     let bytes = match crate::core::codec::to_json_bytes(value) {
         Ok(bytes) => bytes,
         Err(e) => {
-            return crate::core::task::result::TaskResult::Err(crate::core::task::TaskError::builtin(
-                crate::core::task::OperationalErrorCode::WorkerSerializationError,
-                format!("failed to serialize task result: {}", e),
-            ));
+            return crate::core::task::result::TaskResult::Err(
+                crate::core::task::TaskError::builtin(
+                    crate::core::task::OperationalErrorCode::WorkerSerializationError,
+                    format!("failed to serialize task result: {}", e),
+                ),
+            );
         }
     };
 
@@ -92,91 +170,24 @@ macro_rules! async_task_fn {
                 args: &[u8],
             ) -> ::std::pin::Pin<
                 Box<
-                    dyn ::std::future::Future<
-                            Output = $crate::core::task::fn_trait::RawTaskResult,
-                        > + Send
+                    dyn ::std::future::Future<Output = $crate::core::task::fn_trait::RawTaskResult>
+                        + Send
                         + '_,
                 >,
             > {
                 let args = args.to_vec();
                 Box::pin(async move {
-                    let envelope: serde_json::Value = match $crate::core::codec::from_json_bytes(&args) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            return $crate::core::task::result::TaskResult::Err(
-                                $crate::core::task::TaskError::builtin(
-                                    $crate::core::task::OperationalErrorCode::WorkerSerializationError,
-                                    format!("failed to parse args/kwargs envelope: {}", e),
-                                ),
-                            );
-                        }
-                    };
-
-                    let kwargs_value = envelope
-                        .get("kwargs")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                    let args_value = envelope
-                        .get("args")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null);
-
-                    let args_array = match args_value {
-                        serde_json::Value::Array(arr) => arr,
-                        serde_json::Value::Null => Vec::new(),
-                        other => vec![other],
-                    };
-
-                    let candidate = if let serde_json::Value::Object(map) = &kwargs_value {
-                        if !map.is_empty() {
-                            kwargs_value
-                        } else if args_array.len() == 1 {
-                            args_array[0].clone()
-                        } else if args_array.is_empty() {
-                            serde_json::Value::Null
-                        } else {
-                            return $crate::core::task::result::TaskResult::Err(
-                                $crate::core::task::TaskError::builtin(
-                                    $crate::core::task::OperationalErrorCode::WorkerSerializationError,
-                                    "args payload must contain exactly one item when kwargs is empty",
-                                ),
-                            );
-                        }
-                    } else if args_array.len() == 1 {
-                        args_array[0].clone()
-                    } else if args_array.is_empty() {
-                        serde_json::Value::Null
-                    } else {
-                        return $crate::core::task::result::TaskResult::Err(
-                            $crate::core::task::TaskError::builtin(
-                                $crate::core::task::OperationalErrorCode::WorkerSerializationError,
-                                "args payload must contain exactly one item when kwargs is empty",
-                            ),
-                        );
-                    };
-
-                    let deserialized: $args_type = match serde_json::from_value(candidate.clone()) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            return $crate::core::task::result::TaskResult::Err($crate::core::task::TaskError {
-                                error_code: Some($crate::core::task::TaskErrorCode::from(
-                                    $crate::core::task::ContractCode::ArgumentTypeMismatch,
-                                )),
-                                message: Some(format!(
-                                    "task args do not match declared input type {}",
-                                    std::any::type_name::<$args_type>(),
-                                )),
-                                cause: None,
-                                data: Some(serde_json::json!({
-                                    "expected_type": std::any::type_name::<$args_type>(),
-                                    "actual_value": candidate,
-                                    "validation_error": e.to_string(),
-                                })),
-                            });
-                        }
-                    };
+                    let deserialized: $args_type =
+                        match $crate::core::task::macros::decode_task_input(&args) {
+                            Ok(v) => v,
+                            Err(task_error) => {
+                                return $crate::core::task::result::TaskResult::Err(task_error);
+                            }
+                        };
                     match $fn_name(deserialized).await {
-                        Ok(value) => $crate::core::task::macros::encode_validated_task_output(&value),
+                        Ok(value) => {
+                            $crate::core::task::macros::encode_validated_task_output(&value)
+                        }
                         Err(task_error) => $crate::core::task::result::TaskResult::Err(task_error),
                     }
                 })
@@ -217,81 +228,13 @@ macro_rules! blocking_task_fn {
 
         impl $crate::core::task::fn_trait::BlockingTaskFn for __BlockingTaskWrapper {
             fn execute(&self, args: &[u8]) -> $crate::core::task::fn_trait::RawTaskResult {
-                let envelope: serde_json::Value = match $crate::core::codec::from_json_bytes(args) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return $crate::core::task::result::TaskResult::Err(
-                            $crate::core::task::TaskError::builtin(
-                                $crate::core::task::OperationalErrorCode::WorkerSerializationError,
-                                format!("failed to parse args/kwargs envelope: {}", e),
-                            ),
-                        );
-                    }
-                };
-
-                let kwargs_value = envelope
-                    .get("kwargs")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                let args_value = envelope
-                    .get("args")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-
-                let args_array = match args_value {
-                    serde_json::Value::Array(arr) => arr,
-                    serde_json::Value::Null => Vec::new(),
-                    other => vec![other],
-                };
-
-                let candidate = if let serde_json::Value::Object(map) = &kwargs_value {
-                    if !map.is_empty() {
-                        kwargs_value
-                    } else if args_array.len() == 1 {
-                        args_array[0].clone()
-                    } else if args_array.is_empty() {
-                        serde_json::Value::Null
-                    } else {
-                        return $crate::core::task::result::TaskResult::Err(
-                            $crate::core::task::TaskError::builtin(
-                                $crate::core::task::OperationalErrorCode::WorkerSerializationError,
-                                "args payload must contain exactly one item when kwargs is empty",
-                            ),
-                        );
-                    }
-                } else if args_array.len() == 1 {
-                    args_array[0].clone()
-                } else if args_array.is_empty() {
-                    serde_json::Value::Null
-                } else {
-                    return $crate::core::task::result::TaskResult::Err(
-                        $crate::core::task::TaskError::builtin(
-                            $crate::core::task::OperationalErrorCode::WorkerSerializationError,
-                            "args payload must contain exactly one item when kwargs is empty",
-                        ),
-                    );
-                };
-
-                let deserialized: $args_type = match serde_json::from_value(candidate.clone()) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return $crate::core::task::result::TaskResult::Err($crate::core::task::TaskError {
-                            error_code: Some($crate::core::task::TaskErrorCode::from(
-                                $crate::core::task::ContractCode::ArgumentTypeMismatch,
-                            )),
-                            message: Some(format!(
-                                "task args do not match declared input type {}",
-                                std::any::type_name::<$args_type>(),
-                            )),
-                            cause: None,
-                            data: Some(serde_json::json!({
-                                "expected_type": std::any::type_name::<$args_type>(),
-                                "actual_value": candidate,
-                                "validation_error": e.to_string(),
-                            })),
-                        });
-                    }
-                };
+                let deserialized: $args_type =
+                    match $crate::core::task::macros::decode_task_input(args) {
+                        Ok(v) => v,
+                        Err(task_error) => {
+                            return $crate::core::task::result::TaskResult::Err(task_error);
+                        }
+                    };
                 match $fn_name(deserialized) {
                     Ok(value) => $crate::core::task::macros::encode_validated_task_output(&value),
                     Err(task_error) => $crate::core::task::result::TaskResult::Err(task_error),
@@ -343,6 +286,7 @@ macro_rules! blocking_task_fn_kwargs {
 
 #[cfg(test)]
 mod tests {
+    use super::decode_task_input;
     use crate::core::task::fn_trait::RegisteredTask;
     use crate::core::task::TaskError;
     use serde::{Deserialize, Serialize};
@@ -389,6 +333,24 @@ mod tests {
 
     async fn bad_round_trip(_: ()) -> Result<BadRoundTrip, TaskError> {
         Ok(BadRoundTrip)
+    }
+
+    #[test]
+    fn decode_task_input_reads_kwargs_payload() {
+        let envelope = serde_json::json!({"kwargs": {"a": 3, "b": 5}});
+        let args = serde_json::to_vec(&envelope).unwrap();
+        let parsed: AddArgs = decode_task_input(&args).unwrap();
+        assert_eq!(parsed.a, 3);
+        assert_eq!(parsed.b, 5);
+    }
+
+    #[test]
+    fn decode_task_input_reads_single_positional_payload() {
+        let envelope = serde_json::json!({"args": [{"a": 4, "b": 7}]});
+        let args = serde_json::to_vec(&envelope).unwrap();
+        let parsed: AddArgs = decode_task_input(&args).unwrap();
+        assert_eq!(parsed.a, 4);
+        assert_eq!(parsed.b, 7);
     }
 
     #[test]

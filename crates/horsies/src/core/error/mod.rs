@@ -197,9 +197,9 @@ impl ErrorCode {
             | Self::BrokerInitFailed
             | Self::CheckReservedCodeCollision => ErrorCategory::Config,
 
-            Self::TaskNotRegistered
-            | Self::TaskDuplicateName
-            | Self::WorkflowUnregisteredTask => ErrorCategory::Registry,
+            Self::TaskNotRegistered | Self::TaskDuplicateName | Self::WorkflowUnregisteredTask => {
+                ErrorCategory::Registry
+            }
         }
     }
 

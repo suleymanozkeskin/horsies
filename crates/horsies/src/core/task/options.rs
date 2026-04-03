@@ -175,7 +175,10 @@ impl TaskOptions {
                 .iter()
                 .map(|c| serde_json::Value::String(c.to_string()))
                 .collect();
-            map.insert("auto_retry_for".to_owned(), serde_json::Value::Array(codes_json));
+            map.insert(
+                "auto_retry_for".to_owned(),
+                serde_json::Value::Array(codes_json),
+            );
         }
 
         if let Some(ref policy) = self.retry_policy {

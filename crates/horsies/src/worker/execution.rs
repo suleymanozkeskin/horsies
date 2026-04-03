@@ -229,7 +229,9 @@ pub(crate) async fn confirm_ownership_and_set_running(
                         workflow_status = %wf_status,
                         "skipping task - workflow is stopped",
                     );
-                    if let Err(e) = handle_workflow_stop_with_retry(broker, task_id, wf_status).await {
+                    if let Err(e) =
+                        handle_workflow_stop_with_retry(broker, task_id, wf_status).await
+                    {
                         tracing::error!(
                             task_id = %task_id,
                             error = %e,
@@ -246,7 +248,9 @@ pub(crate) async fn confirm_ownership_and_set_running(
         }
         Err(e) => {
             tracing::error!(task_id = %task_id, error = %e, "failed to set RUNNING, requeueing");
-            if let Err(ue) = unclaim_task_with_retry(broker, task_id, worker_id, "set RUNNING failed").await {
+            if let Err(ue) =
+                unclaim_task_with_retry(broker, task_id, worker_id, "set RUNNING failed").await
+            {
                 tracing::error!(task_id = %task_id, error = %ue, "failed to unclaim task after RUNNING transition error");
             }
             OwnershipOutcome::Aborted

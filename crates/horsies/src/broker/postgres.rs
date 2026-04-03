@@ -1494,7 +1494,11 @@ impl PostgresBroker {
         }
 
         tx.commit().await.map_err(BrokerError::Database)?;
-        tracing::info!(task_id, workflow_status, "handled workflow stop before task start");
+        tracing::info!(
+            task_id,
+            workflow_status,
+            "handled workflow stop before task start"
+        );
         Ok(())
     }
 

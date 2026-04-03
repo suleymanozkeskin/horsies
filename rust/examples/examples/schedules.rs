@@ -167,12 +167,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── 8. Start the scheduler in the background ───────────────────────
     let scheduler_cancel = CancellationToken::new();
 
-    let scheduler_handle = spawn_scheduler(
-        broker,
-        schedule_config,
-        config,
-        scheduler_cancel.clone(),
-    );
+    let scheduler_handle =
+        spawn_scheduler(broker, schedule_config, config, scheduler_cancel.clone());
 
     eprintln!("Scheduler started.  Waiting 12 seconds for scheduled tasks to fire...\n");
 

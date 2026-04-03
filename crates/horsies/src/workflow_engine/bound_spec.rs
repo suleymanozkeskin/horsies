@@ -115,7 +115,13 @@ impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
         &self,
         error: &WorkflowStartError,
     ) -> WorkflowStartResult<WorkflowHandle<T>> {
-        crate::workflow_engine::start::retry_start::<T>(&self.pool, &self.spec, error, &self.registry).await
+        crate::workflow_engine::start::retry_start::<T>(
+            &self.pool,
+            &self.spec,
+            error,
+            &self.registry,
+        )
+        .await
     }
 
     /// Reconnect to an already-known workflow ID using the bound resources.

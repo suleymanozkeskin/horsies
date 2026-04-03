@@ -53,9 +53,7 @@ impl<'a, A: Serialize, T: DeserializeOwned + Clone> TaskRegistrationBuilder<'a, 
 
     pub fn register(mut self) -> Result<TaskFunction<A, T>, HorsiesError> {
         // Gap A: DEFAULT mode must not specify a queue at all.
-        if self.queue.is_some()
-            && matches!(self.app.core.config().queue_mode, QueueMode::Default)
-        {
+        if self.queue.is_some() && matches!(self.app.core.config().queue_mode, QueueMode::Default) {
             return Err(HorsiesError::new(
                 "queue cannot be specified in Default queue mode; \
                  remove .queue() or switch to Custom mode",
@@ -63,9 +61,7 @@ impl<'a, A: Serialize, T: DeserializeOwned + Clone> TaskRegistrationBuilder<'a, 
             .with_code(ErrorCode::TaskInvalidOptions));
         }
         // Gap B: CUSTOM mode must specify a queue.
-        if self.queue.is_none()
-            && matches!(self.app.core.config().queue_mode, QueueMode::Custom)
-        {
+        if self.queue.is_none() && matches!(self.app.core.config().queue_mode, QueueMode::Custom) {
             return Err(HorsiesError::new(format!(
                 "queue is required in Custom queue mode; \
                  call .queue() with one of: {:?}",
@@ -444,6 +440,29 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
         node
     }
 
+    pub fn node_with(&self, args: A) -> Result<TaskNode<T>, HorsiesError> {
+        let (args_json, kwargs_json) =
+            serialize_args::<A>(&self.task_name, &args).map_err(|err| {
+                HorsiesError::new(format!(
+                    "failed to serialize workflow node args for '{}': {}",
+                    self.task_name, err.message
+                ))
+                .with_code(ErrorCode::TaskInvalidOptions)
+                .with_help(
+                    "pass a serde::Serialize payload that matches the task's argument contract",
+                )
+            })?;
+
+        let mut node = self.node();
+        if let Some(args_json) = args_json {
+            node = node.args_json(args_json);
+        }
+        if let Some(kwargs_json) = kwargs_json {
+            node = node.kwargs_json(kwargs_json);
+        }
+        Ok(node)
+    }
+
     #[allow(clippy::result_large_err)]
     fn check_suppression(&self) -> TaskSendResult<()> {
         if self.suppress_sends.load(Ordering::Relaxed) {
@@ -608,6 +627,10 @@ mod tests {
         Ok(args.a + args.b)
     }
 
+    async fn double(value: i32) -> Result<i32, crate::core::TaskError> {
+        Ok(value * 2)
+    }
+
     #[test]
     fn register_returns_task_function() {
         let core = CoreHorsies::new(valid_config()).unwrap();
@@ -658,6 +681,46 @@ mod tests {
         let (args, kwargs) = serialize_args::<Vec<i32>>("scalar", &vec![1, 2, 3]).unwrap();
         assert_eq!(args.as_deref(), Some("[1,2,3]"));
         assert!(kwargs.is_none());
+    }
+
+    #[test]
+    fn node_with_struct_populates_kwargs_and_defaults() {
+        let core = CoreHorsies::new(valid_config()).unwrap();
+        let mut app = crate::Horsies::from_core(core);
+        let task = app
+            .task::<Args, i32>("add", async_task_fn!(add, Args))
+            .unwrap()
+            .register()
+            .unwrap();
+
+        let node = task.node_with(Args { a: 1, b: 2 }).unwrap();
+
+        assert_eq!(node.task_name(), "add");
+        let any = node.into_any_node(0);
+        assert_eq!(any.queue.as_deref(), Some("default"));
+        assert_eq!(any.priority, Some(100));
+        assert!(any.args_json.is_none());
+        let kwargs: serde_json::Value =
+            serde_json::from_str(any.kwargs_json.as_deref().unwrap()).unwrap();
+        assert_eq!(kwargs["a"], 1);
+        assert_eq!(kwargs["b"], 2);
+    }
+
+    #[test]
+    fn node_with_scalar_populates_args() {
+        let core = CoreHorsies::new(valid_config()).unwrap();
+        let mut app = crate::Horsies::from_core(core);
+        let task = app
+            .task::<i32, i32>("double", async_task_fn!(double, i32))
+            .unwrap()
+            .register()
+            .unwrap();
+
+        let node = task.node_with(21).unwrap();
+        let any = node.into_any_node(0);
+
+        assert_eq!(any.args_json.as_deref(), Some("21"));
+        assert!(any.kwargs_json.is_none());
     }
 
     fn make_payload(task_name: &str, delay: Option<i64>) -> TaskSendPayload {

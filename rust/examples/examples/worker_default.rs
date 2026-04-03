@@ -22,8 +22,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     common::tasks::basic::register(&mut app)?;
     common::tasks::retries::register(&mut app)?;
-    common::tasks::workflows::register(&mut app)?;
-    common::tasks::workflows::register_workflow_specs(&mut app)?;
+    let workflow_tasks = common::tasks::workflows::register(&mut app)?;
+    common::tasks::workflows::register_workflow_specs(&mut app, &workflow_tasks)?;
 
     println!("Registered tasks:");
     println!("  basic:     do_compute, failing_task, divide, ping");

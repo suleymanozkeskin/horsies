@@ -13,8 +13,7 @@ use serial_test::serial;
 use sqlx::PgPool;
 
 use horsies::{
-    start_workflow, TaskNode, TaskResult, WorkflowHandle, WorkflowSpecBuilder,
-    WorkflowSpecRegistry,
+    start_workflow, TaskNode, TaskResult, WorkflowHandle, WorkflowSpecBuilder, WorkflowSpecRegistry,
 };
 use horsies_test_support::{
     db,

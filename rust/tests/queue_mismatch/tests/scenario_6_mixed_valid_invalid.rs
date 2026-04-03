@@ -63,8 +63,8 @@ async fn check_fails_if_bad_task_bypassed_register() {
     // Task B: bypassing builder, inserting directly into core registry.
     // This simulates a hypothetical code path that skips the builder guard.
     let _ = app.registry().clone(); // just proving registry is accessible
-    // We can't insert into the registry from outside (it's pub(crate)),
-    // but we can verify that register() catches it.
+                                    // We can't insert into the registry from outside (it's pub(crate)),
+                                    // but we can verify that register() catches it.
     let bad_result = app.register(
         "sneaky_task",
         async_task_fn!(tasks::ping, ()).with_task_options(TaskOptions {

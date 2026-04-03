@@ -29,6 +29,9 @@ use crate::core::workflow::status::OnError;
 /// struct ScrapeWorkflow;
 ///
 /// impl WorkflowDefinition for ScrapeWorkflow {
+///     type Output = ();
+///     type Params = ();
+///
 ///     fn name() -> &'static str {
 ///         "scrape_pipeline"
 ///     }
@@ -71,7 +74,15 @@ use crate::core::workflow::status::OnError;
 /// `WorkflowDefinition` collocates all of that in one trait implementation,
 /// giving the same "define everything in one place" ergonomics as Python's
 /// class-based `WorkflowDefinition`.
-pub trait WorkflowDefinition<T = ()> {
+pub trait WorkflowDefinition {
+    /// The workflow output type.
+    type Output;
+
+    /// Runtime params used to build a parameterized workflow definition.
+    ///
+    /// Use `()` for workflows with no runtime params.
+    type Params;
+
     /// The workflow name. Must be unique within the application.
     fn name() -> &'static str;
 
@@ -140,9 +151,7 @@ pub trait WorkflowDefinition<T = ()> {
     /// forwards to `build()`.
     ///
     /// Mirrors Python's `WorkflowDefinition.build_with(app, **params)`.
-    fn build_with(
-        params: &std::collections::HashMap<String, serde_json::Value>,
-    ) -> Result<WorkflowSpec, HorsiesError> {
+    fn build_with(params: Self::Params) -> Result<WorkflowSpec, HorsiesError> {
         let _ = params;
         Self::build()
     }
@@ -265,6 +274,10 @@ impl WorkflowDefConfig {
 ///     },
 /// };
 /// ```
+#[deprecated(
+    since = "0.1.0-alpha.2",
+    note = "prefer WorkflowDefinition for reusable workflows or WorkflowSpecBuilder/app.start(spec) for ad hoc workflows"
+)]
 #[macro_export]
 macro_rules! workflow {
     // Variant: with on_error, nodes closure returns NodeRef (has output)
@@ -362,6 +375,9 @@ mod tests {
     struct SimpleWorkflow;
 
     impl WorkflowDefinition for SimpleWorkflow {
+        type Output = ();
+        type Params = ();
+
         fn name() -> &'static str {
             "simple_pipeline"
         }
@@ -403,9 +419,52 @@ mod tests {
         assert_eq!(registered.spec.tasks.len(), 3);
     }
 
+    struct ParamWorkflow;
+
+    impl WorkflowDefinition for ParamWorkflow {
+        type Output = String;
+        type Params = String;
+
+        fn name() -> &'static str {
+            "param_pipeline"
+        }
+
+        fn definition_key() -> &'static str {
+            "param_pipeline"
+        }
+
+        fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+            let node = builder.task(TaskNode::<String>::new("fetch").node_id("fetch"));
+            Ok(WorkflowDefConfig::new().output(node))
+        }
+
+        fn build_with(params: Self::Params) -> Result<WorkflowSpec, HorsiesError> {
+            let mut builder = WorkflowSpecBuilder::new(format!("param_pipeline_{}", params));
+            builder.definition_key(format!("param_pipeline_{}", params));
+            let node = builder.task(
+                TaskNode::<String>::new("fetch")
+                    .node_id("fetch")
+                    .args_json(serde_json::to_string(&params).unwrap()),
+            );
+            builder.output(node);
+            builder.build()
+        }
+    }
+
+    #[test]
+    fn trait_build_with_typed_params() {
+        let spec = ParamWorkflow::build_with("eu".to_owned()).unwrap();
+        assert_eq!(spec.name, "param_pipeline_eu");
+        assert_eq!(spec.definition_key.as_deref(), Some("param_pipeline_eu"));
+        assert_eq!(spec.tasks[0].args_json.as_deref(), Some("\"eu\""));
+    }
+
     struct CustomErrorWorkflow;
 
     impl WorkflowDefinition for CustomErrorWorkflow {
+        type Output = ();
+        type Params = ();
+
         fn name() -> &'static str {
             "pause_on_error"
         }
@@ -434,6 +493,9 @@ mod tests {
     struct PolicyWorkflow;
 
     impl WorkflowDefinition for PolicyWorkflow {
+        type Output = ();
+        type Params = ();
+
         fn name() -> &'static str {
             "policy_wf"
         }
@@ -472,6 +534,9 @@ mod tests {
     struct SubWorkflowDef;
 
     impl WorkflowDefinition for SubWorkflowDef {
+        type Output = ();
+        type Params = ();
+
         fn name() -> &'static str {
             "parent_wf"
         }
@@ -507,6 +572,9 @@ mod tests {
     struct DiamondWorkflow;
 
     impl WorkflowDefinition for DiamondWorkflow {
+        type Output = ();
+        type Params = ();
+
         fn name() -> &'static str {
             "diamond"
         }
@@ -733,6 +801,9 @@ mod tests {
     struct EmptyNameWorkflow;
 
     impl WorkflowDefinition for EmptyNameWorkflow {
+        type Output = ();
+        type Params = ();
+
         fn name() -> &'static str {
             ""
         }
@@ -759,6 +830,9 @@ mod tests {
     struct NoTasksWorkflow;
 
     impl WorkflowDefinition for NoTasksWorkflow {
+        type Output = ();
+        type Params = ();
+
         fn name() -> &'static str {
             "empty_workflow"
         }
@@ -785,6 +859,9 @@ mod tests {
     struct DuplicateTaskFnWorkflow;
 
     impl WorkflowDefinition for DuplicateTaskFnWorkflow {
+        type Output = ();
+        type Params = ();
+
         fn name() -> &'static str {
             "multi_fetch"
         }
@@ -908,6 +985,9 @@ mod tests {
         struct FailingDefine;
 
         impl WorkflowDefinition for FailingDefine {
+            type Output = ();
+            type Params = ();
+
             fn name() -> &'static str {
                 "fail_define"
             }

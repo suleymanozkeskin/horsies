@@ -726,7 +726,8 @@ async fn enqueue_workflow_task(
     // Matches Python's atomic ENQUEUE_WORKFLOW_TASK_SQL pattern.
     let mut tx = pool.begin().await?;
 
-    let good_until = crate::workflow_engine::parse_good_until_from_options(task.task_options.as_deref());
+    let good_until =
+        crate::workflow_engine::parse_good_until_from_options(task.task_options.as_deref());
 
     sqlx::query(ENQUEUE_TASK_SQL)
         .bind(&task_id)

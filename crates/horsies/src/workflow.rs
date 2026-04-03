@@ -6,8 +6,8 @@ use serde::de::DeserializeOwned;
 use crate::broker::BrokerError;
 use crate::core::{
     AnyNode, HorsiesError, NodeRef, OnError, SubWorkflowNode, SuccessPolicy, TaskNode,
-    WorkflowSpec, WorkflowSpecBuilder, WorkflowStartError, WorkflowStartErrorCode,
-    WorkflowStartResult,
+    WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder, WorkflowStartError,
+    WorkflowStartErrorCode, WorkflowStartResult,
 };
 use crate::workflow_engine::{BoundWorkflowSpec, WorkflowHandle};
 
@@ -175,6 +175,69 @@ impl<T: DeserializeOwned + Clone> WorkflowFunction<T> {
     }
 }
 
+#[derive(Clone)]
+pub struct WorkflowTemplate<P, T> {
+    workflow_name: String,
+    definition_key: String,
+    starter: WorkflowStarter,
+    builder: Arc<dyn Fn(P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync + 'static>,
+    _phantom: PhantomData<fn(P) -> T>,
+}
+
+impl<P, T: DeserializeOwned + Clone> WorkflowTemplate<P, T> {
+    pub(crate) fn from_definition<D>(starter: WorkflowStarter) -> Self
+    where
+        D: WorkflowDefinition<Output = T, Params = P> + 'static,
+    {
+        Self {
+            workflow_name: D::name().to_owned(),
+            definition_key: D::definition_key().to_owned(),
+            starter,
+            builder: Arc::new(D::build_with),
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.workflow_name
+    }
+
+    pub fn definition_key(&self) -> &str {
+        &self.definition_key
+    }
+
+    pub fn build(&self, params: P) -> Result<WorkflowSpec, HorsiesError> {
+        (self.builder)(params)
+    }
+
+    pub async fn start(&self, params: P) -> WorkflowStartResult<WorkflowHandle<T>> {
+        let spec = self.build(params).map_err(|err| WorkflowStartError {
+            code: WorkflowStartErrorCode::ValidationFailed,
+            message: err.to_string(),
+            retryable: false,
+            workflow_name: self.workflow_name.clone(),
+            workflow_id: String::new(),
+        })?;
+        self.starter.start(spec).await
+    }
+
+    pub async fn start_with_id(
+        &self,
+        params: P,
+        workflow_id: impl Into<String>,
+    ) -> WorkflowStartResult<WorkflowHandle<T>> {
+        let workflow_id = workflow_id.into();
+        let spec = self.build(params).map_err(|err| WorkflowStartError {
+            code: WorkflowStartErrorCode::ValidationFailed,
+            message: err.to_string(),
+            retryable: false,
+            workflow_name: self.workflow_name.clone(),
+            workflow_id: workflow_id.clone(),
+        })?;
+        self.starter.start_with_id(spec, workflow_id).await
+    }
+}
+
 /// Lightweight, cloneable handle for starting workflows after the app is consumed.
 ///
 /// Extract this before calling [`Horsies::run_worker_with`] so that tasks
@@ -287,6 +350,15 @@ impl<T> std::fmt::Debug for WorkflowFunction<T> {
             .field("name", &self.spec.name)
             .field("definition_key", &self.spec.definition_key)
             .field("task_count", &self.spec.tasks.len())
+            .finish()
+    }
+}
+
+impl<P, T> std::fmt::Debug for WorkflowTemplate<P, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkflowTemplate")
+            .field("name", &self.workflow_name)
+            .field("definition_key", &self.definition_key)
             .finish()
     }
 }
@@ -485,8 +557,10 @@ mod tests {
     use std::sync::Arc as StdArc;
 
     use crate::core::{
-        AppConfig, PostgresConfig, QueueMode, RecoveryConfig, TaskNode, WorkerResilienceConfig,
+        AppConfig, HorsiesError, PostgresConfig, QueueMode, RecoveryConfig, TaskNode,
+        WorkerResilienceConfig,
     };
+    use crate::{ErrorCode, WorkflowDefConfig, WorkflowDefinition};
 
     fn valid_config() -> AppConfig {
         AppConfig {
@@ -526,6 +600,38 @@ mod tests {
         assert_eq!(workflow.name(), "greet");
         assert_eq!(workflow.definition_key(), Some("tests.greet.v1"));
         assert!(app.workflow_registry().contains("greet"));
+    }
+
+    struct DefinedWorkflow;
+
+    impl WorkflowDefinition for DefinedWorkflow {
+        type Output = String;
+        type Params = ();
+
+        fn name() -> &'static str {
+            "defined_greet"
+        }
+
+        fn definition_key() -> &'static str {
+            "tests.defined_greet.v1"
+        }
+
+        fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+            let node = builder.task(TaskNode::<String>::new("say_hello").node_id("greet"));
+            Ok(WorkflowDefConfig::new().output(node))
+        }
+    }
+
+    #[test]
+    fn register_workflow_definition_returns_startable_workflow_function() {
+        let mut app = crate::Horsies::new(valid_config()).unwrap();
+        let workflow = app
+            .register_workflow_definition::<DefinedWorkflow>()
+            .unwrap();
+
+        assert_eq!(workflow.name(), "defined_greet");
+        assert_eq!(workflow.definition_key(), Some("tests.defined_greet.v1"));
+        assert!(app.workflow_registry().contains("defined_greet"));
     }
 
     #[test]
@@ -646,18 +752,10 @@ mod tests {
         let starter_clone = starter.clone();
 
         // Both the starter and its clone see the pre-existing workflow.
-        let reg = starter
-            .registry
-            .read()
-            .expect("lock")
-            .clone();
+        let reg = starter.registry.read().expect("lock").clone();
         assert!(reg.contains("pre_existing"));
 
-        let reg_clone = starter_clone
-            .registry
-            .read()
-            .expect("lock")
-            .clone();
+        let reg_clone = starter_clone.registry.read().expect("lock").clone();
         assert!(reg_clone.contains("pre_existing"));
     }
 
@@ -678,17 +776,107 @@ mod tests {
         }
 
         // Starter shares the Arc<RwLock<..>> so it sees the update.
-        let reg = starter
-            .registry
-            .read()
-            .expect("lock")
-            .clone();
+        let reg = starter.registry.read().expect("lock").clone();
         assert!(reg.contains("late_registered"));
+    }
+
+    #[derive(Clone)]
+    struct RegionalParams {
+        region: String,
+    }
+
+    struct RegionalWorkflow;
+
+    impl WorkflowDefinition for RegionalWorkflow {
+        type Output = String;
+        type Params = RegionalParams;
+
+        fn name() -> &'static str {
+            "regional_template"
+        }
+
+        fn definition_key() -> &'static str {
+            "tests.regional_template.v1"
+        }
+
+        fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+            let node = builder.task(TaskNode::<String>::new("hello_task").node_id("hello"));
+            Ok(WorkflowDefConfig::new().output(node))
+        }
+
+        fn build_with(params: Self::Params) -> Result<WorkflowSpec, HorsiesError> {
+            let mut builder = WorkflowSpecBuilder::new(format!("regional_{}", params.region));
+            builder.definition_key(format!("tests.regional_template.{}.v1", params.region));
+            let node = builder.task(
+                TaskNode::<String>::new("hello_task")
+                    .node_id("hello")
+                    .args_json(serde_json::to_string(&params.region).unwrap()),
+            );
+            builder.output(node);
+            builder.build()
+        }
+    }
+
+    #[test]
+    fn workflow_template_build_uses_typed_params() {
+        let app = crate::Horsies::new(valid_config()).unwrap();
+        let template = app.workflow_template::<RegionalWorkflow>();
+        let spec = template
+            .build(RegionalParams {
+                region: "eu".to_owned(),
+            })
+            .unwrap();
+
+        assert_eq!(template.name(), "regional_template");
+        assert_eq!(template.definition_key(), "tests.regional_template.v1");
+        assert_eq!(spec.name, "regional_eu");
+        assert_eq!(
+            spec.definition_key.as_deref(),
+            Some("tests.regional_template.eu.v1")
+        );
+        assert_eq!(spec.tasks[0].args_json.as_deref(), Some("\"eu\""));
+    }
+
+    struct InvalidTemplateWorkflow;
+
+    impl WorkflowDefinition for InvalidTemplateWorkflow {
+        type Output = String;
+        type Params = String;
+
+        fn name() -> &'static str {
+            "invalid_template"
+        }
+
+        fn definition_key() -> &'static str {
+            "tests.invalid_template.v1"
+        }
+
+        fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+            let node = builder.task(TaskNode::<String>::new("hello_task").node_id("hello"));
+            Ok(WorkflowDefConfig::new().output(node))
+        }
+
+        fn build_with(params: Self::Params) -> Result<WorkflowSpec, HorsiesError> {
+            Err(HorsiesError::new(format!("bad region: {}", params))
+                .with_code(ErrorCode::WorkflowCheckCaseInvalid))
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_template_start_maps_build_errors_to_validation_failed() {
+        let app = crate::Horsies::new(valid_config()).unwrap();
+        let template = app.workflow_template::<InvalidTemplateWorkflow>();
+
+        let err = template.start("antarctica".to_owned()).await.unwrap_err();
+        assert_eq!(err.code, WorkflowStartErrorCode::ValidationFailed);
+        assert_eq!(err.workflow_name, "invalid_template");
+        assert!(!err.retryable);
+        assert!(err.message.contains("bad region: antarctica"));
     }
 
     #[tokio::test]
     async fn workflow_starter_start_returns_enqueue_failed_without_db() {
-        let mut app = crate::Horsies::new(valid_config()).unwrap();
+        let app = crate::Horsies::new(valid_config()).unwrap();
 
         // Bind a broker that points at a non-existent DB so start() fails at connect.
         let pool = sqlx::postgres::PgPoolOptions::new()

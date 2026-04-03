@@ -35,12 +35,13 @@ async fn check_passes() {
     .register()
     .expect("registration must succeed");
 
-    app.task::<() , String>("ping", async_task_fn!(tasks::ping, ()))
+    app.task::<(), String>("ping", async_task_fn!(tasks::ping, ()))
         .expect("task builder creation should succeed")
         .register()
         .expect("registration must succeed");
 
-    app.check().expect("check must pass with DEFAULT mode + no queues");
+    app.check()
+        .expect("check must pass with DEFAULT mode + no queues");
 }
 
 #[tokio::test]
@@ -48,7 +49,7 @@ async fn worker_startup_reaches_broker() {
     let config = default_mode_config();
     let mut app = Horsies::new(config).expect("app creation should succeed");
 
-    app.task::<() , String>("ping", async_task_fn!(tasks::ping, ()))
+    app.task::<(), String>("ping", async_task_fn!(tasks::ping, ()))
         .expect("task builder creation should succeed")
         .register()
         .expect("registration must succeed");

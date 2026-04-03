@@ -9,7 +9,66 @@ Detailed reference for building, starting, and managing workflow DAGs.
 
 ## WorkflowSpec Construction
 
-### Builder API
+### `WorkflowDefinition` (primary reusable path)
+
+```rust
+use horsies::{
+    HorsiesError, TaskNode, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
+};
+
+struct Pipeline;
+
+impl WorkflowDefinition for Pipeline {
+    type Output = SaveResult;
+    type Params = ();
+
+    fn name() -> &'static str { "etl_pipeline" }
+    fn definition_key() -> &'static str { "myapp.etl_pipeline.v1" }
+
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        let fetch_ref = builder.task(TaskNode::<RawData>::new("fetch_data").node_id("fetch"));
+        let process_ref = builder.task(
+            TaskNode::<Processed>::new("process_data")
+                .waits_for(fetch_ref)
+                .args_from("data", fetch_ref)
+                .node_id("process"),
+        );
+        let save_ref = builder.task(
+            TaskNode::<SaveResult>::new("save_result")
+                .waits_for(process_ref)
+                .args_from("result", process_ref)
+                .node_id("save"),
+        );
+        Ok(WorkflowDefConfig::new().output(save_ref))
+    }
+}
+```
+
+Register and start it with:
+
+```rust
+let workflow = app.register_workflow_definition::<Pipeline>()?;
+let handle = workflow.start().await?;
+```
+
+### `WorkflowRegistrationBuilder` (secondary / local path)
+
+Good for local one-off reusable workflows that do not merit a named
+definition type.
+
+```rust
+let mut app = horsies::Horsies::new(config)?;
+let mut wb = app.workflow::<()>("my_pipeline");
+wb.definition_key("myapp.pipeline.v1");
+wb.task(TaskNode::<()>::new("step_a"));
+let step_b = wb.task(TaskNode::<()>::new("step_b"));
+wb.output(step_b);
+
+let workflow = wb.build()?;
+let handle = workflow.start().await?;
+```
+
+### Builder API (advanced / ad hoc spec construction)
 
 ```rust
 use horsies::{WorkflowSpecBuilder, TaskNode, OnError};
@@ -34,32 +93,21 @@ builder.output(save_ref);
 let spec = builder.build()?;
 ```
 
-### `WorkflowRegistrationBuilder` (primary path)
-
-```rust
-let mut app = horsies::Horsies::new(config)?;
-let mut wb = app.workflow::<()>("my_pipeline");
-wb.definition_key("myapp.pipeline.v1");
-wb.task(TaskNode::<()>::new("step_a"));
-let step_b = wb.task(TaskNode::<()>::new("step_b"));
-wb.output(step_b);
-
-let workflow = wb.build()?;
-let handle = workflow.start().await?;
-```
-
 ### Parameterized definitions via `build_with()`
 
-For reusable workflow-definition types, override `WorkflowDefinition::build_with(...)`:
+For reusable parameterized workflow-definition types, override
+`WorkflowDefinition::build_with(...)` and start them through
+`app.workflow_template::<...>()`:
 
 ```rust
-use std::collections::HashMap;
-
 use horsies::{HorsiesError, TaskNode, WorkflowDefConfig, WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder};
 
 struct RegionalPipeline;
 
-impl WorkflowDefinition<()> for RegionalPipeline {
+impl WorkflowDefinition for RegionalPipeline {
+    type Output = ();
+    type Params = String;
+
     fn name() -> &'static str { "regional_pipeline" }
     fn definition_key() -> &'static str { "myapp.regional_pipeline.v1" }
 
@@ -68,19 +116,20 @@ impl WorkflowDefinition<()> for RegionalPipeline {
         Ok(WorkflowDefConfig::new().output(step))
     }
 
-    fn build_with(params: &HashMap<String, serde_json::Value>) -> Result<WorkflowSpec, HorsiesError> {
-        let region = params
-            .get("region")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| HorsiesError::new("missing region"))?;
-
+    fn build_with(region: Self::Params) -> Result<WorkflowSpec, HorsiesError> {
         let mut builder = WorkflowSpecBuilder::new(format!("regional_{region}"));
-        builder.definition_key(Self::definition_key());
-        let step = builder.task(TaskNode::<()>::new("run_region"));
+        builder.definition_key(format!("myapp.regional_pipeline.{region}.v1"));
+        let step = builder.task(
+            TaskNode::<()>::new("run_region")
+                .args_json(serde_json::to_string(&region).unwrap()),
+        );
         builder.output(step);
         builder.build()
     }
 }
+
+let regional = app.workflow_template::<RegionalPipeline>();
+let handle = regional.start("eu-west".to_owned()).await?;
 ```
 
 ### Explicit workflow builders for `check()`
@@ -185,18 +234,13 @@ SubWorkflowNode::<ChildOutput>::new("child_workflow_name")
 
 Three paths depending on context. All return `WorkflowStartResult<WorkflowHandle<T>>`.
 
-### 1. Static workflow via `app.workflow()` (reusable, pre-registered)
+### 1. Reusable workflow definition via `register_workflow_definition()` (primary)
 
 Best for fixed DAGs known at setup time. Returns a `WorkflowFunction<T>` that
 can be started multiple times.
 
 ```rust
-let mut wf = app.workflow::<Output>("pipeline");
-wf.definition_key("myapp.pipeline.v1");
-let step = wf.task(TaskNode::<Output>::new("run_step"));
-wf.output(step);
-
-let workflow = wf.build()?;
+let workflow = app.register_workflow_definition::<Pipeline>()?;
 let handle = workflow.start().await?;
 let result = handle.get(Some(Duration::from_secs(60))).await?;
 ```
@@ -208,7 +252,23 @@ let result = handle.get(Some(Duration::from_secs(60))).await?;
 - `handle(id).await`
 - `spec()`
 
-### 2. Dynamic workflow via `app.start()` (one-shot, runtime-built)
+### 2. Parameterized reusable workflow via `workflow_template()` (primary for params)
+
+Best for reusable workflows whose DAG shape or fixed node inputs depend on
+typed runtime params.
+
+```rust
+let regional = app.workflow_template::<RegionalPipeline>();
+let handle = regional.start("eu-west".to_owned()).await?;
+let result = handle.get(Some(Duration::from_secs(60))).await?;
+```
+
+`WorkflowTemplate<P, T>` exposes:
+- `build(params)`
+- `start(params)`
+- `start_with_id(params, id)`
+
+### 3. Dynamic workflow via `app.start()` (ad hoc, runtime-built)
 
 Best for dynamic/parameterized workflows where the DAG is built at runtime
 from parameters, user input, or external state.
@@ -227,35 +287,40 @@ let result = handle.get(Some(Duration::from_secs(60))).await?;
 Internally registers the spec and starts it in one step. No broker, registry,
 or binding code required.
 
-### 3. Inside a worker via `WorkflowStarter` (post-app-consumption)
+### 4. Inside a worker via `TaskRuntime` (primary for dynamic in-task starts)
 
-Best for tasks that need to start workflows at runtime, after `app` has been
-consumed by `run_worker_with()`.
-
-Extract the starter before consuming the app:
+Best for tasks that need to build a dynamic `WorkflowSpec` and start it from
+inside a running task, after `app` has been consumed by `run_worker_with()`.
 
 ```rust
-let starter = app.workflow_starter();
-app.run_worker_with(config).await?;
+use horsies::{task, TaskError, TaskRuntime};
+
+#[task("scrape_detail")]
+async fn scrape_detail(rt: TaskRuntime, input: ScrapeInput) -> Result<(), TaskError> {
+    if let Some(spec) = build_enrichment_spec(&input)? {
+        let handle = rt.start::<Output>(spec).await?;
+        tracing::info!(workflow_id = %handle.workflow_id(), "started enrichment workflow");
+    }
+    Ok(())
+}
 ```
 
-Then use it inside tasks (via a global, `OnceCell`, or dependency injection):
-
-```rust
-let spec = WorkflowSpecBuilder::new("enrichment")
-    .task(node_a)
-    .definition_key("myapp.enrichment.v1")
-    .build()?;
-
-let handle = starter.start::<Output>(spec).await?;
-```
-
-`WorkflowStarter` is `Clone` and shares the app's broker and registry via
-`Arc`. Workflows registered before extraction are visible, and any registry
-updates made before the app is consumed are also visible.
+`TaskRuntime` is captured automatically by `#[task]` / `#[blocking_task]` when
+it appears as the first parameter in the task signature.
 
 Sub-workflows referenced by a dynamically-built spec must be registered
 before the worker starts (i.e. before the app is consumed).
+
+### 5. `WorkflowStarter` (advanced / lower-level)
+
+`WorkflowStarter` remains the lower-level workflow launcher that powers
+`TaskRuntime`. Use it when you explicitly want a cloneable launcher object
+outside the task-macro injection path.
+
+```rust
+let starter = app.workflow_starter();
+let handle = starter.start::<Output>(spec).await?;
+```
 
 ### Auto-retry on start
 
@@ -290,7 +355,7 @@ let status = handle.status().await?;
 
 Low-level executable wrapper around a `WorkflowSpec`, bound to a `PgPool`,
 `WorkflowSpecRegistry`, and retry config. Most users should use
-`app.start()`, `app.workflow().build()`, or `WorkflowStarter` instead.
+`app.start()`, `app.workflow().build()`, or `TaskRuntime` instead.
 
 This exists for cases where you already hold a pool and registry directly
 (e.g. custom orchestration outside the `Horsies` app).
