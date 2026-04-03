@@ -36,10 +36,10 @@ use horsies::{task, TaskError};
 use serde::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize)]
-struct AddArgs { a: i32, b: i32 }
+struct AddNumbersInput { a: i32, b: i32 }
 
-#[task("add")]
-async fn add(args: AddArgs) -> Result<i32, TaskError> {
+#[task("add_numbers")]
+async fn add_numbers(args: AddNumbersInput) -> Result<i32, TaskError> {
     Ok(args.a + args.b)
 }
 ```
@@ -54,25 +54,38 @@ use horsies::Horsies;
 
 let mut app = Horsies::new(config)?;
 
-let add_task = add::register(&mut app)?;
+let add_numbers_task = add_numbers::register(&mut app)?;
 
-let handle = add_task.send(AddArgs { a: 5, b: 3 }).await?;
-let result = handle.get(Some(Duration::from_secs(30))).await;
+match add_numbers_task.send(AddNumbersInput { a: 5, b: 3 }).await {
+    Ok(handle) => {
+        let result = handle.get(Some(Duration::from_secs(30))).await;
+    }
+    Err(err) => {
+        eprintln!("send failed: {}", err.message);
+    }
+}
 ```
 
 ### Schedule with delay
 
 ```rust
-let handle = add_task.schedule(Duration::from_secs(60), args).await?;
+match add_numbers_task.schedule(Duration::from_secs(60), args).await {
+    Ok(handle) => {
+        let result = handle.get(Some(Duration::from_secs(90))).await;
+    }
+    Err(err) => {
+        eprintln!("schedule failed: {}", err.message);
+    }
+}
 ```
 
 ### Retry a failed send
 
 ```rust
-match add_task.send(args).await {
+match add_numbers_task.send(args).await {
     Ok(handle) => { /* use handle */ }
     Err(err) if err.retryable => {
-        let handle = add_task.retry_send(&err).await?;
+        let handle = add_numbers_task.retry_send(&err).await?;
     }
     Err(err) => { /* permanent failure */ }
 }
@@ -89,14 +102,14 @@ use horsies::{
 
 let mut app = Horsies::new(config)?;
 
-struct Pipeline;
+struct ETLPipeline;
 
-impl WorkflowDefinition for Pipeline {
+impl WorkflowDefinition for ETLPipeline {
     type Output = Processed;
     type Params = ();
 
-    fn name() -> &'static str { "my_pipeline" }
-    fn definition_key() -> &'static str { "myapp.pipeline.v1" }
+    fn name() -> &'static str { "etl_pipeline" }
+    fn definition_key() -> &'static str { "myapp.etl_pipeline.v1" }
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let fetch = builder.task(TaskNode::<RawData>::new("fetch_data").node_id("fetch"));
@@ -106,20 +119,39 @@ impl WorkflowDefinition for Pipeline {
                 .args_from("data", fetch)
                 .node_id("process"),
         );
-        Ok(WorkflowDefConfig::new().output(process))
+        let save = builder.task(
+            TaskNode::<SaveResult>::new("save_result")
+                .waits_for(process)
+                .args_from("result", process)
+                .node_id("save"),
+        );
+        Ok(WorkflowDefConfig::new().output(save))
     }
 }
 
-let workflow = app.register_workflow_definition::<Pipeline>()?;
-let handle = workflow.start().await?;
-let result = handle.get(Some(Duration::from_secs(60))).await?;
+let workflow = app.register_workflow_definition::<ETLPipeline>()?;
+match workflow.start().await {
+    Ok(handle) => {
+        let result = handle.get(Some(Duration::from_secs(60))).await?;
+    }
+    Err(err) => {
+        eprintln!("start failed: {}", err.message);
+    }
+}
 ```
 
 ### Parameterized reusable definition
 
 ```rust
 let regional = app.workflow_template::<RegionalPipeline>();
-let handle = regional.start("eu-west".to_owned()).await?;
+match regional.start("eu-west".to_owned()).await {
+    Ok(handle) => {
+        let result = handle.get(Some(Duration::from_secs(60))).await?;
+    }
+    Err(err) => {
+        eprintln!("start failed: {}", err.message);
+    }
+}
 ```
 
 ### Dynamic (runtime-built spec)
@@ -131,7 +163,14 @@ let spec = WorkflowSpecBuilder::new("enrichment")
     .definition_key("myapp.enrichment.v1")
     .build()?;
 
-let handle = app.start::<Output>(spec).await?;
+match app.start::<Output>(spec).await {
+    Ok(handle) => {
+        let result = handle.get(Some(Duration::from_secs(60))).await?;
+    }
+    Err(err) => {
+        eprintln!("start failed: {}", err.message);
+    }
+}
 ```
 
 ### Inside a worker (dynamic workflow start)
@@ -139,11 +178,20 @@ let handle = app.start::<Output>(spec).await?;
 ```rust
 use horsies::{task, TaskError, TaskRuntime};
 
-#[task("scrape_detail")]
-async fn scrape_detail(rt: TaskRuntime, input: ScrapeInput) -> Result<(), TaskError> {
-    if let Some(spec) = build_enrichment_spec(&input)? {
-        let handle = rt.start::<Output>(spec).await?;
-        tracing::info!(workflow_id = %handle.workflow_id(), "started enrichment workflow");
+#[task("build_regional_workflow")]
+async fn build_regional_workflow(
+    rt: TaskRuntime,
+    input: RegionalInput,
+) -> Result<(), TaskError> {
+    if let Some(spec) = build_regional_spec(&input)? {
+        match rt.start::<Output>(spec).await {
+            Ok(handle) => {
+                tracing::info!(workflow_id = %handle.workflow_id(), "started regional workflow");
+            }
+            Err(err) => {
+                tracing::warn!(error = %err.message, "failed to start regional workflow");
+            }
+        }
     }
     Ok(())
 }
@@ -159,42 +207,46 @@ Registered tasks now generate runtime helpers automatically:
 ```rust
 use horsies::{task, TaskError, TaskRuntime};
 
-#[task("enqueue_extract_jobs")]
-async fn enqueue_extract_jobs(rt: TaskRuntime) -> Result<(), TaskError> {
-    extract_attachment_text::send(
-        &rt,
-        ExtractTextInput {
-            file_id: 42,
-            bundesland: "berlin".to_owned(),
-        },
-    )
-    .await
-    .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
+#[task("enqueue_add_numbers")]
+async fn enqueue_add_numbers(rt: TaskRuntime) -> Result<(), TaskError> {
+    match add_numbers::send(&rt, AddNumbersInput { a: 2, b: 3 }).await {
+        Ok(handle) => {
+            tracing::info!(task_id = %handle.task_id(), "sent add_numbers");
+        }
+        Err(err) => {
+            tracing::warn!(error = %err.message, "failed to send add_numbers");
+        }
+    }
 
-    extract_attachment_text::schedule(
+    match add_numbers::schedule(
         &rt,
         std::time::Duration::from_secs(30),
-        ExtractTextInput {
-            file_id: 43,
-            bundesland: "hamburg".to_owned(),
-        },
+        AddNumbersInput { a: 5, b: 8 },
     )
     .await
-    .map_err(|err| TaskError::user("SCHEDULE_FAILED", err.message))?;
+    {
+        Ok(handle) => {
+            tracing::info!(task_id = %handle.task_id(), "scheduled add_numbers");
+        }
+        Err(err) => {
+            tracing::warn!(error = %err.message, "failed to schedule add_numbers");
+        }
+    }
 
-    let extract = extract_attachment_text::handle(&rt)?;
-    extract
-        .send(ExtractTextInput {
-            file_id: 44,
-            bundesland: "berlin".to_owned(),
-        })
-        .await
-        .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
+    let add_numbers_task = add_numbers::handle(&rt)?;
+    match add_numbers_task.send(AddNumbersInput { a: 13, b: 21 }).await {
+        Ok(handle) => {
+            tracing::info!(task_id = %handle.task_id(), "sent add_numbers via handle");
+        }
+        Err(err) => {
+            tracing::warn!(error = %err.message, "failed to send add_numbers via handle");
+        }
+    }
     Ok(())
 }
 
-extract_attachment_text::register(&mut app)?;
-enqueue_extract_jobs::register(&mut app)?;
+add_numbers::register(&mut app)?;
+enqueue_add_numbers::register(&mut app)?;
 ```
 
 ### Inside a worker (typed runtime state)

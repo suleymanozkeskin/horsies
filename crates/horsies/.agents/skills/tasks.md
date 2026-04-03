@@ -16,22 +16,14 @@ use horsies::{task, TaskError};
 use serde::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize)]
-struct OrderInput {
-    order_id: String,
-    amount: u64,
+struct AddNumbersInput {
+    a: i32,
+    b: i32,
 }
 
-#[derive(Serialize, Deserialize)]
-struct OrderResult {
-    confirmed: bool,
-}
-
-#[task("process_order", queue = "urgent")]
-async fn process_order(input: OrderInput) -> Result<OrderResult, TaskError> {
-    if input.amount == 0 {
-        return Err(TaskError::user("INVALID_AMOUNT", "amount must be > 0"));
-    }
-    Ok(OrderResult { confirmed: true })
+#[task("add_numbers", queue = "urgent")]
+async fn add_numbers(input: AddNumbersInput) -> Result<i32, TaskError> {
+    Ok(input.a + input.b)
 }
 ```
 
@@ -93,9 +85,9 @@ use horsies::Horsies;
 
 let mut app = Horsies::new(config)?;
 
-let process = process_order::register(&mut app)?;
-let validate = validate_order::register(&mut app)?;
-let check = check_inventory::register(&mut app)?;
+let add_numbers_task = add_numbers::register(&mut app)?;
+let fetch_data_task = fetch_data::register(&mut app)?;
+let process_data_task = process_data::register(&mut app)?;
 ```
 
 Each `#[task]` generates a companion module with a `register()` function.
@@ -107,9 +99,9 @@ That function calls the builder API internally and returns a `TaskFunction<A, T>
 // tasks.rs
 pub fn register(app: &mut Horsies) -> Result<Tasks, HorsiesError> {
     Ok(Tasks {
-        validate: validate_order::register(app)?,
-        check: check_inventory::register(app)?,
-        ship: create_shipment::register(app)?,
+        fetch_data: fetch_data::register(app)?,
+        process_data: process_data::register(app)?,
+        save_result: save_result::register(app)?,
     })
 }
 ```
@@ -139,6 +131,24 @@ let (config, registry, wf_registry) = core.into_parts();
 The Rust equivalent of Python's `TaskFunction[P, T]`. Returned by
 `my_task::register(&mut app)`. Holds task identity, lazy broker,
 queue/priority defaults, task options.
+
+Prefer explicit branching around `.send()` / `.schedule()` in docs and app
+code when the failure path matters operationally:
+
+```rust
+match add_numbers_task.send(AddNumbersInput { a: 5, b: 3 }).await {
+    Ok(handle) => {
+        let result = handle.get(Some(Duration::from_secs(30))).await?;
+    }
+    Err(err) if err.retryable => {
+        let handle = add_numbers_task.retry_send(&err).await?;
+        let result = handle.get(Some(Duration::from_secs(30))).await?;
+    }
+    Err(err) => {
+        tracing::warn!(error = %err.message, "failed to send add_numbers");
+    }
+}
+```
 
 ### Methods
 

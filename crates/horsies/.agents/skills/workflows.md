@@ -16,9 +16,9 @@ use horsies::{
     HorsiesError, TaskNode, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
 };
 
-struct Pipeline;
+struct ETLPipeline;
 
-impl WorkflowDefinition for Pipeline {
+impl WorkflowDefinition for ETLPipeline {
     type Output = SaveResult;
     type Params = ();
 
@@ -47,8 +47,15 @@ impl WorkflowDefinition for Pipeline {
 Register and start it with:
 
 ```rust
-let workflow = app.register_workflow_definition::<Pipeline>()?;
-let handle = workflow.start().await?;
+let workflow = app.register_workflow_definition::<ETLPipeline>()?;
+match workflow.start().await {
+    Ok(handle) => {
+        let result = handle.get(Some(Duration::from_secs(60))).await?;
+    }
+    Err(err) => {
+        eprintln!("start failed: {}", err.message);
+    }
+}
 ```
 
 ### `WorkflowRegistrationBuilder` (secondary / local path)
@@ -58,14 +65,30 @@ definition type.
 
 ```rust
 let mut app = horsies::Horsies::new(config)?;
-let mut wb = app.workflow::<()>("my_pipeline");
-wb.definition_key("myapp.pipeline.v1");
-wb.task(TaskNode::<()>::new("step_a"));
-let step_b = wb.task(TaskNode::<()>::new("step_b"));
-wb.output(step_b);
+let mut wb = app.workflow::<SaveResult>("etl_pipeline");
+wb.definition_key("myapp.etl_pipeline.v1");
+let fetch = wb.task(TaskNode::<RawData>::new("fetch_data"));
+let process = wb.task(
+    TaskNode::<Processed>::new("process_data")
+        .waits_for(fetch)
+        .args_from("data", fetch),
+);
+let save = wb.task(
+    TaskNode::<SaveResult>::new("save_result")
+        .waits_for(process)
+        .args_from("result", process),
+);
+wb.output(save);
 
 let workflow = wb.build()?;
-let handle = workflow.start().await?;
+match workflow.start().await {
+    Ok(handle) => {
+        let result = handle.get(Some(Duration::from_secs(60))).await?;
+    }
+    Err(err) => {
+        eprintln!("start failed: {}", err.message);
+    }
+}
 ```
 
 ### Builder API (advanced / ad hoc spec construction)
@@ -105,31 +128,51 @@ use horsies::{HorsiesError, TaskNode, WorkflowDefConfig, WorkflowDefinition, Wor
 struct RegionalPipeline;
 
 impl WorkflowDefinition for RegionalPipeline {
-    type Output = ();
+    type Output = Processed;
     type Params = String;
 
     fn name() -> &'static str { "regional_pipeline" }
     fn definition_key() -> &'static str { "myapp.regional_pipeline.v1" }
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-        let step = builder.task(TaskNode::<()>::new("placeholder"));
-        Ok(WorkflowDefConfig::new().output(step))
+        let fetch = builder.task(TaskNode::<RawData>::new("fetch_data").node_id("fetch"));
+        let process = builder.task(
+            TaskNode::<Processed>::new("process_data")
+                .waits_for(fetch)
+                .args_from("data", fetch)
+                .node_id("process"),
+        );
+        Ok(WorkflowDefConfig::new().output(process))
     }
 
     fn build_with(region: Self::Params) -> Result<WorkflowSpec, HorsiesError> {
         let mut builder = WorkflowSpecBuilder::new(format!("regional_{region}"));
         builder.definition_key(format!("myapp.regional_pipeline.{region}.v1"));
-        let step = builder.task(
-            TaskNode::<()>::new("run_region")
-                .args_json(serde_json::to_string(&region).unwrap()),
+        let fetch = builder.task(
+            TaskNode::<RawData>::new("fetch_data")
+                .args_json(serde_json::to_string(&region).unwrap())
+                .node_id("fetch"),
         );
-        builder.output(step);
+        let process = builder.task(
+            TaskNode::<Processed>::new("process_data")
+                .waits_for(fetch)
+                .args_from("data", fetch)
+                .node_id("process"),
+        );
+        builder.output(process);
         builder.build()
     }
 }
 
 let regional = app.workflow_template::<RegionalPipeline>();
-let handle = regional.start("eu-west".to_owned()).await?;
+match regional.start("eu-west".to_owned()).await {
+    Ok(handle) => {
+        let result = handle.get(Some(Duration::from_secs(60))).await?;
+    }
+    Err(err) => {
+        eprintln!("start failed: {}", err.message);
+    }
+}
 ```
 
 ### Using `TaskFunction::node()`
@@ -139,11 +182,13 @@ let handle = regional.start("eu-west".to_owned()).await?;
 ```rust
 let fetch = fetch_data::register(&mut app)?;
 let process = process_data::register(&mut app)?;
+let save = save_result::register(&mut app)?;
 
-let mut builder = WorkflowSpecBuilder::new("pipeline");
+let mut builder = WorkflowSpecBuilder::new("etl_pipeline");
 let fetch_ref = builder.task(fetch.node());
 let proc_ref = builder.task(process.node().waits_for(fetch_ref).args_from("data", fetch_ref));
-builder.output(proc_ref);
+let save_ref = builder.task(save.node().waits_for(proc_ref).args_from("result", proc_ref));
+builder.output(save_ref);
 let spec = builder.build()?;
 ```
 
@@ -212,9 +257,15 @@ Best for fixed DAGs known at setup time. Returns a `WorkflowFunction<T>` that
 can be started multiple times.
 
 ```rust
-let workflow = app.register_workflow_definition::<Pipeline>()?;
-let handle = workflow.start().await?;
-let result = handle.get(Some(Duration::from_secs(60))).await?;
+let workflow = app.register_workflow_definition::<ETLPipeline>()?;
+match workflow.start().await {
+    Ok(handle) => {
+        let result = handle.get(Some(Duration::from_secs(60))).await?;
+    }
+    Err(err) => {
+        eprintln!("start failed: {}", err.message);
+    }
+}
 ```
 
 `WorkflowFunction<T>` is the workflow-side equivalent of task `TaskFunction<A, T>`:
@@ -231,8 +282,14 @@ typed runtime params.
 
 ```rust
 let regional = app.workflow_template::<RegionalPipeline>();
-let handle = regional.start("eu-west".to_owned()).await?;
-let result = handle.get(Some(Duration::from_secs(60))).await?;
+match regional.start("eu-west".to_owned()).await {
+    Ok(handle) => {
+        let result = handle.get(Some(Duration::from_secs(60))).await?;
+    }
+    Err(err) => {
+        eprintln!("start failed: {}", err.message);
+    }
+}
 ```
 
 `WorkflowTemplate<P, T>` exposes:
@@ -252,8 +309,14 @@ let spec = WorkflowSpecBuilder::new("enrichment")
     .definition_key("myapp.enrichment.v1")
     .build()?;
 
-let handle = app.start::<Output>(spec).await?;
-let result = handle.get(Some(Duration::from_secs(60))).await?;
+match app.start::<Output>(spec).await {
+    Ok(handle) => {
+        let result = handle.get(Some(Duration::from_secs(60))).await?;
+    }
+    Err(err) => {
+        eprintln!("start failed: {}", err.message);
+    }
+}
 ```
 
 Internally registers the spec and starts it in one step. No broker, registry,
@@ -267,11 +330,20 @@ inside a running task, after `app` has been consumed by `run_worker_with()`.
 ```rust
 use horsies::{task, TaskError, TaskRuntime};
 
-#[task("scrape_detail")]
-async fn scrape_detail(rt: TaskRuntime, input: ScrapeInput) -> Result<(), TaskError> {
-    if let Some(spec) = build_enrichment_spec(&input)? {
-        let handle = rt.start::<Output>(spec).await?;
-        tracing::info!(workflow_id = %handle.workflow_id(), "started enrichment workflow");
+#[task("build_regional_workflow")]
+async fn build_regional_workflow(
+    rt: TaskRuntime,
+    input: RegionalInput,
+) -> Result<(), TaskError> {
+    if let Some(spec) = build_regional_spec(&input)? {
+        match rt.start::<Output>(spec).await {
+            Ok(handle) => {
+                tracing::info!(workflow_id = %handle.workflow_id(), "started regional workflow");
+            }
+            Err(err) => {
+                tracing::warn!(error = %err.message, "failed to start regional workflow");
+            }
+        }
     }
     Ok(())
 }
@@ -290,42 +362,46 @@ Registered tasks now generate typed runtime helpers automatically:
 ```rust
 use horsies::{task, TaskError, TaskRuntime};
 
-#[task("enqueue_extract_jobs")]
-async fn enqueue_extract_jobs(rt: TaskRuntime) -> Result<(), TaskError> {
-    extract_attachment_text::send(
-        &rt,
-        ExtractTextInput {
-            file_id: 42,
-            bundesland: "berlin".to_owned(),
-        },
-    )
-    .await
-    .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
+#[task("enqueue_add_numbers")]
+async fn enqueue_add_numbers(rt: TaskRuntime) -> Result<(), TaskError> {
+    match add_numbers::send(&rt, AddNumbersInput { a: 2, b: 3 }).await {
+        Ok(handle) => {
+            tracing::info!(task_id = %handle.task_id(), "sent add_numbers");
+        }
+        Err(err) => {
+            tracing::warn!(error = %err.message, "failed to send add_numbers");
+        }
+    }
 
-    extract_attachment_text::schedule(
+    match add_numbers::schedule(
         &rt,
         std::time::Duration::from_secs(30),
-        ExtractTextInput {
-            file_id: 43,
-            bundesland: "hamburg".to_owned(),
-        },
+        AddNumbersInput { a: 5, b: 8 },
     )
     .await
-    .map_err(|err| TaskError::user("SCHEDULE_FAILED", err.message))?;
+    {
+        Ok(handle) => {
+            tracing::info!(task_id = %handle.task_id(), "scheduled add_numbers");
+        }
+        Err(err) => {
+            tracing::warn!(error = %err.message, "failed to schedule add_numbers");
+        }
+    }
 
-    let extract = extract_attachment_text::handle(&rt)?;
-    extract
-        .send(ExtractTextInput {
-            file_id: 44,
-            bundesland: "berlin".to_owned(),
-        })
-        .await
-        .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
+    let add_numbers_task = add_numbers::handle(&rt)?;
+    match add_numbers_task.send(AddNumbersInput { a: 13, b: 21 }).await {
+        Ok(handle) => {
+            tracing::info!(task_id = %handle.task_id(), "sent add_numbers via handle");
+        }
+        Err(err) => {
+            tracing::warn!(error = %err.message, "failed to send add_numbers via handle");
+        }
+    }
     Ok(())
 }
 
-extract_attachment_text::register(&mut app)?;
-enqueue_extract_jobs::register(&mut app)?;
+add_numbers::register(&mut app)?;
+enqueue_add_numbers::register(&mut app)?;
 ```
 
 ### 6. Inside a worker via `TaskRuntime::state()` (typed runtime state)
