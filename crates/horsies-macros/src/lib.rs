@@ -31,6 +31,13 @@ mod parse;
 /// }
 /// ```
 ///
+/// `TaskRuntime` can also retrieve typed app-provided state:
+///
+/// ```ignore
+/// let tasks = rt.state::<EnrichmentTasks>()?;
+/// tasks.extract_attachment_text.send(input).await?;
+/// ```
+///
 /// Generates a companion `#[doc(hidden)]` module with a `register()`
 /// function. Register via:
 ///

@@ -19,6 +19,7 @@ mod runtime;
 mod task;
 mod workflow;
 
+use std::any::TypeId;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -100,12 +101,14 @@ pub use crate::workflow_engine::{
 };
 
 use crate::lazy_broker::LazyBroker;
+use crate::runtime::{SharedTaskStateMap, StateValue};
 
 pub struct Horsies {
     pub(crate) core: CoreHorsies,
     pub(crate) broker: Arc<LazyBroker>,
     pub(crate) workflow_builders: Vec<Box<dyn workflow::WorkflowBuilderCheck>>,
     pub(crate) workflow_registry_cache: Arc<RwLock<WorkflowSpecRegistry>>,
+    pub(crate) runtime_state: SharedTaskStateMap,
 }
 
 impl Horsies {
@@ -117,6 +120,7 @@ impl Horsies {
             core,
             broker: Arc::new(LazyBroker::new(broker_config)),
             workflow_builders: Vec::new(),
+            runtime_state: Arc::new(RwLock::new(Default::default())),
         })
     }
 
@@ -127,6 +131,7 @@ impl Horsies {
             core,
             broker: Arc::new(LazyBroker::new(broker_config)),
             workflow_builders: Vec::new(),
+            runtime_state: Arc::new(RwLock::new(Default::default())),
         }
     }
 
@@ -306,12 +311,34 @@ impl Horsies {
         )
     }
 
-    /// Create a [`TaskRuntime`] for task-time dynamic workflow starts.
+    /// Create a [`TaskRuntime`] for task-time workflow starts and typed runtime state access.
     ///
     /// The generated `#[horsies::task]` wrappers capture this automatically
     /// when a task signature includes `TaskRuntime`.
     pub fn task_runtime(&self) -> TaskRuntime {
-        TaskRuntime::new(self.workflow_starter())
+        TaskRuntime::new(self.workflow_starter(), Arc::clone(&self.runtime_state))
+    }
+
+    /// Provide typed runtime state that tasks can later retrieve via `TaskRuntime::state::<T>()`.
+    pub fn provide<T>(&mut self, value: T) -> Result<(), HorsiesError>
+    where
+        T: Send + Sync + 'static,
+    {
+        let mut store = self.runtime_state.write().map_err(|_| {
+            HorsiesError::new("runtime state store is poisoned and cannot accept new values")
+        })?;
+
+        let type_id = TypeId::of::<T>();
+        if store.contains_key(&type_id) {
+            return Err(HorsiesError::new(format!(
+                "runtime state for type {} is already provided; wrap values in a newtype if you need multiple instances",
+                std::any::type_name::<T>()
+            )));
+        }
+
+        let value: StateValue = Arc::new(value);
+        store.insert(type_id, value);
+        Ok(())
     }
 
     pub fn register_workflow<T: DeserializeOwned + Clone>(
@@ -660,6 +687,10 @@ mod tests {
         pub b: i32,
     }
 
+    struct MacroState {
+        label: &'static str,
+    }
+
     #[horsies::task("macro_add")]
     async fn macro_add(args: MacroAddArgs) -> Result<i32, horsies::TaskError> {
         Ok(args.a + args.b)
@@ -725,6 +756,12 @@ mod tests {
         Ok("runtime".into())
     }
 
+    #[horsies::task("macro_rt_state")]
+    async fn macro_rt_state(rt: crate::TaskRuntime) -> Result<String, horsies::TaskError> {
+        let state = rt.state::<MacroState>()?;
+        Ok(state.label.to_owned())
+    }
+
     #[test]
     fn proc_macro_sequential_registration() {
         let mut app = Horsies::new(valid_config()).unwrap();
@@ -768,6 +805,56 @@ mod tests {
         let result = task.execute(&args).await.unwrap();
         let value: String = serde_json::from_slice(&result).unwrap();
         assert_eq!(value, "runtime");
+    }
+
+    #[tokio::test]
+    async fn proc_macro_runtime_state_executes_with_provided_state() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+        macro_rt_state::register(&mut app).unwrap();
+        app.provide(MacroState { label: "provided" }).unwrap();
+
+        let task = app.registry().get("macro_rt_state").unwrap().clone();
+        let RegisteredTask::Async { task, .. } = task else {
+            panic!("expected async task");
+        };
+
+        let envelope = serde_json::json!({"args": [], "kwargs": {}});
+        let args = serde_json::to_vec(&envelope).unwrap();
+        let result = task.execute(&args).await.unwrap();
+        let value: String = serde_json::from_slice(&result).unwrap();
+        assert_eq!(value, "provided");
+    }
+
+    #[tokio::test]
+    async fn proc_macro_runtime_state_missing_returns_task_error() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+        macro_rt_state::register(&mut app).unwrap();
+
+        let task = app.registry().get("macro_rt_state").unwrap().clone();
+        let RegisteredTask::Async { task, .. } = task else {
+            panic!("expected async task");
+        };
+
+        let envelope = serde_json::json!({"args": [], "kwargs": {}});
+        let args = serde_json::to_vec(&envelope).unwrap();
+        let result = task.execute(&args).await;
+        let err = match result {
+            crate::TaskResult::Err(err) => err,
+            crate::TaskResult::Ok(_) => panic!("expected missing state error"),
+        };
+        assert_eq!(
+            err.error_code,
+            Some(crate::TaskErrorCode::User("STATE_NOT_PROVIDED".to_owned()))
+        );
+        assert!(err.message.unwrap_or_default().contains("MacroState"));
+    }
+
+    #[test]
+    fn provide_rejects_duplicate_type() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+        app.provide(MacroState { label: "first" }).unwrap();
+        let err = app.provide(MacroState { label: "second" }).unwrap_err();
+        assert!(err.to_string().contains("already provided"));
     }
 
     #[horsies::task(

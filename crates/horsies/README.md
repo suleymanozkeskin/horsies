@@ -151,6 +151,43 @@ it appears as the first parameter. `WorkflowStarter` remains available as the
 lower-level building block, but it is no longer the primary ergonomic story for
 in-task dynamic workflow starts.
 
+### Provide typed runtime state to tasks
+
+Use `app.provide(...)` for app-owned values that tasks need at runtime, such as
+typed task-handle groups:
+
+```rust
+use horsies::{task, TaskError, TaskFunction, TaskRuntime};
+
+struct EnrichmentTasks {
+    extract_attachment_text: TaskFunction<ExtractTextInput, ()>,
+}
+
+#[task("enqueue_extract_jobs")]
+async fn enqueue_extract_jobs(rt: TaskRuntime) -> Result<(), TaskError> {
+    let tasks = rt.state::<EnrichmentTasks>()?;
+
+    tasks.extract_attachment_text
+        .send(ExtractTextInput {
+            file_id: 42,
+            bundesland: "berlin".to_owned(),
+        })
+        .await
+        .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
+
+    Ok(())
+}
+
+let extract = extract_attachment_text::register(&mut app)?;
+enqueue_extract_jobs::register(&mut app)?;
+app.provide(EnrichmentTasks {
+    extract_attachment_text: extract,
+})?;
+```
+
+This removes the need for process-global `OnceLock` state while keeping task-to-task
+dispatch fully typed.
+
 ### Validate and run
 
 ```rust

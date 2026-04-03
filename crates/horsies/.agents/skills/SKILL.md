@@ -153,6 +153,39 @@ async fn scrape_detail(rt: TaskRuntime, input: ScrapeInput) -> Result<(), TaskEr
 running task. `WorkflowStarter` still exists as the lower-level launcher when
 you need to work with runtime plumbing directly.
 
+### Inside a worker (typed runtime state)
+
+Use `app.provide(...)` for app-owned values that tasks should access at runtime.
+The common case is typed task-handle groups for task-to-task dispatch without
+globals.
+
+```rust
+use horsies::{task, TaskError, TaskFunction, TaskRuntime};
+
+struct EnrichmentTasks {
+    extract_attachment_text: TaskFunction<ExtractTextInput, ()>,
+}
+
+#[task("enqueue_extract_jobs")]
+async fn enqueue_extract_jobs(rt: TaskRuntime) -> Result<(), TaskError> {
+    let tasks = rt.state::<EnrichmentTasks>()?;
+    tasks.extract_attachment_text
+        .send(ExtractTextInput {
+            file_id: 42,
+            bundesland: "berlin".to_owned(),
+        })
+        .await
+        .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
+    Ok(())
+}
+
+let extract = extract_attachment_text::register(&mut app)?;
+enqueue_extract_jobs::register(&mut app)?;
+app.provide(EnrichmentTasks {
+    extract_attachment_text: extract,
+})?;
+```
+
 ### Retry a failed start
 
 ```rust

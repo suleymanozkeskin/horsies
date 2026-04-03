@@ -311,7 +311,42 @@ it appears as the first parameter in the task signature.
 Sub-workflows referenced by a dynamically-built spec must be registered
 before the worker starts (i.e. before the app is consumed).
 
-### 5. `WorkflowStarter` (advanced / lower-level)
+### 5. Inside a worker via `TaskRuntime::state()` (typed runtime state)
+
+Use `app.provide(...)` for app-owned values that tasks should access at
+runtime. This is the primary pattern for task-to-task dispatch without globals.
+
+```rust
+use horsies::{task, TaskError, TaskFunction, TaskRuntime};
+
+struct EnrichmentTasks {
+    extract_attachment_text: TaskFunction<ExtractTextInput, ()>,
+}
+
+#[task("enqueue_extract_jobs")]
+async fn enqueue_extract_jobs(rt: TaskRuntime) -> Result<(), TaskError> {
+    let tasks = rt.state::<EnrichmentTasks>()?;
+    tasks.extract_attachment_text
+        .send(ExtractTextInput {
+            file_id: 42,
+            bundesland: "berlin".to_owned(),
+        })
+        .await
+        .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
+    Ok(())
+}
+
+let extract = extract_attachment_text::register(&mut app)?;
+enqueue_extract_jobs::register(&mut app)?;
+app.provide(EnrichmentTasks {
+    extract_attachment_text: extract,
+})?;
+```
+
+`rt.state::<T>()` returns `Result<Arc<T>, TaskError>`. Missing state is a task
+error, not a panic.
+
+### 6. `WorkflowStarter` (advanced / lower-level)
 
 `WorkflowStarter` remains the lower-level workflow launcher that powers
 `TaskRuntime`. Use it when you explicitly want a cloneable launcher object
