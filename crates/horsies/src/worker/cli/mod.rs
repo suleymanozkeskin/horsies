@@ -1,7 +1,5 @@
 pub mod banner;
 
-pub use banner::{print_banner, print_simple_banner, BannerInfo};
-
 use std::fmt;
 use std::str::FromStr;
 

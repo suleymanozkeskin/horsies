@@ -11,21 +11,9 @@ pub mod query;
 pub mod recovery;
 pub mod start;
 
-pub use bound_handle::WorkflowHandle;
-pub use bound_spec::{BoundWorkflowSpec, WorkflowSpecExt};
-pub use engine::{on_subworkflow_complete, on_workflow_task_complete};
+pub use engine::on_workflow_task_complete;
 pub use error::WorkflowError;
-pub use info::WorkflowTaskInfo;
-pub use lifecycle::{cancel_workflow, pause_workflow, resume_workflow};
-pub use query::{
-    get_workflow_result, get_workflow_result_for, get_workflow_results, get_workflow_status,
-    get_workflow_tasks,
-};
-pub use recovery::{recover_stuck_workflows, RecoveryReport};
-pub use start::{
-    retry_start, start_child_workflow, start_child_workflow_in_tx, start_workflow,
-    start_workflow_with_retry,
-};
+pub use recovery::recover_stuck_workflows;
 
 /// Parse `good_until` from a serialized task_options JSON string.
 ///

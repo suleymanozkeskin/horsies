@@ -147,9 +147,7 @@ async fn scrape_detail(
 ```
 
 `TaskRuntime` is captured automatically by `#[task]` / `#[blocking_task]` when
-it appears as the first parameter. `WorkflowStarter` remains available as the
-lower-level building block, but it is no longer the primary ergonomic story for
-in-task dynamic workflow starts.
+it appears as the first parameter.
 
 ### Send and schedule tasks from inside tasks
 

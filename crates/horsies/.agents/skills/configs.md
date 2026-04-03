@@ -223,18 +223,7 @@ if !errors.is_empty() {
 | 1 | Config — validated at `Horsies::new()` | Done (implicit) |
 | 2 | Schedule validation — task names, queue names | Done |
 | 3.1 | Workflow `definition_key` presence (HRS-016) and uniqueness (HRS-017) | Done |
-| 3.2 | Workflow builder execution — registered builders run under internal send suppression | Done |
 | 3.5 | Runtime policy safety — registered task `task_options`, `retry_policy`, `auto_retry_for`, reserved code collisions | Done |
-
-### Workflow builder execution (Phase 3.2)
-
-Registered via `app.workflow_builder(name, closure)` or `app.workflow_builder0(name, closure)`:
-
-- Zero-arg builders (`workflow_builder0`) auto-invoked once during `check()`
-- Parameterized builders require `.case()` / `.cases()` — missing cases → HRS-027
-- Missing `definition_key` on produced spec → HRS-016
-- Builder panics / untyped failures → HRS-029
-- Builders execute under internal send suppression during `check()`
 
 ### Runtime policy safety (Phase 3.5)
 

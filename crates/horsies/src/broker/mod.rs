@@ -19,7 +19,5 @@ pub use row::task::{
     TaskRunningContextRow, WorkerStatsRow,
 };
 pub use row::worker_state::WorkerStateRow;
-pub use row::workflow::{
-    parse_workflow_status, parse_workflow_task_status, WorkflowRow, WorkflowTaskRow,
-};
+pub use row::workflow::{WorkflowRow, WorkflowTaskRow};
 pub use shared_listener::SharedNotifyListener;

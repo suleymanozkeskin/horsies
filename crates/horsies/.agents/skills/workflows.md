@@ -132,34 +132,6 @@ let regional = app.workflow_template::<RegionalPipeline>();
 let handle = regional.start("eu-west".to_owned()).await?;
 ```
 
-### Explicit workflow builders for `check()`
-
-Rust does not use Python-style decorators/import scanning. Instead, register
-builders explicitly on the app:
-
-```rust
-let mut registration = app.workflow_builder("regional_builder", |_app, region: &String| {
-    let mut builder = WorkflowSpecBuilder::new(format!("regional_{region}"));
-    builder.definition_key(format!("myapp.regional.{region}.v1"));
-    let step = builder.task(TaskNode::<()>::new("run_region"));
-    builder.output(step);
-    builder.build()
-})?;
-
-registration.cases(["us-east".to_owned(), "eu-west".to_owned()]);
-registration.register()?;
-
-app.check()?;
-```
-
-Behavior:
-- `workflow_builder0(...)` auto-invokes zero-arg builders once during `check()`
-- `workflow_builder(...)` requires typed `.case(...)` / `.cases(...)` for parameterized builders
-- builders execute under internal send suppression during `check()`
-- missing cases -> `HRS-027`
-- missing `definition_key` on the produced spec -> `HRS-016`
-- builder panics / untyped failures -> `HRS-029`
-
 ### Using `TaskFunction::node()`
 
 `TaskFunction::node()` returns a `TaskNode<T>` pre-configured with the task's name, queue, priority, good_until, and task_options:
@@ -190,7 +162,7 @@ pub struct WorkflowSpec {
 }
 ```
 
-`WorkflowSpec` is the definition-only workflow type. It is IO-free and implemented in the internal `horsies::core` module. The primary executable workflow object is `WorkflowFunction<T>`; the lower-level executable form is `BoundWorkflowSpec<T>`.
+`WorkflowSpec` is the definition-only workflow type. It is IO-free and implemented in the internal `horsies::core` module. The primary executable workflow objects are `WorkflowFunction<T>` and `WorkflowTemplate<P, T>`.
 
 ## `TaskNode<T>`
 
@@ -381,20 +353,9 @@ async fn use_settings(rt: TaskRuntime) -> Result<(), TaskError> {
 `rt.state::<T>()` returns `Result<Arc<T>, TaskError>`. Missing state is a task
 error, not a panic.
 
-### 7. `WorkflowStarter` (advanced / lower-level)
-
-`WorkflowStarter` remains the lower-level workflow launcher that powers
-`TaskRuntime`. Use it when you explicitly want a cloneable launcher object
-outside the task-macro injection path.
-
-```rust
-let starter = app.workflow_starter();
-let handle = starter.start::<Output>(spec).await?;
-```
-
 ### Auto-retry on start
 
-When `resend_on_transient_err` is true, `WorkflowFunction::start()` and `BoundWorkflowSpec::start()` retry up to 3 times (4 total attempts) with exponential backoff (200ms, 400ms, 800ms, cap 2000ms) on transient DB errors. The workflow_id is generated once and reused across retries for idempotency.
+When `resend_on_transient_err` is true, workflow starts retry up to 3 times (4 total attempts) with exponential backoff (200ms, 400ms, 800ms, cap 2000ms) on transient DB errors. The workflow_id is generated once and reused across retries for idempotency.
 
 ### Retry a failed start
 
@@ -419,22 +380,6 @@ Uses the internal `validate_start_retry()` helper in `horsies::core::workflow::s
 ```rust
 let handle = workflow.handle("known-workflow-uuid").await?;
 let status = handle.status().await?;
-```
-
-## `BoundWorkflowSpec<T>` (advanced plumbing)
-
-Low-level executable wrapper around a `WorkflowSpec`, bound to a `PgPool`,
-`WorkflowSpecRegistry`, and retry config. Most users should use
-`app.start()`, `app.workflow().build()`, or `TaskRuntime` instead.
-
-This exists for cases where you already hold a pool and registry directly
-(e.g. custom orchestration outside the `Horsies` app).
-
-```rust
-use horsies::{BoundWorkflowSpec, WorkflowSpecExt};
-
-let bound: BoundWorkflowSpec<T> = spec.bind_with_broker(&broker, registry, resend);
-let handle = bound.start().await?;
 ```
 
 ## `WorkflowHandle<T>`
@@ -612,8 +557,8 @@ Injects the full `TaskResult` (not raw value) as a kwarg. Receiving function par
 // All from the unified crate
 use horsies::{
     // App + spec construction
-    Horsies, WorkflowFunction, WorkflowStarter, WorkflowSpec, WorkflowSpecBuilder,
-    WorkflowDefinition,
+    Horsies, WorkflowFunction, WorkflowSpec, WorkflowSpecBuilder, WorkflowDefinition,
+    WorkflowTemplate,
     // Nodes
     TaskNode, SubWorkflowNode, NodeRef, NodeKey, AnyNode,
     // Policies

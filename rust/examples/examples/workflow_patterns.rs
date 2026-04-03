@@ -14,7 +14,7 @@ use horsies_examples::common;
 
 use std::time::Duration;
 
-use horsies::{get_workflow_result, start_workflow, Horsies, TaskResult};
+use horsies::{get_workflow_result, Horsies, TaskResult};
 
 use common::tasks::workflows::{AggregateResult, TransformResult};
 
@@ -40,9 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Registered 6 tasks and 3 workflow specs.\n");
 
-    // Decompose the app to get the workflow registry and broker.
-    let (_app_config, _registry, wf_registry, broker) = app.into_parts().await?;
-    let wf_registry = std::sync::Arc::new(wf_registry);
+    let broker = app.get_broker().await?;
     println!("Broker connected.\n");
 
     let wf_listener = broker.workflow_done_listener().await?;
@@ -55,12 +53,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ------------------------------------------------------------------
     println!("--- Pattern 1: Linear Chain ---\n");
     {
-        let spec = wf_registry
+        let spec = app
+            .workflow_registry()
             .get("linear_chain")
-            .expect("linear_chain not registered");
-        let handle =
-            start_workflow::<TransformResult>(broker.pool(), &spec.spec, None, &wf_registry)
-                .await?;
+            .expect("linear_chain not registered")
+            .spec
+            .clone();
+        let handle = app.start::<TransformResult>(spec).await?;
         println!(
             "  Started workflow: linear_chain (id: {})",
             handle.workflow_id()
@@ -91,12 +90,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ------------------------------------------------------------------
     println!("--- Pattern 2: Fan-Out + Fan-In ---\n");
     {
-        let spec = wf_registry
+        let spec = app
+            .workflow_registry()
             .get("fan_in_out")
-            .expect("fan_in_out not registered");
-        let handle =
-            start_workflow::<AggregateResult>(broker.pool(), &spec.spec, None, &wf_registry)
-                .await?;
+            .expect("fan_in_out not registered")
+            .spec
+            .clone();
+        let handle = app.start::<AggregateResult>(spec).await?;
         println!(
             "  Started workflow: fan_in_out (id: {})",
             handle.workflow_id()
@@ -127,11 +127,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ------------------------------------------------------------------
     println!("--- Pattern 3: Error Recovery ---\n");
     {
-        let spec = wf_registry
+        let spec = app
+            .workflow_registry()
             .get("error_recovery")
-            .expect("error_recovery not registered");
-        let handle =
-            start_workflow::<String>(broker.pool(), &spec.spec, None, &wf_registry).await?;
+            .expect("error_recovery not registered")
+            .spec
+            .clone();
+        let handle = app.start::<String>(spec).await?;
         println!(
             "  Started workflow: error_recovery (id: {})",
             handle.workflow_id()

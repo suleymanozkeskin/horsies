@@ -150,8 +150,7 @@ async fn scrape_detail(rt: TaskRuntime, input: ScrapeInput) -> Result<(), TaskEr
 ```
 
 `TaskRuntime` is the primary path for starting dynamic workflows from inside a
-running task. `WorkflowStarter` still exists as the lower-level launcher when
-you need to work with runtime plumbing directly.
+running task.
 
 ### Inside a worker (task-to-task dispatch)
 

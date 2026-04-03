@@ -35,10 +35,7 @@ use crate::core::{Horsies as CoreHorsies, RegisteredWorkflowSpec};
 pub use error::{AppError, AppResult};
 pub use runtime::TaskRuntime;
 pub use task::{TaskFunction, TaskRegistrationBuilder};
-pub use workflow::{
-    WorkflowBuilderRegistration, WorkflowFunction, WorkflowRegistrationBuilder, WorkflowStarter,
-    WorkflowTemplate,
-};
+pub use workflow::{WorkflowFunction, WorkflowRegistrationBuilder, WorkflowTemplate};
 
 // horsies-macros
 pub use horsies_macros::{blocking_task, task};
@@ -79,25 +76,18 @@ pub type Broker = PostgresBroker;
 pub use crate::worker::{
     cli::{init_tracing, LogLevel},
     scheduler::service::spawn_scheduler,
-    Worker, WorkerConfig, WorkerError,
+    config::WorkerConfig,
+    error::WorkerError,
+    worker::Worker,
 };
 
-// workflow engine re-exports
-#[deprecated(
-    since = "0.1.0-alpha.2",
-    note = "advanced plumbing only; prefer WorkflowFunction::start(), WorkflowTemplate::start(...), app.start(spec), or WorkflowStarter"
-)]
-pub use crate::workflow_engine::start_workflow;
-#[deprecated(
-    since = "0.1.0-alpha.2",
-    note = "advanced plumbing only; prefer WorkflowFunction::start(), WorkflowTemplate::start(...), app.start(spec), or WorkflowStarter"
-)]
-pub use crate::workflow_engine::BoundWorkflowSpec;
-pub use crate::workflow_engine::{
-    cancel_workflow, get_workflow_result, on_workflow_task_complete, pause_workflow,
-    recover_stuck_workflows, resume_workflow, WorkflowError, WorkflowHandle, WorkflowSpecExt,
-    WorkflowTaskInfo,
-};
+pub use crate::workflow_engine::bound_handle::WorkflowHandle;
+pub use crate::workflow_engine::engine::on_workflow_task_complete;
+pub use crate::workflow_engine::error::WorkflowError;
+pub use crate::workflow_engine::info::WorkflowTaskInfo;
+pub use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow, resume_workflow};
+pub use crate::workflow_engine::query::get_workflow_result;
+pub use crate::workflow_engine::recovery::recover_stuck_workflows;
 
 use crate::lazy_broker::LazyBroker;
 use crate::runtime::SharedRuntimeCatalog;
@@ -105,7 +95,6 @@ use crate::runtime::SharedRuntimeCatalog;
 pub struct Horsies {
     pub(crate) core: CoreHorsies,
     pub(crate) broker: Arc<LazyBroker>,
-    pub(crate) workflow_builders: Vec<Box<dyn workflow::WorkflowBuilderCheck>>,
     pub(crate) workflow_registry_cache: Arc<RwLock<WorkflowSpecRegistry>>,
     pub(crate) runtime_catalog: SharedRuntimeCatalog,
 }
@@ -118,7 +107,6 @@ impl Horsies {
             workflow_registry_cache: Arc::new(RwLock::new(core.workflow_registry().clone())),
             core,
             broker: Arc::new(LazyBroker::new(broker_config)),
-            workflow_builders: Vec::new(),
             runtime_catalog: Arc::new(crate::runtime::RuntimeCatalog::new()),
         })
     }
@@ -129,7 +117,6 @@ impl Horsies {
             workflow_registry_cache: Arc::new(RwLock::new(core.workflow_registry().clone())),
             core,
             broker: Arc::new(LazyBroker::new(broker_config)),
-            workflow_builders: Vec::new(),
             runtime_catalog: Arc::new(crate::runtime::RuntimeCatalog::new()),
         }
     }
@@ -290,20 +277,8 @@ impl Horsies {
         wf.start().await
     }
 
-    /// Create a [`WorkflowStarter`] for starting workflows after the app is consumed.
-    ///
-    /// Call this before [`run_worker_with`](Self::run_worker_with) so that tasks
-    /// running inside the worker can start dynamic workflows at runtime.
-    ///
-    /// ```ignore
-    /// let starter = app.workflow_starter();
-    /// app.run_worker_with(config).await?;
-    ///
-    /// // Inside a task (via global or dependency injection):
-    /// let handle = starter.start::<T>(spec).await?;
-    /// ```
-    pub fn workflow_starter(&self) -> WorkflowStarter {
-        WorkflowStarter::new(
+    pub(crate) fn workflow_starter(&self) -> workflow::WorkflowStarter {
+        workflow::WorkflowStarter::new(
             Arc::clone(&self.broker),
             Arc::clone(&self.workflow_registry_cache),
             self.core.config().resend_on_transient_err,
@@ -371,56 +346,8 @@ impl Horsies {
         WorkflowTemplate::from_definition::<D>(self.workflow_starter())
     }
 
-    #[deprecated(
-        since = "0.1.0-alpha.2",
-        note = "advanced validation-only builder registration; prefer WorkflowDefinition for reusable workflows and workflow_template(...) for parameterized reusable workflows"
-    )]
-    pub fn workflow_builder<P, F>(
-        &mut self,
-        name: &str,
-        builder: F,
-    ) -> Result<workflow::WorkflowBuilderRegistration<'_, P>, HorsiesError>
-    where
-        P: Send + Sync + 'static,
-        F: Fn(&Self, &P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync + 'static,
-    {
-        if name.trim().is_empty() {
-            return Err(HorsiesError::new("workflow builder name cannot be empty")
-                .with_code(ErrorCode::WorkflowNoName));
-        }
-        Ok(workflow::WorkflowBuilderRegistration::new(
-            self,
-            name.to_owned(),
-            Arc::new(builder),
-        ))
-    }
-
-    #[deprecated(
-        since = "0.1.0-alpha.2",
-        note = "advanced validation-only builder registration; prefer WorkflowDefinition for reusable workflows"
-    )]
-    pub fn workflow_builder0<F>(
-        &mut self,
-        name: &str,
-        builder: F,
-    ) -> Result<workflow::WorkflowBuilderRegistration<'_, ()>, HorsiesError>
-    where
-        F: Fn(&Self) -> Result<WorkflowSpec, HorsiesError> + Send + Sync + 'static,
-    {
-        if name.trim().is_empty() {
-            return Err(HorsiesError::new("workflow builder name cannot be empty")
-                .with_code(ErrorCode::WorkflowNoName));
-        }
-        Ok(workflow::WorkflowBuilderRegistration::new_zero_arg(
-            self,
-            name.to_owned(),
-            Arc::new(builder),
-        ))
-    }
-
     pub fn check(&self) -> Result<(), HorsiesError> {
-        self.core.check()?;
-        self.check_workflow_builders()
+        self.core.check()
     }
 
     pub async fn check_live(&self) -> AppResult<()> {
@@ -525,7 +452,7 @@ impl Horsies {
     ///
     /// This exposes broker and registry plumbing directly. Prefer
     /// `WorkflowFunction`, `WorkflowTemplate`, `app.start(spec)`, or
-    /// `WorkflowStarter` unless you specifically need low-level control.
+    /// `TaskRuntime` unless you specifically need low-level control.
     pub async fn into_parts(
         self,
     ) -> AppResult<(
@@ -546,7 +473,6 @@ impl std::fmt::Debug for Horsies {
         f.debug_struct("Horsies")
             .field("role", &self.role())
             .field("queues", &self.get_valid_queue_names())
-            .field("workflow_builder_count", &self.workflow_builders.len())
             .finish()
     }
 }
@@ -557,21 +483,6 @@ impl Horsies {
             .workflow_registry_cache
             .write()
             .expect("workflow registry lock poisoned") = self.core.workflow_registry().clone();
-    }
-
-    fn check_workflow_builders(&self) -> Result<(), HorsiesError> {
-        let previous = self.are_sends_suppressed();
-        self.suppress_sends(true);
-
-        let mut report = ValidationReport::new("workflow_builder_check");
-        for builder in &self.workflow_builders {
-            for error in builder.run_check(self) {
-                report.add(error);
-            }
-        }
-
-        self.suppress_sends(previous);
-        report.into_result()
     }
 }
 

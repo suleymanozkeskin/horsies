@@ -2,21 +2,34 @@
 ///
 /// Mirrors Python's `conftest.py` helpers: `start_ok`, `complete_task`,
 /// `get_task_status`, `get_workflow_status`.
+use std::sync::Arc;
+
+use serde::de::DeserializeOwned;
 use sqlx::PgPool;
 
-use horsies::{start_workflow, TaskResult, WorkflowHandle, WorkflowSpec, WorkflowSpecRegistry};
+use horsies::{
+    Horsies, PostgresBroker, TaskResult, WorkflowHandle, WorkflowSpec, WorkflowSpecRegistry,
+};
 
+use crate::fixtures;
 use crate::tasks::result_json;
 
 /// Start a workflow and panic on failure (for tests that expect success).
 pub async fn start_ok<T>(
     pool: &PgPool,
     spec: &WorkflowSpec,
-    registry: &WorkflowSpecRegistry,
-) -> WorkflowHandle<T> {
-    start_workflow(pool, spec, None, registry)
+    _registry: &WorkflowSpecRegistry,
+) -> WorkflowHandle<T>
+where
+    T: DeserializeOwned + Clone,
+{
+    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let mut app = Horsies::with_broker(fixtures::default_app_config(), broker).unwrap();
+    let workflow = app.register_workflow_spec::<T>(spec.clone()).unwrap();
+    workflow
+        .start()
         .await
-        .unwrap_or_else(|e| panic!("start_workflow failed: {}", e))
+        .unwrap_or_else(|e| panic!("workflow.start failed: {}", e))
 }
 
 /// Start a workflow with a specific ID and panic on failure.
@@ -24,11 +37,18 @@ pub async fn start_ok_with_id<T>(
     pool: &PgPool,
     spec: &WorkflowSpec,
     workflow_id: &str,
-    registry: &WorkflowSpecRegistry,
-) -> WorkflowHandle<T> {
-    start_workflow(pool, spec, Some(workflow_id.to_owned()), registry)
+    _registry: &WorkflowSpecRegistry,
+) -> WorkflowHandle<T>
+where
+    T: DeserializeOwned + Clone,
+{
+    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let mut app = Horsies::with_broker(fixtures::default_app_config(), broker).unwrap();
+    let workflow = app.register_workflow_spec::<T>(spec.clone()).unwrap();
+    workflow
+        .start_with_id(workflow_id.to_owned())
         .await
-        .unwrap_or_else(|e| panic!("start_workflow failed: {}", e))
+        .unwrap_or_else(|e| panic!("workflow.start_with_id failed: {}", e))
 }
 
 /// Get the horsies_tasks.id linked to a workflow task by index.

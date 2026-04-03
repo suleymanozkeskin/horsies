@@ -8,18 +8,19 @@
 //!   cargo test -p horsies-test-worker --test layer6_workflow_advanced -- --test-threads=1
 
 use std::io::Write;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serial_test::serial;
 use sqlx::PgPool;
 
 use horsies::{
-    cancel_workflow, pause_workflow, resolve_node_task_options, resume_workflow, start_workflow,
-    OnError, SuccessCase, SuccessPolicy, TaskNode, WorkflowHandle, WorkflowSpecBuilder,
-    WorkflowSpecRegistry,
+    cancel_workflow, pause_workflow, resolve_node_task_options, resume_workflow, Horsies,
+    OnError, PostgresBroker, SuccessCase, SuccessPolicy, TaskNode, WorkflowHandle,
+    WorkflowSpecBuilder, WorkflowSpecRegistry,
 };
 use horsies_test_support::{
-    db,
+    db, fixtures,
     e2e::{
         db_poll::{wait_for_task_status, wait_for_workflow_terminal},
         worker::start_worker,
@@ -45,14 +46,13 @@ fn registry() -> WorkflowSpecRegistry {
     WorkflowSpecRegistry::new()
 }
 
-async fn start_wf(
-    pool: &PgPool,
-    spec: &horsies::WorkflowSpec,
-    registry: &WorkflowSpecRegistry,
-) -> String {
-    let handle: WorkflowHandle<serde_json::Value> = start_workflow(pool, spec, None, registry)
+async fn start_wf(pool: &PgPool, spec: &horsies::WorkflowSpec) -> String {
+    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let mut app = Horsies::with_broker(fixtures::default_app_config(), broker).unwrap();
+    let handle: WorkflowHandle<serde_json::Value> = app
+        .start(spec.clone())
         .await
-        .unwrap_or_else(|e| panic!("start_workflow failed: {}", e));
+        .unwrap_or_else(|e| panic!("app.start failed: {}", e));
     handle.workflow_id().to_owned()
 }
 
@@ -125,7 +125,7 @@ async fn test_quorum_ctx_gating() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "COMPLETED");
 
@@ -185,7 +185,7 @@ async fn test_quorum_impossible_skips() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "FAILED");
 
@@ -237,7 +237,7 @@ async fn test_join_any_all_deps_fail_skips() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "FAILED");
 
@@ -291,7 +291,7 @@ async fn test_pause_blocks_ready_transitions() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
 
     // Wait for A to complete.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -367,7 +367,7 @@ async fn test_resume_continues_workflow() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
@@ -425,7 +425,7 @@ async fn test_pause_then_cancel() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
@@ -487,7 +487,7 @@ async fn test_success_policy_satisfied() {
     });
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "COMPLETED");
 
@@ -537,7 +537,7 @@ async fn test_success_policy_not_met() {
     });
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "FAILED");
 
@@ -593,7 +593,7 @@ async fn test_success_policy_multiple_cases() {
     });
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "COMPLETED");
 
@@ -644,7 +644,7 @@ async fn test_on_error_pause_stops_workflow() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     wait_for_wf_status(&pool, &wf_id, "PAUSED", Duration::from_secs(15)).await;
 
     assert_eq!(
@@ -694,7 +694,7 @@ async fn test_on_error_pause_resume_completes() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     wait_for_wf_status(&pool, &wf_id, "PAUSED", Duration::from_secs(15)).await;
 
     let resumed = resume_workflow(&pool, &wf_id, &reg).await.unwrap();
@@ -743,7 +743,7 @@ async fn test_recovery_preserves_results() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "COMPLETED");
 
@@ -801,7 +801,7 @@ async fn test_recovery_preserves_failed_state() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "FAILED");
 
@@ -872,7 +872,7 @@ async fn test_pause_idempotent() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
 
     // Wait for A to complete so workflow is RUNNING.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -925,7 +925,7 @@ async fn test_resume_on_running_noop() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
 
     // Wait until workflow is RUNNING.
     wait_for_wf_status(&pool, &wf_id, "RUNNING", Duration::from_secs(5)).await;
@@ -973,7 +973,7 @@ async fn test_success_policy_not_met_error_content() {
     });
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "FAILED");
 
@@ -1043,7 +1043,7 @@ async fn test_workflow_task_retries() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(30)).await;
     assert_eq!(
         status, "COMPLETED",
@@ -1115,7 +1115,7 @@ async fn test_workflow_task_retries_exhausted() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(60)).await;
     assert_eq!(
         status, "FAILED",
@@ -1255,7 +1255,7 @@ async fn test_workflow_recovers_after_worker_crash() {
         Duration::from_secs(20),
     );
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
 
     // Wait until A and B are COMPLETED.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -1411,7 +1411,7 @@ async fn test_workflow_task_inherits_retry_from_registration() {
         "task_options_json should be set by resolve_node_task_options"
     );
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(30)).await;
     assert_eq!(
         status, "COMPLETED",

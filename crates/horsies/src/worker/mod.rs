@@ -13,10 +13,4 @@ pub mod scheduler;
 pub mod worker;
 pub mod worker_state;
 
-pub use cli::{
-    init_tracing, print_banner, print_simple_banner, BannerInfo, CheckArgs, Cli, Command,
-    GetDocsArgs, LogLevel, SchedulerArgs, WorkerArgs,
-};
-pub use config::WorkerConfig;
 pub use error::WorkerError;
-pub use worker::Worker;

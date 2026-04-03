@@ -12,11 +12,11 @@ use std::time::Duration;
 use serial_test::serial;
 use sqlx::PgPool;
 
-use horsies::{
-    start_workflow, TaskNode, TaskResult, WorkflowHandle, WorkflowSpecBuilder, WorkflowSpecRegistry,
-};
+use std::sync::Arc;
+
+use horsies::{Horsies, PostgresBroker, TaskNode, TaskResult, WorkflowHandle, WorkflowSpecBuilder};
 use horsies_test_support::{
-    db,
+    db, fixtures,
     e2e::{
         db_poll::wait_for_workflow_terminal,
         worker::start_worker,
@@ -38,18 +38,13 @@ fn db_url() -> String {
     db::db_url()
 }
 
-fn registry() -> WorkflowSpecRegistry {
-    WorkflowSpecRegistry::new()
-}
-
-async fn start_wf(
-    pool: &PgPool,
-    spec: &horsies::WorkflowSpec,
-    registry: &WorkflowSpecRegistry,
-) -> String {
-    let handle: WorkflowHandle<serde_json::Value> = start_workflow(pool, spec, None, registry)
+async fn start_wf(pool: &PgPool, spec: &horsies::WorkflowSpec) -> String {
+    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let mut app = Horsies::with_broker(fixtures::default_app_config(), broker).unwrap();
+    let handle: WorkflowHandle<serde_json::Value> = app
+        .start(spec.clone())
         .await
-        .unwrap_or_else(|e| panic!("start_workflow failed: {}", e));
+        .unwrap_or_else(|e| panic!("app.start failed: {}", e));
     handle.workflow_id().to_owned()
 }
 
@@ -75,8 +70,6 @@ async fn get_wf_task_result(pool: &PgPool, wf_id: &str, task_index: i32) -> Opti
 async fn test_args_from_single_dependency() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "2"],
@@ -97,7 +90,7 @@ async fn test_args_from_single_dependency() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "COMPLETED");
 
@@ -117,8 +110,6 @@ async fn test_args_from_single_dependency() {
 async fn test_args_from_multiple_dependencies() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "2"],
@@ -145,7 +136,7 @@ async fn test_args_from_multiple_dependencies() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "COMPLETED");
 
@@ -165,8 +156,6 @@ async fn test_args_from_multiple_dependencies() {
 async fn test_failed_propagation_via_args_from() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "2"],
@@ -189,7 +178,7 @@ async fn test_failed_propagation_via_args_from() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "FAILED");
 
@@ -208,8 +197,6 @@ async fn test_failed_propagation_via_args_from() {
 async fn test_skipped_propagation() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "2"],
@@ -232,7 +219,7 @@ async fn test_skipped_propagation() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(10)).await;
     assert_eq!(status, "FAILED");
 
@@ -249,8 +236,6 @@ async fn test_skipped_propagation() {
 async fn test_args_from_transitive_chain() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "2"],
@@ -277,7 +262,7 @@ async fn test_args_from_transitive_chain() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "COMPLETED");
 
@@ -297,8 +282,6 @@ async fn test_args_from_transitive_chain() {
 async fn test_args_from_failed_dep_skips_and_fails() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "2"],
@@ -320,7 +303,7 @@ async fn test_args_from_failed_dep_skips_and_fails() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(10)).await;
     assert_eq!(status, "FAILED");
 
@@ -337,8 +320,6 @@ async fn test_args_from_failed_dep_skips_and_fails() {
 async fn test_dual_injection_same_node() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "4"],
@@ -366,7 +347,7 @@ async fn test_dual_injection_same_node() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "COMPLETED");
 
@@ -385,8 +366,6 @@ async fn test_dual_injection_same_node() {
 async fn test_workflow_ctx_single_dependency() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "2"],
@@ -409,7 +388,7 @@ async fn test_workflow_ctx_single_dependency() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "COMPLETED");
 
@@ -438,8 +417,6 @@ async fn test_workflow_ctx_single_dependency() {
 async fn test_workflow_ctx_multiple_dependencies() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "4"],
@@ -468,7 +445,7 @@ async fn test_workflow_ctx_multiple_dependencies() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "COMPLETED");
 
@@ -491,8 +468,6 @@ async fn test_workflow_ctx_multiple_dependencies() {
 async fn test_mixed_args_from_and_ctx() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "4"],
@@ -515,7 +490,7 @@ async fn test_mixed_args_from_and_ctx() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "COMPLETED");
 
@@ -544,8 +519,6 @@ async fn test_mixed_args_from_and_ctx() {
 async fn test_args_from_dict_serialization() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "2"],
@@ -563,7 +536,7 @@ async fn test_args_from_dict_serialization() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "COMPLETED");
 
@@ -594,8 +567,6 @@ async fn test_args_from_dict_serialization() {
 async fn test_join_ctx_gating() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "4"],
@@ -626,7 +597,7 @@ async fn test_join_ctx_gating() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "COMPLETED");
 

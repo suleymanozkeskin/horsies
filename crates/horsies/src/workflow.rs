@@ -9,7 +9,8 @@ use crate::core::{
     WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder, WorkflowStartError,
     WorkflowStartErrorCode, WorkflowStartResult,
 };
-use crate::workflow_engine::{BoundWorkflowSpec, WorkflowHandle};
+use crate::workflow_engine::bound_handle::WorkflowHandle;
+use crate::workflow_engine::bound_spec::BoundWorkflowSpec;
 
 use crate::lazy_broker::LazyBroker;
 
@@ -238,29 +239,8 @@ impl<P, T: DeserializeOwned + Clone> WorkflowTemplate<P, T> {
     }
 }
 
-/// Lightweight, cloneable handle for starting workflows after the app is consumed.
-///
-/// Extract this before calling [`Horsies::run_worker_with`] so that tasks
-/// running inside the worker can start dynamic workflows at runtime without
-/// needing direct access to the app or manual broker/registry plumbing.
-///
-/// ```ignore
-/// // Before consuming the app:
-/// let starter = app.workflow_starter();
-///
-/// // After app is consumed by the worker:
-/// // (e.g. inside a task, via a global or dependency injection)
-/// let spec = WorkflowSpecBuilder::new("enrichment")
-///     .task(node_a)
-///     .definition_key("myapp.enrichment.v1")
-///     .build()?;
-/// let handle = starter.start::<MyOutput>(spec).await?;
-/// ```
-///
-/// Sub-workflows referenced by a dynamically-built spec must be registered
-/// before the worker starts (i.e. before the app is consumed).
 #[derive(Clone)]
-pub struct WorkflowStarter {
+pub(crate) struct WorkflowStarter {
     broker: Arc<LazyBroker>,
     registry: Arc<RwLock<crate::core::WorkflowSpecRegistry>>,
     resend_on_transient_err: bool,
@@ -279,8 +259,7 @@ impl WorkflowStarter {
         }
     }
 
-    /// Start a workflow from a runtime-built [`WorkflowSpec`].
-    pub async fn start<T: DeserializeOwned + Clone>(
+    pub(crate) async fn start<T: DeserializeOwned + Clone>(
         &self,
         spec: WorkflowSpec,
     ) -> WorkflowStartResult<WorkflowHandle<T>> {
@@ -306,8 +285,7 @@ impl WorkflowStarter {
         bound.start().await
     }
 
-    /// Start a workflow with a caller-provided ID (idempotent).
-    pub async fn start_with_id<T: DeserializeOwned + Clone>(
+    pub(crate) async fn start_with_id<T: DeserializeOwned + Clone>(
         &self,
         spec: WorkflowSpec,
         workflow_id: impl Into<String>,
@@ -363,198 +341,9 @@ impl<P, T> std::fmt::Debug for WorkflowTemplate<P, T> {
     }
 }
 
-type WorkflowBuilderFn<P> =
-    Arc<dyn Fn(&crate::Horsies, &P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync + 'static>;
-type ZeroArgWorkflowBuilderFn =
-    Arc<dyn Fn(&crate::Horsies) -> Result<WorkflowSpec, HorsiesError> + Send + Sync + 'static>;
-
-pub(crate) trait WorkflowBuilderCheck: Send + Sync {
-    fn run_check(&self, app: &crate::Horsies) -> Vec<HorsiesError>;
-}
-
-struct RegisteredWorkflowBuilder<P> {
-    name: String,
-    cases: Vec<P>,
-    builder: WorkflowBuilderFn<P>,
-}
-
-struct RegisteredZeroArgWorkflowBuilder {
-    name: String,
-    builder: ZeroArgWorkflowBuilderFn,
-}
-
-impl<P> WorkflowBuilderCheck for RegisteredWorkflowBuilder<P>
-where
-    P: Send + Sync + 'static,
-{
-    fn run_check(&self, app: &crate::Horsies) -> Vec<HorsiesError> {
-        if self.cases.is_empty() {
-            return vec![HorsiesError::new(format!(
-                "workflow builder '{}' requires at least one check case",
-                self.name,
-            ))
-            .with_code(crate::core::ErrorCode::WorkflowCheckCasesRequired)
-            .with_help("register at least one typed case via .case(...) or .cases(...)")];
-        }
-
-        let mut errors = Vec::new();
-        for case in &self.cases {
-            errors.extend(self.run_case(app, case));
-        }
-        errors
-    }
-}
-
-impl WorkflowBuilderCheck for RegisteredZeroArgWorkflowBuilder {
-    fn run_check(&self, app: &crate::Horsies) -> Vec<HorsiesError> {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.builder)(app)));
-
-        match result {
-            Ok(Ok(spec)) => {
-                if spec.definition_key.is_none() {
-                    vec![HorsiesError::new(format!(
-                        "workflow builder '{}' produced a workflow without definition_key",
-                        self.name,
-                    ))
-                    .with_code(crate::core::ErrorCode::WorkflowNoDefinitionKey)]
-                } else {
-                    Vec::new()
-                }
-            }
-            Ok(Err(err)) if err.code.is_some() => vec![err],
-            Ok(Err(err)) => vec![HorsiesError::new(format!(
-                "workflow builder '{}' failed: {}",
-                self.name, err,
-            ))
-            .with_code(crate::core::ErrorCode::WorkflowCheckBuilderException)],
-            Err(_) => vec![HorsiesError::new(format!(
-                "workflow builder '{}' panicked during check execution",
-                self.name,
-            ))
-            .with_code(crate::core::ErrorCode::WorkflowCheckBuilderException)],
-        }
-    }
-}
-
-impl<P> RegisteredWorkflowBuilder<P>
-where
-    P: Send + Sync + 'static,
-{
-    fn run_case(&self, app: &crate::Horsies, case: &P) -> Vec<HorsiesError> {
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.builder)(app, case)));
-
-        match result {
-            Ok(Ok(spec)) => {
-                if spec.definition_key.is_none() {
-                    vec![HorsiesError::new(format!(
-                        "workflow builder '{}' produced a workflow without definition_key",
-                        self.name,
-                    ))
-                    .with_code(crate::core::ErrorCode::WorkflowNoDefinitionKey)]
-                } else {
-                    Vec::new()
-                }
-            }
-            Ok(Err(err)) if err.code.is_some() => vec![err],
-            Ok(Err(err)) => vec![HorsiesError::new(format!(
-                "workflow builder '{}' failed: {}",
-                self.name, err,
-            ))
-            .with_code(crate::core::ErrorCode::WorkflowCheckBuilderException)],
-            Err(_) => vec![HorsiesError::new(format!(
-                "workflow builder '{}' panicked during check execution",
-                self.name,
-            ))
-            .with_code(crate::core::ErrorCode::WorkflowCheckBuilderException)],
-        }
-    }
-}
-
-pub struct WorkflowBuilderRegistration<'a, P> {
-    app: &'a mut crate::Horsies,
-    name: String,
-    cases: Vec<P>,
-    kind: WorkflowBuilderRegistrationKind<P>,
-}
-
-enum WorkflowBuilderRegistrationKind<P> {
-    Parameterized(WorkflowBuilderFn<P>),
-    ZeroArg(ZeroArgWorkflowBuilderFn),
-}
-
-impl<'a, P> WorkflowBuilderRegistration<'a, P>
-where
-    P: Send + Sync + 'static,
-{
-    pub(crate) fn new(
-        app: &'a mut crate::Horsies,
-        name: String,
-        builder: WorkflowBuilderFn<P>,
-    ) -> Self {
-        Self {
-            app,
-            name,
-            cases: Vec::new(),
-            kind: WorkflowBuilderRegistrationKind::Parameterized(builder),
-        }
-    }
-
-    pub(crate) fn new_zero_arg(
-        app: &'a mut crate::Horsies,
-        name: String,
-        builder: ZeroArgWorkflowBuilderFn,
-    ) -> Self {
-        Self {
-            app,
-            name,
-            cases: Vec::new(),
-            kind: WorkflowBuilderRegistrationKind::ZeroArg(builder),
-        }
-    }
-
-    pub fn case(&mut self, case: P) -> &mut Self {
-        self.cases.push(case);
-        self
-    }
-
-    pub fn cases<I>(&mut self, cases: I) -> &mut Self
-    where
-        I: IntoIterator<Item = P>,
-    {
-        self.cases.extend(cases);
-        self
-    }
-
-    pub fn register(self) -> Result<(), HorsiesError> {
-        match self.kind {
-            WorkflowBuilderRegistrationKind::Parameterized(builder) => {
-                self.app
-                    .workflow_builders
-                    .push(Box::new(RegisteredWorkflowBuilder {
-                        name: self.name,
-                        cases: self.cases,
-                        builder,
-                    }));
-            }
-            WorkflowBuilderRegistrationKind::ZeroArg(builder) => {
-                self.app
-                    .workflow_builders
-                    .push(Box::new(RegisteredZeroArgWorkflowBuilder {
-                        name: self.name,
-                        builder,
-                    }));
-            }
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc as StdArc;
 
     use crate::core::{
         AppConfig, HorsiesError, PostgresConfig, QueueMode, RecoveryConfig, TaskNode,
@@ -674,65 +463,6 @@ mod tests {
             .expect("workflow registry lock poisoned")
             .clone();
         assert!(current_registry.contains("second"));
-    }
-
-    #[test]
-    fn unified_zero_arg_workflow_builder_runs_during_check() {
-        let mut app = crate::Horsies::new(valid_config()).unwrap();
-        let ran = StdArc::new(AtomicBool::new(false));
-        let ran_clone = StdArc::clone(&ran);
-
-        let registration = app
-            .workflow_builder0("hello_builder", move |_app| {
-                ran_clone.store(true, Ordering::Relaxed);
-                let mut builder = WorkflowSpecBuilder::new("hello");
-                builder.definition_key("tests.hello.v1");
-                let node = builder.task(TaskNode::<String>::new("hello_task"));
-                builder.output(node);
-                builder.build()
-            })
-            .unwrap();
-        registration.register().unwrap();
-
-        app.check().unwrap();
-        assert!(ran.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn unified_parameterized_workflow_builder_requires_cases() {
-        let mut app = crate::Horsies::new(valid_config()).unwrap();
-        let registration = app
-            .workflow_builder("regional", |_app, region: &String| {
-                let mut builder = WorkflowSpecBuilder::new(format!("regional_{region}"));
-                builder.definition_key(format!("tests.regional.{region}.v1"));
-                let node = builder.task(TaskNode::<String>::new("hello_task"));
-                builder.output(node);
-                builder.build()
-            })
-            .unwrap();
-        registration.register().unwrap();
-
-        let err = app.check().unwrap_err();
-        let rendered = err.to_string();
-        assert!(rendered.contains("HRS-027"));
-    }
-
-    #[test]
-    fn unified_workflow_builder_missing_definition_key_is_reported() {
-        let mut app = crate::Horsies::new(valid_config()).unwrap();
-        let registration = app
-            .workflow_builder0("missing_key", |_app| {
-                let mut builder = WorkflowSpecBuilder::new("missing_key");
-                let node = builder.task(TaskNode::<String>::new("hello_task"));
-                builder.output(node);
-                builder.build()
-            })
-            .unwrap();
-        registration.register().unwrap();
-
-        let err = app.check().unwrap_err();
-        let rendered = err.to_string();
-        assert!(rendered.contains("HRS-016"));
     }
 
     #[test]
@@ -924,25 +654,4 @@ mod tests {
         assert!(!err.retryable);
     }
 
-    #[test]
-    fn unified_workflow_builder_runs_under_send_suppression() {
-        let mut app = crate::Horsies::new(valid_config()).unwrap();
-        let observed = StdArc::new(AtomicBool::new(false));
-        let observed_clone = StdArc::clone(&observed);
-
-        let registration = app
-            .workflow_builder0("suppressed", move |app| {
-                observed_clone.store(app.are_sends_suppressed(), Ordering::Relaxed);
-                let mut builder = WorkflowSpecBuilder::new("suppressed");
-                builder.definition_key("tests.suppressed.v1");
-                let node = builder.task(TaskNode::<String>::new("hello_task"));
-                builder.output(node);
-                builder.build()
-            })
-            .unwrap();
-        registration.register().unwrap();
-
-        app.check().unwrap();
-        assert!(observed.load(Ordering::Relaxed));
-    }
 }

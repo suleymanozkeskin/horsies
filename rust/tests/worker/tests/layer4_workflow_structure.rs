@@ -12,11 +12,11 @@ use std::time::Duration;
 use serial_test::serial;
 use sqlx::PgPool;
 
-use horsies::{
-    start_workflow, TaskNode, WorkflowHandle, WorkflowSpecBuilder, WorkflowSpecRegistry,
-};
+use std::sync::Arc;
+
+use horsies::{Horsies, PostgresBroker, TaskNode, WorkflowHandle, WorkflowSpecBuilder};
 use horsies_test_support::{
-    db,
+    db, fixtures,
     e2e::{
         db_poll::wait_for_workflow_terminal,
         worker::start_worker,
@@ -38,19 +38,13 @@ fn db_url() -> String {
     db::db_url()
 }
 
-fn registry() -> WorkflowSpecRegistry {
-    WorkflowSpecRegistry::new()
-}
-
-/// Start workflow and return (workflow_id).
-async fn start_wf(
-    pool: &PgPool,
-    spec: &horsies::WorkflowSpec,
-    registry: &WorkflowSpecRegistry,
-) -> String {
-    let handle: WorkflowHandle<serde_json::Value> = start_workflow(pool, spec, None, registry)
+async fn start_wf(pool: &PgPool, spec: &horsies::WorkflowSpec) -> String {
+    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let mut app = Horsies::with_broker(fixtures::default_app_config(), broker).unwrap();
+    let handle: WorkflowHandle<serde_json::Value> = app
+        .start(spec.clone())
         .await
-        .unwrap_or_else(|e| panic!("start_workflow failed: {}", e));
+        .unwrap_or_else(|e| panic!("app.start failed: {}", e));
     handle.workflow_id().to_owned()
 }
 
@@ -63,8 +57,6 @@ async fn start_wf(
 async fn test_linear_workflow() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "2"],
@@ -92,7 +84,7 @@ async fn test_linear_workflow() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "COMPLETED");
 
@@ -122,8 +114,6 @@ async fn test_linear_workflow() {
 async fn test_fanout_parallel_execution() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "4"],
@@ -157,7 +147,7 @@ async fn test_fanout_parallel_execution() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "COMPLETED");
 
@@ -186,8 +176,6 @@ async fn test_fanout_parallel_execution() {
 async fn test_fanin_waits_for_all() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "4"],
@@ -221,7 +209,7 @@ async fn test_fanin_waits_for_all() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "COMPLETED");
 
@@ -249,8 +237,6 @@ async fn test_fanin_waits_for_all() {
 async fn test_diamond_structure() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "4"],
@@ -285,7 +271,7 @@ async fn test_diamond_structure() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "COMPLETED");
 
@@ -315,8 +301,6 @@ async fn test_diamond_structure() {
 async fn test_single_node_workflow() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "2"],
@@ -332,7 +316,7 @@ async fn test_single_node_workflow() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(10)).await;
     assert_eq!(status, "COMPLETED");
 
@@ -350,8 +334,6 @@ async fn test_single_node_workflow() {
 async fn test_linear_failure_cascades_to_skip() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "2"],
@@ -373,7 +355,7 @@ async fn test_linear_failure_cascades_to_skip() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(10)).await;
     assert_eq!(status, "FAILED");
 
@@ -392,8 +374,6 @@ async fn test_linear_failure_cascades_to_skip() {
 async fn test_workflow_fails_with_error() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "2"],
@@ -409,7 +389,7 @@ async fn test_workflow_fails_with_error() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(10)).await;
     assert_eq!(status, "FAILED");
 
@@ -432,8 +412,6 @@ async fn test_workflow_fails_with_error() {
 async fn test_fanout_one_branch_fails() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "4"],
@@ -467,7 +445,7 @@ async fn test_fanout_one_branch_fails() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
     assert_eq!(status, "FAILED");
 
@@ -496,8 +474,6 @@ async fn test_fanout_one_branch_fails() {
 async fn test_fanin_one_dep_fails_skips_aggregator() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "4"],
@@ -525,7 +501,7 @@ async fn test_fanin_one_dep_fails_skips_aggregator() {
     );
     let spec = b.build().unwrap();
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
     let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(10)).await;
     assert_eq!(status, "FAILED");
 
@@ -546,8 +522,6 @@ async fn test_fanin_one_dep_fails_skips_aggregator() {
 async fn test_workflow_cancellation() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     // Build a chain where B is slow — we cancel while B is enqueued/running.
     let mut b = WorkflowSpecBuilder::new("e2e_cancel");
     let a = b.task(
@@ -576,7 +550,7 @@ async fn test_workflow_cancellation() {
         Duration::from_secs(10),
     );
 
-    let wf_id = start_wf(&pool, &spec, &reg).await;
+    let wf_id = start_wf(&pool, &spec).await;
 
     // Wait for A to complete.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);

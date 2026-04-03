@@ -6,7 +6,7 @@ use serde::de::DeserializeOwned;
 
 use crate::core::task::error::OperationalErrorCode;
 use crate::workflow::WorkflowStarter;
-use crate::workflow_engine::WorkflowHandle;
+use crate::workflow_engine::bound_handle::WorkflowHandle;
 use crate::{HorsiesError, TaskError, WorkflowSpec, WorkflowStartResult};
 
 pub(crate) type StateValue = Arc<dyn Any + Send + Sync>;
@@ -149,11 +149,6 @@ impl TaskRuntime {
         self.workflow_starter.start_with_id(spec, workflow_id).await
     }
 
-    /// Access the underlying starter for advanced workflow-start operations.
-    pub fn workflow_starter(&self) -> &WorkflowStarter {
-        &self.workflow_starter
-    }
-
     /// Retrieve an internally-registered typed task handle by task name.
     ///
     /// This powers the macro-generated `task_name::handle/send/schedule`
@@ -219,12 +214,6 @@ impl TaskRuntime {
                 ),
             )
         })
-    }
-}
-
-impl From<TaskRuntime> for WorkflowStarter {
-    fn from(value: TaskRuntime) -> Self {
-        value.workflow_starter
     }
 }
 
