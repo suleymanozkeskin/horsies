@@ -54,6 +54,13 @@ impl<'a, A: Serialize + 'static, T: DeserializeOwned + Clone + 'static>
     }
 
     pub fn register(mut self) -> Result<TaskFunction<A, T>, HorsiesError> {
+        if self.app.runtime_catalog.is_frozen() {
+            return Err(HorsiesError::new(format!(
+                "runtime task handles are frozen; cannot register {} after task runtime use has begun",
+                self.name
+            )));
+        }
+
         // Gap A: DEFAULT mode must not specify a queue at all.
         if self.queue.is_some() && matches!(self.app.core.config().queue_mode, QueueMode::Default) {
             return Err(HorsiesError::new(

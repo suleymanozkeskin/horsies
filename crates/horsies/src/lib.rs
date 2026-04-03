@@ -19,7 +19,6 @@ mod runtime;
 mod task;
 mod workflow;
 
-use std::any::TypeId;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -101,15 +100,14 @@ pub use crate::workflow_engine::{
 };
 
 use crate::lazy_broker::LazyBroker;
-use crate::runtime::{SharedTaskHandleMap, SharedTaskStateMap, StateValue};
+use crate::runtime::SharedRuntimeCatalog;
 
 pub struct Horsies {
     pub(crate) core: CoreHorsies,
     pub(crate) broker: Arc<LazyBroker>,
     pub(crate) workflow_builders: Vec<Box<dyn workflow::WorkflowBuilderCheck>>,
     pub(crate) workflow_registry_cache: Arc<RwLock<WorkflowSpecRegistry>>,
-    pub(crate) runtime_state: SharedTaskStateMap,
-    pub(crate) task_handles: SharedTaskHandleMap,
+    pub(crate) runtime_catalog: SharedRuntimeCatalog,
 }
 
 impl Horsies {
@@ -121,8 +119,7 @@ impl Horsies {
             core,
             broker: Arc::new(LazyBroker::new(broker_config)),
             workflow_builders: Vec::new(),
-            runtime_state: Arc::new(RwLock::new(Default::default())),
-            task_handles: Arc::new(RwLock::new(Default::default())),
+            runtime_catalog: Arc::new(crate::runtime::RuntimeCatalog::new()),
         })
     }
 
@@ -133,8 +130,7 @@ impl Horsies {
             core,
             broker: Arc::new(LazyBroker::new(broker_config)),
             workflow_builders: Vec::new(),
-            runtime_state: Arc::new(RwLock::new(Default::default())),
-            task_handles: Arc::new(RwLock::new(Default::default())),
+            runtime_catalog: Arc::new(crate::runtime::RuntimeCatalog::new()),
         }
     }
 
@@ -319,11 +315,7 @@ impl Horsies {
     /// The generated `#[horsies::task]` wrappers capture this automatically
     /// when a task signature includes `TaskRuntime`.
     pub fn task_runtime(&self) -> TaskRuntime {
-        TaskRuntime::new(
-            self.workflow_starter(),
-            Arc::clone(&self.runtime_state),
-            Arc::clone(&self.task_handles),
-        )
+        TaskRuntime::new(self.workflow_starter(), Arc::clone(&self.runtime_catalog))
     }
 
     /// Provide typed runtime state that tasks can later retrieve via `TaskRuntime::state::<T>()`.
@@ -331,21 +323,7 @@ impl Horsies {
     where
         T: Send + Sync + 'static,
     {
-        let mut store = self.runtime_state.write().map_err(|_| {
-            HorsiesError::new("runtime state store is poisoned and cannot accept new values")
-        })?;
-
-        let type_id = TypeId::of::<T>();
-        if store.contains_key(&type_id) {
-            return Err(HorsiesError::new(format!(
-                "runtime state for type {} is already provided; wrap values in a newtype if you need multiple instances",
-                std::any::type_name::<T>()
-            )));
-        }
-
-        let value: StateValue = Arc::new(value);
-        store.insert(type_id, value);
-        Ok(())
+        self.runtime_catalog.provide_state(value)
     }
 
     pub(crate) fn store_task_handle<A, T>(
@@ -356,14 +334,7 @@ impl Horsies {
         A: Serialize + 'static,
         T: DeserializeOwned + Clone + 'static,
     {
-        let mut store = self.task_handles.write().map_err(|_| {
-            HorsiesError::new("task handle store is poisoned and cannot accept new handles")
-        })?;
-
-        let task_name = handle.task_name().to_owned();
-        let value: StateValue = Arc::new(handle.clone());
-        store.insert(task_name, value);
-        Ok(())
+        self.runtime_catalog.store_task_handle(handle)
     }
 
     pub fn register_workflow<T: DeserializeOwned + Clone>(
@@ -716,6 +687,10 @@ mod tests {
         label: &'static str,
     }
 
+    struct OtherMacroState {
+        value: &'static str,
+    }
+
     #[horsies::task("macro_add")]
     async fn macro_add(args: MacroAddArgs) -> Result<i32, horsies::TaskError> {
         Ok(args.a + args.b)
@@ -958,6 +933,30 @@ mod tests {
         app.provide(MacroState { label: "first" }).unwrap();
         let err = app.provide(MacroState { label: "second" }).unwrap_err();
         assert!(err.to_string().contains("already provided"));
+    }
+
+    #[test]
+    fn provide_after_runtime_freeze_is_rejected() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+        app.provide(MacroState { label: "first" }).unwrap();
+        let rt = app.task_runtime();
+        let state = rt.state::<MacroState>().unwrap();
+        assert_eq!(state.label, "first");
+
+        let err = app.provide(OtherMacroState { value: "later" }).unwrap_err();
+        assert!(err.to_string().contains("frozen"));
+    }
+
+    #[test]
+    fn register_after_runtime_freeze_is_rejected() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+        macro_dispatch_target::register(&mut app).unwrap();
+        let rt = app.task_runtime();
+        let handle = macro_dispatch_target::handle(&rt).unwrap();
+        assert_eq!(handle.task_name(), "macro_dispatch_target");
+
+        let err = macro_task_a::register(&mut app).unwrap_err();
+        assert!(err.to_string().contains("frozen"));
     }
 
     #[horsies::task(

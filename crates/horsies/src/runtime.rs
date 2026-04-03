@@ -1,17 +1,117 @@
 use std::any::{type_name, Any, TypeId};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::de::DeserializeOwned;
 
 use crate::core::task::error::OperationalErrorCode;
 use crate::workflow::WorkflowStarter;
 use crate::workflow_engine::WorkflowHandle;
-use crate::{TaskError, WorkflowSpec, WorkflowStartResult};
+use crate::{HorsiesError, TaskError, WorkflowSpec, WorkflowStartResult};
 
 pub(crate) type StateValue = Arc<dyn Any + Send + Sync>;
-pub(crate) type SharedTaskStateMap = Arc<RwLock<HashMap<TypeId, StateValue>>>;
-pub(crate) type SharedTaskHandleMap = Arc<RwLock<HashMap<String, StateValue>>>;
+
+#[derive(Debug)]
+struct FrozenRuntimeCatalog {
+    state: Arc<HashMap<TypeId, StateValue>>,
+    task_handles: Arc<HashMap<String, StateValue>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RuntimeCatalog {
+    state_setup: RwLock<HashMap<TypeId, StateValue>>,
+    task_handles_setup: RwLock<HashMap<String, StateValue>>,
+    frozen: OnceLock<Result<Arc<FrozenRuntimeCatalog>, TaskError>>,
+}
+
+pub(crate) type SharedRuntimeCatalog = Arc<RuntimeCatalog>;
+
+impl RuntimeCatalog {
+    pub(crate) fn new() -> Self {
+        Self {
+            state_setup: RwLock::new(HashMap::new()),
+            task_handles_setup: RwLock::new(HashMap::new()),
+            frozen: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn is_frozen(&self) -> bool {
+        self.frozen.get().is_some()
+    }
+
+    pub(crate) fn provide_state<T>(&self, value: T) -> Result<(), HorsiesError>
+    where
+        T: Send + Sync + 'static,
+    {
+        if self.is_frozen() {
+            return Err(HorsiesError::new(format!(
+                "runtime state is frozen; cannot provide {} after task runtime use has begun",
+                type_name::<T>()
+            )));
+        }
+
+        let mut store = self
+            .state_setup
+            .write()
+            .map_err(|_| HorsiesError::new("runtime state store is poisoned"))?;
+        let type_id = TypeId::of::<T>();
+        if store.contains_key(&type_id) {
+            return Err(HorsiesError::new(format!(
+                "runtime state for type {} is already provided; wrap values in a newtype if you need multiple instances",
+                type_name::<T>()
+            )));
+        }
+        store.insert(type_id, Arc::new(value));
+        Ok(())
+    }
+
+    pub(crate) fn store_task_handle<A, T>(
+        &self,
+        handle: &crate::TaskFunction<A, T>,
+    ) -> Result<(), HorsiesError>
+    where
+        A: serde::Serialize + 'static,
+        T: DeserializeOwned + Clone + 'static,
+    {
+        if self.is_frozen() {
+            return Err(HorsiesError::new(format!(
+                "runtime task handles are frozen; cannot register {} after task runtime use has begun",
+                handle.task_name()
+            )));
+        }
+
+        let mut store = self
+            .task_handles_setup
+            .write()
+            .map_err(|_| HorsiesError::new("task handle store is poisoned"))?;
+        store.insert(handle.task_name().to_owned(), Arc::new(handle.clone()));
+        Ok(())
+    }
+
+    fn frozen(&self) -> Result<Arc<FrozenRuntimeCatalog>, TaskError> {
+        self.frozen
+            .get_or_init(|| {
+                let state = self.state_setup.read().map_err(|_| {
+                    TaskError::builtin(
+                        OperationalErrorCode::UnhandledError,
+                        "runtime state store is poisoned while freezing task runtime",
+                    )
+                })?;
+                let task_handles = self.task_handles_setup.read().map_err(|_| {
+                    TaskError::builtin(
+                        OperationalErrorCode::UnhandledError,
+                        "task handle store is poisoned while freezing task runtime",
+                    )
+                })?;
+
+                Ok(Arc::new(FrozenRuntimeCatalog {
+                    state: Arc::new(state.clone()),
+                    task_handles: Arc::new(task_handles.clone()),
+                }))
+            })
+            .clone()
+    }
+}
 
 /// Runtime capabilities made available to tasks by the horsies worker.
 ///
@@ -21,20 +121,14 @@ pub(crate) type SharedTaskHandleMap = Arc<RwLock<HashMap<String, StateValue>>>;
 #[derive(Clone)]
 pub struct TaskRuntime {
     workflow_starter: WorkflowStarter,
-    state: SharedTaskStateMap,
-    task_handles: SharedTaskHandleMap,
+    catalog: SharedRuntimeCatalog,
 }
 
 impl TaskRuntime {
-    pub(crate) fn new(
-        workflow_starter: WorkflowStarter,
-        state: SharedTaskStateMap,
-        task_handles: SharedTaskHandleMap,
-    ) -> Self {
+    pub(crate) fn new(workflow_starter: WorkflowStarter, catalog: SharedRuntimeCatalog) -> Self {
         Self {
             workflow_starter,
-            state,
-            task_handles,
+            catalog,
         }
     }
 
@@ -70,17 +164,9 @@ impl TaskRuntime {
         A: serde::Serialize + 'static,
         T: DeserializeOwned + Clone + 'static,
     {
-        let store = self.task_handles.read().map_err(|_| {
-            TaskError::builtin(
-                OperationalErrorCode::UnhandledError,
-                format!(
-                    "task runtime handle store is poisoned while retrieving {}",
-                    task_name
-                ),
-            )
-        })?;
+        let frozen = self.catalog.frozen()?;
 
-        let value = store.get(task_name).cloned().ok_or_else(|| {
+        let value = frozen.task_handles.get(task_name).cloned().ok_or_else(|| {
             TaskError::user(
                 "TASK_HANDLE_NOT_REGISTERED",
                 format!(
@@ -108,25 +194,21 @@ impl TaskRuntime {
     where
         T: Send + Sync + 'static,
     {
-        let store = self.state.read().map_err(|_| {
-            TaskError::builtin(
-                OperationalErrorCode::UnhandledError,
-                format!(
-                    "task runtime state store is poisoned while retrieving {}",
-                    type_name::<T>()
-                ),
-            )
-        })?;
+        let frozen = self.catalog.frozen()?;
 
-        let value = store.get(&TypeId::of::<T>()).cloned().ok_or_else(|| {
-            TaskError::user(
-                "STATE_NOT_PROVIDED",
-                format!(
-                    "task runtime is missing provided state of type {}",
-                    type_name::<T>()
-                ),
-            )
-        })?;
+        let value = frozen
+            .state
+            .get(&TypeId::of::<T>())
+            .cloned()
+            .ok_or_else(|| {
+                TaskError::user(
+                    "STATE_NOT_PROVIDED",
+                    format!(
+                        "task runtime is missing provided state of type {}",
+                        type_name::<T>()
+                    ),
+                )
+            })?;
 
         Arc::downcast::<T>(value).map_err(|_| {
             TaskError::builtin(
