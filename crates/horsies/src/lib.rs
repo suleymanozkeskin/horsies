@@ -101,7 +101,7 @@ pub use crate::workflow_engine::{
 };
 
 use crate::lazy_broker::LazyBroker;
-use crate::runtime::{SharedTaskStateMap, StateValue};
+use crate::runtime::{SharedTaskHandleMap, SharedTaskStateMap, StateValue};
 
 pub struct Horsies {
     pub(crate) core: CoreHorsies,
@@ -109,6 +109,7 @@ pub struct Horsies {
     pub(crate) workflow_builders: Vec<Box<dyn workflow::WorkflowBuilderCheck>>,
     pub(crate) workflow_registry_cache: Arc<RwLock<WorkflowSpecRegistry>>,
     pub(crate) runtime_state: SharedTaskStateMap,
+    pub(crate) task_handles: SharedTaskHandleMap,
 }
 
 impl Horsies {
@@ -121,6 +122,7 @@ impl Horsies {
             broker: Arc::new(LazyBroker::new(broker_config)),
             workflow_builders: Vec::new(),
             runtime_state: Arc::new(RwLock::new(Default::default())),
+            task_handles: Arc::new(RwLock::new(Default::default())),
         })
     }
 
@@ -132,6 +134,7 @@ impl Horsies {
             broker: Arc::new(LazyBroker::new(broker_config)),
             workflow_builders: Vec::new(),
             runtime_state: Arc::new(RwLock::new(Default::default())),
+            task_handles: Arc::new(RwLock::new(Default::default())),
         }
     }
 
@@ -226,7 +229,7 @@ impl Horsies {
         self.core.register_with_queue(name, task, queue_name)
     }
 
-    pub fn task<A: Serialize, T: DeserializeOwned + Clone>(
+    pub fn task<A: Serialize + 'static, T: DeserializeOwned + Clone + 'static>(
         &mut self,
         name: &str,
         task: RegisteredTask,
@@ -316,7 +319,11 @@ impl Horsies {
     /// The generated `#[horsies::task]` wrappers capture this automatically
     /// when a task signature includes `TaskRuntime`.
     pub fn task_runtime(&self) -> TaskRuntime {
-        TaskRuntime::new(self.workflow_starter(), Arc::clone(&self.runtime_state))
+        TaskRuntime::new(
+            self.workflow_starter(),
+            Arc::clone(&self.runtime_state),
+            Arc::clone(&self.task_handles),
+        )
     }
 
     /// Provide typed runtime state that tasks can later retrieve via `TaskRuntime::state::<T>()`.
@@ -338,6 +345,24 @@ impl Horsies {
 
         let value: StateValue = Arc::new(value);
         store.insert(type_id, value);
+        Ok(())
+    }
+
+    pub(crate) fn store_task_handle<A, T>(
+        &mut self,
+        handle: &TaskFunction<A, T>,
+    ) -> Result<(), HorsiesError>
+    where
+        A: Serialize + 'static,
+        T: DeserializeOwned + Clone + 'static,
+    {
+        let mut store = self.task_handles.write().map_err(|_| {
+            HorsiesError::new("task handle store is poisoned and cannot accept new handles")
+        })?;
+
+        let task_name = handle.task_name().to_owned();
+        let value: StateValue = Arc::new(handle.clone());
+        store.insert(task_name, value);
         Ok(())
     }
 
@@ -762,6 +787,11 @@ mod tests {
         Ok(state.label.to_owned())
     }
 
+    #[horsies::task("macro_dispatch_target")]
+    async fn macro_dispatch_target(args: MacroAddArgs) -> Result<i32, horsies::TaskError> {
+        Ok(args.a + args.b)
+    }
+
     #[test]
     fn proc_macro_sequential_registration() {
         let mut app = Horsies::new(valid_config()).unwrap();
@@ -847,6 +877,79 @@ mod tests {
             Some(crate::TaskErrorCode::User("STATE_NOT_PROVIDED".to_owned()))
         );
         assert!(err.message.unwrap_or_default().contains("MacroState"));
+    }
+
+    #[test]
+    fn generated_task_helper_handle_returns_typed_handle() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+        let registered = macro_dispatch_target::register(&mut app).unwrap();
+        let rt = app.task_runtime();
+
+        let handle = macro_dispatch_target::handle(&rt).unwrap();
+        assert_eq!(handle.task_name(), "macro_dispatch_target");
+        assert_eq!(handle.task_name(), registered.task_name());
+    }
+
+    #[tokio::test]
+    async fn generated_task_helper_send_uses_registered_handle() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+        macro_dispatch_target::register(&mut app).unwrap();
+        app.suppress_sends(true);
+        let rt = app.task_runtime();
+
+        let err = macro_dispatch_target::send(&rt, MacroAddArgs { a: 1, b: 2 })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, crate::TaskSendErrorCode::SendSuppressed);
+    }
+
+    #[tokio::test]
+    async fn generated_task_helper_schedule_uses_registered_handle() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+        macro_dispatch_target::register(&mut app).unwrap();
+        app.suppress_sends(true);
+        let rt = app.task_runtime();
+
+        let err = macro_dispatch_target::schedule(
+            &rt,
+            std::time::Duration::from_secs(30),
+            MacroAddArgs { a: 3, b: 4 },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, crate::TaskSendErrorCode::SendSuppressed);
+    }
+
+    #[test]
+    fn generated_task_helper_missing_handle_returns_task_error() {
+        let app = Horsies::new(valid_config()).unwrap();
+        let rt = app.task_runtime();
+
+        let err = macro_dispatch_target::handle(&rt).unwrap_err();
+        assert_eq!(
+            err.error_code,
+            Some(crate::TaskErrorCode::User(
+                "TASK_HANDLE_NOT_REGISTERED".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn runtime_task_handle_wrong_type_returns_internal_error() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+        macro_dispatch_target::register(&mut app).unwrap();
+        let rt = app.task_runtime();
+
+        let err = rt
+            .task_handle::<(), String>("macro_dispatch_target")
+            .unwrap_err();
+        assert_eq!(
+            err.error_code,
+            Some(crate::TaskErrorCode::BuiltIn(
+                crate::OperationalErrorCode::UnhandledError.into()
+            ))
+        );
+        assert!(err.message.unwrap_or_default().contains("type mismatch"));
     }
 
     #[test]

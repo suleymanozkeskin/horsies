@@ -311,24 +311,40 @@ it appears as the first parameter in the task signature.
 Sub-workflows referenced by a dynamically-built spec must be registered
 before the worker starts (i.e. before the app is consumed).
 
-### 5. Inside a worker via `TaskRuntime::state()` (typed runtime state)
+### 5. Inside a worker via generated task helpers
 
-Use `app.provide(...)` for app-owned values that tasks should access at
-runtime. This is the primary pattern for task-to-task dispatch without globals.
+Registered tasks now generate typed runtime helpers automatically:
 
 ```rust
-use horsies::{task, TaskError, TaskFunction, TaskRuntime};
-
-struct EnrichmentTasks {
-    extract_attachment_text: TaskFunction<ExtractTextInput, ()>,
-}
+use horsies::{task, TaskError, TaskRuntime};
 
 #[task("enqueue_extract_jobs")]
 async fn enqueue_extract_jobs(rt: TaskRuntime) -> Result<(), TaskError> {
-    let tasks = rt.state::<EnrichmentTasks>()?;
-    tasks.extract_attachment_text
-        .send(ExtractTextInput {
+    extract_attachment_text::send(
+        &rt,
+        ExtractTextInput {
             file_id: 42,
+            bundesland: "berlin".to_owned(),
+        },
+    )
+    .await
+    .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
+
+    extract_attachment_text::schedule(
+        &rt,
+        std::time::Duration::from_secs(30),
+        ExtractTextInput {
+            file_id: 43,
+            bundesland: "hamburg".to_owned(),
+        },
+    )
+    .await
+    .map_err(|err| TaskError::user("SCHEDULE_FAILED", err.message))?;
+
+    let extract = extract_attachment_text::handle(&rt)?;
+    extract
+        .send(ExtractTextInput {
+            file_id: 44,
             bundesland: "berlin".to_owned(),
         })
         .await
@@ -336,17 +352,36 @@ async fn enqueue_extract_jobs(rt: TaskRuntime) -> Result<(), TaskError> {
     Ok(())
 }
 
-let extract = extract_attachment_text::register(&mut app)?;
+extract_attachment_text::register(&mut app)?;
 enqueue_extract_jobs::register(&mut app)?;
-app.provide(EnrichmentTasks {
-    extract_attachment_text: extract,
+```
+
+### 6. Inside a worker via `TaskRuntime::state()` (typed runtime state)
+
+Use `app.provide(...)` for arbitrary app-owned runtime state such as config,
+clients, or domain services:
+
+```rust
+struct AppSettings {
+    bundesland: String,
+}
+
+app.provide(AppSettings {
+    bundesland: "berlin".to_owned(),
 })?;
+
+#[task("use_settings")]
+async fn use_settings(rt: TaskRuntime) -> Result<(), TaskError> {
+    let settings = rt.state::<AppSettings>()?;
+    tracing::info!(bundesland = %settings.bundesland);
+    Ok(())
+}
 ```
 
 `rt.state::<T>()` returns `Result<Arc<T>, TaskError>`. Missing state is a task
 error, not a panic.
 
-### 6. `WorkflowStarter` (advanced / lower-level)
+### 7. `WorkflowStarter` (advanced / lower-level)
 
 `WorkflowStarter` remains the lower-level workflow launcher that powers
 `TaskRuntime`. Use it when you explicitly want a cloneable launcher object

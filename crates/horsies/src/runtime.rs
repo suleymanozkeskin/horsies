@@ -11,23 +11,30 @@ use crate::{TaskError, WorkflowSpec, WorkflowStartResult};
 
 pub(crate) type StateValue = Arc<dyn Any + Send + Sync>;
 pub(crate) type SharedTaskStateMap = Arc<RwLock<HashMap<TypeId, StateValue>>>;
+pub(crate) type SharedTaskHandleMap = Arc<RwLock<HashMap<String, StateValue>>>;
 
 /// Runtime capabilities made available to tasks by the horsies worker.
 ///
 /// `TaskRuntime` covers the two primary task-time needs:
 /// - start a dynamically-built workflow spec
-/// - retrieve typed app-provided runtime state such as task-handle groups
+/// - retrieve registered task handles and typed app-provided runtime state
 #[derive(Clone)]
 pub struct TaskRuntime {
     workflow_starter: WorkflowStarter,
     state: SharedTaskStateMap,
+    task_handles: SharedTaskHandleMap,
 }
 
 impl TaskRuntime {
-    pub(crate) fn new(workflow_starter: WorkflowStarter, state: SharedTaskStateMap) -> Self {
+    pub(crate) fn new(
+        workflow_starter: WorkflowStarter,
+        state: SharedTaskStateMap,
+        task_handles: SharedTaskHandleMap,
+    ) -> Self {
         Self {
             workflow_starter,
             state,
+            task_handles,
         }
     }
 
@@ -51,6 +58,49 @@ impl TaskRuntime {
     /// Access the underlying starter for advanced workflow-start operations.
     pub fn workflow_starter(&self) -> &WorkflowStarter {
         &self.workflow_starter
+    }
+
+    /// Retrieve an internally-registered typed task handle by task name.
+    ///
+    /// This powers the macro-generated `task_name::handle/send/schedule`
+    /// helpers. Most users should prefer those generated helpers directly.
+    #[doc(hidden)]
+    pub fn task_handle<A, T>(&self, task_name: &str) -> Result<crate::TaskFunction<A, T>, TaskError>
+    where
+        A: serde::Serialize + 'static,
+        T: DeserializeOwned + Clone + 'static,
+    {
+        let store = self.task_handles.read().map_err(|_| {
+            TaskError::builtin(
+                OperationalErrorCode::UnhandledError,
+                format!(
+                    "task runtime handle store is poisoned while retrieving {}",
+                    task_name
+                ),
+            )
+        })?;
+
+        let value = store.get(task_name).cloned().ok_or_else(|| {
+            TaskError::user(
+                "TASK_HANDLE_NOT_REGISTERED",
+                format!(
+                    "task runtime does not contain a registered handle for {}",
+                    task_name
+                ),
+            )
+        })?;
+
+        let typed = Arc::downcast::<crate::TaskFunction<A, T>>(value).map_err(|_| {
+            TaskError::builtin(
+                OperationalErrorCode::UnhandledError,
+                format!(
+                    "task runtime handle type mismatch while retrieving {}",
+                    task_name
+                ),
+            )
+        })?;
+
+        Ok((*typed).clone())
     }
 
     /// Retrieve app-provided typed runtime state from inside a running task.

@@ -29,7 +29,9 @@ pub struct TaskRegistrationBuilder<'a, A, T> {
     pub(crate) _phantom: PhantomData<fn(A) -> T>,
 }
 
-impl<'a, A: Serialize, T: DeserializeOwned + Clone> TaskRegistrationBuilder<'a, A, T> {
+impl<'a, A: Serialize + 'static, T: DeserializeOwned + Clone + 'static>
+    TaskRegistrationBuilder<'a, A, T>
+{
     pub(crate) fn new(app: &'a mut crate::Horsies, name: String, task: RegisteredTask) -> Self {
         Self {
             app,
@@ -106,7 +108,7 @@ impl<'a, A: Serialize, T: DeserializeOwned + Clone> TaskRegistrationBuilder<'a, 
             None => self.app.core.register(&self.name, self.task)?,
         }
 
-        Ok(TaskFunction::new(
+        let handle = TaskFunction::new(
             self.name,
             Arc::clone(&self.app.broker),
             queue_name.to_owned(),
@@ -114,7 +116,9 @@ impl<'a, A: Serialize, T: DeserializeOwned + Clone> TaskRegistrationBuilder<'a, 
             self.task_options,
             self.app.core.suppress_sends_handle(),
             self.app.core.config().resend_on_transient_err,
-        ))
+        );
+        self.app.store_task_handle(&handle)?;
+        Ok(handle)
     }
 
     pub fn finish(self) -> Result<TaskFunction<A, T>, HorsiesError> {
@@ -478,6 +482,21 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
             });
         }
         Ok(())
+    }
+}
+
+impl<A, T> Clone for TaskFunction<A, T> {
+    fn clone(&self) -> Self {
+        Self {
+            task_name: self.task_name.clone(),
+            broker: Arc::clone(&self.broker),
+            queue_name: self.queue_name.clone(),
+            priority: self.priority,
+            task_options: self.task_options.clone(),
+            suppress_sends: Arc::clone(&self.suppress_sends),
+            resend_on_transient_err: self.resend_on_transient_err,
+            _phantom: PhantomData,
+        }
     }
 }
 

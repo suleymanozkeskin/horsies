@@ -1,16 +1,11 @@
-//! Access app-provided typed state from inside a task via `TaskRuntime`.
+//! Dispatch registered tasks from inside a task via generated helpers.
 //!
-//! This example shows the next ergonomic layer after `rt.start(spec)`: provide
-//! a typed task-handle group once at setup, then retrieve it inside a task
-//! without globals.
+//! This example shows the intended ergonomic path:
+//! - register tasks once
+//! - call `task_name::send(&rt, args)` or `task_name::schedule(&rt, delay, args)`
+//! - use `task_name::handle(&rt)` when reusing a handle repeatedly
 
-use horsies::{
-    task, AppConfig, Horsies, PostgresConfig, QueueMode, TaskError, TaskFunction, TaskRuntime,
-};
-
-struct DispatchTasks {
-    extract_attachment_text: TaskFunction<ExtractTextInput, ()>,
-}
+use horsies::{task, AppConfig, Horsies, PostgresConfig, QueueMode, TaskError, TaskRuntime};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ExtractTextInput {
@@ -25,17 +20,36 @@ async fn extract_attachment_text(_input: ExtractTextInput) -> Result<(), TaskErr
 
 #[task("enqueue_extract_jobs")]
 async fn enqueue_extract_jobs(rt: TaskRuntime) -> Result<(), TaskError> {
-    let tasks = rt.state::<DispatchTasks>()?;
+    extract_attachment_text::send(
+        &rt,
+        ExtractTextInput {
+            file_id: 11,
+            bundesland: "berlin".to_owned(),
+        },
+    )
+    .await
+    .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
 
-    for (file_id, bundesland) in [(11, "berlin"), (12, "hamburg")] {
-        tasks
-            .extract_attachment_text
+    extract_attachment_text::schedule(
+        &rt,
+        std::time::Duration::from_secs(30),
+        ExtractTextInput {
+            file_id: 12,
+            bundesland: "hamburg".to_owned(),
+        },
+    )
+    .await
+    .map_err(|err| TaskError::user("SCHEDULE_FAILED", err.message))?;
+
+    let extract = extract_attachment_text::handle(&rt)?;
+    for file_id in [13, 14] {
+        extract
             .send(ExtractTextInput {
                 file_id,
-                bundesland: bundesland.to_owned(),
+                bundesland: "berlin".to_owned(),
             })
             .await
-            .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
+            .map_err(|err| TaskError::user("SEND_FAILED", err.message.clone()))?;
     }
 
     Ok(())
@@ -69,15 +83,11 @@ fn config() -> AppConfig {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = Horsies::new(config())?;
 
-    let extract = extract_attachment_text::register(&mut app)?;
+    extract_attachment_text::register(&mut app)?;
     let _enqueue = enqueue_extract_jobs::register(&mut app)?;
 
-    app.provide(DispatchTasks {
-        extract_attachment_text: extract,
-    })?;
-
-    println!("registered task runtime state example");
-    println!("inside a worker, call `rt.state::<DispatchTasks>()?` to get typed handles");
+    println!("registered runtime task dispatch example");
+    println!("inside a worker, call task_name::send/schedule/handle(&rt, ...) directly");
 
     Ok(())
 }

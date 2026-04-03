@@ -4,8 +4,8 @@
 use serde::{Deserialize, Serialize};
 
 use horsies::{
-    async_task_fn, task, Horsies, TaskError, TaskErrorCode, TaskFunction, TaskNode, TaskOptions,
-    TaskRuntime, WorkflowSpecBuilder,
+    async_task_fn, task, Horsies, TaskError, TaskErrorCode, TaskNode, TaskOptions, TaskRuntime,
+    WorkflowSpecBuilder,
 };
 
 // =============================================================================
@@ -126,10 +126,6 @@ pub struct DynamicStartInput {
     pub value: i64,
 }
 
-pub struct RuntimeDispatchState {
-    pub ping: TaskFunction<(), String>,
-}
-
 #[task("e2e_rt_ping")]
 async fn rt_ping(_: ()) -> Result<String, TaskError> {
     Ok("pong".to_owned())
@@ -162,11 +158,26 @@ async fn dynamic_rt_start(rt: TaskRuntime, input: DynamicStartInput) -> Result<S
     Ok(handle.workflow_id().to_owned())
 }
 
-#[task("e2e_runtime_state_dispatch")]
-async fn runtime_state_dispatch(rt: TaskRuntime) -> Result<String, TaskError> {
-    let state = rt.state::<RuntimeDispatchState>()?;
-    let handle = state
-        .ping
+#[task("e2e_runtime_helper_dispatch")]
+async fn runtime_helper_dispatch(rt: TaskRuntime) -> Result<String, TaskError> {
+    let handle = rt_ping::send(&rt, ())
+        .await
+        .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
+    Ok(handle.task_id().to_owned())
+}
+
+#[task("e2e_runtime_helper_schedule")]
+async fn runtime_helper_schedule(rt: TaskRuntime) -> Result<String, TaskError> {
+    let handle = rt_ping::schedule(&rt, std::time::Duration::from_secs(5), ())
+        .await
+        .map_err(|err| TaskError::user("SCHEDULE_FAILED", err.message))?;
+    Ok(handle.task_id().to_owned())
+}
+
+#[task("e2e_runtime_helper_handle")]
+async fn runtime_helper_handle(rt: TaskRuntime) -> Result<String, TaskError> {
+    let ping = rt_ping::handle(&rt)?;
+    let handle = ping
         .send(())
         .await
         .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
@@ -712,11 +723,12 @@ pub fn register(app: &mut Horsies) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     app.register("e2e_wf_final_result", async_task_fn!(wf_final_result, ()))?;
     app.register("e2e_wf_fail", async_task_fn!(wf_fail, FailInput))?;
-    let ping = rt_ping::register(app)?;
+    rt_ping::register(app)?;
     dynamic_rt_start::register(app)?;
     dynamic_rt_start_no_args::register(app)?;
-    runtime_state_dispatch::register(app)?;
-    app.provide(RuntimeDispatchState { ping })?;
+    runtime_helper_dispatch::register(app)?;
+    runtime_helper_schedule::register(app)?;
+    runtime_helper_handle::register(app)?;
 
     // Complex result + error code
     app.register(

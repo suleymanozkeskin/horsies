@@ -151,25 +151,41 @@ it appears as the first parameter. `WorkflowStarter` remains available as the
 lower-level building block, but it is no longer the primary ergonomic story for
 in-task dynamic workflow starts.
 
-### Provide typed runtime state to tasks
+### Send and schedule tasks from inside tasks
 
-Use `app.provide(...)` for app-owned values that tasks need at runtime, such as
-typed task-handle groups:
+Registered tasks now expose generated runtime helpers, so task-to-task dispatch
+does not require globals or manual handle wiring:
 
 ```rust
-use horsies::{task, TaskError, TaskFunction, TaskRuntime};
-
-struct EnrichmentTasks {
-    extract_attachment_text: TaskFunction<ExtractTextInput, ()>,
-}
+use horsies::{task, TaskError, TaskRuntime};
 
 #[task("enqueue_extract_jobs")]
 async fn enqueue_extract_jobs(rt: TaskRuntime) -> Result<(), TaskError> {
-    let tasks = rt.state::<EnrichmentTasks>()?;
-
-    tasks.extract_attachment_text
-        .send(ExtractTextInput {
+    extract_attachment_text::send(
+        &rt,
+        ExtractTextInput {
             file_id: 42,
+            bundesland: "berlin".to_owned(),
+        },
+    )
+    .await
+    .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
+
+    extract_attachment_text::schedule(
+        &rt,
+        std::time::Duration::from_secs(30),
+        ExtractTextInput {
+            file_id: 43,
+            bundesland: "hamburg".to_owned(),
+        },
+    )
+    .await
+    .map_err(|err| TaskError::user("SCHEDULE_FAILED", err.message))?;
+
+    let extract = extract_attachment_text::handle(&rt)?;
+    extract
+        .send(ExtractTextInput {
+            file_id: 44,
             bundesland: "berlin".to_owned(),
         })
         .await
@@ -178,15 +194,31 @@ async fn enqueue_extract_jobs(rt: TaskRuntime) -> Result<(), TaskError> {
     Ok(())
 }
 
-let extract = extract_attachment_text::register(&mut app)?;
+extract_attachment_text::register(&mut app)?;
 enqueue_extract_jobs::register(&mut app)?;
-app.provide(EnrichmentTasks {
-    extract_attachment_text: extract,
-})?;
 ```
 
-This removes the need for process-global `OnceLock` state while keeping task-to-task
-dispatch fully typed.
+### Provide typed runtime state to tasks
+
+Use `app.provide(...)` for arbitrary app-owned runtime state such as config,
+clients, or domain services:
+
+```rust
+struct AppSettings {
+    bundesland: String,
+}
+
+app.provide(AppSettings {
+    bundesland: "berlin".to_owned(),
+})?;
+
+#[task("use_settings")]
+async fn use_settings(rt: TaskRuntime) -> Result<(), TaskError> {
+    let settings = rt.state::<AppSettings>()?;
+    tracing::info!(bundesland = %settings.bundesland);
+    Ok(())
+}
+```
 
 ### Validate and run
 

@@ -16,6 +16,7 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
     let fn_name = &func.sig.ident;
     let vis = &func.vis;
     let task_name_str = &attrs.name;
+    let task_name_value = task_name_str.value();
 
     // Task options body
     let task_options_body = build_task_options_body(&attrs);
@@ -46,6 +47,18 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
 
     let func_block = &func.block;
     let func_sig = &func.sig;
+    let helper_docs = format!(
+        "Retrieve the runtime-bound handle for `{}` from `TaskRuntime`.",
+        task_name_value
+    );
+    let send_docs = format!(
+        "Enqueue `{}` immediately from inside another task using `TaskRuntime`.",
+        task_name_value
+    );
+    let schedule_docs = format!(
+        "Enqueue `{}` with a delay from inside another task using `TaskRuntime`.",
+        task_name_value
+    );
 
     // Build the queue setter chain
     let queue_chain = match &attrs.queue {
@@ -95,6 +108,44 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
                 #queue_chain
                 #opts_chain
                 builder.register()
+            }
+
+            #[doc = #helper_docs]
+            pub fn handle(
+                rt: &horsies::TaskRuntime,
+            ) -> Result<horsies::TaskFunction<#args_type, #output_type>, horsies::TaskError> {
+                rt.task_handle::<#args_type, #output_type>(#task_name_str)
+            }
+
+            #[doc = #send_docs]
+            pub async fn send(
+                rt: &horsies::TaskRuntime,
+                args: #args_type,
+            ) -> horsies::TaskSendResult<horsies::TaskHandle<#output_type>> {
+                let handle = handle(rt).map_err(|err| horsies::TaskSendError {
+                    code: horsies::TaskSendErrorCode::ValidationFailed,
+                    message: err.to_string(),
+                    retryable: false,
+                    task_id: None,
+                    payload: None,
+                })?;
+                handle.send(args).await
+            }
+
+            #[doc = #schedule_docs]
+            pub async fn schedule(
+                rt: &horsies::TaskRuntime,
+                delay: std::time::Duration,
+                args: #args_type,
+            ) -> horsies::TaskSendResult<horsies::TaskHandle<#output_type>> {
+                let handle = handle(rt).map_err(|err| horsies::TaskSendError {
+                    code: horsies::TaskSendErrorCode::ValidationFailed,
+                    message: err.to_string(),
+                    retryable: false,
+                    task_id: None,
+                    payload: None,
+                })?;
+                handle.schedule(delay, args).await
             }
         }
     })

@@ -31,11 +31,18 @@ mod parse;
 /// }
 /// ```
 ///
+/// Registered tasks also generate runtime helpers for task-to-task dispatch:
+///
+/// ```ignore
+/// extract_attachment_text::send(&rt, input).await?;
+/// extract_attachment_text::schedule(&rt, Duration::from_secs(30), input).await?;
+/// let extract = extract_attachment_text::handle(&rt)?;
+/// ```
+///
 /// `TaskRuntime` can also retrieve typed app-provided state:
 ///
 /// ```ignore
-/// let tasks = rt.state::<EnrichmentTasks>()?;
-/// tasks.extract_attachment_text.send(input).await?;
+/// let settings = rt.state::<AppSettings>()?;
 /// ```
 ///
 /// Generates a companion `#[doc(hidden)]` module with a `register()`
