@@ -19,6 +19,12 @@ Rust port of [horsies](https://github.com/suleymanozkeskin/horsies) (Python).
 
 ## Quick Start
 
+The examples in this section are mirrored by compile-checked examples in
+[`examples/examples/readme_reference.rs`](./examples/examples/readme_reference.rs),
+[`examples/examples/dynamic_runtime_start.rs`](./examples/examples/dynamic_runtime_start.rs),
+[`examples/examples/runtime_state_dispatch.rs`](./examples/examples/runtime_state_dispatch.rs),
+and [`examples/examples/checked_workflow_builder.rs`](./examples/examples/checked_workflow_builder.rs).
+
 ### Define a task
 
 ```rust
@@ -106,14 +112,14 @@ match workflow.start().await {
 Parameterized reusable workflows should use `WorkflowDefinition::build_with(...)` plus `app.workflow_template::<...>()`:
 
 ```rust
-struct RegionalPipeline;
+struct ChildPipeline;
 
-impl WorkflowDefinition for RegionalPipeline {
+impl WorkflowDefinition for ChildPipeline {
     type Output = Processed;
     type Params = String;
 
-    fn name() -> &'static str { "regional_pipeline" }
-    fn definition_key() -> &'static str { "myapp.regional_pipeline.v1" }
+    fn name() -> &'static str { "child_pipeline" }
+    fn definition_key() -> &'static str { "myapp.child_pipeline.v1" }
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let fetch = builder.task(TaskNode::<Processed>::new("fetch_data").node_id("fetch"));
@@ -126,13 +132,13 @@ impl WorkflowDefinition for RegionalPipeline {
         Ok(WorkflowDefConfig::new().output(process))
     }
 
-    fn build_with(region: Self::Params) -> Result<WorkflowSpec, HorsiesError> {
-        let mut builder = WorkflowSpecBuilder::new(format!("regional_{region}"));
-        builder.definition_key(format!("myapp.regional_pipeline.{region}.v1"));
+    fn build_with(source_url: Self::Params) -> Result<WorkflowSpec, HorsiesError> {
+        let mut builder = WorkflowSpecBuilder::new("child_pipeline");
+        builder.definition_key("myapp.child_pipeline.v1");
         let fetch = builder.task(
             TaskNode::<Processed>::new("fetch_data")
                 .node_id("fetch")
-                .args_json(serde_json::to_string(&region).unwrap()),
+                .args_json(serde_json::to_string(&source_url).unwrap()),
         );
         let process = builder.task(
             TaskNode::<Processed>::new("process_data")
@@ -145,8 +151,8 @@ impl WorkflowDefinition for RegionalPipeline {
     }
 }
 
-let regional = app.workflow_template::<RegionalPipeline>();
-match regional.start("eu-west".to_owned()).await {
+let child = app.workflow_template::<ChildPipeline>();
+match child.start("https://example.com/data.json".to_owned()).await {
     Ok(handle) => {
         let result = handle.get(Some(Duration::from_secs(60))).await?;
     }
@@ -159,10 +165,10 @@ match regional.start("eu-west".to_owned()).await {
 Ad hoc dynamic workflows can still use `app.start()`:
 
 ```rust
-let spec = WorkflowSpecBuilder::new("enrichment")
+let spec = WorkflowSpecBuilder::new("child_pipeline")
     .task(node_a)
     .task(node_b)
-    .definition_key("myapp.enrichment.v1")
+    .definition_key("myapp.child_pipeline.dynamic.v1")
     .build()?;
 
 match app.start::<Output>(spec).await {
@@ -180,18 +186,18 @@ Starting an ad hoc workflow from inside a running task should use `TaskRuntime`:
 ```rust
 use horsies::{task, TaskError, TaskRuntime, WorkflowSpecBuilder};
 
-#[task("build_regional_workflow")]
-async fn build_regional_workflow(
+#[task("build_child_workflow")]
+async fn build_child_workflow(
     rt: TaskRuntime,
-    input: RegionalInput,
+    input: ChildInput,
 ) -> Result<(), TaskError> {
-    if let Some(spec) = build_regional_spec(&input)? {
+    if let Some(spec) = build_child_spec(&input)? {
         match rt.start::<Output>(spec).await {
             Ok(handle) => {
-                tracing::info!(workflow_id = %handle.workflow_id(), "started regional workflow");
+                tracing::info!(workflow_id = %handle.workflow_id(), "started child workflow");
             }
             Err(err) => {
-                tracing::warn!(error = %err.message, "failed to start regional workflow");
+                tracing::warn!(error = %err.message, "failed to start child workflow");
             }
         }
     }
@@ -201,6 +207,43 @@ async fn build_regional_workflow(
 
 `TaskRuntime` is captured automatically by `#[task]` / `#[blocking_task]` when
 it appears as the first parameter.
+
+### Validate dynamic workflow builders at check time
+
+Use `app.check_workflow_builder(...)` when a workflow spec is built from typed
+runtime parameters and you want `app.check()` to validate representative cases:
+
+```rust
+let fetch = fetch_data::register(&mut app)?;
+let process = process_data::register(&mut app)?;
+
+let mut registration = app.check_workflow_builder(
+    "build_child_workflow",
+    move |source_url: &String| {
+        let mut builder = WorkflowSpecBuilder::new("child_pipeline");
+        builder.definition_key("myapp.child_pipeline.v1");
+        let fetch_ref = builder.task(fetch.node_with(FetchDataInput {
+            source: source_url.clone(),
+        })?);
+        let process_ref = builder.task(
+            process
+                .node()
+                .waits_for(fetch_ref)
+                .args_from("data", fetch_ref),
+        );
+        builder.output(process_ref);
+        builder.build()
+    },
+)?;
+
+registration.cases([
+    "https://example.com/source-a.json".to_owned(),
+    "https://example.com/source-b.json".to_owned(),
+]);
+registration.register()?;
+
+app.check()?;
+```
 
 ### Send and schedule tasks from inside tasks
 
@@ -284,6 +327,29 @@ app.check_live().await?;
 app.run_worker().await?;
 app.run_scheduler().await?;
 ```
+
+## Start Patterns
+
+Use these three start paths consistently:
+
+- Setup / HTTP / reusable start:
+  `WorkflowFunction<T>` or `WorkflowTemplate<P, T>`
+- Ad hoc external dynamic start:
+  `app.start::<T>(spec)`
+- Dynamic start from inside a running task:
+  `rt.start::<T>(spec)`
+
+## Migration Notes
+
+From `alpha.3` / `alpha.4` to `alpha.5`:
+
+- `WorkflowStarter` is not public.
+  For external reusable starts, keep `WorkflowFunction<T>` or `WorkflowTemplate<P, T>` in app state.
+  For dynamic starts inside tasks, use `TaskRuntime`.
+- Task dispatch inside tasks should use generated helpers:
+  `task_name::send(&rt, args)`, `task_name::schedule(&rt, delay, args)`, and `task_name::handle(&rt)`.
+- For check-time validation of parameterized or runtime-built workflow specs, use:
+  `app.check_workflow_builder(...)` or `app.check_workflow_builder0(...)`.
 
 ## Crate Structure
 

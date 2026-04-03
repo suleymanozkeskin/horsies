@@ -9,6 +9,7 @@ use crate::core::{
     WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder, WorkflowStartError,
     WorkflowStartErrorCode, WorkflowStartResult,
 };
+use crate::core::app as core_app;
 use crate::workflow_engine::bound_handle::WorkflowHandle;
 use crate::workflow_engine::bound_spec::BoundWorkflowSpec;
 
@@ -18,6 +19,46 @@ pub struct WorkflowRegistrationBuilder<'a, T> {
     pub(crate) app: &'a mut crate::Horsies,
     pub(crate) builder: WorkflowSpecBuilder,
     pub(crate) _phantom: PhantomData<T>,
+}
+
+/// Builder for registering representative dynamic workflow cases for `app.check()`.
+///
+/// This is the public check-time validation path for runtime-built or
+/// parameterized workflow specs whose shape depends on input cases.
+pub struct WorkflowCheckBuilderRegistration<'a, P>
+where
+    P: Send + Sync + 'static,
+{
+    pub(crate) inner: core_app::WorkflowBuilderRegistration<'a, P>,
+}
+
+impl<'a, P> WorkflowCheckBuilderRegistration<'a, P>
+where
+    P: Send + Sync + 'static,
+{
+    pub(crate) fn new(inner: core_app::WorkflowBuilderRegistration<'a, P>) -> Self {
+        Self { inner }
+    }
+
+    /// Add one representative validation case.
+    pub fn case(&mut self, case: P) -> &mut Self {
+        self.inner.case(case);
+        self
+    }
+
+    /// Add multiple representative validation cases.
+    pub fn cases<I>(&mut self, cases: I) -> &mut Self
+    where
+        I: IntoIterator<Item = P>,
+    {
+        self.inner.cases(cases);
+        self
+    }
+
+    /// Finalize registration so `app.check()` runs these cases.
+    pub fn register(self) -> Result<(), HorsiesError> {
+        self.inner.register()
+    }
 }
 
 impl<'a, T: DeserializeOwned + Clone> WorkflowRegistrationBuilder<'a, T> {

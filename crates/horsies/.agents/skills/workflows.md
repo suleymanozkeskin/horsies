@@ -125,14 +125,14 @@ For reusable parameterized workflow-definition types, override
 ```rust
 use horsies::{HorsiesError, TaskNode, WorkflowDefConfig, WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder};
 
-struct RegionalPipeline;
+struct ChildPipeline;
 
-impl WorkflowDefinition for RegionalPipeline {
+impl WorkflowDefinition for ChildPipeline {
     type Output = Processed;
     type Params = String;
 
-    fn name() -> &'static str { "regional_pipeline" }
-    fn definition_key() -> &'static str { "myapp.regional_pipeline.v1" }
+    fn name() -> &'static str { "child_pipeline" }
+    fn definition_key() -> &'static str { "myapp.child_pipeline.v1" }
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let fetch = builder.task(TaskNode::<RawData>::new("fetch_data").node_id("fetch"));
@@ -145,12 +145,12 @@ impl WorkflowDefinition for RegionalPipeline {
         Ok(WorkflowDefConfig::new().output(process))
     }
 
-    fn build_with(region: Self::Params) -> Result<WorkflowSpec, HorsiesError> {
-        let mut builder = WorkflowSpecBuilder::new(format!("regional_{region}"));
-        builder.definition_key(format!("myapp.regional_pipeline.{region}.v1"));
+    fn build_with(source_url: Self::Params) -> Result<WorkflowSpec, HorsiesError> {
+        let mut builder = WorkflowSpecBuilder::new("child_pipeline");
+        builder.definition_key("myapp.child_pipeline.v1");
         let fetch = builder.task(
             TaskNode::<RawData>::new("fetch_data")
-                .args_json(serde_json::to_string(&region).unwrap())
+                .args_json(serde_json::to_string(&source_url).unwrap())
                 .node_id("fetch"),
         );
         let process = builder.task(
@@ -164,8 +164,8 @@ impl WorkflowDefinition for RegionalPipeline {
     }
 }
 
-let regional = app.workflow_template::<RegionalPipeline>();
-match regional.start("eu-west".to_owned()).await {
+let child = app.workflow_template::<ChildPipeline>();
+match child.start("https://example.com/data.json".to_owned()).await {
     Ok(handle) => {
         let result = handle.get(Some(Duration::from_secs(60))).await?;
     }
@@ -174,6 +174,44 @@ match regional.start("eu-west".to_owned()).await {
     }
 }
 ```
+
+### Checked dynamic builders via `check_workflow_builder()`
+
+Use this when the workflow shape depends on typed params and you want
+`app.check()` to validate representative cases:
+
+```rust
+let fetch = fetch_data::register(&mut app)?;
+let process = process_data::register(&mut app)?;
+
+let mut registration = app.check_workflow_builder(
+    "build_child_workflow",
+    move |source_url: &String| {
+        let mut builder = WorkflowSpecBuilder::new("child_pipeline");
+        builder.definition_key("myapp.child_pipeline.v1");
+        let fetch_ref = builder.task(fetch.node_with(FetchDataInput {
+            source: source_url.clone(),
+        })?);
+        let process_ref = builder.task(
+            process
+                .node()
+                .waits_for(fetch_ref)
+                .args_from("data", fetch_ref),
+        );
+        builder.output(process_ref);
+        builder.build()
+    },
+)?;
+
+registration.cases([
+    "https://example.com/source-a.json".to_owned(),
+    "https://example.com/source-b.json".to_owned(),
+]);
+registration.register()?;
+app.check()?;
+```
+
+Use `app.check_workflow_builder0(...)` for zero-arg builders.
 
 ### Using `TaskFunction::node()`
 
@@ -249,7 +287,14 @@ SubWorkflowNode::<ChildOutput>::new("child_workflow_name")
 
 ## Starting a Workflow
 
-Three paths depending on context. All return `WorkflowStartResult<WorkflowHandle<T>>`.
+The blessed public start paths are:
+
+- `WorkflowFunction<T>::start()` for reusable fixed workflows
+- `WorkflowTemplate<P, T>::start(params)` for reusable parameterized workflows
+- `app.start::<T>(spec)` for ad hoc external dynamic specs
+- `TaskRuntime::start::<T>(spec)` for dynamic starts inside running tasks
+
+All return `WorkflowStartResult<WorkflowHandle<T>>`.
 
 ### 1. Reusable workflow definition via `register_workflow_definition()` (primary)
 
@@ -281,8 +326,8 @@ Best for reusable workflows whose DAG shape or fixed node inputs depend on
 typed runtime params.
 
 ```rust
-let regional = app.workflow_template::<RegionalPipeline>();
-match regional.start("eu-west".to_owned()).await {
+let child = app.workflow_template::<ChildPipeline>();
+match child.start("https://example.com/data.json".to_owned()).await {
     Ok(handle) => {
         let result = handle.get(Some(Duration::from_secs(60))).await?;
     }
@@ -303,10 +348,10 @@ Best for dynamic/parameterized workflows where the DAG is built at runtime
 from parameters, user input, or external state.
 
 ```rust
-let spec = WorkflowSpecBuilder::new("enrichment")
+let spec = WorkflowSpecBuilder::new("child_pipeline")
     .task(node_a)
     .task(node_b)
-    .definition_key("myapp.enrichment.v1")
+    .definition_key("myapp.child_pipeline.dynamic.v1")
     .build()?;
 
 match app.start::<Output>(spec).await {
@@ -330,18 +375,18 @@ inside a running task, after `app` has been consumed by `run_worker_with()`.
 ```rust
 use horsies::{task, TaskError, TaskRuntime};
 
-#[task("build_regional_workflow")]
-async fn build_regional_workflow(
+#[task("build_child_workflow")]
+async fn build_child_workflow(
     rt: TaskRuntime,
-    input: RegionalInput,
+    input: ChildInput,
 ) -> Result<(), TaskError> {
-    if let Some(spec) = build_regional_spec(&input)? {
+    if let Some(spec) = build_child_spec(&input)? {
         match rt.start::<Output>(spec).await {
             Ok(handle) => {
-                tracing::info!(workflow_id = %handle.workflow_id(), "started regional workflow");
+                tracing::info!(workflow_id = %handle.workflow_id(), "started child workflow");
             }
             Err(err) => {
-                tracing::warn!(error = %err.message, "failed to start regional workflow");
+                tracing::warn!(error = %err.message, "failed to start child workflow");
             }
         }
     }

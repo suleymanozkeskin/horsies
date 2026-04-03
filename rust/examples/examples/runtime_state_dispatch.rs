@@ -8,46 +8,30 @@
 use horsies::{task, AppConfig, Horsies, PostgresConfig, QueueMode, TaskError, TaskRuntime};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct ExtractTextInput {
-    file_id: i32,
-    bundesland: String,
+struct AddNumbersInput {
+    a: i32,
+    b: i32,
 }
 
-#[task("extract_attachment_text")]
-async fn extract_attachment_text(_input: ExtractTextInput) -> Result<(), TaskError> {
-    Ok(())
+#[task("add_numbers")]
+async fn add_numbers(input: AddNumbersInput) -> Result<i32, TaskError> {
+    Ok(input.a + input.b)
 }
 
-#[task("enqueue_extract_jobs")]
-async fn enqueue_extract_jobs(rt: TaskRuntime) -> Result<(), TaskError> {
-    extract_attachment_text::send(
-        &rt,
-        ExtractTextInput {
-            file_id: 11,
-            bundesland: "berlin".to_owned(),
-        },
-    )
+#[task("enqueue_add_numbers")]
+async fn enqueue_add_numbers(rt: TaskRuntime) -> Result<(), TaskError> {
+    add_numbers::send(&rt, AddNumbersInput { a: 1, b: 2 })
     .await
     .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
 
-    extract_attachment_text::schedule(
-        &rt,
-        std::time::Duration::from_secs(30),
-        ExtractTextInput {
-            file_id: 12,
-            bundesland: "hamburg".to_owned(),
-        },
-    )
+    add_numbers::schedule(&rt, std::time::Duration::from_secs(30), AddNumbersInput { a: 3, b: 4 })
     .await
     .map_err(|err| TaskError::user("SCHEDULE_FAILED", err.message))?;
 
-    let extract = extract_attachment_text::handle(&rt)?;
-    for file_id in [13, 14] {
-        extract
-            .send(ExtractTextInput {
-                file_id,
-                bundesland: "berlin".to_owned(),
-            })
+    let add = add_numbers::handle(&rt)?;
+    for (a, b) in [(5, 6), (7, 8)] {
+        add
+            .send(AddNumbersInput { a, b })
             .await
             .map_err(|err| TaskError::user("SEND_FAILED", err.message.clone()))?;
     }
@@ -83,8 +67,8 @@ fn config() -> AppConfig {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = Horsies::new(config())?;
 
-    extract_attachment_text::register(&mut app)?;
-    let _enqueue = enqueue_extract_jobs::register(&mut app)?;
+    add_numbers::register(&mut app)?;
+    let _enqueue = enqueue_add_numbers::register(&mut app)?;
 
     println!("registered runtime task dispatch example");
     println!("inside a worker, call task_name::send/schedule/handle(&rt, ...) directly");

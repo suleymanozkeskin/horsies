@@ -15,7 +15,7 @@ skill files in this directory:
 | File | When to open |
 |---|---|
 | `tasks.md` | `#[horsies::task]`, `TaskFunction`, `my_task::register()`, send/schedule/retry APIs, serialization |
-| `workflows.md` | unified `horsies::Horsies`, `WorkflowFunction`, `TaskNode`, `WorkflowHandle`, DAG construction, failure semantics |
+| `workflows.md` | unified `horsies::Horsies`, `WorkflowFunction`, `WorkflowTemplate`, `TaskRuntime`, checked workflow builders, DAG construction, failure semantics |
 | `configs.md` | `AppConfig`, `PostgresConfig`, queues, recovery, scheduling, `Horsies::check()`, `check_live()`, workflow builders |
 
 ## Package architecture
@@ -143,8 +143,8 @@ match workflow.start().await {
 ### Parameterized reusable definition
 
 ```rust
-let regional = app.workflow_template::<RegionalPipeline>();
-match regional.start("eu-west".to_owned()).await {
+let child = app.workflow_template::<ChildPipeline>();
+match child.start("https://example.com/data.json".to_owned()).await {
     Ok(handle) => {
         let result = handle.get(Some(Duration::from_secs(60))).await?;
     }
@@ -157,10 +157,10 @@ match regional.start("eu-west".to_owned()).await {
 ### Dynamic (runtime-built spec)
 
 ```rust
-let spec = WorkflowSpecBuilder::new("enrichment")
+let spec = WorkflowSpecBuilder::new("child_pipeline")
     .task(node_a)
     .task(node_b)
-    .definition_key("myapp.enrichment.v1")
+    .definition_key("myapp.child_pipeline.dynamic.v1")
     .build()?;
 
 match app.start::<Output>(spec).await {
@@ -178,18 +178,18 @@ match app.start::<Output>(spec).await {
 ```rust
 use horsies::{task, TaskError, TaskRuntime};
 
-#[task("build_regional_workflow")]
-async fn build_regional_workflow(
+#[task("build_child_workflow")]
+async fn build_child_workflow(
     rt: TaskRuntime,
-    input: RegionalInput,
+    input: ChildInput,
 ) -> Result<(), TaskError> {
-    if let Some(spec) = build_regional_spec(&input)? {
+    if let Some(spec) = build_child_spec(&input)? {
         match rt.start::<Output>(spec).await {
             Ok(handle) => {
-                tracing::info!(workflow_id = %handle.workflow_id(), "started regional workflow");
+                tracing::info!(workflow_id = %handle.workflow_id(), "started child workflow");
             }
             Err(err) => {
-                tracing::warn!(error = %err.message, "failed to start regional workflow");
+                tracing::warn!(error = %err.message, "failed to start child workflow");
             }
         }
     }
@@ -199,6 +199,39 @@ async fn build_regional_workflow(
 
 `TaskRuntime` is the primary path for starting dynamic workflows from inside a
 running task.
+
+### Checked dynamic workflow builders
+
+Use `app.check_workflow_builder(...)` for representative-case validation of
+runtime-built workflow specs during `app.check()`:
+
+```rust
+let mut registration = app.check_workflow_builder(
+    "build_child_workflow",
+    move |source_url: &String| {
+        let mut builder = WorkflowSpecBuilder::new("child_pipeline");
+        builder.definition_key("myapp.child_pipeline.v1");
+        let fetch_ref = builder.task(fetch_data.node_with(FetchDataInput {
+            source: source_url.clone(),
+        })?);
+        let process_ref = builder.task(
+            process_data
+                .node()
+                .waits_for(fetch_ref)
+                .args_from("data", fetch_ref),
+        );
+        builder.output(process_ref);
+        builder.build()
+    },
+)?;
+
+registration.cases([
+    "https://example.com/source-a.json".to_owned(),
+    "https://example.com/source-b.json".to_owned(),
+]);
+registration.register()?;
+app.check()?;
+```
 
 ### Inside a worker (task-to-task dispatch)
 
@@ -289,6 +322,12 @@ match workflow.start().await {
 let handle = workflow.handle("known-workflow-uuid").await?;
 let status = handle.status().await?;
 ```
+
+## Blessed Start Patterns
+
+- Reusable setup/HTTP starts: `WorkflowFunction<T>` and `WorkflowTemplate<P, T>`
+- Ad hoc external dynamic starts: `app.start::<T>(spec)`
+- In-task dynamic starts: `TaskRuntime::start::<T>(spec)`
 
 ## Result Types
 

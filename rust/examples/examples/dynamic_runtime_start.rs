@@ -10,13 +10,13 @@ use horsies::{
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ScrapeInput {
+struct SourceInput {
     value: i64,
 }
 
-fn build_enrichment_spec(input: &ScrapeInput) -> Result<WorkflowSpec, HorsiesError> {
-    let mut builder = WorkflowSpecBuilder::new("example_dynamic_enrichment");
-    builder.definition_key("examples.dynamic_enrichment.v1");
+fn build_child_spec(input: &SourceInput) -> Result<WorkflowSpec, HorsiesError> {
+    let mut builder = WorkflowSpecBuilder::new("example_dynamic_child");
+    builder.definition_key("examples.dynamic_child.v1");
 
     let produce = builder.task(
         TaskNode::<serde_json::Value>::new("produce_value")
@@ -32,13 +32,12 @@ fn build_enrichment_spec(input: &ScrapeInput) -> Result<WorkflowSpec, HorsiesErr
     builder.build()
 }
 
-#[task("start_dynamic_enrichment")]
-async fn start_dynamic_enrichment(
+#[task("start_dynamic_child")]
+async fn start_dynamic_child(
     rt: TaskRuntime,
-    input: ScrapeInput,
+    input: SourceInput,
 ) -> Result<String, TaskError> {
-    let spec =
-        build_enrichment_spec(&input).map_err(|err| TaskError::user("WF_BUILD_FAILED", err))?;
+    let spec = build_child_spec(&input).map_err(|err| TaskError::user("WF_BUILD_FAILED", err))?;
     let handle = rt
         .start::<serde_json::Value>(spec)
         .await
@@ -73,9 +72,9 @@ fn config() -> AppConfig {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = Horsies::new(config())?;
-    let _task = start_dynamic_enrichment::register(&mut app)?;
+    let _task = start_dynamic_child::register(&mut app)?;
 
-    println!("registered `start_dynamic_enrichment`");
+    println!("registered `start_dynamic_child`");
     println!("run this task inside a worker and call `rt.start(spec)` for dynamic workflows");
 
     Ok(())

@@ -35,7 +35,10 @@ use crate::core::{Horsies as CoreHorsies, RegisteredWorkflowSpec};
 pub use error::{AppError, AppResult};
 pub use runtime::TaskRuntime;
 pub use task::{TaskFunction, TaskRegistrationBuilder};
-pub use workflow::{WorkflowFunction, WorkflowRegistrationBuilder, WorkflowTemplate};
+pub use workflow::{
+    WorkflowCheckBuilderRegistration, WorkflowFunction, WorkflowRegistrationBuilder,
+    WorkflowTemplate,
+};
 
 // horsies-macros
 pub use horsies_macros::{blocking_task, task};
@@ -228,6 +231,38 @@ impl Horsies {
         name: &str,
     ) -> WorkflowRegistrationBuilder<'_, T> {
         WorkflowRegistrationBuilder::new(self, name)
+    }
+
+    /// Register a representative dynamic workflow builder for `check()` validation.
+    ///
+    /// Use this when the workflow DAG is built from typed runtime inputs and
+    /// you want `app.check()` to validate one or more representative cases.
+    pub fn check_workflow_builder<P, F>(
+        &mut self,
+        name: &str,
+        builder: F,
+    ) -> Result<WorkflowCheckBuilderRegistration<'_, P>, HorsiesError>
+    where
+        P: Send + Sync + 'static,
+        F: Fn(&P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync + 'static,
+    {
+        let inner = self
+            .core
+            .workflow_builder(name, move |_app, params: &P| builder(params))?;
+        Ok(WorkflowCheckBuilderRegistration::new(inner))
+    }
+
+    /// Register a zero-arg dynamic workflow builder for `check()` validation.
+    pub fn check_workflow_builder0<F>(
+        &mut self,
+        name: &str,
+        builder: F,
+    ) -> Result<WorkflowCheckBuilderRegistration<'_, ()>, HorsiesError>
+    where
+        F: Fn() -> Result<WorkflowSpec, HorsiesError> + Send + Sync + 'static,
+    {
+        let inner = self.core.workflow_builder0(name, move |_app| builder())?;
+        Ok(WorkflowCheckBuilderRegistration::new(inner))
     }
 
     pub fn register_workflow_spec<T: DeserializeOwned + Clone>(
@@ -491,6 +526,7 @@ mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
     use sqlx::postgres::PgPoolOptions;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn valid_config() -> AppConfig {
         AppConfig {
@@ -868,6 +904,55 @@ mod tests {
 
         let err = macro_task_a::register(&mut app).unwrap_err();
         assert!(err.to_string().contains("frozen"));
+    }
+
+    #[test]
+    fn check_workflow_builder_runs_each_case_during_check() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+        macro_task_a::register(&mut app).unwrap();
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&call_count);
+
+        let mut registration = app
+            .check_workflow_builder("build_regional", move |region: &String| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                let mut builder = WorkflowSpecBuilder::new(format!("regional_{region}"));
+                builder.definition_key(format!("tests.regional.{region}.v1"));
+                let node = builder.task(TaskNode::<String>::new("macro_a"));
+                builder.output(node);
+                builder.build()
+            })
+            .unwrap();
+        registration.cases(["us-east".to_owned(), "eu-west".to_owned()]);
+        registration.register().unwrap();
+
+        app.check().unwrap();
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn check_workflow_builder0_runs_during_check() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+        macro_task_a::register(&mut app).unwrap();
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&call_count);
+
+        app.check_workflow_builder0("build_zero", move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+            let mut builder = WorkflowSpecBuilder::new("zero_builder");
+            builder.definition_key("tests.zero_builder.v1");
+            let node = builder.task(TaskNode::<String>::new("macro_a"));
+            builder.output(node);
+            builder.build()
+        })
+        .unwrap()
+        .register()
+        .unwrap();
+
+        app.check().unwrap();
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 
     #[horsies::task(
