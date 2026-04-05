@@ -189,18 +189,6 @@ pub fn format_banner(info: &BannerInfo<'_>) -> String {
     buf
 }
 
-/// Print a minimal banner (ASCII art + version only, no config).
-///
-/// Useful for non-worker roles or quick branding output.
-pub fn print_simple_banner() {
-    let mut stderr = io::stderr().lock();
-    let _ = writeln!(stderr, "{}", HORSE_BRAILLE.cyan());
-
-    let version = env!("CARGO_PKG_VERSION");
-    let logo = LOGO_TEXT.replace("{version}", &format!("v{}", version));
-    let _ = writeln!(stderr, "{}", logo.bright_yellow().bold());
-    let _ = stderr.flush();
-}
 
 // ---------------------------------------------------------------------------
 // Internal helpers

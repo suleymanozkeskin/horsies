@@ -3,6 +3,7 @@
 pub mod backoff;
 pub mod cli;
 pub mod config;
+#[allow(dead_code)] // not yet wired up; will be implemented
 pub mod docs_fetcher;
 pub mod error;
 pub mod execution;

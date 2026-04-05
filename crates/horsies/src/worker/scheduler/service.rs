@@ -102,6 +102,38 @@ async fn initialize_schedules(
 ) -> Result<(), sqlx::Error> {
     let now = Utc::now();
 
+    // Prune stale schedule states (schedules removed from config).
+    // Errors are swallowed so one bad row doesn't block initialization.
+    let configured_names: std::collections::HashSet<&str> =
+        schedules.iter().map(|s| s.name.as_str()).collect();
+
+    match state::get_all_states(pool).await {
+        Ok(all_states) => {
+            for row in all_states {
+                if !configured_names.contains(row.schedule_name.as_str()) {
+                    match state::delete_state(pool, &row.schedule_name).await {
+                        Ok(_) => {
+                            tracing::info!(
+                                schedule = %row.schedule_name,
+                                "pruned stale schedule state",
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                schedule = %row.schedule_name,
+                                error = %e,
+                                "failed to prune stale schedule state",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to fetch schedule states for pruning");
+        }
+    }
+
     for schedule in schedules {
         if !schedule.enabled {
             continue;
@@ -157,18 +189,26 @@ async fn check_and_enqueue(
     tx.commit().await?;
 
     let now = Utc::now();
-    let due = state::get_due_schedules(broker.pool(), now).await?;
+
+    // Only query for enabled schedules — filter at the DB level.
+    let enabled_names: Vec<String> = schedules
+        .iter()
+        .filter(|s| s.enabled)
+        .map(|s| s.name.clone())
+        .collect();
+
+    if enabled_names.is_empty() {
+        return Ok(());
+    }
+
+    let due = state::get_due_schedules_filtered(broker.pool(), &enabled_names, now).await?;
 
     for row in due {
-        // Find the matching schedule config.
+        // Defensive: skip any row that doesn't match a configured schedule.
         let Some(schedule) = schedules.iter().find(|s| s.name == row.schedule_name) else {
             tracing::warn!(schedule = %row.schedule_name, "due schedule not in config");
             continue;
         };
-
-        if !schedule.enabled {
-            continue;
-        }
 
         let lock_conn = match state::try_acquire_schedule_lock(broker.pool(), &schedule.name).await
         {

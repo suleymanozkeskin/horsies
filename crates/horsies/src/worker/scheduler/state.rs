@@ -7,8 +7,10 @@ use sqlx::{PgPool, Postgres};
 #[derive(Debug, sqlx::FromRow)]
 pub struct ScheduleStateRow {
     pub schedule_name: String,
+    #[allow(dead_code)] // populated by FromRow for completeness
     pub last_run_at: Option<DateTime<Utc>>,
     pub next_run_at: Option<DateTime<Utc>>,
+    #[allow(dead_code)] // populated by FromRow for completeness
     pub last_task_id: Option<String>,
     pub run_count: i32,
     pub config_hash: Option<String>,
@@ -32,11 +34,6 @@ SELECT schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_
 FROM horsies_schedule_state
 WHERE schedule_name = $1";
 
-const GET_DUE_SCHEDULES_SQL: &str = "\
-SELECT schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash
-FROM horsies_schedule_state
-WHERE next_run_at IS NOT NULL AND next_run_at <= $1
-ORDER BY next_run_at ASC";
 
 /// SQL for filtered due schedules query.
 /// Note: The `$2` parameter is an array of schedule names (uses `= ANY($2)`).
@@ -106,17 +103,6 @@ pub async fn get_state(
         .await
 }
 
-/// Get all schedules that are due (next_run_at <= now).
-pub async fn get_due_schedules(
-    pool: &PgPool,
-    now: DateTime<Utc>,
-) -> Result<Vec<ScheduleStateRow>, sqlx::Error> {
-    sqlx::query_as(GET_DUE_SCHEDULES_SQL)
-        .bind(now)
-        .fetch_all(pool)
-        .await
-}
-
 /// Get due schedules filtered by a list of schedule names.
 ///
 /// This mirrors Python's `get_due_states(schedule_names, now)` which filters
@@ -165,32 +151,6 @@ pub async fn acquire_scheduler_xact_lock(
     Ok(())
 }
 
-/// Try to acquire the scheduler advisory lock (session-scoped, non-blocking).
-///
-/// Used for per-schedule fine-grained locking within a tick.
-pub async fn try_acquire_lock(
-    pool: &PgPool,
-) -> Result<Option<PoolConnection<Postgres>>, sqlx::Error> {
-    let mut conn = pool.acquire().await?;
-    let result: (bool,) = sqlx::query_as(TRY_ACQUIRE_LOCK_SQL)
-        .bind(SCHEDULER_LOCK_KEY)
-        .fetch_one(&mut *conn)
-        .await?;
-    if result.0 {
-        Ok(Some(conn))
-    } else {
-        Ok(None)
-    }
-}
-
-/// Release the scheduler advisory lock (session-scoped).
-pub async fn release_lock(mut conn: PoolConnection<Postgres>) -> Result<(), sqlx::Error> {
-    sqlx::query(RELEASE_LOCK_SQL)
-        .bind(SCHEDULER_LOCK_KEY)
-        .execute(&mut *conn)
-        .await?;
-    Ok(())
-}
 
 /// Try to acquire a per-schedule advisory lock. Returns Some(conn) if acquired.
 pub async fn try_acquire_schedule_lock(
@@ -238,7 +198,6 @@ mod tests {
     fn sql_constants_have_placeholders() {
         assert!(UPSERT_STATE_SQL.contains("$1"));
         assert!(GET_STATE_SQL.contains("$1"));
-        assert!(GET_DUE_SCHEDULES_SQL.contains("$1"));
         assert!(GET_DUE_SCHEDULES_FILTERED_SQL.contains("$1"));
         assert!(GET_DUE_SCHEDULES_FILTERED_SQL.contains("$2"));
         assert!(DELETE_STATE_SQL.contains("$1"));

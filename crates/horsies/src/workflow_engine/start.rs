@@ -523,66 +523,6 @@ async fn launch_root_subworkflow(
 // Child workflow start
 // ---------------------------------------------------------------------------
 
-/// Start a child workflow as part of a sub-workflow node.
-///
-/// Creates the child workflow row with parent linkage and launches root tasks.
-/// Returns the child workflow ID. Operates against the pool (not transactional).
-pub async fn start_child_workflow(
-    pool: &PgPool,
-    spec: &WorkflowSpec,
-    parent_workflow_id: &str,
-    parent_task_index: i32,
-    depth: i32,
-    root_workflow_id: &str,
-    registry: &WorkflowSpecRegistry,
-) -> Result<String, WorkflowError> {
-    let child_id = Uuid::new_v4().to_string();
-
-    let on_error_str = match spec.on_error {
-        OnError::Fail => "fail",
-        OnError::Pause => "pause",
-    };
-
-    let success_policy_json = spec
-        .success_policy
-        .as_ref()
-        .map(serde_json::to_value)
-        .transpose()?;
-
-    // Wrap child workflow start in a transaction for atomicity.
-    let mut tx = pool.begin().await?;
-
-    sqlx::query(INSERT_CHILD_WORKFLOW_SQL)
-        .bind(&child_id)
-        .bind(&spec.name)
-        .bind(on_error_str)
-        .bind(spec.output_index.map(|i| i as i32))
-        .bind(&success_policy_json)
-        .bind(&spec.definition_key)
-        .bind(parent_workflow_id)
-        .bind(parent_task_index)
-        .bind(depth)
-        .bind(root_workflow_id)
-        .execute(&mut *tx)
-        .await?;
-
-    tracing::debug!(
-        child_workflow_id = %child_id,
-        parent_workflow_id,
-        parent_task_index,
-        depth,
-        name = %spec.name,
-        "child workflow created",
-    );
-
-    // Insert all workflow_task rows and enqueue roots.
-    insert_workflow_tasks(&mut tx, &child_id, &spec.tasks, registry).await?;
-
-    tx.commit().await?;
-
-    Ok(child_id)
-}
-
 /// Start a child workflow within an existing transaction.
 ///
 /// Used by `launch_root_subworkflow` and `enqueue_subworkflow_task` to keep

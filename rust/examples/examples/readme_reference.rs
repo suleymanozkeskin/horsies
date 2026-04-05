@@ -55,7 +55,7 @@ fn build_child_spec(input: &ChildInput) -> Result<WorkflowSpec, HorsiesError> {
             .node_id("fetch")
             .args_json(serde_json::to_string(&FetchDataInput {
                 source: input.source_url.clone(),
-            })?),
+            }).map_err(|e| HorsiesError::new(e.to_string()))?),
     );
     let process = builder.task(
         TaskNode::<String>::new("process_data")
@@ -87,7 +87,7 @@ impl WorkflowDefinition for ETLPipeline {
                 .node_id("fetch")
                 .args_json(serde_json::to_string(&FetchDataInput {
                     source: "default".to_owned(),
-                })?),
+                }).map_err(|e| HorsiesError::new(e.to_string()))?),
         );
         let process = builder.task(
             TaskNode::<String>::new("process_data")
@@ -125,7 +125,7 @@ impl WorkflowDefinition for ChildPipeline {
                 .node_id("fetch")
                 .args_json(serde_json::to_string(&FetchDataInput {
                     source: "placeholder".to_owned(),
-                })?),
+                }).map_err(|e| HorsiesError::new(e.to_string()))?),
         );
         let process = builder.task(
             TaskNode::<String>::new("process_data")
@@ -144,7 +144,7 @@ impl WorkflowDefinition for ChildPipeline {
                 .node_id("fetch")
                 .args_json(serde_json::to_string(&FetchDataInput {
                     source: source_url,
-                })?),
+                }).map_err(|e| HorsiesError::new(e.to_string()))?),
         );
         let process = builder.task(
             TaskNode::<String>::new("process_data")
@@ -163,7 +163,7 @@ async fn build_child_workflow(
     input: ChildInput,
 ) -> Result<(), TaskError> {
     if let Some(spec) = Some(
-        build_child_spec(&input).map_err(|err| TaskError::user("WF_BUILD_FAILED", err))?,
+        build_child_spec(&input).map_err(|err| TaskError::user("WF_BUILD_FAILED", err.to_string()))?,
     ) {
         match rt.start::<String>(spec).await {
             Ok(handle) => {

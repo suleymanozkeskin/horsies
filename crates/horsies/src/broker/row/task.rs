@@ -9,12 +9,14 @@ use crate::broker::error::BrokerError;
 /// Minimal row returned by the claim CTE (just the ID).
 #[derive(Debug, FromRow)]
 pub struct ClaimedId {
+    #[allow(dead_code)] // populated by FromRow; used as existence check
     pub id: String,
 }
 
 /// Row returned by SET_RUNNING_SQL — includes the DB-assigned started_at.
 #[derive(Debug, FromRow)]
 pub struct SetRunningRow {
+    #[allow(dead_code)] // populated by FromRow; used as existence check
     pub id: String,
     pub started_at: DateTime<Utc>,
 }

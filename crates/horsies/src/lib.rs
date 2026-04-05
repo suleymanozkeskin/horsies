@@ -217,13 +217,6 @@ impl Horsies {
         self.core.set_role(role);
     }
 
-    pub(crate) fn suppress_sends(&self, suppress: bool) {
-        self.core.suppress_sends(suppress);
-    }
-
-    pub(crate) fn are_sends_suppressed(&self) -> bool {
-        self.core.are_sends_suppressed()
-    }
 
     pub fn registry(&self) -> &crate::core::TaskRegistry {
         self.core.registry()
@@ -883,7 +876,7 @@ mod tests {
     async fn generated_task_global_send_uses_registered_handle() {
         let mut app = Horsies::new(valid_config()).unwrap();
         macro_dispatch_target::register(&mut app).unwrap();
-        app.suppress_sends(true);
+        app.core.suppress_sends(true);
 
         let err = macro_dispatch_target::send(MacroAddArgs { a: 1, b: 2 })
             .await
@@ -895,7 +888,7 @@ mod tests {
     async fn generated_task_global_schedule_uses_registered_handle() {
         let mut app = Horsies::new(valid_config()).unwrap();
         macro_dispatch_target::register(&mut app).unwrap();
-        app.suppress_sends(true);
+        app.core.suppress_sends(true);
 
         let err = macro_dispatch_target::schedule(
             std::time::Duration::from_secs(30),

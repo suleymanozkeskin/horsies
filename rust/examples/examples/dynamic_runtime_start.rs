@@ -37,7 +37,7 @@ async fn start_dynamic_child(
     rt: TaskRuntime,
     input: SourceInput,
 ) -> Result<String, TaskError> {
-    let spec = build_child_spec(&input).map_err(|err| TaskError::user("WF_BUILD_FAILED", err))?;
+    let spec = build_child_spec(&input).map_err(|err| TaskError::user("WF_BUILD_FAILED", err.to_string()))?;
     let handle = rt
         .start::<serde_json::Value>(spec)
         .await

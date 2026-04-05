@@ -147,6 +147,7 @@ pub struct WorkerArgs {
 impl WorkerArgs {
     /// Resolve the configuration source from either the `-m`/`--module` flag
     /// or the positional argument. The flag takes precedence if both are set.
+    #[allow(dead_code)] // CLI command handlers not yet implemented
     pub fn config_source(&self) -> Option<&str> {
         self.module_flag.as_deref().or(self.module.as_deref())
     }
@@ -182,6 +183,7 @@ pub struct SchedulerArgs {
 impl SchedulerArgs {
     /// Resolve the configuration source from either the `-m`/`--module` flag
     /// or the positional argument. The flag takes precedence if both are set.
+    #[allow(dead_code)] // CLI command handlers not yet implemented
     pub fn config_source(&self) -> Option<&str> {
         self.module_flag.as_deref().or(self.module.as_deref())
     }
@@ -211,6 +213,7 @@ pub struct CheckArgs {
 impl CheckArgs {
     /// Resolve the configuration source from either the `-m`/`--module` flag
     /// or the positional argument. The flag takes precedence if both are set.
+    #[allow(dead_code)] // CLI command handlers not yet implemented
     pub fn config_source(&self) -> Option<&str> {
         self.module_flag.as_deref().or(self.module.as_deref())
     }
