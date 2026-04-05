@@ -355,6 +355,21 @@ app.run_worker().await?;
 app.run_scheduler().await?;
 ```
 
+### Coverage
+
+The repo uses `cargo-llvm-cov` for coverage.
+
+```bash
+./scripts/coverage.sh summary
+./scripts/coverage.sh html
+./scripts/coverage.sh full
+```
+
+`summary` / `html` run the core suite and skip the worker e2e package so you
+can get a stable local baseline quickly. `full` runs the whole workspace.
+All modes exclude non-library workspace crates from the reported coverage so
+the summary reflects the main published crates.
+
 ## Start Patterns
 
 Use these start paths consistently:

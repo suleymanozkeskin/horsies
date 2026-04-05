@@ -1,4 +1,4 @@
-error: task functions must accept exactly one argument (use a struct for multiple fields)
+error: task functions may accept either (args) or (TaskRuntime, args)
  --> tests/compile_fail/multiple_args.rs:5:14
   |
 5 | async fn bad(a: i32, b: i32) -> Result<i32, TaskError> {
