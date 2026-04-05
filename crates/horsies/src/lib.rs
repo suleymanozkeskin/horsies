@@ -14,6 +14,7 @@ pub(crate) mod workflow_engine;
 
 // Facade-level modules.
 mod error;
+mod global_registry;
 mod lazy_broker;
 mod runtime;
 mod task;
@@ -94,6 +95,65 @@ pub use crate::workflow_engine::recovery::recover_stuck_workflows;
 
 use crate::lazy_broker::LazyBroker;
 use crate::runtime::SharedRuntimeCatalog;
+
+// ---------------------------------------------------------------------------
+// Global workflow dispatch
+// ---------------------------------------------------------------------------
+
+/// Start a zero-param workflow from any call site.
+///
+/// Requires `app.register_workflow_definition::<D>()` to have been called at startup.
+pub async fn start_workflow<D>() -> WorkflowStartResult<WorkflowHandle<D::Output>>
+where
+    D: WorkflowDefinition<Params = ()> + 'static,
+    D::Output: DeserializeOwned + Clone + Send + Sync + 'static,
+{
+    let wf: WorkflowFunction<D::Output> =
+        global_registry::get_workflow::<D, WorkflowFunction<D::Output>>().ok_or_else(|| {
+            WorkflowStartError {
+                code: WorkflowStartErrorCode::ValidationFailed,
+                message: format!(
+                    "workflow '{}' ({}) is not registered — call app.register_workflow_definition::<{}>() at startup",
+                    D::name(),
+                    global_registry::definition_type_name::<D>(),
+                    global_registry::definition_type_name::<D>(),
+                ),
+                retryable: false,
+                workflow_name: D::name().to_owned(),
+                workflow_id: String::new(),
+            }
+        })?;
+    wf.start().await
+}
+
+/// Start a parameterized workflow from any call site.
+///
+/// Requires `app.workflow_template::<D>()` to have been called at startup.
+pub async fn start_workflow_with<D>(
+    params: D::Params,
+) -> WorkflowStartResult<WorkflowHandle<D::Output>>
+where
+    D: WorkflowDefinition + 'static,
+    D::Output: DeserializeOwned + Clone + Send + Sync + 'static,
+    D::Params: Clone + Send + Sync + 'static,
+{
+    let template: WorkflowTemplate<D::Params, D::Output> =
+        global_registry::get_workflow::<D, WorkflowTemplate<D::Params, D::Output>>().ok_or_else(
+            || WorkflowStartError {
+                code: WorkflowStartErrorCode::ValidationFailed,
+                message: format!(
+                    "workflow template '{}' ({}) is not registered — call app.workflow_template::<{}>() at startup",
+                    D::name(),
+                    global_registry::definition_type_name::<D>(),
+                    global_registry::definition_type_name::<D>(),
+                ),
+                retryable: false,
+                workflow_name: D::name().to_owned(),
+                workflow_id: String::new(),
+            },
+        )?;
+    template.start(params).await
+}
 
 pub struct Horsies {
     pub(crate) core: CoreHorsies,
@@ -366,19 +426,26 @@ impl Horsies {
         &mut self,
     ) -> Result<WorkflowFunction<D::Output>, HorsiesError>
     where
-        D: WorkflowDefinition<Params = ()>,
-        D::Output: DeserializeOwned + Clone,
+        D: WorkflowDefinition<Params = ()> + 'static,
+        D::Output: DeserializeOwned + Clone + Send + Sync + 'static,
     {
         let registered = D::build_registered()?;
-        self.register_workflow::<D::Output>(registered)
+        let wf = self.register_workflow::<D::Output>(registered)?;
+        global_registry::store_workflow::<D, WorkflowFunction<D::Output>>(wf.clone());
+        Ok(wf)
     }
 
     pub fn workflow_template<D>(&self) -> WorkflowTemplate<D::Params, D::Output>
     where
         D: WorkflowDefinition + 'static,
-        D::Output: DeserializeOwned + Clone,
+        D::Output: DeserializeOwned + Clone + Send + Sync + 'static,
+        D::Params: Clone + Send + Sync + 'static,
     {
-        WorkflowTemplate::from_definition::<D>(self.workflow_starter())
+        let template = WorkflowTemplate::from_definition::<D>(self.workflow_starter());
+        global_registry::store_workflow::<D, WorkflowTemplate<D::Params, D::Output>>(
+            template.clone(),
+        );
+        template
     }
 
     pub fn check(&self) -> Result<(), HorsiesError> {
@@ -813,27 +880,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generated_task_helper_send_uses_registered_handle() {
+    async fn generated_task_global_send_uses_registered_handle() {
         let mut app = Horsies::new(valid_config()).unwrap();
         macro_dispatch_target::register(&mut app).unwrap();
         app.suppress_sends(true);
-        let rt = app.task_runtime();
 
-        let err = macro_dispatch_target::send(&rt, MacroAddArgs { a: 1, b: 2 })
+        let err = macro_dispatch_target::send(MacroAddArgs { a: 1, b: 2 })
             .await
             .unwrap_err();
         assert_eq!(err.code, crate::TaskSendErrorCode::SendSuppressed);
     }
 
     #[tokio::test]
-    async fn generated_task_helper_schedule_uses_registered_handle() {
+    async fn generated_task_global_schedule_uses_registered_handle() {
         let mut app = Horsies::new(valid_config()).unwrap();
         macro_dispatch_target::register(&mut app).unwrap();
         app.suppress_sends(true);
-        let rt = app.task_runtime();
 
         let err = macro_dispatch_target::schedule(
-            &rt,
             std::time::Duration::from_secs(30),
             MacroAddArgs { a: 3, b: 4 },
         )

@@ -159,16 +159,16 @@ async fn dynamic_rt_start(rt: TaskRuntime, input: DynamicStartInput) -> Result<S
 }
 
 #[task("e2e_runtime_helper_dispatch")]
-async fn runtime_helper_dispatch(rt: TaskRuntime) -> Result<String, TaskError> {
-    let handle = rt_ping::send(&rt, ())
+async fn runtime_helper_dispatch(_rt: TaskRuntime) -> Result<String, TaskError> {
+    let handle = rt_ping::send(())
         .await
         .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
     Ok(handle.task_id().to_owned())
 }
 
 #[task("e2e_runtime_helper_schedule")]
-async fn runtime_helper_schedule(rt: TaskRuntime) -> Result<String, TaskError> {
-    let handle = rt_ping::schedule(&rt, std::time::Duration::from_secs(5), ())
+async fn runtime_helper_schedule(_rt: TaskRuntime) -> Result<String, TaskError> {
+    let handle = rt_ping::schedule(std::time::Duration::from_secs(5), ())
         .await
         .map_err(|err| TaskError::user("SCHEDULE_FAILED", err.message))?;
     Ok(handle.task_id().to_owned())

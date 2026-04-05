@@ -1,9 +1,9 @@
-//! Dispatch registered tasks from inside a task via generated helpers.
+//! Dispatch registered tasks from any call site via generated helpers.
 //!
 //! This example shows the intended ergonomic path:
-//! - register tasks once
-//! - call `task_name::send(&rt, args)` or `task_name::schedule(&rt, delay, args)`
-//! - use `task_name::handle(&rt)` when reusing a handle repeatedly
+//! - register tasks once at startup
+//! - call `task_name::send(args)` or `task_name::schedule(delay, args)` from anywhere
+//! - use `task_name::handle(&rt)` for explicit runtime-based dispatch
 
 use horsies::{task, AppConfig, Horsies, PostgresConfig, QueueMode, TaskError, TaskRuntime};
 
@@ -18,17 +18,22 @@ async fn add_numbers(input: AddNumbersInput) -> Result<i32, TaskError> {
     Ok(input.a + input.b)
 }
 
+/// This task dispatches other tasks using the global helpers — no &rt needed.
 #[task("enqueue_add_numbers")]
-async fn enqueue_add_numbers(rt: TaskRuntime) -> Result<(), TaskError> {
-    add_numbers::send(&rt, AddNumbersInput { a: 1, b: 2 })
-    .await
-    .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
+async fn enqueue_add_numbers(_rt: TaskRuntime) -> Result<(), TaskError> {
+    // Global send — works from anywhere after register()
+    add_numbers::send(AddNumbersInput { a: 1, b: 2 })
+        .await
+        .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
 
-    add_numbers::schedule(&rt, std::time::Duration::from_secs(30), AddNumbersInput { a: 3, b: 4 })
-    .await
-    .map_err(|err| TaskError::user("SCHEDULE_FAILED", err.message))?;
+    // Global schedule — same, no &rt needed
+    add_numbers::schedule(std::time::Duration::from_secs(30), AddNumbersInput { a: 3, b: 4 })
+        .await
+        .map_err(|err| TaskError::user("SCHEDULE_FAILED", err.message))?;
 
-    let add = add_numbers::handle(&rt)?;
+    // Explicit path via handle(&rt) — for repeated sends or testing
+    // (requires TaskRuntime in signature)
+    let add = add_numbers::handle(&_rt)?;
     for (a, b) in [(5, 6), (7, 8)] {
         add
             .send(AddNumbersInput { a, b })
@@ -71,7 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _enqueue = enqueue_add_numbers::register(&mut app)?;
 
     println!("registered runtime task dispatch example");
-    println!("inside a worker, call task_name::send/schedule/handle(&rt, ...) directly");
+    println!("call task_name::send(args) from anywhere after register()");
 
     Ok(())
 }

@@ -162,6 +162,33 @@ match child.start("https://example.com/data.json".to_owned()).await {
 }
 ```
 
+### Start workflows from anywhere
+
+Registered workflows also expose global dispatch. Register once at startup,
+then start from anywhere:
+
+```rust
+// Zero-param workflow (after app.register_workflow_definition::<ETLPipeline>()):
+match horsies::start_workflow::<ETLPipeline>().await {
+    Ok(handle) => {
+        let result = handle.get(Some(Duration::from_secs(60))).await?;
+    }
+    Err(err) => {
+        eprintln!("start failed: {}", err.message);
+    }
+}
+
+// Parameterized workflow (after app.workflow_template::<ChildPipeline>()):
+match horsies::start_workflow_with::<ChildPipeline>("https://example.com/data.json".to_owned()).await {
+    Ok(handle) => {
+        let result = handle.get(Some(Duration::from_secs(60))).await?;
+    }
+    Err(err) => {
+        eprintln!("start failed: {}", err.message);
+    }
+}
+```
+
 Ad hoc dynamic workflows can still use `app.start()`:
 
 ```rust
@@ -245,17 +272,17 @@ registration.register()?;
 app.check()?;
 ```
 
-### Send and schedule tasks from inside tasks
+### Send and schedule tasks from anywhere
 
-Registered tasks now expose generated runtime helpers, so task-to-task dispatch
-does not require globals or manual handle wiring:
+Registered tasks expose global helpers. Register once at startup, then call
+`task_name::send(args)` or `task_name::schedule(delay, args)` from anywhere:
 
 ```rust
 use horsies::{task, TaskError, TaskRuntime};
 
 #[task("enqueue_add_numbers")]
 async fn enqueue_add_numbers(rt: TaskRuntime) -> Result<(), TaskError> {
-    match add_numbers::send(&rt, AddNumbersInput { a: 2, b: 3 }).await {
+    match add_numbers::send(AddNumbersInput { a: 2, b: 3 }).await {
         Ok(handle) => {
             tracing::info!(task_id = %handle.task_id(), "sent add_numbers");
         }
@@ -265,7 +292,6 @@ async fn enqueue_add_numbers(rt: TaskRuntime) -> Result<(), TaskError> {
     }
 
     match add_numbers::schedule(
-        &rt,
         std::time::Duration::from_secs(30),
         AddNumbersInput { a: 5, b: 8 },
     )
@@ -279,6 +305,7 @@ async fn enqueue_add_numbers(rt: TaskRuntime) -> Result<(), TaskError> {
         }
     }
 
+    // Explicit handle-based path (useful for testing or advanced scenarios):
     let add_numbers_task = add_numbers::handle(&rt)?;
     match add_numbers_task.send(AddNumbersInput { a: 13, b: 21 }).await {
         Ok(handle) => {
@@ -330,8 +357,10 @@ app.run_scheduler().await?;
 
 ## Start Patterns
 
-Use these three start paths consistently:
+Use these start paths consistently:
 
+- Global dispatch (primary):
+  `horsies::start_workflow::<D>()` or `horsies::start_workflow_with::<D>(params)`
 - Setup / HTTP / reusable start:
   `WorkflowFunction<T>` or `WorkflowTemplate<P, T>`
 - Ad hoc external dynamic start:
@@ -341,13 +370,20 @@ Use these three start paths consistently:
 
 ## Migration Notes
 
+From `alpha.5` to `alpha.6`:
+
+- Task global helpers no longer take `&rt`:
+  `task_name::send(args)`, `task_name::schedule(delay, args)`.
+  The explicit path `task_name::handle(&rt)?.send(args)` still works for testing/advanced use.
+- Workflow global dispatch added:
+  `horsies::start_workflow::<D>()` for zero-param workflows (after `app.register_workflow_definition::<D>()`),
+  `horsies::start_workflow_with::<D>(params)` for parameterized workflows (after `app.workflow_template::<D>()`).
+
 From `alpha.3` / `alpha.4` to `alpha.5`:
 
 - `WorkflowStarter` is not public.
   For external reusable starts, keep `WorkflowFunction<T>` or `WorkflowTemplate<P, T>` in app state.
   For dynamic starts inside tasks, use `TaskRuntime`.
-- Task dispatch inside tasks should use generated helpers:
-  `task_name::send(&rt, args)`, `task_name::schedule(&rt, delay, args)`, and `task_name::handle(&rt)`.
 - For check-time validation of parameterized or runtime-built workflow specs, use:
   `app.check_workflow_builder(...)` or `app.check_workflow_builder0(...)`.
 

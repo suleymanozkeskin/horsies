@@ -52,12 +52,16 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
         task_name_value
     );
     let send_docs = format!(
-        "Enqueue `{}` immediately from inside another task using `TaskRuntime`.",
+        "Enqueue `{}` immediately. Works from any call site after `register()` is called at startup.",
         task_name_value
     );
     let schedule_docs = format!(
-        "Enqueue `{}` with a delay from inside another task using `TaskRuntime`.",
+        "Enqueue `{}` with a delay. Works from any call site after `register()` is called at startup.",
         task_name_value
+    );
+    let not_registered_msg = format!(
+        "task '{}' is not registered — call {}::register(&mut app) at startup",
+        task_name_value, task_name_value
     );
 
     // Build the queue setter chain
@@ -90,10 +94,14 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
         #vis mod #fn_name {
             use super::*;
 
+            static __HANDLE: std::sync::OnceLock<
+                horsies::TaskFunction<#args_type, #output_type>,
+            > = std::sync::OnceLock::new();
+
             /// Register this task on the app and return a typed `TaskFunction`.
             ///
-            /// This is the only public entry point. The macro generates direct
-            /// builder calls — no intermediate descriptor trait involved.
+            /// Also populates the global handle so that [`send`] and [`schedule`]
+            /// work from any call site without `TaskRuntime`.
             pub fn register(
                 app: &mut horsies::Horsies,
             ) -> Result<
@@ -107,7 +115,9 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
                 )?;
                 #queue_chain
                 #opts_chain
-                builder.register()
+                let handle = builder.register()?;
+                let _ = __HANDLE.set(handle.clone());
+                Ok(handle)
             }
 
             #[doc = #helper_docs]
@@ -119,33 +129,37 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
 
             #[doc = #send_docs]
             pub async fn send(
-                rt: &horsies::TaskRuntime,
                 args: #args_type,
             ) -> horsies::TaskSendResult<horsies::TaskHandle<#output_type>> {
-                let handle = handle(rt).map_err(|err| horsies::TaskSendError {
-                    code: horsies::TaskSendErrorCode::ValidationFailed,
-                    message: err.to_string(),
-                    retryable: false,
-                    task_id: None,
-                    payload: None,
-                })?;
-                handle.send(args).await
+                __HANDLE
+                    .get()
+                    .ok_or_else(|| horsies::TaskSendError {
+                        code: horsies::TaskSendErrorCode::ValidationFailed,
+                        message: #not_registered_msg.to_owned(),
+                        retryable: false,
+                        task_id: None,
+                        payload: None,
+                    })?
+                    .send(args)
+                    .await
             }
 
             #[doc = #schedule_docs]
             pub async fn schedule(
-                rt: &horsies::TaskRuntime,
                 delay: std::time::Duration,
                 args: #args_type,
             ) -> horsies::TaskSendResult<horsies::TaskHandle<#output_type>> {
-                let handle = handle(rt).map_err(|err| horsies::TaskSendError {
-                    code: horsies::TaskSendErrorCode::ValidationFailed,
-                    message: err.to_string(),
-                    retryable: false,
-                    task_id: None,
-                    payload: None,
-                })?;
-                handle.schedule(delay, args).await
+                __HANDLE
+                    .get()
+                    .ok_or_else(|| horsies::TaskSendError {
+                        code: horsies::TaskSendErrorCode::ValidationFailed,
+                        message: #not_registered_msg.to_owned(),
+                        retryable: false,
+                        task_id: None,
+                        payload: None,
+                    })?
+                    .schedule(delay, args)
+                    .await
             }
         }
     })

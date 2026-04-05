@@ -233,16 +233,17 @@ registration.register()?;
 app.check()?;
 ```
 
-### Inside a worker (task-to-task dispatch)
+### Task dispatch from anywhere
 
-Registered tasks now generate runtime helpers automatically:
+Register once at startup, then call `task_name::send(args)` or
+`task_name::schedule(delay, args)` from anywhere:
 
 ```rust
 use horsies::{task, TaskError, TaskRuntime};
 
 #[task("enqueue_add_numbers")]
 async fn enqueue_add_numbers(rt: TaskRuntime) -> Result<(), TaskError> {
-    match add_numbers::send(&rt, AddNumbersInput { a: 2, b: 3 }).await {
+    match add_numbers::send(AddNumbersInput { a: 2, b: 3 }).await {
         Ok(handle) => {
             tracing::info!(task_id = %handle.task_id(), "sent add_numbers");
         }
@@ -252,7 +253,6 @@ async fn enqueue_add_numbers(rt: TaskRuntime) -> Result<(), TaskError> {
     }
 
     match add_numbers::schedule(
-        &rt,
         std::time::Duration::from_secs(30),
         AddNumbersInput { a: 5, b: 8 },
     )
@@ -266,6 +266,7 @@ async fn enqueue_add_numbers(rt: TaskRuntime) -> Result<(), TaskError> {
         }
     }
 
+    // Explicit handle-based path (testing / advanced):
     let add_numbers_task = add_numbers::handle(&rt)?;
     match add_numbers_task.send(AddNumbersInput { a: 13, b: 21 }).await {
         Ok(handle) => {
@@ -280,6 +281,32 @@ async fn enqueue_add_numbers(rt: TaskRuntime) -> Result<(), TaskError> {
 
 add_numbers::register(&mut app)?;
 enqueue_add_numbers::register(&mut app)?;
+```
+
+### Workflow dispatch from anywhere
+
+Register once at startup, then start from anywhere:
+
+```rust
+// Zero-param workflow (after app.register_workflow_definition::<ETLPipeline>()):
+match horsies::start_workflow::<ETLPipeline>().await {
+    Ok(handle) => {
+        let result = handle.get(Some(Duration::from_secs(60))).await?;
+    }
+    Err(err) => {
+        eprintln!("start failed: {}", err.message);
+    }
+}
+
+// Parameterized workflow (after app.workflow_template::<ChildPipeline>()):
+match horsies::start_workflow_with::<ChildPipeline>("https://example.com/data.json".to_owned()).await {
+    Ok(handle) => {
+        let result = handle.get(Some(Duration::from_secs(60))).await?;
+    }
+    Err(err) => {
+        eprintln!("start failed: {}", err.message);
+    }
+}
 ```
 
 ### Inside a worker (typed runtime state)
@@ -325,6 +352,7 @@ let status = handle.status().await?;
 
 ## Blessed Start Patterns
 
+- Global dispatch: `horsies::start_workflow::<D>()` and `horsies::start_workflow_with::<D>(params)`
 - Reusable setup/HTTP starts: `WorkflowFunction<T>` and `WorkflowTemplate<P, T>`
 - Ad hoc external dynamic starts: `app.start::<T>(spec)`
 - In-task dynamic starts: `TaskRuntime::start::<T>(spec)`

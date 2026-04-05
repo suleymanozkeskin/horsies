@@ -31,11 +31,12 @@ mod parse;
 /// }
 /// ```
 ///
-/// Registered tasks also generate runtime helpers for task-to-task dispatch:
+/// Registered tasks also generate global helpers for dispatch from anywhere:
 ///
 /// ```ignore
-/// extract_attachment_text::send(&rt, input).await?;
-/// extract_attachment_text::schedule(&rt, Duration::from_secs(30), input).await?;
+/// extract_attachment_text::send(input).await?;
+/// extract_attachment_text::schedule(Duration::from_secs(30), input).await?;
+/// // Explicit handle-based path (testing / advanced):
 /// let extract = extract_attachment_text::handle(&rt)?;
 /// ```
 ///

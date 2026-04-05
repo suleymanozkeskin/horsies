@@ -179,7 +179,7 @@ async fn build_child_workflow(
 
 #[task("enqueue_add_numbers")]
 async fn enqueue_add_numbers(rt: TaskRuntime) -> Result<(), TaskError> {
-    match add_numbers::send(&rt, AddNumbersInput { a: 2, b: 3 }).await {
+    match add_numbers::send(AddNumbersInput { a: 2, b: 3 }).await {
         Ok(handle) => {
             tracing::info!(task_id = %handle.task_id(), "sent add_numbers");
         }
@@ -188,7 +188,7 @@ async fn enqueue_add_numbers(rt: TaskRuntime) -> Result<(), TaskError> {
         }
     }
 
-    match add_numbers::schedule(&rt, Duration::from_secs(30), AddNumbersInput { a: 5, b: 8 }).await
+    match add_numbers::schedule(Duration::from_secs(30), AddNumbersInput { a: 5, b: 8 }).await
     {
         Ok(handle) => {
             tracing::info!(task_id = %handle.task_id(), "scheduled add_numbers");

@@ -289,8 +289,10 @@ SubWorkflowNode::<ChildOutput>::new("child_workflow_name")
 
 The blessed public start paths are:
 
-- `WorkflowFunction<T>::start()` for reusable fixed workflows
-- `WorkflowTemplate<P, T>::start(params)` for reusable parameterized workflows
+- `horsies::start_workflow::<D>()` for global dispatch of zero-param workflows
+- `horsies::start_workflow_with::<D>(params)` for global dispatch of parameterized workflows
+- `WorkflowFunction<T>::start()` for reusable fixed workflows (setup/HTTP context)
+- `WorkflowTemplate<P, T>::start(params)` for reusable parameterized workflows (setup/HTTP context)
 - `app.start::<T>(spec)` for ad hoc external dynamic specs
 - `TaskRuntime::start::<T>(spec)` for dynamic starts inside running tasks
 
@@ -400,16 +402,17 @@ it appears as the first parameter in the task signature.
 Sub-workflows referenced by a dynamically-built spec must be registered
 before the worker starts (i.e. before the app is consumed).
 
-### 5. Inside a worker via generated task helpers
+### 5. Global task dispatch from anywhere
 
-Registered tasks now generate typed runtime helpers automatically:
+Register once at startup, then call `task_name::send(args)` or
+`task_name::schedule(delay, args)` from anywhere:
 
 ```rust
 use horsies::{task, TaskError, TaskRuntime};
 
 #[task("enqueue_add_numbers")]
 async fn enqueue_add_numbers(rt: TaskRuntime) -> Result<(), TaskError> {
-    match add_numbers::send(&rt, AddNumbersInput { a: 2, b: 3 }).await {
+    match add_numbers::send(AddNumbersInput { a: 2, b: 3 }).await {
         Ok(handle) => {
             tracing::info!(task_id = %handle.task_id(), "sent add_numbers");
         }
@@ -419,7 +422,6 @@ async fn enqueue_add_numbers(rt: TaskRuntime) -> Result<(), TaskError> {
     }
 
     match add_numbers::schedule(
-        &rt,
         std::time::Duration::from_secs(30),
         AddNumbersInput { a: 5, b: 8 },
     )
@@ -433,6 +435,7 @@ async fn enqueue_add_numbers(rt: TaskRuntime) -> Result<(), TaskError> {
         }
     }
 
+    // Explicit handle-based path (testing / advanced):
     let add_numbers_task = add_numbers::handle(&rt)?;
     match add_numbers_task.send(AddNumbersInput { a: 13, b: 21 }).await {
         Ok(handle) => {
@@ -449,7 +452,33 @@ add_numbers::register(&mut app)?;
 enqueue_add_numbers::register(&mut app)?;
 ```
 
-### 6. Inside a worker via `TaskRuntime::state()` (typed runtime state)
+### 6. Global workflow dispatch from anywhere
+
+Register once at startup, then start from anywhere:
+
+```rust
+// Zero-param workflow (after app.register_workflow_definition::<ETLPipeline>()):
+match horsies::start_workflow::<ETLPipeline>().await {
+    Ok(handle) => {
+        let result = handle.get(Some(Duration::from_secs(60))).await?;
+    }
+    Err(err) => {
+        eprintln!("start failed: {}", err.message);
+    }
+}
+
+// Parameterized workflow (after app.workflow_template::<ChildPipeline>()):
+match horsies::start_workflow_with::<ChildPipeline>("https://example.com/data.json".to_owned()).await {
+    Ok(handle) => {
+        let result = handle.get(Some(Duration::from_secs(60))).await?;
+    }
+    Err(err) => {
+        eprintln!("start failed: {}", err.message);
+    }
+}
+```
+
+### 7. Inside a worker via `TaskRuntime::state()` (typed runtime state)
 
 Use `app.provide(...)` for arbitrary app-owned runtime state such as config,
 clients, or domain services:
