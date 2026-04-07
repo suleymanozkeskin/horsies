@@ -820,8 +820,12 @@ async fn enqueue_subworkflow_task(
             builder(args_json, kwargs_json).map_err(|e| WorkflowError::WorkflowNotFound {
                 workflow_id: format!("spec_builder for '{}' failed: {}", spec_name, e,),
             })?;
-        // Dynamic specs bypass register_workflow(), so resolve task options here.
+        // Dynamic specs bypass register_workflow(), so resolve task options
+        // and queue/priority here.
         registry.resolve_spec_task_options(&mut spec);
+        registry
+            .resolve_and_validate_spec_queue_priority(&mut spec)
+            .map_err(|e| WorkflowError::Validation(e.to_string()))?;
         spec
     } else {
         registered.spec.clone()

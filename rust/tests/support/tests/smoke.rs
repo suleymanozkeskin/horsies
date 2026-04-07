@@ -196,10 +196,15 @@ async fn workflow_helpers_start_and_complete_workflow() {
 
     // Build a simple 2-node chain: a -> b
     let mut builder = WorkflowSpecBuilder::new("smoke_test_wf");
-    let a = builder.task(TaskNode::<serde_json::Value>::new("task_a").node_id("a"));
+    let a = builder.task(
+        TaskNode::<serde_json::Value>::new("task_a")
+            .node_id("a")
+            .queue("default"),
+    );
     builder.task(
         TaskNode::<serde_json::Value>::new("task_b")
             .node_id("b")
+            .queue("default")
             .waits_for(a),
     );
     let spec = builder.build().unwrap();
@@ -255,7 +260,11 @@ async fn workflow_helpers_failing_task_fails_workflow() {
     let registry = WorkflowSpecRegistry::new();
 
     let mut builder = WorkflowSpecBuilder::new("smoke_fail_wf");
-    builder.task(TaskNode::<serde_json::Value>::new("task_a").node_id("a"));
+    builder.task(
+        TaskNode::<serde_json::Value>::new("task_a")
+            .node_id("a")
+            .queue("default"),
+    );
     let spec = builder.build().unwrap();
 
     let handle: WorkflowHandle<serde_json::Value> =
@@ -290,6 +299,7 @@ async fn workflow_helpers_good_until_persisted_via_task_options() {
     builder.task(
         TaskNode::<serde_json::Value>::new("task_a")
             .node_id("a")
+            .queue("default")
             .good_until(deadline),
     );
     let spec = builder.build().unwrap();
@@ -348,10 +358,15 @@ async fn workflow_helpers_count_tasks_in_status() {
     let registry = WorkflowSpecRegistry::new();
 
     let mut builder = WorkflowSpecBuilder::new("smoke_count_wf");
-    let a = builder.task(TaskNode::<serde_json::Value>::new("task_a").node_id("a"));
+    let a = builder.task(
+        TaskNode::<serde_json::Value>::new("task_a")
+            .node_id("a")
+            .queue("default"),
+    );
     builder.task(
         TaskNode::<serde_json::Value>::new("task_b")
             .node_id("b")
+            .queue("default")
             .waits_for(a),
     );
     let spec = builder.build().unwrap();

@@ -271,7 +271,9 @@ async fn start_workflow_inner<T>(
 
 fn classify_workflow_error(e: &WorkflowError) -> WorkflowStartErrorCode {
     match e {
-        WorkflowError::Serialization(_) => WorkflowStartErrorCode::ValidationFailed,
+        WorkflowError::Serialization(_) | WorkflowError::Validation(_) => {
+            WorkflowStartErrorCode::ValidationFailed
+        }
         WorkflowError::Database(_) | WorkflowError::Broker(_) => {
             WorkflowStartErrorCode::EnqueueFailed
         }
@@ -337,7 +339,14 @@ fn insert_workflow_tasks<'a>(
             } else {
                 Some(serde_json::to_value(&task.args_from)?)
             };
-            let queue = task.queue.as_deref().unwrap_or("default");
+            let queue = task.queue.as_deref().ok_or_else(|| {
+                WorkflowError::Validation(format!(
+                    "node '{}' (task '{}') has no resolved queue; \
+                     this indicates a missing resolution step before workflow start",
+                    task.node_id.as_deref().unwrap_or("?"),
+                    task.task_name,
+                ))
+            })?;
             let priority = task.priority.unwrap_or(100);
 
             // Merge good_until into task_options_json (mirrors Python's lifecycle.py).
@@ -600,11 +609,15 @@ pub(crate) fn build_child_spec(
             builder(args_json, kwargs_json).map_err(|e| WorkflowError::WorkflowNotFound {
                 workflow_id: format!("spec_builder for '{}' failed: {}", registered.spec.name, e,),
             })?;
-        // Dynamic specs bypass register_workflow(), so resolve task options here.
+        // Dynamic specs bypass register_workflow(), so resolve task options
+        // and queue/priority here.
         registry.resolve_spec_task_options(&mut spec);
+        registry
+            .resolve_and_validate_spec_queue_priority(&mut spec)
+            .map_err(|e| WorkflowError::Validation(e.to_string()))?;
         Ok(spec)
     } else {
-        // Static specs already had task options resolved at register_workflow() time.
+        // Static specs already had options/queue/priority resolved at register_workflow() time.
         Ok(registered.spec.clone())
     }
 }

@@ -35,6 +35,10 @@ pub struct TaskMeta {
     /// Definition-time task options, if the task was registered through
     /// a producer/builder path that carries them.
     pub task_options: Option<TaskOptions>,
+    /// Resolved queue name from task registration.
+    pub queue_name: Option<String>,
+    /// Resolved priority from task registration.
+    pub priority: Option<u32>,
 }
 
 /// A registered task: either async or blocking.
@@ -121,6 +125,40 @@ impl RegisteredTask {
     pub fn task_options(&self) -> Option<&TaskOptions> {
         match self {
             Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.task_options.as_ref(),
+        }
+    }
+
+    /// Set the resolved queue name on this task's metadata.
+    pub fn set_queue_name(&mut self, queue: String) {
+        match self {
+            Self::Async { meta, .. } | Self::Blocking { meta, .. } => {
+                meta.queue_name = Some(queue);
+            }
+        }
+    }
+
+    /// Set the resolved priority on this task's metadata.
+    pub fn set_priority(&mut self, priority: u32) {
+        match self {
+            Self::Async { meta, .. } | Self::Blocking { meta, .. } => {
+                meta.priority = Some(priority);
+            }
+        }
+    }
+
+    /// The resolved queue name, if set during registration.
+    pub fn queue_name(&self) -> Option<&str> {
+        match self {
+            Self::Async { meta, .. } | Self::Blocking { meta, .. } => {
+                meta.queue_name.as_deref()
+            }
+        }
+    }
+
+    /// The resolved priority, if set during registration.
+    pub fn priority(&self) -> Option<u32> {
+        match self {
+            Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.priority,
         }
     }
 }

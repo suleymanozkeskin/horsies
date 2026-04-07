@@ -31,4 +31,8 @@ pub enum WorkflowError {
     /// Unrecognized status string from the database.
     #[error("invalid status: {0}")]
     InvalidStatus(String),
+
+    /// Workflow validation error (unresolved queue, invalid node config, etc.).
+    #[error("workflow validation error: {0}")]
+    Validation(String),
 }

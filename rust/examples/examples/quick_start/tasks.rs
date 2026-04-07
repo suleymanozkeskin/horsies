@@ -5,9 +5,39 @@ use std::collections::HashMap;
 use chrono::Utc;
 use uuid::Uuid;
 
-use horsies::{Horsies, TaskError, TaskFunction};
+use horsies::{Horsies, TaskError, TaskFunction, TaskResult};
 
 use super::models::*;
+
+// ---------------------------------------------------------------------------
+// Args-from input structs
+// ---------------------------------------------------------------------------
+
+/// Input for tasks that receive the validated order via args_from.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OrderArgsFrom {
+    pub order: TaskResult<ValidatedOrder>,
+}
+
+/// Aggregated input for reserve_inventory (fan-in from three parallel checks).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ReserveInput {
+    pub inventory: TaskResult<InventoryStatus>,
+    pub cost: TaskResult<ShippingCost>,
+    pub address: TaskResult<AddressValidation>,
+}
+
+/// Input for create_shipment via args_from.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ShipmentArgsFrom {
+    pub reservation: TaskResult<Reservation>,
+}
+
+/// Input for send_notification via args_from.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct NotifyArgsFrom {
+    pub shipment: TaskResult<Shipment>,
+}
 
 // ---------------------------------------------------------------------------
 // Task functions — annotated with #[horsies::task]
@@ -42,7 +72,15 @@ pub async fn validate_order(order: Order) -> Result<ValidatedOrder, TaskError> {
 }
 
 #[horsies::task("check_inventory", queue = "standard")]
-pub async fn check_inventory(order: ValidatedOrder) -> Result<InventoryStatus, TaskError> {
+pub async fn check_inventory(args: OrderArgsFrom) -> Result<InventoryStatus, TaskError> {
+    let order = match args.order {
+        TaskResult::Ok(v) => v,
+        TaskResult::Err(e) => return Err(TaskError::user(
+            "UPSTREAM_FAILED",
+            format!("Cannot check inventory: upstream failed - {:?}", e.error_code),
+        )),
+    };
+
     let availability: HashMap<String, bool> = order
         .items
         .iter()
@@ -57,7 +95,15 @@ pub async fn check_inventory(order: ValidatedOrder) -> Result<InventoryStatus, T
 }
 
 #[horsies::task("calculate_shipping_cost", queue = "standard")]
-pub async fn calculate_shipping_cost(order: ValidatedOrder) -> Result<ShippingCost, TaskError> {
+pub async fn calculate_shipping_cost(args: OrderArgsFrom) -> Result<ShippingCost, TaskError> {
+    let order = match args.order {
+        TaskResult::Ok(v) => v,
+        TaskResult::Err(e) => return Err(TaskError::user(
+            "UPSTREAM_FAILED",
+            format!("Cannot calculate cost: upstream failed - {:?}", e.error_code),
+        )),
+    };
+
     let total_weight: f64 = order.items.iter().map(|i| i.quantity as f64 * 0.5).sum();
 
     let base_cost: u64 = match order.shipping_method {
@@ -76,7 +122,15 @@ pub async fn calculate_shipping_cost(order: ValidatedOrder) -> Result<ShippingCo
 }
 
 #[horsies::task("check_address", queue = "standard")]
-pub async fn check_address(order: ValidatedOrder) -> Result<AddressValidation, TaskError> {
+pub async fn check_address(args: OrderArgsFrom) -> Result<AddressValidation, TaskError> {
+    let order = match args.order {
+        TaskResult::Ok(v) => v,
+        TaskResult::Err(e) => return Err(TaskError::user(
+            "UPSTREAM_FAILED",
+            format!("Cannot check address: upstream failed - {:?}", e.error_code),
+        )),
+    };
+
     let addr = &order.shipping_address;
     let is_valid = !addr.street.is_empty() && !addr.city.is_empty() && !addr.postal_code.is_empty();
 
@@ -93,14 +147,36 @@ pub async fn check_address(order: ValidatedOrder) -> Result<AddressValidation, T
 }
 
 #[horsies::task("reserve_inventory", queue = "urgent")]
-pub async fn reserve_inventory(reservation: ReserveInput) -> Result<Reservation, TaskError> {
-    if !reservation.inventory.all_available {
+pub async fn reserve_inventory(input: ReserveInput) -> Result<Reservation, TaskError> {
+    let inventory = match input.inventory {
+        TaskResult::Ok(v) => v,
+        TaskResult::Err(e) => return Err(TaskError::user(
+            "UPSTREAM_FAILED",
+            format!("Cannot reserve: inventory check failed - {:?}", e.error_code),
+        )),
+    };
+    let cost = match input.cost {
+        TaskResult::Ok(v) => v,
+        TaskResult::Err(e) => return Err(TaskError::user(
+            "UPSTREAM_FAILED",
+            format!("Cannot reserve: cost calculation failed - {:?}", e.error_code),
+        )),
+    };
+    let address = match input.address {
+        TaskResult::Ok(v) => v,
+        TaskResult::Err(e) => return Err(TaskError::user(
+            "UPSTREAM_FAILED",
+            format!("Cannot reserve: address check failed - {:?}", e.error_code),
+        )),
+    };
+
+    if !inventory.all_available {
         return Err(TaskError::user(
             "ITEMS_UNAVAILABLE",
             "Some items are not available",
         ));
     }
-    if !reservation.address.is_valid {
+    if !address.is_valid {
         return Err(TaskError::user(
             "INVALID_ADDRESS",
             "Shipping address is invalid",
@@ -108,16 +184,24 @@ pub async fn reserve_inventory(reservation: ReserveInput) -> Result<Reservation,
     }
 
     Ok(Reservation {
-        order_id: reservation.inventory.order_id.clone(),
+        order_id: inventory.order_id.clone(),
         reservation_id: Uuid::new_v4().to_string(),
         reserved_items: Vec::new(),
         reserved_at: Utc::now(),
-        shipping_cost_cents: reservation.cost.total_cost_cents,
+        shipping_cost_cents: cost.total_cost_cents,
     })
 }
 
 #[horsies::task("create_shipment", queue = "urgent")]
-pub async fn create_shipment(reservation: Reservation) -> Result<Shipment, TaskError> {
+pub async fn create_shipment(args: ShipmentArgsFrom) -> Result<Shipment, TaskError> {
+    let reservation = match args.reservation {
+        TaskResult::Ok(v) => v,
+        TaskResult::Err(e) => return Err(TaskError::user(
+            "UPSTREAM_FAILED",
+            format!("Cannot create shipment: upstream failed - {:?}", e.error_code),
+        )),
+    };
+
     Ok(Shipment {
         order_id: reservation.order_id,
         shipment_id: Uuid::new_v4().to_string(),
@@ -129,7 +213,15 @@ pub async fn create_shipment(reservation: Reservation) -> Result<Shipment, TaskE
 }
 
 #[horsies::task("send_notification", queue = "low")]
-pub async fn send_notification(shipment: Shipment) -> Result<NotificationResult, TaskError> {
+pub async fn send_notification(args: NotifyArgsFrom) -> Result<NotificationResult, TaskError> {
+    let shipment = match args.shipment {
+        TaskResult::Ok(v) => v,
+        TaskResult::Err(e) => return Err(TaskError::user(
+            "UPSTREAM_FAILED",
+            format!("Cannot notify: upstream failed - {:?}", e.error_code),
+        )),
+    };
+
     Ok(NotificationResult {
         order_id: shipment.order_id,
         email_sent: true,
@@ -139,28 +231,17 @@ pub async fn send_notification(shipment: Shipment) -> Result<NotificationResult,
 }
 
 // ---------------------------------------------------------------------------
-// Aggregated input for reserve_inventory
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ReserveInput {
-    pub inventory: InventoryStatus,
-    pub cost: ShippingCost,
-    pub address: AddressValidation,
-}
-
-// ---------------------------------------------------------------------------
 // Registration — one line per task via descriptors
 // ---------------------------------------------------------------------------
 
 pub struct Tasks {
     pub validate_order: TaskFunction<Order, ValidatedOrder>,
-    pub check_inventory: TaskFunction<ValidatedOrder, InventoryStatus>,
-    pub calculate_shipping_cost: TaskFunction<ValidatedOrder, ShippingCost>,
-    pub check_address: TaskFunction<ValidatedOrder, AddressValidation>,
+    pub check_inventory: TaskFunction<OrderArgsFrom, InventoryStatus>,
+    pub calculate_shipping_cost: TaskFunction<OrderArgsFrom, ShippingCost>,
+    pub check_address: TaskFunction<OrderArgsFrom, AddressValidation>,
     pub reserve_inventory: TaskFunction<ReserveInput, Reservation>,
-    pub create_shipment: TaskFunction<Reservation, Shipment>,
-    pub send_notification: TaskFunction<Shipment, NotificationResult>,
+    pub create_shipment: TaskFunction<ShipmentArgsFrom, Shipment>,
+    pub send_notification: TaskFunction<NotifyArgsFrom, NotificationResult>,
 }
 
 pub fn register(app: &mut Horsies) -> Result<Tasks, Box<dyn std::error::Error>> {

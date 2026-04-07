@@ -88,7 +88,7 @@ impl Horsies {
     pub fn register(
         &mut self,
         name: impl Into<String>,
-        task: crate::core::task::fn_trait::RegisteredTask,
+        mut task: crate::core::task::fn_trait::RegisteredTask,
     ) -> Result<(), HorsiesError> {
         if let Some(opts) = task.task_options() {
             match (&self.config.queue_mode, &opts.queue_name) {
@@ -133,7 +133,32 @@ impl Horsies {
                 _ => {}
             }
         }
-        self.registry.register(name, task)
+
+        // Populate resolved queue/priority metadata on TaskMeta.
+        match &self.config.queue_mode {
+            QueueMode::Default => {
+                task.set_queue_name("default".to_owned());
+                task.set_priority(100);
+            }
+            QueueMode::Custom => {
+                // In Custom mode, extract from TaskOptions if available.
+                // Tasks registered via higher-level builders always have this;
+                // low-level register() without TaskOptions leaves None, which
+                // workflow resolution and check() will catch.
+                let queue_from_opts = task
+                    .task_options()
+                    .and_then(|opts| opts.queue_name.clone());
+                if let Some(queue_name) = queue_from_opts {
+                    let priority = self.effective_priority(&queue_name, None);
+                    task.set_queue_name(queue_name);
+                    task.set_priority(priority);
+                }
+            }
+        }
+
+        self.registry.register(name, task)?;
+        self.refresh_workflow_metadata_maps();
+        Ok(())
     }
 
     /// Register a workflow spec with its conditions.
@@ -163,10 +188,47 @@ impl Horsies {
             },
         );
 
-        // Update the task_options_map on the workflow registry so the engine
-        // can resolve options for dynamically built specs (spec_builder).
-        let map = self.build_task_options_map();
-        self.workflow_registry.set_task_options_map(map);
+        // Resolve queue/priority from registered task defaults into workflow nodes.
+        crate::core::workflow::node::resolve_node_queue_priority(
+            &mut registered.spec.tasks,
+            &|task_name| {
+                let t = self.registry.get(task_name).ok()?;
+                let queue = t.queue_name()?.to_owned();
+                let priority = t.priority()?;
+                Some(crate::core::workflow::node::TaskDefaults {
+                    queue_name: queue,
+                    priority,
+                })
+            },
+            &|queue_name| self.effective_priority(queue_name, None),
+        );
+
+        // Validate resolved queue names against app config.
+        for node in &registered.spec.tasks {
+            if node.is_subworkflow {
+                continue;
+            }
+            if let Some(ref queue) = node.queue {
+                self.validate_queue(queue).map_err(|_| {
+                    HorsiesError::new(format!(
+                        "workflow '{}' node '{}' (task '{}') has invalid queue '{}'; valid: {:?}",
+                        registered.spec.name,
+                        node.node_id.as_deref().unwrap_or("?"),
+                        node.task_name,
+                        queue,
+                        self.get_valid_queue_names(),
+                    ))
+                    .with_code(ErrorCode::WorkflowUnresolvedQueue)
+                    .with_help(
+                        "set a valid queue name from configured custom_queues, \
+                         or use TaskFunction::node() to inherit the task's registered queue",
+                    )
+                })?;
+            }
+        }
+
+        // Refresh all metadata maps so dynamic start paths see current state.
+        self.refresh_workflow_metadata_maps();
 
         self.workflow_registry.register(registered)
     }
@@ -351,6 +413,61 @@ impl Horsies {
         map
     }
 
+    /// Build a map of task_name -> (queue, priority) defaults from the task
+    /// registry. Used to populate `WorkflowSpecRegistry::task_defaults_map`.
+    fn build_task_defaults_map(
+        &self,
+    ) -> std::collections::HashMap<String, crate::core::workflow::node::TaskDefaults> {
+        let mut map = std::collections::HashMap::new();
+        for (name, task) in self.registry.iter() {
+            if let (Some(queue), Some(priority)) = (task.queue_name(), task.priority()) {
+                map.insert(
+                    name.to_owned(),
+                    crate::core::workflow::node::TaskDefaults {
+                        queue_name: queue.to_owned(),
+                        priority,
+                    },
+                );
+            }
+        }
+        map
+    }
+
+    /// Build a map of queue_name -> priority from the app config.
+    /// Used to populate `WorkflowSpecRegistry::queue_priority_map`.
+    fn build_queue_priority_map(&self) -> std::collections::HashMap<String, u32> {
+        let mut map = std::collections::HashMap::new();
+        match self.config.queue_mode {
+            QueueMode::Default => {
+                map.insert("default".to_owned(), 100);
+            }
+            QueueMode::Custom => {
+                if let Some(ref queues) = self.config.custom_queues {
+                    for q in queues {
+                        map.insert(q.name.clone(), q.priority);
+                    }
+                }
+            }
+        }
+        map
+    }
+
+    /// Refresh all workflow metadata maps on the workflow registry.
+    ///
+    /// Called after task or workflow registration so that dynamic start
+    /// paths (WorkflowStarter, TaskRuntime, spec_builder) have access
+    /// to current task defaults and queue config.
+    fn refresh_workflow_metadata_maps(&mut self) {
+        let options_map = self.build_task_options_map();
+        self.workflow_registry.set_task_options_map(options_map);
+
+        let defaults_map = self.build_task_defaults_map();
+        self.workflow_registry.set_task_defaults_map(defaults_map);
+
+        let queue_map = self.build_queue_priority_map();
+        self.workflow_registry.set_queue_priority_map(queue_map);
+    }
+
     /// Get list of valid queue names based on configuration.
     ///
     /// In `Default` mode, returns `["default"]`.
@@ -495,6 +612,28 @@ impl Horsies {
             report.add(e);
         }
 
+        // Phase 2.6: Task queue metadata validation (Custom mode).
+        // In Custom mode, every registered task should have resolved queue
+        // metadata. Phase 2.5 catches tasks that have TaskOptions with
+        // queue_name=None. This phase catches tasks that have no TaskOptions
+        // at all — registered via the low-level register() path.
+        if matches!(self.config.queue_mode, QueueMode::Custom) {
+            for (task_name, task) in self.registry.iter() {
+                if task.queue_name().is_none() && task.task_options().is_none() {
+                    report.add(
+                        HorsiesError::new(format!(
+                            "task '{}' has no queue metadata in Custom queue mode",
+                            task_name,
+                        ))
+                        .with_code(ErrorCode::TaskInvalidOptions)
+                        .with_help(
+                            "register the task with .queue() or ensure TaskOptions includes queue_name",
+                        ),
+                    );
+                }
+            }
+        }
+
         // Phase 2.8: Workflow task registration validation.
         // Every non-subworkflow node in a registered workflow must reference
         // a task that is registered in the task registry. Catches typos and
@@ -513,6 +652,53 @@ impl Horsies {
                         .with_code(ErrorCode::WorkflowUnregisteredTask)
                         .with_help("register the task before registering the workflow, or check for typos in the task name"),
                     );
+                }
+            }
+        }
+
+        // Phase 2.9: Workflow node queue validation.
+        // After registration resolves queue/priority, every non-subworkflow
+        // node should have a valid queue. Catches unresolved queues (e.g.
+        // TaskNode::new("name") without registered task defaults) and
+        // invalid queue overrides (e.g. .queue("wrong")).
+        for registered in self.workflow_registry.iter() {
+            for node in &registered.spec.tasks {
+                if node.is_subworkflow {
+                    continue;
+                }
+                match &node.queue {
+                    None => {
+                        report.add(
+                            HorsiesError::new(format!(
+                                "workflow '{}' node '{}' (task '{}') has no resolved queue",
+                                registered.spec.name,
+                                node.node_id.as_deref().unwrap_or("?"),
+                                node.task_name,
+                            ))
+                            .with_code(ErrorCode::WorkflowUnresolvedQueue)
+                            .with_help(
+                                "use TaskFunction::node() or set .queue() explicitly on the TaskNode",
+                            ),
+                        );
+                    }
+                    Some(queue) => {
+                        if let Err(_) = self.validate_queue(queue) {
+                            report.add(
+                                HorsiesError::new(format!(
+                                    "workflow '{}' node '{}' (task '{}') has invalid queue '{}'; valid: {:?}",
+                                    registered.spec.name,
+                                    node.node_id.as_deref().unwrap_or("?"),
+                                    node.task_name,
+                                    queue,
+                                    self.get_valid_queue_names(),
+                                ))
+                                .with_code(ErrorCode::WorkflowUnresolvedQueue)
+                                .with_help(
+                                    "set a valid queue name from configured custom_queues",
+                                ),
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -708,14 +894,21 @@ impl Horsies {
     }
 
     /// Register a task with an explicit queue, validating the queue first.
+    ///
+    /// Sets resolved queue and priority on the task's metadata so workflow
+    /// node resolution can inherit these defaults.
     pub fn register_with_queue(
         &mut self,
         name: impl Into<String>,
-        task: crate::core::task::fn_trait::RegisteredTask,
+        mut task: crate::core::task::fn_trait::RegisteredTask,
         queue: &str,
     ) -> Result<(), HorsiesError> {
         self.validate_queue(queue)?;
-        self.registry.register(name, task)
+        task.set_queue_name(queue.to_owned());
+        task.set_priority(self.effective_priority(queue, None));
+        self.registry.register(name, task)?;
+        self.refresh_workflow_metadata_maps();
+        Ok(())
     }
 
     /// Resolve effective priority for a task being sent to a specific queue.
@@ -838,16 +1031,93 @@ where
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.builder)(app, case)));
 
         match result {
-            Ok(Ok(spec)) => {
+            Ok(Ok(mut spec)) => {
+                let mut errors = Vec::new();
+
                 if spec.definition_key.is_none() {
-                    vec![HorsiesError::new(format!(
-                        "workflow builder '{}' produced a workflow without definition_key",
-                        self.name,
-                    ))
-                    .with_code(ErrorCode::WorkflowNoDefinitionKey)]
-                } else {
-                    Vec::new()
+                    errors.push(
+                        HorsiesError::new(format!(
+                            "workflow builder '{}' produced a workflow without definition_key",
+                            self.name,
+                        ))
+                        .with_code(ErrorCode::WorkflowNoDefinitionKey),
+                    );
                 }
+
+                // Validate task registration and resolve queue/priority.
+                // Builder-produced specs are not inserted into the workflow
+                // registry, so Phase 2.8/2.9 never see them. We must do
+                // the same checks here to match Python's builder validation.
+                for node in &spec.tasks {
+                    if node.is_subworkflow {
+                        continue;
+                    }
+                    if !app.registry().contains(&node.task_name) {
+                        errors.push(
+                            HorsiesError::new(format!(
+                                "workflow builder '{}' references unregistered task '{}'",
+                                self.name, node.task_name,
+                            ))
+                            .with_code(ErrorCode::WorkflowUnregisteredTask)
+                            .with_help(
+                                "register the task before registering the workflow builder, \
+                                 or check for typos in the task name",
+                            ),
+                        );
+                    }
+                }
+
+                crate::core::workflow::node::resolve_node_queue_priority(
+                    &mut spec.tasks,
+                    &|task_name| {
+                        let t = app.registry().get(task_name).ok()?;
+                        let queue = t.queue_name()?.to_owned();
+                        let priority = t.priority()?;
+                        Some(crate::core::workflow::node::TaskDefaults {
+                            queue_name: queue,
+                            priority,
+                        })
+                    },
+                    &|queue_name| app.effective_priority(queue_name, None),
+                );
+
+                for node in &spec.tasks {
+                    if node.is_subworkflow {
+                        continue;
+                    }
+                    match &node.queue {
+                        None => {
+                            errors.push(
+                                HorsiesError::new(format!(
+                                    "workflow builder '{}' node '{}' (task '{}') has no resolved queue",
+                                    self.name,
+                                    node.node_id.as_deref().unwrap_or("?"),
+                                    node.task_name,
+                                ))
+                                .with_code(ErrorCode::WorkflowUnresolvedQueue)
+                                .with_help(
+                                    "use TaskFunction::node() or set .queue() explicitly on the TaskNode",
+                                ),
+                            );
+                        }
+                        Some(queue) => {
+                            if let Err(_) = app.validate_queue(queue) {
+                                errors.push(
+                                    HorsiesError::new(format!(
+                                        "workflow builder '{}' node '{}' (task '{}') has invalid queue '{}'",
+                                        self.name,
+                                        node.node_id.as_deref().unwrap_or("?"),
+                                        node.task_name,
+                                        queue,
+                                    ))
+                                    .with_code(ErrorCode::WorkflowUnresolvedQueue),
+                                );
+                            }
+                        }
+                    }
+                }
+
+                errors
             }
             Ok(Err(err)) if err.code.is_some() => vec![err],
             Ok(Err(err)) => vec![HorsiesError::new(format!(
@@ -1420,6 +1690,7 @@ mod tests {
     #[test]
     fn registered_zero_arg_workflow_builder_runs_during_check() {
         let mut app = Horsies::new(valid_config()).unwrap();
+        app.register("step_a", dummy_registered()).unwrap();
         let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = Arc::clone(&call_count);
 
@@ -1441,6 +1712,7 @@ mod tests {
     #[test]
     fn parameterized_workflow_builder_requires_cases() {
         let mut app = Horsies::new(valid_config()).unwrap();
+        app.register("step_a", dummy_registered()).unwrap();
 
         app.workflow_builder("build_param", |_app, region: &String| {
             let mut builder = WorkflowSpecBuilder::new(format!("wf_{region}"));
@@ -1461,6 +1733,7 @@ mod tests {
     #[test]
     fn parameterized_workflow_builder_runs_each_case() {
         let mut app = Horsies::new(valid_config()).unwrap();
+        app.register("step_a", dummy_registered()).unwrap();
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen_in_builder = Arc::clone(&seen);
 
@@ -1543,6 +1816,7 @@ mod tests {
     #[test]
     fn workflow_builder_runs_under_send_suppression() {
         let mut app = Horsies::new(valid_config()).unwrap();
+        app.register("step_a", dummy_registered()).unwrap();
         let seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let seen_in_builder = Arc::clone(&seen);
 

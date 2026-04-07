@@ -115,6 +115,10 @@ impl<'a, A: Serialize + 'static, T: DeserializeOwned + Clone + 'static>
             None => self.app.core.register(&self.name, self.task)?,
         }
 
+        // Refresh the workflow registry cache so WorkflowStarter sees
+        // updated task defaults and queue priority maps.
+        self.app.refresh_workflow_registry_cache();
+
         let handle = TaskFunction::new(
             self.name,
             Arc::clone(&self.app.broker),

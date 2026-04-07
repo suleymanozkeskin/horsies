@@ -3,7 +3,6 @@ use std::sync::{Arc, RwLock};
 
 use serde::de::DeserializeOwned;
 
-use crate::broker::BrokerError;
 use crate::core::{
     AnyNode, HorsiesError, NodeRef, OnError, SubWorkflowNode, SuccessPolicy, TaskNode,
     WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder, WorkflowStartError,
@@ -157,7 +156,7 @@ impl<T: DeserializeOwned + Clone> WorkflowFunction<T> {
         let bound = self
             .bound_spec()
             .await
-            .map_err(|err| self.wrap_broker_error(&err, String::new()))?;
+            .map_err(|err| self.wrap_app_error(err, String::new()))?;
         bound.start().await
     }
 
@@ -169,7 +168,7 @@ impl<T: DeserializeOwned + Clone> WorkflowFunction<T> {
         let bound = self
             .bound_spec()
             .await
-            .map_err(|err| self.wrap_broker_error(&err, workflow_id.clone()))?;
+            .map_err(|err| self.wrap_app_error(err, workflow_id.clone()))?;
         bound.start_with_id(workflow_id).await
     }
 
@@ -180,7 +179,7 @@ impl<T: DeserializeOwned + Clone> WorkflowFunction<T> {
         let bound = self
             .bound_spec()
             .await
-            .map_err(|err| self.wrap_broker_error(&err, error.workflow_id.clone()))?;
+            .map_err(|err| self.wrap_app_error(err, error.workflow_id.clone()))?;
         bound.retry_start(error).await
     }
 
@@ -191,28 +190,52 @@ impl<T: DeserializeOwned + Clone> WorkflowFunction<T> {
         Ok(self.bound_spec().await?.handle(workflow_id))
     }
 
-    async fn bound_spec(&self) -> Result<BoundWorkflowSpec<T>, BrokerError> {
-        let broker = self.broker.get().await?;
+    async fn bound_spec(&self) -> crate::AppResult<BoundWorkflowSpec<T>> {
         let registry = self
             .registry
             .read()
             .expect("workflow registry lock poisoned")
             .clone();
+        // Belt-and-suspenders: resolve queue/priority in case the spec
+        // was constructed before task defaults were fully populated.
+        // Registered WorkflowFunctions already hold resolved specs, but
+        // this guards against edge cases.
+        // Validate before acquiring the broker connection so spec errors
+        // surface without a network round-trip.
+        let mut spec = self.spec.clone();
+        registry.resolve_and_validate_spec_queue_priority(&mut spec)?;
+        let broker = self.broker.get().await?;
         Ok(BoundWorkflowSpec::from_broker(
-            self.spec.clone(),
+            spec,
             &broker,
             Arc::new(registry),
             self.resend_on_transient_err,
         ))
     }
 
-    fn wrap_broker_error(&self, err: &BrokerError, workflow_id: String) -> WorkflowStartError {
-        WorkflowStartError {
-            code: WorkflowStartErrorCode::EnqueueFailed,
-            message: err.to_string(),
-            retryable: err.is_retryable(),
-            workflow_name: self.spec.name.clone(),
-            workflow_id,
+    fn wrap_app_error(&self, err: crate::AppError, workflow_id: String) -> WorkflowStartError {
+        match err {
+            crate::AppError::Validation(err) => WorkflowStartError {
+                code: WorkflowStartErrorCode::ValidationFailed,
+                message: err.to_string(),
+                retryable: false,
+                workflow_name: self.spec.name.clone(),
+                workflow_id,
+            },
+            crate::AppError::Broker(err) => WorkflowStartError {
+                code: WorkflowStartErrorCode::EnqueueFailed,
+                message: err.to_string(),
+                retryable: err.is_retryable(),
+                workflow_name: self.spec.name.clone(),
+                workflow_id,
+            },
+            other => WorkflowStartError {
+                code: WorkflowStartErrorCode::InternalFailed,
+                message: other.to_string(),
+                retryable: false,
+                workflow_name: self.spec.name.clone(),
+                workflow_id,
+            },
         }
     }
 }
@@ -302,7 +325,7 @@ impl WorkflowStarter {
 
     pub(crate) async fn start<T: DeserializeOwned + Clone>(
         &self,
-        spec: WorkflowSpec,
+        mut spec: WorkflowSpec,
     ) -> WorkflowStartResult<WorkflowHandle<T>> {
         let workflow_name = spec.name.clone();
         let broker = self.broker.get().await.map_err(|err| WorkflowStartError {
@@ -317,6 +340,18 @@ impl WorkflowStarter {
             .read()
             .expect("workflow registry lock poisoned")
             .clone();
+
+        // Resolve queue/priority from task defaults for dynamic specs.
+        registry
+            .resolve_and_validate_spec_queue_priority(&mut spec)
+            .map_err(|err| WorkflowStartError {
+                code: WorkflowStartErrorCode::ValidationFailed,
+                message: err.to_string(),
+                retryable: false,
+                workflow_name: workflow_name.clone(),
+                workflow_id: String::new(),
+            })?;
+
         let bound = BoundWorkflowSpec::<T>::from_broker(
             spec,
             &broker,
@@ -328,7 +363,7 @@ impl WorkflowStarter {
 
     pub(crate) async fn start_with_id<T: DeserializeOwned + Clone>(
         &self,
-        spec: WorkflowSpec,
+        mut spec: WorkflowSpec,
         workflow_id: impl Into<String>,
     ) -> WorkflowStartResult<WorkflowHandle<T>> {
         let workflow_name = spec.name.clone();
@@ -345,6 +380,18 @@ impl WorkflowStarter {
             .read()
             .expect("workflow registry lock poisoned")
             .clone();
+
+        // Resolve queue/priority from task defaults for dynamic specs.
+        registry
+            .resolve_and_validate_spec_queue_priority(&mut spec)
+            .map_err(|err| WorkflowStartError {
+                code: WorkflowStartErrorCode::ValidationFailed,
+                message: err.to_string(),
+                retryable: false,
+                workflow_name: workflow_name.clone(),
+                workflow_id: workflow_id.clone(),
+            })?;
+
         let bound = BoundWorkflowSpec::<T>::from_broker(
             spec,
             &broker,
@@ -661,7 +708,9 @@ mod tests {
 
         let mut builder = WorkflowSpecBuilder::new("starter_test");
         builder.definition_key("tests.starter_test.v1");
-        let node = builder.task(TaskNode::<String>::new("some_task"));
+        // Explicitly set queue so node resolution passes and the error
+        // surfaces from the actual DB connection attempt.
+        let node = builder.task(TaskNode::<String>::new("some_task").queue("default"));
         builder.output(node);
         let spec = builder.build().unwrap();
 

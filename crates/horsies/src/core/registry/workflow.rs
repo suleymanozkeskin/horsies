@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::core::error::{ErrorCode, HorsiesError};
+use crate::core::workflow::node::TaskDefaults;
 use crate::core::workflow::spec::WorkflowSpec;
 
 /// Callback type for dynamically building a child WorkflowSpec at runtime.
@@ -56,6 +57,16 @@ pub struct WorkflowSpecRegistry {
     /// Used by the engine to resolve task options for dynamically built
     /// specs (via `spec_builder`) that bypass `register_workflow()`.
     task_options_map: HashMap<String, String>,
+    /// Pre-computed map of task_name -> (queue, priority) defaults.
+    ///
+    /// Used to resolve workflow node queue/priority from registered task
+    /// metadata for dynamic specs that bypass `register_workflow()`.
+    task_defaults_map: HashMap<String, TaskDefaults>,
+    /// Pre-computed map of queue_name -> priority from app config.
+    ///
+    /// Used to compute effective priority from the final resolved queue
+    /// without needing access to `AppConfig` at start time.
+    queue_priority_map: HashMap<String, u32>,
 }
 
 impl Clone for WorkflowSpecRegistry {
@@ -63,6 +74,8 @@ impl Clone for WorkflowSpecRegistry {
         Self {
             specs: self.specs.clone(),
             task_options_map: self.task_options_map.clone(),
+            task_defaults_map: self.task_defaults_map.clone(),
+            queue_priority_map: self.queue_priority_map.clone(),
         }
     }
 }
@@ -73,6 +86,8 @@ impl WorkflowSpecRegistry {
         Self {
             specs: HashMap::new(),
             task_options_map: HashMap::new(),
+            task_defaults_map: HashMap::new(),
+            queue_priority_map: HashMap::new(),
         }
     }
 
@@ -292,6 +307,90 @@ impl WorkflowSpecRegistry {
         crate::core::workflow::node::resolve_node_task_options(&mut spec.tasks, &|task_name| {
             self.task_options_map.get(task_name).cloned()
         });
+    }
+
+    /// Replace the task defaults map used for resolving queue/priority on
+    /// dynamically built workflow specs.
+    pub fn set_task_defaults_map(&mut self, map: HashMap<String, TaskDefaults>) {
+        self.task_defaults_map = map;
+    }
+
+    /// Replace the queue priority map used for computing effective priority
+    /// from the final resolved queue name.
+    pub fn set_queue_priority_map(&mut self, map: HashMap<String, u32>) {
+        self.queue_priority_map = map;
+    }
+
+    /// Compute effective priority for a queue name using the stored config map.
+    ///
+    /// Falls back to 100 (default priority) for unknown queues.
+    pub fn effective_priority(&self, queue_name: &str) -> u32 {
+        self.queue_priority_map
+            .get(queue_name)
+            .copied()
+            .unwrap_or(100)
+    }
+
+    /// Returns true if the given queue name is known in the stored config map.
+    pub fn is_valid_queue(&self, queue_name: &str) -> bool {
+        self.queue_priority_map.contains_key(queue_name)
+    }
+
+    /// Resolve queue/priority and validate final queue names on a workflow spec.
+    ///
+    /// This is the engine-facing entry point for dynamic specs built via
+    /// `spec_builder` or started through `WorkflowStarter` that bypass
+    /// `register_workflow()`.
+    ///
+    /// Returns an error if any non-subworkflow node has an unresolved or
+    /// invalid queue after resolution.
+    pub fn resolve_and_validate_spec_queue_priority(
+        &self,
+        spec: &mut crate::core::workflow::spec::WorkflowSpec,
+    ) -> Result<(), HorsiesError> {
+        crate::core::workflow::node::resolve_node_queue_priority(
+            &mut spec.tasks,
+            &|task_name| self.task_defaults_map.get(task_name).cloned(),
+            &|queue_name| self.effective_priority(queue_name),
+        );
+
+        // Validate: every non-subworkflow node must have a resolved, valid queue.
+        for node in &spec.tasks {
+            if node.is_subworkflow {
+                continue;
+            }
+            match &node.queue {
+                None => {
+                    return Err(HorsiesError::new(format!(
+                        "workflow '{}' node '{}' (task '{}') has no resolved queue",
+                        spec.name,
+                        node.node_id.as_deref().unwrap_or("?"),
+                        node.task_name,
+                    ))
+                    .with_code(ErrorCode::WorkflowUnresolvedQueue)
+                    .with_help(
+                        "use TaskFunction::node() or set .queue() explicitly on the TaskNode",
+                    ));
+                }
+                Some(queue) if !self.queue_priority_map.is_empty() && !self.is_valid_queue(queue) => {
+                    return Err(HorsiesError::new(format!(
+                        "workflow '{}' node '{}' (task '{}') has invalid queue '{}'",
+                        spec.name,
+                        node.node_id.as_deref().unwrap_or("?"),
+                        node.task_name,
+                        queue,
+                    ))
+                    .with_code(ErrorCode::WorkflowUnresolvedQueue)
+                    .with_help(
+                        "set a valid queue name from configured custom_queues, \
+                         or use TaskFunction::node() to inherit the task's registered queue",
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
     }
 }
 

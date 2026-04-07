@@ -256,7 +256,11 @@ impl Horsies {
         name: impl Into<String>,
         task: RegisteredTask,
     ) -> Result<(), HorsiesError> {
-        self.core.register(name, task)
+        self.core.register(name, task)?;
+        // Refresh the workflow registry cache so WorkflowStarter sees
+        // updated task defaults and queue priority maps.
+        self.refresh_workflow_registry_cache();
+        Ok(())
     }
 
     pub fn register_with_queue(
@@ -265,7 +269,9 @@ impl Horsies {
         task: RegisteredTask,
         queue_name: &str,
     ) -> Result<(), HorsiesError> {
-        self.core.register_with_queue(name, task, queue_name)
+        self.core.register_with_queue(name, task, queue_name)?;
+        self.refresh_workflow_registry_cache();
+        Ok(())
     }
 
     pub fn task<A: Serialize + 'static, T: DeserializeOwned + Clone + 'static>(
@@ -322,10 +328,20 @@ impl Horsies {
         &mut self,
         spec: WorkflowSpec,
     ) -> Result<WorkflowFunction<T>, HorsiesError> {
-        self.core.register_workflow_spec(spec.clone())?;
+        let name = spec.name.clone();
+        self.core.register_workflow_spec(spec)?;
         self.refresh_workflow_registry_cache();
+        // Fetch the resolved spec (with queue/priority filled) from the
+        // registry rather than using the pre-resolution original.
+        let resolved_spec = self
+            .core
+            .workflow_registry()
+            .get(&name)
+            .expect("workflow just registered")
+            .spec
+            .clone();
         Ok(WorkflowFunction::new(
-            spec,
+            resolved_spec,
             Arc::clone(&self.broker),
             Arc::clone(&self.workflow_registry_cache),
             self.core.config().resend_on_transient_err,
@@ -404,11 +420,20 @@ impl Horsies {
         &mut self,
         registered: RegisteredWorkflowSpec,
     ) -> Result<WorkflowFunction<T>, HorsiesError> {
-        let spec = registered.spec.clone();
+        let name = registered.spec.name.clone();
         self.core.register_workflow(registered)?;
         self.refresh_workflow_registry_cache();
+        // Fetch the resolved spec (with queue/priority filled) from the
+        // registry rather than using the pre-resolution clone.
+        let resolved_spec = self
+            .core
+            .workflow_registry()
+            .get(&name)
+            .expect("workflow just registered")
+            .spec
+            .clone();
         Ok(WorkflowFunction::new(
-            spec,
+            resolved_spec,
             Arc::clone(&self.broker),
             Arc::clone(&self.workflow_registry_cache),
             self.core.config().resend_on_transient_err,
@@ -573,7 +598,7 @@ impl std::fmt::Debug for Horsies {
 }
 
 impl Horsies {
-    fn refresh_workflow_registry_cache(&self) {
+    pub(crate) fn refresh_workflow_registry_cache(&self) {
         *self
             .workflow_registry_cache
             .write()

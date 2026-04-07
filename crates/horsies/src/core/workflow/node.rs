@@ -397,6 +397,56 @@ pub fn resolve_node_task_options(nodes: &mut [AnyNode], lookup: &dyn Fn(&str) ->
     }
 }
 
+/// Registered task defaults used for workflow node resolution.
+///
+/// Populated from `TaskMeta` during task registration and stored in
+/// `WorkflowSpecRegistry::task_defaults_map` for start-time resolution
+/// of dynamic workflow specs.
+#[derive(Debug, Clone)]
+pub struct TaskDefaults {
+    /// The task's declared queue name.
+    pub queue_name: String,
+    /// The task's resolved priority at registration time.
+    pub priority: u32,
+}
+
+/// Resolve queue and priority from task defaults into workflow nodes.
+///
+/// For each non-subworkflow node:
+/// 1. If `node.queue` is `None`, fills it from the task's registered default.
+/// 2. If `node.priority` is `None`, computes it from `effective_priority`
+///    applied to the **final resolved queue** (which may be the node's own
+///    override, not the task's default queue).
+///
+/// Node-level overrides are always preserved.
+pub fn resolve_node_queue_priority(
+    nodes: &mut [AnyNode],
+    lookup: &dyn Fn(&str) -> Option<TaskDefaults>,
+    effective_priority: &dyn Fn(&str) -> u32,
+) {
+    for node in nodes.iter_mut() {
+        if node.is_subworkflow {
+            continue;
+        }
+
+        // Resolve queue: node override > task default.
+        if node.queue.is_none() {
+            if let Some(defaults) = lookup(&node.task_name) {
+                node.queue = Some(defaults.queue_name);
+            }
+        }
+
+        // Resolve priority from the FINAL resolved queue.
+        // If the node overrides queue to "urgent" but leaves priority None,
+        // it gets urgent's configured priority, not the task's original priority.
+        if node.priority.is_none() {
+            if let Some(ref resolved_queue) = node.queue {
+                node.priority = Some(effective_priority(resolved_queue) as i32);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,5 +720,86 @@ mod tests {
         let lookup = |_name: &str| -> Option<String> { None };
         resolve_node_task_options(&mut nodes, &lookup);
         assert!(nodes[0].task_options_json.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_node_queue_priority tests
+    // -----------------------------------------------------------------------
+
+    fn defaults_lookup(task_name: &str) -> Option<TaskDefaults> {
+        match task_name {
+            "task_a" => Some(TaskDefaults {
+                queue_name: "standard".to_owned(),
+                priority: 50,
+            }),
+            "task_b" => Some(TaskDefaults {
+                queue_name: "urgent".to_owned(),
+                priority: 10,
+            }),
+            _ => None,
+        }
+    }
+
+    fn queue_priority(queue: &str) -> u32 {
+        match queue {
+            "urgent" => 10,
+            "standard" => 50,
+            "low" => 200,
+            _ => 100,
+        }
+    }
+
+    #[test]
+    fn queue_priority_inherits_from_task_defaults() {
+        let mut nodes = vec![make_any_node("task_a", false)];
+        resolve_node_queue_priority(&mut nodes, &defaults_lookup, &queue_priority);
+        assert_eq!(nodes[0].queue.as_deref(), Some("standard"));
+        assert_eq!(nodes[0].priority, Some(50));
+    }
+
+    #[test]
+    fn node_queue_override_gets_priority_from_overridden_queue() {
+        let mut nodes = vec![make_any_node("task_a", false)];
+        // task_a defaults to "standard" (priority 50), but node overrides to "urgent".
+        nodes[0].queue = Some("urgent".to_owned());
+        resolve_node_queue_priority(&mut nodes, &defaults_lookup, &queue_priority);
+        assert_eq!(nodes[0].queue.as_deref(), Some("urgent"));
+        // Priority should come from "urgent" (10), not "standard" (50).
+        assert_eq!(nodes[0].priority, Some(10));
+    }
+
+    #[test]
+    fn explicit_node_priority_preserved_even_with_queue_override() {
+        let mut nodes = vec![make_any_node("task_a", false)];
+        nodes[0].queue = Some("urgent".to_owned());
+        nodes[0].priority = Some(1);
+        resolve_node_queue_priority(&mut nodes, &defaults_lookup, &queue_priority);
+        assert_eq!(nodes[0].queue.as_deref(), Some("urgent"));
+        assert_eq!(nodes[0].priority, Some(1));
+    }
+
+    #[test]
+    fn queue_priority_skips_subworkflow_nodes() {
+        let mut nodes = vec![make_any_node("task_a", true)];
+        resolve_node_queue_priority(&mut nodes, &defaults_lookup, &queue_priority);
+        assert!(nodes[0].queue.is_none());
+        assert!(nodes[0].priority.is_none());
+    }
+
+    #[test]
+    fn unknown_task_leaves_queue_and_priority_none() {
+        let mut nodes = vec![make_any_node("unknown_task", false)];
+        resolve_node_queue_priority(&mut nodes, &defaults_lookup, &queue_priority);
+        assert!(nodes[0].queue.is_none());
+        assert!(nodes[0].priority.is_none());
+    }
+
+    #[test]
+    fn node_with_queue_but_unknown_task_still_resolves_priority() {
+        let mut nodes = vec![make_any_node("unknown_task", false)];
+        nodes[0].queue = Some("low".to_owned());
+        resolve_node_queue_priority(&mut nodes, &defaults_lookup, &queue_priority);
+        assert_eq!(nodes[0].queue.as_deref(), Some("low"));
+        assert_eq!(nodes[0].priority, Some(200));
     }
 }
