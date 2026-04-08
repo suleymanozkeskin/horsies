@@ -10,7 +10,7 @@
 //!
 //! Prints "worker started" to stderr when ready (e2e harness ready marker).
 
-mod tasks;
+use horsies_test_worker::tasks;
 
 use std::process::ExitCode;
 use std::sync::Arc;

@@ -14,7 +14,7 @@ use sqlx::PgPool;
 
 use std::sync::Arc;
 
-use horsies::{Horsies, PostgresBroker, TaskNode, TaskResult, WorkflowHandle, WorkflowSpecBuilder};
+use horsies::{Horsies, PostgresBroker, TaskResult, WorkflowHandle, WorkflowSpecBuilder};
 use horsies_test_support::{
     db,
     e2e::{
@@ -24,12 +24,26 @@ use horsies_test_support::{
     },
     fixtures,
 };
+use horsies_test_worker::tasks::{
+    wf_ctx_reader, wf_ctx_sum, wf_double, wf_fail, wf_mixed, wf_produce_dict, wf_produce_int,
+    wf_read_dict, wf_slow_step, wf_step, wf_sum_two,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn ensure_tasks_registered() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let mut app = Horsies::new(fixtures::default_app_config()).unwrap();
+        horsies_test_worker::tasks::register(&mut app).unwrap();
+    });
+}
+
 async fn pool() -> PgPool {
+    ensure_tasks_registered();
     let p = db::create_pool().await;
     db::run_migrations(&p).await;
     p
@@ -80,12 +94,14 @@ async fn test_args_from_single_dependency() {
 
     let mut b = WorkflowSpecBuilder::new("e2e_args_from_single");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_produce_int")
+        wf_produce_int::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"value": 5}"#.to_owned()),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_double")
+        wf_double::node()
+            .unwrap()
             .node_id("b")
             .args_from("input_result", a),
     );
@@ -120,17 +136,20 @@ async fn test_args_from_multiple_dependencies() {
 
     let mut b = WorkflowSpecBuilder::new("e2e_args_from_multi");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_produce_int")
+        wf_produce_int::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"value": 10}"#.to_owned()),
     );
     let bnode = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_produce_int")
+        wf_produce_int::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"value": 20}"#.to_owned()),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_sum_two")
+        wf_sum_two::node()
+            .unwrap()
             .node_id("c")
             .args_from("first", a)
             .args_from("second", bnode),
@@ -167,12 +186,14 @@ async fn test_failed_propagation_via_args_from() {
     // A fails → B receives error via args_from (allow_failed_deps=true).
     let mut b = WorkflowSpecBuilder::new("e2e_fail_propagation");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_fail")
+        wf_fail::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"error_code": "UPSTREAM_FAIL"}"#.to_owned()),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_double")
+        wf_double::node()
+            .unwrap()
             .node_id("b")
             .args_from("input_result", a)
             .allow_failed_deps(true),
@@ -207,12 +228,14 @@ async fn test_skipped_propagation() {
 
     let mut b = WorkflowSpecBuilder::new("e2e_skip_propagation");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_fail")
+        wf_fail::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"error_code": "DELIBERATE"}"#.to_owned()),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_step")
+        wf_step::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"step": "B"}"#.to_owned())
             .waits_for(a),
@@ -247,17 +270,20 @@ async fn test_args_from_transitive_chain() {
     // A produces 3, B doubles to 6, C doubles to 12.
     let mut b = WorkflowSpecBuilder::new("e2e_transitive_chain");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_produce_int")
+        wf_produce_int::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"value": 3}"#.to_owned()),
     );
     let bnode = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_double")
+        wf_double::node()
+            .unwrap()
             .node_id("b")
             .args_from("input_result", a),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_double")
+        wf_double::node()
+            .unwrap()
             .node_id("c")
             .args_from("input_result", bnode),
     );
@@ -293,12 +319,14 @@ async fn test_args_from_failed_dep_skips_and_fails() {
     // A fails → B (args_from A, no allow_failed_deps) → SKIPPED
     let mut b = WorkflowSpecBuilder::new("e2e_args_from_fail_skip");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_fail")
+        wf_fail::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"error_code": "FAIL_A"}"#.to_owned()),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_double")
+        wf_double::node()
+            .unwrap()
             .node_id("b")
             .args_from("input_result", a),
     );
@@ -331,17 +359,20 @@ async fn test_dual_injection_same_node() {
     // A=7, B=3 → C sums to 10.
     let mut b = WorkflowSpecBuilder::new("e2e_dual_injection");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_produce_int")
+        wf_produce_int::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"value": 7}"#.to_owned()),
     );
     let bnode = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_produce_int")
+        wf_produce_int::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"value": 3}"#.to_owned()),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_sum_two")
+        wf_sum_two::node()
+            .unwrap()
             .node_id("c")
             .args_from("first", a)
             .args_from("second", bnode),
@@ -377,12 +408,14 @@ async fn test_workflow_ctx_single_dependency() {
     // A produces 42 → B reads A's result via workflow_ctx.
     let mut b = WorkflowSpecBuilder::new("e2e_ctx_single");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_produce_int")
+        wf_produce_int::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"value": 42}"#.to_owned()),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_ctx_reader")
+        wf_ctx_reader::node()
+            .unwrap()
             .node_id("b")
             .waits_for(a)
             .workflow_ctx_from(vec!["a".to_owned()]),
@@ -428,17 +461,20 @@ async fn test_workflow_ctx_multiple_dependencies() {
     // A=10, B=20 → C sums via workflow_ctx.
     let mut b = WorkflowSpecBuilder::new("e2e_ctx_multi");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_produce_int")
+        wf_produce_int::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"value": 10}"#.to_owned()),
     );
     let bnode = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_produce_int")
+        wf_produce_int::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"value": 20}"#.to_owned()),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_ctx_sum")
+        wf_ctx_sum::node()
+            .unwrap()
             .node_id("c")
             .waits_for(a)
             .waits_for(bnode)
@@ -479,12 +515,14 @@ async fn test_mixed_args_from_and_ctx() {
     // A produces 5 → B receives both args_from(A) and workflow_ctx_from(A).
     let mut b = WorkflowSpecBuilder::new("e2e_mixed");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_produce_int")
+        wf_produce_int::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"value": 5}"#.to_owned()),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_mixed")
+        wf_mixed::node()
+            .unwrap()
             .node_id("b")
             .args_from("input_result", a)
             .workflow_ctx_from(vec!["a".to_owned()]),
@@ -529,9 +567,10 @@ async fn test_args_from_dict_serialization() {
 
     // A produces a nested dict → B receives it via args_from and adds a field.
     let mut b = WorkflowSpecBuilder::new("e2e_dict_roundtrip");
-    let a = b.task(TaskNode::<serde_json::Value>::new("e2e_wf_produce_dict").node_id("a"));
+    let a = b.task(wf_produce_dict::node().unwrap().node_id("a"));
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_read_dict")
+        wf_read_dict::node()
+            .unwrap()
             .node_id("b")
             .args_from("input_result", a),
     );
@@ -579,17 +618,20 @@ async fn test_join_ctx_gating() {
     // A will complete first, but C must wait for B because it needs B's result in ctx.
     let mut b = WorkflowSpecBuilder::new("e2e_join_ctx_gating");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"step": "A", "delay_ms": 100}"#.to_owned()),
     );
     let bnode = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"step": "B", "delay_ms": 300}"#.to_owned()),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_ctx_reader")
+        wf_ctx_reader::node()
+            .unwrap()
             .node_id("c")
             .waits_for(a)
             .waits_for(bnode)

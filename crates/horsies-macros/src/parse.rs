@@ -13,6 +13,8 @@ pub struct TaskAttrs {
     pub good_until: Option<Expr>,
     /// Optional: auto_retry_for list of string codes.
     pub auto_retry_for: Option<ExprArray>,
+    /// Optional: mark this task as accepting workflow context injection.
+    pub workflow_ctx: bool,
 }
 
 impl Parse for TaskAttrs {
@@ -24,6 +26,7 @@ impl Parse for TaskAttrs {
         let mut retry_policy = None;
         let mut good_until = None;
         let mut auto_retry_for = None;
+        let mut workflow_ctx = false;
 
         // Parse optional keyword arguments.
         while input.peek(Token![,]) {
@@ -35,6 +38,19 @@ impl Parse for TaskAttrs {
             }
 
             let key: Ident = input.parse()?;
+
+            // `workflow_ctx` is a bare flag — no `= value`.
+            if key == "workflow_ctx" {
+                if workflow_ctx {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        "duplicate `workflow_ctx` attribute",
+                    ));
+                }
+                workflow_ctx = true;
+                continue;
+            }
+
             input.parse::<Token![=]>()?;
 
             match key.to_string().as_str() {
@@ -75,7 +91,7 @@ impl Parse for TaskAttrs {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
-                            "unknown attribute `{}`; expected one of: queue, retry_policy, good_until, auto_retry_for",
+                            "unknown attribute `{}`; expected one of: queue, retry_policy, good_until, auto_retry_for, workflow_ctx",
                             key,
                         ),
                     ));
@@ -93,6 +109,7 @@ impl Parse for TaskAttrs {
             retry_policy,
             good_until,
             auto_retry_for,
+            workflow_ctx,
         })
     }
 }

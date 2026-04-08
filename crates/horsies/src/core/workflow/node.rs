@@ -195,7 +195,10 @@ impl<T> std::fmt::Debug for TaskNode<T> {
 
 impl<T> TaskNode<T> {
     /// Create a new task node for the given registered task name.
-    pub fn new(task_name: impl Into<String>) -> Self {
+    ///
+    /// External callers should use the `#[task]`-generated `node()` / `node_with()`
+    /// helpers instead, which validate registration and carry task options.
+    pub(crate) fn new(task_name: impl Into<String>) -> Self {
         Self {
             task_name: task_name.into(),
             args_json: None,

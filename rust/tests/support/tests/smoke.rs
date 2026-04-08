@@ -8,9 +8,35 @@
 //! Requires `DATABASE_URL` env var or defaults to local test DB.
 //! Run with: `cargo test -p horsies-test-support --test smoke`
 
-use horsies::{TaskNode, TaskResult, WorkflowHandle, WorkflowSpecBuilder, WorkflowSpecRegistry};
+use horsies::{
+    task, Horsies, TaskError, TaskResult, WorkflowHandle, WorkflowSpecBuilder, WorkflowSpecRegistry,
+};
 use horsies_test_support::{db, fixtures, tasks, workflow_helpers};
 use serial_test::serial;
+
+// ---------------------------------------------------------------------------
+// Dummy tasks for workflow infrastructure smoke tests
+// ---------------------------------------------------------------------------
+
+#[task("task_a")]
+async fn dummy_task_a(_input: ()) -> Result<serde_json::Value, TaskError> {
+    Ok(serde_json::Value::Null)
+}
+
+#[task("task_b")]
+async fn dummy_task_b(_input: ()) -> Result<serde_json::Value, TaskError> {
+    Ok(serde_json::Value::Null)
+}
+
+fn ensure_tasks_registered() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let mut app = Horsies::new(fixtures::default_app_config()).unwrap();
+        dummy_task_a::register(&mut app).unwrap();
+        dummy_task_b::register(&mut app).unwrap();
+    });
+}
 
 // ---------------------------------------------------------------------------
 // db module
@@ -188,6 +214,7 @@ async fn workflow_helpers_insert_and_query_task() {
 #[tokio::test]
 #[serial]
 async fn workflow_helpers_start_and_complete_workflow() {
+    ensure_tasks_registered();
     let pool = db::create_pool().await;
     db::run_migrations(&pool).await;
     db::clean_workflow_tables(&pool).await;
@@ -196,13 +223,10 @@ async fn workflow_helpers_start_and_complete_workflow() {
 
     // Build a simple 2-node chain: a -> b
     let mut builder = WorkflowSpecBuilder::new("smoke_test_wf");
-    let a = builder.task(
-        TaskNode::<serde_json::Value>::new("task_a")
-            .node_id("a")
-            .queue("default"),
-    );
+    let a = builder.task(dummy_task_a::node().unwrap().node_id("a").queue("default"));
     builder.task(
-        TaskNode::<serde_json::Value>::new("task_b")
+        dummy_task_b::node()
+            .unwrap()
             .node_id("b")
             .queue("default")
             .waits_for(a),
@@ -253,6 +277,7 @@ async fn workflow_helpers_start_and_complete_workflow() {
 #[tokio::test]
 #[serial]
 async fn workflow_helpers_failing_task_fails_workflow() {
+    ensure_tasks_registered();
     let pool = db::create_pool().await;
     db::run_migrations(&pool).await;
     db::clean_workflow_tables(&pool).await;
@@ -260,11 +285,7 @@ async fn workflow_helpers_failing_task_fails_workflow() {
     let registry = WorkflowSpecRegistry::new();
 
     let mut builder = WorkflowSpecBuilder::new("smoke_fail_wf");
-    builder.task(
-        TaskNode::<serde_json::Value>::new("task_a")
-            .node_id("a")
-            .queue("default"),
-    );
+    builder.task(dummy_task_a::node().unwrap().node_id("a").queue("default"));
     let spec = builder.build().unwrap();
 
     let handle: WorkflowHandle<serde_json::Value> =
@@ -288,6 +309,7 @@ async fn workflow_helpers_failing_task_fails_workflow() {
 async fn workflow_helpers_good_until_persisted_via_task_options() {
     use chrono::{Duration, Utc};
 
+    ensure_tasks_registered();
     let pool = db::create_pool().await;
     db::run_migrations(&pool).await;
     db::clean_workflow_tables(&pool).await;
@@ -297,7 +319,8 @@ async fn workflow_helpers_good_until_persisted_via_task_options() {
 
     let mut builder = WorkflowSpecBuilder::new("smoke_good_until_wf");
     builder.task(
-        TaskNode::<serde_json::Value>::new("task_a")
+        dummy_task_a::node()
+            .unwrap()
             .node_id("a")
             .queue("default")
             .good_until(deadline),
@@ -351,6 +374,7 @@ async fn workflow_helpers_good_until_persisted_via_task_options() {
 #[tokio::test]
 #[serial]
 async fn workflow_helpers_count_tasks_in_status() {
+    ensure_tasks_registered();
     let pool = db::create_pool().await;
     db::run_migrations(&pool).await;
     db::clean_workflow_tables(&pool).await;
@@ -358,13 +382,10 @@ async fn workflow_helpers_count_tasks_in_status() {
     let registry = WorkflowSpecRegistry::new();
 
     let mut builder = WorkflowSpecBuilder::new("smoke_count_wf");
-    let a = builder.task(
-        TaskNode::<serde_json::Value>::new("task_a")
-            .node_id("a")
-            .queue("default"),
-    );
+    let a = builder.task(dummy_task_a::node().unwrap().node_id("a").queue("default"));
     builder.task(
-        TaskNode::<serde_json::Value>::new("task_b")
+        dummy_task_b::node()
+            .unwrap()
             .node_id("b")
             .queue("default")
             .waits_for(a),

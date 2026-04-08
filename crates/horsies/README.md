@@ -65,7 +65,7 @@ Reusable workflows should be defined with `WorkflowDefinition` and registered on
 
 ```rust
 use horsies::{
-    HorsiesError, TaskNode, WorkflowDefConfig, WorkflowDefinition, WorkflowFunction,
+    HorsiesError, WorkflowDefConfig, WorkflowDefinition, WorkflowFunction,
     WorkflowSpecBuilder,
 };
 
@@ -79,15 +79,15 @@ impl WorkflowDefinition for ETLPipeline {
     fn definition_key() -> &'static str { "myapp.etl_pipeline.v1" }
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-        let fetch = builder.task(TaskNode::<RawData>::new("fetch_data").node_id("fetch"));
+        let fetch = builder.task(fetch_data::node()?.node_id("fetch"));
         let process = builder.task(
-            TaskNode::<Processed>::new("process_data")
+            process_data::node()?
                 .waits_for(fetch)
                 .args_from("data", fetch)
                 .node_id("process"),
         );
         let save = builder.task(
-            TaskNode::<Processed>::new("save_result")
+            save_result::node()?
                 .waits_for(process)
                 .args_from("result", process)
                 .node_id("save"),
@@ -122,9 +122,9 @@ impl WorkflowDefinition for ChildPipeline {
     fn definition_key() -> &'static str { "myapp.child_pipeline.v1" }
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-        let fetch = builder.task(TaskNode::<Processed>::new("fetch_data").node_id("fetch"));
+        let fetch = builder.task(fetch_data::node()?.node_id("fetch"));
         let process = builder.task(
-            TaskNode::<Processed>::new("process_data")
+            process_data::node()?
                 .waits_for(fetch)
                 .args_from("data", fetch)
                 .node_id("process"),
@@ -136,12 +136,12 @@ impl WorkflowDefinition for ChildPipeline {
         let mut builder = WorkflowSpecBuilder::new("child_pipeline");
         builder.definition_key("myapp.child_pipeline.v1");
         let fetch = builder.task(
-            TaskNode::<Processed>::new("fetch_data")
+            fetch_data::node()?
                 .node_id("fetch")
                 .args_json(serde_json::to_string(&source_url).unwrap()),
         );
         let process = builder.task(
-            TaskNode::<Processed>::new("process_data")
+            process_data::node()?
                 .waits_for(fetch)
                 .args_from("data", fetch)
                 .node_id("process"),

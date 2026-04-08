@@ -13,7 +13,7 @@ Detailed reference for building, starting, and managing workflow DAGs.
 
 ```rust
 use horsies::{
-    HorsiesError, TaskNode, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
+    HorsiesError, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
 };
 
 struct ETLPipeline;
@@ -26,15 +26,15 @@ impl WorkflowDefinition for ETLPipeline {
     fn definition_key() -> &'static str { "myapp.etl_pipeline.v1" }
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-        let fetch_ref = builder.task(TaskNode::<RawData>::new("fetch_data").node_id("fetch"));
+        let fetch_ref = builder.task(fetch_data::node()?.node_id("fetch"));
         let process_ref = builder.task(
-            TaskNode::<Processed>::new("process_data")
+            process_data::node()?
                 .waits_for(fetch_ref)
                 .args_from("data", fetch_ref)
                 .node_id("process"),
         );
         let save_ref = builder.task(
-            TaskNode::<SaveResult>::new("save_result")
+            save_result::node()?
                 .waits_for(process_ref)
                 .args_from("result", process_ref)
                 .node_id("save"),
@@ -67,14 +67,14 @@ definition type.
 let mut app = horsies::Horsies::new(config)?;
 let mut wb = app.workflow::<SaveResult>("etl_pipeline");
 wb.definition_key("myapp.etl_pipeline.v1");
-let fetch = wb.task(TaskNode::<RawData>::new("fetch_data"));
+let fetch = wb.task(fetch_data::node()?);
 let process = wb.task(
-    TaskNode::<Processed>::new("process_data")
+    process_data::node()?
         .waits_for(fetch)
         .args_from("data", fetch),
 );
 let save = wb.task(
-    TaskNode::<SaveResult>::new("save_result")
+    save_result::node()?
         .waits_for(process)
         .args_from("result", process),
 );
@@ -94,19 +94,19 @@ match workflow.start().await {
 ### Builder API (advanced / ad hoc spec construction)
 
 ```rust
-use horsies::{WorkflowSpecBuilder, TaskNode, OnError};
+use horsies::{WorkflowSpecBuilder, OnError};
 
 let mut builder = WorkflowSpecBuilder::new("etl_pipeline");
 builder.definition_key("myapp.etl_pipeline.v1");
 
-let fetch_ref = builder.task(TaskNode::<RawData>::new("fetch_data"));
+let fetch_ref = builder.task(fetch_data::node()?);
 let process_ref = builder.task(
-    TaskNode::<Processed>::new("process_data")
+    process_data::node()?
         .waits_for(fetch_ref)
         .args_from("data", fetch_ref),
 );
 let save_ref = builder.task(
-    TaskNode::<SaveResult>::new("save_result")
+    save_result::node()?
         .waits_for(process_ref)
         .args_from("result", process_ref),
 );
@@ -123,7 +123,7 @@ For reusable parameterized workflow-definition types, override
 `app.workflow_template::<...>()`:
 
 ```rust
-use horsies::{HorsiesError, TaskNode, WorkflowDefConfig, WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder};
+use horsies::{HorsiesError, WorkflowDefConfig, WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder};
 
 struct ChildPipeline;
 
@@ -135,9 +135,9 @@ impl WorkflowDefinition for ChildPipeline {
     fn definition_key() -> &'static str { "myapp.child_pipeline.v1" }
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-        let fetch = builder.task(TaskNode::<RawData>::new("fetch_data").node_id("fetch"));
+        let fetch = builder.task(fetch_data::node()?.node_id("fetch"));
         let process = builder.task(
-            TaskNode::<Processed>::new("process_data")
+            process_data::node()?
                 .waits_for(fetch)
                 .args_from("data", fetch)
                 .node_id("process"),
@@ -149,12 +149,12 @@ impl WorkflowDefinition for ChildPipeline {
         let mut builder = WorkflowSpecBuilder::new("child_pipeline");
         builder.definition_key("myapp.child_pipeline.v1");
         let fetch = builder.task(
-            TaskNode::<RawData>::new("fetch_data")
+            fetch_data::node()?
                 .args_json(serde_json::to_string(&source_url).unwrap())
                 .node_id("fetch"),
         );
         let process = builder.task(
-            TaskNode::<Processed>::new("process_data")
+            process_data::node()?
                 .waits_for(fetch)
                 .args_from("data", fetch)
                 .node_id("process"),
@@ -249,10 +249,15 @@ pub struct WorkflowSpec {
 
 ## `TaskNode<T>`
 
-Typed task node in a workflow DAG.
+Typed task node in a workflow DAG. Create nodes via the generated `#[task]` helpers:
 
 ```rust
-TaskNode::<MyOutput>::new("task_name")
+// From a registered #[task] module:
+my_task::node()?                  // TaskNode<T> with registered queue/priority/options
+my_task::node_with(typed_args)?   // same, with typed input pre-serialized
+
+// Chaining methods:
+my_task::node()?
     .kwargs(json_string)          // serialized keyword arguments
     .waits_for(dep_ref)           // add dependency
     .waits_for_all(&[ref_a, ref_b])

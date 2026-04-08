@@ -22,12 +22,17 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
     let task_options_body = build_task_options_body(&attrs);
 
     // Macro call: async_task_fn! or blocking_task_fn!
-    let registered_task = if signature.accepts_runtime() {
+    let base_registered_task = if signature.accepts_runtime() {
         build_runtime_registered_task(&signature, fn_name, &args_type, blocking)
     } else if blocking {
         quote! { horsies::blocking_task_fn!(super::#fn_name, #args_type) }
     } else {
         quote! { horsies::async_task_fn!(super::#fn_name, #args_type) }
+    };
+    let registered_task = if attrs.workflow_ctx {
+        quote! { { #base_registered_task }.with_workflow_ctx() }
+    } else {
+        base_registered_task
     };
     let runtime_capture = if signature.accepts_runtime() {
         quote! { let __horsies_runtime = app.task_runtime(); }

@@ -16,7 +16,7 @@ use sqlx::PgPool;
 
 use horsies::{
     cancel_workflow, pause_workflow, resolve_node_task_options, resume_workflow, Horsies, OnError,
-    PostgresBroker, SuccessCase, SuccessPolicy, TaskNode, WorkflowHandle, WorkflowSpecBuilder,
+    PostgresBroker, SuccessCase, SuccessPolicy, WorkflowHandle, WorkflowSpecBuilder,
     WorkflowSpecRegistry,
 };
 use horsies_test_support::{
@@ -28,12 +28,25 @@ use horsies_test_support::{
     },
     fixtures,
 };
+use horsies_test_worker::tasks::{
+    wf_ctx_reader, wf_fail, wf_retry_then_ok, wf_retry_via_registration, wf_slow_step, wf_step,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn ensure_tasks_registered() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let mut app = Horsies::new(fixtures::default_app_config()).unwrap();
+        horsies_test_worker::tasks::register(&mut app).unwrap();
+    });
+}
+
 async fn pool() -> PgPool {
+    ensure_tasks_registered();
     let p = db::create_pool().await;
     db::run_migrations(&p).await;
     p
@@ -101,22 +114,26 @@ async fn test_quorum_ctx_gating() {
     // A(100ms), B(150ms), C(300ms) → D (join=quorum, min_success=2, ctx from C).
     let mut b = WorkflowSpecBuilder::new("e2e_quorum_ctx");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"step":"A","delay_ms":100}"#.to_owned()),
     );
     let bnode = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"step":"B","delay_ms":150}"#.to_owned()),
     );
     let c = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("c")
             .kwargs(r#"{"step":"C","delay_ms":300}"#.to_owned()),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_ctx_reader")
+        wf_ctx_reader::node()
+            .unwrap()
             .node_id("d")
             .waits_for(a)
             .waits_for(bnode)
@@ -161,22 +178,26 @@ async fn test_quorum_impossible_skips() {
     // A(fail), B(fail), C(ok) → D (quorum min_success=3, impossible).
     let mut b = WorkflowSpecBuilder::new("e2e_quorum_impossible");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_fail")
+        wf_fail::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"error_code":"F1"}"#.to_owned()),
     );
     let bnode = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_fail")
+        wf_fail::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"error_code":"F2"}"#.to_owned()),
     );
     let c = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_step")
+        wf_step::node()
+            .unwrap()
             .node_id("c")
             .kwargs(r#"{"step":"C"}"#.to_owned()),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_step")
+        wf_step::node()
+            .unwrap()
             .node_id("d")
             .kwargs(r#"{"step":"D"}"#.to_owned())
             .waits_for(a)
@@ -219,17 +240,20 @@ async fn test_join_any_all_deps_fail_skips() {
 
     let mut b = WorkflowSpecBuilder::new("e2e_any_all_fail");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_fail")
+        wf_fail::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"error_code":"F1"}"#.to_owned()),
     );
     let bnode = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_fail")
+        wf_fail::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"error_code":"F2"}"#.to_owned()),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_step")
+        wf_step::node()
+            .unwrap()
             .node_id("c")
             .kwargs(r#"{"step":"C"}"#.to_owned())
             .waits_for(a)
@@ -268,24 +292,28 @@ async fn test_pause_blocks_ready_transitions() {
     // A(100ms) → B(200ms) → C(200ms) → D(100ms)
     let mut b = WorkflowSpecBuilder::new("e2e_pausable");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"step":"A","delay_ms":100}"#.to_owned()),
     );
     let bnode = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"step":"B","delay_ms":200}"#.to_owned())
             .waits_for(a),
     );
     let c = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("c")
             .kwargs(r#"{"step":"C","delay_ms":200}"#.to_owned())
             .waits_for(bnode),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("d")
             .kwargs(r#"{"step":"D","delay_ms":100}"#.to_owned())
             .waits_for(c),
@@ -344,24 +372,28 @@ async fn test_resume_continues_workflow() {
 
     let mut b = WorkflowSpecBuilder::new("e2e_resume");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"step":"A","delay_ms":100}"#.to_owned()),
     );
     let bnode = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"step":"B","delay_ms":200}"#.to_owned())
             .waits_for(a),
     );
     let c = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("c")
             .kwargs(r#"{"step":"C","delay_ms":200}"#.to_owned())
             .waits_for(bnode),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("d")
             .kwargs(r#"{"step":"D","delay_ms":100}"#.to_owned())
             .waits_for(c),
@@ -408,18 +440,21 @@ async fn test_pause_then_cancel() {
 
     let mut b = WorkflowSpecBuilder::new("e2e_pause_cancel");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"step":"A","delay_ms":100}"#.to_owned()),
     );
     let bnode = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"step":"B","delay_ms":5000}"#.to_owned())
             .waits_for(a),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_step")
+        wf_step::node()
+            .unwrap()
             .node_id("c")
             .kwargs(r#"{"step":"C"}"#.to_owned())
             .waits_for(bnode),
@@ -470,12 +505,14 @@ async fn test_success_policy_satisfied() {
     // A(ok), B(fail). Success policy: A required, B optional → COMPLETED.
     let mut b = WorkflowSpecBuilder::new("e2e_sp_satisfied");
     let _a_ref = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_step")
+        wf_step::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"step":"A"}"#.to_owned()),
     );
     let _b_ref = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_fail")
+        wf_fail::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"error_code":"OPT_FAIL"}"#.to_owned()),
     );
@@ -520,12 +557,14 @@ async fn test_success_policy_not_met() {
     // A(ok), B(fail). Policy: both required → FAILED.
     let mut b = WorkflowSpecBuilder::new("e2e_sp_not_met");
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_step")
+        wf_step::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"step":"A"}"#.to_owned()),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_fail")
+        wf_fail::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"error_code":"REQUIRED_FAIL"}"#.to_owned()),
     );
@@ -570,12 +609,14 @@ async fn test_success_policy_multiple_cases() {
     // A(fail), B(ok). Case1 requires A, Case2 requires B → Case2 satisfied → COMPLETED.
     let mut b = WorkflowSpecBuilder::new("e2e_sp_multi");
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_fail")
+        wf_fail::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"error_code":"F"}"#.to_owned()),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_step")
+        wf_step::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"step":"B"}"#.to_owned()),
     );
@@ -627,18 +668,21 @@ async fn test_on_error_pause_stops_workflow() {
     let mut b = WorkflowSpecBuilder::new("e2e_on_error_pause");
     b.on_error(OnError::Pause);
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_step")
+        wf_step::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"step":"A"}"#.to_owned()),
     );
     let bnode = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_fail")
+        wf_fail::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"error_code":"PAUSE_FAIL"}"#.to_owned())
             .waits_for(a),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_step")
+        wf_step::node()
+            .unwrap()
             .node_id("c")
             .kwargs(r#"{"step":"C"}"#.to_owned())
             .waits_for(bnode),
@@ -677,18 +721,21 @@ async fn test_on_error_pause_resume_completes() {
     let mut b = WorkflowSpecBuilder::new("e2e_pause_resume");
     b.on_error(OnError::Pause);
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_step")
+        wf_step::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"step":"A"}"#.to_owned()),
     );
     let bnode = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_fail")
+        wf_fail::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"error_code":"PAUSE_FAIL"}"#.to_owned())
             .waits_for(a),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_step")
+        wf_step::node()
+            .unwrap()
             .node_id("c")
             .kwargs(r#"{"step":"C"}"#.to_owned())
             .waits_for(bnode),
@@ -732,12 +779,14 @@ async fn test_recovery_preserves_results() {
 
     let mut b = WorkflowSpecBuilder::new("e2e_recovery_preserve");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_step")
+        wf_step::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"step":"A"}"#.to_owned()),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_step")
+        wf_step::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"step":"B"}"#.to_owned())
             .waits_for(a),
@@ -790,12 +839,14 @@ async fn test_recovery_preserves_failed_state() {
 
     let mut b = WorkflowSpecBuilder::new("e2e_recovery_fail");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_step")
+        wf_step::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"step":"A"}"#.to_owned()),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_fail")
+        wf_fail::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"error_code":"MID_FAIL"}"#.to_owned())
             .waits_for(a),
@@ -849,24 +900,28 @@ async fn test_pause_idempotent() {
     // A(100ms) → B(200ms) → C(200ms) → D(100ms)
     let mut b = WorkflowSpecBuilder::new("e2e_pause_idempotent");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"step":"A","delay_ms":100}"#.to_owned()),
     );
     let bnode = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"step":"B","delay_ms":200}"#.to_owned())
             .waits_for(a),
     );
     let c = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("c")
             .kwargs(r#"{"step":"C","delay_ms":200}"#.to_owned())
             .waits_for(bnode),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("d")
             .kwargs(r#"{"step":"D","delay_ms":100}"#.to_owned())
             .waits_for(c),
@@ -914,12 +969,14 @@ async fn test_resume_on_running_noop() {
 
     let mut b = WorkflowSpecBuilder::new("e2e_resume_noop");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"step":"A","delay_ms":100}"#.to_owned()),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"step":"B","delay_ms":2000}"#.to_owned())
             .waits_for(a),
@@ -956,12 +1013,14 @@ async fn test_success_policy_not_met_error_content() {
     // A(ok), B(fail with REQUIRED_FAIL). Policy: both required → FAILED.
     let mut b = WorkflowSpecBuilder::new("e2e_sp_error_content");
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_step")
+        wf_step::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"step":"A"}"#.to_owned()),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_fail")
+        wf_fail::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"error_code":"REQUIRED_FAIL"}"#.to_owned()),
     );
@@ -1034,7 +1093,8 @@ async fn test_workflow_task_retries() {
 
     let mut b = WorkflowSpecBuilder::new("e2e_wf_retry_ok");
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_retry_then_ok")
+        wf_retry_then_ok::node()
+            .unwrap()
             .node_id("a")
             .kwargs(format!(
                 r#"{{"counter_file":"{}","succeed_on_attempt":2}}"#,
@@ -1106,7 +1166,8 @@ async fn test_workflow_task_retries_exhausted() {
 
     let mut b = WorkflowSpecBuilder::new("e2e_wf_retry_exhausted");
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_retry_then_ok")
+        wf_retry_then_ok::node()
+            .unwrap()
             .node_id("a")
             .kwargs(format!(
                 r#"{{"counter_file":"{}","succeed_on_attempt":10}}"#,
@@ -1208,30 +1269,35 @@ async fn test_workflow_recovers_after_worker_crash() {
     // Restart worker → reaper marks C,D FAILED → E runs (allow_failed_deps) → F runs → FAILED.
     let mut b = WorkflowSpecBuilder::new("e2e_recovery_crash");
     let a = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("a")
             .kwargs(r#"{"step":"A","delay_ms":50}"#.to_owned()),
     );
     let bnode = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("b")
             .kwargs(r#"{"step":"B","delay_ms":50}"#.to_owned())
             .waits_for(a),
     );
     let c = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("c")
             .kwargs(r#"{"step":"C","delay_ms":60000}"#.to_owned())
             .waits_for(bnode),
     );
     let d = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("d")
             .kwargs(r#"{"step":"D","delay_ms":60000}"#.to_owned())
             .waits_for(bnode),
     );
     let e = b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("e")
             .kwargs(r#"{"step":"E","delay_ms":50}"#.to_owned())
             .waits_for(c)
@@ -1240,7 +1306,8 @@ async fn test_workflow_recovers_after_worker_crash() {
             .queue("recovery"),
     );
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_slow_step")
+        wf_slow_step::node()
+            .unwrap()
             .node_id("f")
             .kwargs(r#"{"step":"F","delay_ms":50}"#.to_owned())
             .waits_for(e)
@@ -1374,7 +1441,8 @@ async fn test_workflow_task_inherits_retry_from_registration() {
     // with TaskOptions { auto_retry_for: ["TRANSIENT"], retry_policy: fixed([1,1,1]) }.
     let mut b = WorkflowSpecBuilder::new("e2e_wf_inherited_retry");
     b.task(
-        TaskNode::<serde_json::Value>::new("e2e_wf_retry_via_registration")
+        wf_retry_via_registration::node()
+            .unwrap()
             .node_id("a")
             .kwargs(format!(
                 r#"{{"counter_file":"{}","succeed_on_attempt":2}}"#,
