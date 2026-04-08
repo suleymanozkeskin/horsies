@@ -140,7 +140,7 @@ impl WorkflowDefinition for ETLPipeline {
 let workflow = app.register_workflow_definition::<ETLPipeline>()?;
 match workflow.start().await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);
@@ -154,7 +154,7 @@ match workflow.start().await {
 let child = app.workflow_template::<ChildPipeline>();
 match child.start("https://example.com/data.json".to_owned()).await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);
@@ -173,7 +173,7 @@ let spec = WorkflowSpecBuilder::new("child_pipeline")
 
 match app.start::<Output>(spec).await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);
@@ -301,7 +301,7 @@ Register once at startup, then start from anywhere:
 // Zero-param workflow (after app.register_workflow_definition::<ETLPipeline>()):
 match horsies::start_workflow::<ETLPipeline>().await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);
@@ -311,7 +311,7 @@ match horsies::start_workflow::<ETLPipeline>().await {
 // Parameterized workflow (after app.workflow_template::<ChildPipeline>()):
 match horsies::start_workflow_with::<ChildPipeline>("https://example.com/data.json".to_owned()).await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);
@@ -375,6 +375,7 @@ let status = handle.status().await?;
 | `task.send()` | `TaskSendResult<TaskHandle<T>>` | `TaskHandle` | `TaskSendError` |
 | `TaskHandle::get()` | `TaskResult<T>` | `TaskResult::Ok(T)` | `TaskResult::Err(TaskError)` |
 | `workflow.start()` | `WorkflowStartResult<WorkflowHandle<T>>` | `WorkflowHandle` | `WorkflowStartError` |
+| `WorkflowHandle::get()` / `result_for()` | `TaskResult<T>` | `TaskResult::Ok(T)` | `TaskResult::Err(TaskError)` |
 | `WorkflowHandle` query ops | `HandleResult<T>` | value `T` | `HandleOperationError` |
 | Broker infra | `BrokerResult<T>` | value `T` | `BrokerOperationError` |
 

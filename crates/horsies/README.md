@@ -51,7 +51,7 @@ let add_numbers_task = add_numbers::register(&mut app)?;
 
 match add_numbers_task.send(AddNumbersInput { a: 2, b: 3 }).await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(30))).await?;
+        let result = handle.get(Some(Duration::from_secs(30))).await;
     }
     Err(err) => {
         eprintln!("send failed: {}", err.message);
@@ -101,7 +101,7 @@ let workflow: WorkflowFunction<Processed> =
 
 match workflow.start().await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);
@@ -121,24 +121,12 @@ impl WorkflowDefinition for ChildPipeline {
     fn name() -> &'static str { "child_pipeline" }
     fn definition_key() -> &'static str { "myapp.child_pipeline.v1" }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-        let fetch = builder.task(fetch_data::node()?.node_id("fetch"));
-        let process = builder.task(
-            process_data::node()?
-                .waits_for(fetch)
-                .args_from("data", fetch)
-                .node_id("process"),
-        );
-        Ok(WorkflowDefConfig::new().output(process))
-    }
-
     fn build_with(source_url: Self::Params) -> Result<WorkflowSpec, HorsiesError> {
         let mut builder = WorkflowSpecBuilder::new("child_pipeline");
         builder.definition_key("myapp.child_pipeline.v1");
         let fetch = builder.task(
-            fetch_data::node()?
-                .node_id("fetch")
-                .args_json(serde_json::to_string(&source_url).unwrap()),
+            fetch_data::node_with(FetchDataInput { source_url })?
+                .node_id("fetch"),
         );
         let process = builder.task(
             process_data::node()?
@@ -154,7 +142,7 @@ impl WorkflowDefinition for ChildPipeline {
 let child = app.workflow_template::<ChildPipeline>();
 match child.start("https://example.com/data.json".to_owned()).await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);
@@ -171,7 +159,7 @@ then start from anywhere:
 // Zero-param workflow (after app.register_workflow_definition::<ETLPipeline>()):
 match horsies::start_workflow::<ETLPipeline>().await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);
@@ -181,7 +169,7 @@ match horsies::start_workflow::<ETLPipeline>().await {
 // Parameterized workflow (after app.workflow_template::<ChildPipeline>()):
 match horsies::start_workflow_with::<ChildPipeline>("https://example.com/data.json".to_owned()).await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);
@@ -200,7 +188,7 @@ let spec = WorkflowSpecBuilder::new("child_pipeline")
 
 match app.start::<Output>(spec).await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);

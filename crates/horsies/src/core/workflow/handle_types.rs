@@ -9,8 +9,10 @@
 ///    `HandleResult<T>`. Infrastructure errors are `Err(HandleOperationError)`.
 ///
 /// 2. **Fold strategy** — methods that return `TaskResult`
-///    (get, result_for) fold infrastructure errors into
-///    `TaskResult::Err(TaskError(BROKER_ERROR, ...))`.
+///    (`WorkflowHandle::get`, `WorkflowHandle::result_for`) keep that
+///    shape. Infrastructure/query failures fold into
+///    `TaskResult::Err(TaskError(...))` instead of bubbling out as
+///    `HandleResult::Err(...)`.
 ///
 /// Categorized handle operation failure codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -63,7 +65,10 @@ impl std::fmt::Display for HandleOperationError {
 
 impl std::error::Error for HandleOperationError {}
 
-/// Result type for handle operations (wrap strategy).
+/// Result type for wrap-strategy workflow handle operations.
+///
+/// Used by methods like `status()`, `results()`, `tasks()`, `cancel()`,
+/// `pause()`, and `resume()`.
 ///
 /// `Ok(T)` on success, `Err(HandleOperationError)` on failure.
 pub type HandleResult<T> = Result<T, HandleOperationError>;

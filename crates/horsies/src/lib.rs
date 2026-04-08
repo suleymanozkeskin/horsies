@@ -361,7 +361,7 @@ impl Horsies {
     ///     .build()?;
     ///
     /// let handle = app.start::<MyOutput>(spec).await?;
-    /// let result = handle.get(None).await?;
+    /// let result = handle.get(None).await;
     /// ```
     pub async fn start<T: DeserializeOwned + Clone>(
         &mut self,

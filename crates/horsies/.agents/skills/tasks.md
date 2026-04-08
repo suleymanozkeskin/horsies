@@ -224,7 +224,10 @@ Task handles do **not** return `HandleResult`. Retrieval outcomes are represente
 - `TaskResult::Ok(value)` — task completed successfully.
 - `TaskResult::Err(TaskError)` — task failed, timed out while waiting, was not found, or hit a broker/result retrieval error.
 
-This differs from `WorkflowHandle<T>`, whose query methods return `HandleResult<...>` because workflow handle operations expose workflow-query infrastructure failures separately.
+This differs from `WorkflowHandle<T>` only partly:
+
+- `WorkflowHandle::get()` and `WorkflowHandle::result_for()` also fold retrieval and infrastructure failures into `TaskResult::Err(TaskError)`.
+- `WorkflowHandle::status()`, `results()`, `tasks()`, `cancel()`, `pause()`, and `resume()` use `HandleResult<...>`.
 
 ## Serialization Rules
 

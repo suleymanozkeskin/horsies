@@ -7,9 +7,9 @@ use sqlx::PgPool;
 
 use crate::broker::SharedNotifyListener;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
-use crate::core::task::result::TaskResult;
+use crate::core::task::{TaskError, TaskResult};
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
-use crate::core::WorkflowStatus;
+use crate::core::{OperationalErrorCode, RetrievalCode, WorkflowStatus};
 
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::info::WorkflowTaskInfo;
@@ -19,6 +19,13 @@ use crate::workflow_engine::info::WorkflowTaskInfo;
 ///
 /// This is the canonical user-facing workflow handle in Rust, mirroring
 /// Python's single `WorkflowHandle` concept.
+///
+/// Error handling follows a split strategy:
+///
+/// - `get()` and `result_for()` return `TaskResult<T>` and fold
+///   infrastructure/query failures into `TaskResult::Err(TaskError)`.
+/// - `status()`, `results()`, `tasks()`, `cancel()`, `pause()`, and
+///   `resume()` return `HandleResult<_>`.
 pub struct WorkflowHandle<T> {
     workflow_id: String,
     pool: PgPool,
@@ -47,24 +54,46 @@ impl<T> WorkflowHandle<T> {
 
 impl<T: DeserializeOwned> WorkflowHandle<T> {
     /// Wait for the workflow to complete and return the typed result.
-    pub async fn get(&self, timeout: Option<Duration>) -> HandleResult<TaskResult<T>> {
-        let listener = self
+    ///
+    /// Mirrors Python's fold strategy: task/workflow outcome and
+    /// infrastructure retrieval failures are both returned as `TaskResult`.
+    ///
+    /// Typical call shape:
+    ///
+    /// ```ignore
+    /// let result = handle.get(Some(Duration::from_secs(60))).await;
+    /// match result {
+    ///     TaskResult::Ok(value) => { /* completed successfully */ }
+    ///     TaskResult::Err(err) => { /* task/workflow/retrieval/infra error */ }
+    /// }
+    /// ```
+    pub async fn get(&self, timeout: Option<Duration>) -> TaskResult<T> {
+        let listener = match self
             .listener
             .get_or_try_init(|| SharedNotifyListener::new(&self.pool, "workflow_done"))
             .await
-            .map_err(|e| self.wrap_error(&WorkflowError::Broker(e)))?;
+        {
+            Ok(listener) => listener,
+            Err(e) => return self.fold_task_result_error(&WorkflowError::Broker(e)),
+        };
 
-        crate::workflow_engine::query::get_workflow_result::<T>(
+        match crate::workflow_engine::query::get_workflow_result::<T>(
             &self.pool,
             listener,
             &self.workflow_id,
             timeout,
         )
         .await
-        .map_err(|e| self.wrap_error(&e))
+        {
+            Ok(result) => result,
+            Err(e) => self.fold_task_result_error(&e),
+        }
     }
 
     /// Get the current workflow status.
+    ///
+    /// This is a wrap-strategy method: infrastructure/query failures are
+    /// returned as `HandleResult::Err(HandleOperationError)`.
     pub async fn status(&self) -> HandleResult<WorkflowStatus> {
         crate::workflow_engine::query::get_workflow_status(&self.pool, &self.workflow_id)
             .await
@@ -72,6 +101,9 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     }
 
     /// Get all task results keyed by node_id.
+    ///
+    /// This is a wrap-strategy method: DB/query failures return
+    /// `HandleResult::Err(...)`.
     pub async fn results(&self) -> HandleResult<HashMap<String, TaskResult<serde_json::Value>>> {
         crate::workflow_engine::query::get_workflow_results(&self.pool, &self.workflow_id)
             .await
@@ -79,28 +111,35 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     }
 
     /// Get a single node's result by node_id.
-    pub async fn result_for<V: DeserializeOwned>(
-        &self,
-        node_id: &str,
-    ) -> HandleResult<TaskResult<V>> {
-        crate::workflow_engine::query::get_workflow_result_for(
+    ///
+    /// This is a fold-strategy method like `get()`: missing workflow,
+    /// not-ready results, and infrastructure/query failures are returned as
+    /// `TaskResult::Err(TaskError)`.
+    pub async fn result_for<V: DeserializeOwned>(&self, node_id: &str) -> TaskResult<V> {
+        match crate::workflow_engine::query::get_workflow_result_for(
             &self.pool,
             &self.workflow_id,
             node_id,
         )
         .await
-        .map_err(|e| self.wrap_error(&e))
+        {
+            Ok(result) => result,
+            Err(e) => self.fold_task_result_error(&e),
+        }
     }
 
     /// Get a single node's result using a typed `NodeKey<V>`.
     pub async fn result_for_key<V: DeserializeOwned>(
         &self,
         key: &crate::core::NodeKey<V>,
-    ) -> HandleResult<TaskResult<V>> {
+    ) -> TaskResult<V> {
         self.result_for(key.node_id()).await
     }
 
     /// Get task info for all workflow tasks.
+    ///
+    /// This is a wrap-strategy method: DB/query failures return
+    /// `HandleResult::Err(...)`.
     pub async fn tasks(&self) -> HandleResult<Vec<WorkflowTaskInfo>> {
         crate::workflow_engine::query::get_workflow_tasks(&self.pool, &self.workflow_id)
             .await
@@ -108,6 +147,8 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     }
 
     /// Cancel the workflow.
+    ///
+    /// This is a wrap-strategy method.
     pub async fn cancel(&self) -> HandleResult<()> {
         crate::workflow_engine::lifecycle::cancel_workflow(&self.pool, &self.workflow_id)
             .await
@@ -115,11 +156,15 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     }
 
     /// Pause the workflow (RUNNING -> PAUSED).
+    ///
+    /// This is a wrap-strategy method.
     pub async fn pause(&self) -> HandleResult<bool> {
         crate::workflow_engine::lifecycle::pause_workflow(&self.pool, &self.workflow_id).await
     }
 
     /// Resume the workflow (PAUSED -> RUNNING).
+    ///
+    /// This is a wrap-strategy method.
     pub async fn resume(&self) -> HandleResult<bool> {
         crate::workflow_engine::lifecycle::resume_workflow(
             &self.pool,
@@ -144,6 +189,19 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
             workflow_id: self.workflow_id.clone(),
         }
     }
+
+    fn fold_task_result_error<V>(&self, e: &WorkflowError) -> TaskResult<V> {
+        match e {
+            WorkflowError::WorkflowNotFound { .. } => TaskResult::Err(TaskError::builtin(
+                RetrievalCode::WorkflowNotFound,
+                format!("workflow {} not found", self.workflow_id),
+            )),
+            _ => TaskResult::Err(TaskError::builtin(
+                OperationalErrorCode::BrokerError,
+                e.to_string(),
+            )),
+        }
+    }
 }
 
 impl<T> std::fmt::Debug for WorkflowHandle<T> {
@@ -157,10 +215,63 @@ impl<T> std::fmt::Debug for WorkflowHandle<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::task::{BuiltInTaskCode, TaskErrorCode};
+    use crate::workflow_engine::error::WorkflowError;
 
     #[test]
     fn workflow_handle_implements_debug() {
         fn assert_debug<T: std::fmt::Debug>() {}
         assert_debug::<WorkflowHandle<serde_json::Value>>();
+    }
+
+    #[tokio::test]
+    async fn fold_task_result_error_maps_missing_workflow_to_retrieval_error() {
+        let handle = WorkflowHandle::<serde_json::Value>::new(
+            "wf-123".to_owned(),
+            PgPool::connect_lazy("postgresql://localhost/test").expect("lazy pool"),
+            Arc::new(WorkflowSpecRegistry::new()),
+        );
+
+        let result =
+            handle.fold_task_result_error::<serde_json::Value>(&WorkflowError::WorkflowNotFound {
+                workflow_id: "wf-123".to_owned(),
+            });
+
+        match result {
+            TaskResult::Ok(_) => panic!("expected folded error"),
+            TaskResult::Err(err) => {
+                assert_eq!(
+                    err.error_code,
+                    Some(TaskErrorCode::BuiltIn(BuiltInTaskCode::Retrieval(
+                        RetrievalCode::WorkflowNotFound,
+                    )))
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fold_task_result_error_maps_db_failures_to_broker_error() {
+        let handle = WorkflowHandle::<serde_json::Value>::new(
+            "wf-123".to_owned(),
+            PgPool::connect_lazy("postgresql://localhost/test").expect("lazy pool"),
+            Arc::new(WorkflowSpecRegistry::new()),
+        );
+
+        let result = handle.fold_task_result_error::<serde_json::Value>(
+            &WorkflowError::Validation("boom".to_owned()),
+        );
+
+        match result {
+            TaskResult::Ok(_) => panic!("expected folded error"),
+            TaskResult::Err(err) => {
+                assert_eq!(
+                    err.error_code,
+                    Some(TaskErrorCode::BuiltIn(BuiltInTaskCode::Operational(
+                        OperationalErrorCode::BrokerError,
+                    )))
+                );
+            }
+        }
     }
 }

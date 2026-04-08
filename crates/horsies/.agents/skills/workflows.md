@@ -50,7 +50,7 @@ Register and start it with:
 let workflow = app.register_workflow_definition::<ETLPipeline>()?;
 match workflow.start().await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);
@@ -83,7 +83,7 @@ wb.output(save);
 let workflow = wb.build()?;
 match workflow.start().await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);
@@ -155,7 +155,7 @@ impl WorkflowDefinition for ChildPipeline {
 let child = app.workflow_template::<ChildPipeline>();
 match child.start("https://example.com/data.json".to_owned()).await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);
@@ -304,7 +304,7 @@ can be started multiple times.
 let workflow = app.register_workflow_definition::<ETLPipeline>()?;
 match workflow.start().await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);
@@ -328,7 +328,7 @@ typed runtime params.
 let child = app.workflow_template::<ChildPipeline>();
 match child.start("https://example.com/data.json".to_owned()).await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);
@@ -355,7 +355,7 @@ let spec = WorkflowSpecBuilder::new("child_pipeline")
 
 match app.start::<Output>(spec).await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);
@@ -457,7 +457,7 @@ Register once at startup, then start from anywhere:
 // Zero-param workflow (after app.register_workflow_definition::<ETLPipeline>()):
 match horsies::start_workflow::<ETLPipeline>().await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);
@@ -467,7 +467,7 @@ match horsies::start_workflow::<ETLPipeline>().await {
 // Parameterized workflow (after app.workflow_template::<ChildPipeline>()):
 match horsies::start_workflow_with::<ChildPipeline>("https://example.com/data.json".to_owned()).await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);
@@ -538,9 +538,9 @@ Workflow handle bound to a pool and registry. All operations are direct method c
 ```rust
 // Query
 async fn status(&self) -> HandleResult<WorkflowStatus>
-async fn get(&self, timeout: Option<Duration>) -> HandleResult<TaskResult<T>>
+async fn get(&self, timeout: Option<Duration>) -> TaskResult<T>
 async fn results(&self) -> HandleResult<HashMap<String, TaskResult<serde_json::Value>>>
-async fn result_for<V: DeserializeOwned>(&self, node_id: &str) -> HandleResult<TaskResult<V>>
+async fn result_for<V: DeserializeOwned>(&self, node_id: &str) -> TaskResult<V>
 async fn tasks(&self) -> HandleResult<Vec<WorkflowTaskInfo>>
 
 // Lifecycle
@@ -560,6 +560,7 @@ fn workflow_id(&self) -> &str
 - `FAILED` / `CANCELLED` → returns `TaskResult::Err(TaskError(...))`.
 - `PAUSED` → returns immediately with `TaskError(WorkflowPaused)`.
 - Timeout → returns `TaskError(WaitTimeout)`.
+- Infrastructure/query failures are folded into `TaskResult::Err(TaskError(BROKER_ERROR | WORKFLOW_NOT_FOUND, ...))`.
 
 ## `WorkflowStartError` / `WorkflowStartErrorCode`
 

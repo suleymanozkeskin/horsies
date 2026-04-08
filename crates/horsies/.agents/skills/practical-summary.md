@@ -103,7 +103,7 @@ Registration:
 ```rust
 match horsies::start_workflow::<ETLPipeline>().await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);
@@ -158,7 +158,7 @@ match horsies::start_workflow_with::<ChildPipeline>(
     "https://example.com/data.json".to_owned()
 ).await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await?;
+        let result = handle.get(Some(Duration::from_secs(60))).await;
     }
     Err(err) => {
         eprintln!("start failed: {}", err.message);

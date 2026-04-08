@@ -155,20 +155,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let result = handle.get(Some(Duration::from_secs(60))).await;
             match result {
-                Ok(TaskResult::Ok(notification)) => {
+                TaskResult::Ok(notification) => {
                     println!(
                         "order {} processed — notification {}",
                         notification.order_id, notification.notification_id,
                     );
                 }
-                Ok(TaskResult::Err(err)) => {
+                TaskResult::Err(err) => {
                     println!("workflow task error: {:?}", err.error_code);
-                }
-                Err(handle_err) => {
-                    println!(
-                        "handle error: {} (retryable={})",
-                        handle_err.message, handle_err.retryable
-                    );
                 }
             }
         }
