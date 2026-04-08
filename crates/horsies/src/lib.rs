@@ -1000,7 +1000,7 @@ mod tests {
                 seen.fetch_add(1, Ordering::SeqCst);
                 let mut builder = WorkflowSpecBuilder::new(format!("regional_{region}"));
                 builder.definition_key(format!("tests.regional.{region}.v1"));
-                let node = builder.task(TaskNode::<String>::new("macro_a"));
+                let node = builder.task(TaskNode::<String>::raw("macro_a"));
                 builder.output(node);
                 builder.build()
             })
@@ -1024,7 +1024,7 @@ mod tests {
             seen.fetch_add(1, Ordering::SeqCst);
             let mut builder = WorkflowSpecBuilder::new("zero_builder");
             builder.definition_key("tests.zero_builder.v1");
-            let node = builder.task(TaskNode::<String>::new("macro_a"));
+            let node = builder.task(TaskNode::<String>::raw("macro_a"));
             builder.output(node);
             builder.build()
         })

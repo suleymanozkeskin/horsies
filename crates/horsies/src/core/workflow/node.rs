@@ -194,11 +194,11 @@ impl<T> std::fmt::Debug for TaskNode<T> {
 }
 
 impl<T> TaskNode<T> {
-    /// Create a new task node for the given registered task name.
+    /// Low-level constructor from a bare task name.
     ///
-    /// External callers should use the `#[task]`-generated `node()` / `node_with()`
-    /// helpers instead, which validate registration and carry task options.
-    pub(crate) fn new(task_name: impl Into<String>) -> Self {
+    /// Intended for internal spec-builder tests and `TaskFunction::node()`.
+    /// External callers should use `#[task]`-generated `node()` / `node_with()`.
+    pub(crate) fn raw(task_name: impl Into<String>) -> Self {
         Self {
             task_name: task_name.into(),
             args_json: None,
@@ -508,7 +508,7 @@ mod tests {
 
     #[test]
     fn task_node_builder_defaults() {
-        let node: TaskNode<String> = TaskNode::new("my_task");
+        let node: TaskNode<String> = TaskNode::raw("my_task");
         assert_eq!(node.task_name(), "my_task");
         assert!(node.args_json.is_none());
         assert!(node.kwargs_json.is_none());
@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn task_node_chainable_setters() {
-        let node: TaskNode<i32> = TaskNode::new("add")
+        let node: TaskNode<i32> = TaskNode::raw("add")
             .args_json(r#"[1, 2]"#)
             .kwargs_json(r#"{"mode": "fast"}"#)
             .node_id("add_step")
@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn task_node_key_after_node_id() {
-        let node: TaskNode<Vec<u8>> = TaskNode::new("compress").node_id("compress:0");
+        let node: TaskNode<Vec<u8>> = TaskNode::raw("compress").node_id("compress:0");
         let key = node.key().expect("key should be Some after node_id set");
         assert_eq!(key.node_id(), "compress:0");
     }
@@ -557,7 +557,7 @@ mod tests {
     #[test]
     fn task_node_waits_for_deduplicates() {
         let dep = NodeRef { index: 0 };
-        let node: TaskNode<()> = TaskNode::new("t").waits_for(dep).waits_for(dep);
+        let node: TaskNode<()> = TaskNode::raw("t").waits_for(dep).waits_for(dep);
         assert_eq!(node.dependencies, vec![0]);
     }
 
@@ -566,14 +566,14 @@ mod tests {
         let d0 = NodeRef { index: 0 };
         let d1 = NodeRef { index: 1 };
         let d2 = NodeRef { index: 2 };
-        let node: TaskNode<()> = TaskNode::new("t").waits_for_all(&[d0, d1, d2]);
+        let node: TaskNode<()> = TaskNode::raw("t").waits_for_all(&[d0, d1, d2]);
         assert_eq!(node.dependencies, vec![0, 1, 2]);
     }
 
     #[test]
     fn task_node_args_from_adds_dependency() {
         let dep = NodeRef { index: 5 };
-        let node: TaskNode<()> = TaskNode::new("t").args_from("raw_data", dep);
+        let node: TaskNode<()> = TaskNode::raw("t").args_from("raw_data", dep);
         assert_eq!(node.dependencies, vec![5]);
         assert_eq!(node.args_from.get("raw_data"), Some(&5));
     }
@@ -581,7 +581,7 @@ mod tests {
     #[test]
     fn task_node_into_any_node() {
         let dep = NodeRef { index: 0 };
-        let node: TaskNode<String> = TaskNode::new("process")
+        let node: TaskNode<String> = TaskNode::raw("process")
             .args_json(r#""hello""#)
             .waits_for(dep)
             .args_from("input", dep)
@@ -607,7 +607,7 @@ mod tests {
 
     #[test]
     fn task_node_compatibility_setters_delegate_to_json_variants() {
-        let node: TaskNode<String> = TaskNode::new("process")
+        let node: TaskNode<String> = TaskNode::raw("process")
             .args(r#""hello""#)
             .kwargs(r#"{"mode":"fast"}"#);
 
@@ -647,7 +647,7 @@ mod tests {
 
     #[test]
     fn join_all_and_any_setters() {
-        let node: TaskNode<()> = TaskNode::new("t").join_any().join_all();
+        let node: TaskNode<()> = TaskNode::raw("t").join_any().join_all();
         assert_eq!(node.join, JoinType::All);
         assert!(node.min_success.is_none());
     }

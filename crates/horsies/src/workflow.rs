@@ -469,7 +469,7 @@ mod tests {
         let workflow = {
             let mut builder = app.workflow::<String>("greet");
             builder.definition_key("tests.greet.v1");
-            let node = builder.task(TaskNode::<String>::new("say_hello"));
+            let node = builder.task(TaskNode::<String>::raw("say_hello"));
             builder.output(node);
             builder.build().unwrap()
         };
@@ -494,7 +494,7 @@ mod tests {
         }
 
         fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-            let node = builder.task(TaskNode::<String>::new("say_hello").node_id("greet"));
+            let node = builder.task(TaskNode::<String>::raw("say_hello").node_id("greet"));
             Ok(WorkflowDefConfig::new().output(node))
         }
     }
@@ -515,7 +515,7 @@ mod tests {
     fn register_workflow_spec_returns_runtime_object() {
         let mut builder = WorkflowSpecBuilder::new("sum");
         builder.definition_key("tests.sum.v1");
-        let node = builder.task(TaskNode::<i32>::new("sum_task"));
+        let node = builder.task(TaskNode::<i32>::raw("sum_task"));
         builder.output(node);
         let spec = builder.build().unwrap();
 
@@ -532,7 +532,7 @@ mod tests {
         let first = {
             let mut builder = app.workflow::<String>("first");
             builder.definition_key("tests.first.v1");
-            let node = builder.task(TaskNode::<String>::new("hello_task"));
+            let node = builder.task(TaskNode::<String>::raw("hello_task"));
             builder.output(node);
             builder.build().unwrap()
         };
@@ -540,7 +540,7 @@ mod tests {
         {
             let mut builder = app.workflow::<String>("second");
             builder.definition_key("tests.second.v1");
-            let node = builder.task(TaskNode::<String>::new("hello_task"));
+            let node = builder.task(TaskNode::<String>::raw("hello_task"));
             builder.output(node);
             builder.build().unwrap();
         }
@@ -561,7 +561,7 @@ mod tests {
         {
             let mut builder = app.workflow::<String>("pre_existing");
             builder.definition_key("tests.pre_existing.v1");
-            let node = builder.task(TaskNode::<String>::new("hello_task"));
+            let node = builder.task(TaskNode::<String>::raw("hello_task"));
             builder.output(node);
             builder.build().unwrap();
         }
@@ -588,7 +588,7 @@ mod tests {
         {
             let mut builder = app.workflow::<String>("late_registered");
             builder.definition_key("tests.late_registered.v1");
-            let node = builder.task(TaskNode::<String>::new("hello_task"));
+            let node = builder.task(TaskNode::<String>::raw("hello_task"));
             builder.output(node);
             builder.build().unwrap();
         }
@@ -618,7 +618,7 @@ mod tests {
         }
 
         fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-            let node = builder.task(TaskNode::<String>::new("hello_task").node_id("hello"));
+            let node = builder.task(TaskNode::<String>::raw("hello_task").node_id("hello"));
             Ok(WorkflowDefConfig::new().output(node))
         }
 
@@ -626,7 +626,7 @@ mod tests {
             let mut builder = WorkflowSpecBuilder::new(format!("regional_{}", params.region));
             builder.definition_key(format!("tests.regional_template.{}.v1", params.region));
             let node = builder.task(
-                TaskNode::<String>::new("hello_task")
+                TaskNode::<String>::raw("hello_task")
                     .node_id("hello")
                     .args_json(serde_json::to_string(&params.region).unwrap()),
             );
@@ -670,7 +670,7 @@ mod tests {
         }
 
         fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-            let node = builder.task(TaskNode::<String>::new("hello_task").node_id("hello"));
+            let node = builder.task(TaskNode::<String>::raw("hello_task").node_id("hello"));
             Ok(WorkflowDefConfig::new().output(node))
         }
 
@@ -710,7 +710,7 @@ mod tests {
         builder.definition_key("tests.starter_test.v1");
         // Explicitly set queue so node resolution passes and the error
         // surfaces from the actual DB connection attempt.
-        let node = builder.task(TaskNode::<String>::new("some_task").queue("default"));
+        let node = builder.task(TaskNode::<String>::raw("some_task").queue("default"));
         builder.output(node);
         let spec = builder.build().unwrap();
 
@@ -726,7 +726,7 @@ mod tests {
         // Register a workflow first.
         let mut b1 = WorkflowSpecBuilder::new("taken_name");
         b1.definition_key("tests.taken.v1");
-        let node = b1.task(TaskNode::<String>::new("some_task"));
+        let node = b1.task(TaskNode::<String>::raw("some_task"));
         b1.output(node);
         app.register_workflow_spec::<String>(b1.build().unwrap())
             .unwrap();
@@ -734,7 +734,7 @@ mod tests {
         // Trying to start a new spec with the same name should fail validation.
         let mut b2 = WorkflowSpecBuilder::new("taken_name");
         b2.definition_key("tests.taken.v2");
-        let node = b2.task(TaskNode::<String>::new("other_task"));
+        let node = b2.task(TaskNode::<String>::raw("other_task"));
         b2.output(node);
         let spec = b2.build().unwrap();
 

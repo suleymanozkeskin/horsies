@@ -3,6 +3,6 @@
 //! Shared task definitions for e2e tests.
 //!
 //! Exposes generated task modules so integration tests can use typed
-//! `node()` / `node_with()` helpers instead of raw `TaskNode::new(...)`.
+//! `node()` / `node_with()` helpers for typed workflow node construction.
 
 pub mod tasks;

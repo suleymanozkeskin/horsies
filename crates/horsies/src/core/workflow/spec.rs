@@ -654,11 +654,11 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn simple_node(name: &str) -> TaskNode<()> {
-        TaskNode::new(name)
+        TaskNode::raw(name)
     }
 
     fn node_with_id(name: &str, id: &str) -> TaskNode<()> {
-        TaskNode::new(name).node_id(id)
+        TaskNode::raw(name).node_id(id)
     }
 
     // -----------------------------------------------------------------------
@@ -742,7 +742,7 @@ mod tests {
         // Phase 2 collects both errors, so we get a combined error.
         let mut b = WorkflowSpecBuilder::new("wf");
         let a_ref = b.task(simple_node("a"));
-        let _b_ref = b.task(TaskNode::<()>::new("b").waits_for(a_ref));
+        let _b_ref = b.task(TaskNode::<()>::raw("b").waits_for(a_ref));
         // Make a depend on b to remove all roots
         b.tasks[0].dependencies.push(1);
         let err = b.build().unwrap_err();
@@ -790,8 +790,8 @@ mod tests {
         // root -> a -> b -> (back to a) creates a cycle, but root is still a root.
         let mut b = WorkflowSpecBuilder::new("wf");
         let root = b.task(simple_node("root"));
-        let a_ref = b.task(TaskNode::<()>::new("a").waits_for(root));
-        let b_ref = b.task(TaskNode::<()>::new("b").waits_for(a_ref));
+        let a_ref = b.task(TaskNode::<()>::raw("a").waits_for(root));
+        let b_ref = b.task(TaskNode::<()>::raw("b").waits_for(a_ref));
         // Create cycle: a also depends on b
         b.tasks[1].dependencies.push(b_ref.index);
         let err = b.build().unwrap_err();
@@ -802,8 +802,8 @@ mod tests {
     fn linear_chain_valid() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
-        let bb = b.task(TaskNode::<()>::new("b").waits_for(a));
-        b.task(TaskNode::<()>::new("c").waits_for(bb));
+        let bb = b.task(TaskNode::<()>::raw("b").waits_for(a));
+        b.task(TaskNode::<()>::raw("c").waits_for(bb));
         let spec = b.build().unwrap();
         assert_eq!(spec.tasks.len(), 3);
     }
@@ -812,9 +812,9 @@ mod tests {
     fn diamond_dag_valid() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
-        let bb = b.task(TaskNode::<()>::new("b").waits_for(a));
-        let c = b.task(TaskNode::<()>::new("c").waits_for(a));
-        b.task(TaskNode::<()>::new("d").waits_for_all(&[bb, c]));
+        let bb = b.task(TaskNode::<()>::raw("b").waits_for(a));
+        let c = b.task(TaskNode::<()>::raw("c").waits_for(a));
+        b.task(TaskNode::<()>::raw("d").waits_for_all(&[bb, c]));
         let spec = b.build().unwrap();
         assert_eq!(spec.tasks.len(), 4);
     }
@@ -847,7 +847,7 @@ mod tests {
     fn args_from_valid() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
-        b.task(TaskNode::<()>::new("b").args_from("data", a));
+        b.task(TaskNode::<()>::raw("b").args_from("data", a));
         let spec = b.build().unwrap();
         assert_eq!(spec.tasks[1].args_from.get("data"), Some(&0));
     }
@@ -868,7 +868,7 @@ mod tests {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(node_with_id("a", "step_a"));
         b.task(
-            TaskNode::<()>::new("b")
+            TaskNode::<()>::raw("b")
                 .waits_for(a)
                 .workflow_ctx_from(vec!["step_a".to_owned()]),
         );
@@ -884,7 +884,7 @@ mod tests {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
         b.task(
-            TaskNode::<()>::new("b")
+            TaskNode::<()>::raw("b")
                 .args(r#"[1]"#)
                 .args_from("input", a),
         );
@@ -897,7 +897,7 @@ mod tests {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(node_with_id("a", "step_a"));
         b.task(
-            TaskNode::<()>::new("b")
+            TaskNode::<()>::raw("b")
                 .args(r#"[1]"#)
                 .waits_for(a)
                 .workflow_ctx_from(vec!["step_a".to_owned()]),
@@ -909,7 +909,7 @@ mod tests {
     #[test]
     fn e019_kwargs_must_be_object() {
         let mut b = WorkflowSpecBuilder::new("wf");
-        b.task(TaskNode::<()>::new("a").kwargs("[1, 2, 3]"));
+        b.task(TaskNode::<()>::raw("a").kwargs("[1, 2, 3]"));
         let err = b.build().unwrap_err();
         assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidKwargKey));
     }
@@ -919,7 +919,7 @@ mod tests {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
         b.task(
-            TaskNode::<()>::new("b")
+            TaskNode::<()>::raw("b")
                 .kwargs(r#"{"data": 1}"#)
                 .args_from("data", a),
         );
@@ -1000,7 +1000,7 @@ mod tests {
     fn e013_min_success_zero() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
-        b.task(TaskNode::<()>::new("b").waits_for(a));
+        b.task(TaskNode::<()>::raw("b").waits_for(a));
         b.tasks[1].join = JoinType::Quorum;
         b.tasks[1].min_success = Some(0);
         let err = b.build().unwrap_err();
@@ -1011,7 +1011,7 @@ mod tests {
     fn e013_min_success_exceeds_deps() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
-        b.task(TaskNode::<()>::new("b").waits_for(a).join_quorum(5));
+        b.task(TaskNode::<()>::raw("b").waits_for(a).join_quorum(5));
         let err = b.build().unwrap_err();
         assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidJoin));
     }
@@ -1020,7 +1020,7 @@ mod tests {
     fn e013_all_with_min_success() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
-        b.task(TaskNode::<()>::new("b").waits_for(a));
+        b.task(TaskNode::<()>::raw("b").waits_for(a));
         b.tasks[1].join = JoinType::All;
         b.tasks[1].min_success = Some(1);
         let err = b.build().unwrap_err();
@@ -1031,7 +1031,7 @@ mod tests {
     fn e013_any_with_min_success() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
-        b.task(TaskNode::<()>::new("b").waits_for(a));
+        b.task(TaskNode::<()>::raw("b").waits_for(a));
         b.tasks[1].join = JoinType::Any;
         b.tasks[1].min_success = Some(1);
         let err = b.build().unwrap_err();
@@ -1045,7 +1045,7 @@ mod tests {
         let bb = b.task(simple_node("b"));
         let c = b.task(simple_node("c"));
         b.task(
-            TaskNode::<()>::new("d")
+            TaskNode::<()>::raw("d")
                 .waits_for_all(&[a, bb, c])
                 .join_quorum(2),
         );
@@ -1117,12 +1117,12 @@ mod tests {
         let mut b = WorkflowSpecBuilder::new("data_pipeline");
         let fetch = b.task(node_with_id("fetch", "fetch"));
         let parse = b.task(
-            TaskNode::<String>::new("parse")
+            TaskNode::<String>::raw("parse")
                 .args_from("raw", fetch)
                 .node_id("parse"),
         );
         let persist = b.task(
-            TaskNode::<()>::new("persist")
+            TaskNode::<()>::raw("persist")
                 .args_from("data", parse)
                 .node_id("persist"),
         );
@@ -1174,11 +1174,11 @@ mod tests {
         // Building two specs from fresh TaskNodes with the same name produces
         // independent node_ids (auto-assigned from task_name:index).
         let mut b1 = WorkflowSpecBuilder::new("alpha");
-        b1.task(TaskNode::<()>::new("task_a"));
+        b1.task(TaskNode::<()>::raw("task_a"));
         let spec1 = b1.build().unwrap();
 
         let mut b2 = WorkflowSpecBuilder::new("beta");
-        b2.task(TaskNode::<()>::new("task_a"));
+        b2.task(TaskNode::<()>::raw("task_a"));
         let spec2 = b2.build().unwrap();
 
         assert_eq!(spec1.tasks[0].node_id.as_deref(), Some("task_a:0"));
@@ -1188,11 +1188,11 @@ mod tests {
     #[test]
     fn explicit_node_id_preserved_on_reuse() {
         let mut b1 = WorkflowSpecBuilder::new("alpha");
-        b1.task(TaskNode::<()>::new("task_a").node_id("custom-stable-id"));
+        b1.task(TaskNode::<()>::raw("task_a").node_id("custom-stable-id"));
         let spec1 = b1.build().unwrap();
 
         let mut b2 = WorkflowSpecBuilder::new("beta");
-        b2.task(TaskNode::<()>::new("task_a").node_id("custom-stable-id"));
+        b2.task(TaskNode::<()>::raw("task_a").node_id("custom-stable-id"));
         let spec2 = b2.build().unwrap();
 
         assert_eq!(spec1.tasks[0].node_id.as_deref(), Some("custom-stable-id"));
@@ -1203,7 +1203,7 @@ mod tests {
     fn kwargs_json_preserved_after_build() {
         let mut b = WorkflowSpecBuilder::new("wf");
         b.task(
-            TaskNode::<()>::new("task_a")
+            TaskNode::<()>::raw("task_a")
                 .kwargs(r#"{"url":"https://example.com"}"#)
                 .node_id("a"),
         );
@@ -1224,7 +1224,7 @@ mod tests {
         let cloned = spec1.tasks[0].clone();
 
         let mut b2 = WorkflowSpecBuilder::new("second");
-        b2.task(TaskNode::<()>::new("a").node_id("a"));
+        b2.task(TaskNode::<()>::raw("a").node_id("a"));
         let spec2 = b2.build().unwrap();
 
         assert_eq!(spec1.tasks[0].task_name, spec2.tasks[0].task_name);

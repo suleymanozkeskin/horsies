@@ -435,7 +435,7 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
     }
 
     pub fn node(&self) -> TaskNode<T> {
-        let mut node = TaskNode::<T>::new(&self.task_name)
+        let mut node = TaskNode::<T>::raw(&self.task_name)
             .queue(self.queue_name.clone())
             .priority(self.priority as i32);
 

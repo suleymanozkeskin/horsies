@@ -449,7 +449,7 @@ mod tests {
 
     fn make_spec(name: &str) -> WorkflowSpec {
         let mut builder = WorkflowSpecBuilder::new(name);
-        builder.task(TaskNode::<()>::new("my_task"));
+        builder.task(TaskNode::<()>::raw("my_task"));
         builder.build().unwrap()
     }
 
@@ -511,7 +511,7 @@ mod tests {
         use crate::core::workflow::sub_workflow::SubWorkflowNode;
 
         let mut builder = WorkflowSpecBuilder::new(name);
-        let root = builder.task(TaskNode::<()>::new("root_task"));
+        let root = builder.task(TaskNode::<()>::raw("root_task"));
         builder.sub_workflow(
             SubWorkflowNode::new(child_spec_name)
                 .waits_for(root)
@@ -595,7 +595,7 @@ mod tests {
             use crate::core::workflow::sub_workflow::SubWorkflowNode;
 
             let mut builder = WorkflowSpecBuilder::new("wf_a");
-            let root = builder.task(TaskNode::<()>::new("root_task"));
+            let root = builder.task(TaskNode::<()>::raw("root_task"));
             builder.sub_workflow(
                 SubWorkflowNode::new("wf_b")
                     .waits_for(root)

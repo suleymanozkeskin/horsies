@@ -102,8 +102,6 @@ async fn wait_for_wf_status(pool: &PgPool, wf_id: &str, target: &str, timeout: D
 async fn test_quorum_ctx_gating() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "4"],
@@ -166,8 +164,6 @@ async fn test_quorum_ctx_gating() {
 async fn test_quorum_impossible_skips() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "4"],
@@ -229,8 +225,6 @@ async fn test_quorum_impossible_skips() {
 async fn test_join_any_all_deps_fail_skips() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "4"],
@@ -280,8 +274,6 @@ async fn test_join_any_all_deps_fail_skips() {
 async fn test_pause_blocks_ready_transitions() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "2"],
@@ -429,8 +421,6 @@ async fn test_resume_continues_workflow() {
 async fn test_pause_then_cancel() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "2"],
@@ -493,8 +483,6 @@ async fn test_pause_then_cancel() {
 async fn test_success_policy_satisfied() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "4"],
@@ -545,8 +533,6 @@ async fn test_success_policy_satisfied() {
 async fn test_success_policy_not_met() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "4"],
@@ -597,8 +583,6 @@ async fn test_success_policy_not_met() {
 async fn test_success_policy_multiple_cases() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "4"],
@@ -655,8 +639,6 @@ async fn test_success_policy_multiple_cases() {
 async fn test_on_error_pause_stops_workflow() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "2"],
@@ -888,8 +870,6 @@ async fn test_recovery_preserves_failed_state() {
 async fn test_pause_idempotent() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "2"],
@@ -1001,8 +981,6 @@ async fn test_resume_on_running_noop() {
 async fn test_success_policy_not_met_error_content() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "4"],
@@ -1066,8 +1044,6 @@ async fn test_success_policy_not_met_error_content() {
 async fn test_workflow_task_retries() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "2"],
@@ -1140,8 +1116,6 @@ async fn test_workflow_task_retries() {
 async fn test_workflow_task_retries_exhausted() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "2"],
@@ -1257,8 +1231,6 @@ fn write_recovery_custom_config() -> tempfile::NamedTempFile {
 async fn test_workflow_recovers_after_worker_crash() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let config_file = write_recovery_custom_config();
     let config_path = config_file.path().to_str().unwrap().to_owned();
 
@@ -1423,8 +1395,6 @@ async fn test_workflow_recovers_after_worker_crash() {
 async fn test_workflow_task_inherits_retry_from_registration() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
-    let reg = registry();
-
     let _worker = start_worker(
         &db_url(),
         &["--concurrency", "2"],

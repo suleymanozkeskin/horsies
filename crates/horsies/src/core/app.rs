@@ -252,11 +252,11 @@ impl Horsies {
     /// # Example
     ///
     /// ```ignore
-    /// use horsies::{Horsies, WorkflowSpecBuilder, TaskNode};
+    /// use horsies::{Horsies, WorkflowSpecBuilder};
     ///
     /// let mut app = Horsies::new(config)?;
     /// let mut builder = WorkflowSpecBuilder::new("my_pipeline");
-    /// builder.task(TaskNode::<()>::new("step_a"));
+    /// builder.task(step_a::node()?);
     /// let spec = builder.build()?;
     /// app.register_workflow_spec(spec)?;
     /// ```
@@ -278,11 +278,11 @@ impl Horsies {
     /// # Example
     ///
     /// ```ignore
-    /// use horsies::{Horsies, TaskNode};
+    /// use horsies::Horsies;
     ///
     /// let mut app = Horsies::new(config)?;
     /// let mut wb = app.workflow("my_pipeline");
-    /// wb.task(TaskNode::<()>::new("step_a"));
+    /// wb.task(step_a::node()?);
     /// wb.build_and_register()?;
     /// ```
     pub fn workflow(&mut self, name: &str) -> WorkflowRegistrationBuilder<'_> {
@@ -661,7 +661,7 @@ impl Horsies {
         // Phase 2.9: Workflow node queue validation.
         // After registration resolves queue/priority, every non-subworkflow
         // node should have a valid queue. Catches unresolved queues (e.g.
-        // TaskNode::new("name") without registered task defaults) and
+        // TaskNode::raw("name") without registered task defaults) and
         // invalid queue overrides (e.g. .queue("wrong")).
         for registered in self.workflow_registry.iter() {
             for node in &registered.spec.tasks {
@@ -1634,7 +1634,7 @@ mod tests {
     fn register_workflow_spec_simple() {
         let mut app = Horsies::new(valid_config()).unwrap();
         let mut builder = WorkflowSpecBuilder::new("my_pipeline");
-        builder.task(TaskNode::<()>::new("step_a"));
+        builder.task(TaskNode::<()>::raw("step_a"));
         let spec = builder.build().unwrap();
         assert!(app.register_workflow_spec(spec).is_ok());
         assert!(app.workflow_registry().contains("my_pipeline"));
@@ -1660,8 +1660,8 @@ mod tests {
 
         // Build a workflow using both tasks WITHOUT .task_options() on nodes.
         let mut builder = WorkflowSpecBuilder::new("pipeline");
-        let a = builder.task(TaskNode::<()>::new("retryable_task"));
-        builder.task(TaskNode::<()>::new("plain_task").waits_for(a));
+        let a = builder.task(TaskNode::<()>::raw("retryable_task"));
+        builder.task(TaskNode::<()>::raw("plain_task").waits_for(a));
         let spec = builder.build().unwrap();
 
         // Verify task_options_json is None before registration.
@@ -1718,7 +1718,7 @@ mod tests {
         // Build a workflow with EXPLICIT task_options on the node (override).
         let custom_opts = r#"{"retry_policy":{"max_retries":1,"intervals":[10],"backoff_strategy":"fixed","jitter":false}}"#;
         let mut builder = WorkflowSpecBuilder::new("pipeline_explicit");
-        builder.task(TaskNode::<()>::new("retryable_task").task_options(custom_opts));
+        builder.task(TaskNode::<()>::raw("retryable_task").task_options(custom_opts));
         let spec = builder.build().unwrap();
 
         app.register_workflow_spec(spec).unwrap();
@@ -1734,11 +1734,11 @@ mod tests {
         let mut app = Horsies::new(valid_config()).unwrap();
 
         let mut b1 = WorkflowSpecBuilder::new("dup_wf");
-        b1.task(TaskNode::<()>::new("a"));
+        b1.task(TaskNode::<()>::raw("a"));
         app.register_workflow_spec(b1.build().unwrap()).unwrap();
 
         let mut b2 = WorkflowSpecBuilder::new("dup_wf");
-        b2.task(TaskNode::<()>::new("b"));
+        b2.task(TaskNode::<()>::raw("b"));
         let result = app.register_workflow_spec(b2.build().unwrap());
         assert!(result.is_err());
     }
@@ -1750,8 +1750,8 @@ mod tests {
         let mut app = Horsies::new(valid_config()).unwrap();
         {
             let mut wb = app.workflow("pipeline");
-            let a = wb.task(TaskNode::<()>::new("fetch_data"));
-            wb.task(TaskNode::<()>::new("process").waits_for(a));
+            let a = wb.task(TaskNode::<()>::raw("fetch_data"));
+            wb.task(TaskNode::<()>::raw("process").waits_for(a));
             wb.build_and_register().unwrap();
         }
         assert!(app.workflow_registry().contains("pipeline"));
@@ -1772,12 +1772,12 @@ mod tests {
         let mut app = Horsies::new(valid_config()).unwrap();
         {
             let mut wb = app.workflow("wf_dup");
-            wb.task(TaskNode::<()>::new("a"));
+            wb.task(TaskNode::<()>::raw("a"));
             wb.build_and_register().unwrap();
         }
         {
             let mut wb = app.workflow("wf_dup");
-            wb.task(TaskNode::<()>::new("b"));
+            wb.task(TaskNode::<()>::raw("b"));
             let result = wb.build_and_register();
             assert!(result.is_err());
         }
@@ -1794,7 +1794,7 @@ mod tests {
             counter.fetch_add(1, Ordering::Relaxed);
             let mut builder = WorkflowSpecBuilder::new("zero_pipeline");
             builder.definition_key("tests.zero.v1");
-            builder.task(TaskNode::<()>::new("step_a"));
+            builder.task(TaskNode::<()>::raw("step_a"));
             builder.build()
         })
         .unwrap()
@@ -1813,7 +1813,7 @@ mod tests {
         app.workflow_builder("build_param", |_app, region: &String| {
             let mut builder = WorkflowSpecBuilder::new(format!("wf_{region}"));
             builder.definition_key(format!("tests.{region}.v1"));
-            builder.task(TaskNode::<()>::new("step_a"));
+            builder.task(TaskNode::<()>::raw("step_a"));
             builder.build()
         })
         .unwrap()
@@ -1838,7 +1838,7 @@ mod tests {
                 seen_in_builder.lock().unwrap().push(region.clone());
                 let mut builder = WorkflowSpecBuilder::new(format!("wf_{region}"));
                 builder.definition_key(format!("tests.{region}.v1"));
-                builder.task(TaskNode::<()>::new("step_a"));
+                builder.task(TaskNode::<()>::raw("step_a"));
                 builder.build()
             })
             .unwrap();
@@ -1920,7 +1920,7 @@ mod tests {
             seen_in_builder.store(app.are_sends_suppressed(), Ordering::Relaxed);
             let mut builder = WorkflowSpecBuilder::new("suppressed_pipeline");
             builder.definition_key("tests.suppressed.v1");
-            builder.task(TaskNode::<()>::new("step_a"));
+            builder.task(TaskNode::<()>::raw("step_a"));
             builder.build()
         })
         .unwrap()
@@ -2515,13 +2515,13 @@ mod tests {
         let mut builder = WorkflowSpecBuilder::new("missing_input_wf");
         builder.definition_key("tests.missing_input.v1");
         let bad_node = builder.task(
-            TaskNode::<()>::new("needs_input")
+            TaskNode::<()>::raw("needs_input")
                 .node_id("bad")
                 .queue("default"),
         );
         // A node that doesn't need input is fine without args.
         builder.task(
-            TaskNode::<()>::new("no_input")
+            TaskNode::<()>::raw("no_input")
                 .node_id("ok")
                 .queue("default")
                 .waits_for(bad_node),
@@ -2553,12 +2553,12 @@ mod tests {
         let mut builder = WorkflowSpecBuilder::new("has_args_from_wf");
         builder.definition_key("tests.has_args_from.v1");
         let producer = builder.task(
-            TaskNode::<()>::new("producer")
+            TaskNode::<()>::raw("producer")
                 .node_id("producer")
                 .queue("default"),
         );
         builder.task(
-            TaskNode::<()>::new("needs_input")
+            TaskNode::<()>::raw("needs_input")
                 .node_id("consumer")
                 .queue("default")
                 .waits_for(producer)
@@ -2580,7 +2580,7 @@ mod tests {
             let mut builder = WorkflowSpecBuilder::new("builder_missing_input");
             builder.definition_key("tests.builder_missing_input.v1");
             builder.task(
-                TaskNode::<()>::new("needs_input")
+                TaskNode::<()>::raw("needs_input")
                     .node_id("bad")
                     .queue("default"),
             );
