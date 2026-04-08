@@ -32,7 +32,7 @@ skill files in this directory:
 ## Define a Task
 
 ```rust
-use horsies::{task, TaskError};
+use horsies::{task, TaskError, TaskResult};
 use serde::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize)]
@@ -59,6 +59,10 @@ let add_numbers_task = add_numbers::register(&mut app)?;
 match add_numbers_task.send(AddNumbersInput { a: 5, b: 3 }).await {
     Ok(handle) => {
         let result = handle.get(Some(Duration::from_secs(30))).await;
+        match result {
+            TaskResult::Ok(value) => println!("result: {value}"),
+            TaskResult::Err(err) => eprintln!("task failed or timed out: {:?}", err),
+        }
     }
     Err(err) => {
         eprintln!("send failed: {}", err.message);
@@ -72,6 +76,10 @@ match add_numbers_task.send(AddNumbersInput { a: 5, b: 3 }).await {
 match add_numbers_task.schedule(Duration::from_secs(60), args).await {
     Ok(handle) => {
         let result = handle.get(Some(Duration::from_secs(90))).await;
+        match result {
+            TaskResult::Ok(value) => println!("result: {value}"),
+            TaskResult::Err(err) => eprintln!("task failed or timed out: {:?}", err),
+        }
     }
     Err(err) => {
         eprintln!("schedule failed: {}", err.message);
@@ -206,17 +214,19 @@ Use `app.check_workflow_builder(...)` for representative-case validation of
 runtime-built workflow specs during `app.check()`:
 
 ```rust
+fetch_data::register(&mut app)?;
+process_data::register(&mut app)?;
+
 let mut registration = app.check_workflow_builder(
     "build_child_workflow",
     move |source_url: &String| {
         let mut builder = WorkflowSpecBuilder::new("child_pipeline");
         builder.definition_key("myapp.child_pipeline.v1");
-        let fetch_ref = builder.task(fetch_data.node_with(FetchDataInput {
+        let fetch_ref = builder.task(fetch_data::node_with(FetchDataInput {
             source: source_url.clone(),
         })?);
         let process_ref = builder.task(
-            process_data
-                .node()
+            process_data::node()?
                 .waits_for(fetch_ref)
                 .args_from("data", fetch_ref),
         );
@@ -352,7 +362,7 @@ let status = handle.status().await?;
 
 ## Blessed Start Patterns
 
-- Global dispatch: `horsies::start_workflow::<D>()` and `horsies::start_workflow_with::<D>(params)`
+- Global dispatch: `horsies::start_workflow::<D>()` and `horsies::start_workflow_with::<D>(params)` after startup registration
 - Reusable setup/HTTP starts: `WorkflowFunction<T>` and `WorkflowTemplate<P, T>`
 - Ad hoc external dynamic starts: `app.start::<T>(spec)`
 - In-task dynamic starts: `TaskRuntime::start::<T>(spec)`
@@ -363,9 +373,10 @@ let status = handle.status().await?;
 |---|---|---|---|
 | Task execution | `Result<T, TaskError>` | value `T` | `TaskError` |
 | `task.send()` | `TaskSendResult<TaskHandle<T>>` | `TaskHandle` | `TaskSendError` |
+| `TaskHandle::get()` | `TaskResult<T>` | `TaskResult::Ok(T)` | `TaskResult::Err(TaskError)` |
 | `workflow.start()` | `WorkflowStartResult<WorkflowHandle<T>>` | `WorkflowHandle` | `WorkflowStartError` |
+| `WorkflowHandle` query ops | `HandleResult<T>` | value `T` | `HandleOperationError` |
 | Broker infra | `BrokerResult<T>` | value `T` | `BrokerOperationError` |
-| Handle ops | `HandleResult<T>` | value `T` | `HandleOperationError` |
 
 ## Error Code Families
 

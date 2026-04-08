@@ -29,7 +29,11 @@ Registration:
 ```rust
 match add_numbers::send(AddNumbersInput { a: 1, b: 2 }).await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(5))).await?;
+        let result = handle.get(Some(Duration::from_secs(5))).await;
+        match result {
+            TaskResult::Ok(value) => println!("result: {value}"),
+            TaskResult::Err(err) => eprintln!("task failed or timed out: {:?}", err),
+        }
     }
     Err(err) => {
         eprintln!("send failed: {}", err.message);
@@ -75,8 +79,8 @@ impl WorkflowDefinition for ETLPipeline {
 
     fn name() -> &'static str { "etl_pipeline" }
 
-    fn build() -> Result<WorkflowSpec, HorsiesError> {
-        // build fixed DAG
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        // build fixed DAG with generated task_module::node()? helpers
     }
 }
 ```
@@ -219,7 +223,7 @@ async fn trigger_child(rt: TaskRuntime, input: ChildInput) -> Result<(), TaskErr
 }
 ```
 
-**Dynamic workflow lifecycle:** build pure `WorkflowSpec` at runtime -> start with `app.start(...)` externally or `rt.start(...)` inside tasks.
+**Dynamic workflow lifecycle:** build pure `WorkflowSpec` at runtime -> start with `app.start(...)` externally or `rt.start(...)` inside tasks. `app.start(...)` internally registers and starts the spec in one step.
 
 ---
 
@@ -253,4 +257,4 @@ app.check()?;
 | Tasks | `#[task]` | `task_name::register(&mut app)?` | `task_name::send(args).await` |
 | Zero-param workflows | `impl WorkflowDefinition<Params = ()>` | `app.register_workflow_definition::<D>()?` | `horsies::start_workflow::<D>().await` |
 | Parameterized workflows | `impl WorkflowDefinition<Params = P>` | `app.workflow_template::<D>()` | `horsies::start_workflow_with::<D>(params).await` |
-| Dynamic workflows | build `WorkflowSpec` | N/A | `app.start(spec)` or `rt.start(spec)` |
+| Dynamic workflows | build `WorkflowSpec` | no pre-registration; `app.start` registers and starts | `app.start(spec)` or `rt.start(spec)` |

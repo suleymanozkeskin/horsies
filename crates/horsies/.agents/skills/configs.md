@@ -222,16 +222,34 @@ if !errors.is_empty() {
 |---|---|---|
 | 1 | Config — validated at `Horsies::new()` | Done (implicit) |
 | 2 | Schedule validation — task names, queue names | Done |
-| 3.1 | Workflow `definition_key` presence (HRS-016) and uniqueness (HRS-017) | Done |
-| 3.5 | Runtime policy safety — registered task `task_options`, `retry_policy`, `auto_retry_for`, reserved code collisions | Done |
+| 2.5 | Runtime policy safety — registered task `task_options`, `retry_policy`, `auto_retry_for`, reserved code collisions | Done |
+| 2.6 | Custom-mode task queue metadata validation | Done |
+| 2.8 | Registered workflow nodes reference registered tasks | Done |
+| 2.9 | Workflow node queues are resolved and valid | Done |
+| 2.10 | Workflow nodes that require input have args, kwargs, or `args_from` | Done |
+| 3 | Workflow `definition_key` presence (HRS-016) | Done |
+| 3.2 | Checked workflow builder representative cases | Done |
+| 3.5 | Duplicate `definition_key` detection (HRS-017) | Done |
 
-### Runtime policy safety (Phase 3.5)
+### Runtime policy safety (Phase 2.5)
 
 Validates registered task metadata:
 - `task_options` identity / queue consistency
 - `retry_policy.validate()` (intervals, max_retries)
 - `retry_policy` requiring non-empty `auto_retry_for`
 - Reserved built-in collision detection for user-provided retry codes (HRS-212)
+
+### Workflow wiring safety (Phases 2.8–2.10)
+
+Validates registered workflow specs and checked builder output specs:
+- referenced task names are registered
+- node queues resolve from explicit node overrides or registered task defaults
+- resolved queues are valid for the configured queue mode
+- non-unit tasks have an input source: `args_json`, `kwargs_json`, or `args_from`
+
+The same queue/input validation also runs at workflow start through the shared
+workflow registry resolver, so invalid dynamic specs fail before worker
+deserialization.
 
 ### `Horsies::check_live()`
 
@@ -249,17 +267,20 @@ top-level app.
 
 | Code | Description | Phase |
 |---|---|---|
-| `HRS-001–HRS-017` | Workflow validation errors | 3.1 |
-| `HRS-016` | Missing `definition_key` | 3.1, 3.2 |
-| `HRS-017` | Duplicate `definition_key` | 3.1 |
+| `HRS-001–HRS-020`, `HRS-025`, `HRS-027–HRS-030`, `HRS-032` | Workflow validation errors | 2.8–3.5 |
+| `HRS-014` | Workflow queue unresolved or invalid | 2.9, builder validation, start-time validation |
+| `HRS-016` | Missing `definition_key` | 3, 3.2 |
+| `HRS-017` | Duplicate `definition_key` | 3.5 |
+| `HRS-020` | Workflow node missing required input | 2.10, builder validation, start-time validation |
 | `HRS-027` | Parameterized builder without cases | 3.2 |
 | `HRS-029` | Builder exception / wrong return type | 3.2 |
-| `HRS-100–HRS-104` | Task definition errors | 3.5 |
-| `HRS-102` | Invalid task_options / retry policy | 3.5 |
+| `HRS-100–HRS-103` | Task definition errors | 2.5 |
+| `HRS-102` | Invalid task_options / retry policy | 2.5 |
 | `HRS-200–HRS-211` | Configuration errors | 1 |
 | `HRS-203` | Broker connectivity failure (live only) | 4 |
-| `HRS-212` | Reserved code collision in `auto_retry_for` | 3.5 |
+| `HRS-212` | Reserved code collision in `auto_retry_for` | 2.5 |
 | `HRS-301` | Registry duplicate name | Registration |
+| `HRS-302` | Workflow references unregistered task | 2.8, builder validation |
 
 ## `PostgresBroker`
 

@@ -12,7 +12,7 @@ Detailed reference for defining, registering, sending, and handling tasks.
 Annotate an async function with `#[horsies::task]`:
 
 ```rust
-use horsies::{task, TaskError};
+use horsies::{task, TaskError, TaskResult};
 use serde::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize)]
@@ -138,11 +138,19 @@ code when the failure path matters operationally:
 ```rust
 match add_numbers_task.send(AddNumbersInput { a: 5, b: 3 }).await {
     Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(30))).await?;
+        let result = handle.get(Some(Duration::from_secs(30))).await;
+        match result {
+            TaskResult::Ok(value) => tracing::info!(value, "add_numbers completed"),
+            TaskResult::Err(err) => tracing::warn!(error = ?err, "add_numbers failed or timed out"),
+        }
     }
     Err(err) if err.retryable => {
         let handle = add_numbers_task.retry_send(&err).await?;
-        let result = handle.get(Some(Duration::from_secs(30))).await?;
+        let result = handle.get(Some(Duration::from_secs(30))).await;
+        match result {
+            TaskResult::Ok(value) => tracing::info!(value, "add_numbers completed after retry"),
+            TaskResult::Err(err) => tracing::warn!(error = ?err, "add_numbers failed or timed out"),
+        }
     }
     Err(err) => {
         tracing::warn!(error = %err.message, "failed to send add_numbers");
@@ -163,6 +171,7 @@ async fn retry_schedule(&self, err: &TaskSendError) -> TaskSendResult<TaskHandle
 
 // Workflow integration
 fn node(&self) -> TaskNode<T>
+fn node_with(&self, args: A) -> Result<TaskNode<T>, HorsiesError>
 
 // Accessors
 fn task_name(&self) -> &str
@@ -192,6 +201,30 @@ Same as `send()` but with `enqueued_at = now() + delay`. The scheduled time is f
 ### `node()` behavior
 
 Returns `TaskNode<T>` pre-configured with task name, queue, priority, good_until, and serialized task_options. Bridges registered tasks to workflow construction.
+
+`node_with(args)` additionally serializes `args` onto the node. Use it for root tasks or parameterized dynamic workflow nodes that need explicit input.
+
+The generated task module helpers are fallible wrappers around the registered handle:
+
+```rust
+fn add_numbers::node() -> Result<TaskNode<i32>, HorsiesError>
+fn add_numbers::node_with(args: AddNumbersInput) -> Result<TaskNode<i32>, HorsiesError>
+```
+
+They fail if `add_numbers::register(&mut app)?` has not populated the generated module handle.
+
+## `TaskHandle<T>`
+
+```rust
+async fn get(&self, timeout: Option<Duration>) -> TaskResult<T>
+```
+
+Task handles do **not** return `HandleResult`. Retrieval outcomes are represented as `TaskResult<T>`:
+
+- `TaskResult::Ok(value)` — task completed successfully.
+- `TaskResult::Err(TaskError)` — task failed, timed out while waiting, was not found, or hit a broker/result retrieval error.
+
+This differs from `WorkflowHandle<T>`, whose query methods return `HandleResult<...>` because workflow handle operations expose workflow-query infrastructure failures separately.
 
 ## Serialization Rules
 

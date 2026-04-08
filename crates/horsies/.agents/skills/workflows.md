@@ -123,7 +123,7 @@ For reusable parameterized workflow-definition types, override
 `app.workflow_template::<...>()`:
 
 ```rust
-use horsies::{HorsiesError, WorkflowDefConfig, WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder};
+use horsies::{HorsiesError, WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder};
 
 struct ChildPipeline;
 
@@ -134,23 +134,11 @@ impl WorkflowDefinition for ChildPipeline {
     fn name() -> &'static str { "child_pipeline" }
     fn definition_key() -> &'static str { "myapp.child_pipeline.v1" }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-        let fetch = builder.task(fetch_data::node()?.node_id("fetch"));
-        let process = builder.task(
-            process_data::node()?
-                .waits_for(fetch)
-                .args_from("data", fetch)
-                .node_id("process"),
-        );
-        Ok(WorkflowDefConfig::new().output(process))
-    }
-
     fn build_with(source_url: Self::Params) -> Result<WorkflowSpec, HorsiesError> {
         let mut builder = WorkflowSpecBuilder::new("child_pipeline");
         builder.definition_key("myapp.child_pipeline.v1");
         let fetch = builder.task(
-            fetch_data::node()?
-                .args_json(serde_json::to_string(&source_url).unwrap())
+            fetch_data::node_with(FetchDataInput { source_url })?
                 .node_id("fetch"),
         );
         let process = builder.task(
@@ -174,6 +162,10 @@ match child.start("https://example.com/data.json".to_owned()).await {
     }
 }
 ```
+
+Parameterized workflows do not need a placeholder `define()` implementation.
+Override `build_with(params)` directly and use typed `node_with(...)` helpers
+for parameter-derived root inputs.
 
 ### Checked dynamic builders via `check_workflow_builder()`
 
@@ -563,7 +555,8 @@ fn workflow_id(&self) -> &str
 ### `get()` semantics
 
 - Subscribes to `workflow_done` PG NOTIFY channel via shared listener.
-- `COMPLETED` → returns output task's `TaskResult`.
+- `COMPLETED` with an explicit `builder.output(...)` → returns that output task's `TaskResult`.
+- `COMPLETED` without an explicit output → returns `TaskResult::Ok` containing a JSON object of terminal output task results keyed by `node_id`.
 - `FAILED` / `CANCELLED` → returns `TaskResult::Err(TaskError(...))`.
 - `PAUSED` → returns immediately with `TaskError(WorkflowPaused)`.
 - Timeout → returns `TaskError(WaitTimeout)`.
