@@ -613,7 +613,7 @@ pub(crate) fn build_child_spec(
         // and queue/priority here.
         registry.resolve_spec_task_options(&mut spec);
         registry
-            .resolve_and_validate_spec_queue_priority(&mut spec)
+            .resolve_and_validate_spec(&mut spec)
             .map_err(|e| WorkflowError::Validation(e.to_string()))?;
         Ok(spec)
     } else {

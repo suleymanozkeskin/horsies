@@ -107,6 +107,11 @@ impl<'a, A: Serialize + 'static, T: DeserializeOwned + Clone + 'static>
             self.task = self.task.with_task_options(opts.clone());
         }
 
+        // Store input metadata for check() validation.
+        self.task
+            .set_expects_input(std::any::TypeId::of::<A>() != std::any::TypeId::of::<()>());
+        self.task.set_input_type_name(std::any::type_name::<A>());
+
         match self.queue.as_deref() {
             Some(queue) => self
                 .app

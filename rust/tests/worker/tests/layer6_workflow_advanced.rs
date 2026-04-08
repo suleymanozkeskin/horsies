@@ -15,17 +15,18 @@ use serial_test::serial;
 use sqlx::PgPool;
 
 use horsies::{
-    cancel_workflow, pause_workflow, resolve_node_task_options, resume_workflow, Horsies,
-    OnError, PostgresBroker, SuccessCase, SuccessPolicy, TaskNode, WorkflowHandle,
-    WorkflowSpecBuilder, WorkflowSpecRegistry,
+    cancel_workflow, pause_workflow, resolve_node_task_options, resume_workflow, Horsies, OnError,
+    PostgresBroker, SuccessCase, SuccessPolicy, TaskNode, WorkflowHandle, WorkflowSpecBuilder,
+    WorkflowSpecRegistry,
 };
 use horsies_test_support::{
-    db, fixtures,
+    db,
     e2e::{
         db_poll::{wait_for_task_status, wait_for_workflow_terminal},
         worker::start_worker,
         workflow::{get_workflow_task_status, get_workflow_tasks, wait_for_workflow_completion},
     },
+    fixtures,
 };
 
 // ---------------------------------------------------------------------------

@@ -145,9 +145,7 @@ impl Horsies {
                 // Tasks registered via higher-level builders always have this;
                 // low-level register() without TaskOptions leaves None, which
                 // workflow resolution and check() will catch.
-                let queue_from_opts = task
-                    .task_options()
-                    .and_then(|opts| opts.queue_name.clone());
+                let queue_from_opts = task.task_options().and_then(|opts| opts.queue_name.clone());
                 if let Some(queue_name) = queue_from_opts {
                     let priority = self.effective_priority(&queue_name, None);
                     task.set_queue_name(queue_name);
@@ -198,6 +196,8 @@ impl Horsies {
                 Some(crate::core::workflow::node::TaskDefaults {
                     queue_name: queue,
                     priority,
+                    expects_input: t.expects_input(),
+                    input_type_name: t.input_type_name(),
                 })
             },
             &|queue_name| self.effective_priority(queue_name, None),
@@ -426,6 +426,8 @@ impl Horsies {
                     crate::core::workflow::node::TaskDefaults {
                         queue_name: queue.to_owned(),
                         priority,
+                        expects_input: task.expects_input(),
+                        input_type_name: task.input_type_name(),
                     },
                 );
             }
@@ -699,6 +701,51 @@ impl Horsies {
                             );
                         }
                     }
+                }
+            }
+        }
+
+        // Phase 2.10: Workflow node missing-input validation.
+        // Every non-subworkflow node that references a task with expects_input=true
+        // must have at least one of: args_json, kwargs_json, or args_from.
+        // Catches missing root input and non-root nodes with no data source.
+        //
+        // This same validation also runs at start-time via
+        // WorkflowSpecRegistry::resolve_and_validate_spec(), which is
+        // called by WorkflowStarter, WorkflowFunction::bound_spec, and
+        // child spec_builder paths.
+        for registered in self.workflow_registry.iter() {
+            for node in &registered.spec.tasks {
+                if node.is_subworkflow {
+                    continue;
+                }
+                let task = match self.registry.get(&node.task_name) {
+                    Ok(t) => t,
+                    Err(_) => continue, // unregistered tasks caught by Phase 2.8
+                };
+                if !task.expects_input() {
+                    continue;
+                }
+                let has_input = node.args_json.is_some()
+                    || node.kwargs_json.is_some()
+                    || !node.args_from.is_empty();
+                if !has_input {
+                    let type_name = task.input_type_name().unwrap_or("non-unit type");
+                    report.add(
+                        HorsiesError::new(format!(
+                            "workflow '{}' node '{}' (task '{}') requires input `{}` \
+                             but has no args, kwargs, or args_from",
+                            registered.spec.name,
+                            node.node_id.as_deref().unwrap_or("?"),
+                            node.task_name,
+                            type_name,
+                        ))
+                        .with_code(ErrorCode::WorkflowMissingRequiredParams)
+                        .with_help(
+                            "use task_name::node_with(input) to provide typed input, \
+                             or set args_json/kwargs_json/args_from on the node",
+                        ),
+                    );
                 }
             }
         }
@@ -1076,6 +1123,8 @@ where
                         Some(crate::core::workflow::node::TaskDefaults {
                             queue_name: queue,
                             priority,
+                            expects_input: t.expects_input(),
+                            input_type_name: t.input_type_name(),
                         })
                     },
                     &|queue_name| app.effective_priority(queue_name, None),
@@ -1114,6 +1163,41 @@ where
                                 );
                             }
                         }
+                    }
+                }
+
+                // Validate missing input: same as Phase 2.10 for registered specs.
+                for node in &spec.tasks {
+                    if node.is_subworkflow {
+                        continue;
+                    }
+                    let task = match app.registry().get(&node.task_name) {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+                    if !task.expects_input() {
+                        continue;
+                    }
+                    let has_input = node.args_json.is_some()
+                        || node.kwargs_json.is_some()
+                        || !node.args_from.is_empty();
+                    if !has_input {
+                        let type_name = task.input_type_name().unwrap_or("non-unit type");
+                        errors.push(
+                            HorsiesError::new(format!(
+                                "workflow builder '{}' node '{}' (task '{}') requires input `{}` \
+                                 but has no args, kwargs, or args_from",
+                                self.name,
+                                node.node_id.as_deref().unwrap_or("?"),
+                                node.task_name,
+                                type_name,
+                            ))
+                            .with_code(ErrorCode::WorkflowMissingRequiredParams)
+                            .with_help(
+                                "use task_name::node_with(input) to provide typed input, \
+                                 or set args_json/kwargs_json/args_from on the node",
+                            ),
+                        );
                     }
                 }
 
@@ -1354,6 +1438,18 @@ mod tests {
 
     fn registered_with_options(opts: TaskOptions) -> RegisteredTask {
         dummy_registered().with_task_options(opts)
+    }
+
+    /// Dummy task that expects non-unit input (for missing-input validation tests).
+    fn dummy_registered_with_input() -> RegisteredTask {
+        RegisteredTask::Blocking {
+            task: std::sync::Arc::new(DummyTask),
+            meta: TaskMeta {
+                expects_input: true,
+                input_type_name: Some("TestInput"),
+                ..TaskMeta::default()
+            },
+        }
     }
 
     #[test]
@@ -2402,5 +2498,109 @@ mod tests {
         assert_eq!(names.len(), 2);
         assert!(names.contains(&"fast".to_owned()));
         assert!(names.contains(&"slow".to_owned()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2.10: Missing-input validation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn check_catches_missing_input_in_registered_workflow() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+        app.register("needs_input", dummy_registered_with_input())
+            .unwrap();
+        app.register("no_input", dummy_registered()).unwrap();
+
+        // Workflow with a node that needs input but has none.
+        let mut builder = WorkflowSpecBuilder::new("missing_input_wf");
+        builder.definition_key("tests.missing_input.v1");
+        let bad_node = builder.task(
+            TaskNode::<()>::new("needs_input")
+                .node_id("bad")
+                .queue("default"),
+        );
+        // A node that doesn't need input is fine without args.
+        builder.task(
+            TaskNode::<()>::new("no_input")
+                .node_id("ok")
+                .queue("default")
+                .waits_for(bad_node),
+        );
+        let spec = builder.build().unwrap();
+        app.register_workflow_spec(spec).unwrap();
+
+        let err = app.check().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("requires input"),
+            "should report missing input, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("TestInput"),
+            "should include input type name, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn check_passes_when_node_has_args_from() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+        app.register("needs_input", dummy_registered_with_input())
+            .unwrap();
+        app.register("producer", dummy_registered()).unwrap();
+
+        let mut builder = WorkflowSpecBuilder::new("has_args_from_wf");
+        builder.definition_key("tests.has_args_from.v1");
+        let producer = builder.task(
+            TaskNode::<()>::new("producer")
+                .node_id("producer")
+                .queue("default"),
+        );
+        builder.task(
+            TaskNode::<()>::new("needs_input")
+                .node_id("consumer")
+                .queue("default")
+                .waits_for(producer)
+                .args_from("data", producer),
+        );
+        let spec = builder.build().unwrap();
+        app.register_workflow_spec(spec).unwrap();
+
+        assert!(app.check().is_ok());
+    }
+
+    #[test]
+    fn check_catches_missing_input_in_builder_produced_spec() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+        app.register("needs_input", dummy_registered_with_input())
+            .unwrap();
+
+        app.workflow_builder0("bad_builder", |_app| {
+            let mut builder = WorkflowSpecBuilder::new("builder_missing_input");
+            builder.definition_key("tests.builder_missing_input.v1");
+            builder.task(
+                TaskNode::<()>::new("needs_input")
+                    .node_id("bad")
+                    .queue("default"),
+            );
+            builder.build()
+        })
+        .unwrap()
+        .register()
+        .unwrap();
+
+        let err = app.check().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("requires input"),
+            "builder check should report missing input, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("TestInput"),
+            "should include input type name, got: {}",
+            msg
+        );
     }
 }

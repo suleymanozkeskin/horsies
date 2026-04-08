@@ -4,10 +4,40 @@
 //! runtime-built workflow shape without requiring a full worker setup.
 
 use horsies::{
-    task, AppConfig, Horsies, HorsiesError, PostgresConfig, QueueMode, TaskError, TaskNode,
+    task, AppConfig, Horsies, HorsiesError, PostgresConfig, QueueMode, TaskError, TaskResult,
     TaskRuntime, WorkflowSpec, WorkflowSpecBuilder,
 };
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProduceInput {
+    value: i64,
+}
+
+#[task("produce_value")]
+async fn produce_value(input: ProduceInput) -> Result<serde_json::Value, TaskError> {
+    Ok(serde_json::json!({ "value": input.value }))
+}
+
+/// Input for double_value via args_from — receives TaskResult wrapper.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoubleInput {
+    input_result: TaskResult<serde_json::Value>,
+}
+
+#[task("double_value")]
+async fn double_value(input: DoubleInput) -> Result<serde_json::Value, TaskError> {
+    let value = match input.input_result {
+        TaskResult::Ok(v) => v,
+        TaskResult::Err(e) => {
+            return Err(TaskError::user(
+                "UPSTREAM_FAILED",
+                format!("upstream failed: {:?}", e.error_code),
+            ))
+        }
+    };
+    Ok(serde_json::json!({ "doubled": value }))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SourceInput {
@@ -18,13 +48,10 @@ fn build_child_spec(input: &SourceInput) -> Result<WorkflowSpec, HorsiesError> {
     let mut builder = WorkflowSpecBuilder::new("example_dynamic_child");
     builder.definition_key("examples.dynamic_child.v1");
 
-    let produce = builder.task(
-        TaskNode::<serde_json::Value>::new("produce_value")
-            .node_id("produce")
-            .kwargs_json(serde_json::json!({ "value": input.value }).to_string()),
-    );
+    let produce = builder
+        .task(produce_value::node_with(ProduceInput { value: input.value })?.node_id("produce"));
     let doubled = builder.task(
-        TaskNode::<serde_json::Value>::new("double_value")
+        double_value::node()?
             .node_id("double")
             .args_from("input_result", produce),
     );
@@ -33,11 +60,9 @@ fn build_child_spec(input: &SourceInput) -> Result<WorkflowSpec, HorsiesError> {
 }
 
 #[task("start_dynamic_child")]
-async fn start_dynamic_child(
-    rt: TaskRuntime,
-    input: SourceInput,
-) -> Result<String, TaskError> {
-    let spec = build_child_spec(&input).map_err(|err| TaskError::user("WF_BUILD_FAILED", err.to_string()))?;
+async fn start_dynamic_child(rt: TaskRuntime, input: SourceInput) -> Result<String, TaskError> {
+    let spec = build_child_spec(&input)
+        .map_err(|err| TaskError::user("WF_BUILD_FAILED", err.to_string()))?;
     let handle = rt
         .start::<serde_json::Value>(spec)
         .await
@@ -72,9 +97,11 @@ fn config() -> AppConfig {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = Horsies::new(config())?;
+    produce_value::register(&mut app)?;
+    double_value::register(&mut app)?;
     let _task = start_dynamic_child::register(&mut app)?;
 
-    println!("registered `start_dynamic_child`");
+    println!("registered `start_dynamic_child` with typed workflow nodes");
     println!("run this task inside a worker and call `rt.start(spec)` for dynamic workflows");
 
     Ok(())

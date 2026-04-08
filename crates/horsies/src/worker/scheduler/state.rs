@@ -34,7 +34,6 @@ SELECT schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_
 FROM horsies_schedule_state
 WHERE schedule_name = $1";
 
-
 /// SQL for filtered due schedules query.
 /// Note: The `$2` parameter is an array of schedule names (uses `= ANY($2)`).
 /// This matches Python's `get_due_states(schedule_names, now)` which filters
@@ -150,7 +149,6 @@ pub async fn acquire_scheduler_xact_lock(
         .await?;
     Ok(())
 }
-
 
 /// Try to acquire a per-schedule advisory lock. Returns Some(conn) if acquired.
 pub async fn try_acquire_schedule_lock(

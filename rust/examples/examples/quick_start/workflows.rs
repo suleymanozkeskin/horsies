@@ -1,11 +1,15 @@
 //! Workflow definitions for the shipping example.
 
 use horsies::{
-    Horsies, HorsiesError, OnError, TaskNode, WorkflowDefConfig, WorkflowDefinition,
-    WorkflowFunction, WorkflowSpecBuilder,
+    Horsies, HorsiesError, OnError, WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder,
+    WorkflowTemplate,
 };
 
 use super::models::*;
+use super::tasks::{
+    calculate_shipping_cost, check_address, check_inventory, create_shipment, reserve_inventory,
+    send_notification, validate_order,
+};
 
 /// Reusable order-processing workflow definition.
 ///
@@ -30,7 +34,7 @@ pub struct OrderProcessingWorkflow;
 
 impl WorkflowDefinition for OrderProcessingWorkflow {
     type Output = NotificationResult;
-    type Params = ();
+    type Params = Order;
 
     fn name() -> &'static str {
         "order_processing"
@@ -44,26 +48,29 @@ impl WorkflowDefinition for OrderProcessingWorkflow {
         OnError::Fail
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn build_with(order: Order) -> Result<WorkflowSpec, HorsiesError> {
+        let mut builder = WorkflowSpecBuilder::new(Self::name());
+        builder.definition_key(Self::definition_key());
+        builder.on_error(Self::on_error());
+
         // Root task — validates the order
-        let validate =
-            builder.task(TaskNode::<ValidatedOrder>::new("validate_order").node_id("validate"));
+        let validate = builder.task(validate_order::node_with(order)?.node_id("validate"));
 
         // Fan-out: three parallel checks, all depend on validate
         let inventory = builder.task(
-            TaskNode::<InventoryStatus>::new("check_inventory")
+            check_inventory::node()?
                 .node_id("inventory")
                 .waits_for(validate)
                 .args_from("order", validate),
         );
         let cost = builder.task(
-            TaskNode::<ShippingCost>::new("calculate_shipping_cost")
+            calculate_shipping_cost::node()?
                 .node_id("shipping_cost")
                 .waits_for(validate)
                 .args_from("order", validate),
         );
         let address = builder.task(
-            TaskNode::<AddressValidation>::new("check_address")
+            check_address::node()?
                 .node_id("address")
                 .waits_for(validate)
                 .args_from("order", validate),
@@ -71,7 +78,7 @@ impl WorkflowDefinition for OrderProcessingWorkflow {
 
         // Fan-in: reserve waits for all three parallel checks
         let reserve = builder.task(
-            TaskNode::<Reservation>::new("reserve_inventory")
+            reserve_inventory::node()?
                 .node_id("reserve")
                 .waits_for(inventory)
                 .waits_for(cost)
@@ -83,23 +90,26 @@ impl WorkflowDefinition for OrderProcessingWorkflow {
 
         // Sequential: shipment then notification
         let shipment = builder.task(
-            TaskNode::<Shipment>::new("create_shipment")
+            create_shipment::node()?
                 .node_id("shipment")
                 .waits_for(reserve)
                 .args_from("reservation", reserve),
         );
         let notify = builder.task(
-            TaskNode::<NotificationResult>::new("send_notification")
+            send_notification::node()?
                 .node_id("notify")
                 .waits_for(shipment)
                 .args_from("shipment", shipment),
         );
 
-        Ok(WorkflowDefConfig::new().output(notify))
+        builder.output(notify);
+        builder.build()
     }
 }
 
-/// Register the reusable order-processing workflow on the app.
-pub fn register(app: &mut Horsies) -> Result<WorkflowFunction<NotificationResult>, HorsiesError> {
-    app.register_workflow_definition::<OrderProcessingWorkflow>()
+/// Register the order-processing workflow template on the app.
+pub fn register(
+    app: &mut Horsies,
+) -> Result<WorkflowTemplate<Order, NotificationResult>, HorsiesError> {
+    Ok(app.workflow_template::<OrderProcessingWorkflow>())
 }

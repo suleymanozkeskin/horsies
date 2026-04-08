@@ -16,12 +16,13 @@ use std::sync::Arc;
 
 use horsies::{Horsies, PostgresBroker, TaskNode, WorkflowHandle, WorkflowSpecBuilder};
 use horsies_test_support::{
-    db, fixtures,
+    db,
     e2e::{
         db_poll::wait_for_workflow_terminal,
         worker::start_worker,
         workflow::{get_workflow_task_status, get_workflow_tasks, wait_for_workflow_completion},
     },
+    fixtures,
 };
 
 // ---------------------------------------------------------------------------

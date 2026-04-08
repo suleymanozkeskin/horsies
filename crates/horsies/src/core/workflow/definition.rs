@@ -15,14 +15,15 @@ use crate::core::workflow::status::OnError;
 /// where all aspects of a workflow — name, nodes, edges, output, error policy,
 /// and success policy — are specified in one place by implementing this trait.
 ///
-/// The trait provides default implementations for `build()` and
-/// `build_registered()` that delegate to the user-provided `define()` method.
+/// `build_with()` is the primary entry point. For static workflows (`Params = ()`),
+/// override `define()` as a convenience — the default `build_with()` will call it.
+/// For parameterized/dynamic workflows, override `build_with()` directly.
 ///
-/// # Example
+/// # Static workflow example
 ///
 /// ```ignore
 /// use horsies::{
-///     WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder, TaskNode, NodeRef,
+///     WorkflowDefinition, WorkflowDefConfig, WorkflowSpecBuilder,
 ///     OnError, HorsiesError,
 /// };
 ///
@@ -32,48 +33,42 @@ use crate::core::workflow::status::OnError;
 ///     type Output = ();
 ///     type Params = ();
 ///
-///     fn name() -> &'static str {
-///         "scrape_pipeline"
-///     }
-///
-///     fn definition_key() -> &'static str {
-///         "scrape_pipeline"
-///     }
-///
-///     fn on_error() -> OnError {
-///         OnError::Fail
-///     }
+///     fn name() -> &'static str { "scrape_pipeline" }
+///     fn definition_key() -> &'static str { "scrape_pipeline" }
 ///
 ///     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-///         let fetch = builder.task(TaskNode::<String>::new("fetch_listing").node_id("fetch"));
+///         let fetch = builder.task(fetch_listing::node()?.node_id("fetch"));
 ///         let parse = builder.task(
-///             TaskNode::<String>::new("parse_listing")
-///                 .args_from("raw", fetch)
-///                 .node_id("parse"),
+///             parse_listing::node()?.args_from("raw", fetch).node_id("parse"),
 ///         );
 ///         let persist = builder.task(
-///             TaskNode::<()>::new("persist_listing")
-///                 .args_from("data", parse)
-///                 .node_id("persist"),
+///             persist_listing::node()?.args_from("data", parse).node_id("persist"),
 ///         );
-///
 ///         Ok(WorkflowDefConfig::new().output(persist))
 ///     }
 /// }
-///
-/// // Build a validated WorkflowSpec:
-/// let spec = ScrapeWorkflow::build()?;
 /// ```
 ///
-/// # Comparison with `WorkflowSpecBuilder`
+/// # Parameterized workflow example
 ///
-/// The builder API requires callers to create a `WorkflowSpecBuilder`, add
-/// nodes, configure policies, and call `build()` in separate steps — which
-/// can spread workflow logic across multiple functions or scopes.
+/// ```ignore
+/// struct EnrichmentPipeline;
 ///
-/// `WorkflowDefinition` collocates all of that in one trait implementation,
-/// giving the same "define everything in one place" ergonomics as Python's
-/// class-based `WorkflowDefinition`.
+/// impl WorkflowDefinition for EnrichmentPipeline {
+///     type Output = ();
+///     type Params = EnrichmentParams;
+///
+///     fn name() -> &'static str { "enrich_auction" }
+///     fn definition_key() -> &'static str { "schmart.enrich_auction.v1" }
+///
+///     fn build_with(params: EnrichmentParams) -> Result<WorkflowSpec, HorsiesError> {
+///         let mut builder = WorkflowSpecBuilder::new("enrich_auction");
+///         builder.definition_key("schmart.enrich_auction.v1");
+///         // ... build dynamic DAG from params using typed node helpers ...
+///         builder.build()
+///     }
+/// }
+/// ```
 pub trait WorkflowDefinition {
     /// The workflow output type.
     type Output;
@@ -99,11 +94,17 @@ pub trait WorkflowDefinition {
     /// Define the workflow's nodes, edges, and configuration.
     ///
     /// Receives a mutable `WorkflowSpecBuilder` pre-configured with the
-    /// workflow name and error policy. Implementors add nodes via
-    /// `builder.task()` and `builder.sub_workflow()`, wire dependencies,
-    /// and return a `WorkflowDefConfig` with optional output node and
-    /// success policy.
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError>;
+    /// workflow name and error policy. Override this for static workflows
+    /// (`Params = ()`). The default `build_with()` calls this method.
+    ///
+    /// For parameterized workflows, override `build_with()` directly
+    /// instead — there is no need to implement `define()`.
+    fn define(_builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        Err(HorsiesError::new(format!(
+            "WorkflowDefinition '{}' must override either define() or build_with()",
+            Self::name(),
+        )))
+    }
 
     /// Build a validated `WorkflowSpec` from this definition.
     ///
@@ -146,11 +147,12 @@ pub trait WorkflowDefinition {
 
     /// Build a validated `WorkflowSpec` with runtime parameters.
     ///
-    /// Override to apply keyword params to TaskNodes for parameterized
-    /// workflow definitions. Default implementation ignores params and
-    /// forwards to `build()`.
+    /// Override this for parameterized/dynamic workflows. Use generated
+    /// typed node helpers (`task_name::node_with(input)?`) to construct
+    /// nodes with compile-time input type enforcement.
     ///
-    /// Mirrors Python's `WorkflowDefinition.build_with(app, **params)`.
+    /// Default implementation ignores params and forwards to `build()`,
+    /// which calls `define()`.
     fn build_with(params: Self::Params) -> Result<WorkflowSpec, HorsiesError> {
         let _ = params;
         Self::build()

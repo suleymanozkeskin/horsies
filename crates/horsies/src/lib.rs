@@ -79,9 +79,9 @@ pub type Broker = PostgresBroker;
 // worker re-exports
 pub use crate::worker::{
     cli::{init_tracing, LogLevel},
-    scheduler::service::spawn_scheduler,
     config::WorkerConfig,
     error::WorkerError,
+    scheduler::service::spawn_scheduler,
     worker::Worker,
 };
 
@@ -216,7 +216,6 @@ impl Horsies {
     pub fn set_role(&mut self, role: impl Into<String>) {
         self.core.set_role(role);
     }
-
 
     pub fn registry(&self) -> &crate::core::TaskRegistry {
         self.core.registry()

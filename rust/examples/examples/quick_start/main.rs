@@ -149,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 6. Start the workflow ────────────────────────────────────────
     println!("\n--- Starting workflow ---");
-    match order_workflow.start().await {
+    match order_workflow.start(order.clone()).await {
         Ok(handle) => {
             println!("workflow {} started", handle.workflow_id());
 
@@ -172,19 +172,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Err(start_err) if start_err.retryable => {
-            println!("transient start failure, retrying...");
-            match order_workflow.retry_start(&start_err).await {
-                Ok(handle) => {
-                    println!("retry started: {}", handle.workflow_id());
-                }
-                Err(retry_err) => {
-                    println!("retry failed: {}", retry_err.message);
-                }
-            }
-        }
         Err(start_err) => {
-            println!("start failed: {} - {}", start_err.code, start_err.message);
+            println!(
+                "start failed: {} - {} (retryable={})",
+                start_err.code, start_err.message, start_err.retryable
+            );
         }
     }
 

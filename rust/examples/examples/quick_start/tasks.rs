@@ -75,10 +75,15 @@ pub async fn validate_order(order: Order) -> Result<ValidatedOrder, TaskError> {
 pub async fn check_inventory(args: OrderArgsFrom) -> Result<InventoryStatus, TaskError> {
     let order = match args.order {
         TaskResult::Ok(v) => v,
-        TaskResult::Err(e) => return Err(TaskError::user(
-            "UPSTREAM_FAILED",
-            format!("Cannot check inventory: upstream failed - {:?}", e.error_code),
-        )),
+        TaskResult::Err(e) => {
+            return Err(TaskError::user(
+                "UPSTREAM_FAILED",
+                format!(
+                    "Cannot check inventory: upstream failed - {:?}",
+                    e.error_code
+                ),
+            ))
+        }
     };
 
     let availability: HashMap<String, bool> = order
@@ -98,10 +103,15 @@ pub async fn check_inventory(args: OrderArgsFrom) -> Result<InventoryStatus, Tas
 pub async fn calculate_shipping_cost(args: OrderArgsFrom) -> Result<ShippingCost, TaskError> {
     let order = match args.order {
         TaskResult::Ok(v) => v,
-        TaskResult::Err(e) => return Err(TaskError::user(
-            "UPSTREAM_FAILED",
-            format!("Cannot calculate cost: upstream failed - {:?}", e.error_code),
-        )),
+        TaskResult::Err(e) => {
+            return Err(TaskError::user(
+                "UPSTREAM_FAILED",
+                format!(
+                    "Cannot calculate cost: upstream failed - {:?}",
+                    e.error_code
+                ),
+            ))
+        }
     };
 
     let total_weight: f64 = order.items.iter().map(|i| i.quantity as f64 * 0.5).sum();
@@ -125,10 +135,12 @@ pub async fn calculate_shipping_cost(args: OrderArgsFrom) -> Result<ShippingCost
 pub async fn check_address(args: OrderArgsFrom) -> Result<AddressValidation, TaskError> {
     let order = match args.order {
         TaskResult::Ok(v) => v,
-        TaskResult::Err(e) => return Err(TaskError::user(
-            "UPSTREAM_FAILED",
-            format!("Cannot check address: upstream failed - {:?}", e.error_code),
-        )),
+        TaskResult::Err(e) => {
+            return Err(TaskError::user(
+                "UPSTREAM_FAILED",
+                format!("Cannot check address: upstream failed - {:?}", e.error_code),
+            ))
+        }
     };
 
     let addr = &order.shipping_address;
@@ -150,24 +162,36 @@ pub async fn check_address(args: OrderArgsFrom) -> Result<AddressValidation, Tas
 pub async fn reserve_inventory(input: ReserveInput) -> Result<Reservation, TaskError> {
     let inventory = match input.inventory {
         TaskResult::Ok(v) => v,
-        TaskResult::Err(e) => return Err(TaskError::user(
-            "UPSTREAM_FAILED",
-            format!("Cannot reserve: inventory check failed - {:?}", e.error_code),
-        )),
+        TaskResult::Err(e) => {
+            return Err(TaskError::user(
+                "UPSTREAM_FAILED",
+                format!(
+                    "Cannot reserve: inventory check failed - {:?}",
+                    e.error_code
+                ),
+            ))
+        }
     };
     let cost = match input.cost {
         TaskResult::Ok(v) => v,
-        TaskResult::Err(e) => return Err(TaskError::user(
-            "UPSTREAM_FAILED",
-            format!("Cannot reserve: cost calculation failed - {:?}", e.error_code),
-        )),
+        TaskResult::Err(e) => {
+            return Err(TaskError::user(
+                "UPSTREAM_FAILED",
+                format!(
+                    "Cannot reserve: cost calculation failed - {:?}",
+                    e.error_code
+                ),
+            ))
+        }
     };
     let address = match input.address {
         TaskResult::Ok(v) => v,
-        TaskResult::Err(e) => return Err(TaskError::user(
-            "UPSTREAM_FAILED",
-            format!("Cannot reserve: address check failed - {:?}", e.error_code),
-        )),
+        TaskResult::Err(e) => {
+            return Err(TaskError::user(
+                "UPSTREAM_FAILED",
+                format!("Cannot reserve: address check failed - {:?}", e.error_code),
+            ))
+        }
     };
 
     if !inventory.all_available {
@@ -196,10 +220,15 @@ pub async fn reserve_inventory(input: ReserveInput) -> Result<Reservation, TaskE
 pub async fn create_shipment(args: ShipmentArgsFrom) -> Result<Shipment, TaskError> {
     let reservation = match args.reservation {
         TaskResult::Ok(v) => v,
-        TaskResult::Err(e) => return Err(TaskError::user(
-            "UPSTREAM_FAILED",
-            format!("Cannot create shipment: upstream failed - {:?}", e.error_code),
-        )),
+        TaskResult::Err(e) => {
+            return Err(TaskError::user(
+                "UPSTREAM_FAILED",
+                format!(
+                    "Cannot create shipment: upstream failed - {:?}",
+                    e.error_code
+                ),
+            ))
+        }
     };
 
     Ok(Shipment {
@@ -216,10 +245,12 @@ pub async fn create_shipment(args: ShipmentArgsFrom) -> Result<Shipment, TaskErr
 pub async fn send_notification(args: NotifyArgsFrom) -> Result<NotificationResult, TaskError> {
     let shipment = match args.shipment {
         TaskResult::Ok(v) => v,
-        TaskResult::Err(e) => return Err(TaskError::user(
-            "UPSTREAM_FAILED",
-            format!("Cannot notify: upstream failed - {:?}", e.error_code),
-        )),
+        TaskResult::Err(e) => {
+            return Err(TaskError::user(
+                "UPSTREAM_FAILED",
+                format!("Cannot notify: upstream failed - {:?}", e.error_code),
+            ))
+        }
     };
 
     Ok(NotificationResult {

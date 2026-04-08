@@ -336,15 +336,19 @@ impl WorkflowSpecRegistry {
         self.queue_priority_map.contains_key(queue_name)
     }
 
-    /// Resolve queue/priority and validate final queue names on a workflow spec.
+    /// Resolve and validate a workflow spec before start.
     ///
-    /// This is the engine-facing entry point for dynamic specs built via
-    /// `spec_builder` or started through `WorkflowStarter` that bypass
-    /// `register_workflow()`.
+    /// This is the shared validation entry point used by:
+    /// - `WorkflowStarter::start` / `start_with_id` (top-level dynamic starts)
+    /// - `WorkflowFunction::bound_spec` (registered workflow starts)
+    /// - `build_child_spec` in engine/lifecycle/start (child spec_builder paths)
+    /// - `check()` registered workflow and builder validation phases
     ///
-    /// Returns an error if any non-subworkflow node has an unresolved or
-    /// invalid queue after resolution.
-    pub fn resolve_and_validate_spec_queue_priority(
+    /// Performs:
+    /// 1. Queue/priority resolution from task defaults
+    /// 2. Queue validation (unresolved and invalid)
+    /// 3. Missing-input validation (task expects input but node has none)
+    pub fn resolve_and_validate_spec(
         &self,
         spec: &mut crate::core::workflow::spec::WorkflowSpec,
     ) -> Result<(), HorsiesError> {
@@ -354,11 +358,12 @@ impl WorkflowSpecRegistry {
             &|queue_name| self.effective_priority(queue_name),
         );
 
-        // Validate: every non-subworkflow node must have a resolved, valid queue.
         for node in &spec.tasks {
             if node.is_subworkflow {
                 continue;
             }
+
+            // Validate queue: resolved and valid.
             match &node.queue {
                 None => {
                     return Err(HorsiesError::new(format!(
@@ -372,7 +377,9 @@ impl WorkflowSpecRegistry {
                         "use TaskFunction::node() or set .queue() explicitly on the TaskNode",
                     ));
                 }
-                Some(queue) if !self.queue_priority_map.is_empty() && !self.is_valid_queue(queue) => {
+                Some(queue)
+                    if !self.queue_priority_map.is_empty() && !self.is_valid_queue(queue) =>
+                {
                     return Err(HorsiesError::new(format!(
                         "workflow '{}' node '{}' (task '{}') has invalid queue '{}'",
                         spec.name,
@@ -387,6 +394,31 @@ impl WorkflowSpecRegistry {
                     ));
                 }
                 _ => {}
+            }
+
+            // Validate input: task expects input but node has none.
+            if let Some(defaults) = self.task_defaults_map.get(&node.task_name) {
+                if defaults.expects_input {
+                    let has_input = node.args_json.is_some()
+                        || node.kwargs_json.is_some()
+                        || !node.args_from.is_empty();
+                    if !has_input {
+                        let type_name = defaults.input_type_name.unwrap_or("non-unit type");
+                        return Err(HorsiesError::new(format!(
+                            "workflow '{}' node '{}' (task '{}') requires input `{}` \
+                             but has no args, kwargs, or args_from",
+                            spec.name,
+                            node.node_id.as_deref().unwrap_or("?"),
+                            node.task_name,
+                            type_name,
+                        ))
+                        .with_code(ErrorCode::WorkflowMissingRequiredParams)
+                        .with_help(
+                            "use task_name::node_with(input) to provide typed input, \
+                             or set args_json/kwargs_json/args_from on the node",
+                        ));
+                    }
+                }
             }
         }
 

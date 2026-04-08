@@ -408,6 +408,10 @@ pub struct TaskDefaults {
     pub queue_name: String,
     /// The task's resolved priority at registration time.
     pub priority: u32,
+    /// Whether this task expects non-unit input.
+    pub expects_input: bool,
+    /// Type name of the task's input type, for diagnostics.
+    pub input_type_name: Option<&'static str>,
 }
 
 /// Resolve queue and priority from task defaults into workflow nodes.
@@ -731,10 +735,14 @@ mod tests {
             "task_a" => Some(TaskDefaults {
                 queue_name: "standard".to_owned(),
                 priority: 50,
+                expects_input: false,
+                input_type_name: None,
             }),
             "task_b" => Some(TaskDefaults {
                 queue_name: "urgent".to_owned(),
                 priority: 10,
+                expects_input: false,
+                input_type_name: None,
             }),
             _ => None,
         }

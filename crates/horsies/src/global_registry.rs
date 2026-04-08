@@ -19,13 +19,17 @@ fn registry() -> &'static HandleMap {
 
 /// Store a workflow handle keyed by the definition type `D`.
 pub(crate) fn store_workflow<D: 'static, H: Send + Sync + 'static>(handle: H) {
-    let mut map = registry().write().expect("global workflow registry poisoned");
+    let mut map = registry()
+        .write()
+        .expect("global workflow registry poisoned");
     map.insert(TypeId::of::<D>(), Arc::new(handle));
 }
 
 /// Retrieve a workflow handle by definition type `D`, downcast to `H`.
 pub(crate) fn get_workflow<D: 'static, H: Clone + Send + Sync + 'static>() -> Option<H> {
-    let map = registry().read().expect("global workflow registry poisoned");
+    let map = registry()
+        .read()
+        .expect("global workflow registry poisoned");
     let arc = map.get(&TypeId::of::<D>())?;
     let typed = arc.clone().downcast::<H>().ok()?;
     Some((*typed).clone())

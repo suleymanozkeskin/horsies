@@ -28,6 +28,9 @@ pub trait BlockingTaskFn: Send + Sync + 'static {
 }
 
 /// Metadata describing a registered task.
+///
+/// Use [`TaskMeta::for_input::<A>()`] in task construction macros to
+/// automatically populate `expects_input` and `input_type_name`.
 #[derive(Debug, Clone, Default)]
 pub struct TaskMeta {
     /// Whether this task opts into workflow context injection.
@@ -39,6 +42,25 @@ pub struct TaskMeta {
     pub queue_name: Option<String>,
     /// Resolved priority from task registration.
     pub priority: Option<u32>,
+    /// Whether this task expects non-unit input (i.e. `A` is not `()`).
+    pub expects_input: bool,
+    /// Type name of the task's input type, for diagnostics.
+    pub input_type_name: Option<&'static str>,
+}
+
+impl TaskMeta {
+    /// Create metadata with input type information pre-populated.
+    ///
+    /// Use this in `async_task_fn!` / `blocking_task_fn!` macros so that
+    /// low-level registered tasks also carry `expects_input` and
+    /// `input_type_name` for `check()` validation.
+    pub fn for_input<A: 'static>() -> Self {
+        Self {
+            expects_input: std::any::TypeId::of::<A>() != std::any::TypeId::of::<()>(),
+            input_type_name: Some(std::any::type_name::<A>()),
+            ..Self::default()
+        }
+    }
 }
 
 /// A registered task: either async or blocking.
@@ -146,12 +168,28 @@ impl RegisteredTask {
         }
     }
 
+    /// Set whether this task expects non-unit input.
+    pub fn set_expects_input(&mut self, expects: bool) {
+        match self {
+            Self::Async { meta, .. } | Self::Blocking { meta, .. } => {
+                meta.expects_input = expects;
+            }
+        }
+    }
+
+    /// Set the input type name for diagnostics.
+    pub fn set_input_type_name(&mut self, name: &'static str) {
+        match self {
+            Self::Async { meta, .. } | Self::Blocking { meta, .. } => {
+                meta.input_type_name = Some(name);
+            }
+        }
+    }
+
     /// The resolved queue name, if set during registration.
     pub fn queue_name(&self) -> Option<&str> {
         match self {
-            Self::Async { meta, .. } | Self::Blocking { meta, .. } => {
-                meta.queue_name.as_deref()
-            }
+            Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.queue_name.as_deref(),
         }
     }
 
@@ -159,6 +197,20 @@ impl RegisteredTask {
     pub fn priority(&self) -> Option<u32> {
         match self {
             Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.priority,
+        }
+    }
+
+    /// Whether this task expects non-unit input.
+    pub fn expects_input(&self) -> bool {
+        match self {
+            Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.expects_input,
+        }
+    }
+
+    /// The input type name, for diagnostics.
+    pub fn input_type_name(&self) -> Option<&'static str> {
+        match self {
+            Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.input_type_name,
         }
     }
 }

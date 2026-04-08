@@ -27,16 +27,18 @@ async fn enqueue_add_numbers(_rt: TaskRuntime) -> Result<(), TaskError> {
         .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
 
     // Global schedule — same, no &rt needed
-    add_numbers::schedule(std::time::Duration::from_secs(30), AddNumbersInput { a: 3, b: 4 })
-        .await
-        .map_err(|err| TaskError::user("SCHEDULE_FAILED", err.message))?;
+    add_numbers::schedule(
+        std::time::Duration::from_secs(30),
+        AddNumbersInput { a: 3, b: 4 },
+    )
+    .await
+    .map_err(|err| TaskError::user("SCHEDULE_FAILED", err.message))?;
 
     // Explicit path via handle(&rt) — for repeated sends or testing
     // (requires TaskRuntime in signature)
     let add = add_numbers::handle(&_rt)?;
     for (a, b) in [(5, 6), (7, 8)] {
-        add
-            .send(AddNumbersInput { a, b })
+        add.send(AddNumbersInput { a, b })
             .await
             .map_err(|err| TaskError::user("SEND_FAILED", err.message.clone()))?;
     }

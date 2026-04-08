@@ -3,12 +3,12 @@ use std::sync::{Arc, RwLock};
 
 use serde::de::DeserializeOwned;
 
+use crate::core::app as core_app;
 use crate::core::{
     AnyNode, HorsiesError, NodeRef, OnError, SubWorkflowNode, SuccessPolicy, TaskNode,
     WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder, WorkflowStartError,
     WorkflowStartErrorCode, WorkflowStartResult,
 };
-use crate::core::app as core_app;
 use crate::workflow_engine::bound_handle::WorkflowHandle;
 use crate::workflow_engine::bound_spec::BoundWorkflowSpec;
 
@@ -203,7 +203,7 @@ impl<T: DeserializeOwned + Clone> WorkflowFunction<T> {
         // Validate before acquiring the broker connection so spec errors
         // surface without a network round-trip.
         let mut spec = self.spec.clone();
-        registry.resolve_and_validate_spec_queue_priority(&mut spec)?;
+        registry.resolve_and_validate_spec(&mut spec)?;
         let broker = self.broker.get().await?;
         Ok(BoundWorkflowSpec::from_broker(
             spec,
@@ -343,7 +343,7 @@ impl WorkflowStarter {
 
         // Resolve queue/priority from task defaults for dynamic specs.
         registry
-            .resolve_and_validate_spec_queue_priority(&mut spec)
+            .resolve_and_validate_spec(&mut spec)
             .map_err(|err| WorkflowStartError {
                 code: WorkflowStartErrorCode::ValidationFailed,
                 message: err.to_string(),
@@ -383,7 +383,7 @@ impl WorkflowStarter {
 
         // Resolve queue/priority from task defaults for dynamic specs.
         registry
-            .resolve_and_validate_spec_queue_priority(&mut spec)
+            .resolve_and_validate_spec(&mut spec)
             .map_err(|err| WorkflowStartError {
                 code: WorkflowStartErrorCode::ValidationFailed,
                 message: err.to_string(),
@@ -743,5 +743,4 @@ mod tests {
         assert_eq!(err.workflow_name, "taken_name");
         assert!(!err.retryable);
     }
-
 }

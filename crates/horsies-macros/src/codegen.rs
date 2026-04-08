@@ -59,6 +59,14 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
         "Enqueue `{}` with a delay. Works from any call site after `register()` is called at startup.",
         task_name_value
     );
+    let node_docs = format!(
+        "Create a workflow node for `{}`. Inherits queue, priority, and task options from the registered task. Requires `register()` first.",
+        task_name_value
+    );
+    let node_with_docs = format!(
+        "Create a workflow node for `{}` with typed input. Compiler enforces the correct input type. Requires `register()` first.",
+        task_name_value
+    );
     let not_registered_msg = format!(
         "task '{}' is not registered — call {}::register(&mut app) at startup",
         task_name_value, task_name_value
@@ -160,6 +168,28 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
                     })?
                     .schedule(delay, args)
                     .await
+            }
+
+            #[doc = #node_docs]
+            pub fn node() -> Result<horsies::TaskNode<#output_type>, horsies::HorsiesError> {
+                __HANDLE
+                    .get()
+                    .ok_or_else(|| horsies::HorsiesError::new(
+                        #not_registered_msg.to_owned(),
+                    ))
+                    .map(|h| h.node())
+            }
+
+            #[doc = #node_with_docs]
+            pub fn node_with(
+                args: #args_type,
+            ) -> Result<horsies::TaskNode<#output_type>, horsies::HorsiesError> {
+                __HANDLE
+                    .get()
+                    .ok_or_else(|| horsies::HorsiesError::new(
+                        #not_registered_msg.to_owned(),
+                    ))?
+                    .node_with(args)
             }
         }
     })
@@ -370,7 +400,7 @@ fn build_runtime_registered_task(
                 task: ::std::sync::Arc::new(__BlockingTaskWrapper {
                     runtime: __horsies_runtime.clone(),
                 }),
-                meta: horsies::core::task::fn_trait::TaskMeta::default(),
+                meta: horsies::core::task::fn_trait::TaskMeta::for_input::<#args_type>(),
             }
         }}
     } else {
@@ -413,7 +443,7 @@ fn build_runtime_registered_task(
                 task: ::std::sync::Arc::new(__AsyncTaskWrapper {
                     runtime: __horsies_runtime.clone(),
                 }),
-                meta: horsies::core::task::fn_trait::TaskMeta::default(),
+                meta: horsies::core::task::fn_trait::TaskMeta::for_input::<#args_type>(),
             }
         }}
     }

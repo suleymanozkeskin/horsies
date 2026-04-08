@@ -56,4 +56,3 @@ pub struct WorkflowTaskRow {
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
 }
-
