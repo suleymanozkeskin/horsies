@@ -11,6 +11,20 @@ async fn add_numbers(input: AddNumbersInput) -> Result<i32, TaskError> {
 }
 ```
 
+Tasks can also be multi-parameter:
+
+```rust
+#[horsies::task("notify_user")]
+async fn notify_user(
+    data: TaskResult<String>,
+    urgent: bool,
+) -> Result<(), TaskError> {
+    let _ = data;
+    let _ = urgent;
+    Ok(())
+}
+```
+
 ### 2. Register once at startup
 
 ```rust
@@ -224,6 +238,13 @@ async fn trigger_child(rt: TaskRuntime, input: ChildInput) -> Result<(), TaskErr
 ```
 
 **Dynamic workflow lifecycle:** build pure `WorkflowSpec` at runtime -> start with `app.start(...)` externally or `rt.start(...)` inside tasks. `app.start(...)` internally registers and starts the spec in one step.
+
+For workflow input binding:
+- `node().set_input(value)?` for whole explicit input
+- `node().set(task_name::params::field(), value)?` for one explicit parameter
+- `node().arg_from(task_name::params::field(), dep)` for upstream `TaskResult<_>` injection
+- prefer multi-parameter receiving tasks plus `task_name::params::*`
+- use `#[derive(WorkflowInput)]` only when you intentionally want a named receiving struct
 
 ---
 

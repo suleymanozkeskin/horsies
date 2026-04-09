@@ -27,8 +27,13 @@ async fn add_numbers(input: AddNumbersInput) -> Result<i32, TaskError> {
 }
 ```
 
+Supported task shapes:
+- `async fn task(input: A) -> Result<T, TaskError>` for a single typed input
+- `async fn task(param_a: A, param_b: B, ...) -> Result<T, TaskError>` for multi-parameter tasks
+- `async fn task(rt: TaskRuntime, ...) -> Result<T, TaskError>` when task-time runtime access is needed
+
 Requirements:
-- Single argument of type `A: Serialize + DeserializeOwned` (use a struct for multiple fields, `()` for no args).
+- User input types must be serializable/deserializable.
 - Returns `Result<T, TaskError>` where `T: Serialize + DeserializeOwned`.
 - Must be `async fn` for `#[task]`, or `fn` for `#[blocking_task]`.
 
@@ -68,7 +73,6 @@ fn cpu_heavy(input: HeavyInput) -> Result<HeavyOutput, TaskError> { ... }
 ### Compile-time validation
 
 The macro rejects invalid signatures at compile time:
-- Multiple arguments → "use a struct for multiple fields"
 - Methods with `self` → "must be free functions"
 - Generic or lifetime parameters → "not supported"
 - Wrong return type → "must return Result<T, TaskError>"
@@ -92,6 +96,7 @@ let process_data_task = process_data::register(&mut app)?;
 
 Each `#[task]` generates a companion module with a `register()` function.
 That function calls the builder API internally and returns a `TaskFunction<A, T>`.
+For multi-parameter tasks, the macro generates the internal input type for you.
 
 ### Registrar module pattern
 
@@ -204,7 +209,7 @@ Returns `TaskNode<T, A>` pre-configured with task name, queue, priority, good_un
 Use:
 
 - `node().set_input(args)?` when you have the full explicit input value at workflow-build time
-- `node().set(task_name::params::field(), value)?` when you are binding one explicit parameter
+- `node().set(task_name::params::field(), value)?` when you are binding one explicit parameter on a multi-parameter task
 - `node().arg_from(task_name::params::field(), dep)` when that parameter should receive an upstream `TaskResult<_>`
 
 Example:
@@ -222,6 +227,25 @@ let notify = builder.task(
         .set(notify_user::params::urgent(), true)?
 );
 ```
+
+For workflow-injected inputs, prefer multi-parameter tasks plus generated
+`task_name::params::*` tokens:
+
+```rust
+#[task("notify_user")]
+async fn notify_user(
+    data: TaskResult<String>,
+    urgent: bool,
+) -> Result<(), TaskError> {
+    let _ = data;
+    let _ = urgent;
+    Ok(())
+}
+```
+
+`#[derive(WorkflowInput)]` remains useful when you intentionally want a named
+input struct for the receiving task, but it is no longer the default pattern
+for `arg_from(...)`.
 
 The generated task module helpers are fallible wrappers around the registered handle:
 

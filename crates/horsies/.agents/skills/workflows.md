@@ -290,10 +290,10 @@ my_task::node()?.set(my_task::params::flag(), true)? // bind one explicit parame
 
 // Chaining methods:
 my_task::node()?
-    .kwargs(json_string)          // serialized keyword arguments
     .waits_for(dep_ref)           // add dependency
     .waits_for_all(&[ref_a, ref_b])
-    .arg_from(MyInput::field_key(), dep_ref) // inject upstream TaskResult into a typed field
+    .arg_from(my_task::params::data(), dep_ref) // inject upstream TaskResult into a typed parameter
+    .workflow_ctx_from([dep_ref]) // include deps in WorkflowContext
     .queue("critical")            // override queue
     .priority(1)                  // override priority
     .good_until(deadline)         // task expiry
@@ -719,7 +719,26 @@ Failed task → dependents SKIPPED (unless `allow_failed_deps`). Cascades transi
 
 ### `arg_from` data flow
 
-Injects the full `TaskResult` (not raw value) into a typed input field token. The receiving input struct should derive `horsies::WorkflowInput`, and the target field must be `TaskResult<T>` for the source node's `T`.
+Injects the full `TaskResult` (not raw value) into a typed parameter token.
+Prefer the task-module-generated `task_name::params::*` tokens on
+multi-parameter tasks:
+
+```rust
+#[horsies::task("process_data")]
+async fn process_data(
+    input_result: horsies::TaskResult<FetchResult>,
+) -> Result<TransformResult, horsies::TaskError> {
+    let input = input_result?;
+    Ok(TransformResult {
+        processed_count: input.items.len(),
+        data: input.items,
+    })
+}
+```
+
+`#[derive(WorkflowInput)]` on a receiving struct is still supported when you
+want a named input type, but it is now the fallback path rather than the
+default.
 
 ## Validation Errors
 
@@ -749,7 +768,7 @@ use horsies::{
     Horsies, WorkflowFunction, WorkflowSpec, WorkflowSpecBuilder, WorkflowDefinition,
     WorkflowTemplate,
     // Nodes
-    TaskNode, SubWorkflowNode, NodeRef, NodeKey, AnyNode,
+    TaskNode, SubWorkflowNode, NodeRef, AnyNode,
     // Policies
     OnError, SuccessPolicy, SuccessCase, JoinType,
     // Context

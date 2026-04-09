@@ -151,10 +151,9 @@ match child.start("https://example.com/data.json".to_owned()).await {
 }
 ```
 
-For dependency injection, derive `horsies::WorkflowInput` on the receiving
-input struct. That generates typed field tokens such as
-`ProcessDataInput::field_data()` and `SaveResultInput::field_result()`,
-which `arg_from(...)` uses instead of raw string keys.
+For dependency injection, prefer multi-parameter receiving tasks plus the
+generated `task_name::params::*` tokens. That keeps the function signature as
+the contract and avoids authoring wrapper structs solely for workflow wiring.
 
 Use the binding style that matches where the value comes from:
 
@@ -190,6 +189,10 @@ let notify = builder.task(
         .node_id("notify"),
 );
 ```
+
+`#[derive(WorkflowInput)]` is still available when you intentionally want a
+named receiving input struct, but it is now the fallback path rather than the
+default pattern for `arg_from(...)`.
 
 ### Start workflows from anywhere
 

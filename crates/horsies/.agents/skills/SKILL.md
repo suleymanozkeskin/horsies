@@ -46,6 +46,10 @@ async fn add_numbers(args: AddNumbersInput) -> Result<i32, TaskError> {
 
 Every task function returns `Result<T, TaskError>` where `T: Serialize + DeserializeOwned`.
 The `#[task]` macro generates a `register()` function for one-line registration.
+Tasks may take:
+- one typed input value
+- multiple typed parameters
+- optional leading `TaskRuntime`
 
 ## Register and Send
 
@@ -242,6 +246,10 @@ registration.cases([
 registration.register()?;
 app.check()?;
 ```
+
+For workflow data flow, prefer multi-parameter receiving tasks plus
+`task_name::params::*` tokens. Use `#[derive(WorkflowInput)]` only when you
+intentionally want a named receiving struct.
 
 ### Task dispatch from anywhere
 
