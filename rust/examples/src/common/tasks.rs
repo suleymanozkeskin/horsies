@@ -37,7 +37,7 @@ pub mod basic {
     pub async fn do_compute(input: ComputeInput) -> Result<Computed, TaskError> {
         let total = input.a + input.b;
         if total > 1000.0 {
-            return Err(TaskError::user(
+            return Err(TaskError::new(
                 "TOO_LARGE",
                 format!("Sum {} exceeds 1000", total),
             ));
@@ -51,7 +51,7 @@ pub mod basic {
     /// A task that fails when told to.
     pub async fn failing_task(input: FailInput) -> Result<String, TaskError> {
         if input.should_fail {
-            return Err(TaskError::user("FORCED_FAILURE", "told to fail"));
+            return Err(TaskError::new("FORCED_FAILURE", "told to fail"));
         }
         Ok("succeeded".to_string())
     }
@@ -59,7 +59,7 @@ pub mod basic {
     /// Division task - returns error for division by zero.
     pub async fn divide(input: DivInput) -> Result<f64, TaskError> {
         if input.b == 0.0 {
-            return Err(TaskError::user("DIVISION_ERROR", "cannot divide by zero"));
+            return Err(TaskError::new("DIVISION_ERROR", "cannot divide by zero"));
         }
         Ok(input.a / input.b)
     }
@@ -88,7 +88,7 @@ pub mod retries {
     /// Always fails with UNHANDLED_EXCEPTION.
     pub async fn always_fails(_: ()) -> Result<String, TaskError> {
         eprintln!("  [always_fails] executing (will fail)");
-        Err(TaskError::user(
+        Err(TaskError::new(
             "UNHANDLED_EXCEPTION",
             "intentional failure for retry demo",
         ))
@@ -97,7 +97,7 @@ pub mod retries {
     /// Fails with a custom VALUE_ERROR code.
     pub async fn fails_with_custom_code(_: ()) -> Result<String, TaskError> {
         eprintln!("  [fails_with_custom_code] executing (will fail)");
-        Err(TaskError::user("VALUE_ERROR", "bad value for retry demo"))
+        Err(TaskError::new("VALUE_ERROR", "bad value for retry demo"))
     }
 
     /// Always succeeds.
@@ -282,7 +282,7 @@ pub mod workflows {
 
     /// Always-failing task for the error recovery demo.
     pub async fn failing_fetch(_source: String) -> Result<FetchResult, TaskError> {
-        Err(TaskError::user("FETCH_FAILED", "intentional failure"))
+        Err(TaskError::new("FETCH_FAILED", "intentional failure"))
     }
 
     /// Recovery task: handles upstream failures gracefully.

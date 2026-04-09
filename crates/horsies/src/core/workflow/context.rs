@@ -287,7 +287,7 @@ mod tests {
         let mut results = HashMap::new();
         results.insert(
             "failed:0".to_owned(),
-            TaskResult::Err(TaskError::user(
+            TaskResult::Err(TaskError::new(
                 "CUSTOM_ERR".to_owned(),
                 "something broke".to_owned(),
             )),
@@ -307,7 +307,7 @@ mod tests {
         let mut results = HashMap::new();
         results.insert(
             "failed:0".to_owned(),
-            TaskResult::Err(TaskError::user("CUSTOM_ERR".to_owned(), "broke".to_owned())),
+            TaskResult::Err(TaskError::new("CUSTOM_ERR".to_owned(), "broke".to_owned())),
         );
         let ctx = WorkflowContext::new(
             "wf-1".to_owned(),

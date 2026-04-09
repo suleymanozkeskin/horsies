@@ -993,7 +993,7 @@ pub async fn on_subworkflow_complete(
             }
         }
     } else {
-        let err = TaskError::user(
+        let err = TaskError::new(
             "SUBWORKFLOW_FAILED",
             summary
                 .error_summary
@@ -1023,7 +1023,7 @@ pub async fn on_subworkflow_complete(
         }
         row.is_some()
     } else {
-        let error_json = serde_json::to_string(&TaskError::user(
+        let error_json = serde_json::to_string(&TaskError::new(
             "SUBWORKFLOW_FAILED",
             summary
                 .error_summary
@@ -1070,7 +1070,7 @@ pub async fn on_subworkflow_complete(
                 .fetch_one(pool)
                 .await?;
 
-        let error_json = serde_json::to_string(&TaskError::user(
+        let error_json = serde_json::to_string(&TaskError::new(
             "SUBWORKFLOW_FAILED",
             summary
                 .error_summary

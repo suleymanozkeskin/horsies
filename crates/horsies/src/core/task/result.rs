@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn display_err_variant() {
-        let r: TaskResult<i32> = TaskResult::Err(TaskError::user(
+        let r: TaskResult<i32> = TaskResult::Err(TaskError::new(
             "BAD_INPUT".to_owned(),
             "invalid data".to_owned(),
         ));
@@ -324,7 +324,7 @@ mod tests {
 
     #[test]
     fn user_code_is_terminal() {
-        let r: TaskResult<i32> = TaskResult::Err(TaskError::user(
+        let r: TaskResult<i32> = TaskResult::Err(TaskError::new(
             "MY_ERROR".to_owned(),
             "custom fail".to_owned(),
         ));

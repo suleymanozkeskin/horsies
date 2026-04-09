@@ -16,16 +16,16 @@ use super::models::*;
 #[horsies::task("validate_order", queue = "standard")]
 pub async fn validate_order(order: Order) -> Result<ValidatedOrder, TaskError> {
     if order.order_id.is_empty() {
-        return Err(TaskError::user("INVALID_ORDER_ID", "Order ID is required"));
+        return Err(TaskError::new("INVALID_ORDER_ID", "Order ID is required"));
     }
     if order.items.is_empty() {
-        return Err(TaskError::user(
+        return Err(TaskError::new(
             "EMPTY_ORDER",
             "Order must contain at least one item",
         ));
     }
     if order.customer_email.is_empty() {
-        return Err(TaskError::user(
+        return Err(TaskError::new(
             "MISSING_EMAIL",
             "Customer email is required",
         ));
@@ -48,7 +48,7 @@ pub async fn check_inventory(
     let order = match order {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
-            return Err(TaskError::user(
+            return Err(TaskError::new(
                 "UPSTREAM_FAILED",
                 format!(
                     "Cannot check inventory: upstream failed - {:?}",
@@ -78,7 +78,7 @@ pub async fn calculate_shipping_cost(
     let order = match order {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
-            return Err(TaskError::user(
+            return Err(TaskError::new(
                 "UPSTREAM_FAILED",
                 format!(
                     "Cannot calculate cost: upstream failed - {:?}",
@@ -112,7 +112,7 @@ pub async fn check_address(
     let order = match order {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
-            return Err(TaskError::user(
+            return Err(TaskError::new(
                 "UPSTREAM_FAILED",
                 format!("Cannot check address: upstream failed - {:?}", e.error_code),
             ))
@@ -143,7 +143,7 @@ pub async fn reserve_inventory(
     let inventory = match inventory {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
-            return Err(TaskError::user(
+            return Err(TaskError::new(
                 "UPSTREAM_FAILED",
                 format!(
                     "Cannot reserve: inventory check failed - {:?}",
@@ -155,7 +155,7 @@ pub async fn reserve_inventory(
     let cost = match cost {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
-            return Err(TaskError::user(
+            return Err(TaskError::new(
                 "UPSTREAM_FAILED",
                 format!(
                     "Cannot reserve: cost calculation failed - {:?}",
@@ -167,7 +167,7 @@ pub async fn reserve_inventory(
     let address = match address {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
-            return Err(TaskError::user(
+            return Err(TaskError::new(
                 "UPSTREAM_FAILED",
                 format!("Cannot reserve: address check failed - {:?}", e.error_code),
             ))
@@ -175,13 +175,13 @@ pub async fn reserve_inventory(
     };
 
     if !inventory.all_available {
-        return Err(TaskError::user(
+        return Err(TaskError::new(
             "ITEMS_UNAVAILABLE",
             "Some items are not available",
         ));
     }
     if !address.is_valid {
-        return Err(TaskError::user(
+        return Err(TaskError::new(
             "INVALID_ADDRESS",
             "Shipping address is invalid",
         ));
@@ -201,7 +201,7 @@ pub async fn create_shipment(reservation: TaskResult<Reservation>) -> Result<Shi
     let reservation = match reservation {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
-            return Err(TaskError::user(
+            return Err(TaskError::new(
                 "UPSTREAM_FAILED",
                 format!(
                     "Cannot create shipment: upstream failed - {:?}",
@@ -228,7 +228,7 @@ pub async fn send_notification(
     let shipment = match shipment {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
-            return Err(TaskError::user(
+            return Err(TaskError::new(
                 "UPSTREAM_FAILED",
                 format!("Cannot notify: upstream failed - {:?}", e.error_code),
             ))

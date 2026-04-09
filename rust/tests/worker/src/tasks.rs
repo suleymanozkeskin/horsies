@@ -77,7 +77,7 @@ async fn kwargs_task(input: KwargsInput) -> Result<String, TaskError> {
 }
 
 async fn error_task(_input: ()) -> Result<i64, TaskError> {
-    Err(TaskError::user("DELIBERATE_ERROR", "This is intentional"))
+    Err(TaskError::new("DELIBERATE_ERROR", "This is intentional"))
 }
 
 async fn slow_task(input: SlowInput) -> Result<String, TaskError> {
@@ -86,7 +86,7 @@ async fn slow_task(input: SlowInput) -> Result<String, TaskError> {
 }
 
 async fn no_retry_task(_input: ()) -> Result<String, TaskError> {
-    Err(TaskError::user("PERMANENT", "not retryable"))
+    Err(TaskError::new("PERMANENT", "not retryable"))
 }
 
 // =============================================================================
@@ -114,7 +114,7 @@ pub async fn wf_final_result(_input: ()) -> Result<serde_json::Value, TaskError>
 #[task("e2e_wf_fail")]
 pub async fn wf_fail(input: FailInput) -> Result<serde_json::Value, TaskError> {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    Err(TaskError::user(
+    Err(TaskError::new(
         &input.error_code,
         format!("Failed: {}", input.error_code),
     ))
@@ -123,7 +123,7 @@ pub async fn wf_fail(input: FailInput) -> Result<serde_json::Value, TaskError> {
 #[task("e2e_wf_fail_int")]
 pub async fn wf_fail_int(input: FailInput) -> Result<i64, TaskError> {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    Err(TaskError::user(
+    Err(TaskError::new(
         &input.error_code,
         format!("Failed: {}", input.error_code),
     ))
@@ -150,13 +150,13 @@ async fn dynamic_rt_start(rt: TaskRuntime, input: DynamicStartInput) -> Result<S
 
     let produce = builder.task(
         wf_produce_int::node()
-            .map_err(|e| TaskError::user("NODE_ERROR", e.to_string()))?
+            .map_err(|e| TaskError::new("NODE_ERROR", e.to_string()))?
             .node_id("produce")
             .kwargs_json(serde_json::json!({ "value": input.value }).to_string()),
     );
     let doubled = builder.task(
         wf_double::node()
-            .map_err(|e| TaskError::user("NODE_ERROR", e.to_string()))?
+            .map_err(|e| TaskError::new("NODE_ERROR", e.to_string()))?
             .node_id("double")
             .arg_from(DoubleInput::field_input_result(), produce),
     );
@@ -164,11 +164,11 @@ async fn dynamic_rt_start(rt: TaskRuntime, input: DynamicStartInput) -> Result<S
 
     let spec = builder
         .build()
-        .map_err(|err| TaskError::user("WF_BUILD_FAILED", err.to_string()))?;
+        .map_err(|err| TaskError::new("WF_BUILD_FAILED", err.to_string()))?;
     let handle = rt
         .start::<serde_json::Value>(spec)
         .await
-        .map_err(|err| TaskError::user("WF_START_FAILED", err.message))?;
+        .map_err(|err| TaskError::new("WF_START_FAILED", err.message))?;
     Ok(handle.workflow_id().to_owned())
 }
 
@@ -176,7 +176,7 @@ async fn dynamic_rt_start(rt: TaskRuntime, input: DynamicStartInput) -> Result<S
 async fn runtime_helper_dispatch(_rt: TaskRuntime) -> Result<String, TaskError> {
     let handle = rt_ping::send(())
         .await
-        .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
+        .map_err(|err| TaskError::new("SEND_FAILED", err.message))?;
     Ok(handle.task_id().to_owned())
 }
 
@@ -184,7 +184,7 @@ async fn runtime_helper_dispatch(_rt: TaskRuntime) -> Result<String, TaskError> 
 async fn runtime_helper_schedule(_rt: TaskRuntime) -> Result<String, TaskError> {
     let handle = rt_ping::schedule(std::time::Duration::from_secs(5), ())
         .await
-        .map_err(|err| TaskError::user("SCHEDULE_FAILED", err.message))?;
+        .map_err(|err| TaskError::new("SCHEDULE_FAILED", err.message))?;
     Ok(handle.task_id().to_owned())
 }
 
@@ -194,7 +194,7 @@ async fn runtime_helper_handle(rt: TaskRuntime) -> Result<String, TaskError> {
     let handle = ping
         .send(())
         .await
-        .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
+        .map_err(|err| TaskError::new("SEND_FAILED", err.message))?;
     Ok(handle.task_id().to_owned())
 }
 
@@ -205,13 +205,13 @@ async fn dynamic_rt_start_no_args(rt: TaskRuntime) -> Result<String, TaskError> 
 
     let produce = builder.task(
         wf_produce_int::node()
-            .map_err(|e| TaskError::user("NODE_ERROR", e.to_string()))?
+            .map_err(|e| TaskError::new("NODE_ERROR", e.to_string()))?
             .node_id("produce")
             .kwargs_json(serde_json::json!({ "value": 21 }).to_string()),
     );
     let doubled = builder.task(
         wf_double::node()
-            .map_err(|e| TaskError::user("NODE_ERROR", e.to_string()))?
+            .map_err(|e| TaskError::new("NODE_ERROR", e.to_string()))?
             .node_id("double")
             .arg_from(DoubleInput::field_input_result(), produce),
     );
@@ -219,11 +219,11 @@ async fn dynamic_rt_start_no_args(rt: TaskRuntime) -> Result<String, TaskError> 
 
     let spec = builder
         .build()
-        .map_err(|err| TaskError::user("WF_BUILD_FAILED", err.to_string()))?;
+        .map_err(|err| TaskError::new("WF_BUILD_FAILED", err.to_string()))?;
     let handle = rt
         .start::<serde_json::Value>(spec)
         .await
-        .map_err(|err| TaskError::user("WF_START_FAILED", err.message))?;
+        .map_err(|err| TaskError::new("WF_START_FAILED", err.message))?;
     Ok(handle.workflow_id().to_owned())
 }
 
@@ -232,13 +232,13 @@ async fn dynamic_rt_start_no_args(rt: TaskRuntime) -> Result<String, TaskError> 
 // =============================================================================
 
 async fn retry_exhausted(_input: ()) -> Result<String, TaskError> {
-    Err(TaskError::user("TRANSIENT", "always fails"))
+    Err(TaskError::new("TRANSIENT", "always fails"))
 }
 
 async fn retry_success(_input: ()) -> Result<String, TaskError> {
     let state_path = std::env::var("E2E_RETRY_SUCCESS_PATH").unwrap_or_default();
     if state_path.is_empty() {
-        return Err(TaskError::user(
+        return Err(TaskError::new(
             "CONFIG_ERROR",
             "E2E_RETRY_SUCCESS_PATH not set",
         ));
@@ -254,7 +254,7 @@ async fn retry_success(_input: ()) -> Result<String, TaskError> {
     let _ = tokio::fs::write(&state_path, count.to_string()).await;
 
     if count < 3 {
-        Err(TaskError::user("TRANSIENT", format!("attempt {}", count)))
+        Err(TaskError::new("TRANSIENT", format!("attempt {}", count)))
     } else {
         Ok(format!("succeeded_on_attempt_{}", count))
     }
@@ -272,7 +272,7 @@ pub struct IdempotentInput {
 async fn idempotent_task(input: IdempotentInput) -> Result<String, TaskError> {
     let log_dir = std::env::var("E2E_IDEMPOTENT_LOG_DIR").unwrap_or_default();
     if log_dir.is_empty() {
-        return Err(TaskError::user(
+        return Err(TaskError::new(
             "CONFIG_ERROR",
             "E2E_IDEMPOTENT_LOG_DIR not set",
         ));
@@ -291,11 +291,11 @@ async fn idempotent_task(input: IdempotentInput) -> Result<String, TaskError> {
             let _ = f.write_all(b"executed");
             Ok(format!("executed:{}", input.token))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(TaskError::user(
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(TaskError::new(
             "DOUBLE_EXECUTION",
             format!("Token {} already executed", input.token),
         )),
-        Err(e) => Err(TaskError::user("IO_ERROR", format!("{}", e))),
+        Err(e) => Err(TaskError::new("IO_ERROR", format!("{}", e))),
     }
 }
 
@@ -318,7 +318,7 @@ async fn slow_idempotent_task(input: SlowIdempotentInput) -> Result<String, Task
 
     let log_dir = std::env::var("E2E_IDEMPOTENT_LOG_DIR").unwrap_or_default();
     if log_dir.is_empty() {
-        return Err(TaskError::user(
+        return Err(TaskError::new(
             "CONFIG_ERROR",
             "E2E_IDEMPOTENT_LOG_DIR not set",
         ));
@@ -335,11 +335,11 @@ async fn slow_idempotent_task(input: SlowIdempotentInput) -> Result<String, Task
             let _ = f.write_all(b"executed");
             Ok(format!("executed:{}", input.token))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(TaskError::user(
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(TaskError::new(
             "DOUBLE_EXECUTION",
             format!("Token {} already executed", input.token),
         )),
-        Err(e) => Err(TaskError::user("IO_ERROR", format!("{}", e))),
+        Err(e) => Err(TaskError::new("IO_ERROR", format!("{}", e))),
     }
 }
 
@@ -391,7 +391,7 @@ pub async fn wf_retry_then_ok(input: RetryThenOkInput) -> Result<String, TaskErr
     let _ = tokio::fs::write(&input.counter_file, count.to_string()).await;
 
     if count < input.succeed_on_attempt {
-        Err(TaskError::user(
+        Err(TaskError::new(
             "TRANSIENT",
             format!("attempt {} of {}", count, input.succeed_on_attempt),
         ))
@@ -418,7 +418,7 @@ pub async fn wf_retry_via_registration(input: RetryThenOkInput) -> Result<String
     let _ = tokio::fs::write(&input.counter_file, count.to_string()).await;
 
     if count < input.succeed_on_attempt {
-        Err(TaskError::user(
+        Err(TaskError::new(
             "TRANSIENT",
             format!("attempt {} of {}", count, input.succeed_on_attempt),
         ))
@@ -503,7 +503,7 @@ async fn db_ledger_task(input: LedgerInput) -> Result<String, TaskError> {
 
     let pool = sqlx::PgPool::connect(&db_url)
         .await
-        .map_err(|e| TaskError::user("LEDGER_DB_ERROR", format!("connect failed: {}", e)))?;
+        .map_err(|e| TaskError::new("LEDGER_DB_ERROR", format!("connect failed: {}", e)))?;
 
     let worker_identity = format!(
         "{}:{}",
@@ -521,7 +521,7 @@ async fn db_ledger_task(input: LedgerInput) -> Result<String, TaskError> {
     .bind(worker_pid)
     .execute(&pool)
     .await
-    .map_err(|e| TaskError::user("LEDGER_DB_ERROR", format!("{}", e)))?;
+    .map_err(|e| TaskError::new("LEDGER_DB_ERROR", format!("{}", e)))?;
 
     // Claim winner (ON CONFLICT DO NOTHING — first one wins).
     let winner: Option<(String,)> = sqlx::query_as(
@@ -533,12 +533,12 @@ async fn db_ledger_task(input: LedgerInput) -> Result<String, TaskError> {
     .bind(worker_pid)
     .fetch_optional(&pool)
     .await
-    .map_err(|e| TaskError::user("LEDGER_DB_ERROR", format!("{}", e)))?;
+    .map_err(|e| TaskError::new("LEDGER_DB_ERROR", format!("{}", e)))?;
 
     pool.close().await;
 
     if winner.is_none() {
-        return Err(TaskError::user(
+        return Err(TaskError::new(
             "DOUBLE_EXECUTION",
             format!("Token {} already won by another worker", input.token),
         ));
@@ -559,7 +559,7 @@ pub struct RequeueGuardInput {
 async fn requeue_guard_task(input: RequeueGuardInput) -> Result<String, TaskError> {
     let log_dir = std::env::var("E2E_REQUEUE_GUARD_LOG_DIR").unwrap_or_default();
     if log_dir.is_empty() {
-        return Err(TaskError::user(
+        return Err(TaskError::new(
             "CONFIG_ERROR",
             "E2E_REQUEUE_GUARD_LOG_DIR not set",
         ));
@@ -576,11 +576,11 @@ async fn requeue_guard_task(input: RequeueGuardInput) -> Result<String, TaskErro
             let _ = writeln!(f, "executed_by_pid_{}", std::process::id());
             Ok(format!("done:{}", input.token))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(TaskError::user(
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(TaskError::new(
             "DOUBLE_EXECUTION",
             format!("Token {} already executed", input.token),
         )),
-        Err(e) => Err(TaskError::user("IO_ERROR", format!("{}", e))),
+        Err(e) => Err(TaskError::new("IO_ERROR", format!("{}", e))),
     }
 }
 
@@ -600,7 +600,7 @@ pub async fn wf_ctx_reader(input: CtxReaderInput) -> Result<serde_json::Value, T
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let ctx = input
         .workflow_ctx
-        .ok_or_else(|| TaskError::user("NO_CTX", "WorkflowContext not provided"))?;
+        .ok_or_else(|| TaskError::new("NO_CTX", "WorkflowContext not provided"))?;
 
     // Return a summary of what's in the context.
     let mut results = serde_json::Map::new();
@@ -635,7 +635,7 @@ pub async fn wf_ctx_sum(input: CtxSumInput) -> Result<i64, TaskError> {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let ctx = input
         .workflow_ctx
-        .ok_or_else(|| TaskError::user("NO_CTX", "WorkflowContext not provided"))?;
+        .ok_or_else(|| TaskError::new("NO_CTX", "WorkflowContext not provided"))?;
 
     let ctx_json = serde_json::to_value(&ctx).unwrap_or(serde_json::Value::Null);
     let mut total: i64 = 0;

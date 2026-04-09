@@ -44,7 +44,7 @@ async fn process_data(input: ProcessDataInput) -> Result<String, TaskError> {
     let _data = match input.data {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
-            return Err(TaskError::user(
+            return Err(TaskError::new(
                 "UPSTREAM_FAILED",
                 format!("upstream failed: {:?}", e.error_code),
             ))
@@ -64,7 +64,7 @@ async fn save_result(input: SaveResultInput) -> Result<String, TaskError> {
     let _result = match input.result {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
-            return Err(TaskError::user(
+            return Err(TaskError::new(
                 "UPSTREAM_FAILED",
                 format!("upstream failed: {:?}", e.error_code),
             ))
@@ -78,7 +78,7 @@ async fn notify_user(data: TaskResult<String>, urgent: bool) -> Result<(), TaskE
     let _data = match data {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
-            return Err(TaskError::user(
+            return Err(TaskError::new(
                 "UPSTREAM_FAILED",
                 format!("upstream failed: {:?}", e.error_code),
             ))
@@ -215,7 +215,7 @@ impl WorkflowDefinition for ChildPipeline {
 async fn build_child_workflow(rt: TaskRuntime, input: ChildInput) -> Result<(), TaskError> {
     if let Some(spec) = Some(
         build_child_spec(&input)
-            .map_err(|err| TaskError::user("WF_BUILD_FAILED", err.to_string()))?,
+            .map_err(|err| TaskError::new("WF_BUILD_FAILED", err.to_string()))?,
     ) {
         match rt.start::<String>(spec).await {
             Ok(handle) => {

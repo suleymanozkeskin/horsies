@@ -12,7 +12,7 @@ pub fn simple_task_result(value: i32) -> TaskResult<serde_json::Value> {
 
 /// Produce an Err result with a deliberate failure.
 pub fn failing_task_result() -> TaskResult<serde_json::Value> {
-    TaskResult::Err(TaskError::user("DELIBERATE_FAIL", "Test failure"))
+    TaskResult::Err(TaskError::new("DELIBERATE_FAIL", "Test failure"))
 }
 
 /// Produce an Ok result with the value unchanged.

@@ -354,8 +354,8 @@ impl TaskError {
         }
     }
 
-    /// Create a TaskError with a user-defined error code and message.
-    pub fn user(code: impl Into<String>, message: impl Into<String>) -> Self {
+    /// Create a TaskError with an application-defined error code and message.
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             error_code: Some(TaskErrorCode::User(code.into())),
             message: Some(message.into()),
@@ -436,8 +436,8 @@ mod tests {
     }
 
     #[test]
-    fn task_error_user_constructor() {
-        let err = TaskError::user("TOO_LARGE", "payload exceeds 10MB");
+    fn task_error_new_constructor() {
+        let err = TaskError::new("TOO_LARGE", "payload exceeds 10MB");
         assert_eq!(
             err.error_code,
             Some(TaskErrorCode::User("TOO_LARGE".to_owned()))

@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn should_retry_user_code() {
-        let error = TaskError::user("TRANSIENT", "try again");
+        let error = TaskError::new("TRANSIENT", "try again");
         let opts = r#"{"auto_retry_for": ["TRANSIENT"]}"#;
         assert!(should_retry(&error, 0, 3, Some(opts), None));
     }
@@ -430,7 +430,7 @@ mod tests {
         let opts = r#"{"auto_retry_for": ["TIMEOUT", "ConnectionError", "ValueError"]}"#;
 
         // Match on error code.
-        let error1 = TaskError::user("TIMEOUT", "timed out");
+        let error1 = TaskError::new("TIMEOUT", "timed out");
         assert!(should_retry(&error1, 0, 3, Some(opts), None));
 
         // Match on exception type.
@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn should_retry_blocked_by_expired_good_until() {
-        let error = TaskError::user("TRANSIENT", "try again");
+        let error = TaskError::new("TRANSIENT", "try again");
         let opts = r#"{"auto_retry_for": ["TRANSIENT"]}"#;
         let expired = Utc::now() - chrono::Duration::seconds(10);
         assert!(
@@ -467,7 +467,7 @@ mod tests {
 
     #[test]
     fn should_retry_allowed_with_future_good_until() {
-        let error = TaskError::user("TRANSIENT", "try again");
+        let error = TaskError::new("TRANSIENT", "try again");
         let opts = r#"{"auto_retry_for": ["TRANSIENT"]}"#;
         let future = Utc::now() + chrono::Duration::hours(1);
         assert!(
@@ -478,7 +478,7 @@ mod tests {
 
     #[test]
     fn should_retry_allowed_with_no_good_until() {
-        let error = TaskError::user("TRANSIENT", "try again");
+        let error = TaskError::new("TRANSIENT", "try again");
         let opts = r#"{"auto_retry_for": ["TRANSIENT"]}"#;
         assert!(
             should_retry(&error, 0, 3, Some(opts), None),

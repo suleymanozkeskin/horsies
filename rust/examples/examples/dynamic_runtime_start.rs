@@ -30,7 +30,7 @@ async fn double_value(input: DoubleInput) -> Result<serde_json::Value, TaskError
     let value = match input.input_result {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
-            return Err(TaskError::user(
+            return Err(TaskError::new(
                 "UPSTREAM_FAILED",
                 format!("upstream failed: {:?}", e.error_code),
             ))
@@ -65,11 +65,11 @@ fn build_child_spec(input: &SourceInput) -> Result<WorkflowSpec, HorsiesError> {
 #[task("start_dynamic_child")]
 async fn start_dynamic_child(rt: TaskRuntime, input: SourceInput) -> Result<String, TaskError> {
     let spec = build_child_spec(&input)
-        .map_err(|err| TaskError::user("WF_BUILD_FAILED", err.to_string()))?;
+        .map_err(|err| TaskError::new("WF_BUILD_FAILED", err.to_string()))?;
     let handle = rt
         .start::<serde_json::Value>(spec)
         .await
-        .map_err(|err| TaskError::user("WF_START_FAILED", err.message))?;
+        .map_err(|err| TaskError::new("WF_START_FAILED", err.message))?;
     Ok(handle.workflow_id().to_owned())
 }
 

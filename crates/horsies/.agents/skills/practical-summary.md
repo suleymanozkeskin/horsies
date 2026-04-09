@@ -222,7 +222,7 @@ if let Some(spec) = build_child_spec(&input)? {
 #[horsies::task("trigger_child")]
 async fn trigger_child(rt: TaskRuntime, input: ChildInput) -> Result<(), TaskError> {
     if let Some(spec) = build_child_spec(&input)
-        .map_err(|err| TaskError::user("BUILD_FAILED", err.to_string()))?
+        .map_err(|err| TaskError::new("BUILD_FAILED", err.to_string()))?
     {
         match rt.start::<String>(spec).await {
             Ok(handle) => {

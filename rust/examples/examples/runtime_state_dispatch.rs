@@ -24,7 +24,7 @@ async fn enqueue_add_numbers(_rt: TaskRuntime) -> Result<(), TaskError> {
     // Global send — works from anywhere after register()
     add_numbers::send(AddNumbersInput { a: 1, b: 2 })
         .await
-        .map_err(|err| TaskError::user("SEND_FAILED", err.message))?;
+        .map_err(|err| TaskError::new("SEND_FAILED", err.message))?;
 
     // Global schedule — same, no &rt needed
     add_numbers::schedule(
@@ -32,7 +32,7 @@ async fn enqueue_add_numbers(_rt: TaskRuntime) -> Result<(), TaskError> {
         AddNumbersInput { a: 3, b: 4 },
     )
     .await
-    .map_err(|err| TaskError::user("SCHEDULE_FAILED", err.message))?;
+    .map_err(|err| TaskError::new("SCHEDULE_FAILED", err.message))?;
 
     // Explicit path via handle(&rt) — for repeated sends or testing
     // (requires TaskRuntime in signature)
@@ -40,7 +40,7 @@ async fn enqueue_add_numbers(_rt: TaskRuntime) -> Result<(), TaskError> {
     for (a, b) in [(5, 6), (7, 8)] {
         add.send(AddNumbersInput { a, b })
             .await
-            .map_err(|err| TaskError::user("SEND_FAILED", err.message.clone()))?;
+            .map_err(|err| TaskError::new("SEND_FAILED", err.message.clone()))?;
     }
 
     Ok(())

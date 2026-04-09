@@ -162,7 +162,7 @@ impl TaskRuntime {
         let frozen = self.catalog.frozen()?;
 
         let value = frozen.task_handles.get(task_name).cloned().ok_or_else(|| {
-            TaskError::user(
+            TaskError::new(
                 "TASK_HANDLE_NOT_REGISTERED",
                 format!(
                     "task runtime does not contain a registered handle for {}",
@@ -196,7 +196,7 @@ impl TaskRuntime {
             .get(&TypeId::of::<T>())
             .cloned()
             .ok_or_else(|| {
-                TaskError::user(
+                TaskError::new(
                     "STATE_NOT_PROVIDED",
                     format!(
                         "task runtime is missing provided state of type {}",

@@ -321,7 +321,7 @@ pub struct TaskError {
 
 ```rust
 TaskError::builtin(OperationalErrorCode::BrokerError, "connection refused")
-TaskError::user("MY_CUSTOM_CODE", "something went wrong")
+TaskError::new("MY_CUSTOM_CODE", "something went wrong")
 ```
 
 ## `TaskSendResult` / `TaskSendError`

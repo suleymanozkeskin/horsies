@@ -30,7 +30,7 @@ async fn process_data(input: ProcessInput) -> Result<String, TaskError> {
     let _data = match input.data {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
-            return Err(TaskError::user(
+            return Err(TaskError::new(
                 "UPSTREAM_FAILED",
                 format!("upstream failed: {:?}", e.error_code),
             ))
