@@ -136,7 +136,7 @@ async fn test_quorum_ctx_gating() {
             .waits_for(a)
             .waits_for(bnode)
             .waits_for(c)
-            .workflow_ctx_from(vec!["c".to_owned()])
+            .workflow_ctx_from([c])
             .join_quorum(2),
     );
     let spec = b.build().unwrap();

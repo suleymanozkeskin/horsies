@@ -419,7 +419,7 @@ async fn test_workflow_ctx_single_dependency() {
             .unwrap()
             .node_id("b")
             .waits_for(a)
-            .workflow_ctx_from(vec!["a".to_owned()]),
+            .workflow_ctx_from([a]),
     );
     let spec = b.build().unwrap();
 
@@ -479,7 +479,7 @@ async fn test_workflow_ctx_multiple_dependencies() {
             .node_id("c")
             .waits_for(a)
             .waits_for(bnode)
-            .workflow_ctx_from(vec!["a".to_owned(), "b".to_owned()]),
+            .workflow_ctx_from([a, bnode]),
     );
     let spec = b.build().unwrap();
 
@@ -526,7 +526,7 @@ async fn test_mixed_args_from_and_ctx() {
             .unwrap()
             .node_id("b")
             .arg_from(MixedInput::field_input_result(), a)
-            .workflow_ctx_from(vec!["a".to_owned()]),
+            .workflow_ctx_from([a]),
     );
     let spec = b.build().unwrap();
 
@@ -636,7 +636,7 @@ async fn test_join_ctx_gating() {
             .node_id("c")
             .waits_for(a)
             .waits_for(bnode)
-            .workflow_ctx_from(vec!["b".to_owned()])
+            .workflow_ctx_from([bnode])
             .join_any(),
     );
     let spec = b.build().unwrap();

@@ -14,7 +14,8 @@ pub struct SubWorkflowNode<P = (), T = serde_json::Value> {
     spec_name: String,
     dependencies: Vec<usize>,
     args_from: HashMap<String, usize>,
-    workflow_ctx_from: Option<Vec<String>>,
+    workflow_ctx_from_refs: Vec<usize>,
+    workflow_ctx_from_ids: Option<Vec<String>>,
     queue: Option<String>,
     priority: Option<i32>,
     allow_failed_deps: bool,
@@ -39,7 +40,8 @@ impl<P, T> SubWorkflowNode<P, T> {
             spec_name: spec_name.into(),
             dependencies: Vec::new(),
             args_from: HashMap::new(),
-            workflow_ctx_from: None,
+            workflow_ctx_from_refs: Vec::new(),
+            workflow_ctx_from_ids: None,
             queue: None,
             priority: None,
             allow_failed_deps: false,
@@ -101,9 +103,32 @@ impl<P, T> SubWorkflowNode<P, T> {
         self
     }
 
-    /// Set node IDs whose results should populate WorkflowContext.
-    pub fn workflow_ctx_from(mut self, node_ids: Vec<String>) -> Self {
-        self.workflow_ctx_from = Some(node_ids);
+    /// Select upstream nodes whose results should populate WorkflowContext.
+    ///
+    /// This does not add dependencies automatically; every context source must
+    /// still be present in `waits_for(...)` / `waits_for_all(...)`.
+    pub fn workflow_ctx_from<D, R>(mut self, deps: D) -> Self
+    where
+        D: IntoIterator<Item = R>,
+        R: Into<NodeRef>,
+    {
+        for dep in deps {
+            let dep = dep.into();
+            if !self.workflow_ctx_from_refs.contains(&dep.index) {
+                self.workflow_ctx_from_refs.push(dep.index);
+            }
+        }
+        self
+    }
+
+    /// Internal raw lowering hook for tests and spec machinery.
+    #[allow(dead_code)]
+    pub(crate) fn raw_workflow_ctx_from<D>(mut self, node_ids: D) -> Self
+    where
+        D: IntoIterator<Item = String>,
+    {
+        self.workflow_ctx_from_refs.clear();
+        self.workflow_ctx_from_ids = Some(node_ids.into_iter().collect());
         self
     }
 
@@ -169,7 +194,12 @@ impl<P, T> SubWorkflowNode<P, T> {
             kwargs_json: None,
             dependencies: self.dependencies,
             args_from: self.args_from,
-            workflow_ctx_from: self.workflow_ctx_from,
+            workflow_ctx_from: self.workflow_ctx_from_ids,
+            workflow_ctx_from_refs: if self.workflow_ctx_from_refs.is_empty() {
+                None
+            } else {
+                Some(self.workflow_ctx_from_refs)
+            },
             queue: self.queue,
             priority: self.priority,
             allow_failed_deps: self.allow_failed_deps,

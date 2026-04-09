@@ -204,6 +204,11 @@ pub struct AnyNode {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workflow_ctx_from: Option<Vec<String>>,
 
+    /// Builder-only context source refs, lowered to `workflow_ctx_from` node IDs
+    /// during workflow finalization.
+    #[serde(skip)]
+    pub(crate) workflow_ctx_from_refs: Option<Vec<usize>>,
+
     /// Queue override (None = use default).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue: Option<String>,
@@ -259,7 +264,8 @@ pub struct TaskNode<T, I = ()> {
     kwargs_json: Option<String>,
     dependencies: Vec<usize>,
     args_from: HashMap<String, usize>,
-    workflow_ctx_from: Option<Vec<String>>,
+    workflow_ctx_from_refs: Vec<usize>,
+    workflow_ctx_from_ids: Option<Vec<String>>,
     queue: Option<String>,
     priority: Option<i32>,
     allow_failed_deps: bool,
@@ -294,7 +300,8 @@ impl<T, I> TaskNode<T, I> {
             kwargs_json: None,
             dependencies: Vec::new(),
             args_from: HashMap::new(),
-            workflow_ctx_from: None,
+            workflow_ctx_from_refs: Vec::new(),
+            workflow_ctx_from_ids: None,
             queue: None,
             priority: None,
             allow_failed_deps: false,
@@ -423,9 +430,32 @@ impl<T, I> TaskNode<T, I> {
         self
     }
 
-    /// Set node IDs whose results should be available in WorkflowContext.
-    pub fn workflow_ctx_from(mut self, node_ids: Vec<String>) -> Self {
-        self.workflow_ctx_from = Some(node_ids);
+    /// Select upstream nodes whose results should be available in WorkflowContext.
+    ///
+    /// This does not add dependencies automatically; every context source must
+    /// still be present in `waits_for(...)` / `waits_for_all(...)`.
+    pub fn workflow_ctx_from<D, R>(mut self, deps: D) -> Self
+    where
+        D: IntoIterator<Item = R>,
+        R: Into<NodeRef>,
+    {
+        for dep in deps {
+            let dep = dep.into();
+            if !self.workflow_ctx_from_refs.contains(&dep.index) {
+                self.workflow_ctx_from_refs.push(dep.index);
+            }
+        }
+        self
+    }
+
+    /// Internal raw lowering hook for tests and spec machinery.
+    #[allow(dead_code)]
+    pub(crate) fn raw_workflow_ctx_from<D>(mut self, node_ids: D) -> Self
+    where
+        D: IntoIterator<Item = String>,
+    {
+        self.workflow_ctx_from_refs.clear();
+        self.workflow_ctx_from_ids = Some(node_ids.into_iter().collect());
         self
     }
 
@@ -509,7 +539,12 @@ impl<T, I> TaskNode<T, I> {
             kwargs_json: self.kwargs_json,
             dependencies: self.dependencies,
             args_from: self.args_from,
-            workflow_ctx_from: self.workflow_ctx_from,
+            workflow_ctx_from: self.workflow_ctx_from_ids,
+            workflow_ctx_from_refs: if self.workflow_ctx_from_refs.is_empty() {
+                None
+            } else {
+                Some(self.workflow_ctx_from_refs)
+            },
             queue: self.queue,
             priority: self.priority,
             allow_failed_deps: self.allow_failed_deps,
@@ -719,7 +754,8 @@ mod tests {
         assert!(node.kwargs_json.is_none());
         assert!(node.dependencies.is_empty());
         assert!(node.args_from.is_empty());
-        assert!(node.workflow_ctx_from.is_none());
+        assert!(node.workflow_ctx_from_refs.is_empty());
+        assert!(node.workflow_ctx_from_ids.is_none());
         assert!(node.queue.is_none());
         assert!(node.priority.is_none());
         assert!(!node.allow_failed_deps);
@@ -829,6 +865,7 @@ mod tests {
             dependencies: vec![],
             args_from: HashMap::new(),
             workflow_ctx_from: None,
+            workflow_ctx_from_refs: None,
             queue: None,
             priority: None,
             allow_failed_deps: false,
@@ -869,6 +906,7 @@ mod tests {
             dependencies: vec![],
             args_from: HashMap::new(),
             workflow_ctx_from: None,
+            workflow_ctx_from_refs: None,
             queue: None,
             priority: None,
             allow_failed_deps: false,

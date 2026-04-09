@@ -271,6 +271,32 @@ impl WorkflowSpecBuilder {
             }
         }
 
+        // Lower builder-layer workflow_ctx refs to stable node_ids now that
+        // every node has an assigned identifier.
+        let node_ids: Vec<String> = self
+            .tasks
+            .iter()
+            .map(|task| {
+                task.node_id
+                    .as_ref()
+                    .expect("node_id should be assigned before ctx lowering")
+                    .clone()
+            })
+            .collect();
+        for task in &mut self.tasks {
+            if let Some(refs) = task.workflow_ctx_from_refs.take() {
+                let ids = refs
+                    .into_iter()
+                    .map(|idx| {
+                        node_ids.get(idx).cloned().expect(
+                            "workflow_ctx_from ref index out of bounds during builder finalization",
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                task.workflow_ctx_from = Some(ids);
+            }
+        }
+
         // Validate node_id pattern and length.
         for task in &self.tasks {
             if let Some(ref id) = task.node_id {
@@ -858,10 +884,8 @@ mod tests {
     #[test]
     fn e009_ctx_from_not_in_deps() {
         let mut b = WorkflowSpecBuilder::new("wf");
-        b.task(node_with_id("a", "step_a"));
-        b.task(simple_node("b"));
-        // b references step_a in ctx_from but a is not a dependency
-        b.tasks[1].workflow_ctx_from = Some(vec!["step_a".to_owned()]);
+        let a = b.task(node_with_id("a", "step_a"));
+        b.task(TaskNode::<()>::raw("b").workflow_ctx_from([a]));
         let err = b.build().unwrap_err();
         assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidCtxFrom));
     }
@@ -870,11 +894,7 @@ mod tests {
     fn ctx_from_valid() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(node_with_id("a", "step_a"));
-        b.task(
-            TaskNode::<()>::raw("b")
-                .waits_for(a)
-                .workflow_ctx_from(vec!["step_a".to_owned()]),
-        );
+        b.task(TaskNode::<()>::raw("b").waits_for(a).workflow_ctx_from([a]));
         let spec = b.build().unwrap();
         assert_eq!(
             spec.tasks[1].workflow_ctx_from,
@@ -903,7 +923,7 @@ mod tests {
             TaskNode::<()>::raw("b")
                 .args(r#"[1]"#)
                 .waits_for(a)
-                .workflow_ctx_from(vec!["step_a".to_owned()]),
+                .workflow_ctx_from([a]),
         );
         let err = b.build().unwrap_err();
         assert_eq!(err.code, Some(ErrorCode::WorkflowArgsWithInjection));
