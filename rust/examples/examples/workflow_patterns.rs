@@ -36,7 +36,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create Horsies app and register task functions + workflow specs.
     let mut app = Horsies::new(config)?;
     let workflow_tasks = common::tasks::workflows::register(&mut app)?;
-    common::tasks::workflows::register_workflow_specs(&mut app, &workflow_tasks)?;
+    let workflow_specs =
+        common::tasks::workflows::register_workflow_specs(&mut app, &workflow_tasks)?;
 
     println!("Registered 6 tasks and 3 workflow specs.\n");
 
@@ -53,13 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ------------------------------------------------------------------
     println!("--- Pattern 1: Linear Chain ---\n");
     {
-        let spec = app
-            .workflow_registry()
-            .get("linear_chain")
-            .expect("linear_chain not registered")
-            .spec
-            .clone();
-        let handle = app.start::<TransformResult>(spec).await?;
+        let handle = workflow_specs.linear_chain.start().await?;
         println!(
             "  Started workflow: linear_chain (id: {})",
             handle.workflow_id()
@@ -90,13 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ------------------------------------------------------------------
     println!("--- Pattern 2: Fan-Out + Fan-In ---\n");
     {
-        let spec = app
-            .workflow_registry()
-            .get("fan_in_out")
-            .expect("fan_in_out not registered")
-            .spec
-            .clone();
-        let handle = app.start::<AggregateResult>(spec).await?;
+        let handle = workflow_specs.fan_in_out.start().await?;
         println!(
             "  Started workflow: fan_in_out (id: {})",
             handle.workflow_id()
@@ -127,13 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ------------------------------------------------------------------
     println!("--- Pattern 3: Error Recovery ---\n");
     {
-        let spec = app
-            .workflow_registry()
-            .get("error_recovery")
-            .expect("error_recovery not registered")
-            .spec
-            .clone();
-        let handle = app.start::<String>(spec).await?;
+        let handle = workflow_specs.error_recovery.start().await?;
         println!(
             "  Started workflow: error_recovery (id: {})",
             handle.workflow_id()

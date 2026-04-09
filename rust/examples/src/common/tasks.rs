@@ -194,8 +194,8 @@ pub mod custom_queues {
 // ---------------------------------------------------------------------------
 pub mod workflows {
     use horsies::{
-        async_task_fn, Horsies, OnError, TaskError, TaskFunction, TaskResult, WorkflowInput,
-        WorkflowSpecBuilder,
+        async_task_fn, Horsies, OnError, SuccessCase, SuccessPolicy, TaskError, TaskFunction,
+        TaskResult, WorkflowFunction, WorkflowInput, WorkflowSpecBuilder,
     };
     use serde::{Deserialize, Serialize};
 
@@ -302,6 +302,12 @@ pub mod workflows {
         pub recovery_task: TaskFunction<RecoveryArgs, String>,
     }
 
+    pub struct WorkflowSpecs {
+        pub linear_chain: WorkflowFunction<TransformResult>,
+        pub fan_in_out: WorkflowFunction<AggregateResult>,
+        pub error_recovery: WorkflowFunction<String>,
+    }
+
     /// Register all workflow task functions on the given app.
     pub fn register(app: &mut Horsies) -> Result<WorkflowTasks, Box<dyn std::error::Error>> {
         Ok(WorkflowTasks {
@@ -342,9 +348,9 @@ pub mod workflows {
     pub fn register_workflow_specs(
         app: &mut Horsies,
         tasks: &WorkflowTasks,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<WorkflowSpecs, Box<dyn std::error::Error>> {
         // Pattern 1: Linear Chain (fetch -> transform)
-        {
+        let linear_chain = {
             let mut b = WorkflowSpecBuilder::new("linear_chain");
             let fetch = b.task(tasks.fetch_data.node().set_input("source_a".to_owned())?);
             let transform = b.task(
@@ -356,11 +362,11 @@ pub mod workflows {
             );
             b.on_error(OnError::Fail);
             b.output(transform);
-            app.register_workflow_spec::<TransformResult>(b.build()?)?;
-        }
+            app.register_workflow_spec::<TransformResult>(b.build()?)?
+        };
 
         // Pattern 2: Fan-Out + Fan-In
-        {
+        let fan_in_out = {
             let mut b = WorkflowSpecBuilder::new("fan_in_out");
             let fetch = b.task(tasks.fetch_data.node().set_input("source_b".to_owned())?);
             let ca = b.task(
@@ -395,11 +401,11 @@ pub mod workflows {
             );
             b.on_error(OnError::Fail);
             b.output(agg);
-            app.register_workflow_spec::<AggregateResult>(b.build()?)?;
-        }
+            app.register_workflow_spec::<AggregateResult>(b.build()?)?
+        };
 
         // Pattern 3: Error Recovery
-        {
+        let error_recovery = {
             let mut b = WorkflowSpecBuilder::new("error_recovery");
             let fail = b.task(
                 tasks
@@ -417,10 +423,21 @@ pub mod workflows {
             );
             b.on_error(OnError::Fail);
             b.output(recover);
-            app.register_workflow_spec::<String>(b.build()?)?;
-        }
+            b.success_policy(SuccessPolicy {
+                cases: vec![SuccessCase {
+                    required_indices: vec![recover.index],
+                    name: Some("recovered".to_owned()),
+                }],
+                optional_indices: Some(vec![fail.index]),
+            });
+            app.register_workflow_spec::<String>(b.build()?)?
+        };
 
-        Ok(())
+        Ok(WorkflowSpecs {
+            linear_chain,
+            fan_in_out,
+            error_recovery,
+        })
     }
 }
 

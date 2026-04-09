@@ -19,5 +19,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 name = "quick_start"
 path = "examples/quick_start/main.rs"
 
+[[example]]
+name = "quick_start_worker"
+path = "examples/quick_start/worker.rs"
+
 [lints]
 workspace = true

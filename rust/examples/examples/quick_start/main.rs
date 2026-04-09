@@ -12,7 +12,11 @@
 //! - `app.check()` for offline validation
 //!
 //! Run:
-//!   cargo run --example quick_start -p horsies
+//!   # Terminal 1: start the quick-start worker
+//!   cargo run --example quick_start_worker -p horsies-examples
+//!
+//!   # Terminal 2: run the sender
+//!   cargo run --example quick_start -p horsies-examples
 
 mod models;
 mod tasks;
@@ -21,6 +25,7 @@ mod workflows;
 use std::time::Duration;
 
 use horsies::{AppConfig, CustomQueueConfig, Horsies, PostgresConfig, QueueMode, TaskResult};
+use horsies_examples::common;
 
 use models::*;
 
@@ -45,7 +50,7 @@ fn config() -> AppConfig {
             },
         ]),
         broker: PostgresConfig {
-            database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
+            database_url: common::db_url(),
             pool_pre_ping: true,
             pool_size: 30,
             max_overflow: 30,
