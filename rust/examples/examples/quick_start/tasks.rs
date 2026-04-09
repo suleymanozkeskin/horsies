@@ -5,39 +5,9 @@ use std::collections::HashMap;
 use chrono::Utc;
 use uuid::Uuid;
 
-use horsies::{Horsies, TaskError, TaskFunction, TaskResult, WorkflowInput};
+use horsies::{Horsies, TaskError, TaskFunction, TaskResult};
 
 use super::models::*;
-
-// ---------------------------------------------------------------------------
-// Args-from input structs
-// ---------------------------------------------------------------------------
-
-/// Input for tasks that receive the validated order via args_from.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, WorkflowInput)]
-pub struct OrderArgsFrom {
-    pub order: TaskResult<ValidatedOrder>,
-}
-
-/// Aggregated input for reserve_inventory (fan-in from three parallel checks).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, WorkflowInput)]
-pub struct ReserveInput {
-    pub inventory: TaskResult<InventoryStatus>,
-    pub cost: TaskResult<ShippingCost>,
-    pub address: TaskResult<AddressValidation>,
-}
-
-/// Input for create_shipment via args_from.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, WorkflowInput)]
-pub struct ShipmentArgsFrom {
-    pub reservation: TaskResult<Reservation>,
-}
-
-/// Input for send_notification via args_from.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, WorkflowInput)]
-pub struct NotifyArgsFrom {
-    pub shipment: TaskResult<Shipment>,
-}
 
 // ---------------------------------------------------------------------------
 // Task functions — annotated with #[horsies::task]
@@ -72,8 +42,10 @@ pub async fn validate_order(order: Order) -> Result<ValidatedOrder, TaskError> {
 }
 
 #[horsies::task("check_inventory", queue = "standard")]
-pub async fn check_inventory(args: OrderArgsFrom) -> Result<InventoryStatus, TaskError> {
-    let order = match args.order {
+pub async fn check_inventory(
+    order: TaskResult<ValidatedOrder>,
+) -> Result<InventoryStatus, TaskError> {
+    let order = match order {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
             return Err(TaskError::user(
@@ -100,8 +72,10 @@ pub async fn check_inventory(args: OrderArgsFrom) -> Result<InventoryStatus, Tas
 }
 
 #[horsies::task("calculate_shipping_cost", queue = "standard")]
-pub async fn calculate_shipping_cost(args: OrderArgsFrom) -> Result<ShippingCost, TaskError> {
-    let order = match args.order {
+pub async fn calculate_shipping_cost(
+    order: TaskResult<ValidatedOrder>,
+) -> Result<ShippingCost, TaskError> {
+    let order = match order {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
             return Err(TaskError::user(
@@ -132,8 +106,10 @@ pub async fn calculate_shipping_cost(args: OrderArgsFrom) -> Result<ShippingCost
 }
 
 #[horsies::task("check_address", queue = "standard")]
-pub async fn check_address(args: OrderArgsFrom) -> Result<AddressValidation, TaskError> {
-    let order = match args.order {
+pub async fn check_address(
+    order: TaskResult<ValidatedOrder>,
+) -> Result<AddressValidation, TaskError> {
+    let order = match order {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
             return Err(TaskError::user(
@@ -159,8 +135,12 @@ pub async fn check_address(args: OrderArgsFrom) -> Result<AddressValidation, Tas
 }
 
 #[horsies::task("reserve_inventory", queue = "urgent")]
-pub async fn reserve_inventory(input: ReserveInput) -> Result<Reservation, TaskError> {
-    let inventory = match input.inventory {
+pub async fn reserve_inventory(
+    inventory: TaskResult<InventoryStatus>,
+    cost: TaskResult<ShippingCost>,
+    address: TaskResult<AddressValidation>,
+) -> Result<Reservation, TaskError> {
+    let inventory = match inventory {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
             return Err(TaskError::user(
@@ -172,7 +152,7 @@ pub async fn reserve_inventory(input: ReserveInput) -> Result<Reservation, TaskE
             ))
         }
     };
-    let cost = match input.cost {
+    let cost = match cost {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
             return Err(TaskError::user(
@@ -184,7 +164,7 @@ pub async fn reserve_inventory(input: ReserveInput) -> Result<Reservation, TaskE
             ))
         }
     };
-    let address = match input.address {
+    let address = match address {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
             return Err(TaskError::user(
@@ -217,8 +197,8 @@ pub async fn reserve_inventory(input: ReserveInput) -> Result<Reservation, TaskE
 }
 
 #[horsies::task("create_shipment", queue = "urgent")]
-pub async fn create_shipment(args: ShipmentArgsFrom) -> Result<Shipment, TaskError> {
-    let reservation = match args.reservation {
+pub async fn create_shipment(reservation: TaskResult<Reservation>) -> Result<Shipment, TaskError> {
+    let reservation = match reservation {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
             return Err(TaskError::user(
@@ -242,8 +222,10 @@ pub async fn create_shipment(args: ShipmentArgsFrom) -> Result<Shipment, TaskErr
 }
 
 #[horsies::task("send_notification", queue = "low")]
-pub async fn send_notification(args: NotifyArgsFrom) -> Result<NotificationResult, TaskError> {
-    let shipment = match args.shipment {
+pub async fn send_notification(
+    shipment: TaskResult<Shipment>,
+) -> Result<NotificationResult, TaskError> {
+    let shipment = match shipment {
         TaskResult::Ok(v) => v,
         TaskResult::Err(e) => {
             return Err(TaskError::user(
@@ -262,27 +244,18 @@ pub async fn send_notification(args: NotifyArgsFrom) -> Result<NotificationResul
 }
 
 // ---------------------------------------------------------------------------
-// Registration — one line per task via descriptors
+// Registration
 // ---------------------------------------------------------------------------
 
-pub struct Tasks {
-    pub validate_order: TaskFunction<Order, ValidatedOrder>,
-    pub check_inventory: TaskFunction<OrderArgsFrom, InventoryStatus>,
-    pub calculate_shipping_cost: TaskFunction<OrderArgsFrom, ShippingCost>,
-    pub check_address: TaskFunction<OrderArgsFrom, AddressValidation>,
-    pub reserve_inventory: TaskFunction<ReserveInput, Reservation>,
-    pub create_shipment: TaskFunction<ShipmentArgsFrom, Shipment>,
-    pub send_notification: TaskFunction<NotifyArgsFrom, NotificationResult>,
-}
-
-pub fn register(app: &mut Horsies) -> Result<Tasks, Box<dyn std::error::Error>> {
-    Ok(Tasks {
-        validate_order: validate_order::register(app)?,
-        check_inventory: check_inventory::register(app)?,
-        calculate_shipping_cost: calculate_shipping_cost::register(app)?,
-        check_address: check_address::register(app)?,
-        reserve_inventory: reserve_inventory::register(app)?,
-        create_shipment: create_shipment::register(app)?,
-        send_notification: send_notification::register(app)?,
-    })
+pub fn register(
+    app: &mut Horsies,
+) -> Result<TaskFunction<Order, ValidatedOrder>, Box<dyn std::error::Error>> {
+    let validate_order = validate_order::register(app)?;
+    check_inventory::register(app)?;
+    calculate_shipping_cost::register(app)?;
+    check_address::register(app)?;
+    reserve_inventory::register(app)?;
+    create_shipment::register(app)?;
+    send_notification::register(app)?;
+    Ok(validate_order)
 }

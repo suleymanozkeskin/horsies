@@ -38,7 +38,7 @@ pub fn derive_workflow_input(input: DeriveInput) -> syn::Result<TokenStream> {
         let field_name = field_ident.to_string();
         quote! {
             pub fn #fn_ident() -> horsies::InputField<Self, #field_ty> {
-                horsies::InputField::new(#field_name)
+                horsies::__private::input_field(#field_name)
             }
         }
     });

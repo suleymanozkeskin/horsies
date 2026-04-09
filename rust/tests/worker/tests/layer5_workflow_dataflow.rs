@@ -25,9 +25,9 @@ use horsies_test_support::{
     fixtures,
 };
 use horsies_test_worker::tasks::{
-    wf_ctx_reader, wf_ctx_sum, wf_double, wf_fail, wf_mixed, wf_produce_dict, wf_produce_int,
-    wf_read_dict, wf_slow_step, wf_step, wf_sum_two, DoubleInput, MixedInput, ReadDictInput,
-    SumTwoInput,
+    wf_ctx_reader, wf_ctx_sum, wf_double, wf_fail, wf_fail_int, wf_mixed, wf_produce_dict,
+    wf_produce_int, wf_read_dict, wf_slow_step, wf_step, wf_sum_two, DoubleInput, MixedInput,
+    ReadDictInput, SumTwoInput,
 };
 
 // ---------------------------------------------------------------------------
@@ -187,7 +187,7 @@ async fn test_failed_propagation_via_args_from() {
     // A fails → B receives error via args_from (allow_failed_deps=true).
     let mut b = WorkflowSpecBuilder::new("e2e_fail_propagation");
     let a = b.task(
-        wf_fail::node()
+        wf_fail_int::node()
             .unwrap()
             .node_id("a")
             .kwargs(r#"{"error_code": "UPSTREAM_FAIL"}"#.to_owned()),
@@ -320,7 +320,7 @@ async fn test_args_from_failed_dep_skips_and_fails() {
     // A fails → B (args_from A, no allow_failed_deps) → SKIPPED
     let mut b = WorkflowSpecBuilder::new("e2e_args_from_fail_skip");
     let a = b.task(
-        wf_fail::node()
+        wf_fail_int::node()
             .unwrap()
             .node_id("a")
             .kwargs(r#"{"error_code": "FAIL_A"}"#.to_owned()),

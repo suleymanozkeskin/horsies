@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = Horsies::new(config())?;
 
     // ── 2. Register tasks ────────────────────────────────────────────
-    let tasks = tasks::register(&mut app)?;
+    let validate_order_task = tasks::register(&mut app)?;
 
     // ── 3. Register workflow ─────────────────────────────────────────
     let order_workflow = workflows::register(&mut app)?;
@@ -111,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     println!("\n--- Sending standalone task ---");
-    match tasks.validate_order.send(order.clone()).await {
+    match validate_order_task.send(order.clone()).await {
         Ok(handle) => {
             let result: TaskResult<ValidatedOrder> =
                 handle.get(Some(Duration::from_secs(30))).await;
@@ -134,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             if send_err.retryable {
                 println!("retrying...");
-                match tasks.validate_order.retry_send(&send_err).await {
+                match validate_order_task.retry_send(&send_err).await {
                     Ok(handle) => {
                         let _result = handle.get(Some(Duration::from_secs(30))).await;
                         println!("retry succeeded");
@@ -176,8 +176,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 7. Schedule a delayed task ───────────────────────────────────
     println!("\n--- Scheduling delayed task ---");
-    match tasks
-        .validate_order
+    match validate_order_task
         .schedule(Duration::from_secs(300), order)
         .await
     {

@@ -138,7 +138,8 @@ impl WorkflowDefinition for ChildPipeline {
         let mut builder = WorkflowSpecBuilder::new("child_pipeline");
         builder.definition_key("myapp.child_pipeline.v1");
         let fetch = builder.task(
-            fetch_data::node_with(FetchDataInput { source_url })?
+            fetch_data::node()?
+                .set_input(FetchDataInput { source_url })?
                 .node_id("fetch"),
         );
         let process = builder.task(
@@ -164,8 +165,36 @@ match child.start("https://example.com/data.json".to_owned()).await {
 ```
 
 Parameterized workflows do not need a placeholder `define()` implementation.
-Override `build_with(params)` directly and use typed `node_with(...)` helpers
-for parameter-derived root inputs.
+Override `build_with(params)` directly and use typed `node()` helpers with
+`.set_input(...)`, `.set(...)`, and `.arg_from(...)`.
+
+Use the binding style that matches the source of the value:
+
+- `.set_input(value)?` for the node's whole explicit input
+- `.set(task_name::params::field(), value)?` for one explicit parameter
+- `.arg_from(task_name::params::field(), dep)` for upstream `TaskResult<_>` injection
+
+Mixed-source nodes look like this:
+
+```rust
+#[horsies::task("notify_user")]
+async fn notify_user(
+    data: horsies::TaskResult<String>,
+    urgent: bool,
+) -> Result<(), horsies::TaskError> {
+    let _ = data;
+    let _ = urgent;
+    Ok(())
+}
+
+let notify = builder.task(
+    notify_user::node()?
+        .waits_for(process)
+        .arg_from(notify_user::params::data(), process)
+        .set(notify_user::params::urgent(), true)?
+        .node_id("notify"),
+);
+```
 
 ### Checked dynamic builders via `check_workflow_builder()`
 
@@ -181,7 +210,7 @@ let mut registration = app.check_workflow_builder(
     move |source_url: &String| {
         let mut builder = WorkflowSpecBuilder::new("child_pipeline");
         builder.definition_key("myapp.child_pipeline.v1");
-        let fetch_ref = builder.task(fetch.node_with(FetchDataInput {
+        let fetch_ref = builder.task(fetch.node().set_input(FetchDataInput {
             source: source_url.clone(),
         })?);
         let process_ref = builder.task(
@@ -256,7 +285,8 @@ Typed task node in a workflow DAG. Create nodes via the generated `#[task]` help
 ```rust
 // From a registered #[task] module:
 my_task::node()?                  // TaskNode<T, A> with registered queue/priority/options
-my_task::node_with(typed_args)?   // same, with typed input pre-serialized
+my_task::node()?.set_input(typed_args)? // same, with typed input pre-serialized
+my_task::node()?.set(my_task::params::flag(), true)? // bind one explicit parameter
 
 // Chaining methods:
 my_task::node()?

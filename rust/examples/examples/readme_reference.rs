@@ -73,6 +73,21 @@ async fn save_result(input: SaveResultInput) -> Result<String, TaskError> {
     Ok("saved".to_owned())
 }
 
+#[task("notify_user")]
+async fn notify_user(data: TaskResult<String>, urgent: bool) -> Result<(), TaskError> {
+    let _data = match data {
+        TaskResult::Ok(v) => v,
+        TaskResult::Err(e) => {
+            return Err(TaskError::user(
+                "UPSTREAM_FAILED",
+                format!("upstream failed: {:?}", e.error_code),
+            ))
+        }
+    };
+    let _urgent = urgent;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChildInput {
     source_url: String,
@@ -82,10 +97,11 @@ fn build_child_spec(input: &ChildInput) -> Result<WorkflowSpec, HorsiesError> {
     let mut builder = WorkflowSpecBuilder::new("child_pipeline");
     builder.definition_key("examples.child_pipeline.dynamic.v1");
     let fetch = builder.task(
-        fetch_data::node_with(FetchDataInput {
-            source: input.source_url.clone(),
-        })?
-        .node_id("fetch"),
+        fetch_data::node()?
+            .set_input(FetchDataInput {
+                source: input.source_url.clone(),
+            })?
+            .node_id("fetch"),
     );
     let process = builder.task(
         process_data::node()?
@@ -94,6 +110,33 @@ fn build_child_spec(input: &ChildInput) -> Result<WorkflowSpec, HorsiesError> {
             .arg_from(ProcessDataInput::field_data(), fetch),
     );
     builder.output(process);
+    builder.build()
+}
+
+fn build_mixed_binding_spec(input: &ChildInput) -> Result<WorkflowSpec, HorsiesError> {
+    let mut builder = WorkflowSpecBuilder::new("notify_pipeline");
+    builder.definition_key("examples.notify_pipeline.v1");
+    let fetch = builder.task(
+        fetch_data::node()?
+            .set_input(FetchDataInput {
+                source: input.source_url.clone(),
+            })?
+            .node_id("fetch"),
+    );
+    let process = builder.task(
+        process_data::node()?
+            .node_id("process")
+            .waits_for(fetch)
+            .arg_from(ProcessDataInput::field_data(), fetch),
+    );
+    let notify = builder.task(
+        notify_user::node()?
+            .node_id("notify")
+            .waits_for(process)
+            .arg_from(notify_user::params::data(), process)
+            .set(notify_user::params::urgent(), true)?,
+    );
+    builder.output(notify);
     builder.build()
 }
 
@@ -113,10 +156,11 @@ impl WorkflowDefinition for ETLPipeline {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let fetch = builder.task(
-            fetch_data::node_with(FetchDataInput {
-                source: "default".to_owned(),
-            })?
-            .node_id("fetch"),
+            fetch_data::node()?
+                .set_input(FetchDataInput {
+                    source: "default".to_owned(),
+                })?
+                .node_id("fetch"),
         );
         let process = builder.task(
             process_data::node()?
@@ -151,8 +195,11 @@ impl WorkflowDefinition for ChildPipeline {
     fn build_with(source_url: Self::Params) -> Result<WorkflowSpec, HorsiesError> {
         let mut builder = WorkflowSpecBuilder::new("child_pipeline");
         builder.definition_key("examples.child_pipeline.v1");
-        let fetch = builder
-            .task(fetch_data::node_with(FetchDataInput { source: source_url })?.node_id("fetch"));
+        let fetch = builder.task(
+            fetch_data::node()?
+                .set_input(FetchDataInput { source: source_url })?
+                .node_id("fetch"),
+        );
         let process = builder.task(
             process_data::node()?
                 .node_id("process")
@@ -261,12 +308,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fetch_data::register(&mut app)?;
     process_data::register(&mut app)?;
     save_result::register(&mut app)?;
+    notify_user::register(&mut app)?;
     build_child_workflow::register(&mut app)?;
     enqueue_add_numbers::register(&mut app)?;
     use_settings::register(&mut app)?;
 
     let _workflow = app.register_workflow_definition::<ETLPipeline>()?;
     let _child = app.workflow_template::<ChildPipeline>();
+    let _mixed = build_mixed_binding_spec(&ChildInput {
+        source_url: "https://example.com/data.json".to_owned(),
+    })?;
 
     let mut checked = app
         .check_workflow_builder("build_child_workflow_cases", |source_url: &String| {

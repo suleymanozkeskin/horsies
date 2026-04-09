@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::core::task::TaskResult;
+use crate::HorsiesError;
 
 /// Dependency join semantics for workflow tasks.
 ///
@@ -155,8 +156,7 @@ pub struct InputField<I, F> {
 }
 
 impl<I, F> InputField<I, F> {
-    /// Create a new typed field token.
-    pub const fn new(name: &'static str) -> Self {
+    pub(crate) const fn raw(name: &'static str) -> Self {
         Self {
             name,
             _phantom: PhantomData,
@@ -171,7 +171,7 @@ impl<I, F> InputField<I, F> {
 
 impl<I, F> Clone for InputField<I, F> {
     fn clone(&self) -> Self {
-        Self::new(self.name)
+        Self::raw(self.name)
     }
 }
 
@@ -286,7 +286,7 @@ impl<T, I> TaskNode<T, I> {
     /// Low-level constructor from a bare task name.
     ///
     /// Intended for internal spec-builder tests and `TaskFunction::node()`.
-    /// External callers should use `#[task]`-generated `node()` / `node_with()`.
+    /// External callers should use `#[task]`-generated `node()`.
     pub(crate) fn raw(task_name: impl Into<String>) -> Self {
         Self {
             task_name: task_name.into(),
@@ -331,6 +331,44 @@ impl<T, I> TaskNode<T, I> {
     /// Prefer [`TaskNode::kwargs_json`] in new code.
     pub fn kwargs(self, kwargs_json: impl Into<String>) -> Self {
         self.kwargs_json(kwargs_json)
+    }
+
+    /// Set the task's entire explicit input value.
+    ///
+    /// This is the whole-input path used for root tasks and other nodes where
+    /// the complete input value is available when the workflow spec is built.
+    pub fn set_input(mut self, value: I) -> Result<Self, HorsiesError>
+    where
+        I: Serialize,
+    {
+        let value = serde_json::to_value(&value).map_err(|e| {
+            HorsiesError::new(format!("failed to serialize workflow node input: {}", e))
+        })?;
+
+        match value {
+            serde_json::Value::Null => {
+                self.args_json = None;
+                self.kwargs_json = None;
+            }
+            serde_json::Value::Object(_) => {
+                self.args_json = None;
+                self.kwargs_json = Some(value.to_string());
+            }
+            other => {
+                self.args_json = Some(other.to_string());
+                self.kwargs_json = None;
+            }
+        }
+
+        Ok(self)
+    }
+
+    /// Set an explicit field-level input binding on this node.
+    pub fn set<F>(self, field: InputField<I, F>, value: F) -> Result<Self, HorsiesError>
+    where
+        F: Serialize,
+    {
+        apply_field_set(self, field, value)
     }
 
     /// Add a dependency on another node (by its `NodeRef`).
@@ -485,6 +523,61 @@ impl<T, I> TaskNode<T, I> {
             sub_definition_key: None,
         }
     }
+}
+
+fn merge_kwarg_value(
+    existing_kwargs_json: Option<String>,
+    field_name: &str,
+    value: serde_json::Value,
+) -> Result<Option<String>, HorsiesError> {
+    let mut map = match existing_kwargs_json {
+        None => serde_json::Map::new(),
+        Some(kwargs_json) => {
+            let parsed = serde_json::from_str::<serde_json::Value>(&kwargs_json).map_err(|e| {
+                HorsiesError::new(format!("kwargs_json is not valid JSON: {}", e))
+                    .with_help("ensure the node's kwargs payload is valid JSON")
+            })?;
+            match parsed {
+                serde_json::Value::Object(map) => map,
+                _ => {
+                    return Err(HorsiesError::new("kwargs_json must be a JSON object")
+                        .with_help("field-level .set(...) requires object-shaped node kwargs"));
+                }
+            }
+        }
+    };
+
+    map.insert(field_name.to_owned(), value);
+    Ok(Some(serde_json::Value::Object(map).to_string()))
+}
+
+fn apply_field_set<T, I, F>(
+    mut node: TaskNode<T, I>,
+    field: InputField<I, F>,
+    value: F,
+) -> Result<TaskNode<T, I>, HorsiesError>
+where
+    F: Serialize,
+{
+    if node.args_json.is_some() {
+        return Err(HorsiesError::new(
+            "cannot use field-level .set(...) on a node that already has args_json",
+        )
+        .with_help(
+            "use .set_input(...) for whole-input payloads, or keep explicit values in kwargs only",
+        ));
+    }
+
+    let value = serde_json::to_value(&value).map_err(|e| {
+        HorsiesError::new(format!(
+            "failed to serialize workflow field '{}' value: {}",
+            field.name(),
+            e
+        ))
+    })?;
+
+    node.kwargs_json = merge_kwarg_value(node.kwargs_json, field.name(), value)?;
+    Ok(node)
 }
 
 /// Resolve task options from a registry lookup into workflow nodes.

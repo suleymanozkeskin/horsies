@@ -460,29 +460,6 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
         node
     }
 
-    pub fn node_with(&self, args: A) -> Result<TaskNode<T, A>, HorsiesError> {
-        let (args_json, kwargs_json) =
-            serialize_args::<A>(&self.task_name, &args).map_err(|err| {
-                HorsiesError::new(format!(
-                    "failed to serialize workflow node args for '{}': {}",
-                    self.task_name, err.message
-                ))
-                .with_code(ErrorCode::TaskInvalidOptions)
-                .with_help(
-                    "pass a serde::Serialize payload that matches the task's argument contract",
-                )
-            })?;
-
-        let mut node = self.node();
-        if let Some(args_json) = args_json {
-            node = node.args_json(args_json);
-        }
-        if let Some(kwargs_json) = kwargs_json {
-            node = node.kwargs_json(kwargs_json);
-        }
-        Ok(node)
-    }
-
     #[allow(clippy::result_large_err)]
     fn check_suppression(&self) -> TaskSendResult<()> {
         if self.suppress_sends.load(Ordering::Relaxed) {
@@ -728,7 +705,7 @@ mod tests {
             .register()
             .unwrap();
 
-        let node = task.node_with(Args { a: 1, b: 2 }).unwrap();
+        let node = task.node().set_input(Args { a: 1, b: 2 }).unwrap();
 
         assert_eq!(node.task_name(), "add");
         let any = node.into_any_node(0);
@@ -751,7 +728,7 @@ mod tests {
             .register()
             .unwrap();
 
-        let node = task.node_with(21).unwrap();
+        let node = task.node().set_input(21).unwrap();
         let any = node.into_any_node(0);
 
         assert_eq!(any.args_json.as_deref(), Some("21"));

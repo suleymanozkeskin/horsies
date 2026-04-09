@@ -125,7 +125,8 @@ impl WorkflowDefinition for ChildPipeline {
         let mut builder = WorkflowSpecBuilder::new("child_pipeline");
         builder.definition_key("myapp.child_pipeline.v1");
         let fetch = builder.task(
-            fetch_data::node_with(FetchDataInput { source_url })?
+            fetch_data::node()?
+                .set_input(FetchDataInput { source_url })?
                 .node_id("fetch"),
         );
         let process = builder.task(
@@ -154,6 +155,41 @@ For dependency injection, derive `horsies::WorkflowInput` on the receiving
 input struct. That generates typed field tokens such as
 `ProcessDataInput::field_data()` and `SaveResultInput::field_result()`,
 which `arg_from(...)` uses instead of raw string keys.
+
+Use the binding style that matches where the value comes from:
+
+- `.set_input(value)?` when you already have the task's full input value
+- `.set(task::params::x(), value)?` when you are filling one explicit parameter
+- `.arg_from(task::params::y(), dep)` when the value should come from an upstream node
+
+Mixed explicit and injected inputs look like this:
+
+```rust
+#[task("notify_user")]
+async fn notify_user(
+    data: TaskResult<String>,
+    urgent: bool,
+) -> Result<(), TaskError> {
+    let _ = data;
+    let _ = urgent;
+    Ok(())
+}
+
+let process = builder.task(
+    process_data::node()?
+        .waits_for(fetch)
+        .arg_from(ProcessDataInput::field_data(), fetch)
+        .node_id("process"),
+);
+
+let notify = builder.task(
+    notify_user::node()?
+        .waits_for(process)
+        .arg_from(notify_user::params::data(), process)
+        .set(notify_user::params::urgent(), true)?
+        .node_id("notify"),
+);
+```
 
 ### Start workflows from anywhere
 
@@ -242,7 +278,7 @@ let mut registration = app.check_workflow_builder(
     move |source_url: &String| {
         let mut builder = WorkflowSpecBuilder::new("child_pipeline");
         builder.definition_key("myapp.child_pipeline.v1");
-        let fetch_ref = builder.task(fetch.node_with(FetchDataInput {
+        let fetch_ref = builder.task(fetch.node().set_input(FetchDataInput {
             source: source_url.clone(),
         })?);
         let process_ref = builder.task(

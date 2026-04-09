@@ -120,6 +120,15 @@ pub async fn wf_fail(input: FailInput) -> Result<serde_json::Value, TaskError> {
     ))
 }
 
+#[task("e2e_wf_fail_int")]
+pub async fn wf_fail_int(input: FailInput) -> Result<i64, TaskError> {
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    Err(TaskError::user(
+        &input.error_code,
+        format!("Failed: {}", input.error_code),
+    ))
+}
+
 // =============================================================================
 // Dynamic workflow start from inside a task (TaskRuntime injection)
 // =============================================================================
@@ -746,6 +755,7 @@ pub fn register(app: &mut Horsies) -> Result<(), Box<dyn std::error::Error>> {
     wf_slow_step::register(app)?;
     wf_final_result::register(app)?;
     wf_fail::register(app)?;
+    wf_fail_int::register(app)?;
     rt_ping::register(app)?;
     dynamic_rt_start::register(app)?;
     dynamic_rt_start_no_args::register(app)?;

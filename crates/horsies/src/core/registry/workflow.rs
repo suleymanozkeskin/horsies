@@ -414,8 +414,8 @@ impl WorkflowSpecRegistry {
                         ))
                         .with_code(ErrorCode::WorkflowMissingRequiredParams)
                         .with_help(
-                            "use task_name::node_with(input) to provide typed input, \
-                             or set args_json/kwargs_json/args_from on the node",
+                            "use task_name::node()?.set_input(input) for whole inputs, \
+                             or use typed .set(...) / .arg_from(...) on the node",
                         ));
                     }
                 }

@@ -1,4 +1,4 @@
-error: unknown attribute `timeout`; expected one of: queue, retry_policy, good_until, auto_retry_for
+error: unknown attribute `timeout`; expected one of: queue, retry_policy, good_until, auto_retry_for, workflow_ctx
  --> tests/compile_fail/unknown_attribute.rs:4:15
   |
 4 | #[task("bad", timeout = 5000)]

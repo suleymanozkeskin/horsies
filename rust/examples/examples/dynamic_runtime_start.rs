@@ -48,8 +48,11 @@ fn build_child_spec(input: &SourceInput) -> Result<WorkflowSpec, HorsiesError> {
     let mut builder = WorkflowSpecBuilder::new("example_dynamic_child");
     builder.definition_key("examples.dynamic_child.v1");
 
-    let produce = builder
-        .task(produce_value::node_with(ProduceInput { value: input.value })?.node_id("produce"));
+    let produce = builder.task(
+        produce_value::node()?
+            .set_input(ProduceInput { value: input.value })?
+            .node_id("produce"),
+    );
     let doubled = builder.task(
         double_value::node()?
             .node_id("double")

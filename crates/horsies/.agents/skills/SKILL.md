@@ -222,7 +222,7 @@ let mut registration = app.check_workflow_builder(
     move |source_url: &String| {
         let mut builder = WorkflowSpecBuilder::new("child_pipeline");
         builder.definition_key("myapp.child_pipeline.v1");
-        let fetch_ref = builder.task(fetch_data::node_with(FetchDataInput {
+        let fetch_ref = builder.task(fetch_data::node()?.set_input(FetchDataInput {
             source: source_url.clone(),
         })?);
         let process_ref = builder.task(

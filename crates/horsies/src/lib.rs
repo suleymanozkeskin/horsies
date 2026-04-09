@@ -97,6 +97,13 @@ pub use crate::workflow_engine::recovery::recover_stuck_workflows;
 use crate::lazy_broker::LazyBroker;
 use crate::runtime::SharedRuntimeCatalog;
 
+#[doc(hidden)]
+pub mod __private {
+    pub const fn input_field<I, F>(name: &'static str) -> crate::InputField<I, F> {
+        crate::InputField::raw(name)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Global workflow dispatch
 // ---------------------------------------------------------------------------

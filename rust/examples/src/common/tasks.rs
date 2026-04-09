@@ -346,7 +346,7 @@ pub mod workflows {
         // Pattern 1: Linear Chain (fetch -> transform)
         {
             let mut b = WorkflowSpecBuilder::new("linear_chain");
-            let fetch = b.task(tasks.fetch_data.node_with("source_a".to_owned())?);
+            let fetch = b.task(tasks.fetch_data.node().set_input("source_a".to_owned())?);
             let transform = b.task(
                 tasks
                     .transform_data
@@ -362,7 +362,7 @@ pub mod workflows {
         // Pattern 2: Fan-Out + Fan-In
         {
             let mut b = WorkflowSpecBuilder::new("fan_in_out");
-            let fetch = b.task(tasks.fetch_data.node_with("source_b".to_owned())?);
+            let fetch = b.task(tasks.fetch_data.node().set_input("source_b".to_owned())?);
             let ca = b.task(
                 tasks
                     .process_chunk
@@ -401,7 +401,12 @@ pub mod workflows {
         // Pattern 3: Error Recovery
         {
             let mut b = WorkflowSpecBuilder::new("error_recovery");
-            let fail = b.task(tasks.failing_fetch.node_with("will_fail".to_owned())?);
+            let fail = b.task(
+                tasks
+                    .failing_fetch
+                    .node()
+                    .set_input("will_fail".to_owned())?,
+            );
             let recover = b.task(
                 tasks
                     .recovery_task

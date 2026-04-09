@@ -148,8 +148,9 @@ pub trait WorkflowDefinition {
     /// Build a validated `WorkflowSpec` with runtime parameters.
     ///
     /// Override this for parameterized/dynamic workflows. Use generated
-    /// typed node helpers (`task_name::node_with(input)?`) to construct
-    /// nodes with compile-time input type enforcement.
+    /// typed node helpers (`task_name::node()?`) with `.set_input(...)`,
+    /// `.set(...)`, and `.arg_from(...)` to construct nodes with compile-time
+    /// input type enforcement.
     ///
     /// Default implementation ignores params and forwards to `build()`,
     /// which calls `define()`.

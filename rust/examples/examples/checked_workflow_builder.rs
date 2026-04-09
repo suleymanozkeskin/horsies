@@ -74,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.check_workflow_builder("build_child_workflow", move |source_url: &String| {
             let mut builder = WorkflowSpecBuilder::new("child_pipeline");
             builder.definition_key("examples.child_pipeline.v1");
-            let fetch_ref = builder.task(fetch.node_with(FetchInput {
+            let fetch_ref = builder.task(fetch.node().set_input(FetchInput {
                 source_url: source_url.clone(),
             })?);
             let process_ref = builder.task(
