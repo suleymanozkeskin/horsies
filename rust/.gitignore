@@ -29,5 +29,8 @@ horsies-showcase/
 *.profraw
 *.profdata
 
+# Temporary publish-script backup
+macros/Cargo.toml.bak
+
 # website(temporary)
 website/
