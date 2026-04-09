@@ -308,9 +308,35 @@ my_task::node()?
 
 When not set explicitly, `WorkflowSpecBuilder::build()` assigns `"{slugified_workflow_name}:{index}"`.
 
-### `NodeRef`
+### `TypedNodeRef<T>` and `NodeRef`
 
-Returned by `builder.task(node)`. Used for wiring dependencies and output selection.
+`builder.task(node)` returns `TypedNodeRef<T>`, preserving the upstream
+output type for methods like `arg_from(...)`.
+
+Most workflow APIs accept `Into<NodeRef>`, so typed refs usually work without
+manual conversion:
+
+```rust
+let fetch = builder.task(fetch_data::node()?);
+let process = builder.task(
+    process_data::node()?
+        .waits_for(fetch)
+        .arg_from(process_data::params::input_result(), fetch),
+);
+builder.output(process);
+```
+
+Use `NodeRef` only when you need a heterogeneous collection of refs with
+different output types:
+
+```rust
+let mut deps: Vec<NodeRef> = Vec::new();
+deps.push(fetch.into());
+deps.push(process.into());
+```
+
+That erased form is for mixed collections and low-level wiring only. Keep refs
+typed when possible.
 
 ## `SubWorkflowNode<T>`
 

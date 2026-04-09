@@ -212,6 +212,10 @@ async fn build_child_workflow(
 `TaskRuntime` is the primary path for starting dynamic workflows from inside a
 running task.
 
+`builder.task(...)` returns `TypedNodeRef<T>`. Keep refs typed when possible;
+use `.into()` only when you need a heterogeneous `Vec<NodeRef>` for mixed
+output types.
+
 ### Checked dynamic workflow builders
 
 Use `app.check_workflow_builder(...)` for representative-case validation of
