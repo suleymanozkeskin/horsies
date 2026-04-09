@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::core::error::{ErrorCode, HorsiesError, ValidationReport};
 use crate::core::registry::workflow::RegisteredWorkflowSpec;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
-use crate::core::workflow::node::{AnyNode, JoinType, NodeRef, TaskNode};
+use crate::core::workflow::node::{AnyNode, JoinType, NodeRef, TaskNode, TypedNodeRef};
 use crate::core::workflow::policy::SuccessPolicy;
 use crate::core::workflow::status::OnError;
 use crate::core::workflow::sub_workflow::SubWorkflowNode;
@@ -96,23 +96,23 @@ impl WorkflowSpecBuilder {
         }
     }
 
-    /// Add a typed task node. Returns a `NodeRef` for wiring dependencies.
-    pub fn task<T>(&mut self, node: TaskNode<T>) -> NodeRef {
+    /// Add a typed task node. Returns a typed node ref for wiring dependencies.
+    pub fn task<T, I>(&mut self, node: TaskNode<T, I>) -> TypedNodeRef<T> {
         let index = self.tasks.len();
         let any_node = node.into_any_node(index);
         self.tasks.push(any_node);
-        NodeRef { index }
+        TypedNodeRef::new(index)
     }
 
-    /// Add a sub-workflow node. Returns a `NodeRef` for wiring dependencies.
+    /// Add a sub-workflow node. Returns a typed node ref for wiring dependencies.
     ///
     /// The sub-workflow's spec must be registered in the `WorkflowSpecRegistry`
     /// at runtime for the engine to launch it.
-    pub fn sub_workflow(&mut self, node: SubWorkflowNode) -> NodeRef {
+    pub fn sub_workflow<P, T>(&mut self, node: SubWorkflowNode<P, T>) -> TypedNodeRef<T> {
         let index = self.tasks.len();
         let any_node = node.into_any_node(index);
         self.tasks.push(any_node);
-        NodeRef { index }
+        TypedNodeRef::new(index)
     }
 
     /// Set the stable definition key for persistence identity.
@@ -128,8 +128,11 @@ impl WorkflowSpecBuilder {
     }
 
     /// Set the output task (whose result becomes the workflow result).
-    pub fn output(&mut self, node_ref: NodeRef) -> &mut Self {
-        self.output_ref = Some(node_ref);
+    pub fn output<R>(&mut self, node_ref: R) -> &mut Self
+    where
+        R: Into<NodeRef>,
+    {
+        self.output_ref = Some(node_ref.into());
         self
     }
 
@@ -847,7 +850,7 @@ mod tests {
     fn args_from_valid() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
-        b.task(TaskNode::<()>::raw("b").args_from("data", a));
+        b.task(TaskNode::<()>::raw("b").raw_arg_from("data", a.into()));
         let spec = b.build().unwrap();
         assert_eq!(spec.tasks[1].args_from.get("data"), Some(&0));
     }
@@ -886,7 +889,7 @@ mod tests {
         b.task(
             TaskNode::<()>::raw("b")
                 .args(r#"[1]"#)
-                .args_from("input", a),
+                .raw_arg_from("input", a.into()),
         );
         let err = b.build().unwrap_err();
         assert_eq!(err.code, Some(ErrorCode::WorkflowArgsWithInjection));
@@ -921,7 +924,7 @@ mod tests {
         b.task(
             TaskNode::<()>::raw("b")
                 .kwargs(r#"{"data": 1}"#)
-                .args_from("data", a),
+                .raw_arg_from("data", a.into()),
         );
         let err = b.build().unwrap_err();
         assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidKwargKey));
@@ -1118,12 +1121,12 @@ mod tests {
         let fetch = b.task(node_with_id("fetch", "fetch"));
         let parse = b.task(
             TaskNode::<String>::raw("parse")
-                .args_from("raw", fetch)
+                .raw_arg_from("raw", fetch.into())
                 .node_id("parse"),
         );
         let persist = b.task(
             TaskNode::<()>::raw("persist")
-                .args_from("data", parse)
+                .raw_arg_from("data", parse.into())
                 .node_id("persist"),
         );
         b.on_error(OnError::Fail);

@@ -14,7 +14,10 @@ pub use context::{WorkflowContext, WORKFLOW_CTX_KWARG};
 pub use definition::{WorkflowDefConfig, WorkflowDefinition};
 pub use handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
 pub use meta::WorkflowMeta;
-pub use node::{resolve_node_task_options, AnyNode, JoinType, NodeKey, NodeRef, TaskNode};
+pub use node::{
+    resolve_node_task_options, AnyNode, InputField, JoinType, NodeKey, NodeRef, TaskNode,
+    TypedNodeRef,
+};
 pub use policy::{SuccessCase, SuccessPolicy};
 pub use spec::{WorkflowSpec, WorkflowSpecBuilder};
 pub use start_types::{

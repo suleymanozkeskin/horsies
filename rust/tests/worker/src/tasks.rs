@@ -3,7 +3,9 @@
 /// Mirrors Python's `tests/e2e/tasks/basic.py`, `retry.py`, `workflows.py`.
 use serde::{Deserialize, Serialize};
 
-use horsies::{async_task_fn, task, Horsies, TaskError, TaskRuntime, WorkflowSpecBuilder};
+use horsies::{
+    async_task_fn, task, Horsies, TaskError, TaskRuntime, WorkflowInput, WorkflowSpecBuilder,
+};
 
 // =============================================================================
 // Input types
@@ -147,7 +149,7 @@ async fn dynamic_rt_start(rt: TaskRuntime, input: DynamicStartInput) -> Result<S
         wf_double::node()
             .map_err(|e| TaskError::user("NODE_ERROR", e.to_string()))?
             .node_id("double")
-            .args_from("input_result", produce),
+            .arg_from(DoubleInput::field_input_result(), produce),
     );
     builder.output(doubled);
 
@@ -202,7 +204,7 @@ async fn dynamic_rt_start_no_args(rt: TaskRuntime) -> Result<String, TaskError> 
         wf_double::node()
             .map_err(|e| TaskError::user("NODE_ERROR", e.to_string()))?
             .node_id("double")
-            .args_from("input_result", produce),
+            .arg_from(DoubleInput::field_input_result(), produce),
     );
     builder.output(doubled);
 
@@ -430,17 +432,15 @@ pub async fn wf_produce_dict(_input: ()) -> Result<serde_json::Value, TaskError>
     }))
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, WorkflowInput)]
 pub struct ReadDictInput {
-    pub input_result: serde_json::Value,
+    pub input_result: horsies::TaskResult<serde_json::Value>,
 }
 
 #[task("e2e_wf_read_dict")]
 pub async fn wf_read_dict(input: ReadDictInput) -> Result<serde_json::Value, TaskError> {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let tr: horsies::TaskResult<serde_json::Value> = serde_json::from_value(input.input_result)
-        .map_err(|e| TaskError::user("DESER_ERROR", format!("{}", e)))?;
-    match tr {
+    match input.input_result {
         horsies::TaskResult::Ok(v) => {
             // Return the dict with an added field proving we read it.
             let mut obj = v.as_object().cloned().unwrap_or_default();
@@ -646,10 +646,9 @@ pub async fn wf_ctx_sum(input: CtxSumInput) -> Result<i64, TaskError> {
 }
 
 /// Task that receives both args_from and workflow_ctx.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, WorkflowInput)]
 pub struct MixedInput {
-    #[serde(default)]
-    pub input_result: Option<serde_json::Value>,
+    pub input_result: horsies::TaskResult<i64>,
     #[serde(default)]
     pub workflow_ctx: Option<horsies::WorkflowContext>,
 }
@@ -657,17 +656,13 @@ pub struct MixedInput {
 #[task("e2e_wf_mixed", workflow_ctx)]
 pub async fn wf_mixed(input: MixedInput) -> Result<serde_json::Value, TaskError> {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let has_args_from = input.input_result.is_some();
+    let has_args_from = true;
     let has_ctx = input.workflow_ctx.is_some();
 
-    let mut args_from_value: Option<i64> = None;
-    if let Some(ref v) = input.input_result {
-        if let Ok(horsies::TaskResult::Ok(val)) =
-            serde_json::from_value::<horsies::TaskResult<serde_json::Value>>(v.clone())
-        {
-            args_from_value = val.as_i64();
-        }
-    }
+    let args_from_value = match input.input_result {
+        horsies::TaskResult::Ok(val) => Some(val),
+        horsies::TaskResult::Err(_) => None,
+    };
 
     Ok(serde_json::json!({
         "has_args_from": has_args_from,
@@ -693,47 +688,37 @@ pub async fn wf_produce_int(input: ProduceIntInput) -> Result<i64, TaskError> {
 
 /// Receives a TaskResult via args_from and doubles the Ok value.
 /// The input comes as the serialized TaskResult JSON from the upstream task.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, WorkflowInput)]
 pub struct DoubleInput {
-    pub input_result: serde_json::Value,
+    pub input_result: horsies::TaskResult<i64>,
 }
 
 #[task("e2e_wf_double")]
 pub async fn wf_double(input: DoubleInput) -> Result<i64, TaskError> {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    // Parse the injected TaskResult.
-    let tr: horsies::TaskResult<serde_json::Value> = serde_json::from_value(input.input_result)
-        .map_err(|e| TaskError::user("DESER_ERROR", format!("{}", e)))?;
-    match tr {
-        horsies::TaskResult::Ok(v) => {
-            let n = v.as_i64().unwrap_or(0);
-            Ok(n * 2)
-        }
+    match input.input_result {
+        horsies::TaskResult::Ok(v) => Ok(v * 2),
         horsies::TaskResult::Err(e) => Err(e),
     }
 }
 
 /// Receives two TaskResults via args_from and sums their Ok values.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, WorkflowInput)]
 pub struct SumTwoInput {
-    pub first: serde_json::Value,
-    pub second: serde_json::Value,
+    pub first: horsies::TaskResult<i64>,
+    pub second: horsies::TaskResult<i64>,
 }
 
 #[task("e2e_wf_sum_two")]
 pub async fn wf_sum_two(input: SumTwoInput) -> Result<i64, TaskError> {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let first: horsies::TaskResult<serde_json::Value> = serde_json::from_value(input.first)
-        .map_err(|e| TaskError::user("DESER_ERROR", format!("{}", e)))?;
-    let second: horsies::TaskResult<serde_json::Value> = serde_json::from_value(input.second)
-        .map_err(|e| TaskError::user("DESER_ERROR", format!("{}", e)))?;
 
-    let a = match first {
-        horsies::TaskResult::Ok(v) => v.as_i64().unwrap_or(0),
+    let a = match input.first {
+        horsies::TaskResult::Ok(v) => v,
         horsies::TaskResult::Err(e) => return Err(e),
     };
-    let b = match second {
-        horsies::TaskResult::Ok(v) => v.as_i64().unwrap_or(0),
+    let b = match input.second {
+        horsies::TaskResult::Ok(v) => v,
         horsies::TaskResult::Err(e) => return Err(e),
     };
     Ok(a + b)

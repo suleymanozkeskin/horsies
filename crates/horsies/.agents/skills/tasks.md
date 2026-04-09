@@ -170,8 +170,8 @@ async fn retry_send(&self, err: &TaskSendError) -> TaskSendResult<TaskHandle<T>>
 async fn retry_schedule(&self, err: &TaskSendError) -> TaskSendResult<TaskHandle<T>>
 
 // Workflow integration
-fn node(&self) -> TaskNode<T>
-fn node_with(&self, args: A) -> Result<TaskNode<T>, HorsiesError>
+fn node(&self) -> TaskNode<T, A>
+fn node_with(&self, args: A) -> Result<TaskNode<T, A>, HorsiesError>
 
 // Accessors
 fn task_name(&self) -> &str
@@ -200,15 +200,15 @@ Same as `send()` but with `enqueued_at = now() + delay`. The scheduled time is f
 
 ### `node()` behavior
 
-Returns `TaskNode<T>` pre-configured with task name, queue, priority, good_until, and serialized task_options. Bridges registered tasks to workflow construction.
+Returns `TaskNode<T, A>` pre-configured with task name, queue, priority, good_until, and serialized task_options. Bridges registered tasks to workflow construction.
 
 `node_with(args)` additionally serializes `args` onto the node. Use it for root tasks or parameterized dynamic workflow nodes that need explicit input.
 
 The generated task module helpers are fallible wrappers around the registered handle:
 
 ```rust
-fn add_numbers::node() -> Result<TaskNode<i32>, HorsiesError>
-fn add_numbers::node_with(args: AddNumbersInput) -> Result<TaskNode<i32>, HorsiesError>
+fn add_numbers::node() -> Result<TaskNode<i32, AddNumbersInput>, HorsiesError>
+fn add_numbers::node_with(args: AddNumbersInput) -> Result<TaskNode<i32, AddNumbersInput>, HorsiesError>
 ```
 
 They fail if `add_numbers::register(&mut app)?` has not populated the generated module handle.

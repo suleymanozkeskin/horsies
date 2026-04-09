@@ -39,10 +39,10 @@ use crate::core::workflow::status::OnError;
 ///     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
 ///         let fetch = builder.task(fetch_listing::node()?.node_id("fetch"));
 ///         let parse = builder.task(
-///             parse_listing::node()?.args_from("raw", fetch).node_id("parse"),
+///             parse_listing::node()?.arg_from(ParseInput::field_raw(), fetch).node_id("parse"),
 ///         );
 ///         let persist = builder.task(
-///             persist_listing::node()?.args_from("data", parse).node_id("persist"),
+///             persist_listing::node()?.arg_from(PersistInput::field_data(), parse).node_id("persist"),
 ///         );
 ///         Ok(WorkflowDefConfig::new().output(persist))
 ///     }
@@ -186,8 +186,11 @@ impl WorkflowDefConfig {
     }
 
     /// Set the output node.
-    pub fn output(mut self, node_ref: NodeRef) -> Self {
-        self.output = Some(node_ref);
+    pub fn output<R>(mut self, node_ref: R) -> Self
+    where
+        R: Into<NodeRef>,
+    {
+        self.output = Some(node_ref.into());
         self
     }
 
@@ -230,12 +233,12 @@ mod tests {
             let fetch = builder.task(TaskNode::<String>::raw("fetch").node_id("fetch"));
             let process = builder.task(
                 TaskNode::<String>::raw("process")
-                    .args_from("raw", fetch)
+                    .raw_arg_from("raw", fetch.into())
                     .node_id("process"),
             );
             let persist = builder.task(
                 TaskNode::<()>::raw("persist")
-                    .args_from("data", process)
+                    .raw_arg_from("data", process.into())
                     .node_id("persist"),
             );
 

@@ -434,8 +434,8 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
             })
     }
 
-    pub fn node(&self) -> TaskNode<T> {
-        let mut node = TaskNode::<T>::raw(&self.task_name)
+    pub fn node(&self) -> TaskNode<T, A> {
+        let mut node = TaskNode::<T, A>::raw(&self.task_name)
             .queue(self.queue_name.clone())
             .priority(self.priority as i32);
 
@@ -460,7 +460,7 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
         node
     }
 
-    pub fn node_with(&self, args: A) -> Result<TaskNode<T>, HorsiesError> {
+    pub fn node_with(&self, args: A) -> Result<TaskNode<T, A>, HorsiesError> {
         let (args_json, kwargs_json) =
             serialize_args::<A>(&self.task_name, &args).map_err(|err| {
                 HorsiesError::new(format!(

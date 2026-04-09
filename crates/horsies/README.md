@@ -83,13 +83,13 @@ impl WorkflowDefinition for ETLPipeline {
         let process = builder.task(
             process_data::node()?
                 .waits_for(fetch)
-                .args_from("data", fetch)
+                .arg_from(ProcessDataInput::field_data(), fetch)
                 .node_id("process"),
         );
         let save = builder.task(
             save_result::node()?
                 .waits_for(process)
-                .args_from("result", process)
+                .arg_from(SaveResultInput::field_result(), process)
                 .node_id("save"),
         );
         Ok(WorkflowDefConfig::new().output(save))
@@ -131,7 +131,7 @@ impl WorkflowDefinition for ChildPipeline {
         let process = builder.task(
             process_data::node()?
                 .waits_for(fetch)
-                .args_from("data", fetch)
+                .arg_from(ProcessDataInput::field_data(), fetch)
                 .node_id("process"),
         );
         builder.output(process);
@@ -149,6 +149,11 @@ match child.start("https://example.com/data.json".to_owned()).await {
     }
 }
 ```
+
+For dependency injection, derive `horsies::WorkflowInput` on the receiving
+input struct. That generates typed field tokens such as
+`ProcessDataInput::field_data()` and `SaveResultInput::field_result()`,
+which `arg_from(...)` uses instead of raw string keys.
 
 ### Start workflows from anywhere
 
@@ -244,7 +249,7 @@ let mut registration = app.check_workflow_builder(
             process
                 .node()
                 .waits_for(fetch_ref)
-                .args_from("data", fetch_ref),
+                .arg_from(ProcessDataInput::field_data(), fetch_ref),
         );
         builder.output(process_ref);
         builder.build()

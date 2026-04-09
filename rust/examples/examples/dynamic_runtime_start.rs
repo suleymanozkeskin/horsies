@@ -5,7 +5,7 @@
 
 use horsies::{
     task, AppConfig, Horsies, HorsiesError, PostgresConfig, QueueMode, TaskError, TaskResult,
-    TaskRuntime, WorkflowSpec, WorkflowSpecBuilder,
+    TaskRuntime, WorkflowInput, WorkflowSpec, WorkflowSpecBuilder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +20,7 @@ async fn produce_value(input: ProduceInput) -> Result<serde_json::Value, TaskErr
 }
 
 /// Input for double_value via args_from — receives TaskResult wrapper.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, WorkflowInput)]
 struct DoubleInput {
     input_result: TaskResult<serde_json::Value>,
 }
@@ -53,7 +53,7 @@ fn build_child_spec(input: &SourceInput) -> Result<WorkflowSpec, HorsiesError> {
     let doubled = builder.task(
         double_value::node()?
             .node_id("double")
-            .args_from("input_result", produce),
+            .arg_from(DoubleInput::field_input_result(), produce),
     );
     builder.output(doubled);
     builder.build()

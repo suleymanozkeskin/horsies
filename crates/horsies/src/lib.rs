@@ -42,6 +42,7 @@ pub use workflow::{
 };
 
 // horsies-macros
+pub use horsies_macros::WorkflowInput;
 pub use horsies_macros::{blocking_task, task};
 
 // core re-exports
@@ -50,14 +51,14 @@ pub use crate::core::{
     mask_database_url, resolve_node_task_options, AnyNode, AppConfigError, BackoffStrategy,
     BuiltInTaskCode, ContractCode, CustomQueueConfig, CustomQueueConfigError, DailySchedule,
     ErrorCategory, ErrorCode, HandleErrorCode, HandleOperationError, HandleResult, HourlySchedule,
-    IntervalSchedule, JoinType, MonthlySchedule, NodeKey, NodeRef, OnError, OperationalErrorCode,
-    OutcomeCode, PostgresConfig, PostgresConfigError, QueueMode, RecoveryConfig,
-    RecoveryConfigError, RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec,
+    InputField, IntervalSchedule, JoinType, MonthlySchedule, NodeKey, NodeRef, OnError,
+    OperationalErrorCode, OutcomeCode, PostgresConfig, PostgresConfigError, QueueMode,
+    RecoveryConfig, RecoveryConfigError, RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec,
     ResilienceConfigError, ResolvedEnqueue, RetrievalCode, RetryPolicy, RetryPolicyError,
     ScheduleConfig, SchedulePattern, SpecBuilderFn, SubWorkflowError, SubWorkflowNode,
     SubWorkflowSummary, SuccessCase, SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError,
     TaskErrorCode, TaskInfo, TaskNode, TaskOptions, TaskRegistry, TaskResult, TaskSchedule,
-    TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus,
+    TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, TypedNodeRef,
     ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig, WorkflowContext,
     WorkflowDefConfig, WorkflowDefinition, WorkflowMeta, WorkflowSpec, WorkflowSpecBuilder,
     WorkflowSpecRegistry, WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult,

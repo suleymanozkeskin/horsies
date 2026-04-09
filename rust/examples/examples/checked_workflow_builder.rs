@@ -4,7 +4,8 @@
 //! `workflow_builder(...).cases(...).register()` story.
 
 use horsies::{
-    task, AppConfig, Horsies, PostgresConfig, QueueMode, TaskError, TaskResult, WorkflowSpecBuilder,
+    task, AppConfig, Horsies, PostgresConfig, QueueMode, TaskError, TaskResult, WorkflowInput,
+    WorkflowSpecBuilder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +20,7 @@ async fn fetch_data(_input: FetchInput) -> Result<String, TaskError> {
 }
 
 /// Input for process_data via args_from — receives TaskResult wrapper.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, WorkflowInput)]
 struct ProcessInput {
     data: TaskResult<String>,
 }
@@ -80,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 process
                     .node()
                     .waits_for(fetch_ref)
-                    .args_from("data", fetch_ref),
+                    .arg_from(ProcessInput::field_data(), fetch_ref),
             );
             builder.output(process_ref);
             builder.build()

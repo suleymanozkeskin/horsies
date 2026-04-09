@@ -6,7 +6,7 @@ use serde::de::DeserializeOwned;
 use crate::core::app as core_app;
 use crate::core::{
     AnyNode, HorsiesError, NodeRef, OnError, SubWorkflowNode, SuccessPolicy, TaskNode,
-    WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder, WorkflowStartError,
+    TypedNodeRef, WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder, WorkflowStartError,
     WorkflowStartErrorCode, WorkflowStartResult,
 };
 use crate::workflow_engine::bound_handle::WorkflowHandle;
@@ -69,11 +69,11 @@ impl<'a, T: DeserializeOwned + Clone> WorkflowRegistrationBuilder<'a, T> {
         }
     }
 
-    pub fn task<V>(&mut self, node: TaskNode<V>) -> NodeRef {
+    pub fn task<V, I>(&mut self, node: TaskNode<V, I>) -> TypedNodeRef<V> {
         self.builder.task(node)
     }
 
-    pub fn sub_workflow(&mut self, node: SubWorkflowNode) -> NodeRef {
+    pub fn sub_workflow<P, V>(&mut self, node: SubWorkflowNode<P, V>) -> TypedNodeRef<V> {
         self.builder.sub_workflow(node)
     }
 
@@ -87,7 +87,10 @@ impl<'a, T: DeserializeOwned + Clone> WorkflowRegistrationBuilder<'a, T> {
         self
     }
 
-    pub fn output(&mut self, node_ref: NodeRef) -> &mut Self {
+    pub fn output<R>(&mut self, node_ref: R) -> &mut Self
+    where
+        R: Into<NodeRef>,
+    {
         self.builder.output(node_ref);
         self
     }

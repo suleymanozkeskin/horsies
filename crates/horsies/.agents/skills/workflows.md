@@ -30,13 +30,13 @@ impl WorkflowDefinition for ETLPipeline {
         let process_ref = builder.task(
             process_data::node()?
                 .waits_for(fetch_ref)
-                .args_from("data", fetch_ref)
+                .arg_from(ProcessDataInput::field_data(), fetch_ref)
                 .node_id("process"),
         );
         let save_ref = builder.task(
             save_result::node()?
                 .waits_for(process_ref)
-                .args_from("result", process_ref)
+                .arg_from(SaveResultInput::field_result(), process_ref)
                 .node_id("save"),
         );
         Ok(WorkflowDefConfig::new().output(save_ref))
@@ -71,12 +71,12 @@ let fetch = wb.task(fetch_data::node()?);
 let process = wb.task(
     process_data::node()?
         .waits_for(fetch)
-        .args_from("data", fetch),
+        .arg_from(ProcessDataInput::field_data(), fetch),
 );
 let save = wb.task(
     save_result::node()?
         .waits_for(process)
-        .args_from("result", process),
+        .arg_from(SaveResultInput::field_result(), process),
 );
 wb.output(save);
 
@@ -103,12 +103,12 @@ let fetch_ref = builder.task(fetch_data::node()?);
 let process_ref = builder.task(
     process_data::node()?
         .waits_for(fetch_ref)
-        .args_from("data", fetch_ref),
+        .arg_from(ProcessDataInput::field_data(), fetch_ref),
 );
 let save_ref = builder.task(
     save_result::node()?
         .waits_for(process_ref)
-        .args_from("result", process_ref),
+        .arg_from(SaveResultInput::field_result(), process_ref),
 );
 
 builder.on_error(OnError::Fail);
@@ -144,7 +144,7 @@ impl WorkflowDefinition for ChildPipeline {
         let process = builder.task(
             process_data::node()?
                 .waits_for(fetch)
-                .args_from("data", fetch)
+                .arg_from(ProcessDataInput::field_data(), fetch)
                 .node_id("process"),
         );
         builder.output(process);
@@ -188,7 +188,7 @@ let mut registration = app.check_workflow_builder(
             process
                 .node()
                 .waits_for(fetch_ref)
-                .args_from("data", fetch_ref),
+                .arg_from(ProcessInput::field_data(), fetch_ref),
         );
         builder.output(process_ref);
         builder.build()
@@ -207,7 +207,7 @@ Use `app.check_workflow_builder0(...)` for zero-arg builders.
 
 ### Using `TaskFunction::node()`
 
-`TaskFunction::node()` returns a `TaskNode<T>` pre-configured with the task's name, queue, priority, good_until, and task_options:
+`TaskFunction::node()` returns a `TaskNode<T, A>` pre-configured with the task's name, queue, priority, good_until, and task_options:
 
 ```rust
 let fetch = fetch_data::register(&mut app)?;
@@ -216,8 +216,18 @@ let save = save_result::register(&mut app)?;
 
 let mut builder = WorkflowSpecBuilder::new("etl_pipeline");
 let fetch_ref = builder.task(fetch.node());
-let proc_ref = builder.task(process.node().waits_for(fetch_ref).args_from("data", fetch_ref));
-let save_ref = builder.task(save.node().waits_for(proc_ref).args_from("result", proc_ref));
+let proc_ref = builder.task(
+    process
+        .node()
+        .waits_for(fetch_ref)
+        .arg_from(ProcessDataInput::field_data(), fetch_ref),
+);
+let save_ref = builder.task(
+    save
+        .node()
+        .waits_for(proc_ref)
+        .arg_from(SaveResultInput::field_result(), proc_ref),
+);
 builder.output(save_ref);
 let spec = builder.build()?;
 ```
@@ -239,13 +249,13 @@ pub struct WorkflowSpec {
 
 `WorkflowSpec` is the definition-only workflow type. It is IO-free and implemented in the internal `horsies::core` module. The primary executable workflow objects are `WorkflowFunction<T>` and `WorkflowTemplate<P, T>`.
 
-## `TaskNode<T>`
+## `TaskNode<T, A>`
 
 Typed task node in a workflow DAG. Create nodes via the generated `#[task]` helpers:
 
 ```rust
 // From a registered #[task] module:
-my_task::node()?                  // TaskNode<T> with registered queue/priority/options
+my_task::node()?                  // TaskNode<T, A> with registered queue/priority/options
 my_task::node_with(typed_args)?   // same, with typed input pre-serialized
 
 // Chaining methods:
@@ -253,7 +263,7 @@ my_task::node()?
     .kwargs(json_string)          // serialized keyword arguments
     .waits_for(dep_ref)           // add dependency
     .waits_for_all(&[ref_a, ref_b])
-    .args_from("key", dep_ref)    // inject upstream result as kwarg
+    .arg_from(MyInput::field_key(), dep_ref) // inject upstream TaskResult into a typed field
     .queue("critical")            // override queue
     .priority(1)                  // override priority
     .good_until(deadline)         // task expiry
@@ -277,9 +287,9 @@ Returned by `builder.task(node)`. Used for wiring dependencies and output select
 Child workflow node. Resolved at execution time via `WorkflowDefinition` or registry lookup.
 
 ```rust
-SubWorkflowNode::<ChildOutput>::new("child_workflow_name")
+SubWorkflowNode::<(), ChildOutput>::typed("child_workflow_name")
     .waits_for(dep_ref)
-    .args_from("input", dep_ref)
+    .arg_from(ChildParams::field_input(), dep_ref)
 ```
 
 ## Starting a Workflow
@@ -677,9 +687,9 @@ Failed task → dependents SKIPPED (unless `allow_failed_deps`). Cascades transi
 | FAILED | SKIPPED | Runs (receives `TaskResult::Err`) |
 | SKIPPED | SKIPPED | Runs (receives `TaskResult::Err(UpstreamSkipped)`) |
 
-### `args_from` data flow
+### `arg_from` data flow
 
-Injects the full `TaskResult` (not raw value) as a kwarg. Receiving function parameter must accept serialized `TaskResult`.
+Injects the full `TaskResult` (not raw value) into a typed input field token. The receiving input struct should derive `horsies::WorkflowInput`, and the target field must be `TaskResult<T>` for the source node's `T`.
 
 ## Validation Errors
 

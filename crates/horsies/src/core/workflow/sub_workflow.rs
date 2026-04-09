@@ -1,14 +1,16 @@
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
 use chrono::{DateTime, Utc};
 
-use crate::core::workflow::node::{AnyNode, JoinType, NodeRef};
+use crate::core::task::TaskResult;
+use crate::core::workflow::node::{AnyNode, InputField, JoinType, NodeRef, TypedNodeRef};
 
 /// Builder for a sub-workflow node within a parent workflow.
 ///
 /// Creates an `AnyNode` with `is_subworkflow: true` and the spec name
 /// stored in `task_name` (also available via `sub_workflow_spec_name`).
-pub struct SubWorkflowNode {
+pub struct SubWorkflowNode<P = (), T = serde_json::Value> {
     spec_name: String,
     dependencies: Vec<usize>,
     args_from: HashMap<String, usize>,
@@ -20,11 +22,19 @@ pub struct SubWorkflowNode {
     min_success: Option<i32>,
     good_until: Option<DateTime<Utc>>,
     node_id: Option<String>,
+    _phantom: PhantomData<fn() -> (P, T)>,
 }
 
-impl SubWorkflowNode {
+impl SubWorkflowNode<(), serde_json::Value> {
     /// Create a new sub-workflow node for the given registered spec name.
     pub fn new(spec_name: impl Into<String>) -> Self {
+        Self::typed(spec_name)
+    }
+}
+
+impl<P, T> SubWorkflowNode<P, T> {
+    /// Create a typed sub-workflow node for the given registered spec name.
+    pub fn typed(spec_name: impl Into<String>) -> Self {
         Self {
             spec_name: spec_name.into(),
             dependencies: Vec::new(),
@@ -37,11 +47,16 @@ impl SubWorkflowNode {
             min_success: None,
             good_until: None,
             node_id: None,
+            _phantom: PhantomData,
         }
     }
 
     /// Add a dependency on another node.
-    pub fn waits_for(mut self, dep: NodeRef) -> Self {
+    pub fn waits_for<R>(mut self, dep: R) -> Self
+    where
+        R: Into<NodeRef>,
+    {
+        let dep = dep.into();
         if !self.dependencies.contains(&dep.index) {
             self.dependencies.push(dep.index);
         }
@@ -49,8 +64,13 @@ impl SubWorkflowNode {
     }
 
     /// Add multiple dependencies.
-    pub fn waits_for_all(mut self, deps: &[NodeRef]) -> Self {
+    pub fn waits_for_all<D, R>(mut self, deps: D) -> Self
+    where
+        D: IntoIterator<Item = R>,
+        R: Into<NodeRef>,
+    {
         for dep in deps {
+            let dep = dep.into();
             if !self.dependencies.contains(&dep.index) {
                 self.dependencies.push(dep.index);
             }
@@ -58,8 +78,22 @@ impl SubWorkflowNode {
         self
     }
 
-    /// Inject a dependency's result as a keyword argument for the child workflow.
-    pub fn args_from(mut self, kwarg_name: impl Into<String>, dep: NodeRef) -> Self {
+    /// Inject a dependency's `TaskResult<S>` into a typed child workflow param.
+    pub fn arg_from<S>(
+        mut self,
+        field: InputField<P, TaskResult<S>>,
+        dep: TypedNodeRef<S>,
+    ) -> Self {
+        self.args_from.insert(field.name().to_owned(), dep.index);
+        if !self.dependencies.contains(&dep.index) {
+            self.dependencies.push(dep.index);
+        }
+        self
+    }
+
+    /// Internal raw lowering hook for tests and spec machinery.
+    #[allow(dead_code)]
+    pub(crate) fn raw_arg_from(mut self, kwarg_name: impl Into<String>, dep: NodeRef) -> Self {
         self.args_from.insert(kwarg_name.into(), dep.index);
         if !self.dependencies.contains(&dep.index) {
             self.dependencies.push(dep.index);
@@ -151,7 +185,7 @@ impl SubWorkflowNode {
     }
 }
 
-impl std::fmt::Debug for SubWorkflowNode {
+impl<P, T> std::fmt::Debug for SubWorkflowNode<P, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SubWorkflowNode")
             .field("spec_name", &self.spec_name)

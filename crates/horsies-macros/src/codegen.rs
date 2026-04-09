@@ -176,7 +176,7 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
             }
 
             #[doc = #node_docs]
-            pub fn node() -> Result<horsies::TaskNode<#output_type>, horsies::HorsiesError> {
+            pub fn node() -> Result<horsies::TaskNode<#output_type, #args_type>, horsies::HorsiesError> {
                 __HANDLE
                     .get()
                     .ok_or_else(|| horsies::HorsiesError::new(
@@ -188,7 +188,7 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
             #[doc = #node_with_docs]
             pub fn node_with(
                 args: #args_type,
-            ) -> Result<horsies::TaskNode<#output_type>, horsies::HorsiesError> {
+            ) -> Result<horsies::TaskNode<#output_type, #args_type>, horsies::HorsiesError> {
                 __HANDLE
                     .get()
                     .ok_or_else(|| horsies::HorsiesError::new(

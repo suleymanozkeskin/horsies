@@ -8,7 +8,8 @@ use horsies::{
 use super::models::*;
 use super::tasks::{
     calculate_shipping_cost, check_address, check_inventory, create_shipment, reserve_inventory,
-    send_notification, validate_order,
+    send_notification, validate_order, NotifyArgsFrom, OrderArgsFrom, ReserveInput,
+    ShipmentArgsFrom,
 };
 
 /// Reusable order-processing workflow definition.
@@ -61,19 +62,19 @@ impl WorkflowDefinition for OrderProcessingWorkflow {
             check_inventory::node()?
                 .node_id("inventory")
                 .waits_for(validate)
-                .args_from("order", validate),
+                .arg_from(OrderArgsFrom::field_order(), validate),
         );
         let cost = builder.task(
             calculate_shipping_cost::node()?
                 .node_id("shipping_cost")
                 .waits_for(validate)
-                .args_from("order", validate),
+                .arg_from(OrderArgsFrom::field_order(), validate),
         );
         let address = builder.task(
             check_address::node()?
                 .node_id("address")
                 .waits_for(validate)
-                .args_from("order", validate),
+                .arg_from(OrderArgsFrom::field_order(), validate),
         );
 
         // Fan-in: reserve waits for all three parallel checks
@@ -83,9 +84,9 @@ impl WorkflowDefinition for OrderProcessingWorkflow {
                 .waits_for(inventory)
                 .waits_for(cost)
                 .waits_for(address)
-                .args_from("inventory", inventory)
-                .args_from("cost", cost)
-                .args_from("address", address),
+                .arg_from(ReserveInput::field_inventory(), inventory)
+                .arg_from(ReserveInput::field_cost(), cost)
+                .arg_from(ReserveInput::field_address(), address),
         );
 
         // Sequential: shipment then notification
@@ -93,13 +94,13 @@ impl WorkflowDefinition for OrderProcessingWorkflow {
             create_shipment::node()?
                 .node_id("shipment")
                 .waits_for(reserve)
-                .args_from("reservation", reserve),
+                .arg_from(ShipmentArgsFrom::field_reservation(), reserve),
         );
         let notify = builder.task(
             send_notification::node()?
                 .node_id("notify")
                 .waits_for(shipment)
-                .args_from("shipment", shipment),
+                .arg_from(NotifyArgsFrom::field_shipment(), shipment),
         );
 
         builder.output(notify);

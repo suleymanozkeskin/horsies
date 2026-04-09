@@ -26,7 +26,8 @@ use horsies_test_support::{
 };
 use horsies_test_worker::tasks::{
     wf_ctx_reader, wf_ctx_sum, wf_double, wf_fail, wf_mixed, wf_produce_dict, wf_produce_int,
-    wf_read_dict, wf_slow_step, wf_step, wf_sum_two,
+    wf_read_dict, wf_slow_step, wf_step, wf_sum_two, DoubleInput, MixedInput, ReadDictInput,
+    SumTwoInput,
 };
 
 // ---------------------------------------------------------------------------
@@ -103,7 +104,7 @@ async fn test_args_from_single_dependency() {
         wf_double::node()
             .unwrap()
             .node_id("b")
-            .args_from("input_result", a),
+            .arg_from(DoubleInput::field_input_result(), a),
     );
     let spec = b.build().unwrap();
 
@@ -151,8 +152,8 @@ async fn test_args_from_multiple_dependencies() {
         wf_sum_two::node()
             .unwrap()
             .node_id("c")
-            .args_from("first", a)
-            .args_from("second", bnode),
+            .arg_from(SumTwoInput::field_first(), a)
+            .arg_from(SumTwoInput::field_second(), bnode),
     );
     let spec = b.build().unwrap();
 
@@ -195,7 +196,7 @@ async fn test_failed_propagation_via_args_from() {
         wf_double::node()
             .unwrap()
             .node_id("b")
-            .args_from("input_result", a)
+            .arg_from(DoubleInput::field_input_result(), a)
             .allow_failed_deps(true),
     );
     let spec = b.build().unwrap();
@@ -279,13 +280,13 @@ async fn test_args_from_transitive_chain() {
         wf_double::node()
             .unwrap()
             .node_id("b")
-            .args_from("input_result", a),
+            .arg_from(DoubleInput::field_input_result(), a),
     );
     b.task(
         wf_double::node()
             .unwrap()
             .node_id("c")
-            .args_from("input_result", bnode),
+            .arg_from(DoubleInput::field_input_result(), bnode),
     );
     let spec = b.build().unwrap();
 
@@ -328,7 +329,7 @@ async fn test_args_from_failed_dep_skips_and_fails() {
         wf_double::node()
             .unwrap()
             .node_id("b")
-            .args_from("input_result", a),
+            .arg_from(DoubleInput::field_input_result(), a),
     );
     let spec = b.build().unwrap();
 
@@ -374,8 +375,8 @@ async fn test_dual_injection_same_node() {
         wf_sum_two::node()
             .unwrap()
             .node_id("c")
-            .args_from("first", a)
-            .args_from("second", bnode),
+            .arg_from(SumTwoInput::field_first(), a)
+            .arg_from(SumTwoInput::field_second(), bnode),
     );
     let spec = b.build().unwrap();
 
@@ -524,7 +525,7 @@ async fn test_mixed_args_from_and_ctx() {
         wf_mixed::node()
             .unwrap()
             .node_id("b")
-            .args_from("input_result", a)
+            .arg_from(MixedInput::field_input_result(), a)
             .workflow_ctx_from(vec!["a".to_owned()]),
     );
     let spec = b.build().unwrap();
@@ -572,7 +573,7 @@ async fn test_args_from_dict_serialization() {
         wf_read_dict::node()
             .unwrap()
             .node_id("b")
-            .args_from("input_result", a),
+            .arg_from(ReadDictInput::field_input_result(), a),
     );
     let spec = b.build().unwrap();
 

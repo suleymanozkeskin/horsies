@@ -124,13 +124,13 @@ impl WorkflowDefinition for ETLPipeline {
         let process = builder.task(
             process_data::node()?
                 .waits_for(fetch)
-                .args_from("data", fetch)
+                .arg_from(ProcessDataInput::field_data(), fetch)
                 .node_id("process"),
         );
         let save = builder.task(
             save_result::node()?
                 .waits_for(process)
-                .args_from("result", process)
+                .arg_from(SaveResultInput::field_result(), process)
                 .node_id("save"),
         );
         Ok(WorkflowDefConfig::new().output(save))
@@ -228,7 +228,7 @@ let mut registration = app.check_workflow_builder(
         let process_ref = builder.task(
             process_data::node()?
                 .waits_for(fetch_ref)
-                .args_from("data", fetch_ref),
+                .arg_from(ProcessInput::field_data(), fetch_ref),
         );
         builder.output(process_ref);
         builder.build()

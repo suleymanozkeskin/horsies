@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use horsies::{
     task, AppConfig, Horsies, HorsiesError, PostgresConfig, QueueMode, TaskError, TaskResult,
-    TaskRuntime, WorkflowDefConfig, WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder,
+    TaskRuntime, WorkflowDefConfig, WorkflowDefinition, WorkflowInput, WorkflowSpec,
+    WorkflowSpecBuilder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -33,7 +34,7 @@ async fn fetch_data(_input: FetchDataInput) -> Result<String, TaskError> {
 }
 
 /// Input for process_data via args_from — receives TaskResult wrapper.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, WorkflowInput)]
 struct ProcessDataInput {
     data: TaskResult<String>,
 }
@@ -53,7 +54,7 @@ async fn process_data(input: ProcessDataInput) -> Result<String, TaskError> {
 }
 
 /// Input for save_result via args_from — receives TaskResult wrapper.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, WorkflowInput)]
 struct SaveResultInput {
     result: TaskResult<String>,
 }
@@ -90,7 +91,7 @@ fn build_child_spec(input: &ChildInput) -> Result<WorkflowSpec, HorsiesError> {
         process_data::node()?
             .node_id("process")
             .waits_for(fetch)
-            .args_from("data", fetch),
+            .arg_from(ProcessDataInput::field_data(), fetch),
     );
     builder.output(process);
     builder.build()
@@ -121,13 +122,13 @@ impl WorkflowDefinition for ETLPipeline {
             process_data::node()?
                 .node_id("process")
                 .waits_for(fetch)
-                .args_from("data", fetch),
+                .arg_from(ProcessDataInput::field_data(), fetch),
         );
         let save = builder.task(
             save_result::node()?
                 .node_id("save")
                 .waits_for(process)
-                .args_from("result", process),
+                .arg_from(SaveResultInput::field_result(), process),
         );
         Ok(WorkflowDefConfig::new().output(save))
     }
@@ -156,7 +157,7 @@ impl WorkflowDefinition for ChildPipeline {
             process_data::node()?
                 .node_id("process")
                 .waits_for(fetch)
-                .args_from("data", fetch),
+                .arg_from(ProcessDataInput::field_data(), fetch),
         );
         builder.output(process);
         builder.build()

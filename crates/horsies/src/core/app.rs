@@ -1282,23 +1282,23 @@ pub struct WorkflowRegistrationBuilder<'a> {
 }
 
 impl<'a> WorkflowRegistrationBuilder<'a> {
-    /// Add a typed task node. Returns a `NodeRef` for wiring dependencies.
+    /// Add a typed task node. Returns a typed node ref for wiring dependencies.
     ///
     /// Delegates to [`WorkflowSpecBuilder::task()`].
-    pub fn task<T>(
+    pub fn task<T, I>(
         &mut self,
-        node: crate::core::workflow::node::TaskNode<T>,
-    ) -> crate::core::workflow::node::NodeRef {
+        node: crate::core::workflow::node::TaskNode<T, I>,
+    ) -> crate::core::workflow::node::TypedNodeRef<T> {
         self.builder.task(node)
     }
 
-    /// Add a sub-workflow node. Returns a `NodeRef` for wiring dependencies.
+    /// Add a sub-workflow node. Returns a typed node ref for wiring dependencies.
     ///
     /// Delegates to [`WorkflowSpecBuilder::sub_workflow()`].
-    pub fn sub_workflow(
+    pub fn sub_workflow<P, T>(
         &mut self,
-        node: crate::core::workflow::sub_workflow::SubWorkflowNode,
-    ) -> crate::core::workflow::node::NodeRef {
+        node: crate::core::workflow::sub_workflow::SubWorkflowNode<P, T>,
+    ) -> crate::core::workflow::node::TypedNodeRef<T> {
         self.builder.sub_workflow(node)
     }
 
@@ -2562,7 +2562,7 @@ mod tests {
                 .node_id("consumer")
                 .queue("default")
                 .waits_for(producer)
-                .args_from("data", producer),
+                .raw_arg_from("data", producer.into()),
         );
         let spec = builder.build().unwrap();
         app.register_workflow_spec(spec).unwrap();

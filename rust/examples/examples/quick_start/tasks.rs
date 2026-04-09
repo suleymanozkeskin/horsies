@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use chrono::Utc;
 use uuid::Uuid;
 
-use horsies::{Horsies, TaskError, TaskFunction, TaskResult};
+use horsies::{Horsies, TaskError, TaskFunction, TaskResult, WorkflowInput};
 
 use super::models::*;
 
@@ -14,13 +14,13 @@ use super::models::*;
 // ---------------------------------------------------------------------------
 
 /// Input for tasks that receive the validated order via args_from.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, WorkflowInput)]
 pub struct OrderArgsFrom {
     pub order: TaskResult<ValidatedOrder>,
 }
 
 /// Aggregated input for reserve_inventory (fan-in from three parallel checks).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, WorkflowInput)]
 pub struct ReserveInput {
     pub inventory: TaskResult<InventoryStatus>,
     pub cost: TaskResult<ShippingCost>,
@@ -28,13 +28,13 @@ pub struct ReserveInput {
 }
 
 /// Input for create_shipment via args_from.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, WorkflowInput)]
 pub struct ShipmentArgsFrom {
     pub reservation: TaskResult<Reservation>,
 }
 
 /// Input for send_notification via args_from.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, WorkflowInput)]
 pub struct NotifyArgsFrom {
     pub shipment: TaskResult<Shipment>,
 }

@@ -1,8 +1,9 @@
 use proc_macro::TokenStream;
-use syn::{parse_macro_input, ItemFn};
+use syn::{parse_macro_input, DeriveInput, ItemFn};
 
 mod codegen;
 mod parse;
+mod workflow_input;
 
 /// Attribute macro for defining an async horsies task.
 ///
@@ -80,6 +81,27 @@ pub fn blocking_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
 
     match codegen::generate_task(attrs, func, /* blocking */ true) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// Derive typed workflow field tokens for a named-field input struct.
+///
+/// Generates one associated function per field:
+///
+/// ```ignore
+/// #[derive(Serialize, Deserialize, horsies::WorkflowInput)]
+/// struct ProcessInput {
+///     data: TaskResult<String>,
+/// }
+///
+/// process_data::node()?.arg_from(ProcessInput::field_data(), fetch);
+/// ```
+#[proc_macro_derive(WorkflowInput)]
+pub fn derive_workflow_input(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as DeriveInput);
+    match workflow_input::derive_workflow_input(input) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }

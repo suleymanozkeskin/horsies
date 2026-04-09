@@ -194,7 +194,8 @@ pub mod custom_queues {
 // ---------------------------------------------------------------------------
 pub mod workflows {
     use horsies::{
-        async_task_fn, Horsies, OnError, TaskError, TaskFunction, TaskResult, WorkflowSpecBuilder,
+        async_task_fn, Horsies, OnError, TaskError, TaskFunction, TaskResult, WorkflowInput,
+        WorkflowSpecBuilder,
     };
     use serde::{Deserialize, Serialize};
 
@@ -204,7 +205,7 @@ pub mod workflows {
         pub items: Vec<String>,
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize, WorkflowInput)]
     pub struct TransformArgs {
         pub input_result: TaskResult<FetchResult>,
     }
@@ -215,12 +216,12 @@ pub mod workflows {
         pub data: Vec<String>,
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize, WorkflowInput)]
     pub struct ChunkArgs {
         pub input_result: TaskResult<FetchResult>,
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize, WorkflowInput)]
     pub struct AggregateArgs {
         pub chunk_a: TaskResult<i32>,
         pub chunk_b: TaskResult<i32>,
@@ -232,7 +233,7 @@ pub mod workflows {
         pub total: i32,
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize, WorkflowInput)]
     pub struct RecoveryArgs {
         pub input_result: TaskResult<FetchResult>,
     }
@@ -351,7 +352,7 @@ pub mod workflows {
                     .transform_data
                     .node()
                     .waits_for(fetch)
-                    .args_from("input_result", fetch),
+                    .arg_from(TransformArgs::field_input_result(), fetch),
             );
             b.on_error(OnError::Fail);
             b.output(transform);
@@ -367,30 +368,30 @@ pub mod workflows {
                     .process_chunk
                     .node()
                     .waits_for(fetch)
-                    .args_from("input_result", fetch),
+                    .arg_from(ChunkArgs::field_input_result(), fetch),
             );
             let cb = b.task(
                 tasks
                     .process_chunk
                     .node()
                     .waits_for(fetch)
-                    .args_from("input_result", fetch),
+                    .arg_from(ChunkArgs::field_input_result(), fetch),
             );
             let cc = b.task(
                 tasks
                     .process_chunk
                     .node()
                     .waits_for(fetch)
-                    .args_from("input_result", fetch),
+                    .arg_from(ChunkArgs::field_input_result(), fetch),
             );
             let agg = b.task(
                 tasks
                     .aggregate
                     .node()
                     .waits_for_all(&[ca, cb, cc])
-                    .args_from("chunk_a", ca)
-                    .args_from("chunk_b", cb)
-                    .args_from("chunk_c", cc),
+                    .arg_from(AggregateArgs::field_chunk_a(), ca)
+                    .arg_from(AggregateArgs::field_chunk_b(), cb)
+                    .arg_from(AggregateArgs::field_chunk_c(), cc),
             );
             b.on_error(OnError::Fail);
             b.output(agg);
@@ -406,7 +407,7 @@ pub mod workflows {
                     .recovery_task
                     .node()
                     .waits_for(fail)
-                    .args_from("input_result", fail)
+                    .arg_from(RecoveryArgs::field_input_result(), fail)
                     .allow_failed_deps(true),
             );
             b.on_error(OnError::Fail);
