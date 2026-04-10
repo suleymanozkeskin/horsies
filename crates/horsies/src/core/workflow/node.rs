@@ -344,28 +344,16 @@ impl<T, I> TaskNode<T, I> {
     ///
     /// This is the whole-input path used for root tasks and other nodes where
     /// the complete input value is available when the workflow spec is built.
+    ///
+    /// This replaces any prior explicit `.set(...)`, `.args_json(...)`, or
+    /// `.kwargs_json(...)` bindings on the node.
     pub fn set_input(mut self, value: I) -> Result<Self, HorsiesError>
     where
         I: Serialize,
     {
-        let value = serde_json::to_value(&value).map_err(|e| {
-            HorsiesError::new(format!("failed to serialize workflow node input: {}", e))
-        })?;
-
-        match value {
-            serde_json::Value::Null => {
-                self.args_json = None;
-                self.kwargs_json = None;
-            }
-            serde_json::Value::Object(_) => {
-                self.args_json = None;
-                self.kwargs_json = Some(value.to_string());
-            }
-            other => {
-                self.args_json = Some(other.to_string());
-                self.kwargs_json = None;
-            }
-        }
+        let (args_json, kwargs_json) = serialize_explicit_input(&value)?;
+        self.args_json = args_json;
+        self.kwargs_json = kwargs_json;
 
         Ok(self)
     }
@@ -560,7 +548,21 @@ impl<T, I> TaskNode<T, I> {
     }
 }
 
-fn merge_kwarg_value(
+pub(crate) fn serialize_explicit_input<V: Serialize>(
+    value: &V,
+) -> Result<(Option<String>, Option<String>), HorsiesError> {
+    let value = serde_json::to_value(value).map_err(|e| {
+        HorsiesError::new(format!("failed to serialize workflow node input: {}", e))
+    })?;
+
+    Ok(match value {
+        serde_json::Value::Null => (None, None),
+        serde_json::Value::Object(_) => (None, Some(value.to_string())),
+        other => (Some(other.to_string()), None),
+    })
+}
+
+pub(crate) fn merge_kwarg_value(
     existing_kwargs_json: Option<String>,
     field_name: &str,
     value: serde_json::Value,

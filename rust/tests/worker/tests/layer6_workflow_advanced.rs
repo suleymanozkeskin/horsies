@@ -16,7 +16,8 @@ use sqlx::PgPool;
 
 use horsies::{
     cancel_workflow, pause_workflow, resolve_node_task_options, resume_workflow, Horsies, OnError,
-    PostgresBroker, SuccessCase, SuccessPolicy, WorkflowHandle, WorkflowSpecBuilder,
+    PostgresBroker, SubWorkflowNode, SuccessCase, SuccessPolicy, TaskResult, WorkflowHandle,
+    WorkflowSpecBuilder, Worker, WorkerConfig,
     WorkflowSpecRegistry,
 };
 use horsies_test_support::{
@@ -29,7 +30,8 @@ use horsies_test_support::{
     fixtures,
 };
 use horsies_test_worker::tasks::{
-    wf_ctx_reader, wf_fail, wf_retry_then_ok, wf_retry_via_registration, wf_slow_step, wf_step,
+    ChildLabelInput, ProduceIntInput, wf_ctx_reader, wf_fail, wf_produce_int, wf_retry_then_ok,
+    wf_retry_via_registration, wf_slow_step, wf_step,
 };
 
 // ---------------------------------------------------------------------------
@@ -61,8 +63,16 @@ fn registry() -> WorkflowSpecRegistry {
 }
 
 async fn start_wf(pool: &PgPool, spec: &horsies::WorkflowSpec) -> String {
+    start_wf_with_config(pool, spec, fixtures::default_app_config()).await
+}
+
+async fn start_wf_with_config(
+    pool: &PgPool,
+    spec: &horsies::WorkflowSpec,
+    config: horsies::AppConfig,
+) -> String {
     let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
-    let mut app = Horsies::with_broker(fixtures::default_app_config(), broker).unwrap();
+    let mut app = Horsies::with_broker(config, broker).unwrap();
     let handle: WorkflowHandle<serde_json::Value> = app
         .start(spec.clone())
         .await
@@ -91,6 +101,21 @@ async fn wait_for_wf_status(pool: &PgPool, wf_id: &str, target: &str, timeout: D
         target,
         timeout.as_secs()
     );
+}
+
+async fn start_registered_wf<T>(
+    pool: &PgPool,
+    spec: &horsies::WorkflowSpec,
+) -> WorkflowHandle<T>
+where
+    T: serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+{
+    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let mut app = Horsies::with_broker(fixtures::default_app_config(), broker).unwrap();
+    horsies_test_worker::tasks::register(&mut app).unwrap();
+    app.start(spec.clone())
+        .await
+        .unwrap_or_else(|e| panic!("app.start failed: {}", e))
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +239,59 @@ async fn test_quorum_impossible_skips() {
         "COMPLETED"
     );
     assert_eq!(get_workflow_task_status(&pool, &wf_id, 3).await, "SKIPPED");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_subworkflow_mixed_explicit_and_args_from() {
+    let pool = pool().await;
+    db::clean_tables(&pool).await;
+    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let mut worker_app = Horsies::with_broker(fixtures::default_app_config(), broker).unwrap();
+    horsies_test_worker::tasks::register(&mut worker_app).unwrap();
+    let (app_config, registry, wf_registry, broker) = worker_app.into_parts().await.unwrap();
+    let worker = Worker::new(
+        broker,
+        Arc::new(registry),
+        Arc::new(wf_registry),
+        app_config,
+        WorkerConfig {
+            concurrency: 4,
+            ..WorkerConfig::default()
+        },
+    )
+    .unwrap();
+    let cancel = worker.cancel_token();
+    let worker_task = tokio::spawn(async move { worker.run().await });
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let mut b = WorkflowSpecBuilder::new("e2e_subworkflow_mixed_input");
+    let produce = b.task(
+        wf_produce_int::node()
+            .unwrap()
+            .node_id("produce")
+            .set_input(ProduceIntInput { value: 21 })
+            .unwrap(),
+    );
+    let child = b.sub_workflow(
+        SubWorkflowNode::<ChildLabelInput, String>::typed("e2e_child_label_pipeline")
+            .node_id("child")
+            .queue("default")
+            .set(ChildLabelInput::field_label(), "count".to_owned())
+            .unwrap()
+            .arg_from(ChildLabelInput::field_input_result(), produce),
+    );
+    b.output(child);
+    let spec = b.build().unwrap();
+
+    let handle: WorkflowHandle<String> = start_registered_wf(&pool, &spec).await;
+    let result = handle.get(Some(Duration::from_secs(15))).await;
+    cancel.cancel();
+    let _ = worker_task.await;
+    match result {
+        TaskResult::Ok(value) => assert_eq!(value, "count=21"),
+        TaskResult::Err(err) => panic!("workflow failed: {}", err),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1295,7 +1373,15 @@ async fn test_workflow_recovers_after_worker_crash() {
         Duration::from_secs(20),
     );
 
-    let wf_id = start_wf(&pool, &spec).await;
+    // The spec contains .queue("recovery") nodes, so the in-process Horsies
+    // that starts the workflow must use Custom queue mode (matching the binary).
+    let mut app_config = fixtures::default_app_config();
+    app_config.queue_mode = horsies::QueueMode::Custom;
+    app_config.custom_queues = Some(vec![
+        horsies::CustomQueueConfig { name: "default".to_owned(), priority: 1, max_concurrency: 5 },
+        horsies::CustomQueueConfig { name: "recovery".to_owned(), priority: 1, max_concurrency: 1 },
+    ]);
+    let wf_id = start_wf_with_config(&pool, &spec, app_config).await;
 
     // Wait until A and B are COMPLETED.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);

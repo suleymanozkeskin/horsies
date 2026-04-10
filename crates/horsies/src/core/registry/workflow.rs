@@ -24,6 +24,11 @@ pub type SpecBuilderFn = Arc<
 #[derive(Clone)]
 pub struct RegisteredWorkflowSpec {
     /// The validated, immutable workflow specification.
+    ///
+    /// When `spec_builder` is present, this spec still acts as the
+    /// registration-time placeholder used for cycle checks, queue/default
+    /// resolution, and other upfront validation. Keep it structurally aligned
+    /// with what the runtime builder produces.
     pub spec: WorkflowSpec,
 
     /// Optional callback for dynamically building the child spec at runtime.
@@ -360,6 +365,32 @@ impl WorkflowSpecRegistry {
 
         for node in &spec.tasks {
             if node.is_subworkflow {
+                let spec_name = node
+                    .task_name
+                    .strip_prefix("__sub_workflow:")
+                    .unwrap_or(&node.task_name);
+                let has_input = node.args_json.is_some()
+                    || node.kwargs_json.is_some()
+                    || !node.args_from.is_empty();
+
+                if has_input {
+                    if let Some(registered) = self.get(spec_name) {
+                        if registered.spec_builder.is_none() {
+                            return Err(HorsiesError::new(format!(
+                                "workflow '{}' node '{}' supplies params to child workflow '{}' \
+                                 but that child has no runtime spec_builder",
+                                spec.name,
+                                node.node_id.as_deref().unwrap_or("?"),
+                                spec_name,
+                            ))
+                            .with_code(ErrorCode::WorkflowMissingRequiredParams)
+                            .with_help(
+                                "register the child as a parameterized workflow with a spec_builder, \
+                                 or remove .set_input(...) / .set(...) / .arg_from(...) from the sub-workflow node",
+                            ));
+                        }
+                    }
+                }
                 continue;
             }
 
@@ -446,6 +477,8 @@ mod tests {
     use super::*;
     use crate::core::workflow::node::TaskNode;
     use crate::core::workflow::spec::WorkflowSpecBuilder;
+    use crate::core::workflow::sub_workflow::SubWorkflowNode;
+    use crate::WorkflowInput;
 
     fn make_spec(name: &str) -> WorkflowSpec {
         let mut builder = WorkflowSpecBuilder::new(name);
@@ -525,6 +558,11 @@ mod tests {
             spec: make_spec_with_sub(name, child_spec_name),
             spec_builder: None,
         }
+    }
+
+    #[derive(serde::Serialize, WorkflowInput)]
+    struct ChildParams {
+        region: String,
     }
 
     #[test]
@@ -624,6 +662,27 @@ mod tests {
             .register(make_registered_with_sub("wf_a", "unregistered_wf"))
             .unwrap();
         assert!(registry.contains("wf_a"));
+    }
+
+    #[test]
+    fn subworkflow_explicit_input_requires_spec_builder() {
+        let mut registry = WorkflowSpecRegistry::new();
+        registry.register(make_registered("child")).unwrap();
+
+        let mut builder = WorkflowSpecBuilder::new("parent");
+        builder.sub_workflow(
+            SubWorkflowNode::<ChildParams, ()>::typed("child")
+                .set_input(ChildParams {
+                    region: "eu".to_owned(),
+                })
+                .unwrap()
+                .node_id("child_node"),
+        );
+        let mut spec = builder.build().unwrap();
+
+        let err = registry.resolve_and_validate_spec(&mut spec).unwrap_err();
+        assert!(err.to_string().contains("supplies params to child workflow 'child'"));
+        assert!(err.to_string().contains("has no runtime spec_builder"));
     }
 
     // -----------------------------------------------------------------------

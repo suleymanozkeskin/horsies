@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workflow_specs =
         common::tasks::workflows::register_workflow_specs(&mut app, &workflow_tasks)?;
 
-    println!("Registered 6 tasks and 3 workflow specs.\n");
+    println!("Registered 7 tasks and 4 workflow specs.\n");
 
     let broker = app.get_broker().await?;
     println!("Broker connected.\n");
@@ -142,6 +142,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ------------------------------------------------------------------
     // Summary
     // ------------------------------------------------------------------
+    println!("--- Pattern 4: Subworkflow Param Handoff ---\n");
+    {
+        let handle = workflow_specs.subworkflow_handoff.start().await?;
+        println!(
+            "  Started workflow: subworkflow_handoff (id: {})",
+            handle.workflow_id()
+        );
+
+        let result: TaskResult<String> =
+            get_workflow_result(broker.pool(), wf_listener, handle.workflow_id(), timeout).await?;
+
+        match result {
+            TaskResult::Ok(ref v) => {
+                println!("  [PASS] Result: {:?}", v);
+                println!("         (child workflow received static label + injected count)");
+                passed += 1;
+            }
+            TaskResult::Err(ref e) => {
+                println!("  [FAIL] Error: {}", e);
+                failed += 1;
+            }
+        }
+        println!();
+    }
+
     println!("==========================================================");
     println!("  Summary");
     println!("==========================================================");
@@ -153,6 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  1. Linear Chain     -- fetch_data -> transform_data (sequential pipeline)");
     println!("  2. Fan-Out/Fan-In   -- fetch -> 3x process_chunk -> aggregate");
     println!("  3. Error Recovery   -- failing_fetch -> recovery_task (allow_failed_deps)");
+    println!("  4. Subworkflow      -- parent task output + static params into child workflow");
     println!();
 
     if failed > 0 {

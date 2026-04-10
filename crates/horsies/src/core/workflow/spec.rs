@@ -1190,6 +1190,55 @@ mod tests {
         assert!(spec.tasks[1].is_subworkflow);
     }
 
+    #[derive(serde::Serialize, crate::WorkflowInput)]
+    struct ChildWorkflowParams {
+        source: crate::TaskResult<String>,
+        limit: usize,
+    }
+
+    #[test]
+    fn subworkflow_kwargs_json_preserved_after_build() {
+        use crate::core::workflow::sub_workflow::SubWorkflowNode;
+
+        let mut b = WorkflowSpecBuilder::new("wf");
+        b.sub_workflow(
+            SubWorkflowNode::<ChildWorkflowParams, ()>::typed("child_wf")
+                .set(ChildWorkflowParams::field_limit(), 10)
+                .unwrap()
+                .node_id("child"),
+        );
+        let spec = b.build().unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(spec.tasks[0].kwargs_json.as_deref().unwrap())
+                .unwrap(),
+            serde_json::json!({"limit":10})
+        );
+    }
+
+    #[test]
+    fn subworkflow_set_and_arg_from_accepted() {
+        use crate::core::workflow::sub_workflow::SubWorkflowNode;
+
+        let mut b = WorkflowSpecBuilder::new("wf");
+        let producer = b.task(TaskNode::<String>::raw("producer").node_id("producer"));
+        b.sub_workflow(
+            SubWorkflowNode::<ChildWorkflowParams, ()>::typed("child_wf")
+                .set(ChildWorkflowParams::field_limit(), 25)
+                .unwrap()
+                .arg_from(ChildWorkflowParams::field_source(), producer)
+                .node_id("child"),
+        );
+
+        let spec = b.build().unwrap();
+        assert_eq!(spec.tasks[1].args_from.get("source"), Some(&0));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(spec.tasks[1].kwargs_json.as_deref().unwrap())
+                .unwrap(),
+            serde_json::json!({"limit":25})
+        );
+        assert_eq!(spec.tasks[1].dependencies, vec![0]);
+    }
+
     // -- Spec isolation tests (ported from Python test_workflow_spec_isolation.py) --
 
     #[test]

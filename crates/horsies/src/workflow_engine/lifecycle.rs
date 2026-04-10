@@ -652,13 +652,26 @@ async fn enqueue_subworkflow_on_resume(
         })?;
 
     // Build the child spec (supports dynamic parameterization via spec_builder).
+    let has_child_inputs =
+        task.task_args.is_some() || task.task_kwargs.is_some() || task.args_from.is_some();
+
     let child_spec = if let Some(ref builder) = registered.spec_builder {
         let args_json = task.task_args.as_deref();
-        let kwargs_json = task.task_kwargs.as_deref();
-        let mut spec =
-            builder(args_json, kwargs_json).map_err(|e| WorkflowError::WorkflowNotFound {
-                workflow_id: format!("spec_builder for '{}' failed: {}", spec_name, e,),
-            })?;
+        let merged_kwargs = merge_args_from_for_ready(
+            pool,
+            workflow_id,
+            task.task_kwargs.as_deref(),
+            &task.args_from,
+            &task.dependencies,
+        )
+        .await?;
+        let kwargs_json = merged_kwargs.as_deref();
+        let mut spec = builder(args_json, kwargs_json).map_err(|e| {
+            WorkflowError::Validation(format!(
+                "spec_builder for '{}' failed: {}",
+                spec_name, e,
+            ))
+        })?;
         // Dynamic specs bypass register_workflow(), so resolve task options
         // and queue/priority here.
         registry.resolve_spec_task_options(&mut spec);
@@ -666,6 +679,11 @@ async fn enqueue_subworkflow_on_resume(
             .resolve_and_validate_spec(&mut spec)
             .map_err(|e| WorkflowError::Validation(e.to_string()))?;
         spec
+    } else if has_child_inputs {
+        return Err(WorkflowError::Validation(format!(
+            "child workflow '{}' received params from its parent, but the registered child has no spec_builder",
+            spec_name,
+        )));
     } else {
         registered.spec.clone()
     };

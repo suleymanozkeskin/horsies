@@ -29,8 +29,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Registered tasks:");
     println!("  basic:     do_compute, failing_task, divide, ping");
     println!("  retries:   always_fails, fails_with_custom_code, eventually_succeeds");
-    println!("  workflows: fetch_data, transform_data, process_chunk, aggregate, failing_fetch, recovery_task");
-    println!("  specs:     linear_chain, fan_in_out, error_recovery");
+    println!("  workflows: fetch_data, transform_data, process_chunk, aggregate, failing_fetch, recovery_task, child_render");
+    println!("  specs:     linear_chain, fan_in_out, error_recovery, subworkflow_handoff, subworkflow_child");
     println!();
 
     // Connect and migrate.

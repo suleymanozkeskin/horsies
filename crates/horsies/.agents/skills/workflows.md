@@ -344,6 +344,9 @@ Child workflow node. Resolved at execution time via `WorkflowDefinition` or regi
 
 ```rust
 SubWorkflowNode::<(), ChildOutput>::typed("child_workflow_name")
+    .set_input(child_params)?
+    // or mix static + injected params:
+    .set(ChildParams::field_limit(), 100)?
     .waits_for(dep_ref)
     .arg_from(ChildParams::field_input(), dep_ref)
 ```

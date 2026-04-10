@@ -193,9 +193,12 @@ pub mod custom_queues {
 // workflow tasks — used by workflow_patterns.rs and worker_default
 // ---------------------------------------------------------------------------
 pub mod workflows {
+    use std::sync::Arc;
+
     use horsies::{
-        async_task_fn, Horsies, OnError, SuccessCase, SuccessPolicy, TaskError, TaskFunction,
-        TaskResult, WorkflowFunction, WorkflowInput, WorkflowSpecBuilder,
+        async_task_fn, CoreRegisteredWorkflowSpec, Horsies, HorsiesError, OnError, SubWorkflowNode,
+        SuccessCase, SuccessPolicy, TaskError, TaskFunction, TaskResult, WorkflowFunction,
+        WorkflowInput, WorkflowSpecBuilder,
     };
     use serde::{Deserialize, Serialize};
 
@@ -236,6 +239,12 @@ pub mod workflows {
     #[derive(Debug, Serialize, Deserialize, WorkflowInput)]
     pub struct RecoveryArgs {
         pub input_result: TaskResult<FetchResult>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, WorkflowInput)]
+    pub struct ChildRenderInput {
+        pub count_result: TaskResult<i32>,
+        pub label: String,
     }
 
     /// Root task: takes a simple String arg (the source name), returns FetchResult.
@@ -293,6 +302,13 @@ pub mod workflows {
         }
     }
 
+    pub async fn child_render(args: ChildRenderInput) -> Result<String, TaskError> {
+        match args.count_result {
+            TaskResult::Ok(value) => Ok(format!("{}={}", args.label, value)),
+            TaskResult::Err(err) => Err(err),
+        }
+    }
+
     pub struct WorkflowTasks {
         pub fetch_data: TaskFunction<String, FetchResult>,
         pub transform_data: TaskFunction<TransformArgs, TransformResult>,
@@ -300,12 +316,57 @@ pub mod workflows {
         pub aggregate: TaskFunction<AggregateArgs, AggregateResult>,
         pub failing_fetch: TaskFunction<String, FetchResult>,
         pub recovery_task: TaskFunction<RecoveryArgs, String>,
+        pub child_render: TaskFunction<ChildRenderInput, String>,
     }
 
     pub struct WorkflowSpecs {
         pub linear_chain: WorkflowFunction<TransformResult>,
         pub fan_in_out: WorkflowFunction<AggregateResult>,
         pub error_recovery: WorkflowFunction<String>,
+        pub subworkflow_handoff: WorkflowFunction<String>,
+    }
+
+    fn build_child_render_workflow(
+        task: &TaskFunction<ChildRenderInput, String>,
+        params: ChildRenderInput,
+    ) -> Result<horsies::WorkflowSpec, HorsiesError> {
+        let mut builder = WorkflowSpecBuilder::new("subworkflow_child");
+        builder.definition_key("examples.subworkflow_child.v1");
+        let render = builder.task(task.node().set_input(params)?.node_id("render"));
+        builder.output(render);
+        builder.build()
+    }
+
+    fn register_child_render_workflow(
+        app: &mut Horsies,
+        task: &TaskFunction<ChildRenderInput, String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let placeholder = build_child_render_workflow(
+            task,
+            ChildRenderInput {
+                count_result: TaskResult::Ok(0),
+                label: "placeholder".to_owned(),
+            },
+        )?;
+
+        let task = task.clone();
+        let registered = CoreRegisteredWorkflowSpec {
+            spec: placeholder,
+            spec_builder: Some(Arc::new(move |_args_json, kwargs_json| {
+                let kwargs_json = kwargs_json
+                    .ok_or_else(|| HorsiesError::new("subworkflow_child requires kwargs_json params"))?;
+                let params: ChildRenderInput = serde_json::from_str(kwargs_json).map_err(|e| {
+                    HorsiesError::new(format!(
+                        "failed to decode child params for subworkflow_child: {}",
+                        e
+                    ))
+                })?;
+                build_child_render_workflow(&task, params)
+            })),
+        };
+
+        app.register_workflow::<String>(registered)?;
+        Ok(())
     }
 
     /// Register all workflow task functions on the given app.
@@ -341,6 +402,12 @@ pub mod workflows {
                     async_task_fn!(recovery_task, RecoveryArgs),
                 )?
                 .register()?,
+            child_render: app
+                .task::<ChildRenderInput, String>(
+                    "child_render",
+                    async_task_fn!(child_render, ChildRenderInput),
+                )?
+                .register()?,
         })
     }
 
@@ -349,6 +416,8 @@ pub mod workflows {
         app: &mut Horsies,
         tasks: &WorkflowTasks,
     ) -> Result<WorkflowSpecs, Box<dyn std::error::Error>> {
+        register_child_render_workflow(app, &tasks.child_render)?;
+
         // Pattern 1: Linear Chain (fetch -> transform)
         let linear_chain = {
             let mut b = WorkflowSpecBuilder::new("linear_chain");
@@ -433,10 +502,33 @@ pub mod workflows {
             app.register_workflow_spec::<String>(b.build()?)?
         };
 
+        // Pattern 4: Parent workflow hands mixed static + injected params to a child workflow.
+        let subworkflow_handoff = {
+            let mut b = WorkflowSpecBuilder::new("subworkflow_handoff");
+            let fetch = b.task(tasks.fetch_data.node().set_input("source_c".to_owned())?);
+            let count = b.task(
+                tasks
+                    .process_chunk
+                    .node()
+                    .waits_for(fetch)
+                    .arg_from(ChunkArgs::field_input_result(), fetch),
+            );
+            let child = b.sub_workflow(
+                SubWorkflowNode::<ChildRenderInput, String>::typed("subworkflow_child")
+                    .queue("default")
+                    .set(ChildRenderInput::field_label(), "count".to_owned())?
+                    .arg_from(ChildRenderInput::field_count_result(), count),
+            );
+            b.on_error(OnError::Fail);
+            b.output(child);
+            app.register_workflow_spec::<String>(b.build()?)?
+        };
+
         Ok(WorkflowSpecs {
             linear_chain,
             fan_in_out,
             error_recovery,
+            subworkflow_handoff,
         })
     }
 }
