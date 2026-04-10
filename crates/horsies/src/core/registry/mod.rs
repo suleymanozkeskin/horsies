@@ -2,4 +2,6 @@ pub mod task;
 pub mod workflow;
 
 pub use task::TaskRegistry;
-pub use workflow::{RegisteredWorkflowSpec, SpecBuilderFn, WorkflowSpecRegistry};
+pub use workflow::{
+    RegisteredWorkflowDefinition, RegisteredWorkflowSpec, SpecBuilderFn, WorkflowSpecRegistry,
+};

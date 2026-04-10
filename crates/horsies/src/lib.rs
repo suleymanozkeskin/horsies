@@ -460,6 +460,38 @@ impl Horsies {
         Ok(wf)
     }
 
+    /// Register a parameterized workflow builder and return a reusable template.
+    ///
+    /// This is the child-workflow-friendly path for dynamic workflows. It
+    /// registers the runtime builder in the workflow registry without requiring
+    /// a placeholder `WorkflowSpec`, and returns a [`WorkflowTemplate`] that can
+    /// both `start(params)` and create `template.node()` sub-workflow nodes.
+    pub fn register_parameterized_workflow<P, T, F>(
+        &mut self,
+        name: &str,
+        definition_key: &str,
+        builder: F,
+    ) -> Result<WorkflowTemplate<P, T>, HorsiesError>
+    where
+        P: DeserializeOwned + Serialize + Clone + Send + Sync + 'static,
+        T: DeserializeOwned + Clone + Send + Sync + 'static,
+        F: Fn(P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync + 'static,
+    {
+        let builder = Arc::new(builder);
+        self.core
+            .register_parameterized_workflow::<P, _>(name, definition_key, {
+                let builder = Arc::clone(&builder);
+                move |params| builder(params)
+            })?;
+        self.refresh_workflow_registry_cache();
+        Ok(WorkflowTemplate::new(
+            name.to_owned(),
+            definition_key.to_owned(),
+            self.workflow_starter(),
+            builder,
+        ))
+    }
+
     pub fn workflow_template<D>(&self) -> WorkflowTemplate<D::Params, D::Output>
     where
         D: WorkflowDefinition + 'static,
@@ -1042,6 +1074,42 @@ mod tests {
 
         app.check().unwrap();
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn register_parameterized_workflow_returns_template_with_typed_node() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+        macro_task_a::register(&mut app).unwrap();
+
+        let template = app
+            .register_parameterized_workflow::<String, String, _>(
+                "dynamic_child",
+                "tests.dynamic_child.v1",
+                move |region| {
+                    let mut builder = WorkflowSpecBuilder::new("dynamic_child");
+                    builder.definition_key("tests.dynamic_child.v1");
+                    let node = builder.task(
+                        TaskNode::<String, String>::raw("macro_a")
+                            .queue("default")
+                            .set_input(region)?,
+                    );
+                    builder.output(node);
+                    builder.build()
+                },
+            )
+            .unwrap();
+
+        let any = template
+            .node()
+            .set_input("eu".to_owned())
+            .unwrap()
+            .into_any_node(0);
+        assert_eq!(any.task_name, "__sub_workflow:dynamic_child");
+        assert_eq!(
+            any.sub_definition_key.as_deref(),
+            Some("tests.dynamic_child.v1")
+        );
+        assert_eq!(any.args_json.as_deref(), Some("\"eu\""));
     }
 
     #[horsies::task(

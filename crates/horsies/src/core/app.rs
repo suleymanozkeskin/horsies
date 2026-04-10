@@ -2,11 +2,16 @@ use std::any::TypeId;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+
 use crate::core::config::AppConfig;
 use crate::core::config::QueueMode;
 use crate::core::error::{ErrorCode, HorsiesError};
 use crate::core::registry::task::TaskRegistry;
-use crate::core::registry::workflow::{RegisteredWorkflowSpec, WorkflowSpecRegistry};
+use crate::core::registry::workflow::{
+    RegisteredWorkflowDefinition, RegisteredWorkflowSpec, WorkflowSpecRegistry,
+};
 use crate::core::task::error::{BuiltInTaskCode, TaskErrorCode};
 use crate::core::workflow::spec::{WorkflowSpec, WorkflowSpecBuilder};
 
@@ -266,6 +271,38 @@ impl Horsies {
             spec_builder: None,
         };
         self.register_workflow(registered)
+    }
+
+    /// Register a parameterized workflow definition for child workflow resolution.
+    ///
+    /// Unlike [`Horsies::register_workflow`], this does not require a representative
+    /// placeholder spec. The provided builder is invoked at child-workflow start
+    /// time after parent-provided params are decoded into `P`.
+    pub fn register_parameterized_workflow<P, F>(
+        &mut self,
+        name: &str,
+        definition_key: &str,
+        builder: F,
+    ) -> Result<(), HorsiesError>
+    where
+        P: DeserializeOwned + Serialize + Send + Sync + 'static,
+        F: Fn(P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync + 'static,
+    {
+        let name_owned = name.to_owned();
+        let wrapped = Arc::new(move |args_json: Option<&str>, kwargs_json: Option<&str>| {
+            let params =
+                decode_parameterized_workflow_input::<P>(&name_owned, args_json, kwargs_json)?;
+            builder(params)
+        });
+
+        self.workflow_registry
+            .register_definition(RegisteredWorkflowDefinition {
+                name: name.to_owned(),
+                definition_key: definition_key.to_owned(),
+                spec_builder: wrapped,
+            })?;
+        self.refresh_workflow_metadata_maps();
+        Ok(())
     }
 
     /// Start building a workflow and register it in one step.
@@ -1216,6 +1253,34 @@ where
             .with_code(ErrorCode::WorkflowCheckBuilderException)],
         }
     }
+}
+
+fn decode_parameterized_workflow_input<P>(
+    workflow_name: &str,
+    args_json: Option<&str>,
+    kwargs_json: Option<&str>,
+) -> Result<P, HorsiesError>
+where
+    P: DeserializeOwned,
+{
+    if args_json.is_some() && kwargs_json.is_some() {
+        return Err(HorsiesError::new(format!(
+            "parameterized child workflow '{}' received both args_json and kwargs_json",
+            workflow_name,
+        ))
+        .with_help(
+            "provide either a whole params value via .set_input(...), or object fields via .set(...) / .arg_from(...), but not both",
+        ));
+    }
+
+    let raw = kwargs_json.or(args_json).unwrap_or("null");
+    serde_json::from_str(raw).map_err(|e| {
+        HorsiesError::new(format!(
+            "failed to decode params for workflow '{}': {}",
+            workflow_name, e,
+        ))
+        .with_help("ensure the child workflow params type matches the parent-provided input shape")
+    })
 }
 
 /// Builder for registering typed workflow builders on the app.

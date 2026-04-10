@@ -87,6 +87,18 @@ SELECT depth, root_workflow_id
 FROM horsies_workflows
 WHERE id = $1";
 
+const CHECK_ANCESTOR_WORKFLOW_CHAIN_SQL: &str = "\
+WITH RECURSIVE ancestors AS (
+    SELECT id, name, definition_key, parent_workflow_id
+    FROM horsies_workflows
+    WHERE id = $1
+  UNION ALL
+    SELECT w.id, w.name, w.definition_key, w.parent_workflow_id
+    FROM horsies_workflows w
+    JOIN ancestors a ON a.parent_workflow_id = w.id
+)
+SELECT id, name, definition_key FROM ancestors";
+
 // ---------------------------------------------------------------------------
 // Row types
 // ---------------------------------------------------------------------------
@@ -102,6 +114,13 @@ struct ExistsRow {
 struct DepthRow {
     depth: Option<i32>,
     root_workflow_id: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct AncestorWorkflowRow {
+    id: String,
+    name: String,
+    definition_key: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -479,12 +498,6 @@ async fn launch_root_subworkflow(
         .strip_prefix("__sub_workflow:")
         .unwrap_or(&task.task_name);
 
-    let registered = registry
-        .get(spec_name)
-        .ok_or_else(|| WorkflowError::WorkflowNotFound {
-            workflow_id: format!("sub-workflow spec '{}' not found in registry", spec_name,),
-        })?;
-
     // Get parent depth and root_workflow_id.
     let depth_row: DepthRow = sqlx::query_as(GET_WORKFLOW_DEPTH_SQL)
         .bind(workflow_id)
@@ -495,7 +508,12 @@ async fn launch_root_subworkflow(
     let root_wf_id = depth_row.root_workflow_id.as_deref().unwrap_or(workflow_id);
 
     // Build the child spec (supports dynamic parameterization if a builder is registered).
-    let child_spec = build_child_spec(registered, task, registry)?;
+    let child_spec = build_child_spec(
+        spec_name,
+        task.sub_definition_key.as_deref(),
+        task,
+        registry,
+    )?;
 
     // Start the child workflow within the same transaction.
     let child_id = start_child_workflow_in_tx(
@@ -546,6 +564,7 @@ pub async fn start_child_workflow_in_tx(
     registry: &WorkflowSpecRegistry,
 ) -> Result<String, WorkflowError> {
     let child_id = Uuid::new_v4().to_string();
+    ensure_no_runtime_subworkflow_cycle(tx, parent_workflow_id, spec).await?;
 
     let on_error_str = match spec.on_error {
         OnError::Fail => "fail",
@@ -587,6 +606,33 @@ pub async fn start_child_workflow_in_tx(
     Ok(child_id)
 }
 
+async fn ensure_no_runtime_subworkflow_cycle(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    parent_workflow_id: &str,
+    child_spec: &WorkflowSpec,
+) -> Result<(), WorkflowError> {
+    let ancestors: Vec<AncestorWorkflowRow> = sqlx::query_as(CHECK_ANCESTOR_WORKFLOW_CHAIN_SQL)
+        .bind(parent_workflow_id)
+        .fetch_all(&mut **tx)
+        .await?;
+
+    let child_key = child_spec.definition_key.as_deref();
+    if let Some(ancestor) = ancestors.iter().find(|ancestor| {
+        ancestor.name == child_spec.name
+            || match (child_key, ancestor.definition_key.as_deref()) {
+                (Some(child_key), Some(ancestor_key)) => child_key == ancestor_key,
+                _ => false,
+            }
+    }) {
+        return Err(WorkflowError::Validation(format!(
+            "starting child workflow '{}' would create a nested workflow cycle through ancestor '{}' ({})",
+            child_spec.name, ancestor.name, ancestor.id,
+        )));
+    }
+
+    Ok(())
+}
+
 /// Build a child workflow spec, using the spec_builder callback if available,
 /// otherwise falling back to the static registered spec.
 ///
@@ -598,38 +644,75 @@ pub async fn start_child_workflow_in_tx(
 /// registry's `task_options_map` so workflow tasks inherit their
 /// registered retry configuration.
 pub(crate) fn build_child_spec(
-    registered: &crate::core::RegisteredWorkflowSpec,
+    spec_name: &str,
+    definition_key: Option<&str>,
     parent_task: &AnyNode,
     registry: &WorkflowSpecRegistry,
 ) -> Result<WorkflowSpec, WorkflowError> {
     let has_child_inputs = parent_task.args_json.is_some()
         || parent_task.kwargs_json.is_some()
         || !parent_task.args_from.is_empty();
-
-    if let Some(ref builder) = registered.spec_builder {
-        let args_json = parent_task.args_json.as_deref();
-        let kwargs_json = parent_task.kwargs_json.as_deref();
-        let mut spec = builder(args_json, kwargs_json).map_err(|e| {
-            WorkflowError::Validation(format!(
-                "spec_builder for '{}' failed: {}",
-                registered.spec.name, e,
-            ))
+    let resolved = registry
+        .resolve_child_registration(spec_name, definition_key)
+        .ok_or_else(|| WorkflowError::WorkflowNotFound {
+            workflow_id: format!(
+                "sub-workflow spec not found (definition_key={:?}, name='{}')",
+                definition_key, spec_name,
+            ),
         })?;
-        // Dynamic specs bypass register_workflow(), so resolve task options
-        // and queue/priority here.
-        registry.resolve_spec_task_options(&mut spec);
-        registry
-            .resolve_and_validate_spec(&mut spec)
-            .map_err(|e| WorkflowError::Validation(e.to_string()))?;
-        Ok(spec)
-    } else if has_child_inputs {
-        Err(WorkflowError::Validation(format!(
-            "child workflow '{}' received params from its parent, but the registered child has no spec_builder",
-            registered.spec.name,
-        )))
-    } else {
-        // Static specs already had options/queue/priority resolved at register_workflow() time.
-        Ok(registered.spec.clone())
+
+    materialize_child_spec(
+        resolved,
+        has_child_inputs,
+        parent_task.args_json.as_deref(),
+        parent_task.kwargs_json.as_deref(),
+        registry,
+    )
+}
+
+pub(crate) fn materialize_child_spec(
+    resolved: crate::core::registry::workflow::ResolvedChildWorkflow<'_>,
+    has_child_inputs: bool,
+    args_json: Option<&str>,
+    kwargs_json: Option<&str>,
+    registry: &WorkflowSpecRegistry,
+) -> Result<WorkflowSpec, WorkflowError> {
+    match resolved {
+        crate::core::registry::workflow::ResolvedChildWorkflow::Dynamic(registered) => {
+            let mut spec = (registered.spec_builder)(args_json, kwargs_json).map_err(|e| {
+                WorkflowError::Validation(format!(
+                    "spec_builder for '{}' failed: {}",
+                    registered.name, e,
+                ))
+            })?;
+            registry.resolve_spec_task_options(&mut spec);
+            registry
+                .resolve_and_validate_spec(&mut spec)
+                .map_err(|e| WorkflowError::Validation(e.to_string()))?;
+            Ok(spec)
+        }
+        crate::core::registry::workflow::ResolvedChildWorkflow::Static(registered) => {
+            if let Some(ref builder) = registered.spec_builder {
+                let mut spec = builder(args_json, kwargs_json).map_err(|e| {
+                    WorkflowError::Validation(format!(
+                        "spec_builder for '{}' failed: {}",
+                        registered.spec.name, e,
+                    ))
+                })?;
+                registry.resolve_spec_task_options(&mut spec);
+                registry
+                    .resolve_and_validate_spec(&mut spec)
+                    .map_err(|e| WorkflowError::Validation(e.to_string()))?;
+                Ok(spec)
+            } else if has_child_inputs {
+                Err(WorkflowError::Validation(format!(
+                    "child workflow '{}' received params from its parent, but the registered child has no spec_builder",
+                    registered.spec.name,
+                )))
+            } else {
+                Ok(registered.spec.clone())
+            }
+        }
     }
 }
 
@@ -642,7 +725,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use crate::core::registry::workflow::RegisteredWorkflowSpec;
+    use crate::core::registry::workflow::{RegisteredWorkflowDefinition, RegisteredWorkflowSpec};
     use crate::core::workflow::spec::WorkflowSpecBuilder;
     use crate::core::workflow::sub_workflow::SubWorkflowNode;
     use crate::TaskNode;
@@ -658,14 +741,11 @@ mod tests {
     }
 
     #[test]
-    fn build_child_spec_passes_explicit_kwargs_to_spec_builder() {
-        let mut placeholder = WorkflowSpecBuilder::new("child_dynamic");
-        let node = placeholder.task(TaskNode::<String>::raw("hello_task").queue("default"));
-        placeholder.output(node);
-
-        let registered = RegisteredWorkflowSpec {
-            spec: placeholder.build().unwrap(),
-            spec_builder: Some(Arc::new(|_args_json, kwargs_json| {
+    fn build_child_spec_passes_explicit_kwargs_to_dynamic_definition() {
+        let registered = RegisteredWorkflowDefinition {
+            name: "child_dynamic".to_owned(),
+            definition_key: "tests.child_dynamic.v1".to_owned(),
+            spec_builder: Arc::new(|_args_json, kwargs_json| {
                 let kwargs = serde_json::from_str::<serde_json::Value>(kwargs_json.unwrap())
                     .map_err(|e| crate::HorsiesError::new(e.to_string()))?;
                 let region = kwargs["region"].as_str().unwrap().to_owned();
@@ -678,15 +758,23 @@ mod tests {
                 );
                 builder.output(node);
                 builder.build()
-            })),
+            }),
         };
 
         let parent = SubWorkflowNode::<serde_json::Value, String>::typed("child_dynamic")
+            .definition_key("tests.child_dynamic.v1")
             .kwargs_json(r#"{"region":"eu"}"#)
             .into_any_node(0);
 
-        let registry = WorkflowSpecRegistry::new();
-        let child = build_child_spec(&registered, &parent, &registry).unwrap();
+        let mut registry = WorkflowSpecRegistry::new();
+        registry.register_definition(registered).unwrap();
+        let child = build_child_spec(
+            "child_dynamic",
+            parent.sub_definition_key.as_deref(),
+            &parent,
+            &registry,
+        )
+        .unwrap();
         assert_eq!(child.tasks[0].args_json.as_deref(), Some("\"eu\""));
     }
 
@@ -698,8 +786,9 @@ mod tests {
             .unwrap()
             .into_any_node(0);
 
-        let registry = WorkflowSpecRegistry::new();
-        let err = build_child_spec(&registered, &parent, &registry).unwrap_err();
+        let mut registry = WorkflowSpecRegistry::new();
+        registry.register(registered).unwrap();
+        let err = build_child_spec("child_static", None, &parent, &registry).unwrap_err();
         match err {
             WorkflowError::Validation(message) => {
                 assert!(message.contains("received params from its parent"));

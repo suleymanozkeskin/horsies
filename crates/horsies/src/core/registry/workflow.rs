@@ -20,6 +20,26 @@ pub type SpecBuilderFn = Arc<
         + 'static,
 >;
 
+/// A registered dynamic workflow definition for runtime-built child workflows.
+#[derive(Clone)]
+pub struct RegisteredWorkflowDefinition {
+    /// Human-readable workflow name used by `SubWorkflowNode`.
+    pub name: String,
+    /// Stable identity used for persisted/runtime lookup.
+    pub definition_key: String,
+    /// Runtime builder that decodes parent-provided params and returns a concrete spec.
+    pub spec_builder: SpecBuilderFn,
+}
+
+impl std::fmt::Debug for RegisteredWorkflowDefinition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegisteredWorkflowDefinition")
+            .field("name", &self.name)
+            .field("definition_key", &self.definition_key)
+            .finish()
+    }
+}
+
 /// A registered workflow spec with an optional dynamic builder.
 #[derive(Clone)]
 pub struct RegisteredWorkflowSpec {
@@ -56,6 +76,7 @@ impl std::fmt::Debug for RegisteredWorkflowSpec {
 /// Thread-safe for shared reads (behind `Arc` in the worker).
 pub struct WorkflowSpecRegistry {
     specs: HashMap<String, RegisteredWorkflowSpec>,
+    dynamic_definitions: HashMap<String, RegisteredWorkflowDefinition>,
     /// Pre-computed map of task_name -> serialized retry options JSON.
     ///
     /// Populated by `Horsies::register_workflow()` from the task registry.
@@ -78,6 +99,7 @@ impl Clone for WorkflowSpecRegistry {
     fn clone(&self) -> Self {
         Self {
             specs: self.specs.clone(),
+            dynamic_definitions: self.dynamic_definitions.clone(),
             task_options_map: self.task_options_map.clone(),
             task_defaults_map: self.task_defaults_map.clone(),
             queue_priority_map: self.queue_priority_map.clone(),
@@ -90,6 +112,7 @@ impl WorkflowSpecRegistry {
     pub fn new() -> Self {
         Self {
             specs: HashMap::new(),
+            dynamic_definitions: HashMap::new(),
             task_options_map: HashMap::new(),
             task_defaults_map: HashMap::new(),
             queue_priority_map: HashMap::new(),
@@ -106,12 +129,23 @@ impl WorkflowSpecRegistry {
                 .with_code(ErrorCode::WorkflowNoName));
         }
 
-        if self.specs.contains_key(&name) {
+        if self.contains_name(&name) {
             return Err(
                 HorsiesError::new(format!("duplicate workflow spec name: '{}'", name))
                     .with_code(ErrorCode::WorkflowDuplicateNodeId)
                     .with_help("each workflow spec must have a unique name"),
             );
+        }
+
+        if let Some(ref key) = registered.spec.definition_key {
+            if self.definition_key_taken(key) {
+                return Err(HorsiesError::new(format!(
+                    "duplicate workflow definition_key: '{}'",
+                    key
+                ))
+                .with_code(ErrorCode::WorkflowDuplicateNodeId)
+                .with_help("each workflow definition_key must be unique"));
+            }
         }
 
         // Check for sub-workflow cycles before inserting.
@@ -136,6 +170,48 @@ impl WorkflowSpecRegistry {
                 .with_help("remove the circular SubWorkflowNode reference"));
         }
 
+        Ok(())
+    }
+
+    /// Register a runtime-built workflow definition for child workflow use.
+    pub fn register_definition(
+        &mut self,
+        registered: RegisteredWorkflowDefinition,
+    ) -> Result<(), HorsiesError> {
+        if registered.name.is_empty() {
+            return Err(
+                HorsiesError::new("workflow definition name must not be empty")
+                    .with_code(ErrorCode::WorkflowNoName),
+            );
+        }
+
+        if registered.definition_key.is_empty() {
+            return Err(
+                HorsiesError::new("workflow definition_key must not be empty")
+                    .with_code(ErrorCode::WorkflowNoName),
+            );
+        }
+
+        if self.contains_name(&registered.name) {
+            return Err(HorsiesError::new(format!(
+                "duplicate workflow spec name: '{}'",
+                registered.name
+            ))
+            .with_code(ErrorCode::WorkflowDuplicateNodeId)
+            .with_help("each workflow spec must have a unique name"));
+        }
+
+        if self.definition_key_taken(&registered.definition_key) {
+            return Err(HorsiesError::new(format!(
+                "duplicate workflow definition_key: '{}'",
+                registered.definition_key
+            ))
+            .with_code(ErrorCode::WorkflowDuplicateNodeId)
+            .with_help("each workflow definition_key must be unique"));
+        }
+
+        self.dynamic_definitions
+            .insert(registered.name.clone(), registered);
         Ok(())
     }
 
@@ -198,6 +274,11 @@ impl WorkflowSpecRegistry {
         self.specs.get(name)
     }
 
+    /// Look up a registered dynamic workflow definition by name.
+    pub fn get_definition(&self, name: &str) -> Option<&RegisteredWorkflowDefinition> {
+        self.dynamic_definitions.get(name)
+    }
+
     /// Look up a registered workflow spec by its `definition_key`.
     ///
     /// Scans all registered specs for a matching `definition_key`. Used by
@@ -208,19 +289,34 @@ impl WorkflowSpecRegistry {
             .find(|r| r.spec.definition_key.as_deref() == Some(key))
     }
 
+    /// Look up a registered dynamic workflow definition by definition key.
+    pub fn get_definition_by_definition_key(
+        &self,
+        key: &str,
+    ) -> Option<&RegisteredWorkflowDefinition> {
+        self.dynamic_definitions
+            .values()
+            .find(|r| r.definition_key == key)
+    }
+
     /// Check if a workflow spec is registered.
     pub fn contains(&self, name: &str) -> bool {
         self.specs.contains_key(name)
     }
 
+    /// Check if a dynamic workflow definition is registered.
+    pub fn contains_definition(&self, name: &str) -> bool {
+        self.dynamic_definitions.contains_key(name)
+    }
+
     /// Number of registered workflow specs.
     pub fn len(&self) -> usize {
-        self.specs.len()
+        self.specs.len() + self.dynamic_definitions.len()
     }
 
     /// Whether the registry is empty.
     pub fn is_empty(&self) -> bool {
-        self.specs.is_empty()
+        self.specs.is_empty() && self.dynamic_definitions.is_empty()
     }
 
     /// Remove a workflow spec from the registry by name.
@@ -231,6 +327,11 @@ impl WorkflowSpecRegistry {
     /// Equivalent to Python's `unregister_workflow_spec(name)`.
     pub fn unregister(&mut self, name: &str) -> Option<RegisteredWorkflowSpec> {
         self.specs.remove(name)
+    }
+
+    /// Remove a dynamic workflow definition from the registry by name.
+    pub fn unregister_definition(&mut self, name: &str) -> Option<RegisteredWorkflowDefinition> {
+        self.dynamic_definitions.remove(name)
     }
 
     /// Look up a specific node by workflow name and task index.
@@ -285,9 +386,46 @@ impl WorkflowSpecRegistry {
         self.specs.values()
     }
 
+    fn contains_name(&self, name: &str) -> bool {
+        self.specs.contains_key(name) || self.dynamic_definitions.contains_key(name)
+    }
+
+    fn definition_key_taken(&self, key: &str) -> bool {
+        self.specs
+            .values()
+            .any(|r| r.spec.definition_key.as_deref() == Some(key))
+            || self
+                .dynamic_definitions
+                .values()
+                .any(|r| r.definition_key == key)
+    }
+
+    pub(crate) fn resolve_child_registration<'a>(
+        &'a self,
+        name: &str,
+        definition_key: Option<&str>,
+    ) -> Option<ResolvedChildWorkflow<'a>> {
+        if let Some(key) = definition_key {
+            if let Some(registered) = self.get_definition_by_definition_key(key) {
+                return Some(ResolvedChildWorkflow::Dynamic(registered));
+            }
+            if let Some(registered) = self.get_by_definition_key(key) {
+                return Some(ResolvedChildWorkflow::Static(registered));
+            }
+        }
+
+        if let Some(registered) = self.get_definition(name) {
+            return Some(ResolvedChildWorkflow::Dynamic(registered));
+        }
+        self.get(name).map(ResolvedChildWorkflow::Static)
+    }
+
     /// Iterate over registered workflow spec names.
     pub fn spec_names(&self) -> impl Iterator<Item = &str> {
-        self.specs.keys().map(String::as_str)
+        self.specs
+            .keys()
+            .chain(self.dynamic_definitions.keys())
+            .map(String::as_str)
     }
 
     /// Replace the task options map used for resolving retry options on
@@ -373,23 +511,39 @@ impl WorkflowSpecRegistry {
                     || node.kwargs_json.is_some()
                     || !node.args_from.is_empty();
 
-                if has_input {
-                    if let Some(registered) = self.get(spec_name) {
-                        if registered.spec_builder.is_none() {
-                            return Err(HorsiesError::new(format!(
-                                "workflow '{}' node '{}' supplies params to child workflow '{}' \
-                                 but that child has no runtime spec_builder",
-                                spec.name,
-                                node.node_id.as_deref().unwrap_or("?"),
-                                spec_name,
-                            ))
-                            .with_code(ErrorCode::WorkflowMissingRequiredParams)
-                            .with_help(
-                                "register the child as a parameterized workflow with a spec_builder, \
-                                 or remove .set_input(...) / .set(...) / .arg_from(...) from the sub-workflow node",
-                            ));
-                        }
+                let resolved =
+                    self.resolve_child_registration(spec_name, node.sub_definition_key.as_deref());
+
+                match resolved {
+                    None => {
+                        return Err(HorsiesError::new(format!(
+                            "workflow '{}' node '{}' references unregistered child workflow '{}'",
+                            spec.name,
+                            node.node_id.as_deref().unwrap_or("?"),
+                            spec_name,
+                        ))
+                        .with_code(ErrorCode::WorkflowMissingRequiredParams)
+                        .with_help(
+                            "register the child workflow before starting this parent workflow",
+                        ));
                     }
+                    Some(ResolvedChildWorkflow::Static(registered))
+                        if has_input && registered.spec_builder.is_none() =>
+                    {
+                        return Err(HorsiesError::new(format!(
+                            "workflow '{}' node '{}' supplies params to child workflow '{}' \
+                             but that child has no runtime spec_builder",
+                            spec.name,
+                            node.node_id.as_deref().unwrap_or("?"),
+                            spec_name,
+                        ))
+                        .with_code(ErrorCode::WorkflowMissingRequiredParams)
+                        .with_help(
+                            "register the child as a parameterized workflow definition, \
+                             or remove .set_input(...) / .set(...) / .arg_from(...) from the sub-workflow node",
+                        ));
+                    }
+                    _ => {}
                 }
                 continue;
             }
@@ -467,9 +621,15 @@ impl std::fmt::Debug for WorkflowSpecRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WorkflowSpecRegistry")
             .field("spec_count", &self.specs.len())
+            .field("dynamic_definition_count", &self.dynamic_definitions.len())
             .field("spec_names", &self.specs.keys().collect::<Vec<_>>())
             .finish()
     }
+}
+
+pub(crate) enum ResolvedChildWorkflow<'a> {
+    Static(&'a RegisteredWorkflowSpec),
+    Dynamic(&'a RegisteredWorkflowDefinition),
 }
 
 #[cfg(test)]
@@ -681,7 +841,9 @@ mod tests {
         let mut spec = builder.build().unwrap();
 
         let err = registry.resolve_and_validate_spec(&mut spec).unwrap_err();
-        assert!(err.to_string().contains("supplies params to child workflow 'child'"));
+        assert!(err
+            .to_string()
+            .contains("supplies params to child workflow 'child'"));
         assert!(err.to_string().contains("has no runtime spec_builder"));
     }
 

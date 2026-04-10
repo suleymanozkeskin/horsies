@@ -253,17 +253,31 @@ pub struct WorkflowTemplate<P, T> {
 }
 
 impl<P, T: DeserializeOwned + Clone> WorkflowTemplate<P, T> {
+    pub(crate) fn new(
+        workflow_name: String,
+        definition_key: String,
+        starter: WorkflowStarter,
+        builder: Arc<dyn Fn(P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync + 'static>,
+    ) -> Self {
+        Self {
+            workflow_name,
+            definition_key,
+            starter,
+            builder,
+            _phantom: PhantomData,
+        }
+    }
+
     pub(crate) fn from_definition<D>(starter: WorkflowStarter) -> Self
     where
         D: WorkflowDefinition<Output = T, Params = P> + 'static,
     {
-        Self {
-            workflow_name: D::name().to_owned(),
-            definition_key: D::definition_key().to_owned(),
+        Self::new(
+            D::name().to_owned(),
+            D::definition_key().to_owned(),
             starter,
-            builder: Arc::new(D::build_with),
-            _phantom: PhantomData,
-        }
+            Arc::new(D::build_with),
+        )
     }
 
     pub fn name(&self) -> &str {
@@ -272,6 +286,12 @@ impl<P, T: DeserializeOwned + Clone> WorkflowTemplate<P, T> {
 
     pub fn definition_key(&self) -> &str {
         &self.definition_key
+    }
+
+    /// Create a typed sub-workflow node referencing this registered template.
+    pub fn node(&self) -> SubWorkflowNode<P, T> {
+        SubWorkflowNode::typed(self.workflow_name.clone())
+            .definition_key(self.definition_key.clone())
     }
 
     pub fn build(&self, params: P) -> Result<WorkflowSpec, HorsiesError> {

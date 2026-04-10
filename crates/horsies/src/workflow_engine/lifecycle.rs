@@ -10,7 +10,7 @@ use crate::core::WorkflowSpecRegistry;
 use crate::workflow_engine::engine;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::parse_good_until_from_options;
-use crate::workflow_engine::start::start_child_workflow_in_tx;
+use crate::workflow_engine::start::{materialize_child_spec, start_child_workflow_in_tx};
 
 // ---------------------------------------------------------------------------
 // SQL constants
@@ -639,11 +639,8 @@ async fn enqueue_subworkflow_on_resume(
         .unwrap_or(&task.task_name);
 
     // Resolve by definition_key first, then fall back to name.
-    let registered = task
-        .sub_definition_key
-        .as_deref()
-        .and_then(|key| registry.get_by_definition_key(key))
-        .or_else(|| registry.get(spec_name))
+    let registered = registry
+        .resolve_child_registration(spec_name, task.sub_definition_key.as_deref())
         .ok_or_else(|| WorkflowError::WorkflowNotFound {
             workflow_id: format!(
                 "sub-workflow spec not found (definition_key={:?}, name='{}')",
@@ -655,38 +652,21 @@ async fn enqueue_subworkflow_on_resume(
     let has_child_inputs =
         task.task_args.is_some() || task.task_kwargs.is_some() || task.args_from.is_some();
 
-    let child_spec = if let Some(ref builder) = registered.spec_builder {
-        let args_json = task.task_args.as_deref();
-        let merged_kwargs = merge_args_from_for_ready(
-            pool,
-            workflow_id,
-            task.task_kwargs.as_deref(),
-            &task.args_from,
-            &task.dependencies,
-        )
-        .await?;
-        let kwargs_json = merged_kwargs.as_deref();
-        let mut spec = builder(args_json, kwargs_json).map_err(|e| {
-            WorkflowError::Validation(format!(
-                "spec_builder for '{}' failed: {}",
-                spec_name, e,
-            ))
-        })?;
-        // Dynamic specs bypass register_workflow(), so resolve task options
-        // and queue/priority here.
-        registry.resolve_spec_task_options(&mut spec);
-        registry
-            .resolve_and_validate_spec(&mut spec)
-            .map_err(|e| WorkflowError::Validation(e.to_string()))?;
-        spec
-    } else if has_child_inputs {
-        return Err(WorkflowError::Validation(format!(
-            "child workflow '{}' received params from its parent, but the registered child has no spec_builder",
-            spec_name,
-        )));
-    } else {
-        registered.spec.clone()
-    };
+    let merged_kwargs = merge_args_from_for_ready(
+        pool,
+        workflow_id,
+        task.task_kwargs.as_deref(),
+        &task.args_from,
+        &task.dependencies,
+    )
+    .await?;
+    let child_spec = materialize_child_spec(
+        registered,
+        has_child_inputs,
+        task.task_args.as_deref(),
+        merged_kwargs.as_deref(),
+        registry,
+    )?;
 
     // Get parent depth and root_workflow_id.
     let depth_row: DepthRow = sqlx::query_as(GET_WORKFLOW_DEPTH_SQL)

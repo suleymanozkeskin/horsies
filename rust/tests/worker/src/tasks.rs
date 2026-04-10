@@ -4,8 +4,8 @@
 use serde::{Deserialize, Serialize};
 
 use horsies::{
-    async_task_fn, task, CoreRegisteredWorkflowSpec, Horsies, HorsiesError, QueueMode, TaskError,
-    TaskErrorCode, TaskFunction, TaskOptions, TaskRuntime, WorkflowInput, WorkflowSpecBuilder,
+    async_task_fn, task, Horsies, HorsiesError, QueueMode, TaskError, TaskErrorCode, TaskFunction,
+    TaskOptions, TaskRuntime, WorkflowInput, WorkflowSpecBuilder,
 };
 
 // =============================================================================
@@ -764,32 +764,12 @@ fn register_child_label_workflow(
     app: &mut Horsies,
     task: &TaskFunction<ChildLabelInput, String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let placeholder = build_child_label_workflow(
-        task,
-        ChildLabelInput {
-            input_result: horsies::TaskResult::Ok(0),
-            label: "placeholder".to_owned(),
-        },
-    )?;
-
     let task = task.clone();
-    let registered = CoreRegisteredWorkflowSpec {
-        spec: placeholder,
-        spec_builder: Some(std::sync::Arc::new(move |_args_json, kwargs_json| {
-            let kwargs_json = kwargs_json.ok_or_else(|| {
-                HorsiesError::new("child workflow 'e2e_child_label_pipeline' requires kwargs_json params")
-            })?;
-            let params: ChildLabelInput = serde_json::from_str(kwargs_json).map_err(|e| {
-                HorsiesError::new(format!(
-                    "failed to decode child workflow params for 'e2e_child_label_pipeline': {}",
-                    e
-                ))
-            })?;
-            build_child_label_workflow(&task, params)
-        })),
-    };
-
-    app.register_workflow::<String>(registered)?;
+    let _template = app.register_parameterized_workflow::<ChildLabelInput, String, _>(
+        "e2e_child_label_pipeline",
+        "tests.e2e_child_label_pipeline.v1",
+        move |params| build_child_label_workflow(&task, params),
+    )?;
     Ok(())
 }
 
@@ -811,14 +791,22 @@ pub fn register(app: &mut Horsies) -> Result<(), Box<dyn std::error::Error>> {
                 fn execute(
                     &self,
                     args: &[u8],
-                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = horsies::core::task::fn_trait::RawTaskResult> + Send + '_>> {
+                ) -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = horsies::core::task::fn_trait::RawTaskResult,
+                            > + Send
+                            + '_,
+                    >,
+                > {
                     let args = args.to_vec();
                     Box::pin(async move {
                         let rt = self.0.clone();
-                        let input: $args_type = match horsies::core::task::macros::decode_task_input(&args) {
-                            Ok(v) => v,
-                            Err(e) => return horsies::TaskResult::Err(e),
-                        };
+                        let input: $args_type =
+                            match horsies::core::task::macros::decode_task_input(&args) {
+                                Ok(v) => v,
+                                Err(e) => return horsies::TaskResult::Err(e),
+                            };
                         match $fn_name(rt, input).await {
                             Ok(v) => horsies::core::task::macros::encode_validated_task_output(&v),
                             Err(e) => horsies::TaskResult::Err(e),
@@ -841,7 +829,14 @@ pub fn register(app: &mut Horsies) -> Result<(), Box<dyn std::error::Error>> {
                 fn execute(
                     &self,
                     args: &[u8],
-                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = horsies::core::task::fn_trait::RawTaskResult> + Send + '_>> {
+                ) -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = horsies::core::task::fn_trait::RawTaskResult,
+                            > + Send
+                            + '_,
+                    >,
+                > {
                     let _ = args;
                     Box::pin(async move {
                         let rt = self.0.clone();
@@ -863,13 +858,29 @@ pub fn register(app: &mut Horsies) -> Result<(), Box<dyn std::error::Error>> {
     // Basic tasks (no macro, no TaskRuntime).
     // register_with_queue("default") works in both Default and Custom mode.
     // -------------------------------------------------------------------------
-    app.register_with_queue("e2e_healthcheck", async_task_fn!(healthcheck, ()), "default")?;
-    app.register_with_queue("e2e_simple", async_task_fn!(simple_task, SimpleInput), "default")?;
-    app.register_with_queue("e2e_kwargs", async_task_fn!(kwargs_task, KwargsInput), "default")?;
+    app.register_with_queue(
+        "e2e_healthcheck",
+        async_task_fn!(healthcheck, ()),
+        "default",
+    )?;
+    app.register_with_queue(
+        "e2e_simple",
+        async_task_fn!(simple_task, SimpleInput),
+        "default",
+    )?;
+    app.register_with_queue(
+        "e2e_kwargs",
+        async_task_fn!(kwargs_task, KwargsInput),
+        "default",
+    )?;
     app.register_with_queue("e2e_error", async_task_fn!(error_task, ()), "default")?;
     app.register_with_queue("e2e_slow", async_task_fn!(slow_task, SlowInput), "default")?;
     app.register_with_queue("e2e_no_retry", async_task_fn!(no_retry_task, ()), "default")?;
-    app.register_with_queue("e2e_idempotent", async_task_fn!(idempotent_task, IdempotentInput), "default")?;
+    app.register_with_queue(
+        "e2e_idempotent",
+        async_task_fn!(idempotent_task, IdempotentInput),
+        "default",
+    )?;
 
     // -------------------------------------------------------------------------
     // #[task] macro tasks.
@@ -881,34 +892,102 @@ pub fn register(app: &mut Horsies) -> Result<(), Box<dyn std::error::Error>> {
     if custom {
         // Workflow tasks (no TaskRuntime)
         app.register_with_queue("e2e_wf_step", async_task_fn!(wf_step, StepInput), "default")?;
-        app.register_with_queue("e2e_wf_slow_step", async_task_fn!(wf_slow_step, SlowStepInput), "default")?;
-        app.register_with_queue("e2e_wf_final_result", async_task_fn!(wf_final_result, ()), "default")?;
+        app.register_with_queue(
+            "e2e_wf_slow_step",
+            async_task_fn!(wf_slow_step, SlowStepInput),
+            "default",
+        )?;
+        app.register_with_queue(
+            "e2e_wf_final_result",
+            async_task_fn!(wf_final_result, ()),
+            "default",
+        )?;
         app.register_with_queue("e2e_wf_fail", async_task_fn!(wf_fail, FailInput), "default")?;
-        app.register_with_queue("e2e_wf_fail_int", async_task_fn!(wf_fail_int, FailInput), "default")?;
+        app.register_with_queue(
+            "e2e_wf_fail_int",
+            async_task_fn!(wf_fail_int, FailInput),
+            "default",
+        )?;
         app.register_with_queue("e2e_rt_ping", async_task_fn!(rt_ping, ()), "default")?;
 
         // TaskRuntime-injecting tasks
         let rt = app.task_runtime();
-        app.register_with_queue("e2e_dynamic_rt_start", rt_task!(rt, dynamic_rt_start, DynamicStartInput), "default")?;
-        app.register_with_queue("e2e_dynamic_rt_start_no_args", rt_task_no_args!(rt, dynamic_rt_start_no_args), "default")?;
-        app.register_with_queue("e2e_runtime_helper_dispatch", rt_task_no_args!(rt, runtime_helper_dispatch), "default")?;
-        app.register_with_queue("e2e_runtime_helper_schedule", rt_task_no_args!(rt, runtime_helper_schedule), "default")?;
-        app.register_with_queue("e2e_runtime_helper_handle", rt_task_no_args!(rt, runtime_helper_handle), "default")?;
+        app.register_with_queue(
+            "e2e_dynamic_rt_start",
+            rt_task!(rt, dynamic_rt_start, DynamicStartInput),
+            "default",
+        )?;
+        app.register_with_queue(
+            "e2e_dynamic_rt_start_no_args",
+            rt_task_no_args!(rt, dynamic_rt_start_no_args),
+            "default",
+        )?;
+        app.register_with_queue(
+            "e2e_runtime_helper_dispatch",
+            rt_task_no_args!(rt, runtime_helper_dispatch),
+            "default",
+        )?;
+        app.register_with_queue(
+            "e2e_runtime_helper_schedule",
+            rt_task_no_args!(rt, runtime_helper_schedule),
+            "default",
+        )?;
+        app.register_with_queue(
+            "e2e_runtime_helper_handle",
+            rt_task_no_args!(rt, runtime_helper_handle),
+            "default",
+        )?;
 
         // Workflow context tasks (need .with_workflow_ctx())
-        app.register_with_queue("e2e_wf_ctx_reader", async_task_fn!(wf_ctx_reader, CtxReaderInput).with_workflow_ctx(), "default")?;
-        app.register_with_queue("e2e_wf_ctx_sum", async_task_fn!(wf_ctx_sum, CtxSumInput).with_workflow_ctx(), "default")?;
-        app.register_with_queue("e2e_wf_mixed", async_task_fn!(wf_mixed, MixedInput).with_workflow_ctx(), "default")?;
+        app.register_with_queue(
+            "e2e_wf_ctx_reader",
+            async_task_fn!(wf_ctx_reader, CtxReaderInput).with_workflow_ctx(),
+            "default",
+        )?;
+        app.register_with_queue(
+            "e2e_wf_ctx_sum",
+            async_task_fn!(wf_ctx_sum, CtxSumInput).with_workflow_ctx(),
+            "default",
+        )?;
+        app.register_with_queue(
+            "e2e_wf_mixed",
+            async_task_fn!(wf_mixed, MixedInput).with_workflow_ctx(),
+            "default",
+        )?;
 
         // Data flow tasks (no TaskRuntime)
-        app.register_with_queue("e2e_wf_produce_int", async_task_fn!(wf_produce_int, ProduceIntInput), "default")?;
-        app.register_with_queue("e2e_wf_double", async_task_fn!(wf_double, DoubleInput), "default")?;
-        app.register_with_queue("e2e_wf_sum_two", async_task_fn!(wf_sum_two, SumTwoInput), "default")?;
-        app.register_with_queue("e2e_wf_produce_dict", async_task_fn!(wf_produce_dict, ()), "default")?;
-        app.register_with_queue("e2e_wf_read_dict", async_task_fn!(wf_read_dict, ReadDictInput), "default")?;
+        app.register_with_queue(
+            "e2e_wf_produce_int",
+            async_task_fn!(wf_produce_int, ProduceIntInput),
+            "default",
+        )?;
+        app.register_with_queue(
+            "e2e_wf_double",
+            async_task_fn!(wf_double, DoubleInput),
+            "default",
+        )?;
+        app.register_with_queue(
+            "e2e_wf_sum_two",
+            async_task_fn!(wf_sum_two, SumTwoInput),
+            "default",
+        )?;
+        app.register_with_queue(
+            "e2e_wf_produce_dict",
+            async_task_fn!(wf_produce_dict, ()),
+            "default",
+        )?;
+        app.register_with_queue(
+            "e2e_wf_read_dict",
+            async_task_fn!(wf_read_dict, ReadDictInput),
+            "default",
+        )?;
 
         // Workflow retry tasks
-        app.register_with_queue("e2e_wf_retry_then_ok", async_task_fn!(wf_retry_then_ok, RetryThenOkInput), "default")?;
+        app.register_with_queue(
+            "e2e_wf_retry_then_ok",
+            async_task_fn!(wf_retry_then_ok, RetryThenOkInput),
+            "default",
+        )?;
         app.task::<RetryThenOkInput, String>(
             "e2e_wf_retry_via_registration",
             async_task_fn!(wf_retry_via_registration, RetryThenOkInput),
@@ -969,41 +1048,105 @@ pub fn register(app: &mut Horsies) -> Result<(), Box<dyn std::error::Error>> {
     // -------------------------------------------------------------------------
     // Complex result + error code
     // -------------------------------------------------------------------------
-    app.register_with_queue("e2e_complex_result", async_task_fn!(complex_result_task, ()), "default")?;
-    app.register_with_queue("e2e_error_code", async_task_fn!(error_code_task, ()), "default")?;
+    app.register_with_queue(
+        "e2e_complex_result",
+        async_task_fn!(complex_result_task, ()),
+        "default",
+    )?;
+    app.register_with_queue(
+        "e2e_error_code",
+        async_task_fn!(error_code_task, ()),
+        "default",
+    )?;
 
     // Retry
-    app.register_with_queue("e2e_retry_exhausted", async_task_fn!(retry_exhausted, ()), "default")?;
-    app.register_with_queue("e2e_retry_success", async_task_fn!(retry_success, ()), "default")?;
+    app.register_with_queue(
+        "e2e_retry_exhausted",
+        async_task_fn!(retry_exhausted, ()),
+        "default",
+    )?;
+    app.register_with_queue(
+        "e2e_retry_success",
+        async_task_fn!(retry_success, ()),
+        "default",
+    )?;
 
     // Softcap-specific (same functions, different names for instance parity)
-    app.register_with_queue("e2e_softcap_blocker", async_task_fn!(slow_task, SlowInput), "default")?;
-    app.register_with_queue("e2e_softcap_slow_idempotent", async_task_fn!(slow_idempotent_task, SlowIdempotentInput), "default")?;
+    app.register_with_queue(
+        "e2e_softcap_blocker",
+        async_task_fn!(slow_task, SlowInput),
+        "default",
+    )?;
+    app.register_with_queue(
+        "e2e_softcap_slow_idempotent",
+        async_task_fn!(slow_idempotent_task, SlowIdempotentInput),
+        "default",
+    )?;
 
     // Custom queue tasks (all use the same slow function — queue routing is config-driven)
-    app.register_with_queue("e2e_custom_slow", async_task_fn!(slow_task, SlowInput), "default")?;
+    app.register_with_queue(
+        "e2e_custom_slow",
+        async_task_fn!(slow_task, SlowInput),
+        "default",
+    )?;
     app.register_with_queue("e2e_high", async_task_fn!(healthcheck, ()), "default")?;
     app.register_with_queue("e2e_normal", async_task_fn!(healthcheck, ()), "default")?;
     app.register_with_queue("e2e_low", async_task_fn!(healthcheck, ()), "default")?;
 
     // Cluster cap tasks
-    app.register_with_queue("e2e_cluster_cap_slow", async_task_fn!(slow_task, SlowInput), "default")?;
-    app.register_with_queue("e2e_cluster_cap_fail", async_task_fn!(error_task, ()), "default")?;
+    app.register_with_queue(
+        "e2e_cluster_cap_slow",
+        async_task_fn!(slow_task, SlowInput),
+        "default",
+    )?;
+    app.register_with_queue(
+        "e2e_cluster_cap_fail",
+        async_task_fn!(error_task, ()),
+        "default",
+    )?;
 
     // Recovery tasks
-    app.register_with_queue("e2e_recovery_healthcheck", async_task_fn!(healthcheck, ()), "default")?;
-    app.register_with_queue("e2e_recovery_slow", async_task_fn!(slow_task, SlowInput), "default")?;
+    app.register_with_queue(
+        "e2e_recovery_healthcheck",
+        async_task_fn!(healthcheck, ()),
+        "default",
+    )?;
+    app.register_with_queue(
+        "e2e_recovery_slow",
+        async_task_fn!(slow_task, SlowInput),
+        "default",
+    )?;
 
     // DB ledger task (for softcap race tests)
-    app.register_with_queue("e2e_softcap_db_ledger", async_task_fn!(db_ledger_task, LedgerInput), "default")?;
+    app.register_with_queue(
+        "e2e_softcap_db_ledger",
+        async_task_fn!(db_ledger_task, LedgerInput),
+        "default",
+    )?;
 
     // Requeue guard task (for fault injection tests)
-    app.register_with_queue("e2e_requeue_guard", async_task_fn!(requeue_guard_task, RequeueGuardInput), "default")?;
+    app.register_with_queue(
+        "e2e_requeue_guard",
+        async_task_fn!(requeue_guard_task, RequeueGuardInput),
+        "default",
+    )?;
 
     // Scheduler tasks
-    app.register_with_queue("e2e_scheduled_simple", async_task_fn!(healthcheck, ()), "default")?;
-    app.register_with_queue("e2e_scheduled_with_args", async_task_fn!(simple_task, SimpleInput), "default")?;
-    app.register_with_queue("e2e_catch_up_task", async_task_fn!(healthcheck, ()), "default")?;
+    app.register_with_queue(
+        "e2e_scheduled_simple",
+        async_task_fn!(healthcheck, ()),
+        "default",
+    )?;
+    app.register_with_queue(
+        "e2e_scheduled_with_args",
+        async_task_fn!(simple_task, SimpleInput),
+        "default",
+    )?;
+    app.register_with_queue(
+        "e2e_catch_up_task",
+        async_task_fn!(healthcheck, ()),
+        "default",
+    )?;
 
     Ok(())
 }

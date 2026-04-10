@@ -1209,8 +1209,10 @@ mod tests {
         );
         let spec = b.build().unwrap();
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(spec.tasks[0].kwargs_json.as_deref().unwrap())
-                .unwrap(),
+            serde_json::from_str::<serde_json::Value>(
+                spec.tasks[0].kwargs_json.as_deref().unwrap()
+            )
+            .unwrap(),
             serde_json::json!({"limit":10})
         );
     }
@@ -1232,8 +1234,10 @@ mod tests {
         let spec = b.build().unwrap();
         assert_eq!(spec.tasks[1].args_from.get("source"), Some(&0));
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(spec.tasks[1].kwargs_json.as_deref().unwrap())
-                .unwrap(),
+            serde_json::from_str::<serde_json::Value>(
+                spec.tasks[1].kwargs_json.as_deref().unwrap()
+            )
+            .unwrap(),
             serde_json::json!({"limit":25})
         );
         assert_eq!(spec.tasks[1].dependencies, vec![0]);

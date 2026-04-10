@@ -193,12 +193,10 @@ pub mod custom_queues {
 // workflow tasks — used by workflow_patterns.rs and worker_default
 // ---------------------------------------------------------------------------
 pub mod workflows {
-    use std::sync::Arc;
-
     use horsies::{
-        async_task_fn, CoreRegisteredWorkflowSpec, Horsies, HorsiesError, OnError, SubWorkflowNode,
-        SuccessCase, SuccessPolicy, TaskError, TaskFunction, TaskResult, WorkflowFunction,
-        WorkflowInput, WorkflowSpecBuilder,
+        async_task_fn, Horsies, HorsiesError, OnError, SuccessCase, SuccessPolicy, TaskError,
+        TaskFunction, TaskResult, WorkflowFunction, WorkflowInput, WorkflowSpecBuilder,
+        WorkflowTemplate,
     };
     use serde::{Deserialize, Serialize};
 
@@ -317,6 +315,7 @@ pub mod workflows {
         pub failing_fetch: TaskFunction<String, FetchResult>,
         pub recovery_task: TaskFunction<RecoveryArgs, String>,
         pub child_render: TaskFunction<ChildRenderInput, String>,
+        pub child_render_workflow: WorkflowTemplate<ChildRenderInput, String>,
     }
 
     pub struct WorkflowSpecs {
@@ -340,37 +339,26 @@ pub mod workflows {
     fn register_child_render_workflow(
         app: &mut Horsies,
         task: &TaskFunction<ChildRenderInput, String>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let placeholder = build_child_render_workflow(
-            task,
-            ChildRenderInput {
-                count_result: TaskResult::Ok(0),
-                label: "placeholder".to_owned(),
-            },
-        )?;
-
+    ) -> Result<WorkflowTemplate<ChildRenderInput, String>, Box<dyn std::error::Error>> {
         let task = task.clone();
-        let registered = CoreRegisteredWorkflowSpec {
-            spec: placeholder,
-            spec_builder: Some(Arc::new(move |_args_json, kwargs_json| {
-                let kwargs_json = kwargs_json
-                    .ok_or_else(|| HorsiesError::new("subworkflow_child requires kwargs_json params"))?;
-                let params: ChildRenderInput = serde_json::from_str(kwargs_json).map_err(|e| {
-                    HorsiesError::new(format!(
-                        "failed to decode child params for subworkflow_child: {}",
-                        e
-                    ))
-                })?;
-                build_child_render_workflow(&task, params)
-            })),
-        };
-
-        app.register_workflow::<String>(registered)?;
-        Ok(())
+        let template = app.register_parameterized_workflow::<ChildRenderInput, String, _>(
+            "subworkflow_child",
+            "examples.subworkflow_child.v1",
+            move |params| build_child_render_workflow(&task, params),
+        )?;
+        Ok(template)
     }
 
     /// Register all workflow task functions on the given app.
     pub fn register(app: &mut Horsies) -> Result<WorkflowTasks, Box<dyn std::error::Error>> {
+        let child_render = app
+            .task::<ChildRenderInput, String>(
+                "child_render",
+                async_task_fn!(child_render, ChildRenderInput),
+            )?
+            .register()?;
+        let child_render_workflow = register_child_render_workflow(app, &child_render)?;
+
         Ok(WorkflowTasks {
             fetch_data: app
                 .task::<String, FetchResult>("fetch_data", async_task_fn!(fetch_data, String))?
@@ -402,12 +390,8 @@ pub mod workflows {
                     async_task_fn!(recovery_task, RecoveryArgs),
                 )?
                 .register()?,
-            child_render: app
-                .task::<ChildRenderInput, String>(
-                    "child_render",
-                    async_task_fn!(child_render, ChildRenderInput),
-                )?
-                .register()?,
+            child_render,
+            child_render_workflow,
         })
     }
 
@@ -416,8 +400,6 @@ pub mod workflows {
         app: &mut Horsies,
         tasks: &WorkflowTasks,
     ) -> Result<WorkflowSpecs, Box<dyn std::error::Error>> {
-        register_child_render_workflow(app, &tasks.child_render)?;
-
         // Pattern 1: Linear Chain (fetch -> transform)
         let linear_chain = {
             let mut b = WorkflowSpecBuilder::new("linear_chain");
@@ -514,7 +496,9 @@ pub mod workflows {
                     .arg_from(ChunkArgs::field_input_result(), fetch),
             );
             let child = b.sub_workflow(
-                SubWorkflowNode::<ChildRenderInput, String>::typed("subworkflow_child")
+                tasks
+                    .child_render_workflow
+                    .node()
                     .queue("default")
                     .set(ChildRenderInput::field_label(), "count".to_owned())?
                     .arg_from(ChildRenderInput::field_count_result(), count),

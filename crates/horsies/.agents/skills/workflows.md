@@ -168,6 +168,26 @@ Parameterized workflows do not need a placeholder `define()` implementation.
 Override `build_with(params)` directly and use typed `node()` helpers with
 `.set_input(...)`, `.set(...)`, and `.arg_from(...)`.
 
+For child workflows built from runtime params, prefer
+`app.register_parameterized_workflow(...)` over manually constructing a
+placeholder `RegisteredWorkflowSpec`. It returns a `WorkflowTemplate<P, T>`
+that can both `start(params)` and create a child node with `template.node()`:
+
+```rust
+let child = app.register_parameterized_workflow::<ChildParams, ChildOut, _>(
+    "child_pipeline",
+    "myapp.child_pipeline.v1",
+    move |params| build_child_pipeline(params),
+)?;
+
+let child_ref = builder.sub_workflow(
+    child
+        .node()
+        .set(ChildParams::field_limit(), 25)?
+        .arg_from(ChildParams::field_input_result(), upstream),
+);
+```
+
 Use the binding style that matches the source of the value:
 
 - `.set_input(value)?` for the node's whole explicit input

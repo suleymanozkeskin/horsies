@@ -16,9 +16,8 @@ use sqlx::PgPool;
 
 use horsies::{
     cancel_workflow, pause_workflow, resolve_node_task_options, resume_workflow, Horsies, OnError,
-    PostgresBroker, SubWorkflowNode, SuccessCase, SuccessPolicy, TaskResult, WorkflowHandle,
-    WorkflowSpecBuilder, Worker, WorkerConfig,
-    WorkflowSpecRegistry,
+    PostgresBroker, SubWorkflowNode, SuccessCase, SuccessPolicy, TaskResult, Worker, WorkerConfig,
+    WorkflowHandle, WorkflowSpecBuilder, WorkflowSpecRegistry,
 };
 use horsies_test_support::{
     db,
@@ -30,8 +29,8 @@ use horsies_test_support::{
     fixtures,
 };
 use horsies_test_worker::tasks::{
-    ChildLabelInput, ProduceIntInput, wf_ctx_reader, wf_fail, wf_produce_int, wf_retry_then_ok,
-    wf_retry_via_registration, wf_slow_step, wf_step,
+    wf_ctx_reader, wf_fail, wf_produce_int, wf_retry_then_ok, wf_retry_via_registration,
+    wf_slow_step, wf_step, ChildLabelInput, ProduceIntInput,
 };
 
 // ---------------------------------------------------------------------------
@@ -103,10 +102,7 @@ async fn wait_for_wf_status(pool: &PgPool, wf_id: &str, target: &str, timeout: D
     );
 }
 
-async fn start_registered_wf<T>(
-    pool: &PgPool,
-    spec: &horsies::WorkflowSpec,
-) -> WorkflowHandle<T>
+async fn start_registered_wf<T>(pool: &PgPool, spec: &horsies::WorkflowSpec) -> WorkflowHandle<T>
 where
     T: serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
 {
@@ -1378,8 +1374,16 @@ async fn test_workflow_recovers_after_worker_crash() {
     let mut app_config = fixtures::default_app_config();
     app_config.queue_mode = horsies::QueueMode::Custom;
     app_config.custom_queues = Some(vec![
-        horsies::CustomQueueConfig { name: "default".to_owned(), priority: 1, max_concurrency: 5 },
-        horsies::CustomQueueConfig { name: "recovery".to_owned(), priority: 1, max_concurrency: 1 },
+        horsies::CustomQueueConfig {
+            name: "default".to_owned(),
+            priority: 1,
+            max_concurrency: 5,
+        },
+        horsies::CustomQueueConfig {
+            name: "recovery".to_owned(),
+            priority: 1,
+            max_concurrency: 1,
+        },
     ]);
     let wf_id = start_wf_with_config(&pool, &spec, app_config).await;
 

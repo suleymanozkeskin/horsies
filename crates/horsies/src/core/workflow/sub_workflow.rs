@@ -6,8 +6,8 @@ use serde::Serialize;
 
 use crate::core::task::TaskResult;
 use crate::core::workflow::node::{
-    AnyNode, InputField, JoinType, NodeRef, TypedNodeRef, merge_kwarg_value,
-    serialize_explicit_input,
+    merge_kwarg_value, serialize_explicit_input, AnyNode, InputField, JoinType, NodeRef,
+    TypedNodeRef,
 };
 use crate::HorsiesError;
 
@@ -17,6 +17,7 @@ use crate::HorsiesError;
 /// stored in `task_name` (also available via `sub_workflow_spec_name`).
 pub struct SubWorkflowNode<P = (), T = serde_json::Value> {
     spec_name: String,
+    definition_key: Option<String>,
     args_json: Option<String>,
     kwargs_json: Option<String>,
     dependencies: Vec<usize>,
@@ -45,6 +46,32 @@ impl<P, T> SubWorkflowNode<P, T> {
     pub fn typed(spec_name: impl Into<String>) -> Self {
         Self {
             spec_name: spec_name.into(),
+            definition_key: None,
+            args_json: None,
+            kwargs_json: None,
+            dependencies: Vec::new(),
+            args_from: HashMap::new(),
+            workflow_ctx_from_refs: Vec::new(),
+            workflow_ctx_from_ids: None,
+            queue: None,
+            priority: None,
+            allow_failed_deps: false,
+            join: JoinType::All,
+            min_success: None,
+            good_until: None,
+            node_id: None,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Create a sub-workflow node from a registered workflow definition.
+    pub fn from_definition<D>() -> SubWorkflowNode<D::Params, D::Output>
+    where
+        D: crate::WorkflowDefinition,
+    {
+        SubWorkflowNode::<D::Params, D::Output> {
+            spec_name: D::name().to_owned(),
+            definition_key: Some(D::definition_key().to_owned()),
             args_json: None,
             kwargs_json: None,
             dependencies: Vec::new(),
@@ -261,6 +288,11 @@ impl<P, T> SubWorkflowNode<P, T> {
         &self.spec_name
     }
 
+    pub(crate) fn definition_key(mut self, key: impl Into<String>) -> Self {
+        self.definition_key = Some(key.into());
+        self
+    }
+
     /// Convert into a type-erased `AnyNode` with `is_subworkflow: true`.
     pub fn into_any_node(self, index: usize) -> AnyNode {
         AnyNode {
@@ -285,7 +317,7 @@ impl<P, T> SubWorkflowNode<P, T> {
             node_id: self.node_id,
             task_options_json: None,
             is_subworkflow: true,
-            sub_definition_key: None, // Set by the builder when resolving against registry.
+            sub_definition_key: self.definition_key,
         }
     }
 }
@@ -402,9 +434,8 @@ mod tests {
             .set(MixedParams::field_limit(), 25)
             .unwrap_err();
 
-        assert!(
-            err.to_string()
-                .contains("cannot use field-level .set(...) on a sub-workflow node")
-        );
+        assert!(err
+            .to_string()
+            .contains("cannot use field-level .set(...) on a sub-workflow node"));
     }
 }

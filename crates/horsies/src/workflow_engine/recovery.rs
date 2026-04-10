@@ -7,7 +7,7 @@ use crate::core::{TaskResult, WorkflowSpecRegistry};
 use crate::workflow_engine::engine;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::parse_good_until_from_options;
-use crate::workflow_engine::start::start_child_workflow_in_tx;
+use crate::workflow_engine::start::{materialize_child_spec, start_child_workflow_in_tx};
 
 // ---------------------------------------------------------------------------
 // Recovery report
@@ -80,7 +80,9 @@ WHERE wt.status = 'READY'
 
 /// Case 1.5: READY sub-workflow wf_tasks with no child workflow started.
 const CASE1_5_READY_SUBWORKFLOW_SQL: &str = "\
-SELECT wt.workflow_id, wt.task_index, wt.task_name, wt.sub_workflow_name, wt.sub_definition_key
+SELECT wt.workflow_id, wt.task_index, wt.task_name,
+       wt.task_args, wt.task_kwargs, wt.args_from, wt.dependencies,
+       wt.sub_workflow_name, wt.sub_definition_key
 FROM horsies_workflow_tasks wt
 JOIN horsies_workflows w ON w.id = wt.workflow_id
 WHERE wt.status = 'READY'
@@ -224,6 +226,10 @@ struct ReadySubworkflowRow {
     workflow_id: String,
     task_index: i32,
     task_name: String,
+    task_args: Option<String>,
+    task_kwargs: Option<String>,
+    args_from: Option<serde_json::Value>,
+    dependencies: Vec<i32>,
     sub_workflow_name: Option<String>,
     sub_definition_key: Option<String>,
 }
@@ -734,17 +740,32 @@ async fn start_stuck_subworkflow(
         .unwrap_or(&row.task_name);
 
     // Resolve by definition_key first, then fall back to name.
-    let registered = row
-        .sub_definition_key
-        .as_deref()
-        .and_then(|key| registry.get_by_definition_key(key))
-        .or_else(|| registry.get(spec_name))
+    let registered = registry
+        .resolve_child_registration(spec_name, row.sub_definition_key.as_deref())
         .ok_or_else(|| WorkflowError::WorkflowNotFound {
             workflow_id: format!(
                 "sub-workflow spec not found (definition_key={:?}, name='{}')",
                 row.sub_definition_key, spec_name,
             ),
         })?;
+
+    let merged_kwargs = merge_args_from_for_ready(
+        pool,
+        &row.workflow_id,
+        row.task_kwargs.as_deref(),
+        &row.args_from,
+        &row.dependencies,
+    )
+    .await?;
+    let has_child_inputs =
+        row.task_args.is_some() || row.task_kwargs.is_some() || row.args_from.is_some();
+    let child_spec = materialize_child_spec(
+        registered,
+        has_child_inputs,
+        row.task_args.as_deref(),
+        merged_kwargs.as_deref(),
+        registry,
+    )?;
 
     let depth_row: DepthRow = sqlx::query_as(GET_DEPTH_AND_ROOT_SQL)
         .bind(&row.workflow_id)
@@ -762,7 +783,7 @@ async fn start_stuck_subworkflow(
 
     let child_id = start_child_workflow_in_tx(
         &mut tx,
-        &registered.spec,
+        &child_spec,
         &row.workflow_id,
         row.task_index,
         parent_depth + 1,

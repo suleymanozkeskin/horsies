@@ -194,6 +194,25 @@ let notify = builder.task(
 named receiving input struct, but it is now the fallback path rather than the
 default pattern for `arg_from(...)`.
 
+For child workflows built from runtime params, prefer
+`app.register_parameterized_workflow(...)` over hand-rolling a placeholder
+registered spec:
+
+```rust
+let child = app.register_parameterized_workflow::<ChildParams, ChildOut, _>(
+    "child_pipeline",
+    "myapp.child_pipeline.v1",
+    move |params| build_child_pipeline(params),
+)?;
+
+let child_ref = builder.sub_workflow(
+    child
+        .node()
+        .set(ChildParams::field_limit(), 25)?
+        .arg_from(ChildParams::field_input_result(), upstream),
+);
+```
+
 ### Start workflows from anywhere
 
 Registered workflows also expose global dispatch. Register once at startup,
