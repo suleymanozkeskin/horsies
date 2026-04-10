@@ -1,6 +1,4 @@
-use horsies::{
-    AppConfig, CustomQueueConfig, PostgresConfig, QueueMode, RecoveryConfig, WorkerResilienceConfig,
-};
+use horsies::{AppConfig, CustomQueueConfig, QueueMode, RecoveryConfig};
 
 /// Queue name constants.
 pub const HIGH: &str = "high";
@@ -37,11 +35,7 @@ pub fn app_config(db_url: &str) -> AppConfig {
                 max_concurrency: 48,
             },
         ]),
-        broker: PostgresConfig::from_url(db_url),
         cluster_wide_cap: Some(50),
-        prefetch_buffer: 0,
-        claim_lease_ms: None,
-        max_claim_renew_age_ms: 180_000,
         recovery: RecoveryConfig {
             auto_requeue_stale_claimed: true,
             claimed_stale_threshold_ms: 4500,
@@ -52,8 +46,6 @@ pub fn app_config(db_url: &str) -> AppConfig {
             claimer_heartbeat_interval_ms: 1500,
             ..RecoveryConfig::default()
         },
-        resilience: WorkerResilienceConfig::default(),
-        schedule: None,
-        resend_on_transient_err: false,
+        ..AppConfig::for_database_url(db_url)
     }
 }

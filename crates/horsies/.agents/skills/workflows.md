@@ -188,6 +188,12 @@ let child_ref = builder.sub_workflow(
 );
 ```
 
+Use `register_parameterized_workflow(...)` for leaf child workflows. If the
+builder may itself emit nested child workflows, use
+`register_parameterized_workflow_with_children(...)` and declare the child
+workflow definition keys so registration-time cycle detection and `app.check()`
+can validate those edges before runtime.
+
 Use the binding style that matches the source of the value:
 
 - `.set_input(value)?` for the node's whole explicit input

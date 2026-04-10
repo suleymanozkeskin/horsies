@@ -4,8 +4,7 @@
 //! `workflow_builder(...).cases(...).register()` story.
 
 use horsies::{
-    task, AppConfig, Horsies, PostgresConfig, QueueMode, TaskError, TaskResult, WorkflowInput,
-    WorkflowSpecBuilder,
+    task, AppConfig, Horsies, TaskError, TaskResult, WorkflowInput, WorkflowSpecBuilder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,28 +39,10 @@ async fn process_data(input: ProcessInput) -> Result<String, TaskError> {
 }
 
 fn config() -> AppConfig {
-    AppConfig {
-        queue_mode: QueueMode::Default,
-        custom_queues: None,
-        broker: PostgresConfig {
-            database_url: std::env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "postgresql://localhost/horsies_example".to_owned()),
-            pool_pre_ping: true,
-            pool_size: 5,
-            max_overflow: 5,
-            pool_timeout: 30,
-            pool_recycle: 1800,
-            echo: false,
-        },
-        resend_on_transient_err: false,
-        cluster_wide_cap: None,
-        prefetch_buffer: 0,
-        claim_lease_ms: None,
-        max_claim_renew_age_ms: 180_000,
-        recovery: horsies::RecoveryConfig::default(),
-        resilience: horsies::WorkerResilienceConfig::default(),
-        schedule: None,
-    }
+    AppConfig::for_database_url(
+        std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgresql://localhost/horsies_example".to_owned()),
+    )
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

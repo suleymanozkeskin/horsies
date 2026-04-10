@@ -196,7 +196,9 @@ default pattern for `arg_from(...)`.
 
 For child workflows built from runtime params, prefer
 `app.register_parameterized_workflow(...)` over hand-rolling a placeholder
-registered spec:
+registered spec. If the child workflow itself may reference other child
+workflows, use `app.register_parameterized_workflow_with_children(...)` and
+declare those child definition keys for preflight cycle detection:
 
 ```rust
 let child = app.register_parameterized_workflow::<ChildParams, ChildOut, _>(
@@ -212,6 +214,11 @@ let child_ref = builder.sub_workflow(
         .arg_from(ChildParams::field_input_result(), upstream),
 );
 ```
+
+Use `register_parameterized_workflow(...)` for leaf child workflows. Use
+`register_parameterized_workflow_with_children(...)` when the builder may
+emit nested child workflows and you want `app.check()` / registration-time
+cycle detection to see those edges ahead of runtime.
 
 ### Start workflows from anywhere
 

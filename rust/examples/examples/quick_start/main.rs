@@ -24,7 +24,7 @@ mod workflows;
 
 use std::time::Duration;
 
-use horsies::{AppConfig, CustomQueueConfig, Horsies, PostgresConfig, QueueMode, TaskResult};
+use horsies::{AppConfig, CustomQueueConfig, Horsies, QueueMode, TaskResult};
 use horsies_examples::common;
 
 use models::*;
@@ -49,23 +49,7 @@ fn config() -> AppConfig {
                 max_concurrency: 5,
             },
         ]),
-        broker: PostgresConfig {
-            database_url: common::db_url(),
-            pool_pre_ping: true,
-            pool_size: 30,
-            max_overflow: 30,
-            pool_timeout: 30,
-            pool_recycle: 1800,
-            echo: false,
-        },
-        resend_on_transient_err: false,
-        cluster_wide_cap: None,
-        prefetch_buffer: 0,
-        claim_lease_ms: None,
-        max_claim_renew_age_ms: 180_000,
-        recovery: horsies::RecoveryConfig::default(),
-        resilience: horsies::WorkerResilienceConfig::default(),
-        schedule: None,
+        ..AppConfig::for_database_url(common::db_url())
     }
 }
 

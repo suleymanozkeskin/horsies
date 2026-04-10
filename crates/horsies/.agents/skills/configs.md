@@ -12,15 +12,9 @@ Detailed reference for configuration types, validation rules, and runtime setup.
 Root configuration passed to the unified `horsies::Horsies::new(config)`.
 
 ```rust
-use horsies::{AppConfig, Horsies, PostgresConfig, QueueMode};
+use horsies::{AppConfig, Horsies};
 
-let config = AppConfig {
-    broker: PostgresConfig {
-        database_url: "postgresql://user:pass@host/db".into(),
-        ..Default::default()
-    },
-    ..Default::default()
-};
+let config = AppConfig::for_database_url("postgresql://user:pass@host/db");
 let app = Horsies::new(config)?;
 ```
 
@@ -33,7 +27,7 @@ let app = Horsies::new(config)?;
 | `broker` | `PostgresConfig` | required | Database connection config |
 | `cluster_wide_cap` | `Option<u32>` | `None` | Max RUNNING tasks across cluster |
 | `prefetch_buffer` | `u32` | `0` | 0 = hard cap; >0 = soft cap with lease |
-| `claim_lease_ms` | `Option<u64>` | `None` | Claim lease duration; None = default 60s |
+| `claim_lease_ms` | `Option<u32>` | `None` | Claim lease duration; None = default 60s |
 | `max_claim_renew_age_ms` | `u64` | `180_000` | Max age of CLAIMED task for heartbeat renewal |
 | `recovery` | `RecoveryConfig` | `RecoveryConfig::default()` | Stale task detection and retention |
 | `resilience` | `WorkerResilienceConfig` | default | Worker retry behavior |
@@ -51,18 +45,14 @@ let app = Horsies::new(config)?;
 ## `PostgresConfig`
 
 ```rust
-let config = PostgresConfig {
-    database_url: "postgresql://user:pass@localhost:5432/mydb".into(),
-    pool_size: 30,
-    ..Default::default()
-};
+let config = PostgresConfig::from_url("postgresql://user:pass@localhost:5432/mydb");
 ```
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `database_url` | `String` | required | PostgreSQL connection URL |
 | `pool_size` | `u32` | `30` | Connection pool size |
-| `connect_timeout_seconds` | `u64` | `30` | Connection timeout |
+| `pool_timeout` | `u32` | `30` | Timeout in seconds for acquiring a pooled connection |
 
 ## `QueueMode`
 
@@ -96,7 +86,7 @@ let config = AppConfig {
         CustomQueueConfig { name: "critical".into(), priority: 1, max_concurrency: 10 },
         CustomQueueConfig { name: "background".into(), priority: 50, max_concurrency: 3 },
     ]),
-    ..
+    ..AppConfig::for_database_url("postgresql://localhost/mydb")
 };
 ```
 
@@ -167,12 +157,8 @@ Same payload identity across all retry attempts (task_id, sent_at, SHA fixed onc
 
 ```rust
 let config = AppConfig {
-    schedule: Some(ScheduleConfig {
-        enabled: true,
-        schedules: vec![task_schedule],
-        check_interval_seconds: 1,
-    }),
-    ..
+    schedule: Some(ScheduleConfig::new(vec![task_schedule]).check_interval_seconds(1)),
+    ..AppConfig::for_database_url("postgresql://localhost/mydb")
 };
 ```
 
@@ -181,27 +167,20 @@ All `TaskSchedule.name` values must be unique.
 ### `TaskSchedule`
 
 ```rust
-TaskSchedule {
-    name: "sync_inventory".into(),
-    task_name: "sync_inventory".into(),
-    pattern: SchedulePattern::Interval(IntervalSchedule { seconds: Some(30), ..Default::default() }),
-    args: None,
-    kwargs: None,
-    queue_name: None,
-    enabled: true,
-    timezone: "UTC".into(),
-    catch_up_missed: false,
-    max_catch_up_runs: 100,
-}
+TaskSchedule::new(
+    "sync_inventory",
+    "sync_inventory",
+    SchedulePattern::Interval(IntervalSchedule { seconds: Some(30), ..Default::default() }),
+)
 ```
 
 ### Schedule Patterns
 
 - `IntervalSchedule` — `{ seconds, minutes, hours, days }` (at least one set)
 - `HourlySchedule` — `{ minute, second }`
-- `DailySchedule` — `{ hour, minute, second }`
-- `WeeklySchedule` — `{ days: Vec<Weekday>, hour, minute, second }`
-- `MonthlySchedule` — `{ day, hour, minute, second }`
+- `DailySchedule` — `{ time: NaiveTime }`
+- `WeeklySchedule` — `{ days: Vec<Weekday>, time: NaiveTime }`
+- `MonthlySchedule` — `{ day, time: NaiveTime }`
 
 ## `Horsies::check()`
 

@@ -93,6 +93,41 @@ pub enum AppConfigError {
 }
 
 impl AppConfig {
+    /// Create an `AppConfig` from only a database URL, using library defaults
+    /// for all other settings.
+    ///
+    /// This is the intended lightweight constructor for examples and simple
+    /// apps. Override specific fields with struct update syntax when needed.
+    ///
+    /// ```rust
+    /// use horsies::{AppConfig, QueueMode, CustomQueueConfig};
+    ///
+    /// let config = AppConfig {
+    ///     queue_mode: QueueMode::Custom,
+    ///     custom_queues: Some(vec![CustomQueueConfig {
+    ///         name: "critical".into(),
+    ///         priority: 1,
+    ///         max_concurrency: 10,
+    ///     }]),
+    ///     ..AppConfig::for_database_url("postgresql://localhost/mydb")
+    /// };
+    /// ```
+    pub fn for_database_url(url: impl Into<String>) -> Self {
+        Self {
+            queue_mode: default_queue_mode(),
+            custom_queues: None,
+            broker: PostgresConfig::from_url(url),
+            cluster_wide_cap: None,
+            prefetch_buffer: 0,
+            claim_lease_ms: None,
+            max_claim_renew_age_ms: default_max_claim_renew_age_ms(),
+            recovery: RecoveryConfig::default(),
+            resilience: WorkerResilienceConfig::default(),
+            schedule: None,
+            resend_on_transient_err: false,
+        }
+    }
+
     /// Format the configuration as a human-readable string for logging.
     ///
     /// Masks the password in the database URL to avoid leaking credentials.
@@ -699,6 +734,19 @@ mod tests {
     fn defaults_custom_queues_is_none() {
         let config = default_config();
         assert!(config.custom_queues.is_none());
+    }
+
+    #[test]
+    fn for_database_url_uses_expected_defaults() {
+        let config = AppConfig::for_database_url("postgresql://localhost/test");
+        assert!(matches!(config.queue_mode, QueueMode::Default));
+        assert!(config.custom_queues.is_none());
+        assert_eq!(config.broker.database_url, "postgresql://localhost/test");
+        assert_eq!(config.prefetch_buffer, 0);
+        assert!(config.claim_lease_ms.is_none());
+        assert_eq!(config.max_claim_renew_age_ms, MAX_CLAIM_RENEW_AGE_MS);
+        assert!(config.schedule.is_none());
+        assert!(!config.resend_on_transient_err);
     }
 
     #[test]

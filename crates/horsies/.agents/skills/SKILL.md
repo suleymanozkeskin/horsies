@@ -169,6 +169,9 @@ match child.start("https://example.com/data.json".to_owned()).await {
 For child workflows whose params come from a parent workflow, prefer
 `app.register_parameterized_workflow(...)`. It returns a `WorkflowTemplate<P, T>`
 that can both `start(params)` and create a child node via `template.node()`.
+If the builder may emit nested child workflows, use
+`register_parameterized_workflow_with_children(...)` and declare those child
+definition keys so cycle checks can run before runtime.
 
 ### Dynamic (runtime-built spec)
 

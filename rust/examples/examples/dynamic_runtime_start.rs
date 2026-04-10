@@ -4,8 +4,8 @@
 //! runtime-built workflow shape without requiring a full worker setup.
 
 use horsies::{
-    task, AppConfig, Horsies, HorsiesError, PostgresConfig, QueueMode, TaskError, TaskResult,
-    TaskRuntime, WorkflowInput, WorkflowSpec, WorkflowSpecBuilder,
+    task, AppConfig, Horsies, HorsiesError, TaskError, TaskResult, TaskRuntime, WorkflowInput,
+    WorkflowSpec, WorkflowSpecBuilder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -74,28 +74,10 @@ async fn start_dynamic_child(rt: TaskRuntime, input: SourceInput) -> Result<Stri
 }
 
 fn config() -> AppConfig {
-    AppConfig {
-        queue_mode: QueueMode::Default,
-        custom_queues: None,
-        broker: PostgresConfig {
-            database_url: std::env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "postgresql://localhost/horsies_example".to_owned()),
-            pool_pre_ping: true,
-            pool_size: 5,
-            max_overflow: 5,
-            pool_timeout: 30,
-            pool_recycle: 1800,
-            echo: false,
-        },
-        resend_on_transient_err: false,
-        cluster_wide_cap: None,
-        prefetch_buffer: 0,
-        claim_lease_ms: None,
-        max_claim_renew_age_ms: 180_000,
-        recovery: horsies::RecoveryConfig::default(),
-        resilience: horsies::WorkerResilienceConfig::default(),
-        schedule: None,
-    }
+    AppConfig::for_database_url(
+        std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgresql://localhost/horsies_example".to_owned()),
+    )
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

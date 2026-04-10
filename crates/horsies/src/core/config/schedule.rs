@@ -37,6 +37,17 @@ pub struct IntervalSchedule {
     pub days: Option<u32>,
 }
 
+impl Default for IntervalSchedule {
+    fn default() -> Self {
+        Self {
+            seconds: None,
+            minutes: None,
+            hours: None,
+            days: None,
+        }
+    }
+}
+
 impl IntervalSchedule {
     /// Calculate total interval in seconds.
     pub fn total_seconds(&self) -> u64 {
@@ -242,6 +253,64 @@ pub struct TaskSchedule {
     pub max_catch_up_runs: u32,
 }
 
+impl TaskSchedule {
+    /// Create a scheduled task with the required fields and library defaults
+    /// for everything else.
+    pub fn new(
+        name: impl Into<String>,
+        task_name: impl Into<String>,
+        pattern: SchedulePattern,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            task_name: task_name.into(),
+            pattern,
+            args: serde_json::Value::Null,
+            kwargs: serde_json::Value::Null,
+            queue_name: None,
+            enabled: default_true(),
+            timezone: default_timezone(),
+            catch_up_missed: false,
+            max_catch_up_runs: default_max_catch_up_runs(),
+        }
+    }
+
+    pub fn args(mut self, args: serde_json::Value) -> Self {
+        self.args = args;
+        self
+    }
+
+    pub fn kwargs(mut self, kwargs: serde_json::Value) -> Self {
+        self.kwargs = kwargs;
+        self
+    }
+
+    pub fn queue(mut self, queue_name: impl Into<String>) -> Self {
+        self.queue_name = Some(queue_name.into());
+        self
+    }
+
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    pub fn timezone(mut self, timezone: impl Into<String>) -> Self {
+        self.timezone = timezone.into();
+        self
+    }
+
+    pub fn catch_up_missed(mut self, catch_up_missed: bool) -> Self {
+        self.catch_up_missed = catch_up_missed;
+        self
+    }
+
+    pub fn max_catch_up_runs(mut self, max_catch_up_runs: u32) -> Self {
+        self.max_catch_up_runs = max_catch_up_runs;
+        self
+    }
+}
+
 fn default_max_catch_up_runs() -> u32 {
     100
 }
@@ -267,7 +336,36 @@ pub struct ScheduleConfig {
     pub check_interval_seconds: u32,
 }
 
+impl Default for ScheduleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            schedules: Vec::new(),
+            check_interval_seconds: default_check_interval(),
+        }
+    }
+}
+
 impl ScheduleConfig {
+    /// Create a `ScheduleConfig` with the provided schedules and default
+    /// scheduler settings.
+    pub fn new(schedules: Vec<TaskSchedule>) -> Self {
+        Self {
+            schedules,
+            ..Self::default()
+        }
+    }
+
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    pub fn check_interval_seconds(mut self, seconds: u32) -> Self {
+        self.check_interval_seconds = seconds;
+        self
+    }
+
     /// Validate the schedule configuration.
     ///
     /// Checks:
@@ -335,6 +433,15 @@ mod tests {
             days: None,
         };
         assert_eq!(schedule.total_seconds(), 5400);
+    }
+
+    #[test]
+    fn interval_default_is_empty() {
+        let schedule = IntervalSchedule::default();
+        assert!(schedule.seconds.is_none());
+        assert!(schedule.minutes.is_none());
+        assert!(schedule.hours.is_none());
+        assert!(schedule.days.is_none());
     }
 
     #[test]
@@ -724,6 +831,22 @@ mod tests {
     }
 
     #[test]
+    fn schedule_config_default_matches_serde_defaults() {
+        let config = ScheduleConfig::default();
+        assert!(config.enabled);
+        assert!(config.schedules.is_empty());
+        assert_eq!(config.check_interval_seconds, 1);
+    }
+
+    #[test]
+    fn schedule_config_new_uses_defaults() {
+        let config = ScheduleConfig::new(vec![]);
+        assert!(config.enabled);
+        assert!(config.schedules.is_empty());
+        assert_eq!(config.check_interval_seconds, 1);
+    }
+
+    #[test]
     fn schedule_config_validate_propagates_hourly_errors() {
         let config = ScheduleConfig {
             enabled: true,
@@ -840,6 +963,54 @@ mod tests {
         assert!(sched.queue_name.is_none());
         assert_eq!(sched.args, serde_json::Value::default());
         assert_eq!(sched.kwargs, serde_json::Value::default());
+    }
+
+    #[test]
+    fn task_schedule_new_populates_defaults() {
+        let sched = TaskSchedule::new(
+            "daily-task",
+            "my_task",
+            SchedulePattern::Interval(IntervalSchedule {
+                seconds: Some(30),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(sched.name, "daily-task");
+        assert_eq!(sched.task_name, "my_task");
+        assert!(sched.enabled);
+        assert_eq!(sched.timezone, "UTC");
+        assert!(!sched.catch_up_missed);
+        assert_eq!(sched.max_catch_up_runs, 100);
+        assert!(sched.queue_name.is_none());
+        assert_eq!(sched.args, serde_json::Value::Null);
+        assert_eq!(sched.kwargs, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn task_schedule_builder_methods_override_defaults() {
+        let sched = TaskSchedule::new(
+            "full",
+            "my_task",
+            SchedulePattern::Hourly(HourlySchedule {
+                minute: 15,
+                second: 0,
+            }),
+        )
+        .args(serde_json::json!([1, 2]))
+        .kwargs(serde_json::json!({"key": "val"}))
+        .queue("high")
+        .enabled(false)
+        .timezone("Europe/London")
+        .catch_up_missed(true)
+        .max_catch_up_runs(50);
+
+        assert_eq!(sched.queue_name.as_deref(), Some("high"));
+        assert!(!sched.enabled);
+        assert_eq!(sched.timezone, "Europe/London");
+        assert!(sched.catch_up_missed);
+        assert_eq!(sched.max_catch_up_runs, 50);
+        assert_eq!(sched.args, serde_json::json!([1, 2]));
+        assert_eq!(sched.kwargs, serde_json::json!({"key": "val"}));
     }
 
     #[test]

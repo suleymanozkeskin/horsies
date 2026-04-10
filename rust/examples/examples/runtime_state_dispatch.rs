@@ -5,7 +5,7 @@
 //! - call `task_name::send(args)` or `task_name::schedule(delay, args)` from anywhere
 //! - use `task_name::handle(&rt)` for explicit runtime-based dispatch
 
-use horsies::{task, AppConfig, Horsies, PostgresConfig, QueueMode, TaskError, TaskRuntime};
+use horsies::{task, AppConfig, Horsies, TaskError, TaskRuntime};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct AddNumbersInput {
@@ -47,28 +47,10 @@ async fn enqueue_add_numbers(_rt: TaskRuntime) -> Result<(), TaskError> {
 }
 
 fn config() -> AppConfig {
-    AppConfig {
-        queue_mode: QueueMode::Default,
-        custom_queues: None,
-        broker: PostgresConfig {
-            database_url: std::env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "postgresql://localhost/horsies_example".to_owned()),
-            pool_pre_ping: true,
-            pool_size: 5,
-            max_overflow: 5,
-            pool_timeout: 30,
-            pool_recycle: 1800,
-            echo: false,
-        },
-        resend_on_transient_err: false,
-        cluster_wide_cap: None,
-        prefetch_buffer: 0,
-        claim_lease_ms: None,
-        max_claim_renew_age_ms: 180_000,
-        recovery: horsies::RecoveryConfig::default(),
-        resilience: horsies::WorkerResilienceConfig::default(),
-        schedule: None,
-    }
+    AppConfig::for_database_url(
+        std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgresql://localhost/horsies_example".to_owned()),
+    )
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

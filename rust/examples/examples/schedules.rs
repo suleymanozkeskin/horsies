@@ -33,64 +33,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = common::custom_mode::app_config(&db_url);
 
     // ── 2. Build schedule configuration ────────────────────────────────
-    let schedule_config = ScheduleConfig {
-        enabled: true,
-        schedules: vec![
-            // Fires every 3 seconds -- short enough to see activity during
-            // the 10-second demo window.
-            TaskSchedule {
-                name: "fast_interval".to_string(),
-                task_name: "sync_inventory".to_string(),
-                pattern: SchedulePattern::Interval(IntervalSchedule {
-                    seconds: Some(3),
-                    minutes: None,
-                    hours: None,
-                    days: None,
-                }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
-                queue_name: Some(common::custom_mode::LOW.to_string()),
-                enabled: true,
-                timezone: "UTC".to_string(),
-                catch_up_missed: false,
-                max_catch_up_runs: 100,
-            },
-            // Daily at 02:00 -- won't fire during the demo, but shows
-            // how to configure a daily schedule.
-            TaskSchedule {
-                name: "daily_report".to_string(),
-                task_name: "generate_report".to_string(),
-                pattern: SchedulePattern::Daily(DailySchedule {
-                    time: NaiveTime::from_hms_opt(2, 0, 0).expect("valid time"),
-                }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
-                queue_name: Some(common::custom_mode::LOW.to_string()),
-                enabled: true,
-                timezone: "UTC".to_string(),
-                catch_up_missed: false,
-                max_catch_up_runs: 100,
-            },
-            // Weekly on Sunday at 03:00 -- configuration demo only.
-            TaskSchedule {
-                name: "weekly_cleanup".to_string(),
-                task_name: "cleanup_data".to_string(),
-                pattern: SchedulePattern::Weekly(WeeklySchedule {
-                    days: vec![Weekday::Sunday],
-                    time: NaiveTime::from_hms_opt(3, 0, 0).expect("valid time"),
-                }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
-                queue_name: Some(common::custom_mode::LOW.to_string()),
-                enabled: true,
-                timezone: "UTC".to_string(),
-                catch_up_missed: false,
-                max_catch_up_runs: 100,
-            },
-        ],
-        // The scheduler polls for due schedules at this interval.
-        check_interval_seconds: 1,
-    };
+    let schedule_config = ScheduleConfig::new(vec![
+        // Fires every 3 seconds -- short enough to see activity during
+        // the 10-second demo window.
+        TaskSchedule::new(
+            "fast_interval",
+            "sync_inventory",
+            SchedulePattern::Interval(IntervalSchedule {
+                seconds: Some(3),
+                ..Default::default()
+            }),
+        )
+        .queue(common::custom_mode::LOW),
+        // Daily at 02:00 -- won't fire during the demo, but shows
+        // how to configure a daily schedule.
+        TaskSchedule::new(
+            "daily_report",
+            "generate_report",
+            SchedulePattern::Daily(DailySchedule {
+                time: NaiveTime::from_hms_opt(2, 0, 0).expect("valid time"),
+            }),
+        )
+        .queue(common::custom_mode::LOW),
+        // Weekly on Sunday at 03:00 -- configuration demo only.
+        TaskSchedule::new(
+            "weekly_cleanup",
+            "cleanup_data",
+            SchedulePattern::Weekly(WeeklySchedule {
+                days: vec![Weekday::Sunday],
+                time: NaiveTime::from_hms_opt(3, 0, 0).expect("valid time"),
+            }),
+        )
+        .queue(common::custom_mode::LOW),
+    ])
+    // The scheduler polls for due schedules at this interval.
+    .check_interval_seconds(1);
 
     config.schedule = Some(schedule_config.clone());
 
