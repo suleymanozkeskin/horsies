@@ -29,6 +29,12 @@ pub struct RegisteredWorkflowDefinition {
     pub definition_key: String,
     /// Runtime builder that decodes parent-provided params and returns a concrete spec.
     pub spec_builder: SpecBuilderFn,
+    /// Definition keys of child workflows this definition may reference.
+    ///
+    /// Used for static cycle detection at registration time. The runtime
+    /// ancestor guard in `start.rs` remains as defense-in-depth for cases
+    /// where declarations are incomplete or topology varies with params.
+    pub declared_children: Vec<String>,
 }
 
 impl std::fmt::Debug for RegisteredWorkflowDefinition {
@@ -36,6 +42,7 @@ impl std::fmt::Debug for RegisteredWorkflowDefinition {
         f.debug_struct("RegisteredWorkflowDefinition")
             .field("name", &self.name)
             .field("definition_key", &self.definition_key)
+            .field("declared_children", &self.declared_children)
             .finish()
     }
 }
@@ -107,6 +114,17 @@ impl Clone for WorkflowSpecRegistry {
     }
 }
 
+/// Identity of a node in the workflow dependency graph.
+///
+/// Static specs are keyed by name (legacy). Dynamic definitions are keyed
+/// by definition_key (stable identity). The enum prevents accidental
+/// cross-comparison between the two identity spaces.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum WorkflowVertex<'a> {
+    StaticName(&'a str),
+    DynamicDefinitionKey(&'a str),
+}
+
 impl WorkflowSpecRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
@@ -153,7 +171,7 @@ impl WorkflowSpecRegistry {
         // cycle is found.
         self.specs.insert(name.clone(), registered);
 
-        if let Some(cycle_path) = self.detect_subworkflow_cycle(&name) {
+        if let Some(cycle_path) = self.detect_subworkflow_cycle(WorkflowVertex::StaticName(&name)) {
             // Remove the spec we just inserted since it creates a cycle.
             let removed = self
                 .specs
@@ -210,63 +228,157 @@ impl WorkflowSpecRegistry {
             .with_help("each workflow definition_key must be unique"));
         }
 
-        self.dynamic_definitions
-            .insert(registered.name.clone(), registered);
+        let name = registered.name.clone();
+        let def_key = registered.definition_key.clone();
+        self.dynamic_definitions.insert(name.clone(), registered);
+
+        if let Some(cycle_path) =
+            self.detect_subworkflow_cycle(WorkflowVertex::DynamicDefinitionKey(&def_key))
+        {
+            let removed = self
+                .dynamic_definitions
+                .remove(&name)
+                .expect("definition was just inserted above");
+            let cycle_str = cycle_path.join(" -> ");
+            return Err(HorsiesError::new("cycle detected in nested workflows")
+                .with_code(ErrorCode::WorkflowCycleDetected)
+                .with_note(format!(
+                    "registering '{}' creates a circular reference: {}",
+                    removed.name, cycle_str,
+                ))
+                .with_note("cycles in nested workflows are not allowed")
+                .with_help("remove the circular child workflow reference from declared_children"));
+        }
+
         Ok(())
     }
 
-    /// Detect sub-workflow cycles reachable from `start_name`.
+    /// Resolve a child edge originating from a static spec's sub-workflow node.
     ///
-    /// Uses DFS with a recursion stack. Returns `Some(cycle_path)` if a cycle
-    /// is found, `None` otherwise. The cycle_path shows the chain of workflow
-    /// names forming the cycle.
-    fn detect_subworkflow_cycle(&self, start_name: &str) -> Option<Vec<String>> {
-        let mut visited: HashSet<&str> = HashSet::new();
-        let mut stack: Vec<&str> = Vec::new();
-
-        fn dfs<'a>(
-            current: &'a str,
-            specs: &'a HashMap<String, RegisteredWorkflowSpec>,
-            visited: &mut HashSet<&'a str>,
-            stack: &mut Vec<&'a str>,
-        ) -> Option<Vec<String>> {
-            if stack.contains(&current) {
-                // Found a cycle -- build the cycle path from the first
-                // occurrence of `current` in the stack to the end.
-                let pos = stack
-                    .iter()
-                    .position(|&s| s == current)
-                    .expect("current must be in stack (cycle detected)");
-                let mut cycle_path: Vec<String> =
-                    stack[pos..].iter().map(|s| s.to_string()).collect();
-                cycle_path.push(current.to_string());
-                return Some(cycle_path);
+    /// Prefers `sub_definition_key` when present (may resolve to either a
+    /// dynamic definition or a static spec). Falls back to the child name.
+    fn resolve_child_from_static_edge(
+        &self,
+        child_name: &str,
+        sub_definition_key: Option<&str>,
+    ) -> Option<WorkflowVertex<'_>> {
+        if let Some(key) = sub_definition_key {
+            if let Some(def) = self.get_definition_by_definition_key(key) {
+                return Some(WorkflowVertex::DynamicDefinitionKey(&def.definition_key));
             }
-
-            if visited.contains(current) {
-                return None;
+            if let Some(spec) = self.get_by_definition_key(key) {
+                return Some(WorkflowVertex::StaticName(&spec.spec.name));
             }
+        }
+        if let Some(def) = self.dynamic_definitions.get(child_name) {
+            return Some(WorkflowVertex::DynamicDefinitionKey(&def.definition_key));
+        }
+        if let Some(spec) = self.specs.get(child_name) {
+            return Some(WorkflowVertex::StaticName(&spec.spec.name));
+        }
+        None
+    }
 
-            visited.insert(current);
-            stack.push(current);
+    /// Resolve a child edge originating from a dynamic definition's
+    /// `declared_children` (which stores definition keys).
+    fn resolve_child_from_definition_key(&self, key: &str) -> Option<WorkflowVertex<'_>> {
+        if let Some(def) = self.get_definition_by_definition_key(key) {
+            return Some(WorkflowVertex::DynamicDefinitionKey(&def.definition_key));
+        }
+        if let Some(spec) = self.get_by_definition_key(key) {
+            return Some(WorkflowVertex::StaticName(&spec.spec.name));
+        }
+        None
+    }
 
-            if let Some(registered) = specs.get(current) {
-                for task in &registered.spec.tasks {
-                    if task.is_subworkflow {
-                        if let Some(child_name) = task.task_name.strip_prefix("__sub_workflow:") {
-                            if let Some(cycle) = dfs(child_name, specs, visited, stack) {
+    /// Human-friendly display name for a vertex (used in error messages).
+    fn display_name_for_vertex(&self, vertex: WorkflowVertex<'_>) -> String {
+        match vertex {
+            WorkflowVertex::StaticName(name) => name.to_owned(),
+            WorkflowVertex::DynamicDefinitionKey(key) => {
+                if let Some(def) = self.get_definition_by_definition_key(key) {
+                    format!("{} [{}]", def.name, key)
+                } else {
+                    key.to_owned()
+                }
+            }
+        }
+    }
+
+    /// Detect sub-workflow cycles reachable from `start`.
+    ///
+    /// Uses DFS with a recursion stack across both static specs (keyed by
+    /// name) and dynamic definitions (keyed by definition_key). Returns
+    /// `Some(cycle_path)` with human-readable names if a cycle is found.
+    fn detect_subworkflow_cycle(&self, start: WorkflowVertex<'_>) -> Option<Vec<String>> {
+        let mut visited: HashSet<WorkflowVertex<'_>> = HashSet::new();
+        let mut stack: Vec<WorkflowVertex<'_>> = Vec::new();
+        self.dfs_cycle(start, &mut visited, &mut stack)
+    }
+
+    fn dfs_cycle<'a>(
+        &'a self,
+        current: WorkflowVertex<'a>,
+        visited: &mut HashSet<WorkflowVertex<'a>>,
+        stack: &mut Vec<WorkflowVertex<'a>>,
+    ) -> Option<Vec<String>> {
+        if let Some(pos) = stack.iter().position(|v| *v == current) {
+            let mut cycle_path: Vec<String> = stack[pos..]
+                .iter()
+                .map(|v| self.display_name_for_vertex(*v))
+                .collect();
+            cycle_path.push(self.display_name_for_vertex(current));
+            return Some(cycle_path);
+        }
+
+        if visited.contains(&current) {
+            return None;
+        }
+
+        visited.insert(current);
+        stack.push(current);
+
+        let result = match current {
+            WorkflowVertex::StaticName(name) => {
+                if let Some(registered) = self.specs.get(name) {
+                    for task in &registered.spec.tasks {
+                        if task.is_subworkflow {
+                            let child_name = task
+                                .task_name
+                                .strip_prefix("__sub_workflow:")
+                                .unwrap_or(&task.task_name);
+                            if let Some(child_vertex) = self.resolve_child_from_static_edge(
+                                child_name,
+                                task.sub_definition_key.as_deref(),
+                            ) {
+                                if let Some(cycle) = self.dfs_cycle(child_vertex, visited, stack) {
+                                    return Some(cycle);
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            WorkflowVertex::DynamicDefinitionKey(key) => {
+                if let Some(def) = self.get_definition_by_definition_key(key) {
+                    let children: Vec<String> = def.declared_children.clone();
+                    for child_key in &children {
+                        if let Some(child_vertex) =
+                            self.resolve_child_from_definition_key(child_key)
+                        {
+                            if let Some(cycle) = self.dfs_cycle(child_vertex, visited, stack) {
                                 return Some(cycle);
                             }
                         }
                     }
                 }
+                None
             }
+        };
 
-            stack.pop();
-            None
-        }
-
-        dfs(start_name, &self.specs, &mut visited, &mut stack)
+        stack.pop();
+        result
     }
 
     /// Look up a registered workflow spec by name.
@@ -384,6 +496,11 @@ impl WorkflowSpecRegistry {
     /// Iterate over registered workflow specs.
     pub fn iter(&self) -> impl Iterator<Item = &RegisteredWorkflowSpec> {
         self.specs.values()
+    }
+
+    /// Iterate over registered dynamic workflow definitions.
+    pub fn iter_definitions(&self) -> impl Iterator<Item = &RegisteredWorkflowDefinition> {
+        self.dynamic_definitions.values()
     }
 
     fn contains_name(&self, name: &str) -> bool {
@@ -959,6 +1076,225 @@ mod tests {
         assert!(result.is_err());
         // wf_b should NOT be registered.
         assert!(!registry.contains("wf_b"));
+        assert_eq!(registry.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Dynamic definition cycle detection tests
+    // -----------------------------------------------------------------------
+
+    fn make_dynamic_def(
+        name: &str,
+        def_key: &str,
+        declared_children: &[&str],
+    ) -> RegisteredWorkflowDefinition {
+        RegisteredWorkflowDefinition {
+            name: name.to_owned(),
+            definition_key: def_key.to_owned(),
+            spec_builder: Arc::new(|_, _| {
+                let mut b = WorkflowSpecBuilder::new("dummy");
+                b.task(TaskNode::<()>::raw("dummy_task"));
+                b.build()
+            }),
+            declared_children: declared_children.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// Helper: create a static spec whose sub-workflow node carries a
+    /// `sub_definition_key` (the way `WorkflowTemplate::node()` works).
+    fn make_spec_with_sub_definition_key(
+        name: &str,
+        child_name: &str,
+        child_def_key: &str,
+    ) -> WorkflowSpec {
+        let mut builder = WorkflowSpecBuilder::new(name);
+        let root = builder.task(TaskNode::<()>::raw("root_task"));
+        builder.sub_workflow(
+            SubWorkflowNode::new(child_name)
+                .definition_key(child_def_key)
+                .waits_for(root)
+                .node_id(format!("sub_{}", child_name)),
+        );
+        builder.build().unwrap()
+    }
+
+    #[test]
+    fn dynamic_self_cycle_rejected() {
+        // A declares itself as a child.
+        let mut registry = WorkflowSpecRegistry::new();
+        let result = registry.register_definition(make_dynamic_def(
+            "dyn_a",
+            "test.dyn_a.v1",
+            &["test.dyn_a.v1"],
+        ));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, Some(ErrorCode::WorkflowCycleDetected));
+    }
+
+    #[test]
+    fn dynamic_direct_cycle_rejected() {
+        // A declares child B, B declares child A.
+        let mut registry = WorkflowSpecRegistry::new();
+        registry
+            .register_definition(make_dynamic_def(
+                "dyn_a",
+                "test.dyn_a.v1",
+                &["test.dyn_b.v1"],
+            ))
+            .unwrap();
+        let result = registry.register_definition(make_dynamic_def(
+            "dyn_b",
+            "test.dyn_b.v1",
+            &["test.dyn_a.v1"],
+        ));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, Some(ErrorCode::WorkflowCycleDetected));
+    }
+
+    #[test]
+    fn dynamic_no_cycle_accepted() {
+        // A declares child B, B has no children. No cycle.
+        let mut registry = WorkflowSpecRegistry::new();
+        registry
+            .register_definition(make_dynamic_def("dyn_b", "test.dyn_b.v1", &[]))
+            .unwrap();
+        registry
+            .register_definition(make_dynamic_def(
+                "dyn_a",
+                "test.dyn_a.v1",
+                &["test.dyn_b.v1"],
+            ))
+            .unwrap();
+        assert_eq!(registry.len(), 2);
+    }
+
+    #[test]
+    fn dynamic_empty_declared_children_accepted() {
+        // Empty declared_children is the default. No cycle check issues.
+        let mut registry = WorkflowSpecRegistry::new();
+        registry
+            .register_definition(make_dynamic_def("dyn_a", "test.dyn_a.v1", &[]))
+            .unwrap();
+        assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn static_to_dynamic_to_static_cycle_rejected() {
+        // Static A -> Dynamic B (via sub_definition_key) -> Static A (via declared_children).
+        let mut registry = WorkflowSpecRegistry::new();
+
+        // Register static A referencing dynamic B via definition key.
+        let spec_a = make_spec_with_sub_definition_key("wf_a", "dyn_b", "test.dyn_b.v1");
+        registry
+            .register(RegisteredWorkflowSpec {
+                spec: spec_a,
+                spec_builder: None,
+            })
+            .unwrap();
+
+        // Static A has definition_key so dynamic B can reference it.
+        // But wait -- static A doesn't have a definition_key set in make_spec_with_sub_definition_key.
+        // We need A to have a definition_key for B to declare it as a child.
+        // Let's use a different approach: B declares A by A's definition_key.
+
+        // Actually, let's give A a definition_key.
+        let mut registry = WorkflowSpecRegistry::new();
+        let mut spec_a = make_spec_with_sub_definition_key("wf_a", "dyn_b", "test.dyn_b.v1");
+        spec_a.definition_key = Some("test.wf_a.v1".to_owned());
+        registry
+            .register(RegisteredWorkflowSpec {
+                spec: spec_a,
+                spec_builder: None,
+            })
+            .unwrap();
+
+        // Register dynamic B that declares static A as child.
+        let result = registry.register_definition(make_dynamic_def(
+            "dyn_b",
+            "test.dyn_b.v1",
+            &["test.wf_a.v1"],
+        ));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, Some(ErrorCode::WorkflowCycleDetected));
+    }
+
+    #[test]
+    fn dynamic_to_static_to_dynamic_cycle_rejected() {
+        // Dynamic A declares child Static B, Static B refs Dynamic A (via sub_definition_key).
+        let mut registry = WorkflowSpecRegistry::new();
+
+        // Register dynamic A that declares static B as child.
+        registry
+            .register_definition(make_dynamic_def(
+                "dyn_a",
+                "test.dyn_a.v1",
+                &["test.wf_b.v1"],
+            ))
+            .unwrap();
+
+        // Register static B that references dynamic A via sub_definition_key.
+        let mut spec_b = make_spec_with_sub_definition_key("wf_b", "dyn_a", "test.dyn_a.v1");
+        spec_b.definition_key = Some("test.wf_b.v1".to_owned());
+        let result = registry.register(RegisteredWorkflowSpec {
+            spec: spec_b,
+            spec_builder: None,
+        });
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, Some(ErrorCode::WorkflowCycleDetected));
+    }
+
+    #[test]
+    fn dynamic_diamond_no_false_positive() {
+        // A declares [B, C], B declares [D], C declares [D]. No cycle.
+        let mut registry = WorkflowSpecRegistry::new();
+        registry
+            .register_definition(make_dynamic_def("dyn_d", "test.dyn_d.v1", &[]))
+            .unwrap();
+        registry
+            .register_definition(make_dynamic_def(
+                "dyn_b",
+                "test.dyn_b.v1",
+                &["test.dyn_d.v1"],
+            ))
+            .unwrap();
+        registry
+            .register_definition(make_dynamic_def(
+                "dyn_c",
+                "test.dyn_c.v1",
+                &["test.dyn_d.v1"],
+            ))
+            .unwrap();
+        registry
+            .register_definition(make_dynamic_def(
+                "dyn_a",
+                "test.dyn_a.v1",
+                &["test.dyn_b.v1", "test.dyn_c.v1"],
+            ))
+            .unwrap();
+        assert_eq!(registry.len(), 4);
+    }
+
+    #[test]
+    fn dynamic_cycle_rejected_does_not_leave_definition_in_registry() {
+        let mut registry = WorkflowSpecRegistry::new();
+        registry
+            .register_definition(make_dynamic_def(
+                "dyn_a",
+                "test.dyn_a.v1",
+                &["test.dyn_b.v1"],
+            ))
+            .unwrap();
+        let result = registry.register_definition(make_dynamic_def(
+            "dyn_b",
+            "test.dyn_b.v1",
+            &["test.dyn_a.v1"],
+        ));
+        assert!(result.is_err());
+        assert!(!registry.contains_definition("dyn_b"));
         assert_eq!(registry.len(), 1);
     }
 }

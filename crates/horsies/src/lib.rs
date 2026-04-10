@@ -492,6 +492,60 @@ impl Horsies {
         ))
     }
 
+    /// Register a parameterized workflow builder with declared child workflow
+    /// edges for static cycle detection.
+    ///
+    /// Same as [`register_parameterized_workflow`](Self::register_parameterized_workflow)
+    /// but also declares which child workflows the builder may reference
+    /// (by definition key). This enables preflight cycle detection at
+    /// registration time while preserving the runtime ancestor guard as
+    /// defense-in-depth.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let child = app.register_parameterized_workflow::<ChildP, ChildT, _>(
+    ///     "child", "myapp.child.v1", |p| build_child(p),
+    /// )?;
+    ///
+    /// let parent = app.register_parameterized_workflow_with_children::<ParentP, ParentT, _>(
+    ///     "parent", "myapp.parent.v1",
+    ///     &["myapp.child.v1"],
+    ///     |p| build_parent(p),
+    /// )?;
+    /// ```
+    pub fn register_parameterized_workflow_with_children<P, T, F>(
+        &mut self,
+        name: &str,
+        definition_key: &str,
+        declared_children: &[&str],
+        builder: F,
+    ) -> Result<WorkflowTemplate<P, T>, HorsiesError>
+    where
+        P: DeserializeOwned + Serialize + Clone + Send + Sync + 'static,
+        T: DeserializeOwned + Clone + Send + Sync + 'static,
+        F: Fn(P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync + 'static,
+    {
+        let builder = Arc::new(builder);
+        self.core
+            .register_parameterized_workflow_with_children::<P, _>(
+                name,
+                definition_key,
+                declared_children,
+                {
+                    let builder = Arc::clone(&builder);
+                    move |params| builder(params)
+                },
+            )?;
+        self.refresh_workflow_registry_cache();
+        Ok(WorkflowTemplate::new(
+            name.to_owned(),
+            definition_key.to_owned(),
+            self.workflow_starter(),
+            builder,
+        ))
+    }
+
     pub fn workflow_template<D>(&self) -> WorkflowTemplate<D::Params, D::Output>
     where
         D: WorkflowDefinition + 'static,

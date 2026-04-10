@@ -300,6 +300,43 @@ impl Horsies {
                 name: name.to_owned(),
                 definition_key: definition_key.to_owned(),
                 spec_builder: wrapped,
+                declared_children: vec![],
+            })?;
+        self.refresh_workflow_metadata_maps();
+        Ok(())
+    }
+
+    /// Register a parameterized workflow definition with declared child
+    /// workflow edges for static cycle detection.
+    ///
+    /// Same as [`register_parameterized_workflow`](Self::register_parameterized_workflow)
+    /// but also declares which child workflows the builder may reference
+    /// (by definition key). This enables preflight cycle detection at
+    /// registration time.
+    pub fn register_parameterized_workflow_with_children<P, F>(
+        &mut self,
+        name: &str,
+        definition_key: &str,
+        declared_children: &[&str],
+        builder: F,
+    ) -> Result<(), HorsiesError>
+    where
+        P: DeserializeOwned + Serialize + Send + Sync + 'static,
+        F: Fn(P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync + 'static,
+    {
+        let name_owned = name.to_owned();
+        let wrapped = Arc::new(move |args_json: Option<&str>, kwargs_json: Option<&str>| {
+            let params =
+                decode_parameterized_workflow_input::<P>(&name_owned, args_json, kwargs_json)?;
+            builder(params)
+        });
+
+        self.workflow_registry
+            .register_definition(RegisteredWorkflowDefinition {
+                name: name.to_owned(),
+                definition_key: definition_key.to_owned(),
+                spec_builder: wrapped,
+                declared_children: declared_children.iter().map(|s| s.to_string()).collect(),
             })?;
         self.refresh_workflow_metadata_maps();
         Ok(())
@@ -798,6 +835,32 @@ impl Horsies {
                     ))
                     .with_code(ErrorCode::WorkflowNoDefinitionKey),
                 );
+            }
+        }
+
+        // Phase 3.1: Dynamic child declaration validation.
+        // Parameterized child workflows may declare child workflow edges by
+        // definition_key for preflight cycle detection. At check() time the
+        // full registry is assembled, so unresolved declared child keys are
+        // almost certainly typos or missing registrations.
+        for registered in self.workflow_registry.iter_definitions() {
+            for child_key in &registered.declared_children {
+                if self
+                    .workflow_registry
+                    .resolve_child_registration("", Some(child_key.as_str()))
+                    .is_none()
+                {
+                    report.add(
+                        HorsiesError::new(format!(
+                            "parameterized workflow '{}' declares unknown child definition_key '{}'",
+                            registered.name, child_key,
+                        ))
+                        .with_code(ErrorCode::WorkflowInvalidDependency)
+                        .with_help(
+                            "register the child workflow with that definition_key before calling check(), or fix the typo in declared_children",
+                        ),
+                    );
+                }
             }
         }
 
@@ -1938,6 +2001,59 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("HRS-016"));
         assert!(rendered.contains("missing_key"));
+    }
+
+    #[test]
+    fn check_reports_unknown_declared_child_definition_key() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+
+        app.register_parameterized_workflow_with_children::<(), _>(
+            "parent_dynamic",
+            "tests.parent_dynamic.v1",
+            &["tests.missing_child.v1"],
+            |_params| {
+                let mut builder = WorkflowSpecBuilder::new("parent_dynamic");
+                builder.definition_key("tests.parent_dynamic.v1");
+                builder.build()
+            },
+        )
+        .unwrap();
+
+        let err = app.check().unwrap_err();
+        let rendered = err.to_string();
+        assert!(rendered.contains("HRS-006"));
+        assert!(rendered.contains("parent_dynamic"));
+        assert!(rendered.contains("tests.missing_child.v1"));
+    }
+
+    #[test]
+    fn check_allows_declared_child_registered_later() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+
+        app.register_parameterized_workflow_with_children::<(), _>(
+            "parent_dynamic",
+            "tests.parent_dynamic.v1",
+            &["tests.child_dynamic.v1"],
+            |_params| {
+                let mut builder = WorkflowSpecBuilder::new("parent_dynamic");
+                builder.definition_key("tests.parent_dynamic.v1");
+                builder.build()
+            },
+        )
+        .unwrap();
+
+        app.register_parameterized_workflow::<(), _>(
+            "child_dynamic",
+            "tests.child_dynamic.v1",
+            |_params| {
+                let mut builder = WorkflowSpecBuilder::new("child_dynamic");
+                builder.definition_key("tests.child_dynamic.v1");
+                builder.build()
+            },
+        )
+        .unwrap();
+
+        assert!(app.check().is_ok());
     }
 
     #[test]

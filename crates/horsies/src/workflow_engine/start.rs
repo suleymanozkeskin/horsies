@@ -745,6 +745,7 @@ mod tests {
         let registered = RegisteredWorkflowDefinition {
             name: "child_dynamic".to_owned(),
             definition_key: "tests.child_dynamic.v1".to_owned(),
+            declared_children: vec![],
             spec_builder: Arc::new(|_args_json, kwargs_json| {
                 let kwargs = serde_json::from_str::<serde_json::Value>(kwargs_json.unwrap())
                     .map_err(|e| crate::HorsiesError::new(e.to_string()))?;
