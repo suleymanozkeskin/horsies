@@ -47,6 +47,8 @@ pub(crate) enum OwnershipOutcome {
         started_at: chrono::DateTime<Utc>,
         task_error: TaskError,
     },
+    /// Task expired while CLAIMED but before user code started.
+    ExpiredBeforeStart { result_json: String },
     /// Ownership lost or workflow stopped — skip execution.
     Aborted,
 }
@@ -222,6 +224,27 @@ pub(crate) async fn confirm_ownership_and_set_running(
             OwnershipOutcome::Running(started_at)
         }
         Ok(None) => {
+            match broker
+                .expire_claimed_task_before_start(task_id, worker_id)
+                .await
+            {
+                Ok(Some(result_json)) => {
+                    tracing::info!(
+                        task_id = %task_id,
+                        "task expired before execution started",
+                    );
+                    return OwnershipOutcome::ExpiredBeforeStart { result_json };
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        error = %e,
+                        "failed to check claimed task expiry before start",
+                    );
+                }
+            }
+
             match broker.get_workflow_status_for_task(task_id).await {
                 Ok(Some(ref wf_status)) if wf_status == "PAUSED" || wf_status == "CANCELLED" => {
                     tracing::info!(
@@ -1088,6 +1111,14 @@ pub(crate) async fn finalize_pre_execution_failure(
                 Some(FinalizeOutcome::Retried) | None => None,
             };
         }
+        OwnershipOutcome::ExpiredBeforeStart { result_json } => {
+            return Some(Phase2Work {
+                task_id,
+                result_json,
+                is_success: false,
+                queue_name,
+            });
+        }
         OwnershipOutcome::Aborted => return None,
     };
 
@@ -1177,6 +1208,14 @@ pub(crate) async fn execute_and_finalize(
                 }),
                 Some(FinalizeOutcome::Retried) | None => None,
             };
+        }
+        OwnershipOutcome::ExpiredBeforeStart { result_json } => {
+            return Some(Phase2Work {
+                task_id,
+                result_json,
+                is_success: false,
+                queue_name,
+            });
         }
         OwnershipOutcome::Aborted => return None,
     };

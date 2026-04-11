@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use uuid::Uuid;
@@ -19,6 +19,27 @@ use crate::lazy_broker::LazyBroker;
 const SEND_RETRY_COUNT: u32 = 3;
 const SEND_RETRY_INITIAL_MS: u64 = 200;
 const SEND_RETRY_MAX_MS: u64 = 2000;
+
+/// Per-send options for ad-hoc task sends.
+///
+/// For workflow tasks, prefer [`TaskNode::good_until`] so the deadline is
+/// attached when the workflow spec is built.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TaskSendOptions {
+    good_until: Option<DateTime<Utc>>,
+}
+
+impl TaskSendOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the task expiry deadline for this send.
+    pub fn good_until(mut self, deadline: DateTime<Utc>) -> Self {
+        self.good_until = Some(deadline);
+        self
+    }
+}
 
 pub struct TaskRegistrationBuilder<'a, A, T> {
     pub(crate) app: &'a mut crate::Horsies,
@@ -92,6 +113,15 @@ impl<'a, A: Serialize + 'static, T: DeserializeOwned + Clone + 'static>
         let resolved_priority = self.app.core.effective_priority(queue_name, None);
 
         if let Some(ref opts) = self.task_options {
+            if opts.good_until.is_some() {
+                return Err(HorsiesError::new(
+                    "definition-time good_until is not supported; use \
+                     task.with_options(TaskSendOptions::new().good_until(deadline)).send(args) \
+                     for ad-hoc sends, or task.node().good_until(deadline) for workflow tasks",
+                )
+                .with_code(ErrorCode::TaskInvalidOptions));
+            }
+
             if let Some(ref rp) = opts.retry_policy {
                 rp.validate()
                     .map_err(|e| HorsiesError::new(format!("invalid retry policy: {}", e)))?;
@@ -153,6 +183,11 @@ pub struct TaskFunction<A, T> {
     _phantom: PhantomData<fn(A) -> T>,
 }
 
+pub struct TaskFunctionSendOptions<'a, A, T> {
+    task: &'a TaskFunction<A, T>,
+    options: TaskSendOptions,
+}
+
 impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
     pub(crate) fn new(
         task_name: String,
@@ -191,64 +226,60 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
         self.task_options.as_ref()
     }
 
+    pub fn with_options(&self, options: TaskSendOptions) -> TaskFunctionSendOptions<'_, A, T> {
+        TaskFunctionSendOptions {
+            task: self,
+            options,
+        }
+    }
+
     pub async fn send(&self, args: A) -> TaskSendResult<TaskHandle<T>> {
-        self.check_suppression()?;
-        let (args_json, kwargs_json) = serialize_args::<A>(&self.task_name, &args)?;
+        self.send_inner(args, GoodUntilMode::Inherit, None).await
+    }
 
-        let task_options_json = self.serialize_task_options()?;
-        let good_until = self.task_options.as_ref().and_then(|o| o.good_until);
-        let sent_at = Utc::now();
-        let pre_task_id = Uuid::new_v4().to_string();
+    pub async fn send_with_options(
+        &self,
+        options: TaskSendOptions,
+        args: A,
+    ) -> TaskSendResult<TaskHandle<T>> {
+        self.send_inner(args, GoodUntilMode::Override(options.good_until), None)
+            .await
+    }
 
-        let enqueue_sha = compute_enqueue_sha(
-            &self.task_name,
-            &self.queue_name,
-            self.priority as i32,
-            args_json.as_deref(),
-            kwargs_json.as_deref(),
-            sent_at,
-            good_until,
-            None,
-            task_options_json.as_deref(),
-        );
+    pub async fn schedule(&self, delay: Duration, args: A) -> TaskSendResult<TaskHandle<T>> {
+        self.send_inner(args, GoodUntilMode::Inherit, Some(delay))
+            .await
+    }
 
-        let payload = TaskSendPayload {
-            task_name: self.task_name.clone(),
-            queue_name: self.queue_name.clone(),
-            priority: self.priority as i32,
-            args_json: args_json.clone(),
-            kwargs_json: kwargs_json.clone(),
-            sent_at,
-            good_until,
-            enqueue_delay_seconds: None,
-            task_options: task_options_json.clone(),
-            enqueue_sha: enqueue_sha.clone(),
-        };
-
-        self.enqueue_with_retry(
-            args_json.as_deref(),
-            kwargs_json.as_deref(),
-            &pre_task_id,
-            sent_at,
-            None,
-            good_until,
-            task_options_json.as_deref(),
-            &enqueue_sha,
-            &payload,
+    pub async fn schedule_with_options(
+        &self,
+        options: TaskSendOptions,
+        delay: Duration,
+        args: A,
+    ) -> TaskSendResult<TaskHandle<T>> {
+        self.send_inner(
+            args,
+            GoodUntilMode::Override(options.good_until),
+            Some(delay),
         )
         .await
     }
 
-    pub async fn schedule(&self, delay: Duration, args: A) -> TaskSendResult<TaskHandle<T>> {
+    async fn send_inner(
+        &self,
+        args: A,
+        good_until_mode: GoodUntilMode,
+        delay: Option<Duration>,
+    ) -> TaskSendResult<TaskHandle<T>> {
         self.check_suppression()?;
         let (args_json, kwargs_json) = serialize_args::<A>(&self.task_name, &args)?;
 
-        let task_options_json = self.serialize_task_options()?;
-        let good_until = self.task_options.as_ref().and_then(|o| o.good_until);
+        let (good_until, task_options_json) = self.resolve_send_options(good_until_mode)?;
         let sent_at = Utc::now();
-        let delay_secs = delay.as_secs() as i64;
-        let enqueued_at = sent_at
-            + chrono::Duration::from_std(delay).unwrap_or_else(|_| chrono::Duration::zero());
+        let delay_secs = delay.map(|d| d.as_secs() as i64);
+        let enqueued_at = delay.map(|d| {
+            sent_at + chrono::Duration::from_std(d).unwrap_or_else(|_| chrono::Duration::zero())
+        });
         let pre_task_id = Uuid::new_v4().to_string();
 
         let enqueue_sha = compute_enqueue_sha(
@@ -259,7 +290,7 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
             kwargs_json.as_deref(),
             sent_at,
             good_until,
-            Some(delay_secs),
+            delay_secs,
             task_options_json.as_deref(),
         );
 
@@ -271,7 +302,7 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
             kwargs_json: kwargs_json.clone(),
             sent_at,
             good_until,
-            enqueue_delay_seconds: Some(delay_secs),
+            enqueue_delay_seconds: delay_secs,
             task_options: task_options_json.clone(),
             enqueue_sha: enqueue_sha.clone(),
         };
@@ -281,7 +312,7 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
             kwargs_json.as_deref(),
             &pre_task_id,
             sent_at,
-            Some(enqueued_at),
+            enqueued_at,
             good_until,
             task_options_json.as_deref(),
             &enqueue_sha,
@@ -434,26 +465,65 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
             })
     }
 
+    #[allow(clippy::result_large_err)]
+    fn resolve_send_options(
+        &self,
+        good_until_mode: GoodUntilMode,
+    ) -> TaskSendResult<(Option<DateTime<Utc>>, Option<String>)> {
+        match good_until_mode {
+            GoodUntilMode::Inherit => {
+                let good_until = self.task_options.as_ref().and_then(|o| o.good_until);
+                let task_options_json = self.serialize_task_options()?;
+                Ok((good_until, task_options_json))
+            }
+            GoodUntilMode::Override(good_until) => {
+                let task_options_json = self.serialize_task_options_with_good_until(good_until)?;
+                Ok((good_until, task_options_json))
+            }
+        }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn serialize_task_options_with_good_until(
+        &self,
+        good_until: Option<DateTime<Utc>>,
+    ) -> TaskSendResult<Option<String>> {
+        let mut opts = self.task_options.clone().unwrap_or_else(|| TaskOptions {
+            task_name: self.task_name.clone(),
+            queue_name: Some(self.queue_name.clone()),
+            good_until: None,
+            auto_retry_for: None,
+            retry_policy: None,
+        });
+
+        opts.task_name = self.task_name.clone();
+        opts.queue_name = Some(self.queue_name.clone());
+        opts.good_until = good_until;
+
+        if opts.good_until.is_none() && opts.auto_retry_for.is_none() && opts.retry_policy.is_none()
+        {
+            return Ok(None);
+        }
+
+        serde_json::to_string(&opts)
+            .map(Some)
+            .map_err(|e| TaskSendError {
+                code: TaskSendErrorCode::ValidationFailed,
+                message: format!("task_options serialization failed: {}", e),
+                retryable: false,
+                task_id: None,
+                payload: None,
+            })
+    }
+
     pub fn node(&self) -> TaskNode<T, A> {
         let mut node = TaskNode::<T, A>::raw(&self.task_name)
             .queue(self.queue_name.clone())
             .priority(self.priority as i32);
 
         if let Some(ref opts) = self.task_options {
-            if let Some(deadline) = opts.good_until {
-                node = node.good_until(deadline);
-            }
-            match serde_json::to_string(opts) {
-                Ok(json) => {
-                    node = node.task_options(json);
-                }
-                Err(e) => {
-                    tracing::error!(
-                        task_name = %self.task_name,
-                        error = %e,
-                        "failed to serialize task options for workflow node; node-level task_options omitted",
-                    );
-                }
+            if let Some(json) = opts.serialize_retry_options() {
+                node = node.task_options(json);
             }
         }
 
@@ -476,6 +546,24 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
         }
         Ok(())
     }
+}
+
+impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunctionSendOptions<'_, A, T> {
+    pub async fn send(&self, args: A) -> TaskSendResult<TaskHandle<T>> {
+        self.task.send_with_options(self.options, args).await
+    }
+
+    pub async fn schedule(&self, delay: Duration, args: A) -> TaskSendResult<TaskHandle<T>> {
+        self.task
+            .schedule_with_options(self.options, delay, args)
+            .await
+    }
+}
+
+#[derive(Clone, Copy)]
+enum GoodUntilMode {
+    Inherit,
+    Override(Option<DateTime<Utc>>),
 }
 
 impl<A, T> Clone for TaskFunction<A, T> {
@@ -597,13 +685,19 @@ fn serialize_args<A: Serialize>(
 
 #[cfg(test)]
 mod tests {
-    use super::{serialize_args, validate_retry, RetryKind};
+    use super::{
+        serialize_args, validate_retry, GoodUntilMode, RetryKind, TaskFunction, TaskSendOptions,
+    };
     use crate::async_task_fn;
     use crate::core::{
         AppConfig, CustomQueueConfig, ErrorCode, Horsies as CoreHorsies, PostgresConfig, QueueMode,
         RecoveryConfig, TaskSendError, TaskSendErrorCode, TaskSendPayload, WorkerResilienceConfig,
     };
+    use crate::core::{TaskErrorCode, TaskOptions};
+    use crate::lazy_broker::LazyBroker;
     use serde::{Deserialize, Serialize};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
 
     fn valid_config() -> AppConfig {
         AppConfig {
@@ -643,6 +737,19 @@ mod tests {
         Ok(value * 2)
     }
 
+    fn task_function_with_options(opts: Option<TaskOptions>) -> TaskFunction<Args, i32> {
+        let config = valid_config();
+        TaskFunction::new(
+            "deadline_task".to_owned(),
+            Arc::new(LazyBroker::new(config.broker)),
+            "default".to_owned(),
+            100,
+            opts,
+            Arc::new(AtomicBool::new(false)),
+            false,
+        )
+    }
+
     #[test]
     fn register_returns_task_function() {
         let core = CoreHorsies::new(valid_config()).unwrap();
@@ -655,6 +762,96 @@ mod tests {
 
         assert_eq!(task.task_name(), "add");
         assert_eq!(task.queue_name(), "default");
+    }
+
+    #[test]
+    fn registration_rejects_definition_time_good_until() {
+        let core = CoreHorsies::new(valid_config()).unwrap();
+        let mut app = crate::Horsies::from_core(core);
+        let deadline = chrono::Utc::now() + chrono::Duration::minutes(5);
+
+        let err = app
+            .task::<Args, i32>("add", async_task_fn!(add, Args))
+            .unwrap()
+            .task_options(TaskOptions {
+                task_name: String::new(),
+                queue_name: None,
+                good_until: Some(deadline),
+                auto_retry_for: None,
+                retry_policy: None,
+            })
+            .register()
+            .unwrap_err();
+
+        assert_eq!(err.code, Some(ErrorCode::TaskInvalidOptions));
+        assert!(err.message.contains("definition-time good_until"));
+    }
+
+    #[test]
+    fn send_options_good_until_is_serialized_for_this_send() {
+        let task = task_function_with_options(None);
+        let deadline = chrono::Utc::now() + chrono::Duration::minutes(5);
+        let options = TaskSendOptions::new().good_until(deadline);
+
+        let (good_until, json) = task
+            .resolve_send_options(GoodUntilMode::Override(options.good_until))
+            .unwrap();
+
+        assert_eq!(good_until, Some(deadline));
+        let parsed: serde_json::Value = serde_json::from_str(json.as_deref().unwrap()).unwrap();
+        let stored = parsed["good_until"].as_str().unwrap();
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(stored)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            deadline,
+        );
+    }
+
+    #[test]
+    fn send_options_none_clears_existing_definition_time_good_until() {
+        let stale = chrono::Utc::now() + chrono::Duration::minutes(5);
+        let task = task_function_with_options(Some(TaskOptions {
+            task_name: "deadline_task".to_owned(),
+            queue_name: Some("default".to_owned()),
+            good_until: Some(stale),
+            auto_retry_for: None,
+            retry_policy: None,
+        }));
+
+        let (good_until, json) = task
+            .resolve_send_options(GoodUntilMode::Override(None))
+            .unwrap();
+
+        assert!(good_until.is_none());
+        assert!(json.is_none());
+    }
+
+    #[test]
+    fn send_options_preserves_retry_options_while_overriding_good_until() {
+        let task = task_function_with_options(Some(TaskOptions {
+            task_name: "deadline_task".to_owned(),
+            queue_name: Some("default".to_owned()),
+            good_until: None,
+            auto_retry_for: Some(vec![TaskErrorCode::User("TRANSIENT".to_owned())]),
+            retry_policy: None,
+        }));
+        let deadline = chrono::Utc::now() + chrono::Duration::minutes(5);
+
+        let (good_until, json) = task
+            .resolve_send_options(GoodUntilMode::Override(Some(deadline)))
+            .unwrap();
+
+        assert_eq!(good_until, Some(deadline));
+        let parsed: serde_json::Value = serde_json::from_str(json.as_deref().unwrap()).unwrap();
+        let stored = parsed["good_until"].as_str().unwrap();
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(stored)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            deadline,
+        );
+        assert_eq!(parsed["auto_retry_for"][0], "TRANSIENT");
     }
 
     #[test]

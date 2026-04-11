@@ -97,6 +97,43 @@ fn db_url() -> String {
     db::db_url()
 }
 
+fn write_prefetch_config() -> tempfile::NamedTempFile {
+    use std::io::Write;
+
+    let url = db_url();
+    let config = serde_json::json!({
+        "queue_mode": "default",
+        "broker": {
+            "database_url": url,
+            "pool_pre_ping": true,
+            "pool_size": 5,
+            "max_overflow": 5,
+            "pool_timeout": 10,
+            "pool_recycle": 600,
+            "echo": false
+        },
+        "prefetch_buffer": 2,
+        "claim_lease_ms": 5000,
+        "max_claim_renew_age_ms": 180000,
+        "recovery": {
+            "auto_requeue_stale_claimed": true,
+            "claimed_stale_threshold_ms": 120000,
+            "auto_fail_stale_running": true,
+            "running_stale_threshold_ms": 300000,
+            "check_interval_ms": 30000,
+            "runner_heartbeat_interval_ms": 30000,
+            "claimer_heartbeat_interval_ms": 1000
+        },
+        "resend_on_transient_err": false
+    });
+
+    let mut f = tempfile::NamedTempFile::new().unwrap();
+    f.write_all(serde_json::to_string_pretty(&config).unwrap().as_bytes())
+        .unwrap();
+    f.flush().unwrap();
+    f
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1052,6 +1089,96 @@ async fn test_retry_succeeds_within_good_until() {
     assert_eq!(retry_count, 2, "should have 2 retries (3 attempts total)");
 
     std::env::remove_var("E2E_RETRY_SUCCESS_PATH");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_good_until_expires_while_claimed_before_start() {
+    let pool = pool().await;
+    let broker = broker().await;
+    db::clean_tables(&pool).await;
+
+    let config_file = write_prefetch_config();
+    let config_path = config_file.path().to_str().unwrap().to_owned();
+
+    let _worker = start_worker(
+        &config_path,
+        &["--concurrency", "1"],
+        "worker started",
+        Duration::from_secs(10),
+    );
+
+    let blocker_id = enqueue_task(&broker, "e2e_slow", r#"{"duration_ms":1500}"#).await;
+
+    let good_until = chrono::Utc::now() + chrono::Duration::milliseconds(500);
+    let target_id = broker
+        .enqueue(
+            "e2e_simple",
+            None,
+            Some(r#"{"x": 5}"#),
+            "default",
+            100,
+            None,
+            None,
+            Some(good_until),
+            None,
+            &format!("test-{}", uuid::Uuid::new_v4()),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let claim_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < claim_deadline {
+        let status = get_task_status(&pool, &target_id).await;
+        if status == "CLAIMED" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        get_task_status(&pool, &target_id).await,
+        "CLAIMED",
+        "target task should be buffered as CLAIMED before it expires",
+    );
+
+    wait_for_task_status(&pool, &target_id, "EXPIRED", Duration::from_secs(15)).await;
+    wait_for_task_status(&pool, &blocker_id, "COMPLETED", Duration::from_secs(15)).await;
+
+    let row: (
+        String,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
+        Option<bool>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT status, started_at, claimed_by_worker_id, claimed, error_code \
+         FROM horsies_tasks WHERE id = $1",
+    )
+    .bind(&target_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(row.0, "EXPIRED");
+    assert!(
+        row.1.is_none(),
+        "started_at must stay NULL when task expires before user code starts",
+    );
+    assert!(
+        row.2.is_some(),
+        "claimed_by_worker_id should be preserved for forensics",
+    );
+    assert_eq!(row.3, Some(false), "claimed flag should be cleared");
+    assert_eq!(row.4.as_deref(), Some("TASK_EXPIRED"));
+
+    let attempts: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = $1")
+            .bind(&target_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(attempts, 0, "no attempt row should be written");
 }
 
 // ---------------------------------------------------------------------------

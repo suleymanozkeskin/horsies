@@ -44,7 +44,6 @@ Requirements:
     "task_name",                                          // required
     queue = "queue_name",                                 // optional
     retry_policy = RetryPolicy::fixed(vec![60, 300], true).unwrap(),  // optional
-    good_until = Utc::now() + Duration::hours(1),         // optional
     auto_retry_for = ["RATE_LIMITED", "TIMEOUT"],          // optional
 )]
 async fn my_task(args: MyArgs) -> Result<MyOutput, TaskError> { ... }
@@ -55,11 +54,12 @@ async fn my_task(args: MyArgs) -> Result<MyOutput, TaskError> { ... }
 | First positional | string literal | Required: unique task name |
 | `queue` | string literal | Target queue (validated at registration) |
 | `retry_policy` | Rust expression | Retry timing/backoff configuration |
-| `good_until` | Rust expression | Task expiry deadline |
 | `auto_retry_for` | string array | Error codes that trigger automatic retries |
 
-Expression-valued attributes are parsed as real Rust expressions and
-evaluated at registration time, not compile time.
+`good_until` is intentionally rejected on `#[task]` because it would be
+evaluated at registration time, not per send. Use
+`TaskSendOptions::new().good_until(deadline)` with `.with_options(...)` for
+ad-hoc sends, or `.good_until(deadline)` on workflow nodes.
 
 ### `#[horsies::blocking_task]`
 
@@ -169,6 +169,7 @@ match add_numbers_task.send(AddNumbersInput { a: 5, b: 3 }).await {
 // Sending
 async fn send(&self, args: A) -> TaskSendResult<TaskHandle<T>>
 async fn schedule(&self, delay: Duration, args: A) -> TaskSendResult<TaskHandle<T>>
+fn with_options(&self, options: TaskSendOptions) -> TaskFunctionSendOptions<'_, A, T>
 
 // Retry (with cross-method guards)
 async fn retry_send(&self, err: &TaskSendError) -> TaskSendResult<TaskHandle<T>>
@@ -196,6 +197,35 @@ fn task_options(&self) -> Option<&TaskOptions>
 
 Same as `send()` but with `enqueued_at = now() + delay`. The scheduled time is fixed at the first attempt, not recomputed on retry.
 
+### Per-send `good_until`
+
+Use `TaskSendOptions` for ad-hoc dynamic deadlines:
+
+```rust
+use chrono::{Duration, Utc};
+use horsies::TaskSendOptions;
+
+let deadline = Utc::now() + Duration::minutes(5);
+
+let handle = my_task
+    .with_options(TaskSendOptions::new().good_until(deadline))
+    .send(input)
+    .await?;
+```
+
+Generated task modules expose the same pattern:
+
+```rust
+let handle = my_task::with_options(
+    TaskSendOptions::new().good_until(deadline),
+)
+.send(input)
+.await?;
+```
+
+For workflow tasks, prefer node-level `.good_until(deadline)` while building
+the workflow spec.
+
 ### `retry_send()` / `retry_schedule()` guards
 
 - `retry_send` **rejects** errors with `enqueue_delay_seconds` → "use retry_schedule instead"
@@ -204,7 +234,7 @@ Same as `send()` but with `enqueued_at = now() + delay`. The scheduled time is f
 
 ### `node()` behavior
 
-Returns `TaskNode<T, A>` pre-configured with task name, queue, priority, good_until, and serialized task_options. Bridges registered tasks to workflow construction.
+Returns `TaskNode<T, A>` pre-configured with task name, queue, priority, and retry task_options. Bridges registered tasks to workflow construction.
 
 Use:
 
@@ -372,7 +402,7 @@ Validation: max_retries 1–20, intervals 1–86400s, fixed requires `len == max
 
 ### `OutcomeCode`
 
-`TaskCancelled`, `TaskExpired`, `WorkflowPaused`, `WorkflowFailed`, `WorkflowCancelled`, `UpstreamSkipped`, `SubworkflowFailed`, `WorkflowSuccessCaseNotMet`
+`TaskCancelled`, `TaskExpired`, `WorkflowPaused`, `WorkflowFailed`, `WorkflowCancelled`, `UpstreamSkipped`, `SubworkflowFailed`, `WorkflowSuccessCaseNotMet`, `WorkflowStopped`, `SendSuppressed`
 
 ## `TaskStatus`
 
@@ -394,7 +424,8 @@ use horsies::{
     async_task_fn, blocking_task_fn,
     // Task types
     TaskFunction, TaskResult, TaskError, TaskErrorCode, TaskHandle, TaskInfo, TaskOptions,
-    TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult, RegisteredTask,
+    TaskSendError, TaskSendErrorCode, TaskSendOptions, TaskSendPayload, TaskSendResult,
+    RegisteredTask,
     // Retry
     RetryPolicy, ResolvedEnqueue,
     // Error code families

@@ -129,7 +129,7 @@ impl RegisteredTask {
         }
     }
 
-    /// Attach definition-time task options metadata.
+    /// Attach task options metadata.
     pub fn with_task_options(self, task_options: TaskOptions) -> Self {
         match self {
             Self::Async { task, mut meta } => {
@@ -143,7 +143,7 @@ impl RegisteredTask {
         }
     }
 
-    /// Access definition-time task options metadata, if present.
+    /// Access task options metadata, if present.
     pub fn task_options(&self) -> Option<&TaskOptions> {
         match self {
             Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.task_options.as_ref(),

@@ -142,7 +142,7 @@ pub struct TaskOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_name: Option<String>,
 
-    /// Task expiry deadline (task skipped if not claimed by this time).
+    /// Task expiry deadline (task skipped if execution has not started by this time).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub good_until: Option<chrono::DateTime<chrono::Utc>>,
 

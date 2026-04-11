@@ -487,7 +487,7 @@ pub async fn expire_pending_tasks(pool: &PgPool) -> Result<u64, sqlx::Error> {
              updated_at = NOW() \
          WHERE status = 'PENDING' \
            AND good_until IS NOT NULL \
-           AND good_until < NOW()",
+           AND good_until <= NOW()",
     )
     .bind(&result_json)
     .execute(pool)

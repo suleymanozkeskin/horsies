@@ -262,7 +262,7 @@ Use `app.check_workflow_builder0(...)` for zero-arg builders.
 
 ### Using `TaskFunction::node()`
 
-`TaskFunction::node()` returns a `TaskNode<T, A>` pre-configured with the task's name, queue, priority, good_until, and task_options:
+`TaskFunction::node()` returns a `TaskNode<T, A>` pre-configured with the task's name, queue, priority, and retry task_options:
 
 ```rust
 let fetch = fetch_data::register(&mut app)?;

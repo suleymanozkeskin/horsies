@@ -18,7 +18,7 @@ use horsies::{Horsies, PostgresBroker, WorkflowHandle, WorkflowSpecBuilder};
 use horsies_test_support::{
     db,
     e2e::{
-        db_poll::wait_for_workflow_terminal,
+        db_poll::{wait_for_task_status, wait_for_workflow_terminal},
         worker::start_worker,
         workflow::{get_workflow_task_status, get_workflow_tasks, wait_for_workflow_completion},
     },
@@ -50,6 +50,43 @@ fn db_url() -> String {
     db::db_url()
 }
 
+fn write_prefetch_config() -> tempfile::NamedTempFile {
+    use std::io::Write;
+
+    let url = db_url();
+    let config = serde_json::json!({
+        "queue_mode": "default",
+        "broker": {
+            "database_url": url,
+            "pool_pre_ping": true,
+            "pool_size": 5,
+            "max_overflow": 5,
+            "pool_timeout": 10,
+            "pool_recycle": 600,
+            "echo": false
+        },
+        "prefetch_buffer": 2,
+        "claim_lease_ms": 5000,
+        "max_claim_renew_age_ms": 180000,
+        "recovery": {
+            "auto_requeue_stale_claimed": true,
+            "claimed_stale_threshold_ms": 120000,
+            "auto_fail_stale_running": true,
+            "running_stale_threshold_ms": 300000,
+            "check_interval_ms": 30000,
+            "runner_heartbeat_interval_ms": 30000,
+            "claimer_heartbeat_interval_ms": 1000
+        },
+        "resend_on_transient_err": false
+    });
+
+    let mut f = tempfile::NamedTempFile::new().unwrap();
+    f.write_all(serde_json::to_string_pretty(&config).unwrap().as_bytes())
+        .unwrap();
+    f.flush().unwrap();
+    f
+}
+
 async fn start_wf(pool: &PgPool, spec: &horsies::WorkflowSpec) -> String {
     let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
     let mut app = Horsies::with_broker(fixtures::default_app_config(), broker).unwrap();
@@ -58,6 +95,26 @@ async fn start_wf(pool: &PgPool, spec: &horsies::WorkflowSpec) -> String {
         .await
         .unwrap_or_else(|e| panic!("app.start failed: {}", e));
     handle.workflow_id().to_owned()
+}
+
+async fn enqueue_blocker_task(pool: &PgPool, duration_ms: i64) -> String {
+    let broker = PostgresBroker::from_pool(pool.clone());
+    broker
+        .enqueue(
+            "e2e_slow",
+            None,
+            Some(&format!(r#"{{"duration_ms":{duration_ms}}}"#)),
+            "default",
+            100,
+            None,
+            None,
+            None,
+            None,
+            &format!("test-{}", uuid::Uuid::new_v4()),
+            None,
+        )
+        .await
+        .unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -612,4 +669,129 @@ async fn test_workflow_cancellation() {
         .await
         .unwrap();
     assert_eq!(status, "CANCELLED");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_workflow_task_expired_while_claimed_before_start() {
+    let pool = pool().await;
+    db::clean_tables(&pool).await;
+
+    let config_file = write_prefetch_config();
+    let config_path = config_file.path().to_str().unwrap().to_owned();
+
+    let _worker = start_worker(
+        &config_path,
+        &["--concurrency", "1"],
+        "worker started",
+        Duration::from_secs(10),
+    );
+
+    let blocker_id = enqueue_blocker_task(&pool, 1500).await;
+
+    let mut b = WorkflowSpecBuilder::new("e2e_claimed_expiry");
+    b.task(
+        wf_step::node()
+            .unwrap()
+            .node_id("expires")
+            .kwargs(r#"{"step":"EXP"}"#.to_owned())
+            .good_until(chrono::Utc::now() + chrono::Duration::milliseconds(500)),
+    );
+    let spec = b.build().unwrap();
+
+    let wf_id = start_wf(&pool, &spec).await;
+
+    let claim_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < claim_deadline {
+        let row: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT wt.task_id, t.status \
+             FROM horsies_workflow_tasks wt \
+             LEFT JOIN horsies_tasks t ON t.id = wt.task_id \
+             WHERE wt.workflow_id = $1 AND wt.task_index = 0",
+        )
+        .bind(&wf_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        if row.1.as_deref() == Some("CLAIMED") {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let claimed_status: String = sqlx::query_scalar(
+        "SELECT t.status \
+         FROM horsies_workflow_tasks wt \
+         JOIN horsies_tasks t ON t.id = wt.task_id \
+         WHERE wt.workflow_id = $1 AND wt.task_index = 0",
+    )
+    .bind(&wf_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        claimed_status, "CLAIMED",
+        "workflow task should be buffered as CLAIMED before its deadline passes",
+    );
+
+    let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(20)).await;
+    assert_eq!(
+        status, "FAILED",
+        "workflow should fail on expired root task",
+    );
+
+    wait_for_task_status(&pool, &blocker_id, "COMPLETED", Duration::from_secs(15)).await;
+    assert_eq!(
+        get_workflow_task_status(&pool, &wf_id, 0).await,
+        "FAILED",
+        "expired task should be reported as failed to the workflow engine",
+    );
+
+    let row: (
+        String,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
+        Option<bool>,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT t.status, t.started_at, t.claimed_by_worker_id, t.claimed, t.error_code, wt.status \
+         FROM horsies_workflow_tasks wt \
+         JOIN horsies_tasks t ON t.id = wt.task_id \
+         WHERE wt.workflow_id = $1 AND wt.task_index = 0",
+    )
+    .bind(&wf_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(row.0, "EXPIRED");
+    assert!(
+        row.1.is_none(),
+        "underlying task should never transition to RUNNING",
+    );
+    assert!(
+        row.2.is_some(),
+        "claimed_by_worker_id should be preserved on claimed expiry",
+    );
+    assert_eq!(row.3, Some(false));
+    assert_eq!(row.4.as_deref(), Some("TASK_EXPIRED"));
+    assert_eq!(row.5.as_deref(), Some("FAILED"));
+
+    let attempts: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) \
+         FROM horsies_task_attempts ta \
+         JOIN horsies_workflow_tasks wt ON wt.task_id = ta.task_id \
+         WHERE wt.workflow_id = $1 AND wt.task_index = 0",
+    )
+    .bind(&wf_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        attempts, 0,
+        "workflow expired-before-start should record no attempts"
+    );
 }

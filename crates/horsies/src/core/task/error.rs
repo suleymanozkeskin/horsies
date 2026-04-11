@@ -44,8 +44,6 @@ pub enum OperationalErrorCode {
 pub enum ContractCode {
     ArgumentTypeMismatch,
     ReturnTypeMismatch,
-    /// Rust equivalent of Python's PYDANTIC_HYDRATION_ERROR.
-    PydanticHydrationError,
     WorkflowCtxMissingId,
 }
 

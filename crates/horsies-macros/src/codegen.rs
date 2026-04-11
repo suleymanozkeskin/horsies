@@ -38,6 +38,7 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
     let module_input_items = generate_module_input_items(&signature, &args_type);
     let params_items = generate_params_items(&signature, &args_type);
     let send_sig = generate_send_signature(&signature, &args_type);
+    let method_send_sig = generate_method_send_signature(&signature, &args_type);
     let send_build_args = generate_send_build_args(&signature);
 
     // Separate cfg attributes (applied to both fn and module) from
@@ -62,6 +63,10 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
     );
     let schedule_docs = format!(
         "Enqueue `{}` with a delay. Works from any call site after `register()` is called at startup.",
+        task_name_value
+    );
+    let with_options_docs = format!(
+        "Configure per-send options for `{}`. Use this for dynamic deadlines such as `good_until`.",
         task_name_value
     );
     let node_docs = format!(
@@ -106,6 +111,49 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
             #module_input_items
 
             #params_items
+
+            /// Per-send options bound to this task's generated send helpers.
+            pub struct SendOptions {
+                options: horsies::TaskSendOptions,
+            }
+
+            impl SendOptions {
+                #[doc = #send_docs]
+                pub async fn send(&self #method_send_sig) -> horsies::TaskSendResult<horsies::TaskHandle<#output_type>> {
+                    let __args: #args_type = #send_build_args;
+                    __HANDLE
+                        .get()
+                        .ok_or_else(|| horsies::TaskSendError {
+                            code: horsies::TaskSendErrorCode::ValidationFailed,
+                            message: #not_registered_msg.to_owned(),
+                            retryable: false,
+                            task_id: None,
+                            payload: None,
+                        })?
+                        .send_with_options(self.options, __args)
+                        .await
+                }
+
+                #[doc = #schedule_docs]
+                pub async fn schedule(
+                    &self,
+                    delay: std::time::Duration
+                    #method_send_sig
+                ) -> horsies::TaskSendResult<horsies::TaskHandle<#output_type>> {
+                    let __args: #args_type = #send_build_args;
+                    __HANDLE
+                        .get()
+                        .ok_or_else(|| horsies::TaskSendError {
+                            code: horsies::TaskSendErrorCode::ValidationFailed,
+                            message: #not_registered_msg.to_owned(),
+                            retryable: false,
+                            task_id: None,
+                            payload: None,
+                        })?
+                        .schedule_with_options(self.options, delay, __args)
+                        .await
+                }
+            }
 
             static __HANDLE: std::sync::OnceLock<
                 horsies::TaskFunction<#args_type, #output_type>,
@@ -173,6 +221,11 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
                     })?
                     .schedule(delay, __args)
                     .await
+            }
+
+            #[doc = #with_options_docs]
+            pub fn with_options(options: horsies::TaskSendOptions) -> SendOptions {
+                SendOptions { options }
             }
 
             #[doc = #node_docs]
@@ -604,6 +657,16 @@ fn generate_send_signature(signature: &SignatureShape, args_type: &Type) -> Toke
     }
 }
 
+fn generate_method_send_signature(signature: &SignatureShape, args_type: &Type) -> TokenStream {
+    match &signature.input {
+        InputShape::Unit => quote! {},
+        _ => {
+            let send_sig = generate_send_signature(signature, args_type);
+            quote! { , #send_sig }
+        }
+    }
+}
+
 fn generate_send_build_args(signature: &SignatureShape) -> TokenStream {
     match &signature.input {
         InputShape::Unit => quote! { () },
@@ -752,19 +815,13 @@ fn extract_result_ok_type(ty: &Type) -> syn::Result<Type> {
 /// Build the body of `fn task_options(&self)` from parsed attributes.
 fn build_task_options_body(attrs: &TaskAttrs) -> TokenStream {
     let has_retry = attrs.retry_policy.is_some();
-    let has_good_until = attrs.good_until.is_some();
     let has_auto_retry = attrs.auto_retry_for.is_some();
 
-    if !has_retry && !has_good_until && !has_auto_retry {
+    if !has_retry && !has_auto_retry {
         return quote! { None };
     }
 
     let retry_policy_expr = match &attrs.retry_policy {
-        Some(expr) => quote! { Some(#expr) },
-        None => quote! { None },
-    };
-
-    let good_until_expr = match &attrs.good_until {
         Some(expr) => quote! { Some(#expr) },
         None => quote! { None },
     };
@@ -786,7 +843,7 @@ fn build_task_options_body(attrs: &TaskAttrs) -> TokenStream {
             task_name: String::new(),
             queue_name: None,
             retry_policy: #retry_policy_expr,
-            good_until: #good_until_expr,
+            good_until: None,
             auto_retry_for: #auto_retry_for_expr,
         })
     }

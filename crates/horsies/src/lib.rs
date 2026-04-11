@@ -35,7 +35,7 @@ use crate::core::{Horsies as CoreHorsies, RegisteredWorkflowSpec};
 
 pub use error::{AppError, AppResult};
 pub use runtime::TaskRuntime;
-pub use task::{TaskFunction, TaskRegistrationBuilder};
+pub use task::{TaskFunction, TaskFunctionSendOptions, TaskRegistrationBuilder, TaskSendOptions};
 pub use workflow::{
     WorkflowCheckBuilderRegistration, WorkflowFunction, WorkflowRegistrationBuilder,
     WorkflowTemplate,

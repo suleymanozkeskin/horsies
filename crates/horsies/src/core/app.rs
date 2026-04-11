@@ -96,6 +96,14 @@ impl Horsies {
         mut task: crate::core::task::fn_trait::RegisteredTask,
     ) -> Result<(), HorsiesError> {
         if let Some(opts) = task.task_options() {
+            if opts.good_until.is_some() {
+                return Err(HorsiesError::new(
+                    "definition-time good_until is not supported; use send-time \
+                     TaskSendOptions for ad-hoc sends or workflow-node good_until",
+                )
+                .with_code(ErrorCode::TaskInvalidOptions));
+            }
+
             match (&self.config.queue_mode, &opts.queue_name) {
                 // DEFAULT mode: tasks must not declare a queue_name.
                 (QueueMode::Default, Some(queue_name)) if queue_name != "default" => {
@@ -1050,6 +1058,18 @@ impl Horsies {
         mut task: crate::core::task::fn_trait::RegisteredTask,
         queue: &str,
     ) -> Result<(), HorsiesError> {
+        if task
+            .task_options()
+            .and_then(|opts| opts.good_until)
+            .is_some()
+        {
+            return Err(HorsiesError::new(
+                "definition-time good_until is not supported; use send-time \
+                 TaskSendOptions for ad-hoc sends or workflow-node good_until",
+            )
+            .with_code(ErrorCode::TaskInvalidOptions));
+        }
+
         self.validate_queue(queue)?;
         task.set_queue_name(queue.to_owned());
         task.set_priority(self.effective_priority(queue, None));

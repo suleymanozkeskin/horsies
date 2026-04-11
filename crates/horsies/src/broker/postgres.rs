@@ -79,6 +79,7 @@ WHERE id = $1
   AND status = 'CLAIMED'
   AND claimed_by_worker_id = $5
   AND (claim_expires_at IS NULL OR claim_expires_at > now())
+  AND (good_until IS NULL OR good_until > now())
   AND NOT EXISTS (
       SELECT 1
       FROM horsies_workflow_tasks wt
@@ -416,7 +417,7 @@ SELECT
 FROM horsies_tasks
 WHERE status = 'PENDING'
   AND good_until IS NOT NULL
-  AND good_until < NOW()
+  AND good_until <= NOW()
 ORDER BY good_until ASC";
 
 /// Health check: `SELECT 1` to verify broker connectivity.
@@ -929,6 +930,51 @@ impl PostgresBroker {
             .map_err(BrokerError::Database)?;
 
         Ok(result.map(|r| r.started_at))
+    }
+
+    /// Expire a CLAIMED task whose `good_until` passed before user code started.
+    ///
+    /// Returns the persisted `TaskResult::Err` JSON when the transition was
+    /// applied. Returns `None` if another actor already moved the task.
+    pub async fn expire_claimed_task_before_start(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+    ) -> Result<Option<String>, BrokerError> {
+        let task_error = crate::core::TaskError::builtin(
+            crate::core::OutcomeCode::TaskExpired,
+            "task expired before execution started (good_until passed)",
+        );
+        let task_result = crate::core::TaskResult::<serde_json::Value>::Err(task_error);
+        let result_json = serde_json::to_string(&task_result)
+            .unwrap_or_else(|_| r#"{"__type":"err","value":{"message":"expired"}}"#.to_owned());
+        let error_code = "TASK_EXPIRED";
+
+        let updated: Option<crate::broker::row::task::ClaimedId> = sqlx::query_as(
+            "UPDATE horsies_tasks \
+             SET status = 'EXPIRED', \
+                 claimed = FALSE, \
+                 claim_expires_at = NULL, \
+                 failed_at = NOW(), \
+                 result = $1, \
+                 error_code = $2, \
+                 updated_at = NOW() \
+             WHERE id = $3 \
+               AND status = 'CLAIMED' \
+               AND claimed_by_worker_id = $4 \
+               AND good_until IS NOT NULL \
+               AND good_until <= NOW() \
+             RETURNING id",
+        )
+        .bind(&result_json)
+        .bind(error_code)
+        .bind(task_id)
+        .bind(worker_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(BrokerError::Database)?;
+
+        Ok(updated.map(|_| result_json))
     }
 
     /// Mark a task as completed (transactional variant).
@@ -1655,7 +1701,7 @@ impl PostgresBroker {
                  updated_at = NOW() \
              WHERE status = 'PENDING' \
                AND good_until IS NOT NULL \
-               AND good_until < NOW()",
+               AND good_until <= NOW()",
         )
         .bind(&result_json)
         .bind(error_code)
@@ -1876,6 +1922,22 @@ mod tests {
         assert!(!is_terminal_status("PENDING"));
         assert!(!is_terminal_status("CLAIMED"));
         assert!(!is_terminal_status("RUNNING"));
+    }
+
+    #[test]
+    fn set_running_guards_good_until_before_start() {
+        assert!(
+            SET_RUNNING_SQL.contains("AND (good_until IS NULL OR good_until > now())"),
+            "CLAIMED -> RUNNING must reject tasks whose deadline has passed",
+        );
+    }
+
+    #[test]
+    fn expired_task_queries_treat_equal_deadline_as_expired() {
+        assert!(
+            GET_EXPIRED_TASKS_SQL.contains("AND good_until <= NOW()"),
+            "good_until is the last valid instant; equality is expired",
+        );
     }
 
     #[test]

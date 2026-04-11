@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 ///                                → FAILED
 ///                                → CANCELLED
 ///   PENDING → EXPIRED (good_until passed before claim)
+///   CLAIMED → EXPIRED (good_until passed before execution started)
 ///   RUNNING → PENDING (retry on failure/crash)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -23,7 +24,7 @@ pub enum TaskStatus {
     Failed,
     /// Cancelled by the user or system.
     Cancelled,
-    /// Never claimed before good_until passed. Terminal.
+    /// good_until passed before execution started. Terminal.
     Expired,
 }
 

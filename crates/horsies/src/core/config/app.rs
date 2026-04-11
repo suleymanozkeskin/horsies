@@ -56,11 +56,19 @@ pub struct AppConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schedule: Option<ScheduleConfig>,
 
-    /// Auto-retry transient ENQUEUE_FAILED errors for task sends and workflow starts.
+    /// Auto-retry transient `ENQUEUE_FAILED` errors for task sends and workflow starts.
     ///
-    /// When `true`, transient broker failures (connection blips, serialization timeouts)
-    /// are retried up to 3 times with exponential backoff (200ms, 400ms, 800ms cap).
-    /// Mirrors Python's `AppConfig.resend_on_transient_err`.
+    /// When `true`, retries up to 3 times with exponential backoff (200ms, 400ms,
+    /// 800ms cap). Only retries errors classified as retryable by
+    /// [`BrokerError::is_retryable`]:
+    ///
+    /// - I/O errors, pool timeouts, pool closed, worker crashed, protocol/TLS errors
+    /// - PostgreSQL connection exceptions (08xxx), admin shutdown (57P01),
+    ///   crash shutdown (57P02), cannot connect now (57P03)
+    /// - `ConnectionFailed`, `ListenerClosed`
+    ///
+    /// Non-retryable errors (`Serialization`, `Migration`, `InvalidStatus`,
+    /// `PayloadMismatch`) are returned immediately.
     #[serde(default)]
     pub resend_on_transient_err: bool,
 }

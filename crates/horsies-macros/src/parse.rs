@@ -9,8 +9,6 @@ pub struct TaskAttrs {
     pub queue: Option<LitStr>,
     /// Optional: retry policy expression.
     pub retry_policy: Option<Expr>,
-    /// Optional: good_until expression.
-    pub good_until: Option<Expr>,
     /// Optional: auto_retry_for list of string codes.
     pub auto_retry_for: Option<ExprArray>,
     /// Optional: mark this task as accepting workflow context injection.
@@ -24,7 +22,6 @@ impl Parse for TaskAttrs {
 
         let mut queue = None;
         let mut retry_policy = None;
-        let mut good_until = None;
         let mut auto_retry_for = None;
         let mut workflow_ctx = false;
 
@@ -70,13 +67,14 @@ impl Parse for TaskAttrs {
                     retry_policy = Some(input.parse::<Expr>()?);
                 }
                 "good_until" => {
-                    if good_until.is_some() {
-                        return Err(syn::Error::new(
-                            key.span(),
-                            "duplicate `good_until` attribute",
-                        ));
-                    }
-                    good_until = Some(input.parse::<Expr>()?);
+                    let _expr = input.parse::<Expr>()?;
+                    return Err(syn::Error::new(
+                        key.span(),
+                        "`good_until` is not accepted on `#[task]` because it would be \
+                         evaluated at registration time; use \
+                         task.with_options(TaskSendOptions::new().good_until(deadline)).send(args) \
+                         for ad-hoc sends, or task::node()?.good_until(deadline) for workflow tasks",
+                    ));
                 }
                 "auto_retry_for" => {
                     if auto_retry_for.is_some() {
@@ -91,7 +89,7 @@ impl Parse for TaskAttrs {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
-                            "unknown attribute `{}`; expected one of: queue, retry_policy, good_until, auto_retry_for, workflow_ctx",
+                            "unknown attribute `{}`; expected one of: queue, retry_policy, auto_retry_for, workflow_ctx",
                             key,
                         ),
                     ));
@@ -107,7 +105,6 @@ impl Parse for TaskAttrs {
             name,
             queue,
             retry_policy,
-            good_until,
             auto_retry_for,
             workflow_ctx,
         })
