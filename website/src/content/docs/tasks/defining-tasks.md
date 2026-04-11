@@ -178,8 +178,9 @@ def task_two() -> TaskResult[str, TaskError]:
 | `task_name` | `str` | Yes | Unique task identifier |
 | `queue_name` | `str` | No | Target queue (CUSTOM mode only) |
 | `retry_policy` | `RetryPolicy` | No | Retry timing, backoff, and auto-retry triggers |
-| `good_until` | `datetime \| None` | No | Task expiry deadline (set at definition time) |
 | `exception_mapper` | `dict[type[BaseException], str]` | No | Maps exception classes to error codes |
 | `default_unhandled_error_code` | `str` | No | Error code for unmapped exceptions (overrides global) |
 
 **Returns:** Decorated function that can be called directly or via `.send()` / `.send_async()`.
+
+`good_until` is not accepted here — task expiry deadlines are a per-send concern. See [Sending Tasks — Set a Task Deadline](sending-tasks#set-a-task-deadline).

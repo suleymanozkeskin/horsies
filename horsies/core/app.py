@@ -171,7 +171,6 @@ class Horsies:
         task_name: str,
         *,
         queue_name: Optional[str] = None,
-        good_until: Any = None,
         retry_policy: Optional['RetryPolicy'] = None,
         exception_mapper: Optional['ExceptionMapper'] = None,
         default_unhandled_error_code: Optional[str] = None,
@@ -222,6 +221,23 @@ class Horsies:
             default_unhandled_error_code: str | None = task_options_kwargs.pop(
                 'default_unhandled_error_code', None,
             )
+
+            good_until_value = task_options_kwargs.pop('good_until', None)
+            if good_until_value is not None:
+                raise TaskDefinitionError(
+                    message='good_until must be set when sending a task',
+                    code=ErrorCode.TASK_INVALID_OPTIONS,
+                    location=fn_location,
+                    notes=[
+                        f"task '{fn.__name__}'",
+                        '@app.task(..., good_until=...) is evaluated when the task is defined',
+                        'relative deadlines declared there become stale and can expire future sends',
+                    ],
+                    help_text=(
+                        'use task.with_options(good_until=deadline).send(...) '
+                        'or task.node(good_until=deadline)(...) for workflow nodes'
+                    ),
+                )
 
             # Validate per-task mapper if provided
             if exception_mapper is not None:

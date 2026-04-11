@@ -15,7 +15,6 @@ Covers all parameters, error codes, serialization rules, retry patterns, and pit
     task_name: str,
     *,
     queue_name: str | None = None,
-    good_until: datetime | None = None,
     retry_policy: RetryPolicy | None = None,
     exception_mapper: dict[type[BaseException], str] | None = None,
     default_unhandled_error_code: str | None = None,
@@ -27,10 +26,11 @@ def my_task(...) -> TaskResult[T, TaskError]: ...
 |---|---|---|---|
 | `task_name` | `str` | required | Unique identifier. Duplicate names raise `RegistryError(E301)`. |
 | `queue_name` | `str \| None` | `None` | Must be `None` in DEFAULT mode (raises `E200`); must match a configured queue in CUSTOM mode (unrecognized raises `E103`). |
-| `good_until` | `datetime \| None` | `None` | Task expiry deadline. Must be timezone-aware. |
 | `retry_policy` | `RetryPolicy \| None` | `None` | See RetryPolicy section. |
 | `exception_mapper` | `dict[type[BaseException], str] \| None` | `None` | Per-task exception-to-error-code mapping. See ExceptionMapper section. |
 | `default_unhandled_error_code` | `str \| None` | `None` | Override global default for unmapped exceptions. Must be `UPPER_SNAKE_CASE`. |
+
+`good_until` is **not** accepted at definition time — it is a per-send concern. Passing it raises `E102`. Use `.with_options(good_until=...)` at send time instead. For workflow nodes, use `.node(good_until=...)`.
 
 ### Validated at definition time
 
@@ -38,7 +38,7 @@ def my_task(...) -> TaskResult[T, TaskError]: ...
 - Pre-decorated functions (with `__wrapped__` chain) are rejected — `E104`.
 - `exception_mapper` keys must be `BaseException` subclasses, values must be `UPPER_SNAKE_CASE`.
 - `queue_name` cross-validated against `AppConfig.queue_mode`.
-- `good_until` must be timezone-aware.
+- `good_until` rejected — raises `E102` with help text directing to `.with_options()` or `.node()`.
 - Top-level `auto_retry_for` kwarg is rejected — it belongs inside `RetryPolicy`.
 
 Returns `TaskFunction[P, T]`.
@@ -149,7 +149,7 @@ Results from `handle.get()` / `handle.result_for()` when data is not (yet) avail
 Terminal lifecycle outcomes for tasks and workflows:
 
 - `TASK_CANCELLED` — task was cancelled
-- `TASK_EXPIRED` — task was never claimed before `good_until` deadline passed
+- `TASK_EXPIRED` — task's `good_until` deadline passed before execution started (PENDING or CLAIMED)
 - `WORKFLOW_PAUSED` — workflow is paused
 - `WORKFLOW_FAILED` — workflow has failed
 - `WORKFLOW_CANCELLED` — workflow was cancelled
@@ -183,6 +183,9 @@ async def send_async(*args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHa
 # Enqueue with delay
 def schedule(delay: int, *args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHandle[T]]
 
+# Per-send options builder (returns TaskSendOptions with .send/.send_async/.schedule)
+def with_options(*, good_until: datetime | None = None) -> TaskSendOptions[P, T]
+
 # Replay failed send with stored payload (ENQUEUE_FAILED only)
 def retry_send(error: TaskSendError) -> TaskSendResult[TaskHandle[T]]
 async def retry_send_async(error: TaskSendError) -> TaskSendResult[TaskHandle[T]]
@@ -207,6 +210,33 @@ def node(
 ```
 
 **Direct call vs `.send()`**: Direct call runs synchronously in current process, no queue, no retry, no persistence. `.send()` enqueues for background execution by a worker.
+
+## `TaskSendOptions[P, T]` — Per-Send Options
+
+Returned by `task.with_options(...)`. Exposes `.send()`, `.send_async()`, and `.schedule()` with overridden options applied to this specific send.
+
+```python
+# Set a per-send expiry deadline
+deadline = datetime.now(timezone.utc) + timedelta(minutes=5)
+opts = my_task.with_options(good_until=deadline)
+
+opts.send(arg1, arg2)              # sync
+await opts.send_async(arg1, arg2)  # async
+opts.schedule(60, arg1, arg2)      # delayed
+```
+
+**`good_until`**: timezone-aware `datetime` or `None`. Naive datetimes return `Err(VALIDATION_FAILED)`. Passing `good_until=None` explicitly clears any inherited deadline.
+
+**When to use `with_options()` vs `.node(good_until=...)`**: `with_options()` is for ad-hoc sends (`.send()`, `.send_async()`, `.schedule()`). For workflow nodes, use `.node(good_until=...)` — the deadline is evaluated at workflow start time, not at definition time.
+
+### Task Expiry Lifecycle
+
+When `good_until` is set on a send:
+
+1. **Claim-time guard**: The claim SQL filters `AND (good_until IS NULL OR good_until > now())` — expired tasks are not claimed.
+2. **PENDING expiry**: The reaper transitions unclaimed expired tasks to `EXPIRED` with `TASK_EXPIRED` outcome code.
+3. **CLAIMED expiry**: If claimed but `good_until` passes before execution starts, the worker marks it `EXPIRED` directly (takes precedence over workflow PAUSED/CANCELLED handling).
+4. **Retry cap**: A retry scheduled at or past the deadline is rejected — `good_until` caps the entire retry window.
 
 ## `from_node()` — Ergonomic Data Flow for `.node()()`
 
@@ -277,7 +307,7 @@ worker_id: str | None, worker_hostname: str | None, worker_pid: int | None, work
 
 `TaskAttemptOutcome`: `COMPLETED` (success), `FAILED` (domain/library error with TaskResult), `WORKER_FAILURE` (worker crash without TaskResult).
 
-`TaskStatus`: `PENDING -> CLAIMED -> RUNNING -> COMPLETED | FAILED | CANCELLED | EXPIRED`. `is_terminal` is `True` for `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED`. `EXPIRED` means the task was never claimed before `good_until` passed.
+`TaskStatus`: `PENDING -> CLAIMED -> RUNNING -> COMPLETED | FAILED | CANCELLED | EXPIRED`. `is_terminal` is `True` for `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED`. `EXPIRED` means the task's `good_until` deadline passed before execution started (either PENDING or CLAIMED).
 
 ## `TaskSendResult` / `TaskSendError`
 
@@ -550,15 +580,21 @@ if result.is_err() and result.err_value.error_code == RetrievalCode.WAIT_TIMEOUT
 def t() -> TaskResult[str, TaskError]: ...
 ```
 
-### `good_until` must be timezone-aware
+### `good_until` is a per-send concern, not a decorator option
 
 ```python
-# WRONG — naive datetime
-@app.task("t", good_until=datetime.now() + timedelta(hours=1))
-
-# CORRECT
+# WRONG — rejected at definition time (raises E102)
 @app.task("t", good_until=datetime.now(timezone.utc) + timedelta(hours=1))
+
+# CORRECT — set at send time via with_options()
+deadline = datetime.now(timezone.utc) + timedelta(hours=1)
+my_task.with_options(good_until=deadline).send()
+
+# CORRECT — for workflow nodes, use .node(good_until=...)
+node = my_task.node(good_until=deadline)(arg=value)
 ```
+
+`good_until` must be timezone-aware. Naive datetimes return `Err(VALIDATION_FAILED)`.
 
 ## All Public Imports
 
@@ -573,7 +609,7 @@ from horsies import (
     # Retry
     RetryPolicy,
     # Send types
-    TaskHandle, TaskSendResult, TaskSendError, TaskSendErrorCode, TaskSendPayload,
+    TaskHandle, TaskSendOptions, TaskSendResult, TaskSendError, TaskSendErrorCode, TaskSendPayload,
     # Exception mapper
     ExceptionMapper,
     # Status

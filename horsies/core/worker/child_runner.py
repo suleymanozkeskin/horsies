@@ -27,7 +27,12 @@ from horsies.core.codec.serde import (
     SerializationError,
     task_result_from_json,
 )
-from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode
+from horsies.core.models.tasks import (
+    TaskResult,
+    TaskError,
+    OperationalErrorCode,
+    OutcomeCode,
+)
 from horsies.core.types.result import is_err
 
 
@@ -441,11 +446,21 @@ def _update_workflow_task_running_with_retry(task_id: str) -> bool:
 
 def _preflight_workflow_check(
     task_id: str,
+    worker_id: str,
 ) -> Optional[Tuple[bool, str, Optional[str]]]:
     try:
         pool = _get_worker_pool()
         with pool.connection() as conn:
             cursor = conn.cursor(row_factory=namedtuple_row)
+            expired_result = _expire_claimed_task_before_start(
+                cursor,
+                conn,
+                task_id,
+                worker_id,
+            )
+            if expired_result is not None:
+                return expired_result
+
             workflow_status = _get_workflow_status_for_task(cursor, task_id)
             match workflow_status:
                 case 'PAUSED' | 'CANCELLED':
@@ -460,6 +475,53 @@ def _preflight_workflow_check(
     except Exception as e:
         logger.error(f'Failed to check workflow status for task {task_id}: {e}')
         return (False, '', 'WORKFLOW_CHECK_FAILED')
+
+
+def _expire_claimed_task_before_start(
+    cursor: Cursor[Any],
+    conn: Connection[Any],
+    task_id: str,
+    worker_id: str,
+) -> Optional[Tuple[bool, str, Optional[str]]]:
+    task_result: TaskResult[None, TaskError] = TaskResult(
+        err=TaskError(
+            error_code=OutcomeCode.TASK_EXPIRED,
+            message='Task expired: good_until deadline passed before execution started',
+            data={'task_id': task_id, 'worker_id': worker_id},
+        ),
+    )
+    result_json = serialize_error_payload(task_result)
+    cursor.execute(
+        """
+        UPDATE horsies_tasks
+        SET status = 'EXPIRED',
+            claimed = FALSE,
+            claim_expires_at = NULL,
+            failed_at = NOW(),
+            result = %s,
+            error_code = %s,
+            updated_at = NOW()
+        WHERE id = %s
+          AND status = 'CLAIMED'
+          AND claimed_by_worker_id = %s
+          AND good_until IS NOT NULL
+          AND good_until <= NOW()
+        RETURNING id
+        """,
+        (
+            result_json,
+            OutcomeCode.TASK_EXPIRED.value,
+            task_id,
+            worker_id,
+        ),
+    )
+    if cursor.fetchone() is None:
+        return None
+    conn.commit()
+    logger.info(
+        f'Task {task_id} expired before actual execution start; marked EXPIRED.',
+    )
+    return (False, '', OutcomeCode.TASK_EXPIRED.value)
 
 
 def _confirm_ownership_and_set_running(
@@ -485,6 +547,7 @@ def _confirm_ownership_and_set_running(
                   AND status = 'CLAIMED'
                   AND claimed_by_worker_id = %s
                   AND (claim_expires_at IS NULL OR claim_expires_at > now())
+                  AND (good_until IS NULL OR good_until > now())
                   AND NOT EXISTS (
                       SELECT 1
                       FROM horsies_workflow_tasks wt
@@ -505,6 +568,15 @@ def _confirm_ownership_and_set_running(
             )
             updated_row = cursor.fetchone()
             if updated_row is None:
+                expired_result = _expire_claimed_task_before_start(
+                    cursor,
+                    conn,
+                    task_id,
+                    worker_id,
+                )
+                if expired_result is not None:
+                    return expired_result
+
                 workflow_status = _get_workflow_status_for_task(cursor, task_id)
                 match workflow_status:
                     case 'PAUSED' | 'CANCELLED':
@@ -594,7 +666,7 @@ def _run_task_entry(
 
     # Pre-execute guard: check if workflow is PAUSED or CANCELLED
     # If so, skip execution and mark task as SKIPPED
-    preflight_result = _preflight_workflow_check(task_id)
+    preflight_result = _preflight_workflow_check(task_id, master_worker_id)
     if preflight_result is not None:
         return preflight_result
 

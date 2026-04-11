@@ -13,7 +13,7 @@ import pytest
 
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.task_send_types import TaskSendError, TaskSendResult
-from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory
+from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, TaskSendOptions
 from horsies.core.types.result import Ok
 from horsies.core.models.workflow import (
     TaskNode,
@@ -41,6 +41,9 @@ class MockFn(TaskFunction[Any, Any]):
 
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
+
+    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+        return self
 
     def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -78,6 +81,9 @@ class MockFnWithCtx(TaskFunction[Any, Any]):
 
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
+
+    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+        return self
 
     def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))

@@ -172,7 +172,7 @@ GET_EXPIRED_TASKS_SQL = text("""
         NOW() - good_until as expired_for
     FROM horsies_tasks
     WHERE status = 'PENDING'
-      AND good_until < NOW()
+      AND good_until <= NOW()
     ORDER BY good_until ASC
 """)
 
@@ -251,7 +251,7 @@ EXPIRE_PENDING_TASKS_SQL = text("""
         updated_at = NOW()
     WHERE status = 'PENDING'
       AND good_until IS NOT NULL
-      AND good_until < NOW()
+      AND good_until <= NOW()
 """)
 
 SELECT_TASK_ATTEMPTS_BY_TASK_ID_SQL = text("""

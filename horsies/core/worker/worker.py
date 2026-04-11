@@ -1116,6 +1116,7 @@ class Worker:
                             | 'OWNERSHIP_UNCONFIRMED'
                             | 'WORKFLOW_CHECK_FAILED'
                             | 'WORKFLOW_STOPPED'
+                            | 'TASK_EXPIRED'
                         ):
                             logger.debug(
                                 f'Task {task_id} aborted with reason={failed_reason}, skipping finalization'

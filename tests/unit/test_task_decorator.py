@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from functools import wraps
 from datetime import datetime, timezone
 from typing import Any
@@ -745,6 +746,72 @@ class TestCreateTaskWrapperSend:
         assert handle.task_id == 'task-abc'
         assert handle._broker_mode is True
 
+    def test_with_options_good_until_applies_to_this_send(self) -> None:
+        """with_options(good_until=...) sets the expiry on the concrete send."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        broker.enqueue.return_value = Ok('task-abc')
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(
+            good_fn,
+            app,
+            'test.good_fn',
+            TaskOptions(task_name='test.good_fn'),
+        )
+        deadline = datetime(2030, 1, 1, tzinfo=timezone.utc)
+
+        result = wrapper.with_options(good_until=deadline).send(1)
+
+        assert is_ok(result)
+        call_kwargs = broker.enqueue.call_args.kwargs
+        assert call_kwargs['good_until'] == deadline
+        assert json.loads(call_kwargs['task_options'])['good_until'] == deadline.isoformat()
+
+    def test_with_options_naive_good_until_returns_validation_error(self) -> None:
+        """Per-send good_until keeps the same timezone-aware datetime contract."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+        naive_deadline = datetime(2030, 1, 1)
+
+        result = wrapper.with_options(good_until=naive_deadline).send(1)
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert 'timezone-aware' in result.err_value.message
+        broker.enqueue.assert_not_called()
+
+    def test_with_options_none_clears_existing_task_options_good_until(self) -> None:
+        """with_options(good_until=None) explicitly clears stale legacy defaults."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        broker.enqueue.return_value = Ok('task-abc')
+        app.get_broker.return_value = broker
+        stale_deadline = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        wrapper = create_task_wrapper(
+            good_fn,
+            app,
+            'test.good_fn',
+            TaskOptions(task_name='test.good_fn', good_until=stale_deadline),
+        )
+
+        result = wrapper.with_options(good_until=None).send(1)
+
+        assert is_ok(result)
+        call_kwargs = broker.enqueue.call_args.kwargs
+        assert call_kwargs['good_until'] is None
+        assert json.loads(call_kwargs['task_options'])['good_until'] is None
+
     def test_send_broker_failure_returns_enqueue_error_with_payload(self) -> None:
         """Broker Err result during enqueue returns Err(ENQUEUE_FAILED) with payload."""
         def good_fn(x: int) -> TaskResult[int, TaskError]:
@@ -813,6 +880,31 @@ class TestCreateTaskWrapperSendAsync:
         handle = result.ok_value
         assert handle.task_id == 'task-xyz'
         assert handle._broker_mode is True
+
+    @pytest.mark.asyncio
+    async def test_with_options_send_async_sets_good_until(self) -> None:
+        """with_options(good_until=...) is honored by send_async()."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        broker.enqueue_async = AsyncMock(return_value=Ok('task-xyz'))
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(
+            good_fn,
+            app,
+            'test.good_fn',
+            TaskOptions(task_name='test.good_fn'),
+        )
+        deadline = datetime(2030, 1, 1, tzinfo=timezone.utc)
+
+        result = await wrapper.with_options(good_until=deadline).send_async(1)
+
+        assert is_ok(result)
+        call_kwargs = broker.enqueue_async.call_args.kwargs
+        assert call_kwargs['good_until'] == deadline
+        assert json.loads(call_kwargs['task_options'])['good_until'] == deadline.isoformat()
 
     @pytest.mark.asyncio
     async def test_send_async_broker_failure_returns_enqueue_error(self) -> None:
@@ -919,6 +1011,31 @@ class TestCreateTaskWrapperSchedule:
         call_kwargs = broker.enqueue.call_args
         assert call_kwargs.kwargs.get('sent_at') is not None
         assert call_kwargs.kwargs.get('enqueue_delay_seconds') == 60
+
+    def test_with_options_schedule_sets_good_until(self) -> None:
+        """with_options(good_until=...) is honored by schedule()."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        broker.enqueue.return_value = Ok('sched-1')
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(
+            good_fn,
+            app,
+            'test.good_fn',
+            TaskOptions(task_name='test.good_fn'),
+        )
+        deadline = datetime(2030, 1, 1, tzinfo=timezone.utc)
+
+        result = wrapper.with_options(good_until=deadline).schedule(60, 1)
+
+        assert is_ok(result)
+        call_kwargs = broker.enqueue.call_args.kwargs
+        assert call_kwargs['good_until'] == deadline
+        assert call_kwargs['enqueue_delay_seconds'] == 60
+        assert json.loads(call_kwargs['task_options'])['good_until'] == deadline.isoformat()
 
     def test_schedule_broker_exception_returns_enqueue_failed(self) -> None:
         """Broker Err result during schedule returns ENQUEUE_FAILED."""
@@ -1417,6 +1534,30 @@ class TestTaskOptionsGoodUntilTimezone:
         """None is the default and passes validation."""
         opts = TaskOptions(task_name='test.task')
         assert opts.good_until is None
+
+
+@pytest.mark.unit
+class TestDefinitionLevelGoodUntil:
+    """Decorator-level good_until is rejected because it is definition-time state."""
+
+    def test_app_task_rejects_good_until_at_definition_time(self) -> None:
+        from horsies.core.app import Horsies
+
+        app = object.__new__(Horsies)
+        deadline = datetime(2030, 1, 1, tzinfo=timezone.utc)
+
+        def bad_deadline() -> TaskResult[str, TaskError]:
+            return TaskResult(ok='bad')
+
+        with pytest.raises(TaskDefinitionError) as exc_info:
+            decorator = app.task(
+                task_name='test.bad_deadline',
+                **{'good_until': deadline},
+            )
+            decorator(bad_deadline)
+
+        assert exc_info.value.code == ErrorCode.TASK_INVALID_OPTIONS
+        assert 'good_until must be set when sending a task' in exc_info.value.message
 
 
 # =============================================================================

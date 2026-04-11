@@ -9,7 +9,7 @@ import pytest
 
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.task_send_types import TaskSendError, TaskSendResult
-from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, from_node
+from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, TaskSendOptions, TaskSendOptions, from_node
 from horsies.core.types.result import Ok
 from horsies.core.models.workflow import (
     NODE_ID_PATTERN,
@@ -64,6 +64,9 @@ class MockTaskWrapper(TaskFunction[Any, Any]):
 
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
+
+    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+        return self
 
     def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -127,6 +130,9 @@ class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
+    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+        return self
+
     def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
@@ -189,6 +195,9 @@ class MockTaskWrapperWithParams(TaskFunction[Any, Any]):
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
+    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+        return self
+
     def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
@@ -246,6 +255,9 @@ class MockTaskWrapperWithKwargs(TaskFunction[Any, Any]):
 
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
+
+    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+        return self
 
     def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -308,6 +320,9 @@ class MockTaskWrapperWithRequiredMeta(TaskFunction[Any, Any]):
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
+    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+        return self
+
     def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
@@ -366,6 +381,9 @@ class MockTaskWrapperInt(TaskFunction[Any, int]):
 
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[int]]:
         return Ok(TaskHandle('mock'))
+
+    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+        return self
 
     def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[int]]:
         return Ok(TaskHandle('mock'))
@@ -431,6 +449,9 @@ class MockTaskWrapperWithStringResultParam(TaskFunction[Any, Any]):
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
+    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+        return self
+
     def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
@@ -494,6 +515,9 @@ class MockTaskWrapperWithRawParam(TaskFunction[Any, Any]):
 
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
+
+    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+        return self
 
     def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))

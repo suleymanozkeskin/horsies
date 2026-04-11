@@ -19,6 +19,7 @@ from typing import (
     TYPE_CHECKING,
     Optional,
     Any,
+    cast,
 )
 from abc import abstractmethod
 from collections.abc import Mapping
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
 from horsies.core.models.tasks import (
     TaskResult,
     TaskError,
+    TaskOptions,
     BuiltInTaskCode,
     OperationalErrorCode,
     ContractCode,
@@ -76,6 +78,7 @@ from horsies.core.errors import (
 P = ParamSpec('P')
 T = TypeVar('T')
 E = TypeVar('E')
+_UNSET: Final[object] = object()
 
 # Internal retry constants for resend_on_transient_err.
 # 1 initial attempt + _SEND_RETRY_COUNT retries = 4 total broker calls.
@@ -558,6 +561,13 @@ class TaskFunction(Protocol[P, T]):
     ) -> TaskSendResult['TaskHandle[T]']: ...
 
     @abstractmethod
+    def with_options(
+        self,
+        *,
+        good_until: datetime | None = None,
+    ) -> 'TaskSendOptions[P, T]': ...
+
+    @abstractmethod
     def retry_send(
         self,
         error: TaskSendError,
@@ -590,6 +600,35 @@ class TaskFunction(Protocol[P, T]):
         good_until: datetime | None = None,
         node_id: str | None = None,
     ) -> 'NodeFactory[P, T]': ...
+
+
+class TaskSendOptions(Protocol[P, T]):
+    """Per-send options for ad-hoc sends.
+
+    For workflow tasks, use .node(good_until=...)(...) instead.
+    """
+
+    @abstractmethod
+    def send(
+        self,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> TaskSendResult['TaskHandle[T]']: ...
+
+    @abstractmethod
+    async def send_async(
+        self,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> TaskSendResult['TaskHandle[T]']: ...
+
+    @abstractmethod
+    def schedule(
+        self,
+        delay: int,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> TaskSendResult['TaskHandle[T]']: ...
 
 
 def create_task_wrapper(
@@ -782,6 +821,49 @@ def create_task_wrapper(
                 f'Failed to serialize task_options for {task_name}: {_opts_result.err_value}',
             )
         _pre_serialized_options = _opts_result.ok_value
+
+    def _serialize_options_for_send(
+        good_until_override: datetime | None | object,
+    ) -> TaskSendResult[tuple[datetime | None, str | None]]:
+        """Resolve good_until and task_options JSON for this concrete send."""
+        if good_until_override is _UNSET:
+            # app.task() rejects definition-time good_until, but direct wrapper
+            # construction and legacy serialized options can still carry it.
+            return Ok((
+                task_options.good_until if task_options else None,
+                _pre_serialized_options,
+            ))
+
+        good_until = cast(datetime | None, good_until_override)
+        if good_until is None and task_options is None:
+            return Ok((None, None))
+
+        try:
+            send_options = TaskOptions(
+                task_name=task_options.task_name if task_options else task_name,
+                queue_name=task_options.queue_name if task_options else None,
+                good_until=good_until,
+                retry_policy=task_options.retry_policy if task_options else None,
+            )
+        except Exception as exc:
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.VALIDATION_FAILED,
+                message=f'Invalid send options for {task_name}: {exc}',
+                retryable=False,
+                exception=exc if isinstance(exc, BaseException) else None,
+            ))
+
+        opts_result = serialize_task_options(send_options)
+        if is_err(opts_result):
+            err = opts_result.err_value
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.VALIDATION_FAILED,
+                message=f'Failed to serialize send options for {task_name}: {err}',
+                retryable=False,
+                exception=err if isinstance(err, BaseException) else None,
+            ))
+        return Ok((good_until, opts_result.ok_value))
+
     # ---- Broker-to-TaskSendError mapping ----
 
     def _map_broker_err(
@@ -1043,6 +1125,7 @@ def create_task_wrapper(
         args: tuple[Any, ...],
         kwargs_dict: dict[str, Any],
         enqueue_delay_seconds: int | None = None,
+        good_until_override: datetime | None | object = _UNSET,
     ) -> TaskSendResult[tuple[str, TaskSendPayload]]:
         """Validate, serialize, and build a (task_id, TaskSendPayload) tuple.
 
@@ -1062,7 +1145,10 @@ def create_task_wrapper(
 
         task_id = str(uuid.uuid4())
         sent_at = datetime.now(timezone.utc)
-        good_until = task_options.good_until if task_options else None
+        options_result = _serialize_options_for_send(good_until_override)
+        if is_err(options_result):
+            return options_result
+        good_until, task_options_json = options_result.ok_value
 
         # Serialize args
         args_json: str | None = None
@@ -1102,7 +1188,7 @@ def create_task_wrapper(
             sent_at=sent_at,
             good_until=good_until,
             enqueue_delay_seconds=enqueue_delay_seconds,
-            task_options=_pre_serialized_options,
+            task_options=task_options_json,
         )
 
         payload = TaskSendPayload(
@@ -1114,18 +1200,18 @@ def create_task_wrapper(
             sent_at=sent_at,
             good_until=good_until,
             enqueue_delay_seconds=enqueue_delay_seconds,
-            task_options=_pre_serialized_options,
+            task_options=task_options_json,
             enqueue_sha=sha,
         )
         return Ok((task_id, payload))
 
     # ---- Public send methods ----
 
-    def send(
-        *args: P.args,
-        **kwargs: P.kwargs,
+    def _send_with_options(
+        args: tuple[Any, ...],
+        kwargs_dict: dict[str, Any],
+        good_until_override: datetime | None | object,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Execute task asynchronously via app's broker."""
         if app.are_sends_suppressed():
             return Err(TaskSendError(
                 code=TaskSendErrorCode.SEND_SUPPRESSED,
@@ -1133,17 +1219,21 @@ def create_task_wrapper(
                 retryable=False,
             ))
 
-        prep = _prepare_send(args, kwargs)
+        prep = _prepare_send(
+            args,
+            kwargs_dict,
+            good_until_override=good_until_override,
+        )
         if is_err(prep):
             return prep
         task_id, payload = prep.ok_value
         return _do_send(task_id, payload)
 
-    async def send_async(
-        *args: P.args,
-        **kwargs: P.kwargs,
+    async def _send_async_with_options(
+        args: tuple[Any, ...],
+        kwargs_dict: dict[str, Any],
+        good_until_override: datetime | None | object,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Async variant for frameworks like FastAPI."""
         if app.are_sends_suppressed():
             return Err(TaskSendError(
                 code=TaskSendErrorCode.SEND_SUPPRESSED,
@@ -1151,18 +1241,22 @@ def create_task_wrapper(
                 retryable=False,
             ))
 
-        prep = _prepare_send(args, kwargs)
+        prep = _prepare_send(
+            args,
+            kwargs_dict,
+            good_until_override=good_until_override,
+        )
         if is_err(prep):
             return prep
         task_id, payload = prep.ok_value
         return await _do_send_async(task_id, payload)
 
-    def schedule(
+    def _schedule_with_options(
         delay: int,
-        *args: P.args,
-        **kwargs: P.kwargs,
+        args: tuple[Any, ...],
+        kwargs_dict: dict[str, Any],
+        good_until_override: datetime | None | object,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Execute task asynchronously after a delay."""
         if app.are_sends_suppressed():
             return Err(TaskSendError(
                 code=TaskSendErrorCode.SEND_SUPPRESSED,
@@ -1170,11 +1264,71 @@ def create_task_wrapper(
                 retryable=False,
             ))
 
-        prep = _prepare_send(args, kwargs, enqueue_delay_seconds=delay)
+        prep = _prepare_send(
+            args,
+            kwargs_dict,
+            enqueue_delay_seconds=delay,
+            good_until_override=good_until_override,
+        )
         if is_err(prep):
             return prep
         task_id, payload = prep.ok_value
         return _do_schedule(task_id, payload)
+
+    def send(
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> TaskSendResult[TaskHandle[T]]:
+        """Execute task asynchronously via app's broker."""
+        return _send_with_options(args, kwargs, _UNSET)
+
+    async def send_async(
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> TaskSendResult[TaskHandle[T]]:
+        """Async variant for frameworks like FastAPI."""
+        return await _send_async_with_options(args, kwargs, _UNSET)
+
+    def schedule(
+        delay: int,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> TaskSendResult[TaskHandle[T]]:
+        """Execute task asynchronously after a delay."""
+        return _schedule_with_options(delay, args, kwargs, _UNSET)
+
+    class _TaskSendOptionsImpl:
+        def __init__(self, good_until: datetime | None) -> None:
+            self.good_until = good_until
+
+        def send(
+            self,
+            *args: P.args,
+            **kwargs: P.kwargs,
+        ) -> TaskSendResult[TaskHandle[T]]:
+            return _send_with_options(args, kwargs, self.good_until)
+
+        async def send_async(
+            self,
+            *args: P.args,
+            **kwargs: P.kwargs,
+        ) -> TaskSendResult[TaskHandle[T]]:
+            return await _send_async_with_options(args, kwargs, self.good_until)
+
+        def schedule(
+            self,
+            delay: int,
+            *args: P.args,
+            **kwargs: P.kwargs,
+        ) -> TaskSendResult[TaskHandle[T]]:
+            return _schedule_with_options(delay, args, kwargs, self.good_until)
+
+    def with_options(
+        *,
+        good_until: datetime | None = None,
+    ) -> TaskSendOptions[P, T]:
+        """Set options for one ad-hoc send without changing the task definition."""
+        return _TaskSendOptionsImpl(good_until)
 
     # ---- Retry methods ----
 
@@ -1306,6 +1460,13 @@ def create_task_wrapper(
             **kwargs: P.kwargs,
         ) -> TaskSendResult[TaskHandle[T]]:
             return schedule(delay, *args, **kwargs)
+
+        def with_options(
+            self,
+            *,
+            good_until: datetime | None = None,
+        ) -> TaskSendOptions[P, T]:
+            return with_options(good_until=good_until)
 
         def retry_send(
             self,

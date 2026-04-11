@@ -13,7 +13,7 @@ skill files in this directory:
 
 | File | When to open |
 |---|---|
-| `tasks.md` | `@app.task`, `TaskResult`, `send()`, `RetryPolicy`, `ExceptionMapper`, serialization |
+| `tasks.md` | `@app.task`, `TaskResult`, `send()`, `with_options()`, `RetryPolicy`, `ExceptionMapper`, serialization |
 | `workflows.md` | `WorkflowSpec`, `TaskNode`, `WorkflowHandle`, DAG construction, failure semantics |
 | `configs.md` | `AppConfig`, `PostgresConfig`, queues, recovery, scheduling, CLI commands |
 
@@ -63,6 +63,7 @@ match add_numbers.send(a=5, b=3):
 
 Async: `send_async()` / `handle.get_async()`.
 Delayed: `add_numbers.schedule(60, a=5, b=3)` dispatches after 60 seconds.
+Deadline: `add_numbers.with_options(good_until=deadline).send(a=5, b=3)` expires if not executed in time.
 
 ### Retry a Failed Send
 

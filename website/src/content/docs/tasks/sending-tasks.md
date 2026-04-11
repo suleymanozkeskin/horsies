@@ -38,6 +38,37 @@ async def my_endpoint():
 ```
 `send_async()` only enqueues the task. Use `handle.get_async()` if you want to wait for completion.
 
+### Set a Task Deadline
+
+Use `.with_options(good_until=...)` to set a per-send expiry deadline. If the task is not executed before the deadline, it transitions to `EXPIRED`.
+
+```python
+from datetime import datetime, timedelta, timezone
+from horsies import Ok, Err
+
+deadline = datetime.now(timezone.utc) + timedelta(minutes=5)
+
+match my_task.with_options(good_until=deadline).send(arg1, arg2):
+    case Ok(handle):
+        print(f"Task submitted with 5-minute deadline: {handle.task_id}")
+    case Err(err):
+        print(f"Send failed: {err.code}")
+```
+
+`good_until` must be a timezone-aware `datetime`. Naive datetimes return `Err(VALIDATION_FAILED)`.
+
+`with_options()` works with all send methods:
+
+```python
+opts = my_task.with_options(good_until=deadline)
+
+opts.send(arg1, arg2)              # sync
+await opts.send_async(arg1, arg2)  # async
+opts.schedule(60, arg1, arg2)      # delayed
+```
+
+For workflow nodes, use `.node(good_until=...)` instead — see [Typed Node Builder](../concepts/workflows/typed-node-builder).
+
 ### Delay Execution
 
 ```python
@@ -209,6 +240,18 @@ Enqueue task for delayed execution.
 | `**kwargs` | task kwargs | Keyword arguments for the task |
 
 **Returns:** `TaskSendResult[TaskHandle[T]]`
+
+### `.with_options(*, good_until=None) -> TaskSendOptions[P, T]`
+
+Return a per-send options builder. The returned object exposes `.send()`, `.send_async()`, and `.schedule()` with the overridden options applied.
+
+| Parameter | Type | Description |
+| --------- | ---- | ----------- |
+| `good_until` | `datetime \| None` | Task expiry deadline (must be timezone-aware) |
+
+**Returns:** `TaskSendOptions[P, T]` — a builder with `.send()`, `.send_async()`, and `.schedule()`.
+
+Passing `good_until=None` explicitly clears any internally inherited deadline.
 
 ### `.retry_send(error) -> TaskSendResult[TaskHandle[T]]`
 

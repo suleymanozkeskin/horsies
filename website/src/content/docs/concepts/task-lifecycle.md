@@ -15,7 +15,7 @@ tags: [concepts, tasks, states]
 | `COMPLETED` | Task finished successfully |
 | `FAILED` | Task failed (error returned or exception) |
 | `CANCELLED` | Task was cancelled before execution |
-| `EXPIRED` | Task was never claimed before `good_until` deadline passed |
+| `EXPIRED` | Task's `good_until` deadline passed before execution started |
 
 **Terminal states:** `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED`.
 
@@ -59,10 +59,11 @@ TASK_TERMINAL_STATES  # frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, Task
               │            │ claims      │ passed
               │            ▼             ▼
               │     ┌──────────────┐ ┌──────────┐
-    timeout   │     │   CLAIMED    │ │ EXPIRED  │
+    timeout   │     │   CLAIMED    │►│ EXPIRED  │
    (requeue)◄─┼─────┤              │ └──────────┘
-              │     └──────┬───────┘
-              │            │ Execution starts
+              │     └──────┬───────┘  good_until
+              │            │ Execution  passed
+              │            │ starts
               │            ▼
               │     ┌──────────────┐
               │     │   RUNNING    │
@@ -118,6 +119,16 @@ TASK_TERMINAL_STATES  # frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, Task
 - Task has `good_until` set and deadline has passed without being claimed
 - Reaper transitions to EXPIRED with `TASK_EXPIRED` outcome code
 - No attempt row is written (task never started)
+- The claim SQL also filters out expired tasks, preventing new claims after the deadline
+
+### CLAIMED → EXPIRED
+
+- Task was claimed by a worker but `good_until` passed before execution started
+- Detected at two points: the preflight check and the ownership confirmation (`CLAIMED → RUNNING` transition)
+- Worker marks task EXPIRED with `TASK_EXPIRED` outcome code and a result payload containing `task_id` and `worker_id`
+- Claim metadata (`claimed_by_worker_id`, `claimed_at`) is preserved for forensics
+- No attempt row is written (user code never ran)
+- Takes precedence over workflow PAUSED/CANCELLED handling — an expired task is not put back to PENDING
 
 ### CLAIMED → PENDING (stale recovery)
 
@@ -150,11 +161,12 @@ Missing heartbeats trigger automatic recovery. See [Heartbeats & Recovery](../..
 
 ## Task Expiry
 
-Tasks can have a `good_until` deadline:
+Tasks can have a `good_until` deadline set at send time via `.with_options()`:
 
-- If task isn't claimed before `good_until`, it becomes unclaimable
-- The reaper periodically transitions unclaimed expired tasks to `EXPIRED` with a `TASK_EXPIRED` result
-- Useful for time-sensitive operations
+- **PENDING expiry:** If the task isn't claimed before `good_until`, the claim SQL skips it. The reaper periodically transitions unclaimed expired tasks to `EXPIRED`.
+- **CLAIMED expiry:** If the task was claimed but `good_until` passes before execution starts, the worker marks it `EXPIRED` directly instead of proceeding to `RUNNING`.
+- Both paths produce a `TASK_EXPIRED` outcome code. No attempt row is written since user code never ran.
+- `good_until` also caps retries — a retry scheduled at or past the deadline is rejected.
 
 ```python
 from datetime import datetime, timedelta, timezone
@@ -164,5 +176,8 @@ def urgent_task() -> TaskResult[str, TaskError]:
     ...
 
 # Compute deadline at send time, not module load time
-urgent_task.send(good_until=datetime.now(timezone.utc) + timedelta(minutes=5))
+deadline = datetime.now(timezone.utc) + timedelta(minutes=5)
+urgent_task.with_options(good_until=deadline).send()
 ```
+
+`good_until` must be timezone-aware. For workflow nodes, use `.node(good_until=...)` instead — see [Typed Node Builder](../../concepts/workflows/typed-node-builder).

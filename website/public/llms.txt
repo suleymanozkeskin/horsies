@@ -120,7 +120,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### @app.task Decorator
 - Decorated function must return TaskResult[T, TaskError]
-- Options: task_name, queue_name, good_until, retry_policy, exception_mapper, default_unhandled_error_code
+- Options: task_name, queue_name, retry_policy, exception_mapper, default_unhandled_error_code
+- good_until is NOT accepted at definition time (raises E102) — use .with_options(good_until=...) at send time
 - Returns TaskFunction[P, T]
 
 ### TaskFunction[P, T] (decorated task)
@@ -128,11 +129,21 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .send(*args, **kwargs) -> TaskSendResult[TaskHandle[T]] (enqueue for background execution)
 - .send_async(*args, **kwargs) -> TaskSendResult[TaskHandle[T]] (async enqueue)
 - .schedule(delay_seconds, *args, **kwargs) -> TaskSendResult[TaskHandle[T]] (delayed enqueue)
+- .with_options(*, good_until=None) -> TaskSendOptions[P, T] (per-send options builder)
 - .retry_send(error: TaskSendError) -> TaskSendResult[TaskHandle[T]] (retry failed send with stored payload)
 - .retry_send_async(error: TaskSendError) -> TaskSendResult[TaskHandle[T]] (async retry)
 - .retry_schedule(error: TaskSendError) -> TaskSendResult[TaskHandle[T]] (retry failed schedule with stored payload)
 - .node(**workflow_opts) -> NodeFactory[P, T] (typed workflow node builder)
 - .task_name -> str
+
+### TaskSendOptions[P, T] (per-send options)
+- Returned by task.with_options(good_until=deadline)
+- .send(*args, **kwargs) -> TaskSendResult[TaskHandle[T]]
+- .send_async(*args, **kwargs) -> TaskSendResult[TaskHandle[T]]
+- .schedule(delay, *args, **kwargs) -> TaskSendResult[TaskHandle[T]]
+- good_until must be timezone-aware datetime; naive datetimes return Err(VALIDATION_FAILED)
+- Passing good_until=None explicitly clears any inherited deadline
+- For workflow nodes, use .node(good_until=...) instead
 
 ### TaskHandle[T]
 - .task_id -> str
@@ -180,7 +191,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .failed_reason -> str | None (opt-in via include_failed_reason)
 
 ### TaskStatus (enum)
-- PENDING -> CLAIMED -> RUNNING -> COMPLETED | FAILED | CANCELLED | EXPIRED (never claimed before good_until)
+- PENDING -> CLAIMED -> RUNNING -> COMPLETED | FAILED | CANCELLED | EXPIRED (good_until passed before execution started)
 - .is_terminal -> bool
 - TASK_TERMINAL_STATES: frozenset = {COMPLETED, FAILED, CANCELLED, EXPIRED}
 
@@ -628,7 +639,7 @@ SubWorkflowSummary, summary_for, has_summary -> /horsies/concepts/workflows/subw
 WorkflowMeta, workflow_meta, metadata injection -> /horsies/concepts/workflows/workflow-semantics/
 WorkflowDefinition, class-based workflow, build, build_with -> /horsies/concepts/workflows/subworkflows/
 ExceptionMapper, exception_mapper, error code mapping -> /horsies/tasks/error-handling/
-good_until, task expiry, deadline -> /horsies/tasks/defining-tasks/
+good_until, task expiry, deadline, with_options, TaskSendOptions -> /horsies/tasks/sending-tasks/
 schedule, delay, TaskFunction.schedule, resend_on_transient_err -> /horsies/tasks/sending-tasks/
 worker, process pool, claim, execute -> /horsies/workers/worker-architecture/
 concurrency, max_concurrency, cluster_wide_cap, prefetch -> /horsies/workers/concurrency/
