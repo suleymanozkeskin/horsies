@@ -32,5 +32,7 @@ horsies-showcase/
 # Temporary publish-script backup
 macros/Cargo.toml.bak
 
-# website(temporary)
-website/
+# website
+website/node_modules/
+website/dist/
+website/.astro/
