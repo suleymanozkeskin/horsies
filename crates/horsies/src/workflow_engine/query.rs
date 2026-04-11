@@ -453,3 +453,214 @@ fn parse_task_status(s: &str) -> WorkflowTaskStatus {
 fn is_terminal(status: &str) -> bool {
     matches!(status, "COMPLETED" | "FAILED" | "CANCELLED" | "PAUSED")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{
+        OperationalErrorCode, OutcomeCode, RetrievalCode, TaskErrorCode,
+    };
+
+    // -----------------------------------------------------------------------
+    // Helper
+    // -----------------------------------------------------------------------
+
+    fn row(status: &str, result: Option<&str>, error: Option<&str>) -> WorkflowResultRow {
+        WorkflowResultRow {
+            status: status.to_owned(),
+            result: result.map(|s| s.to_owned()),
+            error: error.map(|s| s.to_owned()),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_workflow_result
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn completed_with_valid_result() {
+        let wrapped = TaskResult::Ok(42);
+        let json = serde_json::to_string(&wrapped).unwrap();
+        let r = row("COMPLETED", Some(&json), None);
+
+        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[test]
+    fn completed_with_null_result() {
+        let r = row("COMPLETED", None, None);
+
+        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.error_code,
+            Some(TaskErrorCode::from(RetrievalCode::ResultNotAvailable)),
+        );
+        assert!(err.message.as_deref().unwrap().contains("result is null"));
+    }
+
+    #[test]
+    fn completed_with_malformed_json() {
+        let r = row("COMPLETED", Some("{not valid json"), None);
+
+        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.error_code,
+            Some(TaskErrorCode::from(
+                OperationalErrorCode::ResultDeserializationError,
+            )),
+        );
+    }
+
+    #[test]
+    fn completed_with_wrong_type() {
+        // Result is a string but we try to deserialize as i32.
+        let wrapped = TaskResult::Ok("hello".to_owned());
+        let json = serde_json::to_string(&wrapped).unwrap();
+        let r = row("COMPLETED", Some(&json), None);
+
+        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.error_code,
+            Some(TaskErrorCode::from(
+                OperationalErrorCode::ResultDeserializationError,
+            )),
+        );
+    }
+
+    #[test]
+    fn failed_with_valid_error() {
+        let task_err = TaskError::new("VALIDATION", "bad input");
+        let err_json = serde_json::to_string(&task_err).unwrap();
+        let r = row("FAILED", None, Some(&err_json));
+
+        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.error_code,
+            Some(TaskErrorCode::User("VALIDATION".to_owned())),
+        );
+        assert_eq!(err.message.as_deref(), Some("bad input"));
+    }
+
+    #[test]
+    fn failed_with_malformed_error_json() {
+        let r = row("FAILED", None, Some("{garbage"));
+
+        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.error_code,
+            Some(TaskErrorCode::from(OperationalErrorCode::BrokerError)),
+        );
+        assert!(err.message.as_deref().unwrap().contains("workflow failed"));
+    }
+
+    #[test]
+    fn failed_with_null_error() {
+        let r = row("FAILED", None, None);
+
+        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.error_code,
+            Some(TaskErrorCode::from(OperationalErrorCode::BrokerError)),
+        );
+        assert!(err.message.as_deref().unwrap().contains("workflow failed"));
+    }
+
+    #[test]
+    fn cancelled_produces_workflow_cancelled() {
+        let r = row("CANCELLED", None, None);
+
+        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.error_code,
+            Some(TaskErrorCode::from(OutcomeCode::WorkflowCancelled)),
+        );
+    }
+
+    #[test]
+    fn paused_produces_workflow_paused() {
+        let r = row("PAUSED", None, None);
+
+        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.error_code,
+            Some(TaskErrorCode::from(OutcomeCode::WorkflowPaused)),
+        );
+    }
+
+    #[test]
+    fn unknown_status_produces_result_not_ready() {
+        let r = row("RUNNING", None, None);
+
+        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.error_code,
+            Some(TaskErrorCode::from(RetrievalCode::ResultNotReady)),
+        );
+        assert!(err.message.as_deref().unwrap().contains("wf-1"));
+    }
+
+    // -----------------------------------------------------------------------
+    // map_task_result_value
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn map_ok_with_matching_type() {
+        let raw = TaskResult::Ok(serde_json::json!(42));
+
+        let result: TaskResult<i32> = map_task_result_value(raw, "wf-1", None);
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[test]
+    fn map_ok_with_mismatched_type() {
+        let raw = TaskResult::Ok(serde_json::json!("not a number"));
+
+        let result: TaskResult<i32> = map_task_result_value(raw, "wf-1", None);
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.error_code,
+            Some(TaskErrorCode::from(
+                OperationalErrorCode::ResultDeserializationError,
+            )),
+        );
+        assert!(err.message.as_deref().unwrap().contains("wf-1"));
+    }
+
+    #[test]
+    fn map_ok_with_mismatched_type_includes_node_id() {
+        let raw = TaskResult::Ok(serde_json::json!("not a number"));
+
+        let result: TaskResult<i32> = map_task_result_value(raw, "wf-1", Some("step-a"));
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.error_code,
+            Some(TaskErrorCode::from(
+                OperationalErrorCode::ResultDeserializationError,
+            )),
+        );
+        let msg = err.message.as_deref().unwrap();
+        assert!(msg.contains("wf-1"), "expected workflow_id in message: {msg}");
+        assert!(msg.contains("step-a"), "expected node_id in message: {msg}");
+    }
+
+    #[test]
+    fn map_err_passes_through() {
+        let original = TaskError::new("MY_CODE", "original error");
+        let raw: TaskResult<serde_json::Value> = TaskResult::Err(original.clone());
+
+        let result: TaskResult<i32> = map_task_result_value(raw, "wf-1", None);
+        let err = result.unwrap_err();
+        assert_eq!(err.error_code, original.error_code);
+        assert_eq!(err.message, original.message);
+    }
+}
