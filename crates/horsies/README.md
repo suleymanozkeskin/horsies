@@ -8,6 +8,8 @@
 
 Rust port of [horsies](https://github.com/suleymanozkeskin/horsies) (Python).
 
+[**Full Documentation**](https://suleymanozkeskin.github.io/horsies-rust/)
+
 ## Features
 
 - **Tasks** with typed arguments, retry policies, exception mapping, and scheduling
