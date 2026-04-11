@@ -130,12 +130,6 @@ async fn main() -> ExitCode {
         }
     };
 
-    // Run migrations.
-    if let Err(e) = broker.migrate().await {
-        tracing::error!("migration failed: {}", e);
-        return ExitCode::FAILURE;
-    }
-
     if subcommand == "scheduler" {
         // Run scheduler.
         let Some(schedule_config) = app_config.schedule.clone() else {

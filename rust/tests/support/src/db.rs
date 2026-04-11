@@ -1,7 +1,12 @@
 /// Database connection and cleanup helpers.
 ///
 /// Mirrors Python's `conftest.py` database fixtures.
-use sqlx::PgPool;
+use std::str::FromStr;
+
+use sqlx::postgres::PgConnectOptions;
+use sqlx::{Connection, PgPool};
+use url::Url;
+use uuid::Uuid;
 
 /// Create a connection pool using `DATABASE_URL` env var.
 pub async fn create_pool() -> PgPool {
@@ -17,6 +22,53 @@ pub async fn run_migrations(pool: &PgPool) {
         .run(pool)
         .await
         .expect("failed to run migrations");
+}
+
+/// Create a fresh empty database and return its connection URL.
+///
+/// The returned database has no horsies tables and no `_sqlx_migrations`
+/// metadata yet. Call [`drop_database`] when finished.
+pub async fn create_empty_database() -> String {
+    let base_url = db_url();
+    let mut admin_url = Url::parse(&base_url).expect("invalid DATABASE_URL");
+    let db_name = format!("horsies_tmp_{}", Uuid::new_v4().simple());
+
+    admin_url.set_path("/postgres");
+
+    let mut conn = sqlx::PgConnection::connect(admin_url.as_str())
+        .await
+        .expect("failed to connect to postgres admin database");
+    sqlx::query(&format!("CREATE DATABASE \"{}\"", db_name))
+        .execute(&mut conn)
+        .await
+        .expect("failed to create empty test database");
+
+    let mut fresh_url = Url::parse(&base_url).expect("invalid DATABASE_URL");
+    fresh_url.set_path(&format!("/{}", db_name));
+    fresh_url.to_string()
+}
+
+/// Drop a database created by [`create_empty_database`].
+pub async fn drop_database(database_url: &str) {
+    let mut admin_url = Url::parse(database_url).expect("invalid database URL");
+    let connect = PgConnectOptions::from_str(database_url).expect("invalid database URL");
+    let db_name = connect.get_database().expect("database name missing");
+    admin_url.set_path("/postgres");
+
+    let mut conn = sqlx::PgConnection::connect(admin_url.as_str())
+        .await
+        .expect("failed to connect to postgres admin database");
+    sqlx::query(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
+    )
+    .bind(db_name)
+    .execute(&mut conn)
+    .await
+    .expect("failed to terminate active connections");
+    sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", db_name))
+        .execute(&mut conn)
+        .await
+        .expect("failed to drop empty test database");
 }
 
 /// Truncate all horsies tables. Call before each test for isolation.

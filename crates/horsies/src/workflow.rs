@@ -6,8 +6,8 @@ use serde::de::DeserializeOwned;
 use crate::core::app as core_app;
 use crate::core::{
     AnyNode, HorsiesError, NodeRef, OnError, SubWorkflowNode, SuccessPolicy, TaskNode,
-    TypedNodeRef, WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder, WorkflowStartError,
-    WorkflowStartErrorCode, WorkflowStartResult,
+    TypedNodeRef, WorkerResilienceConfig, WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder,
+    WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult,
 };
 use crate::workflow_engine::bound_handle::WorkflowHandle;
 use crate::workflow_engine::bound_spec::BoundWorkflowSpec;
@@ -116,6 +116,7 @@ pub struct WorkflowFunction<T> {
     broker: Arc<LazyBroker>,
     registry: Arc<RwLock<crate::core::WorkflowSpecRegistry>>,
     resend_on_transient_err: bool,
+    resilience: WorkerResilienceConfig,
     _phantom: PhantomData<T>,
 }
 
@@ -125,12 +126,14 @@ impl<T: DeserializeOwned + Clone> WorkflowFunction<T> {
         broker: Arc<LazyBroker>,
         registry: Arc<RwLock<crate::core::WorkflowSpecRegistry>>,
         resend_on_transient_err: bool,
+        resilience: WorkerResilienceConfig,
     ) -> Self {
         Self {
             spec,
             broker,
             registry,
             resend_on_transient_err,
+            resilience,
             _phantom: PhantomData,
         }
     }
@@ -207,7 +210,7 @@ impl<T: DeserializeOwned + Clone> WorkflowFunction<T> {
         // surface without a network round-trip.
         let mut spec = self.spec.clone();
         registry.resolve_and_validate_spec(&mut spec)?;
-        let broker = self.broker.get().await?;
+        let broker = self.broker.get_ready(&self.resilience).await?;
         Ok(BoundWorkflowSpec::from_broker(
             spec,
             &broker,
@@ -331,6 +334,7 @@ pub(crate) struct WorkflowStarter {
     broker: Arc<LazyBroker>,
     registry: Arc<RwLock<crate::core::WorkflowSpecRegistry>>,
     resend_on_transient_err: bool,
+    resilience: WorkerResilienceConfig,
 }
 
 impl WorkflowStarter {
@@ -338,11 +342,13 @@ impl WorkflowStarter {
         broker: Arc<LazyBroker>,
         registry: Arc<RwLock<crate::core::WorkflowSpecRegistry>>,
         resend_on_transient_err: bool,
+        resilience: WorkerResilienceConfig,
     ) -> Self {
         Self {
             broker,
             registry,
             resend_on_transient_err,
+            resilience,
         }
     }
 
@@ -351,13 +357,17 @@ impl WorkflowStarter {
         mut spec: WorkflowSpec,
     ) -> WorkflowStartResult<WorkflowHandle<T>> {
         let workflow_name = spec.name.clone();
-        let broker = self.broker.get().await.map_err(|err| WorkflowStartError {
-            code: WorkflowStartErrorCode::EnqueueFailed,
-            message: err.to_string(),
-            retryable: err.is_retryable(),
-            workflow_name: workflow_name.clone(),
-            workflow_id: String::new(),
-        })?;
+        let broker = self
+            .broker
+            .get_ready(&self.resilience)
+            .await
+            .map_err(|err| WorkflowStartError {
+                code: WorkflowStartErrorCode::EnqueueFailed,
+                message: err.to_string(),
+                retryable: err.is_retryable(),
+                workflow_name: workflow_name.clone(),
+                workflow_id: String::new(),
+            })?;
         let registry = self
             .registry
             .read()
@@ -391,13 +401,17 @@ impl WorkflowStarter {
     ) -> WorkflowStartResult<WorkflowHandle<T>> {
         let workflow_name = spec.name.clone();
         let workflow_id = workflow_id.into();
-        let broker = self.broker.get().await.map_err(|err| WorkflowStartError {
-            code: WorkflowStartErrorCode::EnqueueFailed,
-            message: err.to_string(),
-            retryable: err.is_retryable(),
-            workflow_name: workflow_name.clone(),
-            workflow_id: workflow_id.clone(),
-        })?;
+        let broker = self
+            .broker
+            .get_ready(&self.resilience)
+            .await
+            .map_err(|err| WorkflowStartError {
+                code: WorkflowStartErrorCode::EnqueueFailed,
+                message: err.to_string(),
+                retryable: err.is_retryable(),
+                workflow_name: workflow_name.clone(),
+                workflow_id: workflow_id.clone(),
+            })?;
         let registry = self
             .registry
             .read()

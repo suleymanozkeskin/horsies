@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::broker::{compute_enqueue_sha, TaskHandle};
 use crate::core::{
     ErrorCode, HorsiesError, QueueMode, RegisteredTask, TaskNode, TaskOptions, TaskSendError,
-    TaskSendErrorCode, TaskSendPayload, TaskSendResult,
+    TaskSendErrorCode, TaskSendPayload, TaskSendResult, WorkerResilienceConfig,
 };
 
 use crate::lazy_broker::LazyBroker;
@@ -162,6 +162,7 @@ impl<'a, A: Serialize + 'static, T: DeserializeOwned + Clone + 'static>
             self.task_options,
             self.app.core.suppress_sends_handle(),
             self.app.core.config().resend_on_transient_err,
+            self.app.core.config().resilience.clone(),
         );
         self.app.store_task_handle(&handle)?;
         Ok(handle)
@@ -180,6 +181,7 @@ pub struct TaskFunction<A, T> {
     task_options: Option<TaskOptions>,
     suppress_sends: Arc<AtomicBool>,
     resend_on_transient_err: bool,
+    resilience: WorkerResilienceConfig,
     _phantom: PhantomData<fn(A) -> T>,
 }
 
@@ -197,6 +199,7 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
         task_options: Option<TaskOptions>,
         suppress_sends: Arc<AtomicBool>,
         resend_on_transient_err: bool,
+        resilience: WorkerResilienceConfig,
     ) -> Self {
         Self {
             task_name,
@@ -206,6 +209,7 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
             task_options,
             suppress_sends,
             resend_on_transient_err,
+            resilience,
             _phantom: PhantomData,
         }
     }
@@ -323,13 +327,17 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
 
     pub async fn retry_send(&self, err: &TaskSendError) -> TaskSendResult<TaskHandle<T>> {
         let (task_id, payload) = validate_retry(err, &self.task_name, RetryKind::Send)?;
-        let broker = self.broker.get().await.map_err(|e| TaskSendError {
-            code: TaskSendErrorCode::EnqueueFailed,
-            message: format!("{}", e),
-            retryable: e.is_retryable(),
-            task_id: Some(task_id.to_owned()),
-            payload: err.payload.clone(),
-        })?;
+        let broker = self
+            .broker
+            .get_ready(&self.resilience)
+            .await
+            .map_err(|e| TaskSendError {
+                code: TaskSendErrorCode::EnqueueFailed,
+                message: format!("{}", e),
+                retryable: e.is_retryable(),
+                task_id: Some(task_id.to_owned()),
+                payload: err.payload.clone(),
+            })?;
 
         let handle = broker
             .retry_send(payload, Some(task_id))
@@ -347,13 +355,17 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
 
     pub async fn retry_schedule(&self, err: &TaskSendError) -> TaskSendResult<TaskHandle<T>> {
         let (task_id, payload) = validate_retry(err, &self.task_name, RetryKind::Schedule)?;
-        let broker = self.broker.get().await.map_err(|e| TaskSendError {
-            code: TaskSendErrorCode::EnqueueFailed,
-            message: format!("{}", e),
-            retryable: e.is_retryable(),
-            task_id: Some(task_id.to_owned()),
-            payload: err.payload.clone(),
-        })?;
+        let broker = self
+            .broker
+            .get_ready(&self.resilience)
+            .await
+            .map_err(|e| TaskSendError {
+                code: TaskSendErrorCode::EnqueueFailed,
+                message: format!("{}", e),
+                retryable: e.is_retryable(),
+                task_id: Some(task_id.to_owned()),
+                payload: err.payload.clone(),
+            })?;
 
         let handle = broker
             .retry_send(payload, Some(task_id))
@@ -403,13 +415,17 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
 
-            let broker = self.broker.get().await.map_err(|e| TaskSendError {
-                code: TaskSendErrorCode::EnqueueFailed,
-                message: format!("{}", e),
-                retryable: e.is_retryable(),
-                task_id: Some(pre_task_id.to_owned()),
-                payload: Some(payload.clone()),
-            })?;
+            let broker =
+                self.broker
+                    .get_ready(&self.resilience)
+                    .await
+                    .map_err(|e| TaskSendError {
+                        code: TaskSendErrorCode::EnqueueFailed,
+                        message: format!("{}", e),
+                        retryable: e.is_retryable(),
+                        task_id: Some(pre_task_id.to_owned()),
+                        payload: Some(payload.clone()),
+                    })?;
 
             match broker
                 .enqueue(
@@ -576,6 +592,7 @@ impl<A, T> Clone for TaskFunction<A, T> {
             task_options: self.task_options.clone(),
             suppress_sends: Arc::clone(&self.suppress_sends),
             resend_on_transient_err: self.resend_on_transient_err,
+            resilience: self.resilience.clone(),
             _phantom: PhantomData,
         }
     }
@@ -747,6 +764,7 @@ mod tests {
             opts,
             Arc::new(AtomicBool::new(false)),
             false,
+            config.resilience,
         )
     }
 

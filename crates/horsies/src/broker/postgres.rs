@@ -434,6 +434,7 @@ pub struct PostgresBroker {
     pool: PgPool,
     task_done_listener: tokio::sync::OnceCell<SharedNotifyListener>,
     workflow_done_listener: tokio::sync::OnceCell<SharedNotifyListener>,
+    schema_initialized: tokio::sync::OnceCell<()>,
 }
 
 impl PostgresBroker {
@@ -446,6 +447,7 @@ impl PostgresBroker {
             pool,
             task_done_listener: tokio::sync::OnceCell::new(),
             workflow_done_listener: tokio::sync::OnceCell::new(),
+            schema_initialized: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -485,6 +487,21 @@ impl PostgresBroker {
             .run(&self.pool)
             .await
             .map_err(BrokerError::Migration)?;
+        Ok(())
+    }
+
+    /// Ensure the embedded schema is initialized exactly once for this broker.
+    ///
+    /// The first successful call runs embedded SQL migrations. Later calls are
+    /// a no-op. If initialization fails, the guard remains unset so a future
+    /// caller can retry.
+    pub async fn ensure_schema_initialized(&self) -> Result<(), BrokerError> {
+        self.schema_initialized
+            .get_or_try_init(|| async {
+                self.migrate().await?;
+                Ok::<(), BrokerError>(())
+            })
+            .await?;
         Ok(())
     }
 

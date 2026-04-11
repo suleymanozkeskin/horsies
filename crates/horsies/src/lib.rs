@@ -210,7 +210,10 @@ impl Horsies {
     }
 
     pub async fn get_broker(&self) -> AppResult<Arc<PostgresBroker>> {
-        Ok(self.broker.get().await?)
+        Ok(self
+            .broker
+            .get_ready(&self.core.config().resilience)
+            .await?)
     }
 
     pub fn config(&self) -> &AppConfig {
@@ -352,6 +355,7 @@ impl Horsies {
             Arc::clone(&self.broker),
             Arc::clone(&self.workflow_registry_cache),
             self.core.config().resend_on_transient_err,
+            self.core.config().resilience.clone(),
         ))
     }
 
@@ -393,6 +397,7 @@ impl Horsies {
             Arc::clone(&self.broker),
             Arc::clone(&self.workflow_registry_cache),
             self.core.config().resend_on_transient_err,
+            self.core.config().resilience.clone(),
         )
     }
 
@@ -444,6 +449,7 @@ impl Horsies {
             Arc::clone(&self.broker),
             Arc::clone(&self.workflow_registry_cache),
             self.core.config().resend_on_transient_err,
+            self.core.config().resilience.clone(),
         ))
     }
 
@@ -565,7 +571,10 @@ impl Horsies {
 
     pub async fn check_live(&self) -> AppResult<()> {
         self.check()?;
-        let broker = self.broker.get().await?;
+        let broker = self
+            .broker
+            .get_ready(&self.core.config().resilience)
+            .await?;
         broker.health_check().await?;
         Ok(())
     }
@@ -596,8 +605,8 @@ impl Horsies {
 
     pub async fn run_worker_with(self, mut worker_config: WorkerConfig) -> AppResult<()> {
         let Self { core, broker, .. } = self;
-        let broker = broker.get().await?;
         let (app_config, registry, workflow_registry) = core.into_parts();
+        let broker = broker.get_ready(&app_config.resilience).await?;
         worker_config.apply_queue_config(&app_config);
         worker_config
             .validate()
@@ -619,7 +628,7 @@ impl Horsies {
         let schedule_config = app_config.schedule.clone().ok_or_else(|| {
             AppError::SchedulerConfig("schedule config is not enabled".to_owned())
         })?;
-        let broker = broker.get().await?;
+        let broker = broker.get_ready(&app_config.resilience).await?;
         let cancel = CancellationToken::new();
 
         {
@@ -675,8 +684,8 @@ impl Horsies {
         Arc<PostgresBroker>,
     )> {
         let Self { core, broker, .. } = self;
-        let broker = broker.get().await?;
         let (config, registry, workflow_registry) = core.into_parts();
+        let broker = broker.get_ready(&config.resilience).await?;
         Ok((config, registry, workflow_registry, broker))
     }
 }

@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use crate::broker::{BrokerError, PostgresBroker};
-use crate::core::PostgresConfig;
+use crate::core::{PostgresConfig, WorkerResilienceConfig};
+use crate::worker::backoff::RetryBackoff;
 use tokio::sync::OnceCell;
 
 pub struct LazyBroker {
@@ -25,6 +26,36 @@ impl LazyBroker {
             })
             .await
             .map(Arc::clone)
+    }
+
+    pub async fn get_ready(
+        &self,
+        resilience: &WorkerResilienceConfig,
+    ) -> Result<Arc<PostgresBroker>, BrokerError> {
+        let mut backoff = RetryBackoff::from_config(resilience);
+
+        loop {
+            match self.try_get_ready_once().await {
+                Ok(broker) => return Ok(broker),
+                Err(err) if err.is_retryable() && backoff.can_retry() => {
+                    let delay = backoff.next_delay_seconds();
+                    tracing::error!(
+                        error = %err,
+                        attempt = backoff.attempts(),
+                        delay_seconds = delay,
+                        "broker startup failed, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs_f64(delay)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    async fn try_get_ready_once(&self) -> Result<Arc<PostgresBroker>, BrokerError> {
+        let broker = self.get().await?;
+        broker.ensure_schema_initialized().await?;
+        Ok(broker)
     }
 
     pub fn set(&self, broker: Arc<PostgresBroker>) -> Result<(), Arc<PostgresBroker>> {
