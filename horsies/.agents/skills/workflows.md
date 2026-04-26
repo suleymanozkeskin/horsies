@@ -1,6 +1,6 @@
 ---
 name: horsies-workflows
-description: Workflow DAG guidance for horsies, including WorkflowSpec, TaskNode and SubWorkflowNode, WorkflowDefinition, WorkflowHandle, failure semantics, and validation errors E001-E031. Use when building, validating, or troubleshooting workflows.
+description: Workflow DAG guidance for horsies, including WorkflowSpec, TaskNode and SubWorkflowNode, WorkflowDefinition, WorkflowHandle, failure semantics, and validation errors HRS-001-HRS-031. Use when building, validating, or troubleshooting workflows.
 ---
 
 # horsies — Workflows
@@ -28,7 +28,7 @@ spec = app.workflow(
 
 - When `output` is provided: returns `WorkflowSpec[OutT]` typed to that node's ok-type.
 - When `output=None`: returns `WorkflowSpec[WorkflowTerminalResults]` — `handle.get()` returns `TaskResult[dict[str, TaskResult | None], TaskError]` where `.ok` is `{node_id: TaskResult | None, ...}`.
-- Resolves queue/priority for each `TaskNode` using app config; raises E014/E015 if unregistered.
+- Resolves queue/priority for each `TaskNode` using app config; raises HRS-014/HRS-015 if unregistered.
 - Attaches broker and `resend_on_transient_err` from app config automatically.
 - `definition_key` is required for top-level workflows built with `app.workflow()` and is used for persistence/runtime lookup.
 
@@ -84,7 +84,7 @@ spec = ChildPipeline.build_with(app, source_url="https://...")
 Requirements:
 - Must return a **fresh** `WorkflowSpec` per call (not cached).
 - `definition_key` is auto-populated via ContextVar when returning a `WorkflowSpec` from `build_with()`; manual setting is unnecessary.
-- Signature must accept `*_args` and `**_kwargs` beyond declared params (E023 otherwise).
+- Signature must accept `*_args` and `**_kwargs` beyond declared params (HRS-023 otherwise).
 
 ### `@app.workflow_builder` decorator
 
@@ -97,7 +97,7 @@ def build_regional_workflow(region: str) -> WorkflowSpec:
 ```
 
 - Executed under send suppression during check (no tasks enqueued).
-- `cases` provides kwarg dicts for parameterized builders. Missing `cases` with required params raises E027.
+- `cases` provides kwarg dicts for parameterized builders. Missing `cases` with required params raises HRS-027.
 
 ## TaskNode
 
@@ -396,8 +396,8 @@ class WorkflowContext(BaseModel):
 
 **Requirements:**
 1. `TaskNode.workflow_ctx_from` must list the upstream nodes to include.
-2. Every node in `workflow_ctx_from` must also be in `waits_for` (E009).
-3. If `workflow_ctx_from` is set but param is missing: E010.
+2. Every node in `workflow_ctx_from` must also be in `waits_for` (HRS-009).
+3. If `workflow_ctx_from` is set but param is missing: HRS-010.
 
 **Scope:** Only nodes in `workflow_ctx_from` are accessible. Others raise `KeyError`.
 
@@ -483,8 +483,8 @@ When a task becomes SKIPPED, all dependents are SKIPPED too (unless `allow_faile
 - Maps kwarg names to upstream nodes.
 - Injects the full `TaskResult[T, TaskError]` — **not just the raw value**.
 - Receiving function parameter must be typed `TaskResult[T, TaskError]`.
-- Upstream must be in `waits_for` (E008). Keys must not overlap with `kwargs` (E021).
-- Positional args not supported on workflow nodes (E026).
+- Upstream must be in `waits_for` (HRS-008). Keys must not overlap with `kwargs` (HRS-021).
+- Positional args not supported on workflow nodes (HRS-026).
 
 ```python
 @app.task("process")
@@ -496,41 +496,41 @@ def process(data: TaskResult[int, TaskError]) -> TaskResult[str, TaskError]:
 node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 ```
 
-## Validation Errors (E001–E031)
+## Validation Errors (HRS-001–HRS-031)
 
 | Code | Name | Trigger |
 |---|---|---|
-| E001 | `WORKFLOW_NO_NAME` | Missing `name` |
-| E002 | `WORKFLOW_NO_NODES` | WorkflowSpec has no tasks |
-| E003 | `WORKFLOW_INVALID_NODE_ID` | Empty, >128 chars, or invalid chars |
-| E004 | `WORKFLOW_DUPLICATE_NODE_ID` | Duplicate `node_id` |
-| E005 | `WORKFLOW_NO_ROOT_TASKS` | All tasks have deps |
-| E006 | `WORKFLOW_INVALID_DEPENDENCY` | `waits_for` references node not in task list |
-| E007 | `WORKFLOW_CYCLE_DETECTED` | Cycle in dependency graph |
-| E008 | `WORKFLOW_INVALID_ARGS_FROM` | `args_from` node not in `waits_for` |
-| E009 | `WORKFLOW_INVALID_CTX_FROM` | `workflow_ctx_from` node not in `waits_for` |
-| E010 | `WORKFLOW_CTX_PARAM_MISSING` | `workflow_ctx_from` set but fn lacks param |
-| E011 | `WORKFLOW_INVALID_OUTPUT` | `output` node not in task list |
-| E012 | `WORKFLOW_INVALID_SUCCESS_POLICY` | Policy references unknown nodes |
-| E013 | `WORKFLOW_INVALID_JOIN` | `quorum` without valid `min_success` |
-| E014 | `WORKFLOW_UNRESOLVED_QUEUE` | Queue not registered |
-| E015 | `WORKFLOW_UNRESOLVED_PRIORITY` | Priority unresolvable |
-| E016 | `WORKFLOW_NO_DEFINITION_KEY` | Workflow definition/spec missing `definition_key` |
-| E017 | `WORKFLOW_DUPLICATE_DEFINITION_KEY` | Two definitions share the same `definition_key` |
-| E018 | `WORKFLOW_SUBWORKFLOW_APP_MISSING` | No app when subworkflow enqueues |
-| E019 | `WORKFLOW_INVALID_KWARG_KEY` | `kwargs` key not in function signature |
-| E020 | `WORKFLOW_MISSING_REQUIRED_PARAMS` | Required param not in kwargs or args_from |
-| E021 | `WORKFLOW_KWARGS_ARGS_FROM_OVERLAP` | Same key in kwargs and args_from |
-| E022 | `WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH` | Child uses default build_with() |
-| E023 | `WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING` | Bad build_with() signature |
-| E024 | `WORKFLOW_ARGS_FROM_TYPE_MISMATCH` | Incompatible TaskResult type |
-| E025 | `WORKFLOW_OUTPUT_TYPE_MISMATCH` | Generic param doesn't match output |
-| E026 | `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED` | Non-empty positional args |
-| E027 | `WORKFLOW_CHECK_CASES_REQUIRED` | Builder needs cases= |
-| E028 | `WORKFLOW_CHECK_CASE_INVALID` | Invalid case kwarg dict |
-| E029 | `WORKFLOW_CHECK_BUILDER_EXCEPTION` | Builder raised or returned wrong type |
-| E030 | `WORKFLOW_CHECK_UNDECORATED_BUILDER` | Returns WorkflowSpec without decorator |
-| E031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails serialization |
+| HRS-001 | `WORKFLOW_NO_NAME` | Missing `name` |
+| HRS-002 | `WORKFLOW_NO_NODES` | WorkflowSpec has no tasks |
+| HRS-003 | `WORKFLOW_INVALID_NODE_ID` | Empty, >128 chars, or invalid chars |
+| HRS-004 | `WORKFLOW_DUPLICATE_NODE_ID` | Duplicate `node_id` |
+| HRS-005 | `WORKFLOW_NO_ROOT_TASKS` | All tasks have deps |
+| HRS-006 | `WORKFLOW_INVALID_DEPENDENCY` | `waits_for` references node not in task list |
+| HRS-007 | `WORKFLOW_CYCLE_DETECTED` | Cycle in dependency graph |
+| HRS-008 | `WORKFLOW_INVALID_ARGS_FROM` | `args_from` node not in `waits_for` |
+| HRS-009 | `WORKFLOW_INVALID_CTX_FROM` | `workflow_ctx_from` node not in `waits_for` |
+| HRS-010 | `WORKFLOW_CTX_PARAM_MISSING` | `workflow_ctx_from` set but fn lacks param |
+| HRS-011 | `WORKFLOW_INVALID_OUTPUT` | `output` node not in task list |
+| HRS-012 | `WORKFLOW_INVALID_SUCCESS_POLICY` | Policy references unknown nodes |
+| HRS-013 | `WORKFLOW_INVALID_JOIN` | `quorum` without valid `min_success` |
+| HRS-014 | `WORKFLOW_UNRESOLVED_QUEUE` | Queue not registered |
+| HRS-015 | `WORKFLOW_UNRESOLVED_PRIORITY` | Priority unresolvable |
+| HRS-016 | `WORKFLOW_NO_DEFINITION_KEY` | Workflow definition/spec missing `definition_key` |
+| HRS-017 | `WORKFLOW_DUPLICATE_DEFINITION_KEY` | Two definitions share the same `definition_key` |
+| HRS-018 | `WORKFLOW_SUBWORKFLOW_APP_MISSING` | No app when subworkflow enqueues |
+| HRS-019 | `WORKFLOW_INVALID_KWARG_KEY` | `kwargs` key not in function signature |
+| HRS-020 | `WORKFLOW_MISSING_REQUIRED_PARAMS` | Required param not in kwargs or args_from |
+| HRS-021 | `WORKFLOW_KWARGS_ARGS_FROM_OVERLAP` | Same key in kwargs and args_from |
+| HRS-022 | `WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH` | Child uses default build_with() |
+| HRS-023 | `WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING` | Bad build_with() signature |
+| HRS-024 | `WORKFLOW_ARGS_FROM_TYPE_MISMATCH` | Incompatible TaskResult type |
+| HRS-025 | `WORKFLOW_OUTPUT_TYPE_MISMATCH` | Generic param doesn't match output |
+| HRS-026 | `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED` | Non-empty positional args |
+| HRS-027 | `WORKFLOW_CHECK_CASES_REQUIRED` | Builder needs cases= |
+| HRS-028 | `WORKFLOW_CHECK_CASE_INVALID` | Invalid case kwarg dict |
+| HRS-029 | `WORKFLOW_CHECK_BUILDER_EXCEPTION` | Builder raised or returned wrong type |
+| HRS-030 | `WORKFLOW_CHECK_UNDECORATED_BUILDER` | Returns WorkflowSpec without decorator |
+| HRS-031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails serialization |
 
 ## Known Constraints
 

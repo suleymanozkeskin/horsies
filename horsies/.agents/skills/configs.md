@@ -41,21 +41,21 @@ app = Horsies(config=AppConfig(
 
 ### Validation Rules
 
-**Queue mode (E200):**
+**Queue mode (HRS-200):**
 - `DEFAULT`: `custom_queues` must be `None`.
 - `CUSTOM`: `custom_queues` must be non-None, non-empty, with unique names.
 
-**Cluster cap (E201):**
+**Cluster cap (HRS-201):**
 - Must be > 0 when set.
 - Mutually exclusive with `prefetch_buffer > 0` (cluster cap requires hard cap mode).
 
-**Prefetch (E202):**
+**Prefetch (HRS-202):**
 - Must be >= 0.
 - When > 0, `claim_lease_ms` must be explicitly set (not None) and > 0.
 - Effective lease must be >= 2x `recovery.claimer_heartbeat_interval_ms`.
 - `max_claim_renew_age_ms` must be > 0 and >= effective lease.
 
-**Exception mapper (E209):**
+**Exception mapper (HRS-209):**
 - Keys must be `BaseException` subclasses.
 - Values must match `^[A-Z][A-Z0-9_]*$`.
 - Values that look like exception class names (e.g., `"TimeoutError"`) are rejected.
@@ -111,7 +111,7 @@ config = PostgresConfig(
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `database_url` | `str` | required | Must start with `"postgresql+psycopg"` (E203 otherwise) |
+| `database_url` | `str` | required | Must start with `"postgresql+psycopg"` (HRS-203 otherwise) |
 | `pool_size` | `int` | `30` | Connection pool size |
 | `max_overflow` | `int` | `30` | Extra connections beyond pool_size |
 | `pool_timeout` | `int` | `30` | Seconds to wait for a connection |
@@ -132,7 +132,7 @@ class QueueMode(Enum):
 ### DEFAULT
 
 - Single `"default"` queue.
-- No `queue_name` on `@app.task(...)` — passing one raises E103.
+- No `queue_name` on `@app.task(...)` — passing one raises HRS-103.
 
 ### CUSTOM
 
@@ -179,7 +179,7 @@ Controls stale task detection, automatic recovery, and data retention.
 | `worker_state_retention_hours` | `int \| None` | `168` (7d) | 1–8760; None disables | Prune old worker_state rows |
 | `terminal_record_retention_hours` | `int \| None` | `720` (30d) | 1–43800; None disables | Prune terminal task/workflow rows |
 
-### Constraints (E204)
+### Constraints (HRS-204)
 
 - `running_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
 - `claimed_stale_threshold_ms >= claimer_heartbeat_interval_ms * 2`
@@ -206,7 +206,7 @@ Controls worker retry behavior on transient DB failures.
 | `db_retry_max_attempts` | `int` | `0` | 0–10000 | Max retries; 0 = infinite |
 | `notify_poll_interval_ms` | `int` | `5_000` | 1s–5min | Fallback poll when NOTIFY is silent |
 
-### Constraint (E208)
+### Constraint (HRS-208)
 
 `db_retry_max_ms >= db_retry_initial_ms`.
 
@@ -229,7 +229,7 @@ delay = min(db_retry_max_ms, db_retry_initial_ms * 2^(attempt-1))
 | `schedules` | `list[TaskSchedule]` | `[]` | — | Scheduled task definitions |
 | `check_interval_seconds` | `int` | `1` | 1–60 | How often scheduler checks for due runs |
 
-All `TaskSchedule.name` values must be unique (E205).
+All `TaskSchedule.name` values must be unique (HRS-205).
 
 ### TaskSchedule
 
@@ -255,7 +255,7 @@ IntervalSchedule(seconds=30)
 IntervalSchedule(hours=1, minutes=30)  # total = 90 minutes
 ```
 
-Fields: `seconds`, `minutes`, `hours`, `days` — all `int | None`. At least one must be set (E205).
+Fields: `seconds`, `minutes`, `hours`, `days` — all `int | None`. At least one must be set (HRS-205).
 
 **HourlySchedule** — every hour at fixed offset:
 
@@ -275,7 +275,7 @@ DailySchedule(time=time(3, 0, 0))  # daily at 03:00
 WeeklySchedule(days=[Weekday.MONDAY, Weekday.FRIDAY], time=time(9, 0))
 ```
 
-`days` must have no duplicates (E205).
+`days` must have no duplicates (HRS-205).
 
 **MonthlySchedule** — fixed day of month:
 
@@ -322,17 +322,17 @@ Phases are fail-fast: errors in phase N stop later phases.
 
 | Phase | What | Errors |
 |---|---|---|
-| 1 — Config | `AppConfig` Pydantic validators (implicit — already validated at construction) | E200–E209 |
-| 2 — Imports | Import each discovered module | ImportError, E210 |
-| 3 — Workflows | `WorkflowSpec` DAG validation during imports | E001–E031 |
-| 3.1 — Builders | Execute `@app.workflow_builder` functions | E027–E030 |
-| 3.2 — Undecorated | Scan for functions returning WorkflowSpec without decorator | E030 |
-| 3.5 — Policies | Re-validate exception_mapper after imports | E209 |
-| 4 — Broker | `SELECT 1` against PostgreSQL (`--live` only) | E211, Connection error |
+| 1 — Config | `AppConfig` Pydantic validators (implicit — already validated at construction) | HRS-200–HRS-209 |
+| 2 — Imports | Import each discovered module | ImportError, HRS-210 |
+| 3 — Workflows | `WorkflowSpec` DAG validation during imports | HRS-001–HRS-031 |
+| 3.1 — Builders | Execute `@app.workflow_builder` functions | HRS-027–HRS-030 |
+| 3.2 — Undecorated | Scan for functions returning WorkflowSpec without decorator | HRS-030 |
+| 3.5 — Policies | Re-validate exception_mapper after imports | HRS-209 |
+| 4 — Broker | `SELECT 1` against PostgreSQL (`--live` only) | HRS-211, Connection error |
 
 **Guarantee model:**
 - **Strong:** `@app.workflow_builder` functions are fully executed and validated.
-- **Best-effort:** Undecorated builder detection (E030) only scans directly discovered modules.
+- **Best-effort:** Undecorated builder detection (HRS-030) only scans directly discovered modules.
 
 Worker and scheduler also run `app.check(live=False)` at startup.
 
@@ -347,7 +347,7 @@ app/config.py:app     # file path + attribute
 app/config.py         # file path, auto-discover
 ```
 
-Auto-discovery: exactly one `Horsies` instance → use it. Zero or multiple → E206.
+Auto-discovery: exactly one `Horsies` instance → use it. Zero or multiple → HRS-206.
 
 ### `horsies worker`
 

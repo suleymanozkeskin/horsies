@@ -24,21 +24,21 @@ def my_task(...) -> TaskResult[T, TaskError]: ...
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `task_name` | `str` | required | Unique identifier. Duplicate names raise `RegistryError(E301)`. |
-| `queue_name` | `str \| None` | `None` | Must be `None` in DEFAULT mode (raises `E200`); must match a configured queue in CUSTOM mode (unrecognized raises `E103`). |
+| `task_name` | `str` | required | Unique identifier. Duplicate names raise `RegistryError(HRS-301)`. |
+| `queue_name` | `str \| None` | `None` | Must be `None` in DEFAULT mode (raises `HRS-200`); must match a configured queue in CUSTOM mode (unrecognized raises `HRS-103`). |
 | `retry_policy` | `RetryPolicy \| None` | `None` | See RetryPolicy section. |
 | `exception_mapper` | `dict[type[BaseException], str] \| None` | `None` | Per-task exception-to-error-code mapping. See ExceptionMapper section. |
 | `default_unhandled_error_code` | `str \| None` | `None` | Override global default for unmapped exceptions. Must be `UPPER_SNAKE_CASE`. |
 
-`good_until` is **not** accepted at definition time — it is a per-send concern. Passing it raises `E102`. Use `.with_options(good_until=...)` at send time instead. For workflow nodes, use `.node(good_until=...)`.
+`good_until` is **not** accepted at definition time — it is a per-send concern. Passing it raises `HRS-102`. Use `.with_options(good_until=...)` at send time instead. For workflow nodes, use `.node(good_until=...)`.
 
 ### Validated at definition time
 
-- Return type annotation present and is `TaskResult[T, TaskError]` — missing raises `E100`, wrong type raises `E101`.
-- Pre-decorated functions (with `__wrapped__` chain) are rejected — `E104`.
+- Return type annotation present and is `TaskResult[T, TaskError]` — missing raises `HRS-100`, wrong type raises `HRS-101`.
+- Pre-decorated functions (with `__wrapped__` chain) are rejected — `HRS-104`.
 - `exception_mapper` keys must be `BaseException` subclasses, values must be `UPPER_SNAKE_CASE`.
 - `queue_name` cross-validated against `AppConfig.queue_mode`.
-- `good_until` rejected — raises `E102` with help text directing to `.with_options()` or `.node()`.
+- `good_until` rejected — raises `HRS-102` with help text directing to `.with_options()` or `.node()`.
 - Top-level `auto_retry_for` kwarg is rejected — it belongs inside `RetryPolicy`.
 
 Returns `TaskFunction[P, T]`.
@@ -162,7 +162,7 @@ Terminal lifecycle outcomes for tasks and workflows:
 All built-in code string values are globally reserved. User-defined error codes must be plain `str` and must not collide with any built-in value.
 
 - `BUILTIN_CODE_REGISTRY` (from `horsies.core.models.tasks`) maps every reserved string to its canonical enum member
-- `horsies check` reports `E212` (`CHECK_RESERVED_CODE_COLLISION`) when `exception_mapper` values or `default_unhandled_error_code` collide with a reserved code
+- `horsies check` reports `HRS-212` (`CHECK_RESERVED_CODE_COLLISION`) when `exception_mapper` values or `default_unhandled_error_code` collide with a reserved code
 - The library default `UNHANDLED_EXCEPTION` for `default_unhandled_error_code` is intentionally built-in and is not flagged
 - User-defined `str, Enum` types degrade to plain `str` after JSON round-trip — only built-in families preserve enum identity
 
@@ -257,7 +257,7 @@ consumer = consume.node()(data=from_node(producer))
 # TaskNode(fn=consume, args_from={"data": producer}, waits_for=[producer])
 ```
 
-Raises `WorkflowValidationError(E008)` if argument is not a `TaskNode` or `SubWorkflowNode`.
+Raises `WorkflowValidationError(HRS-008)` if argument is not a `TaskNode` or `SubWorkflowNode`.
 
 ## `TaskHandle[T]`
 
@@ -453,7 +453,7 @@ Only invoked for unhandled exceptions. If the task returns `TaskResult(err=...)`
 - Keys must be `BaseException` subclasses (not instances, not strings)
 - Values must be non-empty `UPPER_SNAKE_CASE` matching `^[A-Z][A-Z0-9_]*$`
 - Values that look like exception class names (e.g., `"TimeoutError"`) are rejected
-- Invalid entries raise `ConfigurationError(E209)`
+- Invalid entries raise `ConfigurationError(HRS-209)`
 
 ## Serialization Rules
 
@@ -550,7 +550,7 @@ def t() -> TaskResult[str, TaskError]: ...
 def t() -> TaskResult[str, TaskError]: ...
 ```
 
-### Decorator ordering — `E104`
+### Decorator ordering — `HRS-104`
 
 ```python
 # WRONG — @app.task sees already-wrapped function
@@ -575,7 +575,7 @@ if result.is_err() and result.err_value.error_code == RetrievalCode.WAIT_TIMEOUT
 ### `queue_name` in DEFAULT mode
 
 ```python
-# WRONG — raises E200 at definition time if app uses QueueMode.DEFAULT
+# WRONG — raises HRS-200 at definition time if app uses QueueMode.DEFAULT
 @app.task("t", queue_name="critical")
 def t() -> TaskResult[str, TaskError]: ...
 ```
@@ -583,7 +583,7 @@ def t() -> TaskResult[str, TaskError]: ...
 ### `good_until` is a per-send concern, not a decorator option
 
 ```python
-# WRONG — rejected at definition time (raises E102)
+# WRONG — rejected at definition time (raises HRS-102)
 @app.task("t", good_until=datetime.now(timezone.utc) + timedelta(hours=1))
 
 # CORRECT — set at send time via with_options()

@@ -121,7 +121,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ### @app.task Decorator
 - Decorated function must return TaskResult[T, TaskError]
 - Options: task_name, queue_name, retry_policy, exception_mapper, default_unhandled_error_code
-- good_until is NOT accepted at definition time (raises E102) — use .with_options(good_until=...) at send time
+- good_until is NOT accepted at definition time (raises HRS-102) — use .with_options(good_until=...) at send time
 - Returns TaskFunction[P, T]
 
 ### TaskFunction[P, T] (decorated task)
