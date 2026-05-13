@@ -1,6 +1,6 @@
 version: 2
 updates:
-  - package-ecosystem: pip
+  - package-ecosystem: uv
     directory: "/"
     schedule:
       interval: weekly
@@ -9,7 +9,7 @@ updates:
       default-days: 7
       semver-major-days: 14
     groups:
-      python-minor-patch:
+      uv-minor-patch:
         update-types:
           - minor
           - patch
@@ -27,7 +27,7 @@ updates:
           - minor
           - patch
 
-  - package-ecosystem: npm
+  - package-ecosystem: bun
     directory: "/website"
     schedule:
       interval: weekly
@@ -36,7 +36,7 @@ updates:
       default-days: 7
       semver-major-days: 14
     groups:
-      web-minor-patch:
+      bun-minor-patch:
         update-types:
           - minor
           - patch
