@@ -113,8 +113,8 @@ Library utilises these heartbeats to keep track of health and take action.
 
 ## Is it production-ready?
 
-Horsies is in alpha. The API may change between releases.
-Fundamentals will likely remain the same.
+Horsies has exited alpha. The core task, workflow, scheduling, and PostgreSQL storage APIs are intended to remain compatible across patch releases.
+Breaking API changes should be reserved for minor-version releases and documented in release notes.
 
 The library has been tested on a large Celery-dependent codebase with successful results.
 

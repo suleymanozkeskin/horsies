@@ -655,7 +655,7 @@ horsies worker, horsies scheduler, horsies check, horsies get-docs, CLI -> /hors
 PostgreSQL, tables, schema, migration -> /horsies/internals/database-schema/
 serialization, JSON, codec, pydantic, datetime -> /horsies/internals/serialization/
 architecture, LISTEN/NOTIFY, components, data flow -> /horsies/concepts/architecture/
-FAQ, questions, trade-offs, why PostgreSQL, production-ready, alpha -> /horsies/questions-and-answers/
+FAQ, questions, trade-offs, why PostgreSQL, production-ready, compatibility -> /horsies/questions-and-answers/
 ErrorCode, HorsiesError, WorkflowValidationError, validation -> /horsies/tasks/errors/
 ValidationReport, MultipleValidationErrors, raise_collected, error collection -> /horsies/tasks/errors/
 SourceLocation, Rust-style errors, format_rust_style, error display -> /horsies/tasks/errors/

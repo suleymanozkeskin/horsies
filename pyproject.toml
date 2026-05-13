@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "horsies"
-version = "0.1.0a35"
+version = "0.1.0"
 description = "A Python library for distributed task execution"
 readme = "README.md"
 license = "MIT"
@@ -13,7 +13,7 @@ authors = [
     { name = "Suleyman Ozkeskin" },
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries",

@@ -5,7 +5,7 @@ related: [worker-architecture, ../../concepts/queue-modes, ../../configuration/a
 tags: [workers, concurrency, claiming, limits]
 ---
 
-## Alpha Operational Notes
+## Operational Notes
 
 - **Priority ordering:** Within the same priority, FIFO ordering uses `enqueued_at`. When many tasks share the same timestamp, ordering can appear non-deterministic.
 - **Soft-cap bursts:** With `prefetch_buffer > 0`, the system counts only RUNNING tasks. Short-lived bursts above the nominal cap can occur during claim/dispatch.

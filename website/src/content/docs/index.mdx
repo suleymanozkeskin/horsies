@@ -42,7 +42,7 @@ import FeatureCard from '../../components/FeatureCard.astro';
 ## Quick Example
 
 ```python
-from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
+from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError, Ok, Err
 
 app = Horsies(AppConfig(
     broker=PostgresConfig(
@@ -55,8 +55,11 @@ def add_numbers(a: int, b: int) -> TaskResult[int, TaskError]:
     return TaskResult(ok=a + b)
 
 # Send and get result
-handle = add_numbers.send(5, 3)
-result = handle.get()
-if result.is_ok():
-    print(result.ok_value)  # 8
+match add_numbers.send(5, 3):
+    case Ok(handle):
+        result = handle.get()
+        if result.is_ok():
+            print(result.ok_value)  # 8
+    case Err(send_err):
+        print(f"Send failed: {send_err.code} - {send_err.message}")
 ```
