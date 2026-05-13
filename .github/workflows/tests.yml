@@ -16,14 +16,19 @@ concurrency:
   group: unit-tests-${{ github.ref }}
   cancel-in-progress: true
 
+permissions: {}
+
 jobs:
   unit:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34a114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
         with:
+          version: 0.11.14
           enable-cache: true
 
       - name: Install dependencies

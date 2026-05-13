@@ -103,3 +103,7 @@ quote-style = "single"
 
 [tool.ruff.lint.flake8-quotes]
 docstring-quotes = "single"
+
+
+[tool.uv]
+exclude-newer = "7 days"

@@ -9,12 +9,13 @@ concurrency:
   group: coverage-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   coverage:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     services:
       postgres:
         image: postgres:16
@@ -31,10 +32,11 @@ jobs:
           --health-retries 5
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34a114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
         with:
+          version: 0.11.14
           enable-cache: true
 
       - name: Install dependencies
@@ -73,8 +75,15 @@ jobs:
       - name: Generate coverage badge
         run: python3 scripts/update_coverage_badge.py coverage.json .github/badges/coverage.svg
 
+      - name: Upload badge artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-badge
+          path: .github/badges/coverage.svg
+          if-no-files-found: error
+
       - name: Upload coverage artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-report
           path: |
@@ -93,6 +102,20 @@ jobs:
               fh.write(f"## Coverage\n\nTotal coverage: **{percent}%**\n")
           PY
           cat "$HOME/summary.txt" >> "$GITHUB_STEP_SUMMARY"
+
+  commit-badge:
+    needs: coverage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34a114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download badge artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: coverage-badge
+          path: .github/badges
 
       - name: Commit updated badge
         run: |
