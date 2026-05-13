@@ -35,6 +35,10 @@ updates:
     cooldown:
       default-days: 7
       semver-major-days: 14
+    ignore:
+      # @astrojs/starlight 0.38+ requires astro 6+. Lift this once astro is on 6.x.
+      - dependency-name: "@astrojs/starlight"
+        versions: [">=0.38.0"]
     groups:
       bun-minor-patch:
         update-types:

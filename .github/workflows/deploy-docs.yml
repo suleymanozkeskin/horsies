@@ -6,15 +6,17 @@ on:
     paths:
       - 'website/**'
       - '.github/workflows/deploy-docs.yml'
+  pull_request:
+    branches: [main]
 
 concurrency:
-  group: pages
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions: {}
 
 jobs:
-  build:
+  docs-build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -36,7 +38,8 @@ jobs:
           path: website/dist
 
   deploy:
-    needs: build
+    needs: docs-build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       pages: write
