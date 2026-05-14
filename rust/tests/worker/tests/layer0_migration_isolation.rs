@@ -179,3 +179,71 @@ async fn horsies_migrate_backfills_from_legacy_sqlx_migrations() {
     pool.close().await;
     db::drop_database(&db_url).await;
 }
+
+/// Regression for the alpha.14 backfill bug: when a host application has
+/// already populated `_sqlx_migrations` with rows at horsies' version
+/// numbers but with foreign checksums (its own migrations, not ours), the
+/// backfill must copy *zero* rows and horsies' embedded migrations must
+/// then apply fresh.
+#[tokio::test]
+#[serial]
+async fn horsies_migrate_ignores_foreign_rows_at_same_versions() {
+    let db_url = db::create_empty_database().await;
+    let pool = PgPool::connect(&db_url).await.unwrap();
+
+    sqlx::query(
+        "CREATE TABLE _sqlx_migrations (
+            version BIGINT PRIMARY KEY,
+            description TEXT NOT NULL,
+            installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
+            success BOOLEAN NOT NULL,
+            checksum BYTEA NOT NULL,
+            execution_time BIGINT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Simulate a host app that ran its own sqlx migrator first: rows live
+    // at versions 1..=16 (overlapping horsies' embedded range) but with
+    // checksums that have nothing to do with horsies' migration SQL.
+    let foreign_checksum = vec![0xAAu8; 48];
+    for version in 1..=16i64 {
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations \
+                 (version, description, success, checksum, execution_time) \
+             VALUES ($1, $2, TRUE, $3, 0)",
+        )
+        .bind(version)
+        .bind(format!("host_app_migration_{version}"))
+        .bind(&foreign_checksum)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    run_horsies_migrations(&pool).await.unwrap();
+
+    // The host app's rows must be left exactly as they were.
+    let foreign_rows = row_count(&pool, "_sqlx_migrations").await;
+    assert_eq!(foreign_rows, 16);
+
+    // horsies_migrations must contain horsies' real rows (checksum-verified),
+    // not the foreign ones we planted.
+    let horsies_rows: Vec<(i64, Vec<u8>)> =
+        sqlx::query_as("SELECT version, checksum FROM horsies_migrations ORDER BY version")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(!horsies_rows.is_empty(), "embedded migrations must run");
+    for (_v, checksum) in &horsies_rows {
+        assert_ne!(
+            checksum, &foreign_checksum,
+            "horsies_migrations must not contain foreign checksums",
+        );
+    }
+
+    pool.close().await;
+    db::drop_database(&db_url).await;
+}

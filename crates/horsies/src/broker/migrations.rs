@@ -124,10 +124,13 @@ async fn ensure_migrations_table(conn: &mut PgConnection) -> Result<(), BrokerEr
 /// One-time backfill from a pre-existing `_sqlx_migrations` table.
 ///
 /// If `horsies_migrations` is empty and `_sqlx_migrations` exists in the
-/// current search path, copies rows whose `version` matches one of our
-/// embedded migrations. Leaves the host application's own rows in
-/// `_sqlx_migrations` untouched and never touches the table again on
-/// subsequent calls (guarded by the "empty horsies_migrations" check).
+/// current search path, copies rows whose `(version, checksum)` pair matches
+/// one of our embedded migrations. The checksum gate is essential: a host
+/// application's `sqlx::migrate!()` may have populated `_sqlx_migrations`
+/// with rows at the same version numbers as horsies (1, 2, 3…), and those
+/// rows belong to the application, not to a prior horsies install. Matching
+/// on checksum (SHA-384 of the migration SQL) reliably distinguishes our
+/// rows from anyone else's. Foreign rows are left untouched.
 async fn backfill_from_sqlx_migrations(
     conn: &mut PgConnection,
     migrator: &Migrator,
@@ -149,7 +152,15 @@ async fn backfill_from_sqlx_migrations(
         return Ok(());
     }
 
-    let versions: Vec<i64> = migrator.iter().map(|m| m.version).collect();
+    let mut versions: Vec<i64> = Vec::with_capacity(migrator.iter().len());
+    let mut checksums: Vec<Vec<u8>> = Vec::with_capacity(migrator.iter().len());
+    for m in migrator.iter() {
+        if m.migration_type.is_down_migration() {
+            continue;
+        }
+        versions.push(m.version);
+        checksums.push(m.checksum.to_vec());
+    }
     if versions.is_empty() {
         return Ok(());
     }
@@ -157,12 +168,14 @@ async fn backfill_from_sqlx_migrations(
     sqlx::query(&format!(
         "INSERT INTO {MIGRATIONS_TABLE} \
             (version, description, installed_on, success, checksum, execution_time) \
-         SELECT version, description, installed_on, success, checksum, execution_time \
-         FROM _sqlx_migrations \
-         WHERE version = ANY($1) \
+         SELECT s.version, s.description, s.installed_on, s.success, s.checksum, s.execution_time \
+         FROM _sqlx_migrations s \
+         JOIN unnest($1::BIGINT[], $2::BYTEA[]) AS e(version, checksum) \
+           ON s.version = e.version AND s.checksum = e.checksum \
          ON CONFLICT (version) DO NOTHING"
     ))
     .bind(&versions[..])
+    .bind(&checksums[..])
     .execute(&mut *conn)
     .await?;
 
