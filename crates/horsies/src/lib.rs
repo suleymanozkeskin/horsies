@@ -69,10 +69,11 @@ pub use crate::core::{AppConfig, HorsiesError};
 
 // broker re-exports
 pub use crate::broker::{
-    compute_enqueue_sha, BrokerError, BrokerErrorCode, BrokerOperationError, BrokerResult,
-    ClaimedTaskRow, ExpiredTaskRow, HeartbeatRow, NotifyListener, PostgresBroker,
-    SharedNotifyListener, StaleTaskRow, TaskAttemptRow, TaskHandle, TaskInfoRow, TaskResultRow,
-    TaskRunningContextRow, WorkerStateRow, WorkerStatsRow, WorkflowRow, WorkflowTaskRow,
+    compute_enqueue_sha, run_horsies_migrations, BrokerError, BrokerErrorCode,
+    BrokerOperationError, BrokerResult, ClaimedTaskRow, ExpiredTaskRow, HeartbeatRow,
+    NotifyListener, PostgresBroker, SharedNotifyListener, StaleTaskRow, TaskAttemptRow, TaskHandle,
+    TaskInfoRow, TaskResultRow, TaskRunningContextRow, WorkerStateRow, WorkerStatsRow, WorkflowRow,
+    WorkflowTaskRow, MIGRATIONS_TABLE,
 };
 /// Alias for [`PostgresBroker`].
 pub type Broker = PostgresBroker;

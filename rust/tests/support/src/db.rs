@@ -3,6 +3,7 @@
 /// Mirrors Python's `conftest.py` database fixtures.
 use std::str::FromStr;
 
+use horsies::run_horsies_migrations;
 use sqlx::postgres::PgConnectOptions;
 use sqlx::{Connection, PgPool};
 use url::Url;
@@ -18,15 +19,14 @@ pub async fn create_pool() -> PgPool {
 
 /// Run migrations on the pool.
 pub async fn run_migrations(pool: &PgPool) {
-    sqlx::migrate!("../../horsies/migrations")
-        .run(pool)
+    run_horsies_migrations(pool)
         .await
         .expect("failed to run migrations");
 }
 
 /// Create a fresh empty database and return its connection URL.
 ///
-/// The returned database has no horsies tables and no `_sqlx_migrations`
+/// The returned database has no horsies tables and no `horsies_migrations`
 /// metadata yet. Call [`drop_database`] when finished.
 pub async fn create_empty_database() -> String {
     let base_url = db_url();

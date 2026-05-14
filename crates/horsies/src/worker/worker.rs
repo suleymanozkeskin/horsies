@@ -773,8 +773,7 @@ mod tests {
     async fn test_pool() -> PgPool {
         let url = test_db_url();
         let pool = PgPool::connect(&url).await.expect("failed to connect");
-        sqlx::migrate!()
-            .run(&pool)
+        crate::broker::migrations::run_horsies_migrations(&pool)
             .await
             .expect("migrations failed");
         pool

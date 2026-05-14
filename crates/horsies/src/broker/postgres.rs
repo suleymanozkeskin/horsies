@@ -482,12 +482,11 @@ impl PostgresBroker {
     }
 
     /// Run embedded SQL migrations.
+    ///
+    /// Bookkeeps in the horsies-owned `horsies_migrations` table so it never
+    /// collides with an application's own `sqlx::migrate!()` runner.
     pub async fn migrate(&self) -> Result<(), BrokerError> {
-        sqlx::migrate!()
-            .run(&self.pool)
-            .await
-            .map_err(BrokerError::Migration)?;
-        Ok(())
+        crate::broker::migrations::run_horsies_migrations(&self.pool).await
     }
 
     /// Ensure the embedded schema is initialized exactly once for this broker.
