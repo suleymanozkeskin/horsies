@@ -14,7 +14,7 @@ use std::time::Duration;
 use serial_test::serial;
 use sqlx::PgPool;
 
-use horsies::{PostgresBroker, TaskResult};
+use horsies::{OperationalErrorCode, PostgresBroker, TaskResult};
 use horsies_test_support::{
     db,
     e2e::{
@@ -652,20 +652,33 @@ async fn test_worker_resolution_error() {
 
     wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(10)).await;
 
-    let failed_reason: Option<String> =
-        sqlx::query_scalar("SELECT failed_reason FROM horsies_tasks WHERE id = $1")
+    // Task-level failures write to `result` (serialized TaskResult::Err), not
+    // `failed_reason` (which is reserved for worker crashes — see FAIL_TASK_SQL
+    // vs FAIL_WORKER_SQL in horsies/src/broker/postgres.rs).
+    let result_json: String =
+        sqlx::query_scalar("SELECT result FROM horsies_tasks WHERE id = $1")
             .bind(&task_id)
             .fetch_one(&pool)
             .await
             .unwrap();
-
+    let parsed: TaskResult<serde_json::Value> =
+        serde_json::from_str(&result_json).expect("result must deserialize as TaskResult");
+    let TaskResult::Err(err) = parsed else {
+        panic!("expected TaskResult::Err for resolution error, got Ok");
+    };
+    assert_eq!(
+        err.error_code,
+        Some(OperationalErrorCode::WorkerResolutionError.into()),
+        "expected WORKER_RESOLUTION_ERROR, got: {:?}",
+        err.error_code,
+    );
     assert!(
-        failed_reason
-            .as_ref()
-            .map(|r| r.contains("not registered"))
+        err.message
+            .as_deref()
+            .map(|m| m.contains("not registered"))
             .unwrap_or(false),
-        "expected resolution error, got: {:?}",
-        failed_reason,
+        "expected 'not registered' in message, got: {:?}",
+        err.message,
     );
 }
 

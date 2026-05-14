@@ -1,11 +1,12 @@
-/// E2E test task definitions.
+/// E2E task definitions: input types, task functions, and `#[task]`-macro
+/// wrappers. Shared by every queue-mode registrar in this crate.
 ///
 /// Mirrors Python's `tests/e2e/tasks/basic.py`, `retry.py`, `workflows.py`.
 use serde::{Deserialize, Serialize};
 
 use horsies::{
-    async_task_fn, task, Horsies, HorsiesError, QueueMode, TaskError, TaskErrorCode, TaskFunction,
-    TaskOptions, TaskRuntime, WorkflowInput, WorkflowSpecBuilder,
+    task, Horsies, HorsiesError, TaskError, TaskFunction, TaskResult, WorkflowInput,
+    WorkflowSpec, WorkflowSpecBuilder,
 };
 
 // =============================================================================
@@ -58,18 +59,18 @@ pub struct FailInput {
 }
 
 // =============================================================================
-// Basic tasks
+// Basic task fns (no macro)
 // =============================================================================
 
-async fn healthcheck(_input: ()) -> Result<String, TaskError> {
+pub async fn healthcheck(_input: ()) -> Result<String, TaskError> {
     Ok("ready".to_owned())
 }
 
-async fn simple_task(input: SimpleInput) -> Result<i64, TaskError> {
+pub async fn simple_task(input: SimpleInput) -> Result<i64, TaskError> {
     Ok(input.x * 2)
 }
 
-async fn kwargs_task(input: KwargsInput) -> Result<String, TaskError> {
+pub async fn kwargs_task(input: KwargsInput) -> Result<String, TaskError> {
     Ok(format!(
         "{}_{}",
         input.required * input.multiplier,
@@ -77,21 +78,21 @@ async fn kwargs_task(input: KwargsInput) -> Result<String, TaskError> {
     ))
 }
 
-async fn error_task(_input: ()) -> Result<i64, TaskError> {
+pub async fn error_task(_input: ()) -> Result<i64, TaskError> {
     Err(TaskError::new("DELIBERATE_ERROR", "This is intentional"))
 }
 
-async fn slow_task(input: SlowInput) -> Result<String, TaskError> {
+pub async fn slow_task(input: SlowInput) -> Result<String, TaskError> {
     tokio::time::sleep(std::time::Duration::from_millis(input.duration_ms)).await;
     Ok(format!("slept_{}", input.duration_ms))
 }
 
-async fn no_retry_task(_input: ()) -> Result<String, TaskError> {
+pub async fn no_retry_task(_input: ()) -> Result<String, TaskError> {
     Err(TaskError::new("PERMANENT", "not retryable"))
 }
 
 // =============================================================================
-// Workflow tasks
+// Workflow tasks (#[task] macro)
 // =============================================================================
 
 #[task("e2e_wf_step")]
@@ -140,12 +141,15 @@ pub struct DynamicStartInput {
 }
 
 #[task("e2e_rt_ping")]
-async fn rt_ping(_: ()) -> Result<String, TaskError> {
+pub async fn rt_ping(_: ()) -> Result<String, TaskError> {
     Ok("pong".to_owned())
 }
 
 #[task("e2e_dynamic_rt_start")]
-async fn dynamic_rt_start(rt: TaskRuntime, input: DynamicStartInput) -> Result<String, TaskError> {
+pub async fn dynamic_rt_start(
+    rt: horsies::TaskRuntime,
+    input: DynamicStartInput,
+) -> Result<String, TaskError> {
     let mut builder = WorkflowSpecBuilder::new("e2e_dynamic_rt_child");
     builder.definition_key("tests.e2e_dynamic_rt_child.v1");
 
@@ -174,7 +178,7 @@ async fn dynamic_rt_start(rt: TaskRuntime, input: DynamicStartInput) -> Result<S
 }
 
 #[task("e2e_runtime_helper_dispatch")]
-async fn runtime_helper_dispatch(_rt: TaskRuntime) -> Result<String, TaskError> {
+pub async fn runtime_helper_dispatch(_rt: horsies::TaskRuntime) -> Result<String, TaskError> {
     let handle = rt_ping::send(())
         .await
         .map_err(|err| TaskError::new("SEND_FAILED", err.message))?;
@@ -182,7 +186,7 @@ async fn runtime_helper_dispatch(_rt: TaskRuntime) -> Result<String, TaskError> 
 }
 
 #[task("e2e_runtime_helper_schedule")]
-async fn runtime_helper_schedule(_rt: TaskRuntime) -> Result<String, TaskError> {
+pub async fn runtime_helper_schedule(_rt: horsies::TaskRuntime) -> Result<String, TaskError> {
     let handle = rt_ping::schedule(std::time::Duration::from_secs(5), ())
         .await
         .map_err(|err| TaskError::new("SCHEDULE_FAILED", err.message))?;
@@ -190,7 +194,7 @@ async fn runtime_helper_schedule(_rt: TaskRuntime) -> Result<String, TaskError> 
 }
 
 #[task("e2e_runtime_helper_handle")]
-async fn runtime_helper_handle(rt: TaskRuntime) -> Result<String, TaskError> {
+pub async fn runtime_helper_handle(rt: horsies::TaskRuntime) -> Result<String, TaskError> {
     let ping = rt_ping::handle(&rt)?;
     let handle = ping
         .send(())
@@ -200,7 +204,7 @@ async fn runtime_helper_handle(rt: TaskRuntime) -> Result<String, TaskError> {
 }
 
 #[task("e2e_dynamic_rt_start_no_args")]
-async fn dynamic_rt_start_no_args(rt: TaskRuntime) -> Result<String, TaskError> {
+pub async fn dynamic_rt_start_no_args(rt: horsies::TaskRuntime) -> Result<String, TaskError> {
     let mut builder = WorkflowSpecBuilder::new("e2e_dynamic_rt_child_no_args");
     builder.definition_key("tests.e2e_dynamic_rt_child_no_args.v1");
 
@@ -232,11 +236,11 @@ async fn dynamic_rt_start_no_args(rt: TaskRuntime) -> Result<String, TaskError> 
 // Retry tasks
 // =============================================================================
 
-async fn retry_exhausted(_input: ()) -> Result<String, TaskError> {
+pub async fn retry_exhausted(_input: ()) -> Result<String, TaskError> {
     Err(TaskError::new("TRANSIENT", "always fails"))
 }
 
-async fn retry_success(_input: ()) -> Result<String, TaskError> {
+pub async fn retry_success(_input: ()) -> Result<String, TaskError> {
     let state_path = std::env::var("E2E_RETRY_SUCCESS_PATH").unwrap_or_default();
     if state_path.is_empty() {
         return Err(TaskError::new(
@@ -262,7 +266,7 @@ async fn retry_success(_input: ()) -> Result<String, TaskError> {
 }
 
 // =============================================================================
-// Idempotent file-token task (for double-execution detection)
+// Idempotent file-token task
 // =============================================================================
 
 #[derive(Debug, Deserialize)]
@@ -270,7 +274,7 @@ pub struct IdempotentInput {
     pub token: String,
 }
 
-async fn idempotent_task(input: IdempotentInput) -> Result<String, TaskError> {
+pub async fn idempotent_task(input: IdempotentInput) -> Result<String, TaskError> {
     let log_dir = std::env::var("E2E_IDEMPOTENT_LOG_DIR").unwrap_or_default();
     if log_dir.is_empty() {
         return Err(TaskError::new(
@@ -281,7 +285,6 @@ async fn idempotent_task(input: IdempotentInput) -> Result<String, TaskError> {
 
     let token_file = std::path::PathBuf::from(&log_dir).join(&input.token);
 
-    // O_CREAT | O_EXCL equivalent: create file exclusively, fails if exists.
     match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -301,7 +304,7 @@ async fn idempotent_task(input: IdempotentInput) -> Result<String, TaskError> {
 }
 
 // =============================================================================
-// Slow idempotent task (for softcap lease contention tests)
+// Slow idempotent task (softcap lease contention tests)
 // =============================================================================
 
 #[derive(Debug, Deserialize)]
@@ -314,7 +317,7 @@ fn default_100() -> u64 {
     100
 }
 
-async fn slow_idempotent_task(input: SlowIdempotentInput) -> Result<String, TaskError> {
+pub async fn slow_idempotent_task(input: SlowIdempotentInput) -> Result<String, TaskError> {
     tokio::time::sleep(std::time::Duration::from_millis(input.duration_ms)).await;
 
     let log_dir = std::env::var("E2E_IDEMPOTENT_LOG_DIR").unwrap_or_default();
@@ -345,10 +348,10 @@ async fn slow_idempotent_task(input: SlowIdempotentInput) -> Result<String, Task
 }
 
 // =============================================================================
-// Complex result task (nested struct serialization)
+// Complex result task
 // =============================================================================
 
-async fn complex_result_task(_input: ()) -> Result<serde_json::Value, TaskError> {
+pub async fn complex_result_task(_input: ()) -> Result<serde_json::Value, TaskError> {
     Ok(serde_json::json!({
         "value": 42,
         "nested": {"a": [1, 2, 3], "b": [4, 5]}
@@ -356,10 +359,10 @@ async fn complex_result_task(_input: ()) -> Result<serde_json::Value, TaskError>
 }
 
 // =============================================================================
-// Library error code task (returns OperationalErrorCode)
+// Library error code task
 // =============================================================================
 
-async fn error_code_task(_input: ()) -> Result<serde_json::Value, TaskError> {
+pub async fn error_code_task(_input: ()) -> Result<serde_json::Value, TaskError> {
     Err(TaskError::builtin(
         horsies::OperationalErrorCode::TaskError,
         "boom",
@@ -367,7 +370,7 @@ async fn error_code_task(_input: ()) -> Result<serde_json::Value, TaskError> {
 }
 
 // =============================================================================
-// Workflow retry task (counter-file based, succeeds on attempt N)
+// Workflow retry tasks
 // =============================================================================
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -382,7 +385,6 @@ fn default_succeed_on_3() -> i32 {
 
 #[task("e2e_wf_retry_then_ok")]
 pub async fn wf_retry_then_ok(input: RetryThenOkInput) -> Result<String, TaskError> {
-    // Read current attempt count, increment, write back.
     let count = tokio::fs::read_to_string(&input.counter_file)
         .await
         .ok()
@@ -401,9 +403,6 @@ pub async fn wf_retry_then_ok(input: RetryThenOkInput) -> Result<String, TaskErr
     }
 }
 
-/// Duplicate of [`wf_retry_then_ok`] registered under a separate name with
-/// task-level retry options.  Used by T6.10c to verify that workflow nodes
-/// inherit retry config from the task registration.
 #[task(
     "e2e_wf_retry_via_registration",
     auto_retry_for = ["TRANSIENT"],
@@ -429,7 +428,7 @@ pub async fn wf_retry_via_registration(input: RetryThenOkInput) -> Result<String
 }
 
 // =============================================================================
-// Dict serialization tasks (for args_from dict roundtrip tests)
+// Dict serialization tasks
 // =============================================================================
 
 #[task("e2e_wf_produce_dict")]
@@ -444,25 +443,24 @@ pub async fn wf_produce_dict(_input: ()) -> Result<serde_json::Value, TaskError>
 
 #[derive(Debug, Deserialize, Serialize, WorkflowInput)]
 pub struct ReadDictInput {
-    pub input_result: horsies::TaskResult<serde_json::Value>,
+    pub input_result: TaskResult<serde_json::Value>,
 }
 
 #[task("e2e_wf_read_dict")]
 pub async fn wf_read_dict(input: ReadDictInput) -> Result<serde_json::Value, TaskError> {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     match input.input_result {
-        horsies::TaskResult::Ok(v) => {
-            // Return the dict with an added field proving we read it.
+        TaskResult::Ok(v) => {
             let mut obj = v.as_object().cloned().unwrap_or_default();
             obj.insert("received".to_owned(), serde_json::json!(true));
             Ok(serde_json::Value::Object(obj))
         }
-        horsies::TaskResult::Err(e) => Err(e),
+        TaskResult::Err(e) => Err(e),
     }
 }
 
 // =============================================================================
-// DB ledger task (for softcap race detection)
+// DB ledger task (softcap race detection)
 // =============================================================================
 
 #[derive(Debug, Deserialize)]
@@ -499,7 +497,7 @@ fn resolve_db_url() -> String {
     panic!("database URL not found: set DATABASE_URL or add DB_PASSWORD to .env");
 }
 
-async fn db_ledger_task(input: LedgerInput) -> Result<String, TaskError> {
+pub async fn db_ledger_task(input: LedgerInput) -> Result<String, TaskError> {
     let db_url = resolve_db_url();
 
     let pool = sqlx::PgPool::connect(&db_url)
@@ -513,7 +511,6 @@ async fn db_ledger_task(input: LedgerInput) -> Result<String, TaskError> {
     );
     let worker_pid = std::process::id() as i32;
 
-    // Record body entry.
     sqlx::query(
         "INSERT INTO e2e_execution_attempts(token, worker_identity, worker_pid) VALUES ($1, $2, $3)",
     )
@@ -524,7 +521,6 @@ async fn db_ledger_task(input: LedgerInput) -> Result<String, TaskError> {
     .await
     .map_err(|e| TaskError::new("LEDGER_DB_ERROR", format!("{}", e)))?;
 
-    // Claim winner (ON CONFLICT DO NOTHING — first one wins).
     let winner: Option<(String,)> = sqlx::query_as(
         "INSERT INTO e2e_execution_winner(token, worker_identity, worker_pid) \
          VALUES ($1, $2, $3) ON CONFLICT (token) DO NOTHING RETURNING token",
@@ -549,7 +545,7 @@ async fn db_ledger_task(input: LedgerInput) -> Result<String, TaskError> {
 }
 
 // =============================================================================
-// Requeue-guard task (for fault injection tests)
+// Requeue-guard task (fault-injection tests)
 // =============================================================================
 
 #[derive(Debug, Deserialize)]
@@ -557,7 +553,7 @@ pub struct RequeueGuardInput {
     pub token: String,
 }
 
-async fn requeue_guard_task(input: RequeueGuardInput) -> Result<String, TaskError> {
+pub async fn requeue_guard_task(input: RequeueGuardInput) -> Result<String, TaskError> {
     let log_dir = std::env::var("E2E_REQUEUE_GUARD_LOG_DIR").unwrap_or_default();
     if log_dir.is_empty() {
         return Err(TaskError::new(
@@ -586,10 +582,9 @@ async fn requeue_guard_task(input: RequeueGuardInput) -> Result<String, TaskErro
 }
 
 // =============================================================================
-// Workflow context tasks (for workflow_ctx_from tests)
+// Workflow context tasks
 // =============================================================================
 
-/// Task that reads an integer from workflow context by node_id.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CtxReaderInput {
     #[serde(default)]
@@ -603,10 +598,7 @@ pub async fn wf_ctx_reader(input: CtxReaderInput) -> Result<serde_json::Value, T
         .workflow_ctx
         .ok_or_else(|| TaskError::new("NO_CTX", "WorkflowContext not provided"))?;
 
-    // Return a summary of what's in the context.
     let mut results = serde_json::Map::new();
-    // Access internal results — iterate the node_ids we can see.
-    // We use has_result to check, then serialize what we find.
     let ctx_json = serde_json::to_value(&ctx).unwrap_or(serde_json::Value::Null);
     if let Some(by_id) = ctx_json.get("results_by_id") {
         if let Some(obj) = by_id.as_object() {
@@ -624,7 +616,6 @@ pub async fn wf_ctx_reader(input: CtxReaderInput) -> Result<serde_json::Value, T
     }))
 }
 
-/// Task that sums all integer Ok values from workflow context.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CtxSumInput {
     #[serde(default)]
@@ -642,9 +633,8 @@ pub async fn wf_ctx_sum(input: CtxSumInput) -> Result<i64, TaskError> {
     let mut total: i64 = 0;
     if let Some(by_id) = ctx_json.get("results_by_id").and_then(|v| v.as_object()) {
         for (_node_id, result_val) in by_id {
-            // Parse as TaskResult<Value>
-            if let Ok(horsies::TaskResult::Ok(v)) =
-                serde_json::from_value::<horsies::TaskResult<serde_json::Value>>(result_val.clone())
+            if let Ok(TaskResult::Ok(v)) =
+                serde_json::from_value::<TaskResult<serde_json::Value>>(result_val.clone())
             {
                 if let Some(n) = v.as_i64() {
                     total += n;
@@ -655,10 +645,9 @@ pub async fn wf_ctx_sum(input: CtxSumInput) -> Result<i64, TaskError> {
     Ok(total)
 }
 
-/// Task that receives both args_from and workflow_ctx.
 #[derive(Debug, Deserialize, Serialize, WorkflowInput)]
 pub struct MixedInput {
-    pub input_result: horsies::TaskResult<i64>,
+    pub input_result: TaskResult<i64>,
     #[serde(default)]
     pub workflow_ctx: Option<horsies::WorkflowContext>,
 }
@@ -670,8 +659,8 @@ pub async fn wf_mixed(input: MixedInput) -> Result<serde_json::Value, TaskError>
     let has_ctx = input.workflow_ctx.is_some();
 
     let args_from_value = match input.input_result {
-        horsies::TaskResult::Ok(val) => Some(val),
-        horsies::TaskResult::Err(_) => None,
+        TaskResult::Ok(val) => Some(val),
+        TaskResult::Err(_) => None,
     };
 
     Ok(serde_json::json!({
@@ -682,7 +671,7 @@ pub async fn wf_mixed(input: MixedInput) -> Result<serde_json::Value, TaskError>
 }
 
 // =============================================================================
-// Data flow tasks (for workflow args_from tests)
+// Data flow tasks
 // =============================================================================
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -696,27 +685,24 @@ pub async fn wf_produce_int(input: ProduceIntInput) -> Result<i64, TaskError> {
     Ok(input.value)
 }
 
-/// Receives a TaskResult via args_from and doubles the Ok value.
-/// The input comes as the serialized TaskResult JSON from the upstream task.
 #[derive(Debug, Deserialize, Serialize, WorkflowInput)]
 pub struct DoubleInput {
-    pub input_result: horsies::TaskResult<i64>,
+    pub input_result: TaskResult<i64>,
 }
 
 #[task("e2e_wf_double")]
 pub async fn wf_double(input: DoubleInput) -> Result<i64, TaskError> {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     match input.input_result {
-        horsies::TaskResult::Ok(v) => Ok(v * 2),
-        horsies::TaskResult::Err(e) => Err(e),
+        TaskResult::Ok(v) => Ok(v * 2),
+        TaskResult::Err(e) => Err(e),
     }
 }
 
-/// Receives two TaskResults via args_from and sums their Ok values.
 #[derive(Debug, Deserialize, Serialize, WorkflowInput)]
 pub struct SumTwoInput {
-    pub first: horsies::TaskResult<i64>,
-    pub second: horsies::TaskResult<i64>,
+    pub first: TaskResult<i64>,
+    pub second: TaskResult<i64>,
 }
 
 #[task("e2e_wf_sum_two")]
@@ -724,19 +710,23 @@ pub async fn wf_sum_two(input: SumTwoInput) -> Result<i64, TaskError> {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let a = match input.first {
-        horsies::TaskResult::Ok(v) => v,
-        horsies::TaskResult::Err(e) => return Err(e),
+        TaskResult::Ok(v) => v,
+        TaskResult::Err(e) => return Err(e),
     };
     let b = match input.second {
-        horsies::TaskResult::Ok(v) => v,
-        horsies::TaskResult::Err(e) => return Err(e),
+        TaskResult::Ok(v) => v,
+        TaskResult::Err(e) => return Err(e),
     };
     Ok(a + b)
 }
 
+// =============================================================================
+// Child-label workflow (sub-workflow tests)
+// =============================================================================
+
 #[derive(Debug, Deserialize, Serialize, WorkflowInput, Clone)]
 pub struct ChildLabelInput {
-    pub input_result: horsies::TaskResult<i64>,
+    pub input_result: TaskResult<i64>,
     pub label: String,
 }
 
@@ -744,15 +734,15 @@ pub struct ChildLabelInput {
 pub async fn wf_child_label(input: ChildLabelInput) -> Result<String, TaskError> {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     match input.input_result {
-        horsies::TaskResult::Ok(v) => Ok(format!("{}={}", input.label, v)),
-        horsies::TaskResult::Err(e) => Err(e),
+        TaskResult::Ok(v) => Ok(format!("{}={}", input.label, v)),
+        TaskResult::Err(e) => Err(e),
     }
 }
 
 fn build_child_label_workflow(
     task: &TaskFunction<ChildLabelInput, String>,
     params: ChildLabelInput,
-) -> Result<horsies::WorkflowSpec, HorsiesError> {
+) -> Result<WorkflowSpec, HorsiesError> {
     let mut builder = WorkflowSpecBuilder::new("e2e_child_label_pipeline");
     builder.definition_key("tests.e2e_child_label_pipeline.v1");
     let render = builder.task(task.node().set_input(params)?.node_id("render"));
@@ -760,7 +750,7 @@ fn build_child_label_workflow(
     builder.build()
 }
 
-fn register_child_label_workflow(
+pub(crate) fn register_child_label_workflow(
     app: &mut Horsies,
     task: &TaskFunction<ChildLabelInput, String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -770,383 +760,5 @@ fn register_child_label_workflow(
         "tests.e2e_child_label_pipeline.v1",
         move |params| build_child_label_workflow(&task, params),
     )?;
-    Ok(())
-}
-
-// =============================================================================
-// Registration
-// =============================================================================
-
-pub fn register(app: &mut Horsies) -> Result<(), Box<dyn std::error::Error>> {
-    let custom = matches!(app.config().queue_mode, QueueMode::Custom);
-
-    // Helper: create a RegisteredTask for an async fn(TaskRuntime, Args) -> Result<T>.
-    // The #[task] macro's register() goes through TaskRegistrationBuilder which rejects
-    // missing queue in Custom mode, and async_task_fn! can't inject TaskRuntime — so we
-    // need a manual wrapper for these tasks in Custom mode.
-    macro_rules! rt_task {
-        ($rt:expr, $fn_name:path, $args_type:ty) => {{
-            struct __W(horsies::TaskRuntime);
-            impl horsies::core::task::fn_trait::AsyncTaskFn for __W {
-                fn execute(
-                    &self,
-                    args: &[u8],
-                ) -> std::pin::Pin<
-                    Box<
-                        dyn std::future::Future<
-                                Output = horsies::core::task::fn_trait::RawTaskResult,
-                            > + Send
-                            + '_,
-                    >,
-                > {
-                    let args = args.to_vec();
-                    Box::pin(async move {
-                        let rt = self.0.clone();
-                        let input: $args_type =
-                            match horsies::core::task::macros::decode_task_input(&args) {
-                                Ok(v) => v,
-                                Err(e) => return horsies::TaskResult::Err(e),
-                            };
-                        match $fn_name(rt, input).await {
-                            Ok(v) => horsies::core::task::macros::encode_validated_task_output(&v),
-                            Err(e) => horsies::TaskResult::Err(e),
-                        }
-                    })
-                }
-            }
-            horsies::RegisteredTask::Async {
-                task: std::sync::Arc::new(__W($rt.clone())),
-                meta: horsies::core::task::fn_trait::TaskMeta::for_input::<$args_type>(),
-            }
-        }};
-    }
-
-    // Same as rt_task but for async fn(TaskRuntime) -> Result<T> (no user args).
-    macro_rules! rt_task_no_args {
-        ($rt:expr, $fn_name:path) => {{
-            struct __W(horsies::TaskRuntime);
-            impl horsies::core::task::fn_trait::AsyncTaskFn for __W {
-                fn execute(
-                    &self,
-                    args: &[u8],
-                ) -> std::pin::Pin<
-                    Box<
-                        dyn std::future::Future<
-                                Output = horsies::core::task::fn_trait::RawTaskResult,
-                            > + Send
-                            + '_,
-                    >,
-                > {
-                    let _ = args;
-                    Box::pin(async move {
-                        let rt = self.0.clone();
-                        match $fn_name(rt).await {
-                            Ok(v) => horsies::core::task::macros::encode_validated_task_output(&v),
-                            Err(e) => horsies::TaskResult::Err(e),
-                        }
-                    })
-                }
-            }
-            horsies::RegisteredTask::Async {
-                task: std::sync::Arc::new(__W($rt.clone())),
-                meta: horsies::core::task::fn_trait::TaskMeta::for_input::<()>(),
-            }
-        }};
-    }
-
-    // -------------------------------------------------------------------------
-    // Basic tasks (no macro, no TaskRuntime).
-    // register_with_queue("default") works in both Default and Custom mode.
-    // -------------------------------------------------------------------------
-    app.register_with_queue(
-        "e2e_healthcheck",
-        async_task_fn!(healthcheck, ()),
-        "default",
-    )?;
-    app.register_with_queue(
-        "e2e_simple",
-        async_task_fn!(simple_task, SimpleInput),
-        "default",
-    )?;
-    app.register_with_queue(
-        "e2e_kwargs",
-        async_task_fn!(kwargs_task, KwargsInput),
-        "default",
-    )?;
-    app.register_with_queue("e2e_error", async_task_fn!(error_task, ()), "default")?;
-    app.register_with_queue("e2e_slow", async_task_fn!(slow_task, SlowInput), "default")?;
-    app.register_with_queue("e2e_no_retry", async_task_fn!(no_retry_task, ()), "default")?;
-    app.register_with_queue(
-        "e2e_idempotent",
-        async_task_fn!(idempotent_task, IdempotentInput),
-        "default",
-    )?;
-
-    // -------------------------------------------------------------------------
-    // #[task] macro tasks.
-    // In Default mode: use the macro's register() to populate the global handle
-    // (needed for ::node(), ::send(), ::handle() in test code).
-    // In Custom mode: register_with_queue() (the external worker binary doesn't
-    // call ::node() or ::send() — those are used by the in-process test).
-    // -------------------------------------------------------------------------
-    if custom {
-        // Workflow tasks (no TaskRuntime)
-        app.register_with_queue("e2e_wf_step", async_task_fn!(wf_step, StepInput), "default")?;
-        app.register_with_queue(
-            "e2e_wf_slow_step",
-            async_task_fn!(wf_slow_step, SlowStepInput),
-            "default",
-        )?;
-        app.register_with_queue(
-            "e2e_wf_final_result",
-            async_task_fn!(wf_final_result, ()),
-            "default",
-        )?;
-        app.register_with_queue("e2e_wf_fail", async_task_fn!(wf_fail, FailInput), "default")?;
-        app.register_with_queue(
-            "e2e_wf_fail_int",
-            async_task_fn!(wf_fail_int, FailInput),
-            "default",
-        )?;
-        app.register_with_queue("e2e_rt_ping", async_task_fn!(rt_ping, ()), "default")?;
-
-        // TaskRuntime-injecting tasks
-        let rt = app.task_runtime();
-        app.register_with_queue(
-            "e2e_dynamic_rt_start",
-            rt_task!(rt, dynamic_rt_start, DynamicStartInput),
-            "default",
-        )?;
-        app.register_with_queue(
-            "e2e_dynamic_rt_start_no_args",
-            rt_task_no_args!(rt, dynamic_rt_start_no_args),
-            "default",
-        )?;
-        app.register_with_queue(
-            "e2e_runtime_helper_dispatch",
-            rt_task_no_args!(rt, runtime_helper_dispatch),
-            "default",
-        )?;
-        app.register_with_queue(
-            "e2e_runtime_helper_schedule",
-            rt_task_no_args!(rt, runtime_helper_schedule),
-            "default",
-        )?;
-        app.register_with_queue(
-            "e2e_runtime_helper_handle",
-            rt_task_no_args!(rt, runtime_helper_handle),
-            "default",
-        )?;
-
-        // Workflow context tasks (need .with_workflow_ctx())
-        app.register_with_queue(
-            "e2e_wf_ctx_reader",
-            async_task_fn!(wf_ctx_reader, CtxReaderInput).with_workflow_ctx(),
-            "default",
-        )?;
-        app.register_with_queue(
-            "e2e_wf_ctx_sum",
-            async_task_fn!(wf_ctx_sum, CtxSumInput).with_workflow_ctx(),
-            "default",
-        )?;
-        app.register_with_queue(
-            "e2e_wf_mixed",
-            async_task_fn!(wf_mixed, MixedInput).with_workflow_ctx(),
-            "default",
-        )?;
-
-        // Data flow tasks (no TaskRuntime)
-        app.register_with_queue(
-            "e2e_wf_produce_int",
-            async_task_fn!(wf_produce_int, ProduceIntInput),
-            "default",
-        )?;
-        app.register_with_queue(
-            "e2e_wf_double",
-            async_task_fn!(wf_double, DoubleInput),
-            "default",
-        )?;
-        app.register_with_queue(
-            "e2e_wf_sum_two",
-            async_task_fn!(wf_sum_two, SumTwoInput),
-            "default",
-        )?;
-        app.register_with_queue(
-            "e2e_wf_produce_dict",
-            async_task_fn!(wf_produce_dict, ()),
-            "default",
-        )?;
-        app.register_with_queue(
-            "e2e_wf_read_dict",
-            async_task_fn!(wf_read_dict, ReadDictInput),
-            "default",
-        )?;
-
-        // Workflow retry tasks
-        app.register_with_queue(
-            "e2e_wf_retry_then_ok",
-            async_task_fn!(wf_retry_then_ok, RetryThenOkInput),
-            "default",
-        )?;
-        app.task::<RetryThenOkInput, String>(
-            "e2e_wf_retry_via_registration",
-            async_task_fn!(wf_retry_via_registration, RetryThenOkInput),
-        )?
-        .queue("default")
-        .task_options(TaskOptions {
-            task_name: String::new(),
-            queue_name: None,
-            retry_policy: Some(horsies::RetryPolicy::fixed(vec![1, 1, 1], false).unwrap()),
-            good_until: None,
-            auto_retry_for: Some(vec![TaskErrorCode::User("TRANSIENT".to_owned())]),
-        })
-        .register()?;
-    } else {
-        wf_step::register(app)?;
-        wf_slow_step::register(app)?;
-        wf_final_result::register(app)?;
-        wf_fail::register(app)?;
-        wf_fail_int::register(app)?;
-        rt_ping::register(app)?;
-        dynamic_rt_start::register(app)?;
-        dynamic_rt_start_no_args::register(app)?;
-        runtime_helper_dispatch::register(app)?;
-        runtime_helper_schedule::register(app)?;
-        runtime_helper_handle::register(app)?;
-        wf_ctx_reader::register(app)?;
-        wf_ctx_sum::register(app)?;
-        wf_mixed::register(app)?;
-        wf_produce_int::register(app)?;
-        wf_double::register(app)?;
-        wf_sum_two::register(app)?;
-        wf_produce_dict::register(app)?;
-        wf_read_dict::register(app)?;
-        wf_retry_then_ok::register(app)?;
-        wf_retry_via_registration::register(app)?;
-    }
-
-    // -------------------------------------------------------------------------
-    // Child label task + workflow (needs TaskFunction return value).
-    // -------------------------------------------------------------------------
-    let wf_child_label = match app.config().queue_mode {
-        QueueMode::Default => app
-            .task::<ChildLabelInput, String>(
-                "e2e_wf_child_label",
-                async_task_fn!(wf_child_label, ChildLabelInput),
-            )?
-            .register()?,
-        QueueMode::Custom => app
-            .task::<ChildLabelInput, String>(
-                "e2e_wf_child_label",
-                async_task_fn!(wf_child_label, ChildLabelInput),
-            )?
-            .queue("default")
-            .register()?,
-    };
-    register_child_label_workflow(app, &wf_child_label)?;
-
-    // -------------------------------------------------------------------------
-    // Complex result + error code
-    // -------------------------------------------------------------------------
-    app.register_with_queue(
-        "e2e_complex_result",
-        async_task_fn!(complex_result_task, ()),
-        "default",
-    )?;
-    app.register_with_queue(
-        "e2e_error_code",
-        async_task_fn!(error_code_task, ()),
-        "default",
-    )?;
-
-    // Retry
-    app.register_with_queue(
-        "e2e_retry_exhausted",
-        async_task_fn!(retry_exhausted, ()),
-        "default",
-    )?;
-    app.register_with_queue(
-        "e2e_retry_success",
-        async_task_fn!(retry_success, ()),
-        "default",
-    )?;
-
-    // Softcap-specific (same functions, different names for instance parity)
-    app.register_with_queue(
-        "e2e_softcap_blocker",
-        async_task_fn!(slow_task, SlowInput),
-        "default",
-    )?;
-    app.register_with_queue(
-        "e2e_softcap_slow_idempotent",
-        async_task_fn!(slow_idempotent_task, SlowIdempotentInput),
-        "default",
-    )?;
-
-    // Custom queue tasks (all use the same slow function — queue routing is config-driven)
-    app.register_with_queue(
-        "e2e_custom_slow",
-        async_task_fn!(slow_task, SlowInput),
-        "default",
-    )?;
-    app.register_with_queue("e2e_high", async_task_fn!(healthcheck, ()), "default")?;
-    app.register_with_queue("e2e_normal", async_task_fn!(healthcheck, ()), "default")?;
-    app.register_with_queue("e2e_low", async_task_fn!(healthcheck, ()), "default")?;
-
-    // Cluster cap tasks
-    app.register_with_queue(
-        "e2e_cluster_cap_slow",
-        async_task_fn!(slow_task, SlowInput),
-        "default",
-    )?;
-    app.register_with_queue(
-        "e2e_cluster_cap_fail",
-        async_task_fn!(error_task, ()),
-        "default",
-    )?;
-
-    // Recovery tasks
-    app.register_with_queue(
-        "e2e_recovery_healthcheck",
-        async_task_fn!(healthcheck, ()),
-        "default",
-    )?;
-    app.register_with_queue(
-        "e2e_recovery_slow",
-        async_task_fn!(slow_task, SlowInput),
-        "default",
-    )?;
-
-    // DB ledger task (for softcap race tests)
-    app.register_with_queue(
-        "e2e_softcap_db_ledger",
-        async_task_fn!(db_ledger_task, LedgerInput),
-        "default",
-    )?;
-
-    // Requeue guard task (for fault injection tests)
-    app.register_with_queue(
-        "e2e_requeue_guard",
-        async_task_fn!(requeue_guard_task, RequeueGuardInput),
-        "default",
-    )?;
-
-    // Scheduler tasks
-    app.register_with_queue(
-        "e2e_scheduled_simple",
-        async_task_fn!(healthcheck, ()),
-        "default",
-    )?;
-    app.register_with_queue(
-        "e2e_scheduled_with_args",
-        async_task_fn!(simple_task, SimpleInput),
-        "default",
-    )?;
-    app.register_with_queue(
-        "e2e_catch_up_task",
-        async_task_fn!(healthcheck, ()),
-        "default",
-    )?;
-
     Ok(())
 }
