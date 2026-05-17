@@ -23,6 +23,7 @@ from horsies.core.brokers.result_types import BrokerErrorCode
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_listener(url: str = 'postgresql://u:p@localhost/db') -> PostgresListener:
     """Create a PostgresListener without real connections."""
     return PostgresListener(url)
@@ -154,7 +155,11 @@ class TestEnsureConnections:
         listener = _make_listener()
         mock_conn = _make_mock_conn()
 
-        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=mock_conn):
+        with patch(
+            'psycopg.AsyncConnection.connect',
+            new_callable=AsyncMock,
+            return_value=mock_conn,
+        ):
             result = await listener._ensure_connections()
 
         assert result.is_ok()
@@ -166,7 +171,11 @@ class TestEnsureConnections:
         listener = _make_listener()
         mock_conn = _make_mock_conn()
 
-        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=mock_conn):
+        with patch(
+            'psycopg.AsyncConnection.connect',
+            new_callable=AsyncMock,
+            return_value=mock_conn,
+        ):
             result = await listener._ensure_connections()
 
         assert result.is_ok()
@@ -179,7 +188,11 @@ class TestEnsureConnections:
         listener._listen_channels = {'task_done'}
         mock_conn = _make_mock_conn()
 
-        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=mock_conn):
+        with patch(
+            'psycopg.AsyncConnection.connect',
+            new_callable=AsyncMock,
+            return_value=mock_conn,
+        ):
             result = await listener._ensure_connections()
 
         assert result.is_ok()
@@ -210,7 +223,9 @@ class TestEnsureConnections:
         assert listener._command_conn is None
 
     @pytest.mark.asyncio
-    async def test_concurrent_ensure_connections_does_not_leak_dispatcher_conn(self) -> None:
+    async def test_concurrent_ensure_connections_does_not_leak_dispatcher_conn(
+        self,
+    ) -> None:
         """Concurrent callers should not create extra/leaked dispatcher connections."""
         listener = _make_listener()
         created: list[MagicMock] = []
@@ -222,7 +237,11 @@ class TestEnsureConnections:
             await asyncio.sleep(0.01)
             return conn
 
-        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, side_effect=_fake_connect):
+        with patch(
+            'psycopg.AsyncConnection.connect',
+            new_callable=AsyncMock,
+            side_effect=_fake_connect,
+        ):
             r1, r2 = await asyncio.gather(
                 listener._ensure_connections(),
                 listener._ensure_connections(),
@@ -235,7 +254,8 @@ class TestEnsureConnections:
         assert listener._dispatcher_conn is not None
         assert listener._command_conn is not None
         leaked = [
-            conn for conn in created
+            conn
+            for conn in created
             if conn not in (listener._dispatcher_conn, listener._command_conn)
         ]
         assert leaked == []
@@ -268,7 +288,11 @@ class TestEnsureDispatcherConnection:
         listener._dispatcher_conn = None
         new_conn = _make_mock_conn()
 
-        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=new_conn):
+        with patch(
+            'psycopg.AsyncConnection.connect',
+            new_callable=AsyncMock,
+            return_value=new_conn,
+        ):
             result = await listener._ensure_dispatcher_connection()
 
         assert result is new_conn
@@ -471,7 +495,10 @@ class TestHealthMonitor:
             task = asyncio.create_task(listener._health_monitor())
             try:
                 for _ in range(50):
-                    if listener._dispatcher_conn is None and listener._command_conn is None:
+                    if (
+                        listener._dispatcher_conn is None
+                        and listener._command_conn is None
+                    ):
                         break
                     await asyncio.sleep(0)
                 else:
@@ -528,7 +555,8 @@ class TestDispatcher:
 
     @pytest.mark.asyncio
     async def test_queue_full_drops_without_blocking_others(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """When subscriber queue is full, dispatcher should drop with a warning
         but still deliver to other subscribers."""
@@ -625,9 +653,15 @@ class TestListen:
             coro.close()
             return MagicMock()
 
-        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=mock_conn):
+        with patch(
+            'psycopg.AsyncConnection.connect',
+            new_callable=AsyncMock,
+            return_value=mock_conn,
+        ):
             # Patch create_task to capture the dispatcher creation
-            with patch.object(asyncio, 'create_task', side_effect=_close_and_return_mock) as mock_create_task:
+            with patch.object(
+                asyncio, 'create_task', side_effect=_close_and_return_mock
+            ) as mock_create_task:
                 result = await listener.listen('task_done')
 
         assert result.is_ok()
@@ -649,7 +683,11 @@ class TestListen:
         listener._listen_channels.add('task_done')
         listener._subs['task_done'] = {asyncio.Queue()}
 
-        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=mock_conn):
+        with patch(
+            'psycopg.AsyncConnection.connect',
+            new_callable=AsyncMock,
+            return_value=mock_conn,
+        ):
             result = await listener.listen('task_done')
 
         assert result.is_ok()
@@ -657,6 +695,44 @@ class TestListen:
         # Should have 2 queues now
         assert len(listener._subs['task_done']) == 2
         assert q in listener._subs['task_done']
+
+    @pytest.mark.asyncio
+    async def test_listen_replaces_completed_health_monitor(self) -> None:
+        """A completed health monitor task should not block monitor restart."""
+        listener = _make_listener()
+        mock_conn = _make_mock_conn()
+        listener._dispatcher_conn = mock_conn
+        listener._command_conn = mock_conn
+        listener._listen_channels.add('task_done')
+
+        async def _done() -> None:
+            return None
+
+        old_health_task = asyncio.create_task(_done())
+        await old_health_task
+        listener._health_check_task = old_health_task
+
+        result = await listener.listen('task_done')
+
+        assert result.is_ok()
+        assert listener._health_check_task is not old_health_task
+        assert listener._health_check_task is not None
+        await listener.close()
+
+    @pytest.mark.asyncio
+    async def test_listen_many_starts_health_monitor_without_start(self) -> None:
+        """listen_many() should start health monitoring without a prior start()."""
+        listener = _make_listener()
+        mock_conn = _make_mock_conn()
+        listener._dispatcher_conn = mock_conn
+        listener._command_conn = mock_conn
+        listener._listen_channels.add('task_new')
+
+        result = await listener.listen_many(['task_new'])
+
+        assert result.is_ok()
+        assert listener._health_check_task is not None
+        await listener.close()
 
     @pytest.mark.asyncio
     async def test_new_channel_restarts_dispatcher(self) -> None:
@@ -680,8 +756,14 @@ class TestListen:
             return MagicMock()
 
         with (
-            patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=mock_conn),
-            patch.object(asyncio, 'create_task', side_effect=_close_and_return_mock) as mock_create_task,
+            patch(
+                'psycopg.AsyncConnection.connect',
+                new_callable=AsyncMock,
+                return_value=mock_conn,
+            ),
+            patch.object(
+                asyncio, 'create_task', side_effect=_close_and_return_mock
+            ) as mock_create_task,
         ):
             result = await listener.listen('new_channel')
 
@@ -708,7 +790,9 @@ class TestListen:
             coro.close()
             return MagicMock()
 
-        with patch.object(asyncio, 'create_task', side_effect=_close_and_return_mock) as mock_create_task:
+        with patch.object(
+            asyncio, 'create_task', side_effect=_close_and_return_mock
+        ) as mock_create_task:
             result = await listener.listen('new_channel')
 
         assert result.is_err()
@@ -813,7 +897,9 @@ class TestUnlisten:
             coro.close()
             return MagicMock()
 
-        with patch.object(asyncio, 'create_task', side_effect=_close_and_return_mock) as mock_create_task:
+        with patch.object(
+            asyncio, 'create_task', side_effect=_close_and_return_mock
+        ) as mock_create_task:
             await listener.unlisten('task_done', q)
 
         assert old_dispatcher.cancelled()
@@ -1030,7 +1116,9 @@ class TestClose:
         mock_threadsafe.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_cross_loop_close_handoff_failure_falls_back_to_local_cleanup(self) -> None:
+    async def test_cross_loop_close_handoff_failure_falls_back_to_local_cleanup(
+        self,
+    ) -> None:
         """If handoff scheduling fails, close() should close handed coroutine and cleanup locally."""
         listener = _make_listener()
         owner_loop = MagicMock()
@@ -1082,7 +1170,11 @@ class TestListenerResultSurface:
         listener = _make_listener()
         mock_conn = _make_mock_conn()
 
-        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=mock_conn):
+        with patch(
+            'psycopg.AsyncConnection.connect',
+            new_callable=AsyncMock,
+            return_value=mock_conn,
+        ):
             result = await listener.start()
 
         assert result.is_ok()
@@ -1096,7 +1188,11 @@ class TestListenerResultSurface:
         """start() should return Err with LISTENER_START_FAILED on connection error."""
         listener = _make_listener()
 
-        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, side_effect=OperationalError('conn refused')):
+        with patch(
+            'psycopg.AsyncConnection.connect',
+            new_callable=AsyncMock,
+            side_effect=OperationalError('conn refused'),
+        ):
             result = await listener.start()
 
         assert result.is_err()
@@ -1111,7 +1207,11 @@ class TestListenerResultSurface:
         listener = _make_listener()
         original = OperationalError('conn refused')
 
-        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, side_effect=original):
+        with patch(
+            'psycopg.AsyncConnection.connect',
+            new_callable=AsyncMock,
+            side_effect=original,
+        ):
             result = await listener.start()
 
         assert result.is_err()
@@ -1122,7 +1222,11 @@ class TestListenerResultSurface:
         """Non-operational errors (e.g. ValueError) must propagate, not be wrapped as Err."""
         listener = _make_listener()
 
-        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, side_effect=ValueError('bad config')):
+        with patch(
+            'psycopg.AsyncConnection.connect',
+            new_callable=AsyncMock,
+            side_effect=ValueError('bad config'),
+        ):
             with pytest.raises(ValueError, match='bad config'):
                 await listener.start()
 
@@ -1138,8 +1242,14 @@ class TestListenerResultSurface:
             coro.close()
             return MagicMock()
 
-        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=mock_conn):
-            with patch.object(asyncio, 'create_task', side_effect=_close_and_return_mock):
+        with patch(
+            'psycopg.AsyncConnection.connect',
+            new_callable=AsyncMock,
+            return_value=mock_conn,
+        ):
+            with patch.object(
+                asyncio, 'create_task', side_effect=_close_and_return_mock
+            ):
                 result = await listener.listen('task_done')
 
         assert result.is_ok()
@@ -1150,7 +1260,11 @@ class TestListenerResultSurface:
         """listen() should return Err with LISTENER_SUBSCRIBE_FAILED on connection error."""
         listener = _make_listener()
 
-        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, side_effect=OperationalError('refused')):
+        with patch(
+            'psycopg.AsyncConnection.connect',
+            new_callable=AsyncMock,
+            side_effect=OperationalError('refused'),
+        ):
             result = await listener.listen('task_done')
 
         assert result.is_err()
@@ -1197,8 +1311,14 @@ class TestListenerResultSurface:
             coro.close()
             return MagicMock()
 
-        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, return_value=mock_conn):
-            with patch.object(asyncio, 'create_task', side_effect=_close_and_return_mock):
+        with patch(
+            'psycopg.AsyncConnection.connect',
+            new_callable=AsyncMock,
+            return_value=mock_conn,
+        ):
+            with patch.object(
+                asyncio, 'create_task', side_effect=_close_and_return_mock
+            ):
                 result = await listener.listen_many(['ch1', 'ch2'])
 
         assert result.is_ok()
@@ -1211,7 +1331,11 @@ class TestListenerResultSurface:
         """listen_many() should return Err with LISTENER_SUBSCRIBE_FAILED on connection error."""
         listener = _make_listener()
 
-        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock, side_effect=OperationalError('refused')):
+        with patch(
+            'psycopg.AsyncConnection.connect',
+            new_callable=AsyncMock,
+            side_effect=OperationalError('refused'),
+        ):
             result = await listener.listen_many(['ch1'])
 
         assert result.is_err()
@@ -1249,7 +1373,9 @@ class TestListenerResultSurface:
             await listener.listen_many(['ch1'])
 
     @pytest.mark.asyncio
-    async def test_listen_many_restarts_dispatcher_when_listen_fails_mid_update(self) -> None:
+    async def test_listen_many_restarts_dispatcher_when_listen_fails_mid_update(
+        self,
+    ) -> None:
         """A failing LISTEN in listen_many() should revive a previously running dispatcher."""
         listener = _make_listener()
         mock_conn = _make_mock_conn()
@@ -1267,7 +1393,9 @@ class TestListenerResultSurface:
             coro.close()
             return MagicMock()
 
-        with patch.object(asyncio, 'create_task', side_effect=_close_and_return_mock) as mock_create_task:
+        with patch.object(
+            asyncio, 'create_task', side_effect=_close_and_return_mock
+        ) as mock_create_task:
             result = await listener.listen_many(['ch1', 'ch2'])
 
         assert result.is_err()
@@ -1276,12 +1404,16 @@ class TestListenerResultSurface:
         assert 'ch1' not in listener._listen_channels
 
     @pytest.mark.asyncio
-    async def test_ensure_connections_propagates_programming_error_not_wrapped(self) -> None:
+    async def test_ensure_connections_propagates_programming_error_not_wrapped(
+        self,
+    ) -> None:
         """Non-operational exceptions in _ensure_connections() must propagate,
         not silently become Err (which would degrade callers to polling)."""
         listener = _make_listener()
 
-        with patch('psycopg.AsyncConnection.connect', new_callable=AsyncMock) as mock_connect:
+        with patch(
+            'psycopg.AsyncConnection.connect', new_callable=AsyncMock
+        ) as mock_connect:
             mock_connect.side_effect = TypeError('mock programming bug')
 
             with pytest.raises(TypeError, match='mock programming bug'):
@@ -1303,20 +1435,18 @@ class TestCallerUnwrapContract:
     """
 
     @pytest.mark.asyncio
-    async def test_broker_ensure_initialized_raises_on_listener_start_err(self) -> None:
-        """_ensure_initialized should raise when listener.start() returns Err,
-        and ensure_schema_initialized wraps it as SCHEMA_INIT_FAILED."""
-        from horsies.core.brokers.result_types import BrokerOperationError
-        from horsies.core.types.result import Err as Err_, is_err as is_err_
+    async def test_broker_ensure_initialized_does_not_start_listener(self) -> None:
+        """Schema initialization should not eagerly start listener connections."""
+        from horsies.core.types.result import is_ok as is_ok_
         from horsies.core.models.broker import PostgresConfig
         from horsies.core.brokers.postgres import PostgresBroker
-
-        original_exc = OperationalError('listener conn refused')
 
         with (
             patch('horsies.core.brokers.postgres.create_async_engine') as mock_engine,
             patch('horsies.core.brokers.postgres.async_sessionmaker'),
-            patch('horsies.core.brokers.postgres.PostgresListener') as mock_listener_cls,
+            patch(
+                'horsies.core.brokers.postgres.PostgresListener'
+            ) as mock_listener_cls,
         ):
             mock_engine.return_value = MagicMock()
             mock_engine.return_value.dispose = AsyncMock()
@@ -1332,22 +1462,17 @@ class TestCallerUnwrapContract:
             mock_engine.return_value.begin.return_value = mock_begin_ctx
 
             mock_listener = AsyncMock()
-            mock_listener.start.return_value = Err_(BrokerOperationError(
-                code=BrokerErrorCode.LISTENER_START_FAILED,
-                message='Failed to establish listener connections: listener conn refused',
-                retryable=True,
-                exception=original_exc,
-            ))
             mock_listener_cls.return_value = mock_listener
 
-            config = PostgresConfig(database_url='postgresql+psycopg://u:p@localhost/db')
+            config = PostgresConfig(
+                database_url='postgresql+psycopg://u:p@localhost/db'
+            )
             broker = PostgresBroker(config)
 
             result = await broker.ensure_schema_initialized()
 
-        assert is_err_(result)
-        assert result.err_value.code == BrokerErrorCode.SCHEMA_INIT_FAILED
-        assert 'listener conn refused' in result.err_value.message
+        assert is_ok_(result)
+        mock_listener.start.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_worker_start_raises_on_listener_start_err(self) -> None:
@@ -1358,12 +1483,14 @@ class TestCallerUnwrapContract:
 
         original_exc = OperationalError('listener conn refused')
         mock_listener = AsyncMock()
-        mock_listener.start.return_value = Err_(BrokerOperationError(
-            code=BrokerErrorCode.LISTENER_START_FAILED,
-            message='Failed to establish listener connections',
-            retryable=True,
-            exception=original_exc,
-        ))
+        mock_listener.start.return_value = Err_(
+            BrokerOperationError(
+                code=BrokerErrorCode.LISTENER_START_FAILED,
+                message='Failed to establish listener connections',
+                retryable=True,
+                exception=original_exc,
+            )
+        )
 
         from horsies.core.worker.worker import Worker
         from horsies.core.worker.config import WorkerConfig
@@ -1398,12 +1525,14 @@ class TestCallerUnwrapContract:
         original_exc = OperationalError('subscribe failed')
         mock_listener = AsyncMock()
         mock_listener.start.return_value = Ok_(None)
-        mock_listener.listen_many.return_value = Err_(BrokerOperationError(
-            code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
-            message='Failed to subscribe to channels',
-            retryable=True,
-            exception=original_exc,
-        ))
+        mock_listener.listen_many.return_value = Err_(
+            BrokerOperationError(
+                code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
+                message='Failed to subscribe to channels',
+                retryable=True,
+                exception=original_exc,
+            )
+        )
 
         from horsies.core.worker.worker import Worker
         from horsies.core.worker.config import WorkerConfig

@@ -50,6 +50,8 @@ def _serialization_error_response(
         ),
     )
     return (True, serialize_error_payload(tr), f'SerializationError: {error}')
+
+
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.logging import get_logger
 from horsies.core.worker.current import get_current_app, set_current_app
@@ -161,6 +163,7 @@ def _child_initializer(
     sys_path_roots: Sequence[str],
     loglevel: int,
     database_url: str,
+    pgbouncer_transaction_mode: bool = False,
 ) -> None:
     # Ignore SIGINT in child processes - let the parent handle shutdown gracefully
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -212,7 +215,10 @@ def _child_initializer(
     _debug_imports_log(f'[child {os.getpid()}] registered_tasks={keys}')
 
     # Initialize per-process connection pool (after all imports complete)
-    _initialize_worker_pool(database_url)
+    _initialize_worker_pool(
+        database_url,
+        pgbouncer_transaction_mode=pgbouncer_transaction_mode,
+    )
     logger.debug(f'[child {os.getpid()}] Connection pool initialized')
 
 
@@ -718,7 +724,9 @@ def _run_task_entry(
 
         kwargs_json_result = loads_json(kwargs_json)
         if is_err(kwargs_json_result):
-            return _serialization_error_response(task_name, kwargs_json_result.err_value)
+            return _serialization_error_response(
+                task_name, kwargs_json_result.err_value
+            )
         kwargs_result = json_to_kwargs(kwargs_json_result.ok_value)
         if is_err(kwargs_result):
             return _serialization_error_response(task_name, kwargs_result.err_value)
@@ -736,10 +744,14 @@ def _run_task_entry(
                 if isinstance(data_str, str):
                     data_json_result = loads_json(data_str)
                     if is_err(data_json_result):
-                        return _serialization_error_response(task_name, data_json_result.err_value)
+                        return _serialization_error_response(
+                            task_name, data_json_result.err_value
+                        )
                     tr_result = task_result_from_json(data_json_result.ok_value)
                     if is_err(tr_result):
-                        return _serialization_error_response(task_name, tr_result.err_value)
+                        return _serialization_error_response(
+                            task_name, tr_result.err_value
+                        )
                     kwargs[key] = tr_result.ok_value
 
         # Handle workflow injection payloads (workflow_ctx / workflow_meta).
@@ -762,10 +774,14 @@ def _run_task_entry(
                     if isinstance(result_json, str):
                         rj = loads_json(result_json)
                         if is_err(rj):
-                            return _serialization_error_response(task_name, rj.err_value)
+                            return _serialization_error_response(
+                                task_name, rj.err_value
+                            )
                         tr_r = task_result_from_json(rj.ok_value)
                         if is_err(tr_r):
-                            return _serialization_error_response(task_name, tr_r.err_value)
+                            return _serialization_error_response(
+                                task_name, tr_r.err_value
+                            )
                         results_by_id[node_id] = tr_r.ok_value
 
                 summaries_by_id_raw = workflow_ctx_data.get('summaries_by_id', {})
@@ -774,7 +790,9 @@ def _run_task_entry(
                     if isinstance(summary_json, str):
                         sj = loads_json(summary_json)
                         if is_err(sj):
-                            return _serialization_error_response(task_name, sj.err_value)
+                            return _serialization_error_response(
+                                task_name, sj.err_value
+                            )
                         parsed = sj.ok_value
                         if isinstance(parsed, dict):
                             summaries_by_id[node_id] = SubWorkflowSummary.from_json(

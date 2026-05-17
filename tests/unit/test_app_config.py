@@ -45,6 +45,58 @@ SHORT_HB_RECOVERY = RecoveryConfig(claimer_heartbeat_interval_ms=1_000)
 
 
 @pytest.mark.unit
+class TestPostgresConfigPgBouncer:
+    """Tests for split PostgreSQL URL configuration."""
+
+    def test_effective_session_database_url_defaults_to_database_url(self) -> None:
+        config = PostgresConfig(
+            database_url='postgresql+psycopg://user:pass@localhost/db',
+        )
+
+        assert config.effective_session_database_url == config.database_url
+
+    def test_split_database_urls_are_valid(self) -> None:
+        config = PostgresConfig(
+            database_url='postgresql+psycopg://user:pass@pooler:6432/db',
+            session_database_url='postgresql+psycopg://user:pass@direct:5432/db',
+            pgbouncer_transaction_mode=True,
+        )
+
+        assert config.effective_session_database_url == (
+            'postgresql+psycopg://user:pass@direct:5432/db'
+        )
+        assert config.pooled_connect_args == {'prepare_threshold': None}
+
+    def test_pgbouncer_mode_requires_session_database_url(self) -> None:
+        with pytest.raises(ConfigurationError, match='session_database_url required'):
+            PostgresConfig(
+                database_url='postgresql+psycopg://user:pass@pooler:6432/db',
+                pgbouncer_transaction_mode=True,
+            )
+
+    @pytest.mark.parametrize(
+        'url',
+        [
+            'postgresql+psycopg2://user:pass@localhost/db',
+            'postgresql+psycopgx://user:pass@localhost/db',
+            'postgresql://user:pass@localhost/db',
+        ],
+    )
+    def test_database_url_requires_exact_psycopg3_scheme(self, url: str) -> None:
+        with pytest.raises(ConfigurationError, match='invalid database URL scheme'):
+            PostgresConfig(database_url=url)
+
+    def test_session_database_url_requires_exact_psycopg3_scheme(self) -> None:
+        with pytest.raises(
+            ConfigurationError, match='invalid session database URL scheme'
+        ):
+            PostgresConfig(
+                database_url='postgresql+psycopg://user:pass@localhost/db',
+                session_database_url='postgresql+psycopg2://user:pass@localhost/db',
+            )
+
+
+@pytest.mark.unit
 class TestPrefetchBufferValidation:
     """Tests for prefetch_buffer configuration validation."""
 
@@ -173,7 +225,8 @@ class TestMaxClaimRenewAgeMsValidation:
     def test_zero_raises(self) -> None:
         """max_claim_renew_age_ms=0 should raise ConfigurationError."""
         with pytest.raises(
-            ConfigurationError, match='max_claim_renew_age_ms must be positive',
+            ConfigurationError,
+            match='max_claim_renew_age_ms must be positive',
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
@@ -185,7 +238,8 @@ class TestMaxClaimRenewAgeMsValidation:
     def test_negative_raises(self) -> None:
         """max_claim_renew_age_ms < 0 should raise ConfigurationError."""
         with pytest.raises(
-            ConfigurationError, match='max_claim_renew_age_ms must be positive',
+            ConfigurationError,
+            match='max_claim_renew_age_ms must be positive',
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
@@ -197,7 +251,8 @@ class TestMaxClaimRenewAgeMsValidation:
     def test_less_than_effective_lease_raises(self) -> None:
         """max_claim_renew_age_ms < effective lease should raise ConfigurationError."""
         with pytest.raises(
-            ConfigurationError, match='max_claim_renew_age_ms must be >= effective claim lease',
+            ConfigurationError,
+            match='max_claim_renew_age_ms must be >= effective claim lease',
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
@@ -236,7 +291,8 @@ class TestMaxClaimRenewAgeMsValidation:
         max_claim_renew_age_ms must be >= 60_000 in that case.
         """
         with pytest.raises(
-            ConfigurationError, match='max_claim_renew_age_ms must be >= effective claim lease',
+            ConfigurationError,
+            match='max_claim_renew_age_ms must be >= effective claim lease',
         ):
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
@@ -684,7 +740,13 @@ class TestLogConfig:
         logger = MagicMock()
         with patch.dict('os.environ', {}, clear=False):
             # Ensure HORSIES_CHILD_PROCESS is not set
-            env = dict(**{k: v for k, v in __import__('os').environ.items() if k != 'HORSIES_CHILD_PROCESS'})
+            env = dict(
+                **{
+                    k: v
+                    for k, v in __import__('os').environ.items()
+                    if k != 'HORSIES_CHILD_PROCESS'
+                }
+            )
             with patch.dict('os.environ', env, clear=True):
                 config.log_config(logger=logger)
         logger.info.assert_called_once()
@@ -693,7 +755,11 @@ class TestLogConfig:
         """log_config with no logger should use the 'horsies' library logger."""
         config = AppConfig(broker=BROKER)
         with patch.dict('os.environ', {}, clear=False):
-            env = {k: v for k, v in __import__('os').environ.items() if k != 'HORSIES_CHILD_PROCESS'}
+            env = {
+                k: v
+                for k, v in __import__('os').environ.items()
+                if k != 'HORSIES_CHILD_PROCESS'
+            }
             with patch.dict('os.environ', env, clear=True):
                 with patch('logging.getLogger') as mock_get_logger:
                     mock_logger = MagicMock()

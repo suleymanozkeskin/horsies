@@ -248,7 +248,10 @@ class TestChildInitializer:
         mock_locate_app.assert_called_once_with('mymod:app')
         mock_set_current.assert_called_once_with(mocks['app'])
         mock_import_module.assert_any_call('extra_mod')
-        mock_init_pool.assert_called_once_with('postgresql://localhost/test')
+        mock_init_pool.assert_called_once_with(
+            'postgresql://localhost/test',
+            pgbouncer_transaction_mode=False,
+        )
 
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')

@@ -30,6 +30,31 @@ config = AppConfig(
 app = Horsies(config)
 ```
 
+## PgBouncer / Transaction Pooling
+
+If your provider gives you a transaction-pooled PgBouncer URL, keep ordinary SQL
+traffic on that pooled URL and give Horsies a second direct/session-capable URL
+for schema setup and `LISTEN`/`NOTIFY`.
+
+```python
+from horsies import Horsies, AppConfig, PostgresConfig
+
+config = AppConfig(
+    broker=PostgresConfig(
+        database_url=os.environ["DATABASE_URL_POOLED"],
+        session_database_url=os.environ["DATABASE_URL_DIRECT"],
+        pgbouncer_transaction_mode=True,
+    ),
+)
+
+app = Horsies(config)
+```
+
+Managed providers, such as PlanetScale Postgres, may show separate pooled and
+direct connection strings. Verify the current ports and URLs in your provider
+dashboard or docs. Workers do not support a PgBouncer-only URL because
+PostgreSQL `LISTEN` requires a persistent session.
+
 ## Custom Queues with Priorities
 
 Different operations have different urgency levels can be defined with priority values.

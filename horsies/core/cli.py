@@ -252,7 +252,9 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
             raise ConfigurationError(
                 message=f"module '{module_name}' has no attribute '{attr_name}'",
                 code=ErrorCode.CLI_INVALID_ARGS,
-                notes=[f"available attributes: {[n for n in dir(module) if not n.startswith('_')]}"],
+                notes=[
+                    f"available attributes: {[n for n in dir(module) if not n.startswith('_')]}"
+                ],
                 help_text='check the variable name after the colon in your module locator',
             )
         obj = getattr(module, attr_name)
@@ -260,7 +262,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
             raise ConfigurationError(
                 message=f"'{attr_name}' in module '{module_name}' is not a Horsies instance",
                 code=ErrorCode.CLI_INVALID_ARGS,
-                notes=[f"got {type(obj).__name__} instead of Horsies"],
+                notes=[f'got {type(obj).__name__} instead of Horsies'],
                 help_text='ensure the variable points to a Horsies() instance',
             )
         app = obj
@@ -393,7 +395,9 @@ def worker_command(args: argparse.Namespace) -> None:
 
     worker_config = WorkerConfig(
         dsn=postgres_config.database_url,
-        psycopg_dsn=to_psycopg_url(postgres_config.database_url),
+        session_dsn=postgres_config.effective_session_database_url,
+        psycopg_dsn=to_psycopg_url(postgres_config.effective_session_database_url),
+        pgbouncer_transaction_mode=postgres_config.pgbouncer_transaction_mode,
         queues=queues,
         processes=processes,
         app_locator=app_locator,
@@ -451,7 +455,9 @@ def worker_command(args: argparse.Namespace) -> None:
             finally:
                 close_result = await broker.close_async()
                 if is_err(close_result):
-                    logger.error(f'Broker close failed: {close_result.err_value.message}')
+                    logger.error(
+                        f'Broker close failed: {close_result.err_value.message}'
+                    )
 
         try:
             asyncio.run(run_worker())

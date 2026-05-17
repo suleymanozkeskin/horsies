@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import AsyncGenerator, Generator
+from typing import Any, AsyncGenerator, Generator
 import os
 import pytest
 import pytest_asyncio
@@ -155,13 +155,21 @@ async def _cleanup_tables(session: AsyncSession) -> None:
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope='session')
-async def clean_db(session: AsyncSession) -> AsyncGenerator[None, None]:
+async def clean_db(request: pytest.FixtureRequest) -> AsyncGenerator[None, None]:
     """Auto-cleanup before and after each e2e test."""
-    await _cleanup_tables(session)
+    node: Any = getattr(request, 'node')
+    if node.get_closest_marker('pgbouncer') is not None:
+        yield
+        return
+
+    await default_instance.broker.ensure_schema_initialized()
+    async with default_instance.broker.session_factory() as session:
+        await _cleanup_tables(session)
     try:
         yield
     finally:
-        await _cleanup_tables(session)
+        async with default_instance.broker.session_factory() as session:
+            await _cleanup_tables(session)
 
 
 @pytest.fixture(scope='session', autouse=True)

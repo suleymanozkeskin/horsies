@@ -43,9 +43,7 @@ class AppConfig(BaseModel):
     # orphaned CLAIMED tasks after dispatch failure + requeue DB error.
     max_claim_renew_age_ms: int = MAX_CLAIM_RENEW_AGE_MS
     recovery: RecoveryConfig = Field(default_factory=RecoveryConfig)
-    resilience: WorkerResilienceConfig = Field(
-        default_factory=WorkerResilienceConfig
-    )
+    resilience: WorkerResilienceConfig = Field(default_factory=WorkerResilienceConfig)
     schedule: Optional[ScheduleConfig] = Field(
         default=None, description='Scheduler configuration'
     )
@@ -285,6 +283,16 @@ class AppConfig(BaseModel):
         masked_url = mask_database_url(self.broker.database_url)
         lines.append(f'  broker:')
         lines.append(f'    database_url: {masked_url}')
+        if (
+            self.broker.session_database_url is not None
+            and self.broker.session_database_url != self.broker.database_url
+        ) or self.broker.pgbouncer_transaction_mode:
+            lines.append(
+                f'    session_database_url: {mask_database_url(self.broker.effective_session_database_url)}'
+            )
+        lines.append(
+            f'    pgbouncer_transaction_mode: {self.broker.pgbouncer_transaction_mode}'
+        )
         lines.append(f'    pool_size: {self.broker.pool_size}')
         lines.append(f'    max_overflow: {self.broker.max_overflow}')
 
@@ -332,7 +340,9 @@ class AppConfig(BaseModel):
         if self.exception_mapper:
             lines.append(f'  exception_mapper: {len(self.exception_mapper)} mapping(s)')
         if self.default_unhandled_error_code != 'UNHANDLED_EXCEPTION':
-            lines.append(f'  default_unhandled_error_code: {self.default_unhandled_error_code}')
+            lines.append(
+                f'  default_unhandled_error_code: {self.default_unhandled_error_code}'
+            )
 
         # Schedule config
         if self.schedule is not None:

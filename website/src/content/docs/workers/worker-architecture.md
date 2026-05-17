@@ -52,9 +52,9 @@ horsies worker myapp.instance:app --processes=8
 
 1. Load app from module
 2. Import task modules (for registry population)
-3. Create ProcessPoolExecutor with N workers
-4. Initialize child processes (each loads app independently)
-5. Subscribe to NOTIFY channels
+3. Subscribe to NOTIFY channels
+4. Create ProcessPoolExecutor with N workers
+5. Initialize child processes (each loads app independently)
 
 ### 2. Main Loop
 
@@ -140,12 +140,19 @@ From `WorkerConfig`:
 | Field | Description |
 | ----- | ----------- |
 | `dsn` | SQLAlchemy database URL |
+| `session_dsn` | Session-capable URL used for listener-capable operations |
+| `pgbouncer_transaction_mode` | Disables child-process prepared statements for PgBouncer transaction pooling |
 | `queues` | Queue names to process |
 | `processes` | Child process count |
 | `max_claim_batch` | Max claims per queue per pass |
 | `max_claim_per_worker` | Total claim limit |
 | `app_locator` | Path to app instance |
 | `imports` | Task module paths |
+
+Workers require PostgreSQL `LISTEN` for dispatch. When using transaction-pooled
+PgBouncer, configure `PostgresConfig.session_database_url` with a direct or
+session-capable URL. Workers fail startup instead of silently switching to
+poll-only dispatch if `LISTEN` is unavailable.
 
 ## Graceful Shutdown
 
