@@ -13,6 +13,8 @@ const FAKE_DB: &str = "postgresql://guard_test:guard_test@localhost:5432/guard_t
 fn broker() -> PostgresConfig {
     PostgresConfig {
         database_url: FAKE_DB.to_owned(),
+        session_database_url: None,
+        pgbouncer_transaction_mode: false,
         pool_pre_ping: true,
         pool_size: 5,
         max_overflow: 5,

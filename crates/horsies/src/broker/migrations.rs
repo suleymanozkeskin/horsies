@@ -11,10 +11,12 @@
 //! untouched for the host application.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
-use sqlx::migrate::{Migration, MigrateError, Migrator};
+use rand::Rng;
+use sqlx::migrate::{MigrateError, Migration, Migrator};
 use sqlx::{Acquire, Executor, PgConnection, PgPool};
-use tokio::time::Instant;
+use tokio::time::{sleep, Instant};
 
 use crate::broker::error::BrokerError;
 
@@ -27,6 +29,9 @@ pub const MIGRATIONS_TABLE: &str = "horsies_migrations";
 /// never blocks or is blocked by an application's `sqlx::migrate!().run()`.
 const ADVISORY_LOCK_KEY: i64 = 0x484F_5253_4945_5300;
 
+const MIGRATION_MAX_ATTEMPTS: usize = 5;
+const DEADLOCK_SQLSTATE: &str = "40P01";
+
 /// Run all embedded horsies migrations against `pool`.
 ///
 /// Bookkeeps in [`MIGRATIONS_TABLE`] rather than `_sqlx_migrations`.
@@ -34,6 +39,35 @@ const ADVISORY_LOCK_KEY: i64 = 0x484F_5253_4945_5300;
 /// `_sqlx_migrations` table so prior alpha installs upgrade cleanly.
 pub async fn run_horsies_migrations(pool: &PgPool) -> Result<(), BrokerError> {
     let migrator = sqlx::migrate!();
+    if migrations_are_current(pool, &migrator).await? {
+        return Ok(());
+    }
+
+    let mut attempt = 1;
+    loop {
+        match run_horsies_migrations_locked(pool, &migrator).await {
+            Ok(()) => return Ok(()),
+            Err(err) if is_deadlock_error(&err) && attempt < MIGRATION_MAX_ATTEMPTS => {
+                let scale = 1_u64 << (attempt - 1);
+                let jitter_ms = rand::thread_rng().gen_range(0..=200_u64) * scale;
+                let backoff = Duration::from_millis(50 + jitter_ms);
+                tracing::warn!(
+                    attempt,
+                    backoff_ms = backoff.as_millis(),
+                    "horsies migration hit deadlock, retrying"
+                );
+                sleep(backoff).await;
+                attempt += 1;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+async fn run_horsies_migrations_locked(
+    pool: &PgPool,
+    migrator: &Migrator,
+) -> Result<(), BrokerError> {
     let mut conn = pool.acquire().await?;
 
     sqlx::query("SELECT pg_advisory_lock($1)")
@@ -41,7 +75,7 @@ pub async fn run_horsies_migrations(pool: &PgPool) -> Result<(), BrokerError> {
         .execute(&mut *conn)
         .await?;
 
-    let outcome = run_inner(&mut conn, &migrator).await;
+    let outcome = run_inner(&mut conn, migrator).await;
 
     // Always release the session-level lock, even on error, so the connection
     // can return to the pool clean. Swallow unlock errors so we surface the
@@ -55,6 +89,10 @@ pub async fn run_horsies_migrations(pool: &PgPool) -> Result<(), BrokerError> {
 }
 
 async fn run_inner(conn: &mut PgConnection, migrator: &Migrator) -> Result<(), BrokerError> {
+    if migrations_are_current_on_conn(conn, migrator).await? {
+        return Ok(());
+    }
+
     ensure_migrations_table(conn).await?;
     backfill_from_sqlx_migrations(conn, migrator).await?;
 
@@ -78,6 +116,8 @@ async fn run_inner(conn: &mut PgConnection, migrator: &Migrator) -> Result<(), B
     let embedded_versions: HashSet<i64> = migrator.iter().map(|m| m.version).collect();
     for &version in applied.keys() {
         if !embedded_versions.contains(&version) {
+            // Match sqlx migrator rollback behavior: a database with a future
+            // horsies migration should fail hard under an older binary.
             return Err(BrokerError::Migration(MigrateError::VersionMissing(
                 version,
             )));
@@ -101,6 +141,81 @@ async fn run_inner(conn: &mut PgConnection, migrator: &Migrator) -> Result<(), B
     }
 
     Ok(())
+}
+
+async fn migrations_are_current(pool: &PgPool, migrator: &Migrator) -> Result<bool, BrokerError> {
+    let mut conn = pool.acquire().await?;
+    migrations_are_current_on_conn(&mut conn, migrator).await
+}
+
+async fn migrations_are_current_on_conn(
+    conn: &mut PgConnection,
+    migrator: &Migrator,
+) -> Result<bool, BrokerError> {
+    let table_exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+        .bind(MIGRATIONS_TABLE)
+        .fetch_one(&mut *conn)
+        .await?;
+    if !table_exists {
+        return Ok(false);
+    }
+
+    let applied_rows: Vec<(i64, bool, Vec<u8>)> = sqlx::query_as(&format!(
+        "SELECT version, success, checksum FROM {MIGRATIONS_TABLE} ORDER BY version"
+    ))
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let mut applied: HashMap<i64, (bool, Vec<u8>)> = HashMap::new();
+    for (version, success, checksum) in applied_rows {
+        if !success {
+            return Ok(false);
+        }
+        applied.insert(version, (success, checksum));
+    }
+
+    let embedded_versions: HashSet<i64> = migrator.iter().map(|m| m.version).collect();
+    for &version in applied.keys() {
+        if !embedded_versions.contains(&version) {
+            // Force the locked path, which reports VersionMissing for future
+            // migration rows instead of silently treating the schema as current.
+            return Ok(false);
+        }
+    }
+
+    for migration in migrator.iter() {
+        if migration.migration_type.is_down_migration() {
+            continue;
+        }
+        match applied.get(&migration.version) {
+            Some((true, checksum)) if checksum.as_slice() == migration.checksum.as_ref() => {}
+            _ => return Ok(false),
+        }
+    }
+
+    Ok(true)
+}
+
+fn is_deadlock_error(err: &BrokerError) -> bool {
+    broker_error_sqlstate(err).as_deref() == Some(DEADLOCK_SQLSTATE)
+}
+
+fn broker_error_sqlstate(err: &BrokerError) -> Option<String> {
+    match err {
+        BrokerError::Database(err) => sqlx_error_sqlstate(err),
+        BrokerError::Migration(MigrateError::Execute(err))
+        | BrokerError::Migration(MigrateError::ExecuteMigration(err, _)) => {
+            sqlx_error_sqlstate(err)
+        }
+        _ => None,
+    }
+}
+
+fn sqlx_error_sqlstate(err: &sqlx::Error) -> Option<String> {
+    match err {
+        sqlx::Error::Database(db_err) => db_err.code().map(|code| code.into_owned()),
+        _ => None,
+    }
 }
 
 async fn ensure_migrations_table(conn: &mut PgConnection) -> Result<(), BrokerError> {
@@ -200,11 +315,7 @@ async fn apply_migration(
 
     // execution_time is best-effort; if the process dies here the row already
     // exists with execution_time = -1 (matching sqlx's own behaviour).
-    let elapsed_ns: i64 = start
-        .elapsed()
-        .as_nanos()
-        .try_into()
-        .unwrap_or(i64::MAX);
+    let elapsed_ns: i64 = start.elapsed().as_nanos().try_into().unwrap_or(i64::MAX);
     sqlx::query(&format!(
         "UPDATE {MIGRATIONS_TABLE} SET execution_time = $1 WHERE version = $2"
     ))
@@ -223,7 +334,9 @@ where
     executor
         .execute(migration.sql.as_ref())
         .await
-        .map_err(|e| BrokerError::Migration(MigrateError::ExecuteMigration(e, migration.version)))?;
+        .map_err(|e| {
+            BrokerError::Migration(MigrateError::ExecuteMigration(e, migration.version))
+        })?;
     Ok(())
 }
 

@@ -6,6 +6,7 @@
 //! - use `task_name::handle(&rt)` for explicit runtime-based dispatch
 
 use horsies::{task, AppConfig, Horsies, TaskError, TaskRuntime};
+use horsies_examples::common;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct AddNumbersInput {
@@ -47,10 +48,7 @@ async fn enqueue_add_numbers(_rt: TaskRuntime) -> Result<(), TaskError> {
 }
 
 fn config() -> AppConfig {
-    AppConfig::for_database_url(
-        std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgresql://localhost/horsies_example".to_owned()),
-    )
+    common::app_config(&common::db_url())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

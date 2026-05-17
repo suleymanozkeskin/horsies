@@ -150,6 +150,8 @@ mod tests {
             ]),
             broker: PostgresConfig {
                 database_url: "postgresql://localhost/test".to_owned(),
+                session_database_url: None,
+                pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
                 pool_size: 30,
                 max_overflow: 30,
@@ -209,6 +211,8 @@ mod tests {
             custom_queues: None,
             broker: PostgresConfig {
                 database_url: "postgresql://localhost/test".to_owned(),
+                session_database_url: None,
+                pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
                 pool_size: 30,
                 max_overflow: 30,

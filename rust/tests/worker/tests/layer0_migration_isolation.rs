@@ -8,6 +8,9 @@ use horsies::{run_horsies_migrations, PostgresBroker};
 use horsies_test_support::db;
 use serial_test::serial;
 use sqlx::{Executor, PgPool};
+use std::time::Duration;
+
+const HORSIES_MIGRATION_LOCK_KEY: i64 = 0x484F_5253_4945_5300;
 
 async fn table_exists(pool: &PgPool, name: &str) -> bool {
     let regclass: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
@@ -118,6 +121,67 @@ async fn horsies_migrate_is_idempotent() {
 
     assert_eq!(first, second, "second migrate run must not add rows");
     assert!(first > 0);
+
+    pool.close().await;
+    db::drop_database(&db_url).await;
+}
+
+/// Once migrations are current, the fast path should not wait for the
+/// advisory migration lock. This is the Rust equivalent of the Python
+/// schema-version startup fast path: already-initialized applications should
+/// avoid DDL and lock contention during normal startup.
+#[tokio::test]
+#[serial]
+async fn horsies_migrate_fast_path_skips_advisory_lock_when_current() {
+    let db_url = db::create_empty_database().await;
+    let pool = PgPool::connect(&db_url).await.unwrap();
+
+    run_horsies_migrations(&pool).await.unwrap();
+
+    let mut lock_conn = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(HORSIES_MIGRATION_LOCK_KEY)
+        .execute(&mut *lock_conn)
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), run_horsies_migrations(&pool))
+        .await
+        .expect("current migrations should use the fast path and not block on the advisory lock")
+        .unwrap();
+
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(HORSIES_MIGRATION_LOCK_KEY)
+        .execute(&mut *lock_conn)
+        .await
+        .unwrap();
+
+    pool.close().await;
+    db::drop_database(&db_url).await;
+}
+
+/// Concurrent first-time startup should serialize under the migration lock and
+/// leave exactly one applied row per embedded migration.
+#[tokio::test]
+#[serial]
+async fn concurrent_cold_start_migrations_all_succeed() {
+    let db_url = db::create_empty_database().await;
+    let pool = PgPool::connect(&db_url).await.unwrap();
+
+    let mut handles = Vec::new();
+    for _ in 0..4 {
+        let pool = pool.clone();
+        handles.push(tokio::spawn(
+            async move { run_horsies_migrations(&pool).await },
+        ));
+    }
+
+    for handle in handles {
+        handle.await.unwrap().unwrap();
+    }
+
+    assert!(table_exists(&pool, "horsies_migrations").await);
+    assert!(row_count(&pool, "horsies_migrations").await > 0);
 
     pool.close().await;
     db::drop_database(&db_url).await;

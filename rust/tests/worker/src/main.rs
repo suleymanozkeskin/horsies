@@ -26,6 +26,8 @@ fn app_config_from_url(url: &str) -> AppConfig {
         custom_queues: None,
         broker: PostgresConfig {
             database_url: url.to_owned(),
+            session_database_url: None,
+            pgbouncer_transaction_mode: false,
             pool_pre_ping: true,
             pool_size: 5,
             max_overflow: 5,

@@ -1,0 +1,41 @@
+name: Tests Full
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  pgbouncer:
+    name: PgBouncer Contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Start PgBouncer fixture stack
+        run: docker compose -f tests/fixtures/pgbouncer/compose.yaml up -d --wait
+
+      - name: Build test worker binary
+        run: cargo build -p horsies-test-worker --bin horsies-test-worker
+
+      - name: Run PgBouncer contracts
+        env:
+          HORSIES_PGBOUNCER_TEST: "1"
+          DB_PASSWORD: testpassword
+          HORSIES_TEST_DATABASE_URL_DIRECT: postgresql://postgres:testpassword@localhost:15432/horsies
+          HORSIES_TEST_DATABASE_URL_TRANSACTION: postgresql://postgres:testpassword@localhost:16432/horsies
+          HORSIES_TEST_DATABASE_URL_PREPARED: postgresql://postgres:testpassword@localhost:16435/horsies
+          HORSIES_TEST_DATABASE_URL_SESSION: postgresql://postgres:testpassword@localhost:16433/horsies
+          HORSIES_TEST_DATABASE_URL_STATEMENT: postgresql://postgres:testpassword@localhost:16434/horsies
+        run: cargo test -p horsies-test-worker --test pgbouncer_contract -- --test-threads=1
+
+      - name: Stop PgBouncer fixture stack
+        if: always()
+        run: docker compose -f tests/fixtures/pgbouncer/compose.yaml down -v

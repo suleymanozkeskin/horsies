@@ -127,20 +127,11 @@ struct AncestorWorkflowRow {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Start a workflow from a validated spec.
-///
-/// Creates the workflow row (RUNNING), inserts all workflow_task rows,
-/// and enqueues root tasks (those with no dependencies). Returns a
-/// typed handle for result retrieval.
-///
-/// If a caller-provided `workflow_id` already exists in the database,
-/// returns the existing handle (idempotent start), matching Python's
-/// behavior.
-///
-/// All inserts are wrapped in a single database transaction so that a
-/// crash mid-start does not leave a partially-created workflow.
-pub async fn start_workflow<T>(
+/// Start a workflow with a separate session-capable pool for result
+/// LISTEN/NOTIFY handles.
+pub async fn start_workflow_with_listener_pool<T>(
     pool: &PgPool,
+    listener_pool: &PgPool,
     spec: &WorkflowSpec,
     workflow_id: Option<String>,
     registry: &WorkflowSpecRegistry,
@@ -148,7 +139,7 @@ pub async fn start_workflow<T>(
     let wf_id = workflow_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let wf_name = spec.name.clone();
 
-    start_workflow_inner(pool, spec, &wf_id, registry)
+    start_workflow_inner(pool, listener_pool, spec, &wf_id, registry)
         .await
         .map_err(|e| WorkflowStartError {
             code: classify_workflow_error(&e),
@@ -159,24 +150,19 @@ pub async fn start_workflow<T>(
         })
 }
 
-/// Start a workflow with automatic retry on transient errors.
-///
-/// When `resend_on_transient_err` is `true`, retries up to 3 times with
-/// exponential backoff (200ms, 400ms, 800ms, capped at 2000ms) on
-/// retryable errors. 1 initial attempt + 3 retries = 4 total attempts.
-///
-/// The workflow_id is generated once and reused across all retry attempts,
-/// preserving idempotency. Mirrors Python's `resend_on_transient_err`
-/// behavior on `WorkflowSpec.start()`.
-pub async fn start_workflow_with_retry<T>(
+/// Start a workflow with retry and a separate session-capable pool for result
+/// LISTEN/NOTIFY handles.
+pub async fn start_workflow_with_retry_and_listener_pool<T>(
     pool: &PgPool,
+    listener_pool: &PgPool,
     spec: &WorkflowSpec,
     workflow_id: Option<String>,
     registry: &WorkflowSpecRegistry,
     resend_on_transient_err: bool,
 ) -> WorkflowStartResult<WorkflowHandle<T>> {
     if !resend_on_transient_err {
-        return start_workflow(pool, spec, workflow_id, registry).await;
+        return start_workflow_with_listener_pool(pool, listener_pool, spec, workflow_id, registry)
+            .await;
     }
 
     // 1 initial attempt + START_RETRY_COUNT retries = 4 total attempts.
@@ -209,7 +195,15 @@ pub async fn start_workflow_with_retry<T>(
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
         }
 
-        match start_workflow(pool, spec, Some(wf_id.clone()), registry).await {
+        match start_workflow_with_listener_pool(
+            pool,
+            listener_pool,
+            spec,
+            Some(wf_id.clone()),
+            registry,
+        )
+        .await
+        {
             Ok(handle) => return Ok(handle),
             Err(e) => {
                 if e.retryable && attempt < max_attempts - 1 {
@@ -226,6 +220,7 @@ pub async fn start_workflow_with_retry<T>(
 
 async fn start_workflow_inner<T>(
     pool: &PgPool,
+    listener_pool: &PgPool,
     spec: &WorkflowSpec,
     wf_id: &str,
     registry: &WorkflowSpecRegistry,
@@ -242,9 +237,10 @@ async fn start_workflow_inner<T>(
             workflow_id = %wf_id,
             "workflow already exists, returning existing handle",
         );
-        return Ok(WorkflowHandle::new(
+        return Ok(WorkflowHandle::new_with_listener_pool(
             wf_id.to_owned(),
             pool.clone(),
+            listener_pool.clone(),
             Arc::new(registry.clone()),
         ));
     }
@@ -281,9 +277,10 @@ async fn start_workflow_inner<T>(
 
     tx.commit().await?;
 
-    Ok(WorkflowHandle::new(
+    Ok(WorkflowHandle::new_with_listener_pool(
         wf_id.to_owned(),
         pool.clone(),
+        listener_pool.clone(),
         Arc::new(registry.clone()),
     ))
 }
@@ -308,26 +305,18 @@ fn is_retryable_workflow_error(e: &WorkflowError) -> bool {
     }
 }
 
-/// Retry a failed workflow start using the `WorkflowStartError` from a
-/// previous `start_workflow()` call.
-///
-/// Validates the error before retrying:
-/// - Only `ENQUEUE_FAILED` errors are eligible
-/// - Cross-workflow retry is rejected (error workflow_name must match spec)
-///
-/// Best-effort idempotent by workflow_id: if the workflow already exists
-/// (e.g., the original start partially succeeded), returns the existing handle.
-///
-/// Mirrors Python's `WorkflowSpec.retry_start(error)`.
-pub async fn retry_start<T>(
+/// Retry a failed workflow start using a separate session-capable pool for
+/// result LISTEN/NOTIFY handles.
+pub async fn retry_start_with_listener_pool<T>(
     pool: &PgPool,
+    listener_pool: &PgPool,
     spec: &WorkflowSpec,
     error: &WorkflowStartError,
     registry: &WorkflowSpecRegistry,
 ) -> WorkflowStartResult<WorkflowHandle<T>> {
     // Reuse the existing validation from horsies-core.
     let workflow_id = crate::core::workflow::start_types::validate_start_retry(error, &spec.name)?;
-    start_workflow(pool, spec, Some(workflow_id), registry).await
+    start_workflow_with_listener_pool(pool, listener_pool, spec, Some(workflow_id), registry).await
 }
 
 // ---------------------------------------------------------------------------

@@ -19,22 +19,26 @@ use crate::workflow_engine::bound_handle::WorkflowHandle;
 pub struct BoundWorkflowSpec<T> {
     spec: WorkflowSpec,
     pool: PgPool,
+    listener_pool: PgPool,
     registry: Arc<WorkflowSpecRegistry>,
     resend_on_transient_err: bool,
     _phantom: PhantomData<T>,
 }
 
 impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
-    /// Create a bound workflow spec from a spec, pool, and registry.
-    pub fn new(
+    /// Create a bound workflow spec with a separate session-capable pool for
+    /// workflow result LISTEN/NOTIFY.
+    pub fn new_with_listener_pool(
         spec: WorkflowSpec,
         pool: PgPool,
+        listener_pool: PgPool,
         registry: Arc<WorkflowSpecRegistry>,
         resend_on_transient_err: bool,
     ) -> Self {
         Self {
             spec,
             pool,
+            listener_pool,
             registry,
             resend_on_transient_err,
             _phantom: PhantomData,
@@ -50,9 +54,10 @@ impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
         registry: Arc<WorkflowSpecRegistry>,
         resend_on_transient_err: bool,
     ) -> Self {
-        Self::new(
+        Self::new_with_listener_pool(
             spec,
             broker.pool().clone(),
+            broker.session_pool().clone(),
             registry,
             resend_on_transient_err,
         )
@@ -60,8 +65,9 @@ impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
 
     /// Start the workflow with an auto-generated workflow ID.
     pub async fn start(&self) -> WorkflowStartResult<WorkflowHandle<T>> {
-        crate::workflow_engine::start::start_workflow_with_retry::<T>(
+        crate::workflow_engine::start::start_workflow_with_retry_and_listener_pool::<T>(
             &self.pool,
+            &self.listener_pool,
             &self.spec,
             None,
             &self.registry,
@@ -75,8 +81,9 @@ impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
         &self,
         workflow_id: impl Into<String>,
     ) -> WorkflowStartResult<WorkflowHandle<T>> {
-        crate::workflow_engine::start::start_workflow_with_retry::<T>(
+        crate::workflow_engine::start::start_workflow_with_retry_and_listener_pool::<T>(
             &self.pool,
+            &self.listener_pool,
             &self.spec,
             Some(workflow_id.into()),
             &self.registry,
@@ -90,8 +97,9 @@ impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
         &self,
         error: &WorkflowStartError,
     ) -> WorkflowStartResult<WorkflowHandle<T>> {
-        crate::workflow_engine::start::retry_start::<T>(
+        crate::workflow_engine::start::retry_start_with_listener_pool::<T>(
             &self.pool,
+            &self.listener_pool,
             &self.spec,
             error,
             &self.registry,
@@ -101,9 +109,10 @@ impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
 
     /// Reconnect to an already-known workflow ID using the bound resources.
     pub fn handle(&self, workflow_id: impl Into<String>) -> WorkflowHandle<T> {
-        WorkflowHandle::new(
+        WorkflowHandle::new_with_listener_pool(
             workflow_id.into(),
             self.pool.clone(),
+            self.listener_pool.clone(),
             std::sync::Arc::clone(&self.registry),
         )
     }

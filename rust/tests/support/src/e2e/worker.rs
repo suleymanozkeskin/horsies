@@ -7,9 +7,12 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 /// Number of active managed worker contexts. Prevents stale-worker cleanup
 /// from killing intentionally running workers in nested contexts.
@@ -239,20 +242,24 @@ pub fn start_worker(
         .unwrap_or_else(|| "default".to_owned());
 
     // Resolve the DB URL — config_path may be a direct URL or a JSON config file.
-    let db_url =
+    let (db_url, pgbouncer_transaction_mode) =
         if config_path.starts_with("postgresql://") || config_path.starts_with("postgres://") {
-            config_path.to_owned()
+            (config_path.to_owned(), false)
         } else {
             // Parse broker.database_url from the JSON config file.
             std::fs::read_to_string(config_path)
                 .ok()
                 .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
                 .and_then(|v| {
-                    v.get("broker")
-                        .and_then(|b| b.get("database_url"))
-                        .and_then(|u| u.as_str().map(|s| s.to_owned()))
+                    let broker = v.get("broker")?;
+                    let url = broker.get("database_url")?.as_str()?.to_owned();
+                    let pgbouncer_transaction_mode = broker
+                        .get("pgbouncer_transaction_mode")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false);
+                    Some((url, pgbouncer_transaction_mode))
                 })
-                .unwrap_or_else(crate::db::db_url)
+                .unwrap_or_else(|| (crate::db::db_url(), false))
         };
 
     // Functional readiness: enqueue a healthcheck task and poll until COMPLETED.
@@ -275,13 +282,15 @@ pub fn start_worker(
         if healthcheck_id.is_none() {
             // Try to connect and enqueue. May fail if the DB isn't ready or
             // the task table doesn't exist yet.
-            if let Ok(id) = try_enqueue_healthcheck(&db_url, &healthcheck_queue) {
+            if let Ok(id) =
+                try_enqueue_healthcheck(&db_url, pgbouncer_transaction_mode, &healthcheck_queue)
+            {
                 healthcheck_id = Some(id);
             }
         }
 
         if let Some(ref hc_id) = healthcheck_id {
-            if is_task_completed(&db_url, hc_id) {
+            if is_task_completed(&db_url, pgbouncer_transaction_mode, hc_id) {
                 return ManagedWorker {
                     child: Some(child),
                     _drain_handles: vec![stdout_handle, stderr_handle],
@@ -318,7 +327,11 @@ where
 }
 
 /// Try to enqueue a healthcheck task. Returns Ok(task_id) or Err on any failure.
-fn try_enqueue_healthcheck(db_url: &str, queue: &str) -> Result<String, ()> {
+fn try_enqueue_healthcheck(
+    db_url: &str,
+    pgbouncer_transaction_mode: bool,
+    queue: &str,
+) -> Result<String, ()> {
     let url = db_url.to_owned();
     let queue = queue.to_owned();
     run_on_dedicated_thread(move || {
@@ -328,7 +341,7 @@ fn try_enqueue_healthcheck(db_url: &str, queue: &str) -> Result<String, ()> {
             .map_err(|_| ())?;
 
         rt.block_on(async {
-            let pool = sqlx::PgPool::connect(&url).await.map_err(|_| ())?;
+            let pool = connect_readiness_pool(&url, pgbouncer_transaction_mode).await?;
             let task_id = uuid::Uuid::new_v4().to_string();
             let sha = format!("healthcheck-{}", task_id);
             sqlx::query(
@@ -352,7 +365,7 @@ fn try_enqueue_healthcheck(db_url: &str, queue: &str) -> Result<String, ()> {
 }
 
 /// Check if a task has reached COMPLETED status.
-fn is_task_completed(db_url: &str, task_id: &str) -> bool {
+fn is_task_completed(db_url: &str, pgbouncer_transaction_mode: bool, task_id: &str) -> bool {
     let url = db_url.to_owned();
     let id = task_id.to_owned();
     run_on_dedicated_thread(move || {
@@ -364,7 +377,7 @@ fn is_task_completed(db_url: &str, task_id: &str) -> bool {
         let Some(rt) = rt else { return false };
 
         rt.block_on(async {
-            let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            let Ok(pool) = connect_readiness_pool(&url, pgbouncer_transaction_mode).await else {
                 return false;
             };
             let status: Option<String> =
@@ -379,6 +392,28 @@ fn is_task_completed(db_url: &str, task_id: &str) -> bool {
         })
     })
     .unwrap_or(false)
+}
+
+async fn connect_readiness_pool(
+    db_url: &str,
+    pgbouncer_transaction_mode: bool,
+) -> Result<sqlx::PgPool, ()> {
+    if pgbouncer_transaction_mode {
+        let options = PgConnectOptions::from_str(db_url)
+            .map_err(|_| ())?
+            .statement_cache_capacity(0);
+        PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options)
+            .await
+            .map_err(|_| ())
+    } else {
+        PgPoolOptions::new()
+            .max_connections(2)
+            .connect(db_url)
+            .await
+            .map_err(|_| ())
+    }
 }
 
 /// Start a scheduler process with the given config file.

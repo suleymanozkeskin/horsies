@@ -172,6 +172,16 @@ impl AppConfig {
         let masked_url = mask_database_url(&self.broker.database_url);
         lines.push("  broker:".to_owned());
         lines.push(format!("    database_url: {}", masked_url));
+        if let Some(session_database_url) = &self.broker.session_database_url {
+            lines.push(format!(
+                "    session_database_url: {}",
+                mask_database_url(session_database_url),
+            ));
+        }
+        lines.push(format!(
+            "    pgbouncer_transaction_mode: {}",
+            self.broker.pgbouncer_transaction_mode,
+        ));
         lines.push(format!("    pool_size: {}", self.broker.pool_size));
         lines.push(format!("    max_overflow: {}", self.broker.max_overflow));
 
@@ -414,6 +424,8 @@ mod tests {
     fn valid_broker() -> PostgresConfig {
         PostgresConfig {
             database_url: "postgresql://localhost/test".to_owned(),
+            session_database_url: None,
+            pgbouncer_transaction_mode: false,
             pool_pre_ping: true,
             pool_size: 30,
             max_overflow: 30,
@@ -529,6 +541,8 @@ mod tests {
             custom_queues: None,
             broker: PostgresConfig {
                 database_url: "mysql://localhost/db".to_owned(),
+                session_database_url: None,
+                pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
                 pool_size: 30,
                 max_overflow: 30,
@@ -646,6 +660,8 @@ mod tests {
             custom_queues: None,
             broker: PostgresConfig {
                 database_url: "postgresql://user:secret@localhost/db".to_owned(),
+                session_database_url: None,
+                pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
                 pool_size: 30,
                 max_overflow: 30,
