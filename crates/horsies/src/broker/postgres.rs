@@ -444,6 +444,35 @@ fn pg_connect_options(
     Ok(connect_options)
 }
 
+fn pg_pool_options(config: &PostgresConfig) -> PgPoolOptions {
+    PgPoolOptions::new()
+        .max_connections(config.pool_size + config.max_overflow)
+        .acquire_timeout(Duration::from_secs(config.pool_timeout as u64))
+        .idle_timeout(Duration::from_secs(config.pool_recycle as u64))
+        .test_before_acquire(config.pool_pre_ping)
+}
+
+fn listener_probe_failed(err: sqlx::Error) -> BrokerError {
+    BrokerError::ConnectionFailed(format!(
+        "Postgres LISTEN delivery probe failed; session_database_url must be direct/session-capable and able to preserve LISTEN/NOTIFY session state: {err}",
+    ))
+}
+
+fn prepared_statement_tracking_failed(err: &sqlx::Error) -> bool {
+    err.to_string()
+        .to_lowercase()
+        .contains("prepared statement")
+}
+
+fn prepared_statement_tracking_error(err: sqlx::Error) -> BrokerError {
+    BrokerError::ConnectionFailed(format!(
+        "PgBouncer transaction mode requires protocol prepared-statement tracking \
+         (PgBouncer max_prepared_statements > 0). Configure PgBouncer prepared \
+         statement support, or use a direct/session-capable database_url for Rust \
+         SQLx clients: {err}",
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // PostgresBroker
 // ---------------------------------------------------------------------------
@@ -491,11 +520,7 @@ impl PostgresBroker {
             config.echo,
             config.pgbouncer_transaction_mode,
         )?;
-        let pool = PgPoolOptions::new()
-            .max_connections(config.pool_size + config.max_overflow)
-            .acquire_timeout(Duration::from_secs(config.pool_timeout as u64))
-            .idle_timeout(Duration::from_secs(config.pool_recycle as u64))
-            .test_before_acquire(config.pool_pre_ping)
+        let pool = pg_pool_options(config)
             .connect_with(connect_options)
             .await
             .map_err(BrokerError::Database)?;
@@ -505,12 +530,7 @@ impl PostgresBroker {
         } else {
             let session_options =
                 pg_connect_options(config.effective_session_database_url(), config.echo, false)?;
-            PgPoolOptions::new()
-                .max_connections(config.pool_size + config.max_overflow)
-                .acquire_timeout(Duration::from_secs(config.pool_timeout as u64))
-                .idle_timeout(Duration::from_secs(config.pool_recycle as u64))
-                .test_before_acquire(config.pool_pre_ping)
-                .connect_lazy_with(session_options)
+            pg_pool_options(config).connect_lazy_with(session_options)
         };
 
         Ok(Self {
@@ -1789,7 +1809,13 @@ impl PostgresBroker {
         let _: (i32,) = sqlx::query_as(HEALTH_CHECK_SQL)
             .fetch_one(&self.pool)
             .await
-            .map_err(BrokerError::Database)?;
+            .map_err(|err| {
+                if self.pgbouncer_transaction_mode && prepared_statement_tracking_failed(&err) {
+                    prepared_statement_tracking_error(err)
+                } else {
+                    BrokerError::Database(err)
+                }
+            })?;
         if self.pgbouncer_transaction_mode {
             self.check_listener_delivery().await?;
         }
@@ -1804,25 +1830,31 @@ impl PostgresBroker {
     pub async fn check_listener_delivery(&self) -> Result<(), BrokerError> {
         let mut listener = sqlx::postgres::PgListener::connect_with(&self.session_pool)
             .await
-            .map_err(BrokerError::Database)?;
+            .map_err(listener_probe_failed)?;
         let channel = format!("horsies_probe_{}", Uuid::new_v4().simple());
         let payload = Uuid::new_v4().to_string();
 
         listener
             .listen(&channel)
             .await
-            .map_err(BrokerError::Database)?;
+            .map_err(listener_probe_failed)?;
 
         sqlx::query("SELECT pg_notify($1, $2)")
             .bind(&channel)
             .bind(&payload)
             .execute(&self.pool)
             .await
-            .map_err(BrokerError::Database)?;
+            .map_err(|err| {
+                if self.pgbouncer_transaction_mode && prepared_statement_tracking_failed(&err) {
+                    prepared_statement_tracking_error(err)
+                } else {
+                    listener_probe_failed(err)
+                }
+            })?;
 
         let delivered = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let notification = listener.recv().await.map_err(BrokerError::Database)?;
+                let notification = listener.recv().await.map_err(listener_probe_failed)?;
                 if notification.channel() == channel && notification.payload() == payload {
                     return Ok::<(), BrokerError>(());
                 }

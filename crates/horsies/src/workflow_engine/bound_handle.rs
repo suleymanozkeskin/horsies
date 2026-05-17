@@ -29,6 +29,7 @@ use crate::workflow_engine::info::WorkflowTaskInfo;
 pub struct WorkflowHandle<T> {
     workflow_id: String,
     pool: PgPool,
+    listener_pool: PgPool,
     registry: Arc<WorkflowSpecRegistry>,
     listener: tokio::sync::OnceCell<SharedNotifyListener>,
     _phantom: std::marker::PhantomData<T>,
@@ -37,9 +38,21 @@ pub struct WorkflowHandle<T> {
 impl<T> WorkflowHandle<T> {
     /// Create a new workflow handle for a known workflow ID.
     pub fn new(workflow_id: String, pool: PgPool, registry: Arc<WorkflowSpecRegistry>) -> Self {
+        Self::new_with_listener_pool(workflow_id, pool.clone(), pool, registry)
+    }
+
+    /// Create a workflow handle with a separate session-capable pool for
+    /// LISTEN/NOTIFY.
+    pub fn new_with_listener_pool(
+        workflow_id: String,
+        pool: PgPool,
+        listener_pool: PgPool,
+        registry: Arc<WorkflowSpecRegistry>,
+    ) -> Self {
         Self {
             workflow_id,
             pool,
+            listener_pool,
             registry,
             listener: tokio::sync::OnceCell::new(),
             _phantom: std::marker::PhantomData,
@@ -70,7 +83,7 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     pub async fn get(&self, timeout: Option<Duration>) -> TaskResult<T> {
         let listener = match self
             .listener
-            .get_or_try_init(|| SharedNotifyListener::new(&self.pool, "workflow_done"))
+            .get_or_try_init(|| SharedNotifyListener::new(&self.listener_pool, "workflow_done"))
             .await
         {
             Ok(listener) => listener,

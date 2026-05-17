@@ -16,5 +16,6 @@
 pub mod db;
 pub mod e2e;
 pub mod fixtures;
+pub mod pgbouncer;
 pub mod tasks;
 pub mod workflow_helpers;

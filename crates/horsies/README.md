@@ -19,6 +19,7 @@ Rust port of [horsies](https://github.com/suleymanozkeskin/horsies) (Python).
 - Workflow DAGs with typed node wiring
 - PostgreSQL broker with LISTEN/NOTIFY
 - PgBouncer transaction-pool support with a direct/session URL for LISTEN/NOTIFY
+  and PgBouncer prepared-statement tracking (`max_prepared_statements > 0`)
 - Automatic schema initialization on normal startup paths
 - Worker heartbeats and stale-task recovery
 - Recurring scheduler for interval, hourly, daily, weekly, and monthly jobs

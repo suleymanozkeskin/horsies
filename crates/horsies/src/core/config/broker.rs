@@ -18,11 +18,14 @@ pub struct PostgresConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_database_url: Option<String>,
 
-    /// Disable SQLx's named prepared-statement cache for PgBouncer
-    /// transaction-pool compatibility.
+    /// Configure the runtime pool for PgBouncer transaction pooling.
     ///
-    /// Requires `session_database_url` so schema initialization and
-    /// LISTEN/NOTIFY continue to use a session-capable connection.
+    /// SQLx uses protocol-level prepared statements for parameterized
+    /// Postgres queries. The PgBouncer endpoint must therefore have prepared
+    /// statement tracking enabled (`max_prepared_statements > 0`). This flag
+    /// disables SQLx's local statement cache and requires `session_database_url`
+    /// so schema initialization and LISTEN/NOTIFY continue to use a
+    /// session-capable connection.
     #[serde(default)]
     pub pgbouncer_transaction_mode: bool,
 
@@ -103,7 +106,8 @@ impl PostgresConfig {
     ///
     /// `database_url` should be the transaction-pool endpoint. `session_database_url`
     /// must be a direct or session-pooled endpoint used for schema work and
-    /// LISTEN/NOTIFY.
+    /// LISTEN/NOTIFY. The transaction-pool endpoint must support
+    /// protocol-level prepared statement tracking (`max_prepared_statements > 0`).
     pub fn from_pgbouncer_urls(
         database_url: impl Into<String>,
         session_database_url: impl Into<String>,
