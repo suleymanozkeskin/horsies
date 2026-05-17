@@ -46,6 +46,6 @@ pub fn app_config(db_url: &str) -> AppConfig {
             claimer_heartbeat_interval_ms: 1500,
             ..RecoveryConfig::default()
         },
-        ..AppConfig::for_database_url(db_url)
+        ..super::app_config(db_url)
     }
 }

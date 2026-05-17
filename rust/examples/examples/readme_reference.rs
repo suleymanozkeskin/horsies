@@ -9,6 +9,7 @@ use horsies::{
     task, AppConfig, Horsies, HorsiesError, TaskError, TaskResult, TaskRuntime, WorkflowDefConfig,
     WorkflowDefinition, WorkflowInput, WorkflowSpec, WorkflowSpecBuilder,
 };
+use horsies_examples::common;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -276,10 +277,7 @@ async fn use_settings(rt: TaskRuntime) -> Result<(), TaskError> {
 }
 
 fn config() -> AppConfig {
-    AppConfig::for_database_url(
-        std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgresql://localhost/horsies_example".to_owned()),
-    )
+    common::app_config(&common::db_url())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

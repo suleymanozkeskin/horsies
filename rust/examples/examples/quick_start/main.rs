@@ -49,7 +49,7 @@ fn config() -> AppConfig {
                 max_concurrency: 5,
             },
         ]),
-        ..AppConfig::for_database_url(common::db_url())
+        ..common::app_config(&common::db_url())
     }
 }
 

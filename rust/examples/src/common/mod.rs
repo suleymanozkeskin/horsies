@@ -6,7 +6,7 @@ pub mod tasks;
 
 use std::sync::Arc;
 
-use horsies::{PostgresBroker, PostgresConfig};
+use horsies::{AppConfig, PostgresBroker, PostgresConfig};
 
 /// Resolve the database URL.
 ///
@@ -49,11 +49,37 @@ pub fn db_url() -> String {
     std::process::exit(1);
 }
 
+/// Resolve an optional session-capable database URL.
+///
+/// When set, examples treat `DATABASE_URL` as the runtime SQL URL and this
+/// value as the schema/LISTEN URL, enabling PgBouncer transaction-pool checks.
+pub fn session_db_url() -> Option<String> {
+    std::env::var("SESSION_DATABASE_URL")
+        .or_else(|_| std::env::var("HORSIES_SESSION_DATABASE_URL"))
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+/// Build broker config from example environment variables.
+pub fn postgres_config(db_url: &str) -> PostgresConfig {
+    match session_db_url() {
+        Some(session_url) => PostgresConfig::from_pgbouncer_urls(db_url, session_url),
+        None => PostgresConfig::from_url(db_url),
+    }
+}
+
+/// Build app config from example environment variables.
+pub fn app_config(db_url: &str) -> AppConfig {
+    let mut config = AppConfig::for_database_url(db_url);
+    config.broker = postgres_config(db_url);
+    config
+}
+
 /// Connect to Postgres and run migrations.
 ///
 /// Returns an `Arc<PostgresBroker>` for sending tasks and retrieving results.
 pub async fn connect_broker(db_url: &str) -> Arc<PostgresBroker> {
-    let config = PostgresConfig::from_url(db_url);
+    let config = postgres_config(db_url);
     let broker = Arc::new(
         PostgresBroker::connect_with(&config)
             .await
