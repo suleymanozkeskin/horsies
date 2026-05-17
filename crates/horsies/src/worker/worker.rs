@@ -313,7 +313,10 @@ impl Worker {
 
     /// Attempt to connect the LISTEN/NOTIFY listener and subscribe to queues.
     async fn try_connect_listener(&self) -> Result<NotifyListener, WorkerError> {
-        let mut listener = NotifyListener::connect(self.broker.pool()).await?;
+        if self.broker.pgbouncer_transaction_mode() {
+            self.broker.check_listener_delivery().await?;
+        }
+        let mut listener = NotifyListener::connect(self.broker.session_pool()).await?;
         for queue in &self.worker_config.queues {
             listener.listen(&format!("task_queue_{}", queue)).await?;
         }

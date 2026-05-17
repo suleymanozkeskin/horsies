@@ -722,6 +722,8 @@ mod tests {
             custom_queues: None,
             broker: PostgresConfig {
                 database_url: "postgresql://localhost/test".to_owned(),
+                session_database_url: None,
+                pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
                 pool_size: 30,
                 max_overflow: 30,
@@ -754,10 +756,15 @@ mod tests {
 
     #[tokio::test]
     async fn check_live_surfaces_connectivity_failure() {
-        let app = Horsies::new(valid_config()).unwrap();
+        let mut config = valid_config();
+        config.resilience.db_retry_initial_ms = 500;
+        config.resilience.db_retry_max_ms = 500;
+        config.resilience.db_retry_max_attempts = 1;
+        let app = Horsies::new(config).unwrap();
         let pool = PgPoolOptions::new()
-            .connect_lazy("postgresql://postgres@127.0.0.1:1/test")
+            .connect_lazy("postgresql://postgres@localhost/test")
             .unwrap();
+        pool.close().await;
         assert!(app
             .bind_broker(Arc::new(PostgresBroker::from_pool(pool)))
             .is_ok());

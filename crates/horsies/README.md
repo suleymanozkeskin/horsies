@@ -18,6 +18,7 @@ Rust port of [horsies](https://github.com/suleymanozkeskin/horsies) (Python).
 - Structured `TaskError` values
 - Workflow DAGs with typed node wiring
 - PostgreSQL broker with LISTEN/NOTIFY
+- PgBouncer transaction-pool support with a direct/session URL for LISTEN/NOTIFY
 - Automatic schema initialization on normal startup paths
 - Worker heartbeats and stale-task recovery
 - Recurring scheduler for interval, hourly, daily, weekly, and monthly jobs

@@ -12,6 +12,8 @@ pub fn default_app_config() -> AppConfig {
         custom_queues: None,
         broker: PostgresConfig {
             database_url: db::db_url(),
+            session_database_url: None,
+            pgbouncer_transaction_mode: false,
             pool_pre_ping: true,
             pool_size: 5,
             max_overflow: 5,
@@ -52,6 +54,8 @@ pub fn fast_recovery_app_config() -> AppConfig {
 pub fn test_postgres_config() -> PostgresConfig {
     PostgresConfig {
         database_url: db::db_url(),
+        session_database_url: None,
+        pgbouncer_transaction_mode: false,
         pool_pre_ping: true,
         pool_size: 5,
         max_overflow: 5,

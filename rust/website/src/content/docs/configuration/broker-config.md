@@ -19,7 +19,9 @@ let broker = PostgresConfig::from_url(
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `database_url` | `String` | required | PostgreSQL connection URL |
+| `database_url` | `String` | required | PostgreSQL runtime connection URL |
+| `session_database_url` | `Option<String>` | `None` | Direct/session-capable URL for schema initialization and LISTEN/NOTIFY |
+| `pgbouncer_transaction_mode` | `bool` | `false` | Disable SQLx named prepared-statement caching for PgBouncer transaction pools |
 | `pool_size` | `u32` | 30 | Connection pool size |
 | `max_overflow` | `u32` | 30 | Additional connections beyond pool_size |
 | `pool_timeout` | `u32` | 30 | Seconds to wait for connection |
@@ -57,6 +59,8 @@ PostgresConfig::from_url(
 ```rust
 PostgresConfig {
     database_url: "postgresql://app:secret@db.example.com:5432/production".into(),
+    session_database_url: None,
+    pgbouncer_transaction_mode: false,
     pool_size: 10,
     max_overflow: 20,
     pool_timeout: 30,
@@ -93,6 +97,26 @@ The broker manages an async connection pool:
 
 Consider: `pool_size + max_overflow` should not exceed PostgreSQL's `max_connections` (divided by number of worker instances).
 
+## PgBouncer Transaction Pooling
+
+PgBouncer transaction pooling can be used for normal task and workflow SQL, but it cannot preserve session state for `LISTEN/NOTIFY`. Horsies therefore needs two URLs:
+
+- `database_url`: runtime SQL URL, which may point at the transaction-pool endpoint.
+- `session_database_url`: direct or session-pooled URL used for schema initialization and `LISTEN/NOTIFY`.
+
+```rust
+let broker = PostgresConfig::from_pgbouncer_urls(
+    std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
+    std::env::var("SESSION_DATABASE_URL").expect("SESSION_DATABASE_URL must be set"),
+);
+```
+
+With `pgbouncer_transaction_mode=true`, Horsies disables SQLx's named prepared-statement cache for the runtime pool. Schema initialization, workers, result listeners, and workflow listeners use `session_database_url`.
+
+Different providers expose direct and pooled Postgres endpoints differently. Some publish separate ports, some publish separate hostnames, and those details can change; check your provider's current connection documentation instead of copying an example port.
+
+`app.check_live()` also runs a bounded `LISTEN` + `NOTIFY` delivery probe in PgBouncer transaction mode. If the session URL is accidentally transaction-pooled, the check fails with a message indicating that `session_database_url` cannot preserve `LISTEN/NOTIFY` state.
+
 ## Multiple Components
 
 The broker creates two connection types:
@@ -100,11 +124,13 @@ The broker creates two connection types:
 1. **Query pool**: For queries, inserts, updates
 2. **LISTEN/NOTIFY**: For real-time notifications
 
-Both share the same `database_url`.
+By default both use `database_url`. When `session_database_url` is configured, schema initialization and LISTEN/NOTIFY use the session URL while normal SQL uses `database_url`.
 
 ## Schema Initialization
 
 When you use high-level `Horsies` entry points such as task sends, workflow starts, `app.run_worker()`, `app.run_scheduler()`, `app.get_broker()`, or `app.check_live()`, the library ensures the schema automatically on first use.
+
+Schema initialization uses a fast path when the embedded migrations are already current. Fresh or upgraded databases still run the migration path under a PostgreSQL advisory lock, double-check migration state after acquiring the lock, and retry PostgreSQL deadlocks.
 
 Use an explicit broker call when you want a preflight step outside those paths, or when you're working with `PostgresBroker` directly:
 

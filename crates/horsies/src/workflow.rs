@@ -482,6 +482,8 @@ mod tests {
             custom_queues: None,
             broker: PostgresConfig {
                 database_url: "postgresql://localhost/test".to_owned(),
+                session_database_url: None,
+                pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
                 pool_size: 30,
                 max_overflow: 30,
@@ -731,12 +733,18 @@ mod tests {
 
     #[tokio::test]
     async fn workflow_starter_start_returns_enqueue_failed_without_db() {
-        let app = crate::Horsies::new(valid_config()).unwrap();
+        let mut config = valid_config();
+        config.resilience.db_retry_initial_ms = 500;
+        config.resilience.db_retry_max_ms = 500;
+        config.resilience.db_retry_max_attempts = 1;
+        let app = crate::Horsies::new(config).unwrap();
 
-        // Bind a broker that points at a non-existent DB so start() fails at connect.
+        // Bind a broker with a closed pool so start() fails at the broker
+        // boundary without depending on platform TCP timeout behavior.
         let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgresql://postgres@127.0.0.1:1/nonexistent")
+            .connect_lazy("postgresql://postgres@localhost/nonexistent")
             .unwrap();
+        pool.close().await;
         assert!(app
             .bind_broker(std::sync::Arc::new(crate::PostgresBroker::from_pool(pool)))
             .is_ok());

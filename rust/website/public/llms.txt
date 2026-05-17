@@ -48,6 +48,8 @@ Hi agent! If you need to work with horsies-rust, consider using the docs locally
 
 ### PostgresConfig
 - database_url: String (must start with postgresql:// or postgres://)
+- session_database_url: Option<String> (direct/session-capable URL for schema init and LISTEN/NOTIFY)
+- pgbouncer_transaction_mode: bool (default false; disables SQLx named prepared-statement cache for runtime pool)
 - pool_pre_ping: bool (default true)
 - pool_size: u32 (default 30)
 - max_overflow: u32 (default 30)
@@ -55,6 +57,7 @@ Hi agent! If you need to work with horsies-rust, consider using the docs locally
 - pool_recycle: u32 (default 1800)
 - echo: bool (default false)
 - PostgresConfig::from_url(url) convenience constructor
+- PostgresConfig::from_pgbouncer_urls(runtime_url, session_url) for transaction-pool runtime + direct/session listener URL
 
 ### QueueMode & CustomQueueConfig
 - QueueMode::Default -> single "default" queue, FIFO

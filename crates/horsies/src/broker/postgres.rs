@@ -423,6 +423,27 @@ ORDER BY good_until ASC";
 /// Health check: `SELECT 1` to verify broker connectivity.
 const HEALTH_CHECK_SQL: &str = "SELECT 1";
 
+fn pg_connect_options(
+    database_url: &str,
+    echo: bool,
+    pgbouncer_transaction_mode: bool,
+) -> Result<PgConnectOptions, BrokerError> {
+    let mut connect_options = PgConnectOptions::from_str(database_url)
+        .map_err(|e| BrokerError::ConnectionFailed(e.to_string()))?;
+
+    if echo {
+        connect_options = connect_options.log_statements(log::LevelFilter::Debug);
+    } else {
+        connect_options = connect_options.log_statements(log::LevelFilter::Off);
+    }
+
+    if pgbouncer_transaction_mode {
+        connect_options = connect_options.statement_cache_capacity(0);
+    }
+
+    Ok(connect_options)
+}
+
 // ---------------------------------------------------------------------------
 // PostgresBroker
 // ---------------------------------------------------------------------------
@@ -432,6 +453,8 @@ const HEALTH_CHECK_SQL: &str = "SELECT 1";
 /// All operations are async and use connection pooling via `sqlx::PgPool`.
 pub struct PostgresBroker {
     pool: PgPool,
+    session_pool: PgPool,
+    pgbouncer_transaction_mode: bool,
     task_done_listener: tokio::sync::OnceCell<SharedNotifyListener>,
     workflow_done_listener: tokio::sync::OnceCell<SharedNotifyListener>,
     schema_initialized: tokio::sync::OnceCell<()>,
@@ -444,7 +467,9 @@ impl PostgresBroker {
     /// `PgPool` lifecycle.
     pub fn from_pool(pool: PgPool) -> Self {
         Self {
+            session_pool: pool.clone(),
             pool,
+            pgbouncer_transaction_mode: false,
             task_done_listener: tokio::sync::OnceCell::new(),
             workflow_done_listener: tokio::sync::OnceCell::new(),
             schema_initialized: tokio::sync::OnceCell::new(),
@@ -461,15 +486,11 @@ impl PostgresBroker {
 
     /// Connect using a `PostgresConfig` from horsies-core.
     pub async fn connect_with(config: &PostgresConfig) -> Result<Self, BrokerError> {
-        let mut connect_options = PgConnectOptions::from_str(&config.database_url)
-            .map_err(|e| BrokerError::ConnectionFailed(e.to_string()))?;
-
-        if config.echo {
-            connect_options = connect_options.log_statements(log::LevelFilter::Debug);
-        } else {
-            connect_options = connect_options.log_statements(log::LevelFilter::Off);
-        }
-
+        let connect_options = pg_connect_options(
+            &config.database_url,
+            config.echo,
+            config.pgbouncer_transaction_mode,
+        )?;
         let pool = PgPoolOptions::new()
             .max_connections(config.pool_size + config.max_overflow)
             .acquire_timeout(Duration::from_secs(config.pool_timeout as u64))
@@ -478,7 +499,28 @@ impl PostgresBroker {
             .connect_with(connect_options)
             .await
             .map_err(BrokerError::Database)?;
-        Ok(Self::from_pool(pool))
+
+        let session_pool = if config.effective_session_database_url() == config.database_url {
+            pool.clone()
+        } else {
+            let session_options =
+                pg_connect_options(config.effective_session_database_url(), config.echo, false)?;
+            PgPoolOptions::new()
+                .max_connections(config.pool_size + config.max_overflow)
+                .acquire_timeout(Duration::from_secs(config.pool_timeout as u64))
+                .idle_timeout(Duration::from_secs(config.pool_recycle as u64))
+                .test_before_acquire(config.pool_pre_ping)
+                .connect_lazy_with(session_options)
+        };
+
+        Ok(Self {
+            pool,
+            session_pool,
+            pgbouncer_transaction_mode: config.pgbouncer_transaction_mode,
+            task_done_listener: tokio::sync::OnceCell::new(),
+            workflow_done_listener: tokio::sync::OnceCell::new(),
+            schema_initialized: tokio::sync::OnceCell::new(),
+        })
     }
 
     /// Run embedded SQL migrations.
@@ -486,7 +528,7 @@ impl PostgresBroker {
     /// Bookkeeps in the horsies-owned `horsies_migrations` table so it never
     /// collides with an application's own `sqlx::migrate!()` runner.
     pub async fn migrate(&self) -> Result<(), BrokerError> {
-        crate::broker::migrations::run_horsies_migrations(&self.pool).await
+        crate::broker::migrations::run_horsies_migrations(&self.session_pool).await
     }
 
     /// Ensure the embedded schema is initialized exactly once for this broker.
@@ -509,6 +551,17 @@ impl PostgresBroker {
         &self.pool
     }
 
+    /// Get the session-capable pool used for schema and LISTEN/NOTIFY.
+    pub fn session_pool(&self) -> &PgPool {
+        &self.session_pool
+    }
+
+    /// Whether this broker's runtime pool is configured for PgBouncer
+    /// transaction pooling.
+    pub fn pgbouncer_transaction_mode(&self) -> bool {
+        self.pgbouncer_transaction_mode
+    }
+
     /// Shared listener for the `task_done` NOTIFY channel.
     ///
     /// Lazily initialized on first call. All concurrent `get_result()`
@@ -516,7 +569,7 @@ impl PostgresBroker {
     /// creating their own.
     pub async fn task_done_listener(&self) -> Result<&SharedNotifyListener, BrokerError> {
         self.task_done_listener
-            .get_or_try_init(|| SharedNotifyListener::new(&self.pool, "task_done"))
+            .get_or_try_init(|| SharedNotifyListener::new(&self.session_pool, "task_done"))
             .await
     }
 
@@ -526,7 +579,7 @@ impl PostgresBroker {
     /// `horsies-workflow::get_workflow_result()`.
     pub async fn workflow_done_listener(&self) -> Result<&SharedNotifyListener, BrokerError> {
         self.workflow_done_listener
-            .get_or_try_init(|| SharedNotifyListener::new(&self.pool, "workflow_done"))
+            .get_or_try_init(|| SharedNotifyListener::new(&self.session_pool, "workflow_done"))
             .await
     }
 
@@ -1737,7 +1790,54 @@ impl PostgresBroker {
             .fetch_one(&self.pool)
             .await
             .map_err(BrokerError::Database)?;
+        if self.pgbouncer_transaction_mode {
+            self.check_listener_delivery().await?;
+        }
         Ok(())
+    }
+
+    /// Verify that the session pool can actually receive LISTEN/NOTIFY.
+    ///
+    /// PgBouncer transaction mode may accept `LISTEN` syntactically but drop
+    /// the session state when the transaction ends. A bounded delivery probe
+    /// catches that misconfiguration with a clear startup error.
+    pub async fn check_listener_delivery(&self) -> Result<(), BrokerError> {
+        let mut listener = sqlx::postgres::PgListener::connect_with(&self.session_pool)
+            .await
+            .map_err(BrokerError::Database)?;
+        let channel = format!("horsies_probe_{}", Uuid::new_v4().simple());
+        let payload = Uuid::new_v4().to_string();
+
+        listener
+            .listen(&channel)
+            .await
+            .map_err(BrokerError::Database)?;
+
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(&channel)
+            .bind(&payload)
+            .execute(&self.pool)
+            .await
+            .map_err(BrokerError::Database)?;
+
+        let delivered = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let notification = listener.recv().await.map_err(BrokerError::Database)?;
+                if notification.channel() == channel && notification.payload() == payload {
+                    return Ok::<(), BrokerError>(());
+                }
+            }
+        })
+        .await;
+
+        let _ = listener.unlisten(&channel).await;
+
+        match delivered {
+            Ok(result) => result,
+            Err(_) => Err(BrokerError::ConnectionFailed(
+                "Postgres LISTEN delivery probe timed out; session_database_url appears to be transaction-pooled or otherwise unable to preserve LISTEN/NOTIFY session state".to_owned(),
+            )),
+        }
     }
 
     /// This is a **read-only** query for operational dashboards and alerting.
