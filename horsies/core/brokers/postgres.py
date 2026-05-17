@@ -1,11 +1,12 @@
 # app/core/brokers/postgres.py
 from __future__ import annotations
-import asyncio, hashlib, contextlib, threading
+import asyncio, hashlib, contextlib, random, threading
 from typing import Any, Optional, TYPE_CHECKING
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine, async_sessionmaker
 from sqlalchemy import text, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import DBAPIError
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.brokers.result_types import (
     BrokerErrorCode,
@@ -56,6 +57,25 @@ def _broker_err(
     )
 
 
+def _dbapi_sqlstate(exc: BaseException) -> str | None:
+    orig = getattr(exc, 'orig', exc)
+    sqlstate = getattr(orig, 'sqlstate', None)
+    if isinstance(sqlstate, str):
+        return sqlstate
+    pgcode = getattr(orig, 'pgcode', None)
+    if isinstance(pgcode, str):
+        return pgcode
+    return None
+
+
+def _is_schema_deadlock(exc: BaseException) -> bool:
+    return _dbapi_sqlstate(exc) == _SCHEMA_INIT_DEADLOCK_SQLSTATE
+
+
+def _is_missing_schema_version_table(exc: BaseException) -> bool:
+    return _dbapi_sqlstate(exc) == _SCHEMA_VERSION_MISSING_SQLSTATE
+
+
 # ---- Schema DDL (triggers, indexes, migrations) ----
 from horsies.core.schemas.triggers import (
     CREATE_TASK_NOTIFY_FUNCTION_SQL,
@@ -82,6 +102,7 @@ from horsies.core.schemas.indexes import (
 )
 from horsies.core.schemas.migrations import (
     CREATE_TASK_ATTEMPTS_TABLE_SQL,
+    CREATE_SCHEMA_VERSION_TABLE_SQL,
     ADD_DEPTH_COLUMN_SQL,
     ADD_ENQUEUE_SHA_COLUMN_SQL,
     ADD_ENQUEUED_AT_COLUMN_SQL,
@@ -110,6 +131,10 @@ from horsies.core.schemas.migrations import (
     DROP_WORKFLOW_DEF_MODULE_COLUMN_SQL,
     DROP_WORKFLOW_DEF_QUALNAME_COLUMN_SQL,
     SCHEMA_ADVISORY_LOCK_SQL,
+    SCHEMA_VERSION,
+    SCHEMA_VERSION_TABLE_EXISTS_SQL,
+    INSERT_SCHEMA_VERSION_SQL,
+    READ_SCHEMA_VERSION_SQL,
     SET_ENQUEUE_SHA_NOT_NULL_SQL,
     SET_ENQUEUED_AT_DEFAULT_SQL,
     SET_ENQUEUED_AT_NOT_NULL_SQL,
@@ -117,6 +142,10 @@ from horsies.core.schemas.migrations import (
     SET_WORKFLOW_SENT_AT_DEFAULT_SQL,
     SET_WORKFLOW_SENT_AT_NOT_NULL_SQL,
 )
+
+_SCHEMA_INIT_MAX_ATTEMPTS = 5
+_SCHEMA_INIT_DEADLOCK_SQLSTATE = '40P01'
+_SCHEMA_VERSION_MISSING_SQLSTATE = '42P01'
 
 # ---- Monitoring queries ----
 
@@ -488,7 +517,48 @@ class PostgresBroker:
         finally:
             await schema_engine.dispose()
 
-    async def _initialize_schema(self, engine: AsyncEngine) -> None:
+    async def _read_schema_version(self, conn: Any) -> int:
+        result = await conn.execute(READ_SCHEMA_VERSION_SQL)
+        version = result.scalar_one()
+        return int(version or 0)
+
+    async def _read_schema_version_if_exists(self, engine: AsyncEngine) -> int:
+        try:
+            async with engine.begin() as conn:
+                exists_result = await conn.execute(SCHEMA_VERSION_TABLE_EXISTS_SQL)
+                if not bool(exists_result.scalar()):
+                    return 0
+                return await self._read_schema_version(conn)
+        except DBAPIError as exc:
+            if _is_missing_schema_version_table(exc):
+                return 0
+            raise
+
+    async def _maybe_run_schema_init(self, engine: AsyncEngine) -> None:
+        if await self._read_schema_version_if_exists(engine) >= SCHEMA_VERSION:
+            return
+        await self._run_schema_migrations_with_retry(engine)
+
+    async def _run_schema_migrations_with_retry(self, engine: AsyncEngine) -> None:
+        for attempt in range(1, _SCHEMA_INIT_MAX_ATTEMPTS + 1):
+            try:
+                await self._run_schema_migrations(engine)
+                return
+            except Exception as exc:
+                if (
+                    not _is_schema_deadlock(exc)
+                    or attempt == _SCHEMA_INIT_MAX_ATTEMPTS
+                ):
+                    raise
+                backoff = 0.05 + random.uniform(0, 0.2) * (2 ** (attempt - 1))
+                self.logger.warning(
+                    'schema init hit deadlock; retrying attempt=%s backoff_s=%.3f',
+                    attempt,
+                    backoff,
+                )
+                await asyncio.sleep(backoff)
+
+    async def _run_schema_migrations(self, engine: AsyncEngine) -> None:
         async with engine.begin() as conn:
             # Acquire every relevant legacy URL-derived key before the new
             # constant key. Sorting keeps new-process lock ordering stable,
@@ -504,6 +574,11 @@ class PostgresBroker:
                 SCHEMA_ADVISORY_LOCK_SQL,
                 {'key': self._schema_advisory_key()},
             )
+
+            await conn.execute(CREATE_SCHEMA_VERSION_TABLE_SQL)
+            if await self._read_schema_version(conn) >= SCHEMA_VERSION:
+                return
+
             await conn.run_sync(Base.metadata.create_all)
 
             # Migration: ensure NOT NULL columns have server-side DEFAULTs
@@ -543,11 +618,18 @@ class PostgresBroker:
 
             await self._create_triggers(conn)
             await self._create_workflow_schema(conn)
+            await conn.execute(
+                INSERT_SCHEMA_VERSION_SQL,
+                {'version': SCHEMA_VERSION},
+            )
+
+    async def _initialize_schema(self, engine: AsyncEngine) -> None:
+        await self._run_schema_migrations_with_retry(engine)
 
     async def _ensure_initialized(self) -> None:
         if self._initialized:
             return
-        await self._run_with_schema_engine(self._initialize_schema)
+        await self._run_with_schema_engine(self._maybe_run_schema_init)
         self._initialized = True
 
     async def ensure_schema_initialized(self) -> BrokerResult[None]:

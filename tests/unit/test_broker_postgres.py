@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
+from horsies.core.brokers.result_types import BrokerErrorCode
 from horsies.core.models.tasks import (
     OperationalErrorCode,
     OutcomeCode,
@@ -25,7 +25,7 @@ from horsies.core.models.tasks import (
     TaskInfo,
     TaskResult,
 )
-from horsies.core.types.result import Err, Ok, is_err, is_ok
+from horsies.core.types.result import Ok, is_err, is_ok
 from horsies.core.types.status import TaskStatus
 
 
@@ -217,6 +217,9 @@ class TestPostgresBrokerPgBouncerWiring:
         schema_engine.dispose = AsyncMock()
         conn = AsyncMock()
         conn.run_sync = AsyncMock()
+        version_result = MagicMock()
+        version_result.scalar_one.return_value = 0
+        conn.execute.return_value = version_result
         begin_ctx = MagicMock()
         begin_ctx.__aenter__ = AsyncMock(return_value=conn)
         begin_ctx.__aexit__ = AsyncMock(return_value=None)
@@ -255,6 +258,9 @@ class TestPostgresBrokerPgBouncerWiring:
         engine = MagicMock()
         conn = AsyncMock()
         conn.run_sync = AsyncMock()
+        version_result = MagicMock()
+        version_result.scalar_one.return_value = 0
+        conn.execute.return_value = version_result
         begin_ctx = MagicMock()
         begin_ctx.__aenter__ = AsyncMock(return_value=conn)
         begin_ctx.__aexit__ = AsyncMock(return_value=None)
@@ -273,8 +279,14 @@ class TestPostgresBrokerPgBouncerWiring:
             broker = PostgresBroker(config)
             await broker._ensure_initialized()
 
-        first_params = conn.execute.await_args_list[0].args[1]
-        second_params = conn.execute.await_args_list[1].args[1]
+        from horsies.core.schemas.migrations import SCHEMA_ADVISORY_LOCK_SQL
+
+        lock_calls = [
+            call for call in conn.execute.await_args_list
+            if call.args[0] is SCHEMA_ADVISORY_LOCK_SQL
+        ]
+        first_params = lock_calls[0].args[1]
+        second_params = lock_calls[1].args[1]
         assert first_params == {'key': broker._legacy_schema_advisory_key()}
         assert second_params == {'key': broker._schema_advisory_key()}
 
@@ -290,6 +302,9 @@ class TestPostgresBrokerPgBouncerWiring:
         schema_engine.dispose = AsyncMock()
         conn = AsyncMock()
         conn.run_sync = AsyncMock()
+        version_result = MagicMock()
+        version_result.scalar_one.return_value = 0
+        conn.execute.return_value = version_result
         begin_ctx = MagicMock()
         begin_ctx.__aenter__ = AsyncMock(return_value=conn)
         begin_ctx.__aexit__ = AsyncMock(return_value=None)
@@ -311,7 +326,13 @@ class TestPostgresBrokerPgBouncerWiring:
             broker = PostgresBroker(config)
             await broker._ensure_initialized()
 
-        lock_params = [call.args[1] for call in conn.execute.await_args_list[:3]]
+        from horsies.core.schemas.migrations import SCHEMA_ADVISORY_LOCK_SQL
+
+        lock_params = [
+            call.args[1]
+            for call in conn.execute.await_args_list
+            if call.args[0] is SCHEMA_ADVISORY_LOCK_SQL
+        ]
         expected_legacy_keys = broker._legacy_schema_advisory_keys()
         assert lock_params == [
             {'key': expected_legacy_keys[0]},
@@ -2055,6 +2076,153 @@ class TestEnsureSchemaInitialized:
 
         assert is_ok(result)
         assert result.ok_value is None
+
+
+@pytest.mark.unit
+class TestSchemaVersionInitialization:
+    """Tests for schema-version fast path and slow-path retry behavior."""
+
+    @pytest.mark.asyncio
+    async def test_current_schema_version_skips_schema_migrations(self) -> None:
+        from horsies.core.brokers.postgres import PostgresBroker
+        from horsies.core.models.broker import PostgresConfig
+        from horsies.core.schemas.migrations import (
+            READ_SCHEMA_VERSION_SQL,
+            SCHEMA_ADVISORY_LOCK_SQL,
+            SCHEMA_VERSION,
+            SCHEMA_VERSION_TABLE_EXISTS_SQL,
+        )
+
+        engine = MagicMock()
+        conn = AsyncMock()
+        conn.run_sync = AsyncMock()
+        exists_result = MagicMock()
+        exists_result.scalar.return_value = True
+        version_result = MagicMock()
+        version_result.scalar_one.return_value = SCHEMA_VERSION
+        conn.execute.side_effect = [exists_result, version_result]
+        begin_ctx = MagicMock()
+        begin_ctx.__aenter__ = AsyncMock(return_value=conn)
+        begin_ctx.__aexit__ = AsyncMock(return_value=None)
+        engine.begin.return_value = begin_ctx
+
+        with (
+            patch(
+                'horsies.core.brokers.postgres.create_async_engine',
+                return_value=engine,
+            ),
+            patch('horsies.core.brokers.postgres.async_sessionmaker'),
+            patch('horsies.core.brokers.postgres.PostgresListener'),
+        ):
+            broker = PostgresBroker(
+                PostgresConfig(database_url='postgresql+psycopg://u:p@localhost/db')
+            )
+            await broker._ensure_initialized()
+
+        assert len(conn.execute.await_args_list) == 2
+        assert conn.execute.await_args_list[0].args == (
+            SCHEMA_VERSION_TABLE_EXISTS_SQL,
+        )
+        assert conn.execute.await_args_list[1].args == (READ_SCHEMA_VERSION_SQL,)
+        assert not any(
+            call.args[0] is SCHEMA_ADVISORY_LOCK_SQL
+            for call in conn.execute.await_args_list
+        )
+        conn.run_sync.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_schema_version_table_skips_version_read(self) -> None:
+        from horsies.core.schemas.migrations import READ_SCHEMA_VERSION_SQL
+
+        engine = MagicMock()
+        conn = AsyncMock()
+        exists_result = MagicMock()
+        exists_result.scalar.return_value = False
+        conn.execute.return_value = exists_result
+        begin_ctx = MagicMock()
+        begin_ctx.__aenter__ = AsyncMock(return_value=conn)
+        begin_ctx.__aexit__ = AsyncMock(return_value=None)
+        engine.begin.return_value = begin_ctx
+
+        broker = _make_broker()
+
+        assert await broker._read_schema_version_if_exists(engine) == 0
+        assert not any(
+            call.args[0] is READ_SCHEMA_VERSION_SQL
+            for call in conn.execute.await_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_slow_path_inserts_schema_version_after_migrations(self) -> None:
+        from horsies.core.schemas.migrations import (
+            CREATE_SCHEMA_VERSION_TABLE_SQL,
+            INSERT_SCHEMA_VERSION_SQL,
+            SCHEMA_ADVISORY_LOCK_SQL,
+            SCHEMA_VERSION,
+        )
+
+        engine = MagicMock()
+        conn = AsyncMock()
+        conn.run_sync = AsyncMock()
+        version_result = MagicMock()
+        version_result.scalar_one.return_value = 0
+        conn.execute.return_value = version_result
+        begin_ctx = MagicMock()
+        begin_ctx.__aenter__ = AsyncMock(return_value=conn)
+        begin_ctx.__aexit__ = AsyncMock(return_value=None)
+        engine.begin.return_value = begin_ctx
+
+        broker = _make_broker()
+        await broker._run_schema_migrations(engine)
+
+        calls = conn.execute.await_args_list
+        lock_indices = [
+            index
+            for index, call in enumerate(calls)
+            if call.args[0] is SCHEMA_ADVISORY_LOCK_SQL
+        ]
+        create_version_index = next(
+            index
+            for index, call in enumerate(calls)
+            if call.args[0] is CREATE_SCHEMA_VERSION_TABLE_SQL
+        )
+        insert_version_index = next(
+            index
+            for index, call in enumerate(calls)
+            if call.args[0] is INSERT_SCHEMA_VERSION_SQL
+        )
+
+        assert max(lock_indices) < create_version_index
+        conn.run_sync.assert_awaited_once()
+        assert insert_version_index > create_version_index
+        assert calls[insert_version_index].args[1] == {'version': SCHEMA_VERSION}
+
+    @pytest.mark.asyncio
+    async def test_schema_deadlock_retries_slow_path(self) -> None:
+        broker = _make_broker()
+        engine = MagicMock()
+
+        class FakeDeadlock(Exception):
+            orig = SimpleNamespace(sqlstate='40P01')
+
+        broker._run_schema_migrations = AsyncMock(
+            side_effect=[FakeDeadlock(), None]
+        )
+
+        with (
+            patch(
+                'horsies.core.brokers.postgres.random.uniform',
+                return_value=0,
+            ),
+            patch(
+                'horsies.core.brokers.postgres.asyncio.sleep',
+                new_callable=AsyncMock,
+            ) as mock_sleep,
+        ):
+            await broker._run_schema_migrations_with_retry(engine)
+
+        assert broker._run_schema_migrations.await_count == 2
+        mock_sleep.assert_awaited_once_with(0.05)
 
 
 @pytest.mark.unit
