@@ -12,7 +12,12 @@ from typing import (
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskOptions, RetryPolicy, OperationalErrorCode
+from horsies.core.models.tasks import (
+    TaskError,
+    TaskOptions,
+    RetryPolicy,
+    OperationalErrorCode,
+)
 from horsies.core.task_decorator import create_task_wrapper, effective_priority
 from horsies.core.models.workflow import (
     TaskNode,
@@ -209,17 +214,19 @@ class Horsies:
                         "top-level 'auto_retry_for' is deprecated",
                     ],
                     help_text=(
-                        "move retry triggers into RetryPolicy, e.g. "
-                        "RetryPolicy.fixed([...], auto_retry_for=[...])"
+                        'move retry triggers into RetryPolicy, e.g. '
+                        'RetryPolicy.fixed([...], auto_retry_for=[...])'
                     ),
                 )
 
             # Pop mapper-related kwargs (not part of TaskOptions, not serialized)
             exception_mapper: ExceptionMapper | None = task_options_kwargs.pop(
-                'exception_mapper', None,
+                'exception_mapper',
+                None,
             )
             default_unhandled_error_code: str | None = task_options_kwargs.pop(
-                'default_unhandled_error_code', None,
+                'default_unhandled_error_code',
+                None,
             )
 
             good_until_value = task_options_kwargs.pop('good_until', None)
@@ -598,7 +605,9 @@ class Horsies:
                                     code=ErrorCode.CHECK_RESERVED_CODE_COLLISION,
                                     notes=[
                                         f"task '{task_name}'",
-                                        f'key: {exc_cls.__name__}' if isinstance(exc_cls, type) else f'key: {exc_cls!r}',
+                                        f'key: {exc_cls.__name__}'
+                                        if isinstance(exc_cls, type)
+                                        else f'key: {exc_cls!r}',
                                     ],
                                     help_text='use a different UPPER_SNAKE_CASE code that does not match a built-in library code',
                                 )
@@ -616,7 +625,10 @@ class Horsies:
                         ConfigurationError(
                             message='invalid task_options_json',
                             code=ErrorCode.TASK_INVALID_OPTIONS,
-                            notes=[f"task '{task_name}'", str(options_result.err_value)],
+                            notes=[
+                                f"task '{task_name}'",
+                                str(options_result.err_value),
+                            ],
                             help_text='task options metadata must be valid JSON',
                         )
                     )
@@ -629,7 +641,10 @@ class Horsies:
                         ConfigurationError(
                             message='task_options_json must be an object',
                             code=ErrorCode.TASK_INVALID_OPTIONS,
-                            notes=[f"task '{task_name}'", f'task_options_json={options!r}'],
+                            notes=[
+                                f"task '{task_name}'",
+                                f'task_options_json={options!r}',
+                            ],
                             help_text='task options metadata must be a JSON object',
                         )
                     )
@@ -644,7 +659,10 @@ class Horsies:
                         ConfigurationError(
                             message='retry_policy must be an object',
                             code=ErrorCode.TASK_INVALID_OPTIONS,
-                            notes=[f"task '{task_name}'", f'retry_policy={retry_policy_raw!r}'],
+                            notes=[
+                                f"task '{task_name}'",
+                                f'retry_policy={retry_policy_raw!r}',
+                            ],
                             help_text='retry policy metadata must be a JSON object',
                         )
                     )
@@ -746,38 +764,128 @@ class Horsies:
         return errors
 
     def _check_broker_connectivity(self) -> list[HorsiesError]:
-        """Check broker connectivity via SELECT 1 using an isolated engine.
+        """Check broker connectivity using isolated connections.
 
         Uses a short-lived async engine/session to avoid mutating the app's
         long-lived broker/session pool inside an ephemeral asyncio.run loop.
         """
         import asyncio
+        import contextlib
+        import uuid
 
+        import psycopg
+        from psycopg import sql
         from sqlalchemy import text
         from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+        from horsies.core.utils.url import to_psycopg_url
 
         HEALTH_CHECK_SQL = text("""SELECT 1""")
+        LISTENER_PROBE_TIMEOUT_SECONDS = 2.0
 
         errors: list[HorsiesError] = []
         try:
-            engine_cfg = self.config.broker.model_dump(
-                exclude={'database_url'}, exclude_none=True
-            )
-            health_engine = create_async_engine(
-                self.config.broker.database_url, **engine_cfg
-            )
-            health_session_factory = async_sessionmaker(
-                health_engine, expire_on_commit=False
+            base_engine_cfg = self.config.broker.model_dump(
+                exclude={
+                    'database_url',
+                    'session_database_url',
+                    'pgbouncer_transaction_mode',
+                },
+                exclude_none=True,
             )
 
-            async def _test_connection() -> None:
+            async def _test_connection(
+                database_url: str,
+                *,
+                connect_args: dict[str, object] | None = None,
+            ) -> None:
+                engine_cfg = dict(base_engine_cfg)
+                if connect_args:
+                    engine_cfg['connect_args'] = connect_args
+                health_engine = create_async_engine(database_url, **engine_cfg)
+                health_session_factory = async_sessionmaker(
+                    health_engine, expire_on_commit=False
+                )
                 try:
                     async with health_session_factory() as session:
                         await session.execute(HEALTH_CHECK_SQL)
                 finally:
                     await health_engine.dispose()
 
-            asyncio.run(_test_connection())
+            async def _run_listener_probe() -> None:
+                channel = f'horsies_check_{uuid.uuid4().hex}'
+                payload = 'ok'
+                listener_conn = None
+                notifier_conn = None
+                wait_task: asyncio.Task[None] | None = None
+
+                async def _wait_for_notification() -> None:
+                    async for notify in listener_conn.notifies():  # type: ignore[union-attr]
+                        if notify.channel == channel and notify.payload == payload:
+                            return
+
+                try:
+                    listener_conn = await psycopg.AsyncConnection.connect(
+                        to_psycopg_url(
+                            self.config.broker.effective_session_database_url
+                        ),
+                        autocommit=True,
+                    )
+                    await listener_conn.execute(
+                        sql.SQL('LISTEN {}').format(sql.Identifier(channel))
+                    )
+                    wait_task = asyncio.create_task(_wait_for_notification())
+
+                    notifier_conn = await psycopg.AsyncConnection.connect(
+                        to_psycopg_url(
+                            self.config.broker.effective_session_database_url
+                        ),
+                        autocommit=True,
+                    )
+                    await notifier_conn.execute(
+                        'SELECT pg_notify(%s, %s)',
+                        (channel, payload),
+                    )
+                    await asyncio.wait_for(
+                        wait_task,
+                        timeout=LISTENER_PROBE_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise ConfigurationError(
+                        message='broker listener capability check failed',
+                        code=ErrorCode.BROKER_INVALID_URL,
+                        notes=[
+                            'session_database_url appears to be transaction-pooled; LISTEN notification was not delivered',
+                        ],
+                        help_text='use a direct/session-capable Postgres URL for session_database_url',
+                    ) from exc
+                finally:
+                    if wait_task is not None and not wait_task.done():
+                        wait_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError, Exception):
+                            await wait_task
+                    if listener_conn is not None:
+                        with contextlib.suppress(Exception):
+                            await listener_conn.execute(
+                                sql.SQL('UNLISTEN {}').format(sql.Identifier(channel))
+                            )
+                    if notifier_conn is not None:
+                        with contextlib.suppress(Exception):
+                            await notifier_conn.close()
+                    if listener_conn is not None:
+                        with contextlib.suppress(Exception):
+                            await listener_conn.close()
+
+            async def _test_all_connections() -> None:
+                await _test_connection(
+                    self.config.broker.database_url,
+                    connect_args=self.config.broker.pooled_connect_args,
+                )
+                if self.config.broker.session_database_url is not None:
+                    await _test_connection(self.config.broker.session_database_url)
+                if self.config.broker.pgbouncer_transaction_mode:
+                    await _run_listener_probe()
+
+            asyncio.run(_test_all_connections())
         except HorsiesError as exc:
             errors.append(exc)
         except Exception as exc:
@@ -1169,7 +1277,8 @@ class Horsies:
             p
             for p in sig.parameters.values()
             if p.default is inspect.Parameter.empty
-            and p.kind not in (
+            and p.kind
+            not in (
                 inspect.Parameter.VAR_POSITIONAL,
                 inspect.Parameter.VAR_KEYWORD,
             )
@@ -1418,8 +1527,11 @@ class Horsies:
             # Only functions defined in this module (or its sub-modules for packages)
             obj_module = getattr(obj, '__module__', None)
             if obj_module != module.__name__:
-                if not (is_package and obj_module is not None
-                        and obj_module.startswith(module.__name__ + '.')):
+                if not (
+                    is_package
+                    and obj_module is not None
+                    and obj_module.startswith(module.__name__ + '.')
+                ):
                     continue
             try:
                 hints = inspect.get_annotations(obj, eval_str=True)

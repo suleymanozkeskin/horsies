@@ -26,6 +26,8 @@ class WorkerConfig:
     dsn: str  # SQLAlchemy async URL (e.g. postgresql+psycopg://...)
     psycopg_dsn: str  # plain psycopg URL for listener
     queues: list[str]  # which queues to serve
+    session_dsn: str = ''  # SQLAlchemy async URL for session features
+    pgbouncer_transaction_mode: bool = False
     processes: int = os.cpu_count() or 2
     # Claiming knobs
     # max_claim_batch: Top-level fairness limiter to prevent worker starvation in multi-worker setups.

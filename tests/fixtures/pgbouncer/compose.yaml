@@ -1,0 +1,90 @@
+name: horsies-pgbouncer-tests
+
+services:
+  postgres:
+    # Postgres 18.4 amd64 manifest. The tag documents the major; the digest pins it.
+    image: docker.io/library/postgres:18@sha256:bfae840554bdbd4e9f8d097d8e23ffda8aac82866e04ea0d6bc09647234dd359
+    platform: linux/amd64
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: testpassword
+      POSTGRES_DB: horsies
+    ports:
+      - "15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d horsies"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  pgbouncer-transaction:
+    # PgBouncer v1.24.1-p1 amd64 manifest. The tag documents the version; the digest pins it.
+    image: docker.io/edoburu/pgbouncer:v1.24.1-p1@sha256:027f7d14132166813b442ae6be1c6ed7327085e40287979fac5d8b463df13ce3
+    platform: linux/amd64
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "16432:6432"
+    volumes:
+      - ./pgbouncer-transaction.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U postgres -d horsies"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  pgbouncer-session:
+    # PgBouncer v1.24.1-p1 amd64 manifest. The tag documents the version; the digest pins it.
+    image: docker.io/edoburu/pgbouncer:v1.24.1-p1@sha256:027f7d14132166813b442ae6be1c6ed7327085e40287979fac5d8b463df13ce3
+    platform: linux/amd64
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "16433:6432"
+    volumes:
+      - ./pgbouncer-session.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U postgres -d horsies"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  pgbouncer-prepared:
+    # PgBouncer v1.24.1-p1 amd64 manifest. The tag documents the version; the digest pins it.
+    image: docker.io/edoburu/pgbouncer:v1.24.1-p1@sha256:027f7d14132166813b442ae6be1c6ed7327085e40287979fac5d8b463df13ce3
+    platform: linux/amd64
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "16435:6432"
+    volumes:
+      - ./pgbouncer-prepared.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U postgres -d horsies"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  pgbouncer-statement:
+    # PgBouncer v1.24.1-p1 amd64 manifest. The tag documents the version; the digest pins it.
+    image: docker.io/edoburu/pgbouncer:v1.24.1-p1@sha256:027f7d14132166813b442ae6be1c6ed7327085e40287979fac5d8b463df13ce3
+    platform: linux/amd64
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "16434:6432"
+    volumes:
+      - ./pgbouncer-statement.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U postgres -d horsies"]
+      interval: 5s
+      timeout: 5s
+      retries: 20

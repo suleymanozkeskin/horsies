@@ -26,7 +26,12 @@ from horsies.core.codec.serde import (
     loads_json,
     task_result_from_json,
 )
-from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode, BuiltInTaskCode
+from horsies.core.models.tasks import (
+    TaskResult,
+    TaskError,
+    OperationalErrorCode,
+    BuiltInTaskCode,
+)
 from horsies.core.logging import get_logger
 from horsies.core.worker.current import set_current_app
 from horsies.core.models.resilience import WorkerResilienceConfig
@@ -96,7 +101,7 @@ from horsies.core.worker.sql import (  # noqa: F401
     _FINALIZER_DRAIN_TIMEOUT_S,
 )
 
-logger = get_logger("worker")
+logger = get_logger('worker')
 
 _FINALIZE_STAGE_PHASE1 = 'phase1_persist'
 _FINALIZE_STAGE_PHASE2 = 'phase2_workflow'
@@ -244,6 +249,7 @@ class Worker:
                 self.cfg.sys_path_roots,
                 self.cfg.loglevel,
                 child_database_url,
+                self.cfg.pgbouncer_transaction_mode,
             ),
         )
 
@@ -342,6 +348,12 @@ class Worker:
             start_r = await self.listener.start()
             if is_err(start_r):
                 err = start_r.err_value
+                logger.error(
+                    'Postgres LISTEN failed. If database_url points to PgBouncer '
+                    'transaction pooling, set PostgresConfig.session_database_url '
+                    'to a direct/session-capable Postgres URL. Original error: %s',
+                    err.message,
+                )
                 raise err.exception or RuntimeError(err.message)
             # Surface concurrency configuration clearly for operators
             max_claimed_effective = (
@@ -366,6 +378,12 @@ class Worker:
             listen_r = await self.listener.listen_many(all_channels)
             if is_err(listen_r):
                 err = listen_r.err_value
+                logger.error(
+                    'Postgres LISTEN failed. If database_url points to PgBouncer '
+                    'transaction pooling, set PostgresConfig.session_database_url '
+                    'to a direct/session-capable Postgres URL. Original error: %s',
+                    err.message,
+                )
                 raise err.exception or RuntimeError(err.message)
             all_queues = listen_r.ok_value
             self._queues = all_queues[:-1]
@@ -377,11 +395,13 @@ class Worker:
 
             # Start claimer heartbeat loop (CLAIMED coverage)
             self._spawn_background(
-                self._claimer_heartbeat_loop(), name='claimer-heartbeat',
+                self._claimer_heartbeat_loop(),
+                name='claimer-heartbeat',
             )
             # Start worker state heartbeat loop for monitoring
             self._spawn_background(
-                self._worker_state_heartbeat_loop(), name='worker-state-heartbeat',
+                self._worker_state_heartbeat_loop(),
+                name='worker-state-heartbeat',
             )
             logger.info('Worker state heartbeat loop started for monitoring')
             # Start reaper loop for automatic stale task handling
@@ -751,7 +771,10 @@ class Worker:
 
         for row in claimed_rows:
             await self._dispatch_one(
-                row['id'], row['task_name'], row['args'], row['kwargs'],
+                row['id'],
+                row['task_name'],
+                row['args'],
+                row['kwargs'],
             )
         return len(claimed_rows) > 0
 
@@ -842,7 +865,10 @@ class Worker:
         return datetime.now(timezone.utc) + timedelta(milliseconds=lease_ms)
 
     async def _claim_batch_locked(
-        self, s: AsyncSession, queue: str, limit: int,
+        self,
+        s: AsyncSession,
+        queue: str,
+        limit: int,
     ) -> list[dict[str, Any]]:
         """Claim up to *limit* tasks and return dispatch-ready row dicts.
 
@@ -914,7 +940,9 @@ class Worker:
         except Exception as exc:
             logger.error(
                 'DB error while requeueing task %s (%s): %s',
-                task_id, reason, exc,
+                task_id,
+                reason,
+                exc,
             )
             return _RequeueOutcome.DB_ERROR
 
@@ -924,19 +952,23 @@ class Worker:
         else:
             logger.warning(
                 'Failed to requeue task %s (not CLAIMED or owner mismatch): %s',
-                task_id, reason,
+                task_id,
+                reason,
             )
             return _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
 
     async def _handle_broken_pool(self, task_id: str, exc: BaseException) -> None:
         outcome = await self._requeue_claimed_task(
-            task_id, f'Broken process pool: {exc}',
+            task_id,
+            f'Broken process pool: {exc}',
         )
         if outcome is _RequeueOutcome.DB_ERROR:
             logger.critical(
                 'Requeue DB_ERROR: task %s may remain orphaned CLAIMED '
                 '(worker=%s, reason=broken pool: %s)',
-                task_id, self.worker_instance_id, exc,
+                task_id,
+                self.worker_instance_id,
+                exc,
             )
         await self._restart_executor(f'Broken process pool: {exc}')
 
@@ -952,13 +984,15 @@ class Worker:
             await self._restart_executor('Executor missing before dispatch')
             if self._executor is None:
                 outcome = await self._requeue_claimed_task(
-                    task_id, 'Executor unavailable after restart attempt',
+                    task_id,
+                    'Executor unavailable after restart attempt',
                 )
                 if outcome is _RequeueOutcome.DB_ERROR:
                     logger.critical(
                         'Requeue DB_ERROR: task %s may remain orphaned CLAIMED '
                         '(worker=%s, reason=executor unavailable)',
-                        task_id, self.worker_instance_id,
+                        task_id,
+                        self.worker_instance_id,
                     )
                 return
         loop = asyncio.get_running_loop()
@@ -989,13 +1023,16 @@ class Worker:
             return
         except Exception as exc:
             outcome = await self._requeue_claimed_task(
-                task_id, f'Failed to dispatch task to executor: {exc}',
+                task_id,
+                f'Failed to dispatch task to executor: {exc}',
             )
             if outcome is _RequeueOutcome.DB_ERROR:
                 logger.critical(
                     'Requeue DB_ERROR: task %s may remain orphaned CLAIMED '
                     '(worker=%s, reason=dispatch failed: %s)',
-                    task_id, self.worker_instance_id, exc,
+                    task_id,
+                    self.worker_instance_id,
+                    exc,
                 )
             return
 
@@ -1036,7 +1073,7 @@ class Worker:
                     stage=_FINALIZE_STAGE_FUTURE,
                     message=f'Worker future failed before result: {exc}',
                     retryable=is_retryable_connection_error(exc)
-                        and requeue_outcome != _RequeueOutcome.REQUEUED,
+                    and requeue_outcome != _RequeueOutcome.REQUEUED,
                     data={
                         'exception_type': type(exc).__name__,
                         'requeue_outcome': requeue_outcome.value,
@@ -1127,7 +1164,8 @@ class Worker:
 
                 # Lock the RUNNING row and extract context for attempt history
                 ctx_result = await s.execute(
-                    SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL, {'id': task_id},
+                    SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
+                    {'id': task_id},
                 )
                 ctx_row = ctx_result.fetchone()
                 if ctx_row is None:
@@ -1148,18 +1186,21 @@ class Worker:
 
                 if not ok:
                     # Worker-level failure (rare): write WORKER_FAILURE attempt, mark FAILED
-                    await s.execute(UPSERT_TASK_ATTEMPT_SQL, {
-                        'task_id': task_id,
-                        'attempt': attempt_num,
-                        'outcome': 'WORKER_FAILURE',
-                        'will_retry': False,
-                        'started_at': attempt_started_at,
-                        'finished_at': now,
-                        'error_code': None,
-                        'error_message': None,
-                        'failed_reason': failed_reason or 'Worker failure',
-                        **attempt_worker,
-                    })
+                    await s.execute(
+                        UPSERT_TASK_ATTEMPT_SQL,
+                        {
+                            'task_id': task_id,
+                            'attempt': attempt_num,
+                            'outcome': 'WORKER_FAILURE',
+                            'will_retry': False,
+                            'started_at': attempt_started_at,
+                            'finished_at': now,
+                            'error_code': None,
+                            'error_message': None,
+                            'failed_reason': failed_reason or 'Worker failure',
+                            **attempt_worker,
+                        },
+                    )
                     await s.execute(
                         MARK_TASK_FAILED_WORKER_SQL,
                         {
@@ -1174,7 +1215,9 @@ class Worker:
                 # --- ok=True: parse the TaskResult ---
                 _loads_r = loads_json(result_json_str)
                 if is_err(_loads_r):
-                    logger.error(f'Task {task_id} result JSON is corrupt: {_loads_r.err_value}')
+                    logger.error(
+                        f'Task {task_id} result JSON is corrupt: {_loads_r.err_value}'
+                    )
                     _err_tr: TaskResult[None, TaskError] = TaskResult(
                         err=TaskError(
                             error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
@@ -1182,18 +1225,21 @@ class Worker:
                             data={'task_id': task_id},
                         ),
                     )
-                    await s.execute(UPSERT_TASK_ATTEMPT_SQL, {
-                        'task_id': task_id,
-                        'attempt': attempt_num,
-                        'outcome': 'FAILED',
-                        'will_retry': False,
-                        'started_at': attempt_started_at,
-                        'finished_at': now,
-                        'error_code': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
-                        'error_message': f'Result JSON corrupt: {_loads_r.err_value}',
-                        'failed_reason': None,
-                        **attempt_worker,
-                    })
+                    await s.execute(
+                        UPSERT_TASK_ATTEMPT_SQL,
+                        {
+                            'task_id': task_id,
+                            'attempt': attempt_num,
+                            'outcome': 'FAILED',
+                            'will_retry': False,
+                            'started_at': attempt_started_at,
+                            'finished_at': now,
+                            'error_code': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
+                            'error_message': f'Result JSON corrupt: {_loads_r.err_value}',
+                            'failed_reason': None,
+                            **attempt_worker,
+                        },
+                    )
                     await s.execute(
                         MARK_TASK_FAILED_SQL,
                         {
@@ -1208,7 +1254,9 @@ class Worker:
 
                 _tr_r = task_result_from_json(_loads_r.ok_value)
                 if is_err(_tr_r):
-                    logger.error(f'Task {task_id} result deser failed: {_tr_r.err_value}')
+                    logger.error(
+                        f'Task {task_id} result deser failed: {_tr_r.err_value}'
+                    )
                     _err_tr = TaskResult(
                         err=TaskError(
                             error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
@@ -1216,18 +1264,21 @@ class Worker:
                             data={'task_id': task_id},
                         ),
                     )
-                    await s.execute(UPSERT_TASK_ATTEMPT_SQL, {
-                        'task_id': task_id,
-                        'attempt': attempt_num,
-                        'outcome': 'FAILED',
-                        'will_retry': False,
-                        'started_at': attempt_started_at,
-                        'finished_at': now,
-                        'error_code': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
-                        'error_message': f'Result deser failed: {_tr_r.err_value}',
-                        'failed_reason': None,
-                        **attempt_worker,
-                    })
+                    await s.execute(
+                        UPSERT_TASK_ATTEMPT_SQL,
+                        {
+                            'task_id': task_id,
+                            'attempt': attempt_num,
+                            'outcome': 'FAILED',
+                            'will_retry': False,
+                            'started_at': attempt_started_at,
+                            'finished_at': now,
+                            'error_code': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
+                            'error_message': f'Result deser failed: {_tr_r.err_value}',
+                            'failed_reason': None,
+                            **attempt_worker,
+                        },
+                    )
                     await s.execute(
                         MARK_TASK_FAILED_SQL,
                         {
@@ -1261,18 +1312,23 @@ class Worker:
                         match await self._schedule_retry(task_id, s):
                             case 'scheduled':
                                 # Retry scheduled: write FAILED attempt with will_retry=True
-                                await s.execute(UPSERT_TASK_ATTEMPT_SQL, {
-                                    'task_id': task_id,
-                                    'attempt': attempt_num,
-                                    'outcome': 'FAILED',
-                                    'will_retry': True,
-                                    'started_at': attempt_started_at,
-                                    'finished_at': now,
-                                    'error_code': error_code_str,
-                                    'error_message': task_error.message if task_error else None,
-                                    'failed_reason': None,
-                                    **attempt_worker,
-                                })
+                                await s.execute(
+                                    UPSERT_TASK_ATTEMPT_SQL,
+                                    {
+                                        'task_id': task_id,
+                                        'attempt': attempt_num,
+                                        'outcome': 'FAILED',
+                                        'will_retry': True,
+                                        'started_at': attempt_started_at,
+                                        'finished_at': now,
+                                        'error_code': error_code_str,
+                                        'error_message': task_error.message
+                                        if task_error
+                                        else None,
+                                        'failed_reason': None,
+                                        **attempt_worker,
+                                    },
+                                )
                                 await s.commit()
                                 return Ok(None)
                             case 'reaper_reclaimed':
@@ -1290,18 +1346,21 @@ class Worker:
                                 # Fall through to mark task FAILED with original error.
 
                     # Terminal failure: write FAILED attempt with will_retry=False
-                    await s.execute(UPSERT_TASK_ATTEMPT_SQL, {
-                        'task_id': task_id,
-                        'attempt': attempt_num,
-                        'outcome': 'FAILED',
-                        'will_retry': False,
-                        'started_at': attempt_started_at,
-                        'finished_at': now,
-                        'error_code': error_code_str,
-                        'error_message': task_error.message if task_error else None,
-                        'failed_reason': None,
-                        **attempt_worker,
-                    })
+                    await s.execute(
+                        UPSERT_TASK_ATTEMPT_SQL,
+                        {
+                            'task_id': task_id,
+                            'attempt': attempt_num,
+                            'outcome': 'FAILED',
+                            'will_retry': False,
+                            'started_at': attempt_started_at,
+                            'finished_at': now,
+                            'error_code': error_code_str,
+                            'error_message': task_error.message if task_error else None,
+                            'failed_reason': None,
+                            **attempt_worker,
+                        },
+                    )
                     fail_res = await s.execute(
                         MARK_TASK_FAILED_SQL,
                         {
@@ -1319,18 +1378,21 @@ class Worker:
                         return Ok(None)
                 else:
                     # Success: write COMPLETED attempt
-                    await s.execute(UPSERT_TASK_ATTEMPT_SQL, {
-                        'task_id': task_id,
-                        'attempt': attempt_num,
-                        'outcome': 'COMPLETED',
-                        'will_retry': False,
-                        'started_at': attempt_started_at,
-                        'finished_at': now,
-                        'error_code': None,
-                        'error_message': None,
-                        'failed_reason': None,
-                        **attempt_worker,
-                    })
+                    await s.execute(
+                        UPSERT_TASK_ATTEMPT_SQL,
+                        {
+                            'task_id': task_id,
+                            'attempt': attempt_num,
+                            'outcome': 'COMPLETED',
+                            'will_retry': False,
+                            'started_at': attempt_started_at,
+                            'finished_at': now,
+                            'error_code': None,
+                            'error_message': None,
+                            'failed_reason': None,
+                            **attempt_worker,
+                        },
+                    )
                     comp_res = await s.execute(
                         MARK_TASK_COMPLETED_SQL,
                         {'now': now, 'result_json': result_json_str, 'id': task_id},
@@ -1385,7 +1447,9 @@ class Worker:
                     rowq = resq.fetchone()
                     qname = str(rowq[0]) if rowq and rowq[0] else 'default'
                     payload = f'capacity:{task_id}'
-                    await s.execute(NOTIFY_TASK_NEW_SQL, {'c1': 'task_new', 'p': payload})
+                    await s.execute(
+                        NOTIFY_TASK_NEW_SQL, {'c1': 'task_new', 'p': payload}
+                    )
                     await s.execute(
                         NOTIFY_TASK_QUEUE_SQL,
                         {'c2': f'task_queue_{qname}', 'p': payload},
@@ -1481,7 +1545,9 @@ class Worker:
     async def _handle_finalize_error(self, err: Any) -> None:
         """Handle finalize Result errors with bounded retries for phase1/phase2."""
         if not isinstance(err, _FinalizeError):
-            logger.error(f'Unexpected finalize error payload type: {type(err).__name__}')
+            logger.error(
+                f'Unexpected finalize error payload type: {type(err).__name__}'
+            )
             return
 
         stage = err.stage
@@ -1633,7 +1699,10 @@ class Worker:
         await on_workflow_task_complete(session, task_id, result, broker)
 
     async def _should_retry_task(
-        self, task_id: str, error: TaskError, session: AsyncSession,
+        self,
+        task_id: str,
+        error: TaskError,
+        session: AsyncSession,
     ) -> bool:
         """Check if a task should be retried based on its configuration and current retry count."""
         result = await session.execute(
@@ -1688,7 +1757,8 @@ class Worker:
                 if good_until <= db_now:
                     logger.info(
                         'Task %s retry skipped: good_until (%s) already passed',
-                        task_id, good_until,
+                        task_id,
+                        good_until,
                     )
                     return False
             return True
@@ -1748,7 +1818,9 @@ class Worker:
             if next_retry_at >= good_until:
                 logger.info(
                     'Task %s retry expired: next_retry_at (%s) would exceed good_until (%s)',
-                    task_id, next_retry_at, good_until,
+                    task_id,
+                    next_retry_at,
+                    good_until,
                 )
                 return 'expired'
 
@@ -1781,7 +1853,9 @@ class Worker:
                             logger.info(
                                 'Task %s retry expired at SQL guard: next_retry_at (%s) '
                                 'would exceed good_until (%s)',
-                                task_id, next_retry_at, post_good_until,
+                                task_id,
+                                next_retry_at,
+                                post_good_until,
                             )
                             return 'expired'
             logger.warning(
@@ -1794,7 +1868,9 @@ class Worker:
         queue_name = await self._get_task_queue_name(task_id)
         self._spawn_background(
             self._schedule_delayed_notification(
-                delay_seconds, f'task_queue_{queue_name}', f'retry:{task_id}',
+                delay_seconds,
+                f'task_queue_{queue_name}',
+                f'retry:{task_id}',
             ),
             name=f'delayed-notify-{task_id}',
         )
@@ -1805,7 +1881,9 @@ class Worker:
         return 'scheduled'
 
     def _calculate_retry_delay(
-        self, retry_attempt: int, retry_policy_data: dict[str, Any],
+        self,
+        retry_attempt: int,
+        retry_policy_data: dict[str, Any],
     ) -> float:
         """Calculate the delay in seconds for a retry attempt."""
         from horsies.core.utils.retry import calculate_retry_delay
@@ -2012,8 +2090,15 @@ class Worker:
                 from horsies.core.brokers.postgres import PostgresBroker
                 from horsies.core.models.broker import PostgresConfig
 
-                temp_broker_config = PostgresConfig(database_url=self.cfg.dsn)
-                temp_broker = PostgresBroker(temp_broker_config)
+                temp_broker_config = PostgresConfig(
+                    database_url=self.cfg.dsn,
+                    session_database_url=self.cfg.session_dsn or None,
+                    pgbouncer_transaction_mode=self.cfg.pgbouncer_transaction_mode,
+                )
+                temp_broker = PostgresBroker(
+                    temp_broker_config,
+                    assume_initialized=True,
+                )
                 owns_temp_broker = True
                 if self._app is not None:
                     temp_broker.app = self._app
@@ -2039,7 +2124,10 @@ class Worker:
                                 )
                             case Err(err):
                                 requeue_permanent_failures += 1
-                                if requeue_permanent_failures >= _REAPER_MAX_PERMANENT_FAILURES:
+                                if (
+                                    requeue_permanent_failures
+                                    >= _REAPER_MAX_PERMANENT_FAILURES
+                                ):
                                     requeue_disabled = True
                                     logger.critical(
                                         f'Reaper requeue_stale_claimed disabled after '
@@ -2055,7 +2143,10 @@ class Worker:
                                     )
 
                     # Auto-fail stale RUNNING tasks
-                    if recovery_cfg.auto_fail_stale_running and not mark_failed_disabled:
+                    if (
+                        recovery_cfg.auto_fail_stale_running
+                        and not mark_failed_disabled
+                    ):
                         match await temp_broker.mark_stale_tasks_as_failed(
                             stale_threshold_ms=recovery_cfg.running_stale_threshold_ms,
                         ):
@@ -2073,7 +2164,10 @@ class Worker:
                                 )
                             case Err(err):
                                 mark_failed_permanent_failures += 1
-                                if mark_failed_permanent_failures >= _REAPER_MAX_PERMANENT_FAILURES:
+                                if (
+                                    mark_failed_permanent_failures
+                                    >= _REAPER_MAX_PERMANENT_FAILURES
+                                ):
                                     mark_failed_disabled = True
                                     logger.critical(
                                         f'Reaper mark_stale_tasks_as_failed disabled after '
@@ -2138,7 +2232,10 @@ class Worker:
                                     )
                                     deleted_heartbeats = int(hb_result.rowcount or 0)
 
-                                if recovery_cfg.worker_state_retention_hours is not None:
+                                if (
+                                    recovery_cfg.worker_state_retention_hours
+                                    is not None
+                                ):
                                     ws_result = await s.execute(
                                         DELETE_EXPIRED_WORKER_STATES_SQL,
                                         {
@@ -2147,7 +2244,10 @@ class Worker:
                                     )
                                     deleted_worker_states = int(ws_result.rowcount or 0)
 
-                                if recovery_cfg.terminal_record_retention_hours is not None:
+                                if (
+                                    recovery_cfg.terminal_record_retention_hours
+                                    is not None
+                                ):
                                     wf_params = {
                                         'retention_hours': recovery_cfg.terminal_record_retention_hours,
                                         'wf_terminal_states': WORKFLOW_TERMINAL_VALUES,
@@ -2169,7 +2269,9 @@ class Worker:
                                         DELETE_EXPIRED_TASKS_SQL,
                                         task_params,
                                     )
-                                    deleted_workflow_tasks = int(wt_result.rowcount or 0)
+                                    deleted_workflow_tasks = int(
+                                        wt_result.rowcount or 0
+                                    )
                                     deleted_workflows = int(wf_result.rowcount or 0)
                                     deleted_tasks = int(task_result.rowcount or 0)
 
@@ -2191,9 +2293,7 @@ class Worker:
                                     deleted_tasks,
                                 )
                         except Exception as cleanup_err:
-                            logger.error(
-                                f'Retention cleanup error: {cleanup_err}'
-                            )
+                            logger.error(f'Retention cleanup error: {cleanup_err}')
                         finally:
                             next_retention_cleanup_at = (
                                 now_monotonic + _RETENTION_CLEANUP_INTERVAL_S

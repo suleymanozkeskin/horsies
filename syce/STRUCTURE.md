@@ -10,7 +10,7 @@ workflows, filters, and maintenance actions.
 syce/
 ├── src/
 │   ├── main.rs              # Entry point
-│   ├── cli.rs               # DATABASE_URL, tick rate, frame rate
+│   ├── cli.rs               # Database URLs, PgBouncer mode, tick/frame rates
 │   ├── app.rs               # Main app state, data loading, routing, rendering
 │   ├── action.rs            # UI actions, data update events, listener state
 │   ├── listener.rs          # PostgreSQL LISTEN/NOTIFY bridge
@@ -40,11 +40,14 @@ syce/
 
 1. `main.rs` parses `Cli`, initializes the terminal, and creates `App`.
 2. `App` opens a `PgPool` when `DATABASE_URL` is provided.
-3. `NotifyListenerHandle` subscribes to Horsies channels and sends debounced
+3. In PgBouncer transaction mode, SQLx statement cache is disabled for the
+   query pool.
+4. `NotifyListenerHandle` opens its own session URL, subscribes to Horsies
+   channels, and sends debounced
    refresh events into the TUI event loop.
-4. `App` handles actions from keyboard input, mouse input, ticks, and NOTIFY
+5. `App` handles actions from keyboard input, mouse input, ticks, and NOTIFY
    batches.
-5. Data loaders in `app.rs` call `db::queries`, update `state.rs`, and render
+6. Data loaders in `app.rs` call `db::queries`, update `state.rs`, and render
    the active tab through components.
 
 ## NOTIFY Channels
@@ -105,6 +108,15 @@ or:
 
 ```bash
 cargo run -- --database-url "postgresql://user:pass@localhost/horsies"
+```
+
+For transaction-pooled PgBouncer:
+
+```bash
+cargo run -- \
+  --database-url "$DATABASE_URL_POOLED" \
+  --session-database-url "$DATABASE_URL_DIRECT" \
+  --pgbouncer-transaction-mode
 ```
 
 Without a database URL, syce can still run in demo/no-pool paths where supported

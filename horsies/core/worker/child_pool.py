@@ -32,7 +32,11 @@ def _cleanup_worker_pool() -> None:
         _worker_pool = None
 
 
-def _initialize_worker_pool(database_url: str) -> None:
+def _initialize_worker_pool(
+    database_url: str,
+    *,
+    pgbouncer_transaction_mode: bool = False,
+) -> None:
     """
     Initialize the per-process connection pool.
 
@@ -42,14 +46,25 @@ def _initialize_worker_pool(database_url: str) -> None:
     global _worker_pool
     if _worker_pool is not None:
         return  # Already initialized
-    _worker_pool = ConnectionPool(
-        database_url,
-        min_size=1,
-        max_size=5,
-        max_lifetime=300.0,
-        check=ConnectionPool.check_connection,
-        open=True,
-    )
+    if pgbouncer_transaction_mode:
+        _worker_pool = ConnectionPool(
+            database_url,
+            min_size=1,
+            max_size=5,
+            max_lifetime=300.0,
+            check=ConnectionPool.check_connection,
+            open=True,
+            kwargs={'prepare_threshold': None},
+        )
+    else:
+        _worker_pool = ConnectionPool(
+            database_url,
+            min_size=1,
+            max_size=5,
+            max_lifetime=300.0,
+            check=ConnectionPool.check_connection,
+            open=True,
+        )
     atexit.register(_cleanup_worker_pool)
 
 

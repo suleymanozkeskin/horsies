@@ -1,11 +1,12 @@
 # app/core/brokers/postgres.py
 from __future__ import annotations
-import uuid, asyncio, hashlib, contextlib, threading
+import asyncio, hashlib, contextlib, random, threading
 from typing import Any, Optional, TYPE_CHECKING
 from datetime import datetime, timedelta, timezone
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine, async_sessionmaker
 from sqlalchemy import text, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import DBAPIError
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.brokers.result_types import (
     BrokerErrorCode,
@@ -46,12 +47,33 @@ def _broker_err(
     exc: BaseException,
 ) -> Err[BrokerOperationError]:
     """Build an Err with retryable classification from the raw exception."""
-    return Err(BrokerOperationError(
-        code=code,
-        message=message,
-        retryable=is_retryable_connection_error(exc),
-        exception=exc,
-    ))
+    return Err(
+        BrokerOperationError(
+            code=code,
+            message=message,
+            retryable=is_retryable_connection_error(exc),
+            exception=exc,
+        )
+    )
+
+
+def _dbapi_sqlstate(exc: BaseException) -> str | None:
+    orig = getattr(exc, 'orig', exc)
+    sqlstate = getattr(orig, 'sqlstate', None)
+    if isinstance(sqlstate, str):
+        return sqlstate
+    pgcode = getattr(orig, 'pgcode', None)
+    if isinstance(pgcode, str):
+        return pgcode
+    return None
+
+
+def _is_schema_deadlock(exc: BaseException) -> bool:
+    return _dbapi_sqlstate(exc) == _SCHEMA_INIT_DEADLOCK_SQLSTATE
+
+
+def _is_missing_schema_version_table(exc: BaseException) -> bool:
+    return _dbapi_sqlstate(exc) == _SCHEMA_VERSION_MISSING_SQLSTATE
 
 
 # ---- Schema DDL (triggers, indexes, migrations) ----
@@ -67,7 +89,10 @@ from horsies.core.schemas.triggers import (
     CREATE_WORKFLOW_STATUS_NOTIFY_FUNCTION_SQL,
     CREATE_WORKFLOW_STATUS_NOTIFY_TRIGGER_SQL,
 )
-from horsies.core.worker.sql import UPSERT_TASK_ATTEMPT_SQL, SCHEDULE_STALE_TASK_RETRY_SQL
+from horsies.core.worker.sql import (
+    UPSERT_TASK_ATTEMPT_SQL,
+    SCHEDULE_STALE_TASK_RETRY_SQL,
+)
 from horsies.core.schemas.indexes import (
     CREATE_HEARTBEATS_TASK_ROLE_SENT_INDEX_SQL,
     CREATE_TASK_ATTEMPTS_ERROR_CODE_INDEX_SQL,
@@ -77,6 +102,7 @@ from horsies.core.schemas.indexes import (
 )
 from horsies.core.schemas.migrations import (
     CREATE_TASK_ATTEMPTS_TABLE_SQL,
+    CREATE_SCHEMA_VERSION_TABLE_SQL,
     ADD_DEPTH_COLUMN_SQL,
     ADD_ENQUEUE_SHA_COLUMN_SQL,
     ADD_ENQUEUED_AT_COLUMN_SQL,
@@ -105,6 +131,10 @@ from horsies.core.schemas.migrations import (
     DROP_WORKFLOW_DEF_MODULE_COLUMN_SQL,
     DROP_WORKFLOW_DEF_QUALNAME_COLUMN_SQL,
     SCHEMA_ADVISORY_LOCK_SQL,
+    SCHEMA_VERSION,
+    SCHEMA_VERSION_TABLE_EXISTS_SQL,
+    INSERT_SCHEMA_VERSION_SQL,
+    READ_SCHEMA_VERSION_SQL,
     SET_ENQUEUE_SHA_NOT_NULL_SQL,
     SET_ENQUEUED_AT_DEFAULT_SQL,
     SET_ENQUEUED_AT_NOT_NULL_SQL,
@@ -112,6 +142,10 @@ from horsies.core.schemas.migrations import (
     SET_WORKFLOW_SENT_AT_DEFAULT_SQL,
     SET_WORKFLOW_SENT_AT_NOT_NULL_SQL,
 )
+
+_SCHEMA_INIT_MAX_ATTEMPTS = 5
+_SCHEMA_INIT_DEADLOCK_SQLSTATE = '40P01'
+_SCHEMA_VERSION_MISSING_SQLSTATE = '42P01'
 
 # ---- Monitoring queries ----
 
@@ -308,24 +342,48 @@ class PostgresBroker:
       - Operational monitoring (stale tasks, worker stats)
     """
 
-    def __init__(self, config: PostgresConfig):
+    def __init__(self, config: PostgresConfig, *, assume_initialized: bool = False):
         self.config = config
         self.logger = get_logger('broker')
         self._app: Horsies | None = None  # Set by Horsies.get_broker()
 
-        engine_cfg = self.config.model_dump(exclude={'database_url'}, exclude_none=True)
+        engine_cfg = self._runtime_engine_config()
         self.async_engine = create_async_engine(self.config.database_url, **engine_cfg)
         self.session_factory = async_sessionmaker(
             self.async_engine, expire_on_commit=False
         )
 
-        psycopg_url = to_psycopg_url(self.config.database_url)
-        self.listener = PostgresListener(psycopg_url)
+        if assume_initialized:
+            self._listener = None
+        else:
+            psycopg_url = to_psycopg_url(self.config.effective_session_database_url)
+            self._listener = PostgresListener(psycopg_url)
 
-        self._initialized = False
+        self._initialized = assume_initialized
         self._loop_runner = LoopRunner()  # for sync facades
 
         self.logger.info('PostgresBroker initialized')
+
+    def _base_engine_config(self) -> dict[str, Any]:
+        return self.config.model_dump(
+            exclude={
+                'database_url',
+                'session_database_url',
+                'pgbouncer_transaction_mode',
+            },
+            exclude_none=True,
+        )
+
+    def _runtime_engine_config(self) -> dict[str, Any]:
+        engine_cfg = self._base_engine_config()
+        connect_args = self.config.pooled_connect_args
+        if connect_args:
+            # Internal PgBouncer compatibility knob, not a public connect_args API.
+            engine_cfg['connect_args'] = connect_args
+        return engine_cfg
+
+    def _schema_engine_config(self) -> dict[str, Any]:
+        return self._base_engine_config()
 
     @property
     def app(self) -> 'Horsies | None':
@@ -337,18 +395,44 @@ class PostgresBroker:
         """Set the Horsies app instance."""
         self._app = value
 
+    @property
+    def listener(self) -> PostgresListener:
+        if self._listener is None:
+            raise RuntimeError('Postgres listener is disabled for this broker')
+        return self._listener
+
+    @listener.setter
+    def listener(self, value: PostgresListener | None) -> None:
+        self._listener = value
+
     def _schema_advisory_key(self) -> int:
         """
         Compute a stable 64-bit advisory lock key for schema initialization.
 
-        Uses the database URL as a basis so that different clusters do not
-        contend on the same advisory lock key.
+        PostgreSQL advisory locks are scoped to the current database, so this
+        URL-independent key serializes Horsies schema initializers per database.
         """
-        basis = self.config.database_url.encode('utf-8', errors='ignore')
+        h = hashlib.sha256(b'horsies:schema:v1').digest()
+        return int.from_bytes(h[:8], byteorder='big', signed=True)
+
+    def _legacy_schema_advisory_key_for_url(self, url: str) -> int:
+        basis = url.encode('utf-8', errors='ignore')
         h = hashlib.sha256(b'horsies-schema:' + basis).digest()
         return int.from_bytes(h[:8], byteorder='big', signed=True)
 
-    async def _create_triggers(self) -> None:
+    def _legacy_schema_advisory_key(self) -> int:
+        return self._legacy_schema_advisory_key_for_url(self.config.database_url)
+
+    def _legacy_schema_advisory_keys(self) -> tuple[int, ...]:
+        urls = {
+            self.config.database_url,
+            self.config.effective_session_database_url,
+        }
+        return tuple(
+            sorted(self._legacy_schema_advisory_key_for_url(url) for url in urls)
+        )
+
+    async def _create_triggers(self, conn: Any) -> None:
         """
         Set up PostgreSQL triggers for automatic task notifications.
 
@@ -358,20 +442,19 @@ class PostgresBroker:
 
         This enables real-time task processing without polling.
         """
-        async with self.async_engine.begin() as conn:
-            # Create trigger function
-            await conn.execute(CREATE_TASK_NOTIFY_FUNCTION_SQL)
+        # Create trigger function
+        await conn.execute(CREATE_TASK_NOTIFY_FUNCTION_SQL)
 
-            # Create trigger
-            await conn.execute(CREATE_TASK_NOTIFY_TRIGGER_SQL)
+        # Create trigger
+        await conn.execute(CREATE_TASK_NOTIFY_TRIGGER_SQL)
 
-            # TUI notification triggers (broader: fires on ANY status change)
-            await conn.execute(CREATE_TASK_STATUS_NOTIFY_FUNCTION_SQL)
-            await conn.execute(CREATE_TASK_STATUS_NOTIFY_TRIGGER_SQL)
-            await conn.execute(CREATE_WORKER_STATE_NOTIFY_FUNCTION_SQL)
-            await conn.execute(CREATE_WORKER_STATE_NOTIFY_TRIGGER_SQL)
+        # TUI notification triggers (broader: fires on ANY status change)
+        await conn.execute(CREATE_TASK_STATUS_NOTIFY_FUNCTION_SQL)
+        await conn.execute(CREATE_TASK_STATUS_NOTIFY_TRIGGER_SQL)
+        await conn.execute(CREATE_WORKER_STATE_NOTIFY_FUNCTION_SQL)
+        await conn.execute(CREATE_WORKER_STATE_NOTIFY_TRIGGER_SQL)
 
-    async def _create_workflow_schema(self) -> None:
+    async def _create_workflow_schema(self, conn: Any) -> None:
         """
         Set up workflow-specific schema elements.
 
@@ -380,59 +463,122 @@ class PostgresBroker:
         - Trigger for workflow completion notifications
         - Migration: adds task_options column if missing (for existing installs)
         """
-        async with self.async_engine.begin() as conn:
-            # GIN index for efficient dependency array lookups
-            await conn.execute(CREATE_WORKFLOW_TASKS_DEPS_INDEX_SQL)
+        # GIN index for efficient dependency array lookups
+        await conn.execute(CREATE_WORKFLOW_TASKS_DEPS_INDEX_SQL)
 
-            # Migration: add task_options column for existing installs
-            await conn.execute(ADD_TASK_OPTIONS_COLUMN_SQL)
+        # Migration: add task_options column for existing installs
+        await conn.execute(ADD_TASK_OPTIONS_COLUMN_SQL)
 
-            # Migration: add success_policy column for existing installs
-            await conn.execute(ADD_SUCCESS_POLICY_COLUMN_SQL)
+        # Migration: add success_policy column for existing installs
+        await conn.execute(ADD_SUCCESS_POLICY_COLUMN_SQL)
 
-            # Migration: add join_type and min_success columns for existing installs
-            await conn.execute(ADD_JOIN_TYPE_COLUMN_SQL)
-            await conn.execute(ADD_MIN_SUCCESS_COLUMN_SQL)
-            await conn.execute(ADD_NODE_ID_COLUMN_SQL)
+        # Migration: add join_type and min_success columns for existing installs
+        await conn.execute(ADD_JOIN_TYPE_COLUMN_SQL)
+        await conn.execute(ADD_MIN_SUCCESS_COLUMN_SQL)
+        await conn.execute(ADD_NODE_ID_COLUMN_SQL)
 
-            # Subworkflow support columns
-            await conn.execute(ADD_PARENT_WORKFLOW_ID_COLUMN_SQL)
-            await conn.execute(ADD_PARENT_TASK_INDEX_COLUMN_SQL)
-            await conn.execute(ADD_DEPTH_COLUMN_SQL)
-            await conn.execute(ADD_ROOT_WORKFLOW_ID_COLUMN_SQL)
-            await conn.execute(ADD_DEFINITION_KEY_COLUMN_SQL)
-            await conn.execute(DROP_WORKFLOW_DEF_MODULE_COLUMN_SQL)
-            await conn.execute(DROP_WORKFLOW_DEF_QUALNAME_COLUMN_SQL)
+        # Subworkflow support columns
+        await conn.execute(ADD_PARENT_WORKFLOW_ID_COLUMN_SQL)
+        await conn.execute(ADD_PARENT_TASK_INDEX_COLUMN_SQL)
+        await conn.execute(ADD_DEPTH_COLUMN_SQL)
+        await conn.execute(ADD_ROOT_WORKFLOW_ID_COLUMN_SQL)
+        await conn.execute(ADD_DEFINITION_KEY_COLUMN_SQL)
+        await conn.execute(DROP_WORKFLOW_DEF_MODULE_COLUMN_SQL)
+        await conn.execute(DROP_WORKFLOW_DEF_QUALNAME_COLUMN_SQL)
 
-            await conn.execute(ADD_IS_SUBWORKFLOW_COLUMN_SQL)
-            await conn.execute(ADD_SUB_WORKFLOW_ID_COLUMN_SQL)
-            await conn.execute(ADD_SUB_WORKFLOW_NAME_COLUMN_SQL)
-            await conn.execute(DROP_SUB_WORKFLOW_RETRY_MODE_COLUMN_SQL)
-            await conn.execute(ADD_SUB_WORKFLOW_SUMMARY_COLUMN_SQL)
-            await conn.execute(ADD_SUB_DEFINITION_KEY_COLUMN_SQL)
-            await conn.execute(DROP_SUB_WORKFLOW_MODULE_COLUMN_SQL)
-            await conn.execute(DROP_SUB_WORKFLOW_QUALNAME_COLUMN_SQL)
+        await conn.execute(ADD_IS_SUBWORKFLOW_COLUMN_SQL)
+        await conn.execute(ADD_SUB_WORKFLOW_ID_COLUMN_SQL)
+        await conn.execute(ADD_SUB_WORKFLOW_NAME_COLUMN_SQL)
+        await conn.execute(DROP_SUB_WORKFLOW_RETRY_MODE_COLUMN_SQL)
+        await conn.execute(ADD_SUB_WORKFLOW_SUMMARY_COLUMN_SQL)
+        await conn.execute(ADD_SUB_DEFINITION_KEY_COLUMN_SQL)
+        await conn.execute(DROP_SUB_WORKFLOW_MODULE_COLUMN_SQL)
+        await conn.execute(DROP_SUB_WORKFLOW_QUALNAME_COLUMN_SQL)
 
-            # Workflow notification trigger function
-            await conn.execute(CREATE_WORKFLOW_NOTIFY_FUNCTION_SQL)
+        # Workflow notification trigger function
+        await conn.execute(CREATE_WORKFLOW_NOTIFY_FUNCTION_SQL)
 
-            # Create workflow trigger
-            await conn.execute(CREATE_WORKFLOW_NOTIFY_TRIGGER_SQL)
+        # Create workflow trigger
+        await conn.execute(CREATE_WORKFLOW_NOTIFY_TRIGGER_SQL)
 
-            # TUI notification trigger (broader: fires on ANY workflow status change)
-            await conn.execute(CREATE_WORKFLOW_STATUS_NOTIFY_FUNCTION_SQL)
-            await conn.execute(CREATE_WORKFLOW_STATUS_NOTIFY_TRIGGER_SQL)
+        # TUI notification trigger (broader: fires on ANY workflow status change)
+        await conn.execute(CREATE_WORKFLOW_STATUS_NOTIFY_FUNCTION_SQL)
+        await conn.execute(CREATE_WORKFLOW_STATUS_NOTIFY_TRIGGER_SQL)
 
-    async def _ensure_initialized(self) -> None:
-        if self._initialized:
+    async def _run_with_schema_engine(self, fn: Any) -> None:
+        schema_url = self.config.effective_session_database_url
+        if schema_url == self.config.database_url:
+            await fn(self.async_engine)
             return
-        async with self.async_engine.begin() as conn:
-            # Take a short-lived, cluster-wide advisory lock to serialize
-            # schema creation across workers and producers.
+
+        schema_engine = create_async_engine(schema_url, **self._schema_engine_config())
+        try:
+            await fn(schema_engine)
+        finally:
+            await schema_engine.dispose()
+
+    async def _read_schema_version(self, conn: Any) -> int:
+        result = await conn.execute(READ_SCHEMA_VERSION_SQL)
+        version = result.scalar_one()
+        return int(version or 0)
+
+    async def _read_schema_version_if_exists(self, engine: AsyncEngine) -> int:
+        try:
+            async with engine.begin() as conn:
+                exists_result = await conn.execute(SCHEMA_VERSION_TABLE_EXISTS_SQL)
+                if not bool(exists_result.scalar()):
+                    return 0
+                return await self._read_schema_version(conn)
+        except DBAPIError as exc:
+            if _is_missing_schema_version_table(exc):
+                return 0
+            raise
+
+    async def _maybe_run_schema_init(self, engine: AsyncEngine) -> None:
+        if await self._read_schema_version_if_exists(engine) >= SCHEMA_VERSION:
+            return
+        await self._run_schema_migrations_with_retry(engine)
+
+    async def _run_schema_migrations_with_retry(self, engine: AsyncEngine) -> None:
+        for attempt in range(1, _SCHEMA_INIT_MAX_ATTEMPTS + 1):
+            try:
+                await self._run_schema_migrations(engine)
+                return
+            except Exception as exc:
+                if (
+                    not _is_schema_deadlock(exc)
+                    or attempt == _SCHEMA_INIT_MAX_ATTEMPTS
+                ):
+                    raise
+                backoff = 0.05 + random.uniform(0, 0.2) * (2 ** (attempt - 1))
+                self.logger.warning(
+                    'schema init hit deadlock; retrying attempt=%s backoff_s=%.3f',
+                    attempt,
+                    backoff,
+                )
+                await asyncio.sleep(backoff)
+
+    async def _run_schema_migrations(self, engine: AsyncEngine) -> None:
+        async with engine.begin() as conn:
+            # Acquire every relevant legacy URL-derived key before the new
+            # constant key. Sorting keeps new-process lock ordering stable,
+            # while also protecting rolling deploys that change database_url
+            # from a direct URL to a pooled URL and move direct access to
+            # session_database_url.
+            for key in self._legacy_schema_advisory_keys():
+                await conn.execute(
+                    SCHEMA_ADVISORY_LOCK_SQL,
+                    {'key': key},
+                )
             await conn.execute(
                 SCHEMA_ADVISORY_LOCK_SQL,
                 {'key': self._schema_advisory_key()},
             )
+
+            await conn.execute(CREATE_SCHEMA_VERSION_TABLE_SQL)
+            if await self._read_schema_version(conn) >= SCHEMA_VERSION:
+                return
+
             await conn.run_sync(Base.metadata.create_all)
 
             # Migration: ensure NOT NULL columns have server-side DEFAULTs
@@ -470,12 +616,20 @@ class PostgresBroker:
             await conn.execute(SET_WORKFLOW_SENT_AT_NOT_NULL_SQL)
             await conn.execute(SET_WORKFLOW_SENT_AT_DEFAULT_SQL)
 
-        await self._create_triggers()
-        await self._create_workflow_schema()
-        start_r = await self.listener.start()
-        if is_err(start_r):
-            err = start_r.err_value
-            raise err.exception or RuntimeError(err.message)
+            await self._create_triggers(conn)
+            await self._create_workflow_schema(conn)
+            await conn.execute(
+                INSERT_SCHEMA_VERSION_SQL,
+                {'version': SCHEMA_VERSION},
+            )
+
+    async def _initialize_schema(self, engine: AsyncEngine) -> None:
+        await self._run_schema_migrations_with_retry(engine)
+
+    async def _ensure_initialized(self) -> None:
+        if self._initialized:
+            return
+        await self._run_with_schema_engine(self._maybe_run_schema_init)
         self._initialized = True
 
     async def ensure_schema_initialized(self) -> BrokerResult[None]:
@@ -552,7 +706,11 @@ class PostgresBroker:
             if task_options:
                 opts_r = loads_json(task_options)
                 if is_err(opts_r):
-                    return _broker_err(BrokerErrorCode.ENQUEUE_FAILED, f'task_options JSON corrupt: {opts_r.err_value}', opts_r.err_value)
+                    return _broker_err(
+                        BrokerErrorCode.ENQUEUE_FAILED,
+                        f'task_options JSON corrupt: {opts_r.err_value}',
+                        opts_r.err_value,
+                    )
                 options_data = opts_r.ok_value
                 if isinstance(options_data, dict):
                     retry_policy = options_data.get('retry_policy')
@@ -638,15 +796,17 @@ class PostgresBroker:
             # SELECT failed — task exists (conflict proves it) but we cannot
             # confirm payload identity. Retryable so auto-retry or manual
             # retry can reattempt when DB recovers.
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.ENQUEUE_FAILED,
-                message=(
-                    f'task_id {task_id} conflict detected but verification '
-                    f'query failed for {task_name}: {exc}'
-                ),
-                retryable=True,
-                exception=exc,
-            ))
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.ENQUEUE_FAILED,
+                    message=(
+                        f'task_id {task_id} conflict detected but verification '
+                        f'query failed for {task_name}: {exc}'
+                    ),
+                    retryable=True,
+                    exception=exc,
+                )
+            )
 
         if row is None:
             # Task existed and was already cleaned up (completed and purged).
@@ -661,24 +821,26 @@ class PostgresBroker:
 
         existing_sha: str = row.enqueue_sha
         # enqueue_sha is NOT NULL — defensive assertion against data corruption.
-        assert existing_sha is not None, (
-            f'enqueue_sha is NULL for task_id={task_id} — column is NOT NULL'
-        )
+        assert (
+            existing_sha is not None
+        ), f'enqueue_sha is NULL for task_id={task_id} — column is NOT NULL'
 
         if existing_sha == enqueue_sha:
             # Idempotent success — same payload already enqueued.
             return Ok(task_id)
 
         # Different payload with same task_id — always a bug.
-        return Err(BrokerOperationError(
-            code=BrokerErrorCode.PAYLOAD_MISMATCH,
-            message=(
-                f'task_id {task_id} already exists with different payload '
-                f'for {task_name} (sha mismatch)'
-            ),
-            retryable=False,
-            exception=None,
-        ))
+        return Err(
+            BrokerOperationError(
+                code=BrokerErrorCode.PAYLOAD_MISMATCH,
+                message=(
+                    f'task_id {task_id} already exists with different payload '
+                    f'for {task_name} (sha mismatch)'
+                ),
+                retryable=False,
+                exception=None,
+            )
+        )
 
     async def get_result_async(
         self, task_id: str, timeout_ms: Optional[int] = None
@@ -693,7 +855,13 @@ class PostgresBroker:
 
         Broker failures (e.g., database errors) are returned as BROKER_ERROR.
         """
-        from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode, RetrievalCode, OutcomeCode
+        from horsies.core.models.tasks import (
+            TaskResult,
+            TaskError,
+            OperationalErrorCode,
+            RetrievalCode,
+            OutcomeCode,
+        )
 
         try:
             await self._ensure_initialized()
@@ -717,22 +885,30 @@ class PostgresBroker:
                             data={'task_id': task_id},
                         )
                     )
-                if row.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.EXPIRED):
+                if row.status in (
+                    TaskStatus.COMPLETED,
+                    TaskStatus.FAILED,
+                    TaskStatus.EXPIRED,
+                ):
                     self.logger.info(f'Task {task_id} already completed')
                     _lr = loads_json(row.result)
                     if is_err(_lr):
-                        return TaskResult(err=TaskError(
-                            error_code=OperationalErrorCode.BROKER_ERROR,
-                            message=f'Result JSON corrupt: {_lr.err_value}',
-                            data={'task_id': task_id},
-                        ))
+                        return TaskResult(
+                            err=TaskError(
+                                error_code=OperationalErrorCode.BROKER_ERROR,
+                                message=f'Result JSON corrupt: {_lr.err_value}',
+                                data={'task_id': task_id},
+                            )
+                        )
                     _trr = task_result_from_json(_lr.ok_value)
                     if is_err(_trr):
-                        return TaskResult(err=TaskError(
-                            error_code=OperationalErrorCode.BROKER_ERROR,
-                            message=f'Result deser failed: {_trr.err_value}',
-                            data={'task_id': task_id},
-                        ))
+                        return TaskResult(
+                            err=TaskError(
+                                error_code=OperationalErrorCode.BROKER_ERROR,
+                                message=f'Result deser failed: {_trr.err_value}',
+                                data={'task_id': task_id},
+                            )
+                        )
                     return _trr.ok_value
                 if row.status == TaskStatus.CANCELLED:
                     self.logger.info(f'Task {task_id} was cancelled')
@@ -752,7 +928,10 @@ class PostgresBroker:
                 listen_r = await self.listener.listen('task_done')
             except RuntimeError as e:
                 self.logger.debug(
-                    'Listener unavailable on current event loop; falling back to polling for task_done: %s',
+                    'LISTEN unavailable; falling back to polling for task_done. '
+                    'If using PgBouncer transaction pooling, configure '
+                    'PostgresConfig.session_database_url with a direct/session-capable '
+                    'Postgres URL. Original error: %s',
                     e,
                 )
             else:
@@ -761,7 +940,10 @@ class PostgresBroker:
                         q = queue
                     case Err(listen_err):
                         self.logger.debug(
-                            'Listener subscribe failed; falling back to polling for task_done: %s',
+                            'LISTEN unavailable; falling back to polling for task_done. '
+                            'If using PgBouncer transaction pooling, configure '
+                            'PostgresConfig.session_database_url with a direct/session-capable '
+                            'Postgres URL. Original error: %s',
                             listen_err.message,
                         )
             try:
@@ -822,24 +1004,32 @@ class PostgresBroker:
                                     data={'task_id': task_id},
                                 )
                             )
-                        if row.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.EXPIRED):
+                        if row.status in (
+                            TaskStatus.COMPLETED,
+                            TaskStatus.FAILED,
+                            TaskStatus.EXPIRED,
+                        ):
                             self.logger.debug(
                                 f'Task {task_id} completed, polling database'
                             )
                             _lr = loads_json(row.result)
                             if is_err(_lr):
-                                return TaskResult(err=TaskError(
-                                    error_code=OperationalErrorCode.BROKER_ERROR,
-                                    message=f'Result JSON corrupt: {_lr.err_value}',
-                                    data={'task_id': task_id},
-                                ))
+                                return TaskResult(
+                                    err=TaskError(
+                                        error_code=OperationalErrorCode.BROKER_ERROR,
+                                        message=f'Result JSON corrupt: {_lr.err_value}',
+                                        data={'task_id': task_id},
+                                    )
+                                )
                             _trr = task_result_from_json(_lr.ok_value)
                             if is_err(_trr):
-                                return TaskResult(err=TaskError(
-                                    error_code=OperationalErrorCode.BROKER_ERROR,
-                                    message=f'Result deser failed: {_trr.err_value}',
-                                    data={'task_id': task_id},
-                                ))
+                                return TaskResult(
+                                    err=TaskError(
+                                        error_code=OperationalErrorCode.BROKER_ERROR,
+                                        message=f'Result deser failed: {_trr.err_value}',
+                                        data={'task_id': task_id},
+                                    )
+                                )
                             return _trr.ok_value
                         if row.status == TaskStatus.CANCELLED:
                             self.logger.error(f'Task {task_id} was cancelled')
@@ -871,7 +1061,9 @@ class PostgresBroker:
 
     async def _unsubscribe_task_done_safely(self, q: asyncio.Queue[Any]) -> None:
         """Ensure task_done unsubscribe completes even under repeated cancellation."""
-        unsubscribe_task = asyncio.create_task(self.listener.unsubscribe('task_done', q))
+        unsubscribe_task = asyncio.create_task(
+            self.listener.unsubscribe('task_done', q)
+        )
         cancelled_during_cleanup = False
         while not unsubscribe_task.done():
             try:
@@ -892,7 +1084,8 @@ class PostgresBroker:
         """Close listener/engine and stop sync loop runner if it was started."""
         errors: list[BaseException] = []
         try:
-            await self.listener.close()
+            if self._listener is not None:
+                await self._listener.close()
         except Exception as exc:
             errors.append(exc)
         try:
@@ -984,7 +1177,11 @@ class PostgresBroker:
         preventing races with concurrent worker finalizers.
         """
         try:
-            from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode
+            from horsies.core.models.tasks import (
+                TaskResult,
+                TaskError,
+                OperationalErrorCode,
+            )
             from horsies.core.codec.serde import dumps_json
             from horsies.core.utils.retry import (
                 check_retry_eligibility,
@@ -1064,31 +1261,46 @@ class PostgresBroker:
                         )
 
                         if should_retry:
-                            retry_policy_data = parse_retry_policy(task_options_json) or {}
+                            retry_policy_data = (
+                                parse_retry_policy(task_options_json) or {}
+                            )
                             new_retry_count = retry_count + 1
-                            delay_seconds = calculate_retry_delay(new_retry_count, retry_policy_data)
+                            delay_seconds = calculate_retry_delay(
+                                new_retry_count, retry_policy_data
+                            )
                             next_retry_at = db_now + timedelta(seconds=delay_seconds)
 
                             # Guard: don't schedule retry past good_until
                             if good_until is not None:
-                                _gu = good_until.replace(tzinfo=timezone.utc) if good_until.tzinfo is None else good_until
-                                _nra = next_retry_at.replace(tzinfo=timezone.utc) if next_retry_at.tzinfo is None else next_retry_at
+                                _gu = (
+                                    good_until.replace(tzinfo=timezone.utc)
+                                    if good_until.tzinfo is None
+                                    else good_until
+                                )
+                                _nra = (
+                                    next_retry_at.replace(tzinfo=timezone.utc)
+                                    if next_retry_at.tzinfo is None
+                                    else next_retry_at
+                                )
                                 if _nra >= _gu:
                                     should_retry = False
 
                         if should_retry:
-                            await session.execute(UPSERT_TASK_ATTEMPT_SQL, {
-                                'task_id': task_id,
-                                'attempt': attempt_num,
-                                'outcome': 'FAILED',
-                                'will_retry': True,
-                                'started_at': started_at or now_utc,
-                                'finished_at': now_utc,
-                                'error_code': OperationalErrorCode.WORKER_CRASHED.value,
-                                'error_message': failed_reason_str,
-                                'failed_reason': failed_reason_str,
-                                **attempt_worker,
-                            })
+                            await session.execute(
+                                UPSERT_TASK_ATTEMPT_SQL,
+                                {
+                                    'task_id': task_id,
+                                    'attempt': attempt_num,
+                                    'outcome': 'FAILED',
+                                    'will_retry': True,
+                                    'started_at': started_at or now_utc,
+                                    'finished_at': now_utc,
+                                    'error_code': OperationalErrorCode.WORKER_CRASHED.value,
+                                    'error_message': failed_reason_str,
+                                    'failed_reason': failed_reason_str,
+                                    **attempt_worker,
+                                },
+                            )
                             res = await session.execute(
                                 SCHEDULE_STALE_TASK_RETRY_SQL,
                                 {
@@ -1105,7 +1317,9 @@ class PostgresBroker:
                             await session.commit()
                             self.logger.info(
                                 'Reaper scheduled retry #%d for stale task %s at %s',
-                                new_retry_count, task_id, next_retry_at,
+                                new_retry_count,
+                                task_id,
+                                next_retry_at,
                             )
 
                             # Best-effort: notify workers so they wake at next_retry_at
@@ -1114,7 +1328,7 @@ class PostgresBroker:
                             try:
                                 async with self.session_factory() as notify_session:
                                     await notify_session.execute(
-                                        text("SELECT pg_notify(:ch, :p)"),
+                                        text('SELECT pg_notify(:ch, :p)'),
                                         {
                                             'ch': f'task_queue_{queue_name}',
                                             'p': f'retry:{task_id}',
@@ -1133,33 +1347,41 @@ class PostgresBroker:
                                     'worker_pid': worker_pid,
                                     'worker_hostname': worker_hostname,
                                     'worker_id': worker_id,
-                                    'started_at': started_at.isoformat() if started_at else None,
+                                    'started_at': started_at.isoformat()
+                                    if started_at
+                                    else None,
                                     'detected_at': now_utc.isoformat(),
                                 },
                             )
-                            task_result: TaskResult[None, TaskError] = TaskResult(err=task_error)
+                            task_result: TaskResult[None, TaskError] = TaskResult(
+                                err=task_error
+                            )
                             ser_r = dumps_json(task_result)
                             if is_err(ser_r):
                                 self.logger.error(
                                     'Failed to serialize crash result for task %s: %s',
-                                    task_id, ser_r.err_value,
+                                    task_id,
+                                    ser_r.err_value,
                                 )
                                 await session.rollback()
                                 continue
                             result_json = ser_r.ok_value
 
-                            await session.execute(UPSERT_TASK_ATTEMPT_SQL, {
-                                'task_id': task_id,
-                                'attempt': attempt_num,
-                                'outcome': 'FAILED',
-                                'will_retry': False,
-                                'started_at': started_at or now_utc,
-                                'finished_at': now_utc,
-                                'error_code': OperationalErrorCode.WORKER_CRASHED.value,
-                                'error_message': task_error.message,
-                                'failed_reason': failed_reason_str,
-                                **attempt_worker,
-                            })
+                            await session.execute(
+                                UPSERT_TASK_ATTEMPT_SQL,
+                                {
+                                    'task_id': task_id,
+                                    'attempt': attempt_num,
+                                    'outcome': 'FAILED',
+                                    'will_retry': False,
+                                    'started_at': started_at or now_utc,
+                                    'finished_at': now_utc,
+                                    'error_code': OperationalErrorCode.WORKER_CRASHED.value,
+                                    'error_message': task_error.message,
+                                    'failed_reason': failed_reason_str,
+                                    **attempt_worker,
+                                },
+                            )
                             mark_failed_res = await session.execute(
                                 MARK_STALE_TASK_FAILED_SQL,
                                 {
@@ -1178,7 +1400,9 @@ class PostgresBroker:
                         processed += 1
                 except Exception as task_exc:
                     self.logger.error(
-                        'Reaper failed to process stale task %s: %s', task_id, task_exc,
+                        'Reaper failed to process stale task %s: %s',
+                        task_id,
+                        task_exc,
                     )
                     continue
 
@@ -1309,7 +1533,11 @@ class PostgresBroker:
         Returns:
             TaskResult - success, task error, retrieval error, or broker error
         """
-        from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode
+        from horsies.core.models.tasks import (
+            TaskResult,
+            TaskError,
+            OperationalErrorCode,
+        )
 
         try:
             return self._loop_runner.call(self.get_result_async, task_id, timeout_ms)
@@ -1426,10 +1654,18 @@ class PostgresBroker:
                     if raw_result:
                         _lr = loads_json(raw_result)
                         if is_err(_lr):
-                            return _broker_err(BrokerErrorCode.TASK_INFO_QUERY_FAILED, f'Result JSON corrupt: {_lr.err_value}', _lr.err_value)
+                            return _broker_err(
+                                BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+                                f'Result JSON corrupt: {_lr.err_value}',
+                                _lr.err_value,
+                            )
                         _trr = task_result_from_json(_lr.ok_value)
                         if is_err(_trr):
-                            return _broker_err(BrokerErrorCode.TASK_INFO_QUERY_FAILED, f'Result deser failed: {_trr.err_value}', _trr.err_value)
+                            return _broker_err(
+                                BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+                                f'Result deser failed: {_trr.err_value}',
+                                _trr.err_value,
+                            )
                         result_value = _trr.ok_value
 
                 if include_failed_reason:
@@ -1461,29 +1697,31 @@ class PostgresBroker:
                         for att_row in att_result.fetchall()
                     ]
 
-                return Ok(TaskInfo(
-                    task_id=task_id_value,
-                    task_name=task_name,
-                    status=status,
-                    queue_name=queue_name,
-                    priority=priority,
-                    retry_count=retry_count,
-                    max_retries=max_retries,
-                    next_retry_at=next_retry_at,
-                    sent_at=sent_at,
-                    enqueued_at=enqueued_at,
-                    claimed_at=claimed_at,
-                    started_at=started_at,
-                    completed_at=completed_at,
-                    failed_at=failed_at,
-                    worker_hostname=worker_hostname,
-                    worker_pid=worker_pid,
-                    worker_process_name=worker_process_name,
-                    error_code=error_code_value,
-                    result=result_value,
-                    failed_reason=failed_reason,
-                    attempts=attempts,
-                ))
+                return Ok(
+                    TaskInfo(
+                        task_id=task_id_value,
+                        task_name=task_name,
+                        status=status,
+                        queue_name=queue_name,
+                        priority=priority,
+                        retry_count=retry_count,
+                        max_retries=max_retries,
+                        next_retry_at=next_retry_at,
+                        sent_at=sent_at,
+                        enqueued_at=enqueued_at,
+                        claimed_at=claimed_at,
+                        started_at=started_at,
+                        completed_at=completed_at,
+                        failed_at=failed_at,
+                        worker_hostname=worker_hostname,
+                        worker_pid=worker_pid,
+                        worker_process_name=worker_process_name,
+                        error_code=error_code_value,
+                        result=result_value,
+                        failed_reason=failed_reason,
+                        attempts=attempts,
+                    )
+                )
         except Exception as exc:
             return _broker_err(
                 BrokerErrorCode.TASK_INFO_QUERY_FAILED,

@@ -141,3 +141,52 @@ jobs:
         env:
           DB_PASSWORD: testpassword
         run: uv run pytest tests/e2e/test_fanout_saturation.py -v --tb=short
+
+  pgbouncer:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Start PgBouncer fixture stack
+        run: docker compose -f tests/fixtures/pgbouncer/compose.yaml up -d --wait
+
+      - name: PgBouncer integration contracts
+        env:
+          HORSIES_PGBOUNCER_TEST: "1"
+          DB_PASSWORD: testpassword
+          HORSIES_TEST_DATABASE_URL_DIRECT: postgresql+psycopg://postgres:testpassword@localhost:15432/horsies
+          HORSIES_TEST_DATABASE_URL_TRANSACTION: postgresql+psycopg://postgres:testpassword@localhost:16432/horsies
+          HORSIES_TEST_DATABASE_URL_PREPARED: postgresql+psycopg://postgres:testpassword@localhost:16435/horsies
+          HORSIES_TEST_DATABASE_URL_SESSION: postgresql+psycopg://postgres:testpassword@localhost:16433/horsies
+          HORSIES_TEST_DATABASE_URL_STATEMENT: postgresql+psycopg://postgres:testpassword@localhost:16434/horsies
+        run: |
+          uv run pytest \
+            tests/integration/test_pgbouncer_contract.py \
+            tests/integration/test_pgbouncer_prepared_statements.py \
+            tests/integration/test_pgbouncer_rolling_upgrade.py \
+            -v --tb=short
+
+      - name: PgBouncer e2e smoke
+        env:
+          HORSIES_PGBOUNCER_TEST: "1"
+          DB_PASSWORD: testpassword
+          HORSIES_TEST_DATABASE_URL_DIRECT: postgresql+psycopg://postgres:testpassword@localhost:15432/horsies
+          HORSIES_TEST_DATABASE_URL_TRANSACTION: postgresql+psycopg://postgres:testpassword@localhost:16432/horsies
+          HORSIES_TEST_DATABASE_URL_PREPARED: postgresql+psycopg://postgres:testpassword@localhost:16435/horsies
+          HORSIES_TEST_DATABASE_URL_SESSION: postgresql+psycopg://postgres:testpassword@localhost:16433/horsies
+          HORSIES_TEST_DATABASE_URL_STATEMENT: postgresql+psycopg://postgres:testpassword@localhost:16434/horsies
+        run: uv run pytest tests/e2e/test_pgbouncer_smoke.py -v --tb=short
+
+      - name: Stop PgBouncer fixture stack
+        if: always()
+        run: docker compose -f tests/fixtures/pgbouncer/compose.yaml down -v

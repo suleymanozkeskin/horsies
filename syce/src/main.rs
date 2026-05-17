@@ -21,7 +21,14 @@ async fn main() -> Result<()> {
     crate::errors::init()?;
 
     let args = Cli::parse();
-    let mut app = App::new(args.tick_rate, args.frame_rate, args.database_url).await?;
+    let mut app = App::new(
+        args.tick_rate,
+        args.frame_rate,
+        args.database_url,
+        args.session_database_url,
+        args.pgbouncer_transaction_mode,
+    )
+    .await?;
     app.run().await?;
     Ok(())
 }

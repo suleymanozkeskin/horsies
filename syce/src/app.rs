@@ -1,8 +1,10 @@
 use std::cell::Cell;
+use std::str::FromStr;
 
 use crate::errors::{Result, SyceError};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::prelude::{Position, Rect};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::PgPool;
 use tokio::sync::mpsc;
 
@@ -107,6 +109,7 @@ pub struct App {
     action_rx: mpsc::UnboundedReceiver<Action>,
     state: AppState,
     pool: Option<PgPool>,
+    listener_database_url: Option<String>,
     tick_counter: u64,
     listener_handle: Option<NotifyListenerHandle>,
     task_detail_fetch_inflight: bool,
@@ -114,12 +117,26 @@ pub struct App {
 }
 
 impl App {
-    pub async fn new(tick_rate: f64, frame_rate: f64, database_url: Option<String>) -> Result<Self> {
+    pub async fn new(
+        tick_rate: f64,
+        frame_rate: f64,
+        database_url: Option<String>,
+        session_database_url: Option<String>,
+        pgbouncer_transaction_mode: bool,
+    ) -> Result<Self> {
         let (action_tx, action_rx) = mpsc::unbounded_channel();
+
+        let listener_database_url = session_database_url.or_else(|| database_url.clone());
 
         // Initialize database pool if URL provided
         let pool = if let Some(url) = database_url {
-            match PgPool::connect(&url).await {
+            let connect_result = if pgbouncer_transaction_mode {
+                let options = PgConnectOptions::from_str(&url)?.statement_cache_capacity(0);
+                PgPoolOptions::new().connect_with(options).await
+            } else {
+                PgPool::connect(&url).await
+            };
+            match connect_result {
                 Ok(pool) => {
                     eprintln!("✓ Connected to database");
                     Some(pool)
@@ -145,6 +162,7 @@ impl App {
             action_rx,
             state: AppState::new(),
             pool,
+            listener_database_url,
             tick_counter: 0,
             listener_handle: None,
             task_detail_fetch_inflight: false,
@@ -167,7 +185,8 @@ impl App {
 
     fn start_listener(&mut self, event_tx: mpsc::Sender<Event>) {
         if self.listener_handle.is_none() {
-            self.listener_handle = NotifyListenerHandle::spawn(self.pool.clone(), event_tx);
+            self.listener_handle =
+                NotifyListenerHandle::spawn(self.listener_database_url.clone(), event_tx);
         }
     }
 

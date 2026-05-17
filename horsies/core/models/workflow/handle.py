@@ -312,7 +312,10 @@ class WorkflowHandle(Generic[OutT]):
                     q = queue
                 case Err(listen_err):
                     logger.debug(
-                        'Listener subscribe failed for workflow_done; falling back to polling: %s',
+                        'LISTEN unavailable; falling back to polling for workflow_done. '
+                        'If using PgBouncer transaction pooling, configure '
+                        'PostgresConfig.session_database_url with a direct/session-capable '
+                        'Postgres URL. Original error: %s',
                         listen_err.message,
                     )
 
