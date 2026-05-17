@@ -1,6 +1,6 @@
 [package]
 name = "horsies-macros"
-version = "0.1.0-alpha.15"
+version = "0.1.0-alpha.16"
 edition = "2021"
 description = "Proc macros for the horsies task queue and workflow engine"
 license = "MIT"
