@@ -764,6 +764,8 @@ mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://postgres@localhost/test")
             .unwrap();
+        // Closing a lazy pool gives a deterministic connectivity failure without
+        // depending on platform-specific TCP timeout behavior.
         pool.close().await;
         assert!(app
             .bind_broker(Arc::new(PostgresBroker::from_pool(pool)))

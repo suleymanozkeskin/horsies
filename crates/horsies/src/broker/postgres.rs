@@ -423,6 +423,11 @@ ORDER BY good_until ASC";
 /// Health check: `SELECT 1` to verify broker connectivity.
 const HEALTH_CHECK_SQL: &str = "SELECT 1";
 
+// Separate session/direct endpoints usually have much tighter connection
+// limits than a transaction pool. Horsies needs only migrations plus a small
+// number of long-lived LISTEN connections.
+const SESSION_POOL_MAX_CONNECTIONS: u32 = 4;
+
 fn pg_connect_options(
     database_url: &str,
     echo: bool,
@@ -452,6 +457,14 @@ fn pg_pool_options(config: &PostgresConfig) -> PgPoolOptions {
         .test_before_acquire(config.pool_pre_ping)
 }
 
+fn pg_session_pool_options(config: &PostgresConfig) -> PgPoolOptions {
+    PgPoolOptions::new()
+        .max_connections(SESSION_POOL_MAX_CONNECTIONS)
+        .acquire_timeout(Duration::from_secs(config.pool_timeout as u64))
+        .idle_timeout(Duration::from_secs(config.pool_recycle as u64))
+        .test_before_acquire(config.pool_pre_ping)
+}
+
 fn listener_probe_failed(err: sqlx::Error) -> BrokerError {
     BrokerError::ConnectionFailed(format!(
         "Postgres LISTEN delivery probe failed; session_database_url must be direct/session-capable and able to preserve LISTEN/NOTIFY session state: {err}",
@@ -459,6 +472,9 @@ fn listener_probe_failed(err: sqlx::Error) -> BrokerError {
 }
 
 fn prepared_statement_tracking_failed(err: &sqlx::Error) -> bool {
+    // String-sniff deliberately: PgBouncer prepared-statement tracking failures
+    // do not have one stable SQLSTATE across "missing prepared statement",
+    // "already exists", and protocol-level variants.
     err.to_string()
         .to_lowercase()
         .contains("prepared statement")
@@ -486,6 +502,7 @@ pub struct PostgresBroker {
     pgbouncer_transaction_mode: bool,
     task_done_listener: tokio::sync::OnceCell<SharedNotifyListener>,
     workflow_done_listener: tokio::sync::OnceCell<SharedNotifyListener>,
+    listener_delivery_checked: tokio::sync::OnceCell<()>,
     schema_initialized: tokio::sync::OnceCell<()>,
 }
 
@@ -501,6 +518,7 @@ impl PostgresBroker {
             pgbouncer_transaction_mode: false,
             task_done_listener: tokio::sync::OnceCell::new(),
             workflow_done_listener: tokio::sync::OnceCell::new(),
+            listener_delivery_checked: tokio::sync::OnceCell::new(),
             schema_initialized: tokio::sync::OnceCell::new(),
         }
     }
@@ -515,6 +533,9 @@ impl PostgresBroker {
 
     /// Connect using a `PostgresConfig` from horsies-core.
     pub async fn connect_with(config: &PostgresConfig) -> Result<Self, BrokerError> {
+        config
+            .validate()
+            .map_err(|err| BrokerError::ConnectionFailed(err.to_string()))?;
         let connect_options = pg_connect_options(
             &config.database_url,
             config.echo,
@@ -530,7 +551,10 @@ impl PostgresBroker {
         } else {
             let session_options =
                 pg_connect_options(config.effective_session_database_url(), config.echo, false)?;
-            pg_pool_options(config).connect_lazy_with(session_options)
+            pg_session_pool_options(config)
+                .connect_with(session_options)
+                .await
+                .map_err(BrokerError::Database)?
         };
 
         Ok(Self {
@@ -539,6 +563,7 @@ impl PostgresBroker {
             pgbouncer_transaction_mode: config.pgbouncer_transaction_mode,
             task_done_listener: tokio::sync::OnceCell::new(),
             workflow_done_listener: tokio::sync::OnceCell::new(),
+            listener_delivery_checked: tokio::sync::OnceCell::new(),
             schema_initialized: tokio::sync::OnceCell::new(),
         })
     }
@@ -1801,10 +1826,14 @@ impl PostgresBroker {
         Ok(result.rows_affected())
     }
 
-    /// Verify broker connectivity with a `SELECT 1` query.
+    /// Verify runtime-pool connectivity with a cheap `SELECT 1` query.
     ///
     /// Returns `Ok(())` if the database is reachable, `Err(BrokerError)` otherwise.
     /// Mirrors Python's `HEALTH_CHECK_SQL` used by `horsies check --live`.
+    ///
+    /// This intentionally does not probe LISTEN/NOTIFY. Workers call
+    /// `ensure_listener_delivery_checked()` once during startup when configured
+    /// for PgBouncer transaction pooling.
     pub async fn health_check(&self) -> Result<(), BrokerError> {
         let _: (i32,) = sqlx::query_as(HEALTH_CHECK_SQL)
             .fetch_one(&self.pool)
@@ -1816,9 +1845,23 @@ impl PostgresBroker {
                     BrokerError::Database(err)
                 }
             })?;
-        if self.pgbouncer_transaction_mode {
-            self.check_listener_delivery().await?;
+        Ok(())
+    }
+
+    /// Verify LISTEN/NOTIFY delivery once per broker in PgBouncer mode.
+    ///
+    /// Reconnect loops may call this repeatedly; successful probes are cached so
+    /// transient listener reconnects do not open another direct connection.
+    pub async fn ensure_listener_delivery_checked(&self) -> Result<(), BrokerError> {
+        if !self.pgbouncer_transaction_mode {
+            return Ok(());
         }
+        self.listener_delivery_checked
+            .get_or_try_init(|| async {
+                self.check_listener_delivery().await?;
+                Ok::<(), BrokerError>(())
+            })
+            .await?;
         Ok(())
     }
 

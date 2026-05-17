@@ -116,6 +116,7 @@ async fn transaction_pool_split_urls_migrate_health_check_and_enqueue() -> Resul
                 .await?;
         broker.migrate().await?;
         broker.health_check().await?;
+        broker.check_listener_delivery().await?;
 
         let mut task_ids = Vec::new();
         for i in 0..30 {
@@ -170,7 +171,8 @@ async fn transaction_pool_as_session_url_fails_loudly() -> Result<(), Box<dyn Er
         let broker =
             PostgresBroker::connect_with(&pgbouncer_config(&urls.transaction, &urls.transaction))
                 .await?;
-        let err = broker.health_check().await.unwrap_err();
+        broker.health_check().await?;
+        let err = broker.check_listener_delivery().await.unwrap_err();
         assert!(
             err.to_string().contains("LISTEN delivery probe")
                 || err.to_string().to_lowercase().contains("listen"),
@@ -195,10 +197,41 @@ async fn statement_pool_as_session_url_fails_loudly() -> Result<(), Box<dyn Erro
         let broker =
             PostgresBroker::connect_with(&pgbouncer_config(&urls.statement, &urls.statement))
                 .await?;
-        let err = broker.health_check().await.unwrap_err();
+        broker.health_check().await?;
+        let err = broker.check_listener_delivery().await.unwrap_err();
         let text = err.to_string().to_lowercase();
         assert!(
             text.contains("listen") || text.contains("statement") || text.contains("pool"),
+            "unexpected error: {err}",
+        );
+        Ok::<(), Box<dyn Error>>(())
+    }
+    .await;
+    pgbouncer::drop_isolated_database(&urls).await;
+    result
+}
+
+#[tokio::test]
+#[serial]
+async fn split_url_connect_fails_when_session_url_is_unreachable() -> Result<(), Box<dyn Error>> {
+    if skip_if_disabled() {
+        return Ok(());
+    }
+
+    let urls = pgbouncer::create_isolated_database("horsies_pgbouncer_bad_session_host").await;
+    let result = async {
+        let err = match PostgresBroker::connect_with(&pgbouncer_config(
+            &urls.transaction,
+            "postgresql://postgres:testpassword@127.0.0.1:1/horsies",
+        ))
+        .await
+        {
+            Ok(_) => panic!("expected unreachable session_database_url to fail during connect"),
+            Err(err) => err,
+        };
+        let text = err.to_string().to_lowercase();
+        assert!(
+            text.contains("connection") || text.contains("database error"),
             "unexpected error: {err}",
         );
         Ok::<(), Box<dyn Error>>(())
@@ -242,7 +275,10 @@ async fn transaction_pool_without_prepared_statement_tracking_fails_loudly(
 
         let broker_without_tracking =
             PostgresBroker::connect_with(&pgbouncer_config(&urls.prepared, &urls.direct)).await?;
-        let err = broker_without_tracking.health_check().await.unwrap_err();
+        let err = broker_without_tracking
+            .check_listener_delivery()
+            .await
+            .unwrap_err();
         let text = err.to_string();
         assert!(
             text.contains("max_prepared_statements") || text.contains("prepared statement"),

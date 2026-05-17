@@ -127,28 +127,6 @@ struct AncestorWorkflowRow {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Start a workflow from a validated spec.
-///
-/// Creates the workflow row (RUNNING), inserts all workflow_task rows,
-/// and enqueues root tasks (those with no dependencies). Returns a
-/// typed handle for result retrieval.
-///
-/// If a caller-provided `workflow_id` already exists in the database,
-/// returns the existing handle (idempotent start), matching Python's
-/// behavior.
-///
-/// All inserts are wrapped in a single database transaction so that a
-/// crash mid-start does not leave a partially-created workflow.
-#[allow(dead_code)]
-pub async fn start_workflow<T>(
-    pool: &PgPool,
-    spec: &WorkflowSpec,
-    workflow_id: Option<String>,
-    registry: &WorkflowSpecRegistry,
-) -> WorkflowStartResult<WorkflowHandle<T>> {
-    start_workflow_with_listener_pool(pool, pool, spec, workflow_id, registry).await
-}
-
 /// Start a workflow with a separate session-capable pool for result
 /// LISTEN/NOTIFY handles.
 pub async fn start_workflow_with_listener_pool<T>(
@@ -170,34 +148,6 @@ pub async fn start_workflow_with_listener_pool<T>(
             workflow_name: wf_name,
             workflow_id: wf_id,
         })
-}
-
-/// Start a workflow with automatic retry on transient errors.
-///
-/// When `resend_on_transient_err` is `true`, retries up to 3 times with
-/// exponential backoff (200ms, 400ms, 800ms, capped at 2000ms) on
-/// retryable errors. 1 initial attempt + 3 retries = 4 total attempts.
-///
-/// The workflow_id is generated once and reused across all retry attempts,
-/// preserving idempotency. Mirrors Python's `resend_on_transient_err`
-/// behavior on `WorkflowSpec.start()`.
-#[allow(dead_code)]
-pub async fn start_workflow_with_retry<T>(
-    pool: &PgPool,
-    spec: &WorkflowSpec,
-    workflow_id: Option<String>,
-    registry: &WorkflowSpecRegistry,
-    resend_on_transient_err: bool,
-) -> WorkflowStartResult<WorkflowHandle<T>> {
-    start_workflow_with_retry_and_listener_pool(
-        pool,
-        pool,
-        spec,
-        workflow_id,
-        registry,
-        resend_on_transient_err,
-    )
-    .await
 }
 
 /// Start a workflow with retry and a separate session-capable pool for result
@@ -353,27 +303,6 @@ fn is_retryable_workflow_error(e: &WorkflowError) -> bool {
         WorkflowError::Broker(broker_err) => broker_err.is_retryable(),
         _ => false,
     }
-}
-
-/// Retry a failed workflow start using the `WorkflowStartError` from a
-/// previous `start_workflow()` call.
-///
-/// Validates the error before retrying:
-/// - Only `ENQUEUE_FAILED` errors are eligible
-/// - Cross-workflow retry is rejected (error workflow_name must match spec)
-///
-/// Best-effort idempotent by workflow_id: if the workflow already exists
-/// (e.g., the original start partially succeeded), returns the existing handle.
-///
-/// Mirrors Python's `WorkflowSpec.retry_start(error)`.
-#[allow(dead_code)]
-pub async fn retry_start<T>(
-    pool: &PgPool,
-    spec: &WorkflowSpec,
-    error: &WorkflowStartError,
-    registry: &WorkflowSpecRegistry,
-) -> WorkflowStartResult<WorkflowHandle<T>> {
-    retry_start_with_listener_pool(pool, pool, spec, error, registry).await
 }
 
 /// Retry a failed workflow start using a separate session-capable pool for

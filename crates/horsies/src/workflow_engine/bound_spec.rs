@@ -26,17 +26,6 @@ pub struct BoundWorkflowSpec<T> {
 }
 
 impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
-    /// Create a bound workflow spec from a spec, pool, and registry.
-    #[allow(dead_code)]
-    pub fn new(
-        spec: WorkflowSpec,
-        pool: PgPool,
-        registry: Arc<WorkflowSpecRegistry>,
-        resend_on_transient_err: bool,
-    ) -> Self {
-        Self::new_with_listener_pool(spec, pool.clone(), pool, registry, resend_on_transient_err)
-    }
-
     /// Create a bound workflow spec with a separate session-capable pool for
     /// workflow result LISTEN/NOTIFY.
     pub fn new_with_listener_pool(

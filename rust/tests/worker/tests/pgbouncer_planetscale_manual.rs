@@ -87,6 +87,7 @@ async fn planetscale_split_urls_concurrent_cold_start_task_and_workflow(
                 barrier.wait().await;
                 broker.migrate().await?;
                 broker.health_check().await?;
+                broker.check_listener_delivery().await?;
                 broker
                     .enqueue(
                         "pgbouncer_manual_cold_start",

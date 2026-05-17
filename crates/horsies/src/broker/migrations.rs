@@ -43,7 +43,8 @@ pub async fn run_horsies_migrations(pool: &PgPool) -> Result<(), BrokerError> {
         return Ok(());
     }
 
-    for attempt in 1..=MIGRATION_MAX_ATTEMPTS {
+    let mut attempt = 1;
+    loop {
         match run_horsies_migrations_locked(pool, &migrator).await {
             Ok(()) => return Ok(()),
             Err(err) if is_deadlock_error(&err) && attempt < MIGRATION_MAX_ATTEMPTS => {
@@ -56,12 +57,11 @@ pub async fn run_horsies_migrations(pool: &PgPool) -> Result<(), BrokerError> {
                     "horsies migration hit deadlock, retrying"
                 );
                 sleep(backoff).await;
+                attempt += 1;
             }
             Err(err) => return Err(err),
         }
     }
-
-    unreachable!("migration retry loop always returns");
 }
 
 async fn run_horsies_migrations_locked(
@@ -116,6 +116,8 @@ async fn run_inner(conn: &mut PgConnection, migrator: &Migrator) -> Result<(), B
     let embedded_versions: HashSet<i64> = migrator.iter().map(|m| m.version).collect();
     for &version in applied.keys() {
         if !embedded_versions.contains(&version) {
+            // Match sqlx migrator rollback behavior: a database with a future
+            // horsies migration should fail hard under an older binary.
             return Err(BrokerError::Migration(MigrateError::VersionMissing(
                 version,
             )));
@@ -175,6 +177,8 @@ async fn migrations_are_current_on_conn(
     let embedded_versions: HashSet<i64> = migrator.iter().map(|m| m.version).collect();
     for &version in applied.keys() {
         if !embedded_versions.contains(&version) {
+            // Force the locked path, which reports VersionMissing for future
+            // migration rows instead of silently treating the schema as current.
             return Ok(false);
         }
     }

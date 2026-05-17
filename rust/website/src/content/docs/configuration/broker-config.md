@@ -22,8 +22,8 @@ let broker = PostgresConfig::from_url(
 | `database_url` | `String` | required | PostgreSQL runtime connection URL |
 | `session_database_url` | `Option<String>` | `None` | Direct/session-capable URL for schema initialization and LISTEN/NOTIFY |
 | `pgbouncer_transaction_mode` | `bool` | `false` | Disable SQLx named prepared-statement caching for PgBouncer transaction pools |
-| `pool_size` | `u32` | 30 | Connection pool size |
-| `max_overflow` | `u32` | 30 | Additional connections beyond pool_size |
+| `pool_size` | `u32` | 30 | Runtime SQL connection pool size |
+| `max_overflow` | `u32` | 30 | Additional runtime SQL connections beyond pool_size |
 | `pool_timeout` | `u32` | 30 | Seconds to wait for connection |
 | `pool_pre_ping` | `bool` | `true` | Pre-ping connections before use |
 | `echo` | `bool` | `false` | Echo SQL statements to logs |
@@ -111,11 +111,11 @@ let broker = PostgresConfig::from_pgbouncer_urls(
 );
 ```
 
-With `pgbouncer_transaction_mode=true`, Horsies disables SQLx's named prepared-statement cache for the runtime pool. Schema initialization, workers, result listeners, and workflow listeners use `session_database_url`.
+With `pgbouncer_transaction_mode=true`, Horsies disables SQLx's named prepared-statement cache for the runtime pool. Schema initialization, workers, result listeners, and workflow listeners use `session_database_url`. When `session_database_url` is different from `database_url`, Horsies caps that direct/session-capable pool at 4 connections instead of inheriting the runtime pool size.
 
 Different providers expose direct and pooled Postgres endpoints differently. Some publish separate ports, some publish separate hostnames, and those details can change; check your provider's current connection documentation instead of copying an example port.
 
-`app.check_live()` also runs a bounded `LISTEN` + `NOTIFY` delivery probe in PgBouncer transaction mode. If the session URL is accidentally transaction-pooled, the check fails with a message indicating that `session_database_url` cannot preserve `LISTEN/NOTIFY` state.
+`app.check_live()` is a cheap runtime-pool `SELECT 1` liveness check. Workers run a bounded `LISTEN` + `NOTIFY` delivery probe once at startup in PgBouncer transaction mode. If the session URL is accidentally transaction-pooled, worker startup fails with a message indicating that `session_database_url` cannot preserve `LISTEN/NOTIFY` state.
 
 ## Multiple Components
 

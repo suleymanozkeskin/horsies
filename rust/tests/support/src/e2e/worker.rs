@@ -408,7 +408,11 @@ async fn connect_readiness_pool(
             .await
             .map_err(|_| ())
     } else {
-        sqlx::PgPool::connect(db_url).await.map_err(|_| ())
+        PgPoolOptions::new()
+            .max_connections(2)
+            .connect(db_url)
+            .await
+            .map_err(|_| ())
     }
 }
 
