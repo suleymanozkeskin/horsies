@@ -420,8 +420,9 @@ class TestReaperHeartbeatRetention:
         created_brokers: list[Any] = []
 
         class _FakeBroker:
-            def __init__(self, config: Any):
+            def __init__(self, config: Any, **kwargs: Any):
                 self.config = config
+                self.assume_initialized = kwargs.get('assume_initialized')
                 self.app = None
                 self.session_factory = MagicMock(return_value=session)
                 self.close_async = AsyncMock(return_value=Ok(None))
@@ -443,6 +444,7 @@ class TestReaperHeartbeatRetention:
         )
         assert recover_mock.await_count >= 1
         assert len(created_brokers) == 1
+        assert created_brokers[0].assume_initialized is True
         created_brokers[0].close_async.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -537,8 +539,9 @@ class TestReaperHeartbeatRetention:
         created_brokers: list[Any] = []
 
         class _FakeBroker:
-            def __init__(self, config: Any):
+            def __init__(self, config: Any, **kwargs: Any):
                 self.config = config
+                self.assume_initialized = kwargs.get('assume_initialized')
                 self.app = None
                 self.session_factory = MagicMock(return_value=session)
                 self.close_async = AsyncMock(return_value=Ok(None))
@@ -565,6 +568,7 @@ class TestReaperHeartbeatRetention:
         assert session.commit.await_count >= 1
         assert recover_mock.await_count >= 1
         assert len(created_brokers) == 1
+        assert created_brokers[0].assume_initialized is True
         created_brokers[0].close_async.assert_awaited_once()
 
 
@@ -2009,7 +2013,9 @@ def _make_reaper_worker(
     close_rv = broker_close_result if broker_close_result is not None else Ok(None)
 
     class _FakeBroker:
-        def __init__(self, config: Any) -> None:
+        def __init__(self, config: Any, **kwargs: Any) -> None:
+            self.config = config
+            self.assume_initialized = kwargs.get('assume_initialized')
             self.session_factory = MagicMock(return_value=session)
             self.close_async = AsyncMock(return_value=close_rv)
             self.requeue_stale_claimed = _requeue_side_effect
@@ -2257,7 +2263,7 @@ class TestReaperMatchArms:
             return Ok(0)
 
         class _BoomBroker:
-            def __init__(self, config: Any) -> None:
+            def __init__(self, config: Any, **_kwargs: Any) -> None:
                 self.session_factory = MagicMock(return_value=session)
                 self.close_async = AsyncMock(return_value=Ok(None))
                 self.requeue_stale_claimed = _requeue_with_boom
@@ -2306,7 +2312,7 @@ class TestReaperMatchArms:
             raise asyncio.CancelledError()
 
         class _CancelBroker:
-            def __init__(self, config: Any) -> None:
+            def __init__(self, config: Any, **_kwargs: Any) -> None:
                 self.session_factory = MagicMock()
                 self.close_async = AsyncMock(return_value=Ok(None))
                 self.requeue_stale_claimed = _cancel_on_requeue

@@ -30,7 +30,11 @@ import psycopg
 from psycopg import AsyncConnection, InterfaceError, OperationalError, Notify
 from psycopg import sql
 
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError, BrokerResult
+from horsies.core.brokers.result_types import (
+    BrokerErrorCode,
+    BrokerOperationError,
+    BrokerResult,
+)
 from horsies.core.logging import get_logger
 from horsies.core.types.result import Ok, Err, is_err
 from horsies.core.utils.db import is_retryable_connection_error
@@ -162,12 +166,14 @@ class PostgresListener:
         if is_err(conn_r):
             return conn_r
         # Defer starting the dispatcher until at least one channel is LISTENed.
-        if self._health_check_task is None:
-            # Start proactive health monitoring
+        self._start_health_monitor_if_needed()
+        return Ok(None)
+
+    def _start_health_monitor_if_needed(self) -> None:
+        if self._health_check_task is None or self._health_check_task.done():
             self._health_check_task = asyncio.create_task(
                 self._health_monitor(), name='pg-listener-health'
             )
-        return Ok(None)
 
     async def _start_listening(self, conn: AsyncConnection) -> None:
         """
@@ -221,18 +227,23 @@ class PostgresListener:
                 self._command_conn = None
             if created_dispatcher:
                 self._unregister_fd_monitoring()
-                if self._dispatcher_conn is not None and not self._dispatcher_conn.closed:
+                if (
+                    self._dispatcher_conn is not None
+                    and not self._dispatcher_conn.closed
+                ):
                     with contextlib.suppress(
                         OperationalError, InterfaceError, RuntimeError, OSError
                     ):
                         await self._dispatcher_conn.close()
                 self._dispatcher_conn = None
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.LISTENER_START_FAILED,
-                message=f'Failed to establish listener connections: {exc}',
-                retryable=is_retryable_connection_error(exc),
-                exception=exc,
-            ))
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.LISTENER_START_FAILED,
+                    message=f'Failed to establish listener connections: {exc}',
+                    retryable=is_retryable_connection_error(exc),
+                    exception=exc,
+                )
+            )
 
     async def _execute_on_command_conn(
         self,
@@ -462,12 +473,14 @@ class PostgresListener:
         self._bind_or_validate_loop()
         conn_r = await self._ensure_connections()
         if is_err(conn_r):
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
-                message=f'Failed to subscribe to {channel_name!r}: {conn_r.err_value.message}',
-                retryable=conn_r.err_value.retryable,
-                exception=conn_r.err_value.exception,
-            ))
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
+                    message=f'Failed to subscribe to {channel_name!r}: {conn_r.err_value.message}',
+                    retryable=conn_r.err_value.retryable,
+                    exception=conn_r.err_value.exception,
+                )
+            )
 
         try:
             async with self._lock:
@@ -494,17 +507,21 @@ class PostgresListener:
                 # Create a fresh bounded queue for this subscriber.
                 q: Queue[Notify] = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_MAXSIZE)
                 self._subs[channel_name].add(q)
+                self._start_health_monitor_if_needed()
                 return Ok(q)
         except (OperationalError, InterfaceError, OSError) as exc:
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
-                message=f'Failed to subscribe to {channel_name!r}: {exc}',
-                retryable=is_retryable_connection_error(exc),
-                exception=exc,
-            ))
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
+                    message=f'Failed to subscribe to {channel_name!r}: {exc}',
+                    retryable=is_retryable_connection_error(exc),
+                    exception=exc,
+                )
+            )
 
     async def listen_many(
-        self, channel_names: Sequence[str],
+        self,
+        channel_names: Sequence[str],
     ) -> BrokerResult[list[Queue[Notify]]]:
         """Subscribe to multiple channels in a single lock acquisition.
 
@@ -519,12 +536,14 @@ class PostgresListener:
         self._bind_or_validate_loop()
         conn_r = await self._ensure_connections()
         if is_err(conn_r):
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
-                message=f'Failed to subscribe to channels: {conn_r.err_value.message}',
-                retryable=conn_r.err_value.retryable,
-                exception=conn_r.err_value.exception,
-            ))
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
+                    message=f'Failed to subscribe to channels: {conn_r.err_value.message}',
+                    retryable=conn_r.err_value.retryable,
+                    exception=conn_r.err_value.exception,
+                )
+            )
 
         try:
             async with self._lock:
@@ -557,14 +576,17 @@ class PostgresListener:
                     q: Queue[Notify] = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_MAXSIZE)
                     self._subs[ch].add(q)
                     queues.append(q)
+                self._start_health_monitor_if_needed()
                 return Ok(queues)
         except (OperationalError, InterfaceError, OSError) as exc:
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
-                message=f'Failed to subscribe to channels: {exc}',
-                retryable=is_retryable_connection_error(exc),
-                exception=exc,
-            ))
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
+                    message=f'Failed to subscribe to channels: {exc}',
+                    retryable=is_retryable_connection_error(exc),
+                    exception=exc,
+                )
+            )
 
     async def unlisten(
         self, channel_name: str, q: Optional[Queue[Notify]] = None

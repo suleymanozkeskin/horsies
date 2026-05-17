@@ -41,6 +41,24 @@ syce
 syce --database-url "postgresql://user:pass@localhost:5432/mydb"
 ```
 
+### PgBouncer / Transaction Pooling
+
+When monitoring a deployment that uses transaction-pooled PgBouncer, point
+Syce's query pool at the pooled URL and its listener at the direct/session URL:
+
+```bash
+syce \
+  --database-url "$DATABASE_URL_POOLED" \
+  --session-database-url "$DATABASE_URL_DIRECT" \
+  --pgbouncer-transaction-mode
+```
+
+Managed providers, such as PlanetScale Postgres, may show separate pooled and
+direct connection strings. Verify the current ports and URLs in your provider
+dashboard or docs. Without a session-capable listener URL, Syce can still
+refresh by polling, but real-time notifications will show as disconnected or
+reconnecting.
+
 ### `.env` file
 
 ```bash
@@ -53,6 +71,8 @@ DATABASE_URL="postgresql://user:pass@localhost:5432/mydb"
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--database-url`, `-d` | `$DATABASE_URL` | PostgreSQL connection string |
+| `--session-database-url` | `$HORSIES_SESSION_DATABASE_URL` | Direct/session-capable URL for LISTEN/NOTIFY |
+| `--pgbouncer-transaction-mode` | `$HORSIES_PGBOUNCER_TRANSACTION_MODE` | Disable SQLx statement cache for transaction-pooled PgBouncer |
 | `--tick-rate`, `-t` | `4.0` | Data refresh rate (ticks per second) |
 | `--frame-rate`, `-f` | `60.0` | UI render rate (frames per second) |
 

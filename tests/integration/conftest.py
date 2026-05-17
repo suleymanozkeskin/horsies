@@ -34,8 +34,16 @@ from horsies.core.workflows.engine import start_workflow_async
 from horsies.core.types.result import is_err
 
 
+def _database_url() -> str:
+    return (
+        os.environ.get('HORSIES_TEST_DATABASE_URL')
+        or os.environ.get('HORSES_E2E_DB_URL')
+        or f'postgresql+psycopg://postgres:{os.environ["DB_PASSWORD"]}@localhost:5432/horsies'
+    )
+
+
 # Database URL
-DB_URL = f'postgresql+psycopg://postgres:{os.environ["DB_PASSWORD"]}@localhost:5432/horsies'
+DB_URL = _database_url()
 
 
 @pytest.fixture(scope='session')

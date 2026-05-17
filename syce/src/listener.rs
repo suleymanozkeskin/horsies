@@ -1,7 +1,6 @@
 //! PostgreSQL NOTIFY/LISTEN with debouncing for real-time updates.
 
 use sqlx::postgres::PgListener;
-use sqlx::PgPool;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -39,16 +38,16 @@ pub struct NotifyListenerHandle {
 impl NotifyListenerHandle {
     /// Spawn a background listener task.
     ///
-    /// Returns `None` if pool is `None` (demo mode).
-    pub fn spawn(pool: Option<PgPool>, event_tx: Sender<Event>) -> Option<Self> {
-        let pool = pool?;
+    /// Returns `None` if database_url is `None` (demo mode).
+    pub fn spawn(database_url: Option<String>, event_tx: Sender<Event>) -> Option<Self> {
+        let database_url = database_url?;
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_notify = Arc::new(Notify::new());
         let flag = Arc::clone(&stop_flag);
         let notify = Arc::clone(&stop_notify);
 
         tokio::spawn(async move {
-            listener_loop(pool, event_tx, flag, notify).await;
+            listener_loop(database_url, event_tx, flag, notify).await;
         });
 
         Some(Self {
@@ -72,7 +71,7 @@ impl Drop for NotifyListenerHandle {
 
 /// Main listener loop with reconnection logic.
 async fn listener_loop(
-    pool: PgPool,
+    database_url: String,
     tx: Sender<Event>,
     stop: Arc<AtomicBool>,
     stop_notify: Arc<Notify>,
@@ -82,7 +81,7 @@ async fn listener_loop(
             break;
         }
 
-        match connect_and_listen(&pool, &tx, &stop, &stop_notify).await {
+        match connect_and_listen(&database_url, &tx, &stop, &stop_notify).await {
             Ok(()) => break, // Clean exit (stop flag set)
             Err(e) => {
                 eprintln!("Listener error: {e}. Reconnecting in {RECONNECT_DELAY_SECS}s...");
@@ -100,7 +99,7 @@ async fn listener_loop(
 
 /// Connect to PostgreSQL and listen for notifications with debouncing.
 async fn connect_and_listen(
-    pool: &PgPool,
+    database_url: &str,
     tx: &Sender<Event>,
     stop: &Arc<AtomicBool>,
     stop_notify: &Arc<Notify>,
@@ -110,7 +109,7 @@ async fn connect_and_listen(
     }
     let _ = tx.try_send(Event::ListenerStateChanged(ListenerState::Connecting));
 
-    let mut listener = PgListener::connect_with(pool).await?;
+    let mut listener = PgListener::connect(database_url).await?;
     for ch in CHANNELS {
         listener.listen(ch).await?;
     }

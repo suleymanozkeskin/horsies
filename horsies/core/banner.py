@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 # ANSI color codes (matching Rust owo-colors output)
 # ---------------------------------------------------------------------------
 
+
 class Colors:
     """ANSI escape codes for terminal colors."""
 
@@ -74,6 +75,7 @@ def get_version() -> str:
     """Get horsies version from package metadata."""
     try:
         from importlib.metadata import version
+
         return version('horsies')
     except Exception:
         return 'dev'
@@ -89,6 +91,7 @@ def format_banner(version: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 # Formatting helpers (matching Rust banner.rs)
 # ---------------------------------------------------------------------------
+
 
 def _format_ms(ms: int) -> str:
     """Format milliseconds into a human-readable string."""
@@ -175,6 +178,20 @@ def print_banner(
 
     # Broker info (mask password)
     _write_kv(lines, 'broker', mask_database_url(app.config.broker.database_url))
+    if (
+        app.config.broker.session_database_url is not None
+        and app.config.broker.session_database_url != app.config.broker.database_url
+    ) or app.config.broker.pgbouncer_transaction_mode:
+        _write_kv(
+            lines,
+            'broker_session',
+            mask_database_url(app.config.broker.effective_session_database_url),
+        )
+    _write_kv(
+        lines,
+        'pgbouncer_tx',
+        _format_bool(app.config.broker.pgbouncer_transaction_mode),
+    )
 
     # Cluster-wide cap
     if app.config.cluster_wide_cap is not None:

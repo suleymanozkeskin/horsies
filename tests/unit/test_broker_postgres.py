@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
+from horsies.core.brokers.result_types import BrokerErrorCode
 from horsies.core.models.tasks import (
     OperationalErrorCode,
     OutcomeCode,
@@ -25,13 +25,14 @@ from horsies.core.models.tasks import (
     TaskInfo,
     TaskResult,
 )
-from horsies.core.types.result import Err, Ok, is_err, is_ok
+from horsies.core.types.result import Ok, is_err, is_ok
 from horsies.core.types.status import TaskStatus
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_broker(database_url: str = 'postgresql+psycopg://u:p@localhost/db') -> Any:
     """Create a PostgresBroker with fully mocked internals."""
@@ -105,7 +106,7 @@ def _make_task_row(**overrides: Any) -> MagicMock:
 
 @pytest.mark.unit
 class TestSchemaAdvisoryKey:
-    """Tests for _schema_advisory_key determinism and uniqueness."""
+    """Tests for schema advisory key behavior."""
 
     def test_returns_stable_int_from_database_url(self) -> None:
         """Same URL should always produce the same advisory key."""
@@ -117,15 +118,49 @@ class TestSchemaAdvisoryKey:
         assert isinstance(key1, int)
         assert key1 == key2
 
-    def test_different_urls_produce_different_keys(self) -> None:
-        """Different database URLs should produce different advisory keys."""
+    def test_schema_key_is_url_independent(self) -> None:
+        """Different URLs should share the new schema advisory key."""
         broker_a = _make_broker('postgresql+psycopg://u:p@host_a/db')
         broker_b = _make_broker('postgresql+psycopg://u:p@host_b/db')
 
         key_a = broker_a._schema_advisory_key()
         key_b = broker_b._schema_advisory_key()
 
-        assert key_a != key_b
+        assert key_a == key_b
+
+    def test_legacy_schema_key_remains_url_derived(self) -> None:
+        """The transitional legacy lock still protects old rolling-deploy peers."""
+        broker_a = _make_broker('postgresql+psycopg://u:p@host_a/db')
+        broker_b = _make_broker('postgresql+psycopg://u:p@host_b/db')
+
+        assert (
+            broker_a._legacy_schema_advisory_key()
+            != broker_b._legacy_schema_advisory_key()
+        )
+
+    def test_legacy_schema_keys_include_runtime_and_session_urls(self) -> None:
+        """Split URL deploys acquire both old URL-derived schema locks."""
+        from horsies.core.models.broker import PostgresConfig
+        from horsies.core.brokers.postgres import PostgresBroker
+
+        database_url = 'postgresql+psycopg://u:p@pooler:6432/db'
+        session_url = 'postgresql+psycopg://u:p@direct:5432/db'
+        broker = PostgresBroker(
+            PostgresConfig(
+                database_url=database_url,
+                session_database_url=session_url,
+                pgbouncer_transaction_mode=True,
+            )
+        )
+
+        assert broker._legacy_schema_advisory_keys() == tuple(
+            sorted(
+                {
+                    broker._legacy_schema_advisory_key_for_url(database_url),
+                    broker._legacy_schema_advisory_key_for_url(session_url),
+                }
+            )
+        )
 
     def test_key_is_signed_64_bit(self) -> None:
         """Advisory key must fit in a signed 64-bit range for pg_advisory_xact_lock."""
@@ -134,6 +169,198 @@ class TestSchemaAdvisoryKey:
         key = broker._schema_advisory_key()
 
         assert -(2**63) <= key <= 2**63 - 1
+
+
+@pytest.mark.unit
+class TestPostgresBrokerPgBouncerWiring:
+    """Tests for split URL and PgBouncer-specific broker wiring."""
+
+    def test_runtime_engine_uses_database_url_and_listener_uses_session_url(
+        self,
+    ) -> None:
+        from horsies.core.models.broker import PostgresConfig
+        from horsies.core.brokers.postgres import PostgresBroker
+
+        database_url = 'postgresql+psycopg://u:p@pooler:6432/db'
+        session_url = 'postgresql+psycopg://u:p@direct:5432/db'
+
+        with (
+            patch('horsies.core.brokers.postgres.create_async_engine') as mock_engine,
+            patch('horsies.core.brokers.postgres.async_sessionmaker'),
+            patch(
+                'horsies.core.brokers.postgres.PostgresListener'
+            ) as mock_listener_cls,
+        ):
+            mock_engine.return_value = MagicMock()
+
+            config = PostgresConfig(
+                database_url=database_url,
+                session_database_url=session_url,
+                pgbouncer_transaction_mode=True,
+            )
+            PostgresBroker(config)
+
+        mock_engine.assert_called_once()
+        assert mock_engine.call_args.args[0] == database_url
+        assert mock_engine.call_args.kwargs['connect_args'] == {
+            'prepare_threshold': None,
+        }
+        mock_listener_cls.assert_called_once_with('postgresql://u:p@direct:5432/db')
+
+    @pytest.mark.asyncio
+    async def test_schema_initialization_uses_session_url_when_split(self) -> None:
+        from horsies.core.models.broker import PostgresConfig
+        from horsies.core.brokers.postgres import PostgresBroker
+
+        runtime_engine = MagicMock()
+        schema_engine = MagicMock()
+        schema_engine.dispose = AsyncMock()
+        conn = AsyncMock()
+        conn.run_sync = AsyncMock()
+        version_result = MagicMock()
+        version_result.scalar_one.return_value = 0
+        conn.execute.return_value = version_result
+        begin_ctx = MagicMock()
+        begin_ctx.__aenter__ = AsyncMock(return_value=conn)
+        begin_ctx.__aexit__ = AsyncMock(return_value=None)
+        schema_engine.begin.return_value = begin_ctx
+
+        database_url = 'postgresql+psycopg://u:p@pooler:6432/db'
+        session_url = 'postgresql+psycopg://u:p@direct:5432/db'
+
+        with (
+            patch(
+                'horsies.core.brokers.postgres.create_async_engine',
+                side_effect=[runtime_engine, schema_engine],
+            ) as mock_engine,
+            patch('horsies.core.brokers.postgres.async_sessionmaker'),
+            patch('horsies.core.brokers.postgres.PostgresListener'),
+        ):
+            config = PostgresConfig(
+                database_url=database_url,
+                session_database_url=session_url,
+                pgbouncer_transaction_mode=True,
+            )
+            broker = PostgresBroker(config)
+            await broker._ensure_initialized()
+
+        assert mock_engine.call_args_list[0].args[0] == database_url
+        assert mock_engine.call_args_list[1].args[0] == session_url
+        schema_engine.dispose.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_schema_initialization_acquires_legacy_then_constant_lock(
+        self,
+    ) -> None:
+        from horsies.core.models.broker import PostgresConfig
+        from horsies.core.brokers.postgres import PostgresBroker
+
+        engine = MagicMock()
+        conn = AsyncMock()
+        conn.run_sync = AsyncMock()
+        version_result = MagicMock()
+        version_result.scalar_one.return_value = 0
+        conn.execute.return_value = version_result
+        begin_ctx = MagicMock()
+        begin_ctx.__aenter__ = AsyncMock(return_value=conn)
+        begin_ctx.__aexit__ = AsyncMock(return_value=None)
+        engine.begin.return_value = begin_ctx
+
+        with (
+            patch(
+                'horsies.core.brokers.postgres.create_async_engine', return_value=engine
+            ),
+            patch('horsies.core.brokers.postgres.async_sessionmaker'),
+            patch('horsies.core.brokers.postgres.PostgresListener'),
+        ):
+            config = PostgresConfig(
+                database_url='postgresql+psycopg://u:p@localhost/db',
+            )
+            broker = PostgresBroker(config)
+            await broker._ensure_initialized()
+
+        from horsies.core.schemas.migrations import SCHEMA_ADVISORY_LOCK_SQL
+
+        lock_calls = [
+            call for call in conn.execute.await_args_list
+            if call.args[0] is SCHEMA_ADVISORY_LOCK_SQL
+        ]
+        first_params = lock_calls[0].args[1]
+        second_params = lock_calls[1].args[1]
+        assert first_params == {'key': broker._legacy_schema_advisory_key()}
+        assert second_params == {'key': broker._schema_advisory_key()}
+
+    @pytest.mark.asyncio
+    async def test_schema_initialization_acquires_split_legacy_locks_before_constant(
+        self,
+    ) -> None:
+        from horsies.core.models.broker import PostgresConfig
+        from horsies.core.brokers.postgres import PostgresBroker
+
+        runtime_engine = MagicMock()
+        schema_engine = MagicMock()
+        schema_engine.dispose = AsyncMock()
+        conn = AsyncMock()
+        conn.run_sync = AsyncMock()
+        version_result = MagicMock()
+        version_result.scalar_one.return_value = 0
+        conn.execute.return_value = version_result
+        begin_ctx = MagicMock()
+        begin_ctx.__aenter__ = AsyncMock(return_value=conn)
+        begin_ctx.__aexit__ = AsyncMock(return_value=None)
+        schema_engine.begin.return_value = begin_ctx
+
+        with (
+            patch(
+                'horsies.core.brokers.postgres.create_async_engine',
+                side_effect=[runtime_engine, schema_engine],
+            ),
+            patch('horsies.core.brokers.postgres.async_sessionmaker'),
+            patch('horsies.core.brokers.postgres.PostgresListener'),
+        ):
+            config = PostgresConfig(
+                database_url='postgresql+psycopg://u:p@pooler:6432/db',
+                session_database_url='postgresql+psycopg://u:p@direct:5432/db',
+                pgbouncer_transaction_mode=True,
+            )
+            broker = PostgresBroker(config)
+            await broker._ensure_initialized()
+
+        from horsies.core.schemas.migrations import SCHEMA_ADVISORY_LOCK_SQL
+
+        lock_params = [
+            call.args[1]
+            for call in conn.execute.await_args_list
+            if call.args[0] is SCHEMA_ADVISORY_LOCK_SQL
+        ]
+        expected_legacy_keys = broker._legacy_schema_advisory_keys()
+        assert lock_params == [
+            {'key': expected_legacy_keys[0]},
+            {'key': expected_legacy_keys[1]},
+            {'key': broker._schema_advisory_key()},
+        ]
+
+    def test_assume_initialized_skips_listener_creation(self) -> None:
+        from horsies.core.models.broker import PostgresConfig
+        from horsies.core.brokers.postgres import PostgresBroker
+
+        with (
+            patch('horsies.core.brokers.postgres.create_async_engine'),
+            patch('horsies.core.brokers.postgres.async_sessionmaker'),
+            patch(
+                'horsies.core.brokers.postgres.PostgresListener'
+            ) as mock_listener_cls,
+        ):
+            broker = PostgresBroker(
+                PostgresConfig(database_url='postgresql+psycopg://u:p@localhost/db'),
+                assume_initialized=True,
+            )
+
+        assert broker._initialized is True
+        assert broker._listener is None
+        with pytest.raises(RuntimeError, match='listener is disabled'):
+            _ = broker.listener
+        mock_listener_cls.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +400,8 @@ class TestEnqueueAsync:
         broker.session_factory = MagicMock(return_value=session)
 
         result = await broker.enqueue_async(
-            'my_task', 'default',
+            'my_task',
+            'default',
             task_id='test-task-id',
             enqueue_sha='test-sha',
             args_json='[1, 2]',
@@ -547,14 +775,18 @@ class TestScheduleSlotTaskId:
 
         slot_a = datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
         slot_b = datetime(2025, 6, 2, 12, 0, 0, tzinfo=timezone.utc)
-        assert schedule_slot_task_id('daily_report', slot_a) != schedule_slot_task_id('daily_report', slot_b)
+        assert schedule_slot_task_id('daily_report', slot_a) != schedule_slot_task_id(
+            'daily_report', slot_b
+        )
 
     def test_schedule_slot_task_id_different_schedule(self) -> None:
         """Different name + same slot_time -> different UUID5."""
         from horsies.core.utils.fingerprint import schedule_slot_task_id
 
         slot = datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
-        assert schedule_slot_task_id('daily_report', slot) != schedule_slot_task_id('hourly_check', slot)
+        assert schedule_slot_task_id('daily_report', slot) != schedule_slot_task_id(
+            'hourly_check', slot
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -727,7 +959,9 @@ class TestGetResultAsync:
 
         broker.listener.unsubscribe = AsyncMock(side_effect=_unsubscribe)
 
-        task = asyncio.create_task(broker.get_result_async('task-123', timeout_ms=60_000))
+        task = asyncio.create_task(
+            broker.get_result_async('task-123', timeout_ms=60_000)
+        )
 
         for _ in range(50):
             if broker.listener.listen.await_count > 0:
@@ -814,7 +1048,12 @@ class TestMonitoringQueries:
     async def test_get_worker_stats_returns_list_of_dicts(self) -> None:
         """get_worker_stats should return Ok(dicts) keyed by column names."""
         broker = _make_broker()
-        columns = ['worker_hostname', 'worker_pid', 'worker_process_name', 'active_tasks']
+        columns = [
+            'worker_hostname',
+            'worker_pid',
+            'worker_process_name',
+            'active_tasks',
+        ]
         rows = [('host-1', 1234, 'worker-0', 3)]
         self._setup_session_with_rows(broker, columns, rows)
 
@@ -828,7 +1067,16 @@ class TestMonitoringQueries:
     async def test_get_expired_tasks_returns_list_of_dicts(self) -> None:
         """get_expired_tasks should return Ok(dicts) keyed by column names."""
         broker = _make_broker()
-        columns = ['id', 'task_name', 'queue_name', 'priority', 'sent_at', 'enqueued_at', 'good_until', 'expired_for']
+        columns = [
+            'id',
+            'task_name',
+            'queue_name',
+            'priority',
+            'sent_at',
+            'enqueued_at',
+            'good_until',
+            'expired_for',
+        ]
         rows = [('task-1', 'slow_task', 'default', 100, None, None, None, '00:05:00')]
         self._setup_session_with_rows(broker, columns, rows)
 
@@ -889,10 +1137,17 @@ class TestMarkStaleTasksAsFailed:
         # Phase 2: per-task sessions — SELECT FOR UPDATE returns fresh row, then UPSERT + MARK_FAILED
         def _make_task_session(task_id: str, retry_count: int = 0) -> AsyncMock:
             ctx_row = SimpleNamespace(
-                id=task_id, worker_pid=1234, worker_hostname='host-1',
-                claimed_by_worker_id='worker-1', started_at=stale_started_at,
-                retry_count=retry_count, worker_process_name='proc-1',
-                max_retries=0, task_options=None, good_until=None, db_now=db_now,
+                id=task_id,
+                worker_pid=1234,
+                worker_hostname='host-1',
+                claimed_by_worker_id='worker-1',
+                started_at=stale_started_at,
+                retry_count=retry_count,
+                worker_process_name='proc-1',
+                max_retries=0,
+                task_options=None,
+                good_until=None,
+                db_now=db_now,
                 queue_name='default',
             )
             ctx_result = MagicMock()
@@ -908,7 +1163,10 @@ class TestMarkStaleTasksAsFailed:
             )
             return ts
 
-        task_sessions = [_make_task_session('task-1'), _make_task_session('task-2', retry_count=2)]
+        task_sessions = [
+            _make_task_session('task-1'),
+            _make_task_session('task-2', retry_count=2),
+        ]
         broker.session_factory = MagicMock(side_effect=[scan_session, *task_sessions])
 
         result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
@@ -933,11 +1191,17 @@ class TestMarkStaleTasksAsFailed:
         scan_session.execute = AsyncMock(return_value=scan_result)
 
         ctx_row = SimpleNamespace(
-            id='task-1', worker_pid=100, worker_hostname='host',
+            id='task-1',
+            worker_pid=100,
+            worker_hostname='host',
             claimed_by_worker_id='w-1',
             started_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
-            retry_count=0, worker_process_name='proc-1',
-            max_retries=0, task_options=None, good_until=None, db_now=db_now,
+            retry_count=0,
+            worker_process_name='proc-1',
+            max_retries=0,
+            task_options=None,
+            good_until=None,
+            db_now=db_now,
             queue_name='default',
         )
         ctx_result = MagicMock()
@@ -974,18 +1238,21 @@ class TestMarkStaleTasksAsFailed:
     async def test_stale_task_with_retry_policy_schedules_retry(self) -> None:
         """Stale task with WORKER_CRASHED in auto_retry_for should be retried."""
         import json
+
         broker = _make_broker()
         db_now = datetime(2025, 1, 1, 0, 10, tzinfo=timezone.utc)
-        task_options_json = json.dumps({
-            'task_name': 'my_task',
-            'retry_policy': {
-                'max_retries': 3,
-                'intervals': [60, 300, 900],
-                'backoff_strategy': 'fixed',
-                'jitter': False,
-                'auto_retry_for': ['WORKER_CRASHED'],
-            },
-        })
+        task_options_json = json.dumps(
+            {
+                'task_name': 'my_task',
+                'retry_policy': {
+                    'max_retries': 3,
+                    'intervals': [60, 300, 900],
+                    'backoff_strategy': 'fixed',
+                    'jitter': False,
+                    'auto_retry_for': ['WORKER_CRASHED'],
+                },
+            }
+        )
         scan_rows = [SimpleNamespace(id='task-retry-1')]
         scan_result = MagicMock()
         scan_result.fetchall.return_value = scan_rows
@@ -996,12 +1263,18 @@ class TestMarkStaleTasksAsFailed:
         scan_session.execute = AsyncMock(return_value=scan_result)
 
         ctx_row = SimpleNamespace(
-            id='task-retry-1', worker_pid=100, worker_hostname='host',
+            id='task-retry-1',
+            worker_pid=100,
+            worker_hostname='host',
             claimed_by_worker_id='w-1',
             started_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
-            retry_count=0, worker_process_name='proc-1',
-            max_retries=3, task_options=task_options_json,
-            good_until=None, db_now=db_now, queue_name='default',
+            retry_count=0,
+            worker_process_name='proc-1',
+            max_retries=3,
+            task_options=task_options_json,
+            good_until=None,
+            db_now=db_now,
+            queue_name='default',
         )
         ctx_result = MagicMock()
         ctx_result.fetchone.return_value = ctx_row
@@ -1021,7 +1294,9 @@ class TestMarkStaleTasksAsFailed:
         notify_session.__aenter__ = AsyncMock(return_value=notify_session)
         notify_session.__aexit__ = AsyncMock(return_value=None)
 
-        broker.session_factory = MagicMock(side_effect=[scan_session, task_session, notify_session])
+        broker.session_factory = MagicMock(
+            side_effect=[scan_session, task_session, notify_session]
+        )
 
         result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
 
@@ -1039,18 +1314,21 @@ class TestMarkStaleTasksAsFailed:
     async def test_stale_task_retries_exhausted_marks_failed(self) -> None:
         """Stale task with retry policy but retries exhausted should be marked FAILED."""
         import json
+
         broker = _make_broker()
         db_now = datetime(2025, 1, 1, 0, 10, tzinfo=timezone.utc)
-        task_options_json = json.dumps({
-            'task_name': 'my_task',
-            'retry_policy': {
-                'max_retries': 3,
-                'intervals': [60, 300, 900],
-                'backoff_strategy': 'fixed',
-                'jitter': False,
-                'auto_retry_for': ['WORKER_CRASHED'],
-            },
-        })
+        task_options_json = json.dumps(
+            {
+                'task_name': 'my_task',
+                'retry_policy': {
+                    'max_retries': 3,
+                    'intervals': [60, 300, 900],
+                    'backoff_strategy': 'fixed',
+                    'jitter': False,
+                    'auto_retry_for': ['WORKER_CRASHED'],
+                },
+            }
+        )
         scan_rows = [SimpleNamespace(id='task-exhausted')]
         scan_result = MagicMock()
         scan_result.fetchall.return_value = scan_rows
@@ -1061,12 +1339,18 @@ class TestMarkStaleTasksAsFailed:
         scan_session.execute = AsyncMock(return_value=scan_result)
 
         ctx_row = SimpleNamespace(
-            id='task-exhausted', worker_pid=100, worker_hostname='host',
+            id='task-exhausted',
+            worker_pid=100,
+            worker_hostname='host',
             claimed_by_worker_id='w-1',
             started_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
-            retry_count=3, worker_process_name='proc-1',
-            max_retries=3, task_options=task_options_json,
-            good_until=None, db_now=db_now, queue_name='default',
+            retry_count=3,
+            worker_process_name='proc-1',
+            max_retries=3,
+            task_options=task_options_json,
+            good_until=None,
+            db_now=db_now,
+            queue_name='default',
         )
         ctx_result = MagicMock()
         ctx_result.fetchone.return_value = ctx_row
@@ -1295,12 +1579,16 @@ class TestSyncFacades:
         broker._loop_runner.call = MagicMock(return_value='task-id-123')
 
         result = broker.enqueue(
-            'my_task', 'queue',
+            'my_task',
+            'queue',
             task_id='test-task-id',
             enqueue_sha='test-sha',
             args_json='[1]',
             kwargs_json='{"k": "v"}',
-            priority=50, sent_at=None, good_until=None, task_options=None,
+            priority=50,
+            sent_at=None,
+            good_until=None,
+            task_options=None,
         )
 
         assert result == 'task-id-123'
@@ -1347,7 +1635,9 @@ class TestSyncFacades:
         broker._loop_runner.call = MagicMock(return_value=Ok(None))
 
         result = broker.get_task_info(
-            'task-id', include_result=True, include_failed_reason=True,
+            'task-id',
+            include_result=True,
+            include_failed_reason=True,
         )
 
         assert is_ok(result)
@@ -1403,9 +1693,23 @@ class TestGetTaskInfoAsync:
         # started_at, completed_at, failed_at, worker_hostname, worker_pid,
         # worker_process_name, error_code
         row = (
-            'task-abc', 'compute', 'RUNNING', 'default', 100,
-            1, 3, None, now, now, None,
-            now, None, None, 'host-1', 9999, 'worker-0',
+            'task-abc',
+            'compute',
+            'RUNNING',
+            'default',
+            100,
+            1,
+            3,
+            None,
+            now,
+            now,
+            None,
+            now,
+            None,
+            None,
+            'host-1',
+            9999,
+            'worker-0',
             None,
         )
         self._setup_task_info_session(broker, row=row)
@@ -1435,10 +1739,25 @@ class TestGetTaskInfoAsync:
         result_json = '{"__task_result__":true,"ok":"hello","err":null}'
         # 18 base + 1 result column
         row = (
-            'task-abc', 'compute', 'COMPLETED', 'default', 100,
-            0, 0, None, now, now, None,
-            now, now, None, 'host-1', 9999, 'worker-0',
-            None, result_json,
+            'task-abc',
+            'compute',
+            'COMPLETED',
+            'default',
+            100,
+            0,
+            0,
+            None,
+            now,
+            now,
+            None,
+            now,
+            now,
+            None,
+            'host-1',
+            9999,
+            'worker-0',
+            None,
+            result_json,
         )
         self._setup_task_info_session(broker, row=row)
 
@@ -1458,14 +1777,31 @@ class TestGetTaskInfoAsync:
         now = datetime.now(timezone.utc)
         # 18 base + 1 failed_reason column
         row = (
-            'task-abc', 'compute', 'FAILED', 'default', 100,
-            0, 0, None, now, now, None,
-            now, None, now, 'host-1', 9999, 'worker-0',
-            None, 'Worker crashed unexpectedly',
+            'task-abc',
+            'compute',
+            'FAILED',
+            'default',
+            100,
+            0,
+            0,
+            None,
+            now,
+            now,
+            None,
+            now,
+            None,
+            now,
+            'host-1',
+            9999,
+            'worker-0',
+            None,
+            'Worker crashed unexpectedly',
         )
         self._setup_task_info_session(broker, row=row)
 
-        result = await broker.get_task_info_async('task-abc', include_failed_reason=True)
+        result = await broker.get_task_info_async(
+            'task-abc', include_failed_reason=True
+        )
 
         assert is_ok(result)
         info = result.ok_value
@@ -1479,10 +1815,25 @@ class TestGetTaskInfoAsync:
         now = datetime.now(timezone.utc)
         # 18 base + 1 result column (None)
         row = (
-            'task-abc', 'compute', 'RUNNING', 'default', 100,
-            0, 0, None, now, now, None,
-            now, None, None, None, None, None,
-            None, None,
+            'task-abc',
+            'compute',
+            'RUNNING',
+            'default',
+            100,
+            0,
+            0,
+            None,
+            now,
+            now,
+            None,
+            now,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
         self._setup_task_info_session(broker, row=row)
 
@@ -1501,15 +1852,33 @@ class TestGetTaskInfoAsync:
         result_json = '{"__task_result__":true,"ok":null,"err":{"__task_error__":true,"error_code":{"__builtin_task_code__":"TASK_EXCEPTION"},"message":"fail","data":null}}'
         # 18 base + 1 result + 1 failed_reason
         row = (
-            'task-abc', 'compute', 'FAILED', 'default', 100,
-            0, 0, None, now, now, None,
-            now, None, now, 'host-1', 9999, 'worker-0',
-            'TASK_EXCEPTION', result_json, 'Something broke',
+            'task-abc',
+            'compute',
+            'FAILED',
+            'default',
+            100,
+            0,
+            0,
+            None,
+            now,
+            now,
+            None,
+            now,
+            None,
+            now,
+            'host-1',
+            9999,
+            'worker-0',
+            'TASK_EXCEPTION',
+            result_json,
+            'Something broke',
         )
         self._setup_task_info_session(broker, row=row)
 
         result = await broker.get_task_info_async(
-            'task-abc', include_result=True, include_failed_reason=True,
+            'task-abc',
+            include_result=True,
+            include_failed_reason=True,
         )
 
         assert is_ok(result)
@@ -1565,7 +1934,9 @@ class TestCloseAsync:
         broker._loop_runner.stop.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_close_async_does_not_stop_loop_runner_from_its_own_thread(self) -> None:
+    async def test_close_async_does_not_stop_loop_runner_from_its_own_thread(
+        self,
+    ) -> None:
         """close_async must not self-stop when running on loop-runner thread."""
         broker = _make_broker()
         broker._loop_runner = MagicMock()
@@ -1708,6 +2079,153 @@ class TestEnsureSchemaInitialized:
 
 
 @pytest.mark.unit
+class TestSchemaVersionInitialization:
+    """Tests for schema-version fast path and slow-path retry behavior."""
+
+    @pytest.mark.asyncio
+    async def test_current_schema_version_skips_schema_migrations(self) -> None:
+        from horsies.core.brokers.postgres import PostgresBroker
+        from horsies.core.models.broker import PostgresConfig
+        from horsies.core.schemas.migrations import (
+            READ_SCHEMA_VERSION_SQL,
+            SCHEMA_ADVISORY_LOCK_SQL,
+            SCHEMA_VERSION,
+            SCHEMA_VERSION_TABLE_EXISTS_SQL,
+        )
+
+        engine = MagicMock()
+        conn = AsyncMock()
+        conn.run_sync = AsyncMock()
+        exists_result = MagicMock()
+        exists_result.scalar.return_value = True
+        version_result = MagicMock()
+        version_result.scalar_one.return_value = SCHEMA_VERSION
+        conn.execute.side_effect = [exists_result, version_result]
+        begin_ctx = MagicMock()
+        begin_ctx.__aenter__ = AsyncMock(return_value=conn)
+        begin_ctx.__aexit__ = AsyncMock(return_value=None)
+        engine.begin.return_value = begin_ctx
+
+        with (
+            patch(
+                'horsies.core.brokers.postgres.create_async_engine',
+                return_value=engine,
+            ),
+            patch('horsies.core.brokers.postgres.async_sessionmaker'),
+            patch('horsies.core.brokers.postgres.PostgresListener'),
+        ):
+            broker = PostgresBroker(
+                PostgresConfig(database_url='postgresql+psycopg://u:p@localhost/db')
+            )
+            await broker._ensure_initialized()
+
+        assert len(conn.execute.await_args_list) == 2
+        assert conn.execute.await_args_list[0].args == (
+            SCHEMA_VERSION_TABLE_EXISTS_SQL,
+        )
+        assert conn.execute.await_args_list[1].args == (READ_SCHEMA_VERSION_SQL,)
+        assert not any(
+            call.args[0] is SCHEMA_ADVISORY_LOCK_SQL
+            for call in conn.execute.await_args_list
+        )
+        conn.run_sync.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_schema_version_table_skips_version_read(self) -> None:
+        from horsies.core.schemas.migrations import READ_SCHEMA_VERSION_SQL
+
+        engine = MagicMock()
+        conn = AsyncMock()
+        exists_result = MagicMock()
+        exists_result.scalar.return_value = False
+        conn.execute.return_value = exists_result
+        begin_ctx = MagicMock()
+        begin_ctx.__aenter__ = AsyncMock(return_value=conn)
+        begin_ctx.__aexit__ = AsyncMock(return_value=None)
+        engine.begin.return_value = begin_ctx
+
+        broker = _make_broker()
+
+        assert await broker._read_schema_version_if_exists(engine) == 0
+        assert not any(
+            call.args[0] is READ_SCHEMA_VERSION_SQL
+            for call in conn.execute.await_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_slow_path_inserts_schema_version_after_migrations(self) -> None:
+        from horsies.core.schemas.migrations import (
+            CREATE_SCHEMA_VERSION_TABLE_SQL,
+            INSERT_SCHEMA_VERSION_SQL,
+            SCHEMA_ADVISORY_LOCK_SQL,
+            SCHEMA_VERSION,
+        )
+
+        engine = MagicMock()
+        conn = AsyncMock()
+        conn.run_sync = AsyncMock()
+        version_result = MagicMock()
+        version_result.scalar_one.return_value = 0
+        conn.execute.return_value = version_result
+        begin_ctx = MagicMock()
+        begin_ctx.__aenter__ = AsyncMock(return_value=conn)
+        begin_ctx.__aexit__ = AsyncMock(return_value=None)
+        engine.begin.return_value = begin_ctx
+
+        broker = _make_broker()
+        await broker._run_schema_migrations(engine)
+
+        calls = conn.execute.await_args_list
+        lock_indices = [
+            index
+            for index, call in enumerate(calls)
+            if call.args[0] is SCHEMA_ADVISORY_LOCK_SQL
+        ]
+        create_version_index = next(
+            index
+            for index, call in enumerate(calls)
+            if call.args[0] is CREATE_SCHEMA_VERSION_TABLE_SQL
+        )
+        insert_version_index = next(
+            index
+            for index, call in enumerate(calls)
+            if call.args[0] is INSERT_SCHEMA_VERSION_SQL
+        )
+
+        assert max(lock_indices) < create_version_index
+        conn.run_sync.assert_awaited_once()
+        assert insert_version_index > create_version_index
+        assert calls[insert_version_index].args[1] == {'version': SCHEMA_VERSION}
+
+    @pytest.mark.asyncio
+    async def test_schema_deadlock_retries_slow_path(self) -> None:
+        broker = _make_broker()
+        engine = MagicMock()
+
+        class FakeDeadlock(Exception):
+            orig = SimpleNamespace(sqlstate='40P01')
+
+        broker._run_schema_migrations = AsyncMock(
+            side_effect=[FakeDeadlock(), None]
+        )
+
+        with (
+            patch(
+                'horsies.core.brokers.postgres.random.uniform',
+                return_value=0,
+            ),
+            patch(
+                'horsies.core.brokers.postgres.asyncio.sleep',
+                new_callable=AsyncMock,
+            ) as mock_sleep,
+        ):
+            await broker._run_schema_migrations_with_retry(engine)
+
+        assert broker._run_schema_migrations.await_count == 2
+        mock_sleep.assert_awaited_once_with(0.05)
+
+
+@pytest.mark.unit
 class TestCloseAsyncErrorPaths:
     """Regression tests for error handling in close_async."""
 
@@ -1729,7 +2247,9 @@ class TestCloseAsyncErrorPaths:
 
         result = await broker.close_async()
 
-        assert dispose_called, 'engine.dispose must be called even after listener.close fails'
+        assert (
+            dispose_called
+        ), 'engine.dispose must be called even after listener.close fails'
         assert is_err(result)
         err = result.err_value
         assert err.code == BrokerErrorCode.CLOSE_FAILED

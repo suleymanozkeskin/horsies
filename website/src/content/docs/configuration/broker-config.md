@@ -20,6 +20,8 @@ broker = PostgresConfig(
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `database_url` | `str` | required | SQLAlchemy connection URL |
+| `session_database_url` | `str \| None` | `None` | Direct/session-capable URL for schema setup and LISTEN/NOTIFY |
+| `pgbouncer_transaction_mode` | `bool` | `False` | Disable prepared statements for transaction-pooled PgBouncer |
 | `pool_size` | `int` | 30 | Connection pool size |
 | `max_overflow` | `int` | 30 | Additional connections beyond pool_size |
 | `pool_timeout` | `int` | 30 | Seconds to wait for connection |
@@ -72,6 +74,38 @@ PostgresConfig(
 )
 ```
 
+### PgBouncer / Transaction Pooling
+
+Use a split configuration when the main SQL URL points to PgBouncer transaction
+pooling. `database_url` is used for ordinary SQL work. `session_database_url` is
+used for schema setup and PostgreSQL `LISTEN`/`NOTIFY`, which need persistent
+session semantics.
+
+```python
+from horsies import AppConfig, PostgresConfig
+
+config = AppConfig(
+    broker=PostgresConfig(
+        database_url=os.environ["DATABASE_URL_POOLED"],
+        session_database_url=os.environ["DATABASE_URL_DIRECT"],
+        pgbouncer_transaction_mode=True,
+    ),
+)
+```
+
+Some managed providers, including PlanetScale Postgres, expose separate pooled
+and direct connection strings. Treat provider-specific ports and hostnames as an
+example, not a Horsies requirement. Check your provider dashboard or current
+provider docs and copy the pooled transaction URL into `database_url` and the
+direct/session-capable URL into `session_database_url`.
+
+Rules:
+
+- Workers require `session_database_url` when `pgbouncer_transaction_mode=True`.
+- Syce requires the session URL for real-time updates.
+- PgBouncer-only worker deployment is unsupported.
+- Horsies does not infer PgBouncer mode from port numbers.
+
 ## Connection Pooling
 
 The broker uses SQLAlchemy's async connection pool:
@@ -98,7 +132,9 @@ The broker creates two connection types:
 1. **Async engine** (SQLAlchemy): For queries, inserts, updates
 2. **LISTEN/NOTIFY** (psycopg): For real-time notifications
 
-Both share the same `database_url`.
+By default both use `database_url`. With split PgBouncer configuration, ordinary
+SQL uses `database_url`, while schema setup and `LISTEN`/`NOTIFY` use
+`session_database_url`.
 
 ## Health Monitoring
 

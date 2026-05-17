@@ -76,6 +76,24 @@ Workers don't poll for tasks:
 - Result waiters listen on `task_done` channel
 - Fallback polling handles edge cases (lost notifications)
 
+### PgBouncer Split URLs
+
+Transaction-pooled PgBouncer is safe for ordinary SQL, but not for persistent
+session features. When `pgbouncer_transaction_mode=True`, Horsies uses this
+split:
+
+```text
+Producer/Worker SQL  --> database_url          --> PgBouncer transaction pool
+Worker LISTEN        --> session_database_url  --> direct/session Postgres
+Result wait LISTEN   --> session_database_url  --> direct/session Postgres
+Syce LISTEN          --> session_database_url  --> direct/session Postgres
+Schema setup         --> session_database_url  --> direct/session Postgres
+```
+
+Workers intentionally fail startup if the listener URL is not session-capable.
+Producer-side result waits may fall back to polling when notifications are
+unavailable.
+
 ## User-Facing Components
 
 | Component | Description |

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -528,6 +530,133 @@ class TestLiveBrokerConnectivityCheck:
         assert 'db down' in (errors[0].notes[0] if errors[0].notes else '')
         assert app._broker is None
         mock_engine.dispose.assert_awaited_once()
+
+    def test_pgbouncer_live_check_uses_session_url_for_notify_probe(self) -> None:
+        """PgBouncer live check verifies actual notification delivery on the session URL."""
+        app = Horsies(
+            config=AppConfig(
+                broker=PostgresConfig(
+                    database_url="postgresql+psycopg://test:test@pooler/test",
+                    session_database_url="postgresql+psycopg://test:test@direct/test",
+                    pgbouncer_transaction_mode=True,
+                ),
+            )
+        )
+
+        mock_engine = mock.MagicMock()
+        mock_engine.dispose = mock.AsyncMock()
+        mock_session = mock.AsyncMock()
+        mock_session.__aenter__ = mock.AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = mock.AsyncMock(return_value=None)
+        mock_session.execute = mock.AsyncMock(return_value=None)
+        mock_session_factory = mock.MagicMock(return_value=mock_session)
+
+        class _FakeListenerConn:
+            execute = mock.AsyncMock()
+            close = mock.AsyncMock()
+
+            async def notifies(self):
+                yield SimpleNamespace(channel="horsies_check_probe", payload="ok")
+
+        class _FakeNotifierConn:
+            execute = mock.AsyncMock()
+            close = mock.AsyncMock()
+
+        listener_conn = _FakeListenerConn()
+        notifier_conn = _FakeNotifierConn()
+
+        with (
+            mock.patch(
+                "sqlalchemy.ext.asyncio.create_async_engine",
+                return_value=mock_engine,
+            ) as mock_create_engine,
+            mock.patch(
+                "sqlalchemy.ext.asyncio.async_sessionmaker",
+                return_value=mock_session_factory,
+            ),
+            mock.patch(
+                "psycopg.AsyncConnection.connect",
+                new=mock.AsyncMock(side_effect=[listener_conn, notifier_conn]),
+            ) as mock_connect,
+            mock.patch("uuid.uuid4", return_value=SimpleNamespace(hex="probe")),
+        ):
+            errors = app.check(live=True)
+
+        assert errors == []
+        assert mock_create_engine.call_args_list[0].args[0] == (
+            "postgresql+psycopg://test:test@pooler/test"
+        )
+        assert mock_create_engine.call_args_list[0].kwargs["connect_args"] == {
+            "prepare_threshold": None,
+        }
+        assert mock_create_engine.call_args_list[1].args[0] == (
+            "postgresql+psycopg://test:test@direct/test"
+        )
+        assert mock_connect.await_args_list == [
+            mock.call("postgresql://test:test@direct/test", autocommit=True),
+            mock.call("postgresql://test:test@direct/test", autocommit=True),
+        ]
+
+    def test_pgbouncer_live_check_reports_missing_notify_delivery(self) -> None:
+        """A LISTEN/NOTIFY timeout is reported as transaction-pool-like behavior."""
+        app = Horsies(
+            config=AppConfig(
+                broker=PostgresConfig(
+                    database_url="postgresql+psycopg://test:test@pooler/test",
+                    session_database_url="postgresql+psycopg://test:test@direct/test",
+                    pgbouncer_transaction_mode=True,
+                ),
+            )
+        )
+
+        mock_engine = mock.MagicMock()
+        mock_engine.dispose = mock.AsyncMock()
+        mock_session = mock.AsyncMock()
+        mock_session.__aenter__ = mock.AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = mock.AsyncMock(return_value=None)
+        mock_session.execute = mock.AsyncMock(return_value=None)
+        mock_session_factory = mock.MagicMock(return_value=mock_session)
+
+        class _FakeListenerConn:
+            execute = mock.AsyncMock()
+            close = mock.AsyncMock()
+
+            async def notifies(self):
+                await asyncio.Future()
+                yield SimpleNamespace(channel="unreachable", payload="never")
+
+        class _FakeNotifierConn:
+            execute = mock.AsyncMock()
+            close = mock.AsyncMock()
+
+        with (
+            mock.patch(
+                "sqlalchemy.ext.asyncio.create_async_engine",
+                return_value=mock_engine,
+            ),
+            mock.patch(
+                "sqlalchemy.ext.asyncio.async_sessionmaker",
+                return_value=mock_session_factory,
+            ),
+            mock.patch(
+                "psycopg.AsyncConnection.connect",
+                new=mock.AsyncMock(
+                    side_effect=[_FakeListenerConn(), _FakeNotifierConn()]
+                ),
+            ),
+            mock.patch(
+                "asyncio.wait_for",
+                new=mock.AsyncMock(side_effect=asyncio.TimeoutError),
+            ),
+        ):
+            errors = app.check(live=True)
+
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.BROKER_INVALID_URL
+        assert errors[0].notes is not None
+        assert (
+            "session_database_url appears to be transaction-pooled" in errors[0].notes[0]
+        )
 
 
 @pytest.mark.unit

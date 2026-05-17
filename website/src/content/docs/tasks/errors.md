@@ -164,6 +164,45 @@ Use the `horsies check` command to validate your configuration, task registry, a
 horsies check myapp.instance:app
 ```
 
+### PgBouncer Configuration Errors
+
+These startup and operator messages usually mean the deployment is using
+transaction-pooled PgBouncer without a direct/session-capable URL.
+
+```text
+session_database_url required when pgbouncer_transaction_mode=True
+```
+
+Set `PostgresConfig.session_database_url` to the direct/session-capable
+Postgres URL. Managed providers, such as PlanetScale Postgres, may expose
+separate pooled and direct connection strings; verify the current ports and URLs
+in your provider dashboard or docs.
+
+```text
+Postgres LISTEN failed. If database_url points to PgBouncer transaction pooling
+```
+
+The worker listener could not establish a persistent PostgreSQL session. Workers
+do not support PgBouncer-only transaction-pool deployment.
+
+```text
+LISTEN unavailable; falling back to polling
+```
+
+Producer-side result waits can poll when notifications are unavailable. This is
+not the supported worker dispatch mode.
+
+```text
+session_database_url appears to be transaction-pooled; LISTEN notification was not delivered
+```
+
+`horsies check --live` accepted the session URL at the SQL level, but a
+`LISTEN` + `NOTIFY` behavior probe did not deliver a notification. Use a direct
+Postgres URL or a session-pooling URL for `session_database_url`.
+
+See [PgBouncer Troubleshooting](../troubleshooting/pgbouncer) for the full
+deployment pattern.
+
 ### Reserved Built-In Code Enforcement
 
 All string values used by the built-in error code families (`OperationalErrorCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`) are **reserved**. User-defined error codes must not collide with these values.

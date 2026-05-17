@@ -78,32 +78,53 @@ parse_junit_xml() {
 extract_failures() {
     local xml_file="$1"
     local suite_name="$2"
+    local max_failures="${MAX_FAILURES_PER_SUITE:-50}"
 
     if [[ ! -f "$xml_file" ]]; then
         return
     fi
 
-    # Extract failing test names and messages
-    local current_test=""
-    while IFS= read -r line; do
-        # Match testcase name
-        if echo "$line" | grep -q '<testcase'; then
-            current_test=$(echo "$line" | sed -n 's/.*name="\([^"]*\)".*/\1/p')
-        fi
+    uv run python - "$xml_file" "$suite_name" "$max_failures" >> "$SUMMARY_FILE" <<'PY'
+from __future__ import annotations
 
-        # Match failure or error with message
-        if echo "$line" | grep -q '<failure\|<error'; then
-            local msg
-            msg=$(echo "$line" | sed -n 's/.*message="\([^"]*\)".*/\1/p')
-            echo "  - $current_test" >> "$SUMMARY_FILE"
-            if [[ -n "$msg" ]]; then
-                # Truncate long messages
-                msg=$(echo "$msg" | head -c 200)
-                echo "    Message: $msg" >> "$SUMMARY_FILE"
-            fi
-            echo "" >> "$SUMMARY_FILE"
-        fi
-    done < "$xml_file"
+import sys
+import xml.etree.ElementTree as ET
+
+xml_file, suite_name, max_failures_raw = sys.argv[1], sys.argv[2], sys.argv[3]
+max_failures = int(max_failures_raw)
+
+root = ET.parse(xml_file).getroot()
+emitted = 0
+remaining = 0
+
+for case in root.iter("testcase"):
+    failure = case.find("failure")
+    error = case.find("error")
+    problem = failure if failure is not None else error
+    if problem is None:
+        continue
+
+    if emitted >= max_failures:
+        remaining += 1
+        continue
+
+    classname = case.attrib.get("classname", "")
+    name = case.attrib.get("name", "<unknown>")
+    display_name = f"{classname}::{name}" if classname else name
+    message = problem.attrib.get("message", "").replace("\n", " ")
+    if len(message) > 200:
+        message = message[:200]
+
+    print(f"  - {display_name}")
+    if message:
+        print(f"    Message: {message}")
+    print()
+    emitted += 1
+
+if remaining:
+    print(f"  ... {remaining} more failing/erroring test(s) omitted for {suite_name}")
+    print()
+PY
 }
 
 run_test_suite() {
@@ -183,13 +204,13 @@ run_test_suite() {
 # claim tasks or hold DB connections that break subsequent layers.
 kill_orphaned_workers() {
     local count
-    count=$(pgrep -f "horsies worker" 2>/dev/null | wc -l | tr -d ' ')
+    count=$({ pgrep -f "horsies worker" 2>/dev/null || true; } | wc -l | tr -d ' ')
     if [[ "$count" -gt 0 ]]; then
         echo -e "${YELLOW}Stopping $count orphaned horsies worker process(es)...${NC}"
         # Graceful SIGTERM first — lets workers close DB connections
         pkill -TERM -f "horsies worker" 2>/dev/null || true
         for i in 1 2 3; do
-            count=$(pgrep -f "horsies worker" 2>/dev/null | wc -l | tr -d ' ')
+            count=$({ pgrep -f "horsies worker" 2>/dev/null || true; } | wc -l | tr -d ' ')
             if [[ "$count" -eq 0 ]]; then
                 return
             fi
@@ -199,7 +220,7 @@ kill_orphaned_workers() {
         echo -e "${YELLOW}Force-killing $count remaining worker(s)...${NC}"
         pkill -9 -f "horsies worker" 2>/dev/null || true
         for i in 1 2; do
-            count=$(pgrep -f "horsies worker" 2>/dev/null | wc -l | tr -d ' ')
+            count=$({ pgrep -f "horsies worker" 2>/dev/null || true; } | wc -l | tr -d ' ')
             if [[ "$count" -eq 0 ]]; then
                 return
             fi

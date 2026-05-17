@@ -7,8 +7,31 @@ from sqlalchemy import text
 
 # ---- Schema infrastructure ----
 
+SCHEMA_VERSION = 1
+
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
+""")
+
+CREATE_SCHEMA_VERSION_TABLE_SQL = text("""
+    CREATE TABLE IF NOT EXISTS horsies_schema_version (
+        version INTEGER PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+""")
+
+SCHEMA_VERSION_TABLE_EXISTS_SQL = text("""
+    SELECT to_regclass('horsies_schema_version') IS NOT NULL
+""")
+
+READ_SCHEMA_VERSION_SQL = text("""
+    SELECT COALESCE(MAX(version), 0) FROM horsies_schema_version
+""")
+
+INSERT_SCHEMA_VERSION_SQL = text("""
+    INSERT INTO horsies_schema_version (version)
+    VALUES (:version)
+    ON CONFLICT (version) DO NOTHING
 """)
 
 

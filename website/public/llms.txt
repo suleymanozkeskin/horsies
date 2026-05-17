@@ -51,12 +51,16 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### PostgresConfig
 - database_url: str (must start with "postgresql+psycopg://")
+- session_database_url: str | None (direct/session-capable URL for schema setup and LISTEN/NOTIFY)
+- pgbouncer_transaction_mode: bool (default False; disables prepared statements for transaction-pooled PgBouncer)
 - pool_size: int (default 30)
 - max_overflow: int (default 30)
 - pool_timeout: int (default 30)
 - pool_recycle: int (default 1800)
 - pool_pre_ping: bool (default True)
 - echo: bool (default False)
+- PgBouncer pattern: database_url -> pooled transaction URL, session_database_url -> direct/session-capable URL, pgbouncer_transaction_mode=True
+- PgBouncer-only workers are unsupported because PostgreSQL LISTEN requires a persistent session
 
 ### QueueMode
 - QueueMode.DEFAULT — single "default" queue, no queue_name on tasks

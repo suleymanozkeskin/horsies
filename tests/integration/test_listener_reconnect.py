@@ -11,8 +11,16 @@ from psycopg import Notify
 
 from horsies.core.brokers.listener import PostgresListener
 
+
+def _database_url() -> str:
+    url = os.environ.get("HORSIES_TEST_DATABASE_URL") or os.environ.get("HORSES_E2E_DB_URL")
+    if url is not None:
+        return url.replace("postgresql+psycopg://", "postgresql://", 1)
+    return f'postgresql://postgres:{os.environ["DB_PASSWORD"]}@localhost:5432/horsies'
+
+
 # Raw psycopg URL (no +psycopg scheme) — matches what PostgresBroker passes to PostgresListener
-DB_URL = f'postgresql://postgres:{os.environ["DB_PASSWORD"]}@localhost:5432/horsies'
+DB_URL = _database_url()
 
 CHANNEL = "test_reconnect"
 RECV_TIMEOUT = 5.0
