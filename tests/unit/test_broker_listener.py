@@ -1440,6 +1440,7 @@ class TestCallerUnwrapContract:
         from horsies.core.types.result import is_ok as is_ok_
         from horsies.core.models.broker import PostgresConfig
         from horsies.core.brokers.postgres import PostgresBroker
+        from horsies.core.schemas.migrations import SCHEMA_VERSION
 
         with (
             patch('horsies.core.brokers.postgres.create_async_engine') as mock_engine,
@@ -1455,7 +1456,13 @@ class TestCallerUnwrapContract:
             # begin() as async context manager for schema init
             mock_conn_ctx = AsyncMock()
             mock_conn_ctx.run_sync = AsyncMock()
-            mock_conn_ctx.execute = AsyncMock()
+            version_table_exists = MagicMock()
+            version_table_exists.scalar.return_value = True
+            schema_version = MagicMock()
+            schema_version.scalar_one.return_value = SCHEMA_VERSION
+            mock_conn_ctx.execute = AsyncMock(
+                side_effect=[version_table_exists, schema_version]
+            )
             mock_begin_ctx = MagicMock()
             mock_begin_ctx.__aenter__ = AsyncMock(return_value=mock_conn_ctx)
             mock_begin_ctx.__aexit__ = AsyncMock(return_value=None)
