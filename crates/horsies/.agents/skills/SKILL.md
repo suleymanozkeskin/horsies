@@ -16,7 +16,7 @@ skill files in this directory:
 |---|---|
 | `tasks.md` | `#[horsies::task]`, `TaskFunction`, `my_task::register()`, send/schedule/retry APIs, serialization |
 | `workflows.md` | unified `horsies::Horsies`, `WorkflowFunction`, `WorkflowTemplate`, `TaskRuntime`, checked workflow builders, DAG construction, failure semantics |
-| `configs.md` | `AppConfig`, `PostgresConfig`, queues, recovery, scheduling, `Horsies::check()`, `check_live()`, workflow builders |
+| `configs.md` | `AppConfig`, `PostgresConfig`, queues, recovery, scheduling, `Horsies::check()`, `check_live()`, workflow builders, PgBouncer transaction-pool deployments (`from_pgbouncer_urls`, `session_database_url`) |
 
 ## Package architecture
 

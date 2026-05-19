@@ -73,6 +73,14 @@ The goal: fail at startup, not in production.
 
 See [App Config](../configuration/app-config) for `app.check()` details.
 
+## Does horsies work with PgBouncer or managed Postgres poolers?
+
+Yes, in transaction-pool mode. Because transaction pooling cannot preserve session state for `LISTEN/NOTIFY`, the broker takes two URLs: a runtime URL that may point at the pooler and a `session_database_url` that points at a direct or session-pooled endpoint. Use `PostgresConfig::from_pgbouncer_urls(runtime_url, session_url)` to wire both at once.
+
+The runtime pool disables SQLx's local prepared-statement cache and requires the pooler to have `max_prepared_statements > 0` so PgBouncer can track protocol-level prepared statements. Schema initialization, workers, and listeners use the session URL; workers also run a one-shot `LISTEN/NOTIFY` delivery probe at startup to fail fast if the session URL is accidentally transaction-pooled.
+
+See [broker config — PgBouncer Transaction Pooling](../configuration/broker-config#pgbouncer-transaction-pooling).
+
 ## Does it have a scheduler?
 
 Yes. Runs in-process via `app.run_scheduler()`. It supports intervals with human-readable typed models, not cron expressions.

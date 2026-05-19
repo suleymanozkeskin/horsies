@@ -30,6 +30,26 @@ let config = AppConfig::for_database_url(
 let mut app = Horsies::new(config)?;
 ```
 
+## Pooled Postgres / PgBouncer
+
+When deploying behind a PgBouncer transaction-pool endpoint (or a managed provider that fronts Postgres with one), the runtime URL alone is not enough — transaction pooling cannot preserve session state for `LISTEN/NOTIFY`. Pass both a pooled runtime URL and a direct/session-capable URL:
+
+```rust
+use horsies::{AppConfig, Horsies, PostgresConfig};
+
+let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+let session_url = std::env::var("SESSION_DATABASE_URL").expect("SESSION_DATABASE_URL must be set");
+
+let mut config = AppConfig::for_database_url(&database_url);
+config.broker = PostgresConfig::from_pgbouncer_urls(database_url, session_url);
+
+let mut app = Horsies::new(config)?;
+```
+
+The pooler must have prepared-statement tracking enabled (`max_prepared_statements > 0`); workers also run a one-shot `LISTEN/NOTIFY` probe at startup to fail fast if the session URL is accidentally pooled.
+
+See [Broker Config — PgBouncer Transaction Pooling](../../configuration/broker-config#pgbouncer-transaction-pooling) for the full configuration surface.
+
 ## Custom Queues with Priorities
 
 Different operations have different urgency levels can be defined with priority values.

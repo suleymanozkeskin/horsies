@@ -50,9 +50,59 @@ let config = PostgresConfig::from_url("postgresql://user:pass@localhost:5432/myd
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `database_url` | `String` | required | PostgreSQL connection URL |
-| `pool_size` | `u32` | `30` | Connection pool size |
-| `pool_timeout` | `u32` | `30` | Timeout in seconds for acquiring a pooled connection |
+| `database_url` | `String` | required | Runtime PostgreSQL connection URL. May point at a PgBouncer transaction-pool endpoint when `pgbouncer_transaction_mode = true`. |
+| `session_database_url` | `Option<String>` | `None` | Direct or session-pooled URL used for schema initialization and `LISTEN/NOTIFY`. Required when `pgbouncer_transaction_mode = true`. |
+| `pgbouncer_transaction_mode` | `bool` | `false` | Configure the runtime pool for PgBouncer transaction pooling. Disables SQLx's local prepared-statement cache; the pooler must have protocol-level prepared-statement tracking enabled (`max_prepared_statements > 0`). |
+| `pool_pre_ping` | `bool` | `true` | Pre-ping each connection before use. |
+| `pool_size` | `u32` | `30` | Runtime connection pool size. |
+| `max_overflow` | `u32` | `30` | Additional runtime connections beyond `pool_size`. |
+| `pool_timeout` | `u32` | `30` | Seconds to wait for acquiring a pooled connection. |
+| `pool_recycle` | `u32` | `1800` | Seconds before a connection is recycled. |
+| `echo` | `bool` | `false` | Log SQL statements. |
+
+### PgBouncer transaction pooling
+
+PgBouncer transaction pooling can carry normal task and workflow SQL, but it
+cannot preserve session state for `LISTEN/NOTIFY`. When deploying behind a
+transaction-pool endpoint, configure two URLs:
+
+```rust
+let broker = PostgresConfig::from_pgbouncer_urls(
+    std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
+    std::env::var("SESSION_DATABASE_URL").expect("SESSION_DATABASE_URL must be set"),
+);
+```
+
+`from_pgbouncer_urls(runtime_url, session_url)` sets `database_url`,
+`session_database_url`, and `pgbouncer_transaction_mode = true` in one call.
+
+- The runtime pool uses `database_url` (the transaction-pool endpoint) and
+  disables SQLx's local prepared-statement cache. The pooler must have
+  `max_prepared_statements > 0`; if prepared-statement tracking is off, the
+  broker returns a clear `PgBouncer transaction mode requires protocol prepared-statement tracking`
+  error during connect.
+- Schema initialization, workers, result listeners, and workflow listeners use
+  `session_database_url`. When the session URL differs from `database_url`,
+  the session-capable pool is capped at 4 connections instead of inheriting
+  `pool_size`.
+- Workers run a bounded `LISTEN` + `NOTIFY` delivery probe once at startup in
+  PgBouncer transaction mode. If the session URL is accidentally
+  transaction-pooled, worker startup fails with a message indicating the URL
+  cannot preserve `LISTEN/NOTIFY` state.
+- `effective_session_database_url()` returns `session_database_url` when set,
+  otherwise falls back to `database_url`.
+
+Validation at `PostgresConfig::validate()` (called transitively through
+`Horsies::new()`):
+
+- `pgbouncer_transaction_mode = true` without `session_database_url` →
+  `PostgresConfigError::MissingSessionDatabaseUrl`.
+- Either URL with a non-`postgresql://` / `postgres://` scheme →
+  `InvalidUrlScheme` / `InvalidSessionUrlScheme`.
+
+Different managed providers expose direct and pooled Postgres endpoints
+differently (separate ports vs separate hostnames). Check your provider's
+current connection documentation when deriving the two URLs.
 
 ## `QueueMode`
 
