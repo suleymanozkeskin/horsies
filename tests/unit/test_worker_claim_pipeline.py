@@ -16,7 +16,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Generator
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -419,3 +419,19 @@ class TestUnclaimSqlClearsLeaseExpiry:
         sql_text = UNCLAIM_CLAIMED_TASK_SQL.text
         normalised = ' '.join(sql_text.split())
         assert 'claim_expires_at = NULL' in normalised
+
+    def test_unclaim_claimed_task_matches_owned_running_tasks(self) -> None:
+        """BrokenProcessPool requeue must match worker-owned RUNNING rows."""
+        sql_text = UNCLAIM_CLAIMED_TASK_SQL.text
+        normalised = ' '.join(sql_text.split())
+        assert "status IN ('CLAIMED', 'RUNNING')" in normalised
+        assert 'claimed_by_worker_id = CAST(:wid AS VARCHAR)' in normalised
+
+    def test_unclaim_claimed_task_clears_runtime_metadata(self) -> None:
+        """RUNNING task requeue must clear stale runtime metadata."""
+        sql_text = UNCLAIM_CLAIMED_TASK_SQL.text
+        normalised = ' '.join(sql_text.split())
+        assert 'started_at = NULL' in normalised
+        assert 'worker_pid = NULL' in normalised
+        assert 'worker_hostname = NULL' in normalised
+        assert 'worker_process_name = NULL' in normalised

@@ -133,9 +133,13 @@ UNCLAIM_CLAIMED_TASK_SQL = text("""
         claimed_at = NULL,
         claimed_by_worker_id = NULL,
         claim_expires_at = NULL,
+        started_at = NULL,
+        worker_pid = NULL,
+        worker_hostname = NULL,
+        worker_process_name = NULL,
         updated_at = NOW()
     WHERE id = :id
-      AND status = 'CLAIMED'
+      AND status IN ('CLAIMED', 'RUNNING')
       AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
 """)
 
