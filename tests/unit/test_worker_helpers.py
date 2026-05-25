@@ -21,15 +21,8 @@ import logging
 from horsies.core.worker.worker import (
     Worker,
     WorkerConfig,
-    CLAIM_ADVISORY_LOCK_SQL,
-    CLAIM_SQL,
-    COUNT_CLAIMED_FOR_WORKER_SQL,
-    COUNT_GLOBAL_IN_FLIGHT_SQL,
-    COUNT_IN_FLIGHT_FOR_WORKER_SQL,
     COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
     COUNT_QUEUE_IN_FLIGHT_SOFT_SQL,
-    COUNT_RUNNING_FOR_WORKER_SQL,
-    COUNT_RUNNING_IN_QUEUE_SQL,
     DELETE_EXPIRED_HEARTBEATS_SQL,
     DELETE_EXPIRED_TASKS_SQL,
     DELETE_EXPIRED_WORKER_STATES_SQL,
@@ -50,10 +43,8 @@ from horsies.core.worker.worker import (
     _FINALIZE_STAGE_PHASE2,
     _is_retryable_db_error,
     _RequeueOutcome,
-    _RetryBackoff,
 )
 from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.models.resilience import WorkerResilienceConfig
 
 
 # ---------------------------------------------------------------------------
@@ -1780,6 +1771,48 @@ class TestRestartExecutor:
         await worker._restart_executor('broken pool')
 
         assert worker._executor is new_executor
+
+    @pytest.mark.asyncio
+    async def test_concurrent_restarts_share_one_replacement(self) -> None:
+        """Concurrent restart requests should not create orphaned replacement executors."""
+        worker = _make_worker()
+        old_executor = MagicMock()
+        worker._executor = old_executor
+        replacements = [MagicMock(name=f'executor-{idx}') for idx in range(12)]
+        worker._create_executor = MagicMock(side_effect=replacements)  # type: ignore[assignment]
+
+        await asyncio.gather(
+            *(
+                worker._restart_executor(
+                    f'broken pool {idx}',
+                    failed_executor=old_executor,
+                )
+                for idx in range(12)
+            )
+        )
+
+        old_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+        worker._create_executor.assert_called_once()
+        assert worker._executor is replacements[0]
+
+    @pytest.mark.asyncio
+    async def test_stale_restart_request_does_not_replace_current_executor(self) -> None:
+        """A late handler for an old broken executor should not restart its replacement."""
+        worker = _make_worker()
+        old_executor = MagicMock()
+        worker._executor = old_executor
+        first_replacement = MagicMock(name='first-replacement')
+        second_replacement = MagicMock(name='second-replacement')
+        worker._create_executor = MagicMock(  # type: ignore[assignment]
+            side_effect=[first_replacement, second_replacement]
+        )
+
+        await worker._restart_executor('first broken pool', failed_executor=old_executor)
+        await worker._restart_executor('late broken pool', failed_executor=old_executor)
+
+        old_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+        worker._create_executor.assert_called_once()
+        assert worker._executor is first_replacement
 
 
 @pytest.mark.unit
