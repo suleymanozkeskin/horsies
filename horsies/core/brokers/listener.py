@@ -53,7 +53,7 @@ class PostgresListener:
       - Multiple subscribers per channel via independent asyncio queues
       - Safe SQL with identifier quoting and parameter binding
       - Auto-reconnect with exponential backoff and re-LISTEN
-      - Proactive connection health monitoring
+      - Periodic connection health monitoring
 
     Architecture:
       - dispatcher_conn: Exclusively consumes notifications from conn.notifies()
@@ -107,12 +107,12 @@ class PostgresListener:
         # Background dispatcher task consuming conn.notifies() and distributing to subscriber queues.
         self._dispatcher_task: Optional[Task[None]] = None
 
-        # Health check task for proactive disconnection detection
+        # Health check task for periodic disconnection detection
         self._health_check_task: Optional[Task[None]] = None
 
-        # Event for file descriptor activity detection
-        self._fd_activity = asyncio.Event()
-        self._fd_registered = False
+        # Event set when the dispatcher receives notifications; health monitor
+        # also probes on timeout when no notifications arrive.
+        self._notification_activity = asyncio.Event()
 
         # A lock used to serialize LISTEN/UNLISTEN and subscription book-keeping.
         self._lock = asyncio.Lock()
@@ -202,8 +202,6 @@ class PostgresListener:
                         )
                         created_dispatcher = True
                         await self._start_listening(self._dispatcher_conn)
-                        # Register file descriptor for activity monitoring
-                        self._register_fd_monitoring()
 
             # Ensure command connection (for lightweight health/probe SQL)
             if self._command_conn is None or self._command_conn.closed:
@@ -226,7 +224,6 @@ class PostgresListener:
                         await self._command_conn.close()
                 self._command_conn = None
             if created_dispatcher:
-                self._unregister_fd_monitoring()
                 if (
                     self._dispatcher_conn is not None
                     and not self._dispatcher_conn.closed
@@ -312,56 +309,27 @@ class PostgresListener:
                 self._dispatcher(), name='pg-listener-dispatcher'
             )
 
-    def _register_fd_monitoring(self) -> None:
-        """
-        Register file descriptor monitoring for proactive disconnection detection.
-        """
-        if (
-            self._dispatcher_conn
-            and not self._dispatcher_conn.closed
-            and not self._fd_registered
-        ):
-            try:
-                loop = asyncio.get_running_loop()
-                loop.add_reader(self._dispatcher_conn.fileno(), self._fd_activity.set)
-                self._fd_registered = True
-            except (OSError, AttributeError):
-                # fileno() might not be available or connection might be closed
-                pass
-
-    def _unregister_fd_monitoring(self) -> None:
-        """
-        Unregister file descriptor monitoring.
-        """
-        if self._fd_registered and self._dispatcher_conn:
-            try:
-                loop = asyncio.get_running_loop()
-                loop.remove_reader(self._dispatcher_conn.fileno())
-            except (OSError, AttributeError, ValueError, OperationalError):
-                # Connection might be closed or already removed;
-                # OperationalError raised by fileno() when connection is dead.
-                pass
-            finally:
-                self._fd_registered = False
-
     async def _handle_health_disconnect(self) -> None:
         """Reset listener connections after health monitor detects a dead connection."""
-        self._unregister_fd_monitoring()
         await self._close_connections()
 
     async def _health_monitor(self) -> None:
         """
-        Proactive health monitoring using psycopg3 recommended pattern:
-        - Monitor file descriptor activity with timeout
-        - Perform health checks during idle periods
-        - Detect disconnections faster than waiting for operations to fail
+        Health monitoring for listener connections.
+
+        The dispatcher already owns psycopg's notification socket reader via
+        conn.notifies(); this monitor must not register another event-loop
+        reader on the same fd. Instead, it probes after notification activity
+        and periodically during idle periods.
         """
         while True:
             try:
-                # Wait up to 60 seconds for file descriptor activity
+                # Wait up to 60 seconds for notification activity
                 try:
-                    await asyncio.wait_for(self._fd_activity.wait(), timeout=60.0)
-                    self._fd_activity.clear()
+                    await asyncio.wait_for(
+                        self._notification_activity.wait(), timeout=60.0
+                    )
+                    self._notification_activity.clear()
 
                     # Activity detected - verify connection health
                     if self._command_conn and not self._command_conn.closed:
@@ -409,8 +377,8 @@ class PostgresListener:
                     # Activity means the connection is healthy; reset backoff.
                     backoff = 0.2
 
-                    # Signal file descriptor activity
-                    self._fd_activity.set()
+                    # Signal notification activity for the health monitor.
+                    self._notification_activity.set()
 
                     # Distribute to all subscriber queues for this channel
                     # Use list() snapshot to avoid mutation during iteration
@@ -427,18 +395,15 @@ class PostgresListener:
 
             except OperationalError:
                 # Likely a disconnect. Back off a bit, then force reconnect and re-LISTEN.
-                self._unregister_fd_monitoring()
                 await self._close_connections()
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 5.0)  # cap backoff
                 continue
             except asyncio.CancelledError:
                 # Graceful shutdown: stop dispatching and exit the task.
-                self._unregister_fd_monitoring()
                 raise
             except Exception:
                 # Unexpected issue: brief pause to avoid a hot loop, then try again.
-                self._unregister_fd_monitoring()
                 await self._close_connections()
                 await asyncio.sleep(0.5)
                 continue
@@ -662,7 +627,6 @@ class PostgresListener:
             and self._command_conn is None
             and self._health_check_task is None
             and self._dispatcher_task is None
-            and not self._fd_registered
             and not self._subs
             and not self._listen_channels
         ):
@@ -708,7 +672,6 @@ class PostgresListener:
                 await self._dispatcher_task
             self._dispatcher_task = None
 
-        self._unregister_fd_monitoring()
         await self._close_connections()
 
         # Release local bookkeeping to avoid process-lifetime growth.
