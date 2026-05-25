@@ -368,4 +368,5 @@ PAUSE_WORKFLOW_ON_ERROR_SQL = text("""
     UPDATE horsies_workflows
     SET status = 'PAUSED', error = :error, updated_at = NOW()
     WHERE id = :wf_id AND status = 'RUNNING'
+    RETURNING id
 """)
