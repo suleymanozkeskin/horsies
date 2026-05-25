@@ -198,6 +198,7 @@ class Worker:
         # Delay creation of the process pool until after preloading modules so that
         # any import/validation errors surface in the main process at startup.
         self._executor: Optional[ProcessPoolExecutor] = None
+        self._executor_restart_lock = asyncio.Lock()
         self._stop = asyncio.Event()
         self._service_tasks: set[asyncio.Task[Any]] = set()
         self._finalizer_tasks: set[asyncio.Task[Any]] = set()
@@ -253,25 +254,37 @@ class Worker:
             ),
         )
 
-    async def _restart_executor(self, reason: str) -> None:
+    async def _restart_executor(
+        self,
+        reason: str,
+        failed_executor: Optional[ProcessPoolExecutor] = None,
+    ) -> None:
         if self._stop.is_set():
             return
-        if self._executor is None:
-            self._executor = self._create_executor()
-            logger.warning(f'Executor created after restart request: {reason}')
-            return
+        async with self._executor_restart_lock:
+            if self._stop.is_set():
+                return
+            if failed_executor is not None and failed_executor is not self._executor:
+                logger.warning(
+                    f'Executor restart skipped; executor already replaced: {reason}'
+                )
+                return
+            if self._executor is None:
+                self._executor = self._create_executor()
+                logger.warning(f'Executor created after restart request: {reason}')
+                return
 
-        loop = asyncio.get_running_loop()
-        executor = self._executor
-        self._executor = None
-        logger.error(f'Restarting worker executor: {reason}')
-        try:
-            await loop.run_in_executor(
-                None, lambda: executor.shutdown(wait=True, cancel_futures=True)
-            )
-        except Exception as e:
-            logger.error(f'Error shutting down broken executor: {e}')
-        self._executor = self._create_executor()
+            loop = asyncio.get_running_loop()
+            executor = self._executor
+            self._executor = None
+            logger.error(f'Restarting worker executor: {reason}')
+            try:
+                await loop.run_in_executor(
+                    None, lambda: executor.shutdown(wait=True, cancel_futures=True)
+                )
+            except Exception as e:
+                logger.error(f'Error shutting down broken executor: {e}')
+            self._executor = self._create_executor()
 
     def _make_retry_backoff(self) -> _RetryBackoff:
         return _RetryBackoff(
@@ -961,7 +974,12 @@ class Worker:
             )
             return _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
 
-    async def _handle_broken_pool(self, task_id: str, exc: BaseException) -> None:
+    async def _handle_broken_pool(
+        self,
+        task_id: str,
+        exc: BaseException,
+        failed_executor: Optional[ProcessPoolExecutor] = None,
+    ) -> None:
         outcome = await self._requeue_claimed_task(
             task_id,
             f'Broken process pool: {exc}',
@@ -974,7 +992,10 @@ class Worker:
                 self.worker_instance_id,
                 exc,
             )
-        await self._restart_executor(f'Broken process pool: {exc}')
+        await self._restart_executor(
+            f'Broken process pool: {exc}',
+            failed_executor=failed_executor,
+        )
 
     async def _dispatch_one(
         self,
@@ -999,6 +1020,9 @@ class Worker:
                         self.worker_instance_id,
                     )
                 return
+        executor = self._executor
+        if executor is None:
+            return
         loop = asyncio.get_running_loop()
 
         # Get heartbeat interval from recovery config (milliseconds)
@@ -1012,7 +1036,7 @@ class Worker:
         database_url = to_psycopg_url(self.cfg.dsn)
         try:
             fut = loop.run_in_executor(
-                self._executor,
+                executor,
                 _run_task_entry,
                 task_name,
                 args_json,
@@ -1023,7 +1047,7 @@ class Worker:
                 runner_heartbeat_interval_ms,
             )
         except BrokenProcessPool as exc:
-            await self._handle_broken_pool(task_id, exc)
+            await self._handle_broken_pool(task_id, exc, executor)
             return
         except Exception as exc:
             outcome = await self._requeue_claimed_task(
@@ -1042,7 +1066,7 @@ class Worker:
 
         # When done, record the outcome
         self._spawn_background(
-            self._finalize_after(fut, task_id),
+            self._finalize_after(fut, task_id, executor),
             name=f'finalize-{task_id}',
             finalizer=True,
         )
@@ -1050,14 +1074,17 @@ class Worker:
     # ----- finalize (write back to DB + notify) -----
 
     async def _finalize_after(
-        self, fut: 'asyncio.Future[tuple[bool, str, Optional[str]]]', task_id: str
+        self,
+        fut: 'asyncio.Future[tuple[bool, str, Optional[str]]]',
+        task_id: str,
+        executor: Optional[ProcessPoolExecutor] = None,
     ) -> Result[None, _FinalizeError]:
         try:
             ok, result_json_str, failed_reason = await fut
         except asyncio.CancelledError:
             raise
         except BrokenProcessPool as exc:
-            await self._handle_broken_pool(task_id, exc)
+            await self._handle_broken_pool(task_id, exc, executor)
             return Err(
                 self._make_finalize_error(
                     task_id=task_id,
