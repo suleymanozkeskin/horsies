@@ -440,7 +440,7 @@ class Scheduler:
                     )
 
                     next_run = calculate_next_run(
-                        schedule.pattern, check_time, schedule.timezone,
+                        schedule.pattern, slot_time, schedule.timezone,
                     )
                     await self.state_manager.update_after_run(
                         schedule_name=schedule.name,
