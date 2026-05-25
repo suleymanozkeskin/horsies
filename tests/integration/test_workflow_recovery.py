@@ -225,42 +225,56 @@ class TestWorkflowRecovery:
         assert row[2] is not None  # error derived from failed task
         assert 'TEST_ERROR' in row[2]  # error contains task error
 
-    async def test_recover_failed_preserves_existing_error(
+    async def test_recover_failed_recomputes_first_failed_error(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """Recovery preserves existing error, does not overwrite."""
+        """Recovery finalization uses the first failed task error by index."""
         session, broker, app = setup
-        task_a = make_failing_task(app, 'recover_preserve_a')
+        task_a = make_failing_task(app, 'recover_first_error_a')
+        task_b = make_failing_task(app, 'recover_first_error_b')
 
         node_a = TaskNode(fn=task_a)
+        node_b = TaskNode(fn=task_b)
         spec = make_workflow_spec(
             broker=broker,
-            name='recover_preserve',
-            tasks=[node_a],
+            name='recover_first_error',
+            tasks=[node_a, node_b],
             on_error=OnError.FAIL,
         )
 
         handle = await start_ok(spec, broker)
 
-        # Simulate: task failed, workflow error already set (from earlier failure handling)
-        existing_error = '{"error_code": "ORIGINAL_ERROR", "message": "Original error"}'
+        # Simulate: both tasks failed, but workflow.error currently has the
+        # later failure from prior per-task failure handling.
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
-                SET status = 'FAILED', result = '{"err": {"error_code": "TASK_ERROR", "message": "Task failure"}}'
+                SET status = 'FAILED',
+                    result = '{"err": {"error_code": "FIRST_ERROR", "message": "First failure"}}'
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
             {'wf_id': handle.workflow_id},
         )
-        # Workflow still RUNNING but has existing error
+        await session.execute(
+            text("""
+                UPDATE horsies_workflow_tasks
+                SET status = 'FAILED',
+                    result = '{"err": {"error_code": "SECOND_ERROR", "message": "Second failure"}}'
+                WHERE workflow_id = :wf_id AND task_index = 1
+            """),
+            {'wf_id': handle.workflow_id},
+        )
         await session.execute(
             text("""
                 UPDATE horsies_workflows
                 SET status = 'RUNNING', completed_at = NULL, result = NULL, error = :error
                 WHERE id = :wf_id
             """),
-            {'wf_id': handle.workflow_id, 'error': existing_error},
+            {
+                'wf_id': handle.workflow_id,
+                'error': '{"error_code": "SECOND_ERROR", "message": "Second failure"}',
+            },
         )
         await session.commit()
 
@@ -270,7 +284,7 @@ class TestWorkflowRecovery:
 
         assert recovered == 1
 
-        # Workflow should be FAILED with original error preserved
+        # Workflow should be FAILED with the deterministic first failed task error.
         result = await session.execute(
             text('SELECT status, result, error FROM horsies_workflows WHERE id = :wf_id'),
             {'wf_id': handle.workflow_id},
@@ -278,9 +292,9 @@ class TestWorkflowRecovery:
         row = result.fetchone()
         assert row[0] == 'FAILED'
         assert row[1] is not None  # result persisted
-        assert row[2] is not None  # error preserved
-        assert 'ORIGINAL_ERROR' in row[2]  # original error kept
-        assert 'TASK_ERROR' not in row[2]  # task error not used
+        assert row[2] is not None
+        assert 'FIRST_ERROR' in row[2]
+        assert 'SECOND_ERROR' not in row[2]
 
     async def test_recover_paused_not_touched(
         self,
