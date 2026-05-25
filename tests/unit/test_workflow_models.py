@@ -769,7 +769,7 @@ class TestWorkflowSpecValidation:
         assert deps[1] is spec.tasks[1]
 
     def test_collect_dag_errors_robust_to_duplicate_waits_for(self) -> None:
-        """_collect_dag_errors handles duplicate refs without relying on _unique_node_refs.
+        """_collect_dag_errors handles duplicate refs without relying on unique_node_refs.
 
         Constructs a valid spec, then bypasses the _isolate_inputs dedupe invariant
         by re-injecting duplicate refs post-construction. Proves the Kahn's-algorithm
@@ -783,7 +783,7 @@ class TestWorkflowSpecValidation:
 
         spec = WorkflowSpec(name='post_construction_dupe', tasks=[node_a, node_b])
 
-        # Bypass _freeze_graph + _unique_node_refs to expose the algorithm
+        # Bypass _freeze_graph + unique_node_refs to expose the algorithm
         # to duplicates directly.
         copied_b = spec.tasks[1]
         object.__setattr__(
