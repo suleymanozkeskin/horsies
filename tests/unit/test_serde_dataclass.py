@@ -24,7 +24,7 @@ class TestDataclassSerializationShape:
     """Verify to_jsonable produces correct tagged dicts for dataclass types."""
 
     def test_simple_dataclass_produces_tagged_dict(self, tmp_path: Path) -> None:
-        """Serialized dataclass must have __dataclass__, module, qualname, data keys."""
+        """Serialized dataclass must have __h_dataclass__, module, qualname, data keys."""
         pkg = tmp_path / 'serdeshape'
         pkg.mkdir()
         (pkg / '__init__.py').write_text('')
@@ -47,8 +47,8 @@ class Simple:
             result = to_jsonable(mod.Simple(x=42, name='hello')).unwrap()
 
             assert isinstance(result, dict)
-            assert set(result.keys()) == {'__dataclass__', 'module', 'qualname', 'data'}
-            assert result['__dataclass__'] is True
+            assert set(result.keys()) == {'__h_dataclass__', 'module', 'qualname', 'data'}
+            assert result['__h_dataclass__'] is True
             assert result['qualname'] == 'Simple'
             assert isinstance(result['data'], dict)
             assert result['data'] == {'x': 42, 'name': 'hello'}
@@ -56,7 +56,7 @@ class Simple:
             sys.path[:] = original_path
 
     def test_nested_dataclass_preserves_inner_metadata(self, tmp_path: Path) -> None:
-        """Inner dataclass fields also carry __dataclass__ tags."""
+        """Inner dataclass fields also carry __h_dataclass__ tags."""
         pkg = tmp_path / 'serdenested_shape'
         pkg.mkdir()
         (pkg / '__init__.py').write_text('')
@@ -92,17 +92,17 @@ class OuterDC:
             result = to_jsonable(outer).unwrap()
 
             assert isinstance(result, dict)
-            assert result['__dataclass__'] is True
+            assert result['__h_dataclass__'] is True
 
             # Inner dataclass field must also be tagged
             inner_dc = result['data']['dc_field']
             assert isinstance(inner_dc, dict)
-            assert inner_dc['__dataclass__'] is True
+            assert inner_dc['__h_dataclass__'] is True
 
             # Inner pydantic field must carry pydantic tag
             inner_model = result['data']['model_field']
             assert isinstance(inner_model, dict)
-            assert inner_model['__pydantic_model__'] is True
+            assert inner_model['__h_pydantic__'] is True
         finally:
             sys.path[:] = original_path
 
@@ -325,7 +325,7 @@ class Container:
 
 
 # ---------------------------------------------------------------------------
-# Rehydration: error paths in rehydrate_value for __dataclass__ dicts
+# Rehydration: error paths in rehydrate_value for __h_dataclass__ dicts
 # ---------------------------------------------------------------------------
 
 
@@ -336,7 +336,7 @@ class TestDataclassRehydrationErrors:
     def test_rehydrate_missing_module_key_dataclass(self) -> None:
         """Dataclass payload without 'module' key returns Err with clear message."""
         raw = {
-            '__dataclass__': True,
+            '__h_dataclass__': True,
             'qualname': 'SomeClass',
             'data': {},
         }
@@ -347,7 +347,7 @@ class TestDataclassRehydrationErrors:
     def test_rehydrate_missing_qualname_key_dataclass(self) -> None:
         """Dataclass payload without 'qualname' key returns Err with clear message."""
         raw = {
-            '__dataclass__': True,
+            '__h_dataclass__': True,
             'module': 'some.module',
             'data': {},
         }
@@ -358,7 +358,7 @@ class TestDataclassRehydrationErrors:
     def test_rehydrate_non_string_module_dataclass(self) -> None:
         """Dataclass payload with non-string 'module' returns Err."""
         raw = {
-            '__dataclass__': True,
+            '__h_dataclass__': True,
             'module': 123,
             'qualname': 'SomeClass',
             'data': {},
@@ -370,7 +370,7 @@ class TestDataclassRehydrationErrors:
     def test_rehydrate_missing_module_key_pydantic(self) -> None:
         """Pydantic payload without 'module' key returns Err with clear message."""
         raw = {
-            '__pydantic_model__': True,
+            '__h_pydantic__': True,
             'qualname': 'SomeModel',
             'data': {},
         }
@@ -381,7 +381,7 @@ class TestDataclassRehydrationErrors:
     def test_rehydrate_non_string_qualname_pydantic(self) -> None:
         """Pydantic payload with non-string 'qualname' returns Err."""
         raw = {
-            '__pydantic_model__': True,
+            '__h_pydantic__': True,
             'module': 'some.module',
             'qualname': None,
             'data': {},
@@ -393,7 +393,7 @@ class TestDataclassRehydrationErrors:
     def test_rehydrate_import_error(self) -> None:
         """Bad module name returns Err(SerializationError) matching 'Could not import'."""
         raw = {
-            '__dataclass__': True,
+            '__h_dataclass__': True,
             'module': 'nonexistent.module.xyz',
             'qualname': 'SomeClass',
             'data': {},
@@ -405,7 +405,7 @@ class TestDataclassRehydrationErrors:
     def test_rehydrate_not_a_dataclass(self) -> None:
         """Module exists but name is not a dataclass returns Err(SerializationError)."""
         raw = {
-            '__dataclass__': True,
+            '__h_dataclass__': True,
             'module': 'os.path',
             'qualname': 'join',
             'data': {},
@@ -437,7 +437,7 @@ class Payload:
             module_name = type(mod.Payload(x=1)).__module__
 
             raw = {
-                '__dataclass__': True,
+                '__h_dataclass__': True,
                 'module': module_name,
                 'qualname': 'Payload',
                 'data': [1, 2, 3],
@@ -509,7 +509,7 @@ class Strict:
             module_name = type(mod.Strict(x=1)).__module__
 
             raw = {
-                '__dataclass__': True,
+                '__h_dataclass__': True,
                 'module': module_name,
                 'qualname': 'Strict',
                 'data': {'x': 'not_an_int'},

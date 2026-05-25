@@ -68,7 +68,7 @@ def _extract_taskresult_value(raw: Any, default: int = 0) -> int:
     """Extract int value from a raw build_with param that may be a wrapped TaskResult."""
     if isinstance(raw, dict):
         raw_dict: dict[str, Any] = dict(raw)
-        if raw_dict.get('__horsies_taskresult__'):
+        if raw_dict.get('__h_taskresult_envelope__'):
             data_str = raw_dict.get('data')
             if isinstance(data_str, str):
                 tr = task_result_from_json(loads_json(data_str).unwrap()).unwrap()
@@ -116,7 +116,7 @@ class ParamChildWorkflow(WorkflowDefinition[int]):
         raw_value: Any = params_map.get('value', 0)
         if isinstance(raw_value, dict):
             raw_dict: dict[str, Any] = dict(raw_value)
-            if raw_dict.get('__horsies_taskresult__'):
+            if raw_dict.get('__h_taskresult_envelope__'):
                 data_str = raw_dict.get('data')
                 if isinstance(data_str, str):
                     tr = task_result_from_json(loads_json(data_str).unwrap()).unwrap()

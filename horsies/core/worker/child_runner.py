@@ -36,6 +36,17 @@ from horsies.core.models.tasks import (
 from horsies.core.types.result import is_err
 
 
+# Pre-namespace transport keys that the engine used to inject directly into
+# task kwargs.  Renamed to the ``__h_*`` namespace; the old names are now an
+# explicit fail-closed signal rather than silently honoured (which would
+# preserve the smuggling vector through the queue).
+_LEGACY_TRANSPORT_KEYS: frozenset[str] = frozenset({
+    '__horsies_workflow_ctx__',
+    '__horsies_workflow_meta__',
+    '__horsies_taskresult__',
+})
+
+
 def _serialization_error_response(
     task_name: str,
     error: SerializationError,
@@ -732,12 +743,30 @@ def _run_task_entry(
             return _serialization_error_response(task_name, kwargs_result.err_value)
         kwargs = kwargs_result.ok_value
 
+        # Reject legacy transport keys (pre-namespace horsies versions).  We
+        # check explicitly so the failure mode is a clean
+        # LEGACY_SERDE_TAG_UNSUPPORTED rather than "unexpected kwarg" surfacing
+        # downstream as a confusing TypeError or silent pass-through to
+        # ``**kwargs``.
+        legacy_transport_keys = _LEGACY_TRANSPORT_KEYS & kwargs.keys()
+        if legacy_transport_keys:
+            return _serialization_error_response(
+                task_name,
+                SerializationError(
+                    f'Legacy transport key(s) {sorted(legacy_transport_keys)!r} '
+                    f'encountered: payload was serialized by a pre-namespace '
+                    f'horsies version. Drain queues and finish in-flight '
+                    f'workflows before upgrading.',
+                    code=OperationalErrorCode.LEGACY_SERDE_TAG_UNSUPPORTED,
+                ),
+            )
+
         # Deserialize injected TaskResults from workflow args_from
         for key, value in list(kwargs.items()):
             if (
                 isinstance(value, dict)
-                and '__horsies_taskresult__' in value
-                and value['__horsies_taskresult__']
+                and '__h_taskresult_envelope__' in value
+                and value['__h_taskresult_envelope__']
             ):
                 task_result_dict = cast(dict[str, Any], value)
                 data_str = task_result_dict.get('data')
@@ -755,8 +784,8 @@ def _run_task_entry(
                     kwargs[key] = tr_result.ok_value
 
         # Handle workflow injection payloads (workflow_ctx / workflow_meta).
-        workflow_ctx_data = kwargs.pop('__horsies_workflow_ctx__', None)
-        workflow_meta_data = kwargs.pop('__horsies_workflow_meta__', None)
+        workflow_ctx_data = kwargs.pop('__h_workflow_ctx__', None)
+        workflow_meta_data = kwargs.pop('__h_workflow_meta__', None)
         if workflow_ctx_data is not None or workflow_meta_data is not None:
             import inspect
 

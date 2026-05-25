@@ -187,7 +187,7 @@ async def test_invalid_task_result_structure_returns_err(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Valid JSON but missing __task_result__ marker → Err with 'deserialize failed'."""
+    """Valid JSON but missing __h_task_result__ marker → Err with 'deserialize failed'."""
     task_id = await _insert_task(
         session, status='COMPLETED', result='{"random": 1}',
     )

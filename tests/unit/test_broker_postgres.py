@@ -827,7 +827,7 @@ class TestGetResultAsync:
 
         row = _make_task_row(
             status=TaskStatus.COMPLETED,
-            result='{"__task_result__":true,"ok":42,"err":null}',
+            result='{"__h_task_result__":true,"ok":42,"err":null}',
         )
         session.get = AsyncMock(return_value=row)
         broker.session_factory = MagicMock(return_value=session)
@@ -846,8 +846,8 @@ class TestGetResultAsync:
         session.__aexit__ = AsyncMock(return_value=None)
 
         result_json = (
-            '{"__task_result__":true,"ok":null,"err":'
-            '{"__task_error__":true,"error_code":{"__builtin_task_code__":"UNHANDLED_EXCEPTION"},"message":"boom","data":null}}'
+            '{"__h_task_result__":true,"ok":null,"err":'
+            '{"__h_task_error__":true,"error_code":{"__builtin_task_code__":"UNHANDLED_EXCEPTION"},"message":"boom","data":null}}'
         )
         row = _make_task_row(status=TaskStatus.FAILED, result=result_json)
         session.get = AsyncMock(return_value=row)
@@ -923,7 +923,7 @@ class TestGetResultAsync:
         row_running = _make_task_row(status=TaskStatus.RUNNING)
         row_completed = _make_task_row(
             status=TaskStatus.COMPLETED,
-            result='{"__task_result__":true,"ok":"done","err":null}',
+            result='{"__h_task_result__":true,"ok":"done","err":null}',
         )
         # First get() is the initial quick-path check, second is first polling pass.
         session.get = AsyncMock(side_effect=[row_running, row_completed])
@@ -1738,7 +1738,7 @@ class TestGetTaskInfoAsync:
         """include_result=True should add deserialized result to Ok(TaskInfo)."""
         broker = _make_broker()
         now = datetime.now(timezone.utc)
-        result_json = '{"__task_result__":true,"ok":"hello","err":null}'
+        result_json = '{"__h_task_result__":true,"ok":"hello","err":null}'
         # 18 base + 1 result column
         row = (
             'task-abc',
@@ -1851,7 +1851,7 @@ class TestGetTaskInfoAsync:
         """Both include flags should add both columns to Ok(TaskInfo)."""
         broker = _make_broker()
         now = datetime.now(timezone.utc)
-        result_json = '{"__task_result__":true,"ok":null,"err":{"__task_error__":true,"error_code":{"__builtin_task_code__":"TASK_EXCEPTION"},"message":"fail","data":null}}'
+        result_json = '{"__h_task_result__":true,"ok":null,"err":{"__h_task_error__":true,"error_code":{"__builtin_task_code__":"TASK_EXCEPTION"},"message":"fail","data":null}}'
         # 18 base + 1 result + 1 failed_reason
         row = (
             'task-abc',

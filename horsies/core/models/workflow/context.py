@@ -77,10 +77,10 @@ class SubWorkflowSummary(Generic[OkT_co]):
             return all(isinstance(k, str) for k in cast(dict[Any, Any], value))
 
         # Normalize possible serde dataclass envelope:
-        # {"__dataclass__": true, "module": ..., "qualname": ..., "data": {...}}
+        # {"__h_dataclass__": true, "module": ..., "qualname": ..., "data": {...}}
         payload: dict[str, Any] = data
         raw_inner = data.get('data')
-        if data.get('__dataclass__') and _is_str_key_dict(raw_inner):
+        if data.get('__h_dataclass__') and _is_str_key_dict(raw_inner):
             payload = raw_inner
 
         def _as_int(value: Any, default: int = 0) -> int:

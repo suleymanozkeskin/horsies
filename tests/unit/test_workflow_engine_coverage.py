@@ -344,21 +344,12 @@ class TestEnqueueWorkflowTask:
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
 
-        # First dumps_json call succeeds (for kwargs parsing),
-        # but the final one for kwargs serialization fails
-        original_dumps = engine.dumps_json
-        call_idx = 0
-
-        def _dumps_side_effect(value: Any) -> Any:
-            nonlocal call_idx
-            call_idx += 1
-            # The kwargs serialization is the first dumps_json call
-            # in enqueue_workflow_task (for the final kwargs)
-            return Err(Exception('kwargs ser fail'))
-
+        # Workflow-task kwargs serialization goes through the
+        # horsies-internal variant (which allows __h_* control keys).
+        # Patch that to fail and confirm the engine handles it.
         with patch(
-            'horsies.core.workflows.engine.dumps_json',
-            side_effect=_dumps_side_effect,
+            'horsies.core.workflows.engine.dumps_json_horsies_internal',
+            side_effect=lambda value: Err(Exception('kwargs ser fail')),
         ):
             result = await enqueue_workflow_task(session, 'wf-1', 0, {})
         assert result is None
@@ -719,14 +710,15 @@ class TestEnqueueSubworkflowTask:
         mock_wf_def.name = 'TestWF'
         mock_wf_def._original_build_with = mock_wf_def.build_with
 
-        # dumps_json returns Err for the child kwargs serialization
-        original_dumps = engine.dumps_json
+        # Child sub kwargs serialization goes through the horsies-internal
+        # variant (which allows __h_* control keys propagated from
+        # build_with).  Patch that to fail on the child kwargs.
+        original_internal = engine.dumps_json_horsies_internal
 
-        def _dumps_failing(value: Any) -> Any:
-            # Fail on child sub kwargs (dict with 'k')
+        def _internal_failing(value: Any) -> Any:
             if isinstance(value, dict) and 'k' in value:
                 return Err(Exception('child kwargs ser fail'))
-            return original_dumps(value)
+            return original_internal(value)
 
         with patch(
             'horsies.core.workflows.registry.get_subworkflow_node',
@@ -739,8 +731,8 @@ class TestEnqueueSubworkflowTask:
         ), patch(
             'horsies.core.workflows.engine.guard_no_positional_args',
         ), patch(
-            'horsies.core.workflows.engine.dumps_json',
-            side_effect=_dumps_failing,
+            'horsies.core.workflows.engine.dumps_json_horsies_internal',
+            side_effect=_internal_failing,
         ), patch(
             'horsies.core.workflows.engine._fail_enqueued_task',
             new=AsyncMock(),
@@ -935,11 +927,13 @@ class TestEnqueueSubworkflowTask:
 
         original_dumps = engine.dumps_json
 
-        def _dumps_failing(value: Any) -> Any:
-            # Fail on child task kwargs
+        # Child task kwargs go through the horsies-internal serializer.
+        original_internal = engine.dumps_json_horsies_internal
+
+        def _internal_failing(value: Any) -> Any:
             if isinstance(value, dict) and 'data' in value:
                 return Err(Exception('child task kwargs ser fail'))
-            return original_dumps(value)
+            return original_internal(value)
 
         with patch(
             'horsies.core.workflows.registry.get_subworkflow_node',
@@ -952,8 +946,8 @@ class TestEnqueueSubworkflowTask:
         ), patch(
             'horsies.core.workflows.engine.guard_no_positional_args',
         ), patch(
-            'horsies.core.workflows.engine.dumps_json',
-            side_effect=_dumps_failing,
+            'horsies.core.workflows.engine.dumps_json_horsies_internal',
+            side_effect=_internal_failing,
         ), patch(
             'horsies.core.workflows.engine._fail_enqueued_task',
             new=AsyncMock(),

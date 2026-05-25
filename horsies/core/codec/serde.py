@@ -18,10 +18,12 @@ import traceback as tb
 from pydantic import BaseModel, ValidationError
 import dataclasses
 from horsies.core.models.tasks import (
+    BuiltInTaskCode,
+    ContractCode,
+    OperationalErrorCode,
     TaskOptions,
     TaskResult,
     TaskError,
-    ContractCode,
 )
 from horsies.core.types.result import Ok, Err, Result, is_err
 from importlib import import_module
@@ -39,11 +41,80 @@ type SerdeResult[T] = Result[T, SerializationError]
 
 
 class SerializationError(Exception):
-    """
-    Raised when a value cannot be serialized to or deserialized from JSON.
+    """Raised when a value cannot be serialized to or deserialized from JSON.
+
+    Carries an optional ``code`` so callers can dispatch on the origin of
+    the failure (e.g. legacy tag, reserved key, unknown tag) rather than
+    matching free-text messages.
     """
 
-    pass
+    def __init__(
+        self,
+        message: str,
+        code: BuiltInTaskCode | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code: BuiltInTaskCode | None = code
+
+
+# ---------------------------------------------------------------------------
+# Reserved serde tags / namespace
+# ---------------------------------------------------------------------------
+
+# All internal serde envelopes live under a single ``__h_*`` namespace so the
+# rejection rule for user data is a one-line prefix check.  ``__builtin_task_code__``
+# is intentionally outside this namespace — it is a Pydantic field-level enum
+# discriminator on ``TaskError`` and is read by ``TaskError.field_validator``,
+# not by ``rehydrate_value``.
+_INTERNAL_NAMESPACE_PREFIX: str = '__h_'
+
+_TAG_PYDANTIC: str = '__h_pydantic__'
+_TAG_DATACLASS: str = '__h_dataclass__'
+_TAG_TASK_RESULT: str = '__h_task_result__'
+_TAG_TASK_ERROR: str = '__h_task_error__'
+_TAG_DATETIME: str = '__h_datetime__'
+_TAG_DATE: str = '__h_date__'
+_TAG_TIME: str = '__h_time__'
+
+_KNOWN_INTERNAL_TAGS: frozenset[str] = frozenset({
+    _TAG_PYDANTIC,
+    _TAG_DATACLASS,
+    _TAG_TASK_RESULT,
+    _TAG_TASK_ERROR,
+    _TAG_DATETIME,
+    _TAG_DATE,
+    _TAG_TIME,
+})
+
+# Transport keys are also under the ``__h_*`` namespace but are consumed
+# by ``child_runner`` AFTER serde rehydration completes.  They must pass
+# through ``rehydrate_value`` as opaque dict keys without triggering the
+# unknown-tag fail-closed branch.
+_TRANSPORT_TAGS: frozenset[str] = frozenset({
+    '__h_taskresult_envelope__',
+    '__h_workflow_ctx__',
+    '__h_workflow_meta__',
+})
+
+_RECOGNIZED_INTERNAL_TAGS: frozenset[str] = _KNOWN_INTERNAL_TAGS | _TRANSPORT_TAGS
+
+# Pre-namespace tag names that previously triggered typed rehydration.  Any
+# of these appearing in a deserialized payload after the migration means the
+# payload was produced by an older horsies version; rehydration fails closed.
+_LEGACY_SERDE_TAGS: frozenset[str] = frozenset({
+    '__pydantic_model__',
+    '__dataclass__',
+    '__task_result__',
+    '__task_error__',
+    '__datetime__',
+    '__date__',
+    '__time__',
+})
+
+# ``__builtin_task_code__`` is a Pydantic discriminator on TaskError.error_code;
+# it is not a serde envelope.  We still reject it as a user dict key in plain
+# user mappings so callers don't accidentally smuggle a confusing shape.
+_RESERVED_PYDANTIC_INTERNAL_KEY: str = '__builtin_task_code__'
 
 
 # ---------------------------------------------------------------------------
@@ -60,11 +131,63 @@ def _exception_to_json(ex: BaseException) -> Dict[str, Json]:
     }
 
 
+def _scan_for_reserved_keys(value: Json) -> SerdeResult[None]:
+    """Recursively reject any dict key matching the ``__h_*`` namespace.
+
+    Invoked on serialization output that bypasses ``to_jsonable``'s Mapping
+    branch — i.e. on ``model_dump`` results and on ``TaskError`` dumped data.
+    Without this scan, a user model with a ``dict[str, Any]`` field could
+    smuggle a forged ``__h_pydantic__`` envelope through Pydantic's serializer
+    and cause the consumer to dispatch on it.
+
+    The scan does NOT reject ``__builtin_task_code__`` because TaskError's
+    own ``model_dump`` legitimately emits it for ``error_code`` discrimination.
+    """
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key.startswith(_INTERNAL_NAMESPACE_PREFIX):
+                return Err(SerializationError(
+                    f'User data contains reserved key {key!r}: the '
+                    f'{_INTERNAL_NAMESPACE_PREFIX!r} prefix is reserved for '
+                    f'horsies internal serde tags.',
+                    code=ContractCode.RESERVED_KEY_IN_USER_DATA,
+                ))
+            sub = _scan_for_reserved_keys(item)
+            if is_err(sub):
+                return sub
+        return Ok(None)
+    if isinstance(value, list):
+        for item in value:
+            sub = _scan_for_reserved_keys(item)
+            if is_err(sub):
+                return sub
+    return Ok(None)
+
+
+def _validate_user_mapping_key(key: str) -> SerdeResult[None]:
+    """Reject user dict keys that collide with horsies-internal names."""
+    if key.startswith(_INTERNAL_NAMESPACE_PREFIX):
+        return Err(SerializationError(
+            f'User dict key {key!r} uses the reserved '
+            f'{_INTERNAL_NAMESPACE_PREFIX!r} prefix.',
+            code=ContractCode.RESERVED_KEY_IN_USER_DATA,
+        ))
+    if key == _RESERVED_PYDANTIC_INTERNAL_KEY:
+        return Err(SerializationError(
+            f'User dict key {key!r} is a reserved Pydantic discriminator '
+            f'used by TaskError.error_code.',
+            code=ContractCode.RESERVED_KEY_IN_USER_DATA,
+        ))
+    return Ok(None)
+
+
 def _task_error_to_json(err: TaskError) -> SerdeResult[Dict[str, Json]]:
     """Convert a TaskError to a JSON-serializable dictionary.
 
     Handles the exception field manually to avoid pydantic trying to
-    serialize BaseException subclasses.
+    serialize BaseException subclasses.  Scans the dumped output for the
+    ``__h_*`` namespace so a TaskError carrying a user-controlled ``data``
+    field cannot smuggle a forged serde envelope.
     """
     ex = err.exception
     try:
@@ -73,6 +196,10 @@ def _task_error_to_json(err: TaskError) -> SerdeResult[Dict[str, Json]]:
         return Err(SerializationError(
             f'Failed to serialize TaskError: {exc}',
         ))
+
+    scan = _scan_for_reserved_keys(cast(Json, data))
+    if is_err(scan):
+        return Err(scan.err_value)
 
     if isinstance(ex, BaseException):
         ex_json: Optional[Dict[str, Json]] = _exception_to_json(ex)
@@ -83,9 +210,12 @@ def _task_error_to_json(err: TaskError) -> SerdeResult[Dict[str, Json]]:
         ex_json = {'type': type(ex).__name__, 'message': str(ex)}
 
     if ex_json is not None:
+        ex_scan = _scan_for_reserved_keys(cast(Json, ex_json))
+        if is_err(ex_scan):
+            return Err(ex_scan.err_value)
         data['exception'] = ex_json
 
-    return Ok({'__task_error__': True, **data})
+    return Ok({_TAG_TASK_ERROR: True, **data})
 
 
 def _is_task_result(value: Any) -> TypeGuard[TaskResult[Any, TaskError]]:
@@ -96,6 +226,10 @@ def _is_task_result(value: Any) -> TypeGuard[TaskResult[Any, TaskError]]:
 # ---------------------------------------------------------------------------
 # Caches
 # ---------------------------------------------------------------------------
+#
+# These caches sit alongside ``import_module`` in the deserialization path
+# below.  They are replaced by the class registry in the follow-up commit
+# that rewrites ``rehydrate_value`` to registry-only lookup.
 
 _CLASS_CACHE: Dict[
     str, Type[BaseModel]
@@ -153,8 +287,25 @@ def _qualified_dataclass_path(instance: Any) -> SerdeResult[tuple[str, str]]:
 def to_jsonable(value: Any) -> SerdeResult[Json]:
     """Convert a Python value to a JSON-serializable form.
 
-    Every recursive step propagates Result — a failure at any nesting
-    depth surfaces as Err to the caller.
+    Strict path: the Mapping branch rejects user dict keys matching the
+    ``__h_*`` namespace or ``__builtin_task_code__``.  Every recursive step
+    propagates Result — a failure at any nesting depth surfaces as Err to
+    the caller.
+    """
+    return _to_jsonable_impl(value, allow_internal_keys=False)
+
+
+def _to_jsonable_impl(
+    value: Any,
+    *,
+    allow_internal_keys: bool,
+) -> SerdeResult[Json]:
+    """Shared implementation for the strict and engine-internal serializers.
+
+    ``allow_internal_keys`` only affects the Mapping branch's user-key
+    validation.  All other branches (BaseModel, dataclass, TaskError,
+    TaskResult) still scan their ``model_dump`` output for ``__h_*``
+    keys because that data originates from user-defined types.
     """
     # Primitives — always safe
     if value is None or isinstance(value, (bool, int, float, str)):
@@ -162,19 +313,21 @@ def to_jsonable(value: Any) -> SerdeResult[Json]:
 
     # datetime.datetime is a subclass of datetime.date — check datetime first.
     if isinstance(value, dt.datetime):
-        return Ok({'__datetime__': True, 'value': value.isoformat()})
+        return Ok({_TAG_DATETIME: True, 'value': value.isoformat()})
 
     if isinstance(value, dt.date):
-        return Ok({'__date__': True, 'value': value.isoformat()})
+        return Ok({_TAG_DATE: True, 'value': value.isoformat()})
 
     if isinstance(value, dt.time):
-        return Ok({'__time__': True, 'value': value.isoformat()})
+        return Ok({_TAG_TIME: True, 'value': value.isoformat()})
 
     # Is value a `TaskResult`?
     if _is_task_result(value):
         ok_json: Json = None
         if value.is_ok():
-            ok_result = to_jsonable(value.ok)
+            ok_result = _to_jsonable_impl(
+                value.ok, allow_internal_keys=allow_internal_keys,
+            )
             if is_err(ok_result):
                 return ok_result
             ok_json = ok_result.ok_value
@@ -187,9 +340,12 @@ def to_jsonable(value: Any) -> SerdeResult[Json]:
                 err_json = task_err_result.ok_value
             elif isinstance(value.err, BaseModel):
                 err_json = value.err.model_dump()  # if someone used a model for error
+                err_scan = _scan_for_reserved_keys(cast(Json, err_json))
+                if is_err(err_scan):
+                    return Err(err_scan.err_value)
             else:
                 err_json = {'message': str(value.err)}
-        return Ok({'__task_result__': True, 'ok': ok_json, 'err': err_json})
+        return Ok({_TAG_TASK_RESULT: True, 'ok': ok_json, 'err': err_json})
 
     # TaskError (standalone)
     if isinstance(value, TaskError):
@@ -201,11 +357,15 @@ def to_jsonable(value: Any) -> SerdeResult[Json]:
         if is_err(path_result):
             return path_result
         module, qualname = path_result.ok_value
+        dumped = value.model_dump(mode='json')
+        scan = _scan_for_reserved_keys(cast(Json, dumped))
+        if is_err(scan):
+            return Err(scan.err_value)
         return Ok({
-            '__pydantic_model__': True,
+            _TAG_PYDANTIC: True,
             'module': module,
             'qualname': qualname,
-            'data': value.model_dump(mode='json'),
+            'data': dumped,
         })
 
     # Dataclass
@@ -217,12 +377,14 @@ def to_jsonable(value: Any) -> SerdeResult[Json]:
         field_data: Dict[str, Json] = {}
         for field in dataclasses.fields(value):
             field_value = getattr(value, field.name)
-            field_result = to_jsonable(field_value)
+            field_result = _to_jsonable_impl(
+                field_value, allow_internal_keys=allow_internal_keys,
+            )
             if is_err(field_result):
                 return field_result
             field_data[field.name] = field_result.ok_value
         return Ok({
-            '__dataclass__': True,
+            _TAG_DATACLASS: True,
             'module': module,
             'qualname': qualname,
             'data': field_data,
@@ -235,12 +397,18 @@ def to_jsonable(value: Any) -> SerdeResult[Json]:
         original_keys: Dict[str, object] = {}
         for key, item in mapping.items():
             str_key = str(key)
+            if not allow_internal_keys:
+                key_check = _validate_user_mapping_key(str_key)
+                if is_err(key_check):
+                    return Err(key_check.err_value)
             if str_key in result_dict:
                 return Err(SerializationError(
                     f"Mapping key collision: {key!r} and {original_keys[str_key]!r} "
                     f"both resolve to '{str_key}' after stringification",
                 ))
-            item_result = to_jsonable(item)
+            item_result = _to_jsonable_impl(
+                item, allow_internal_keys=allow_internal_keys,
+            )
             if is_err(item_result):
                 return item_result
             original_keys[str_key] = key
@@ -252,7 +420,9 @@ def to_jsonable(value: Any) -> SerdeResult[Json]:
         seq = cast(Sequence[object], value)
         result_list: List[Json] = []
         for item in seq:
-            item_result = to_jsonable(item)
+            item_result = _to_jsonable_impl(
+                item, allow_internal_keys=allow_internal_keys,
+            )
             if is_err(item_result):
                 return item_result
             result_list.append(item_result.ok_value)
@@ -264,8 +434,44 @@ def to_jsonable(value: Any) -> SerdeResult[Json]:
 
 
 def dumps_json(value: Any) -> SerdeResult[str]:
-    """Serialize a Python value to a JSON string."""
+    """Serialize a Python value to a JSON string.
+
+    Strict path: rejects user dict keys matching ``^__h_`` and
+    ``__builtin_task_code__``.  This is what user-facing serialization
+    (``args_to_json``, ``kwargs_to_json``, ``TaskNode.kwargs`` round-trip
+    validation) flows through.
+    """
     jsonable_result = to_jsonable(value)
+    if is_err(jsonable_result):
+        return jsonable_result
+    try:
+        return Ok(json.dumps(
+            jsonable_result.ok_value,
+            ensure_ascii=False,
+            separators=(',', ':'),
+            allow_nan=False,
+        ))
+    except (ValueError, TypeError) as exc:
+        return Err(SerializationError(f'json.dumps failed: {exc}'))
+
+
+def dumps_json_horsies_internal(value: Any) -> SerdeResult[str]:
+    """Serialize a value containing horsies-internal ``__h_*`` keys.
+
+    Engine-only.  Bypasses the user-key validation that ``dumps_json``
+    applies, so engine-injected transport keys
+    (``__h_workflow_ctx__``, ``__h_workflow_meta__``,
+    ``__h_taskresult_envelope__``) round-trip without being rejected as
+    user smuggling.
+
+    **The caller is responsible for ensuring no untrusted user-supplied
+    dict carries a ``__h_*`` key.**  In the engine's case the user-supplied
+    portion (``TaskNode.kwargs``) has already been validated through the
+    strict path at workflow construction (``WorkflowSpec`` validation
+    round-trips kwargs through ``dumps_json``), so the only fresh
+    ``__h_*`` keys at this point are the ones the engine itself added.
+    """
+    jsonable_result = _to_jsonable_impl(value, allow_internal_keys=True)
     if is_err(jsonable_result):
         return jsonable_result
     try:
@@ -325,14 +531,43 @@ def loads_json(s: Optional[str]) -> SerdeResult[Json]:
         return Err(SerializationError(f'JSON parse failed: {exc}'))
 
 
+def _legacy_tag_in_dict(value: dict[str, Json]) -> str | None:
+    """Return the first legacy serde tag present in this dict, if any."""
+    for tag in _LEGACY_SERDE_TAGS:
+        if value.get(tag):
+            return tag
+    return None
+
+
+def _unknown_internal_tag_in_dict(value: dict[str, Json]) -> str | None:
+    """Return the first unknown ``__h_*`` key present in this dict, if any.
+
+    Recognises both serde tags (dispatched here) and transport tags
+    (consumed downstream by ``child_runner``).
+    """
+    for key in value:
+        if (
+            key.startswith(_INTERNAL_NAMESPACE_PREFIX)
+            and key not in _RECOGNIZED_INTERNAL_TAGS
+        ):
+            return key
+    return None
+
+
 def rehydrate_value(value: Json) -> SerdeResult[Any]:
     """Recursively rehydrate a JSON value, restoring typed objects.
 
-    Every recursive step propagates Result. Fixes the ValueError leak
-    from datetime.fromisoformat that existed in the old raising version.
+    Branch order (each subsequent branch only fires when the previous
+    branches don't match):
+
+    1. Known internal tags (Pydantic, dataclass, datetime/date/time, TaskResult)
+    2. Legacy tag detection → ``LEGACY_SERDE_TAG_UNSUPPORTED``
+    3. Unknown ``__h_*`` tag detection → ``UNKNOWN_SERDE_TAG``
+    4. Generic dict / list recursion
+    5. Primitive passthrough
     """
     # Pydantic model rehydration
-    if isinstance(value, dict) and value.get('__pydantic_model__'):
+    if isinstance(value, dict) and value.get(_TAG_PYDANTIC):
         module_name = value.get('module')
         qualname = value.get('qualname')
         if not isinstance(module_name, str) or not isinstance(qualname, str):
@@ -354,13 +589,14 @@ def rehydrate_value(value: Json) -> SerdeResult[Any]:
                         f'Did you move the file without leaving a re-export shim? Error: {e}',
                     ))
 
-                cls = mod
+                resolved_cls: Any = mod
                 for part in qualname.split('.'):
-                    cls = getattr(cls, part)
+                    resolved_cls = getattr(resolved_cls, part)
 
-                if not (isinstance(cls, type) and issubclass(cls, BaseModel)):
+                if not (isinstance(resolved_cls, type) and issubclass(resolved_cls, BaseModel)):
                     return Err(SerializationError(f'{cache_key} is not a BaseModel'))
 
+                cls = resolved_cls
                 _CLASS_CACHE[cache_key] = cls
 
             return Ok(cls.model_validate(data))
@@ -372,7 +608,7 @@ def rehydrate_value(value: Json) -> SerdeResult[Any]:
             return Err(SerializationError(f'Failed to rehydrate {cache_key}: {e}'))
 
     # Dataclass rehydration
-    if isinstance(value, dict) and value.get('__dataclass__'):
+    if isinstance(value, dict) and value.get(_TAG_DATACLASS):
         module_name = value.get('module')
         qualname = value.get('qualname')
         if not isinstance(module_name, str) or not isinstance(qualname, str):
@@ -442,29 +678,51 @@ def rehydrate_value(value: Json) -> SerdeResult[Any]:
             return Err(SerializationError(f'Failed to rehydrate dataclass {cache_key}: {e}'))
 
     # Datetime rehydration (datetime before date — subclass ordering)
-    # Bug fix: fromisoformat can raise ValueError, which previously leaked
-    # as a raw ValueError instead of SerializationError.
-    if isinstance(value, dict) and value.get('__datetime__'):
+    if isinstance(value, dict) and value.get(_TAG_DATETIME):
         try:
             return Ok(dt.datetime.fromisoformat(cast(str, value['value'])))
         except (ValueError, KeyError) as exc:
             return Err(SerializationError(f'datetime rehydration failed: {exc}'))
 
-    if isinstance(value, dict) and value.get('__date__'):
+    if isinstance(value, dict) and value.get(_TAG_DATE):
         try:
             return Ok(dt.date.fromisoformat(cast(str, value['value'])))
         except (ValueError, KeyError) as exc:
             return Err(SerializationError(f'date rehydration failed: {exc}'))
 
-    if isinstance(value, dict) and value.get('__time__'):
+    if isinstance(value, dict) and value.get(_TAG_TIME):
         try:
             return Ok(dt.time.fromisoformat(cast(str, value['value'])))
         except (ValueError, KeyError) as exc:
             return Err(SerializationError(f'time rehydration failed: {exc}'))
 
     # Nested TaskResult (mutual recursion with task_result_from_json)
-    if isinstance(value, dict) and value.get('__task_result__'):
+    if isinstance(value, dict) and value.get(_TAG_TASK_RESULT):
         return task_result_from_json(value)
+
+    # Legacy tag detection — fail closed so old typed payloads don't silently
+    # downgrade to plain dicts (which would let user code receive an untyped
+    # dict where it expects a model instance).
+    if isinstance(value, dict):
+        legacy = _legacy_tag_in_dict(value)
+        if legacy is not None:
+            return Err(SerializationError(
+                f'Legacy serde tag {legacy!r} encountered: payload was '
+                f'serialized by a pre-namespace horsies version. Drain '
+                f'queues and finish in-flight workflows before upgrading.',
+                code=OperationalErrorCode.LEGACY_SERDE_TAG_UNSUPPORTED,
+            ))
+
+        # Unknown __h_* tag — forward-compat fail-closed.  A newer producer
+        # may emit a tag this consumer doesn't recognise; treat as fatal rather
+        # than silently passing the dict through.
+        unknown = _unknown_internal_tag_in_dict(value)
+        if unknown is not None:
+            return Err(SerializationError(
+                f'Unknown internal serde tag {unknown!r}: this consumer is '
+                f'older than the producer that wrote this payload.',
+                code=OperationalErrorCode.UNKNOWN_SERDE_TAG,
+            ))
 
     # Recursively rehydrate nested dicts
     if isinstance(value, dict):
@@ -532,8 +790,16 @@ def task_result_from_json(j: Json) -> SerdeResult[TaskResult[Any, TaskError]]:
     if the user's return type changed between serialization and deserialization,
     the task result should be an error, not a crash.
     """
-    if not isinstance(j, dict) or '__task_result__' not in j:
-        # Accept legacy "ok"/"err" shape
+    if not isinstance(j, dict) or _TAG_TASK_RESULT not in j:
+        # Legacy ``__task_result__`` envelope — fail closed.
+        if isinstance(j, dict) and '__task_result__' in j:
+            return Err(SerializationError(
+                f'Legacy serde tag {"__task_result__"!r} encountered: '
+                f'payload was serialized by a pre-namespace horsies version. '
+                f'Drain queues and finish in-flight workflows before upgrading.',
+                code=OperationalErrorCode.LEGACY_SERDE_TAG_UNSUPPORTED,
+            ))
+        # Accept bare ``ok``/``err`` shape (engine-side construction paths).
         if isinstance(j, dict) and ('ok' in j or 'err' in j):
             payload = j
         else:
@@ -546,8 +812,15 @@ def task_result_from_json(j: Json) -> SerdeResult[TaskResult[Any, TaskError]]:
 
     # Task returned an error
     if err is not None:
-        if isinstance(err, dict) and err.get('__task_error__'):
-            err = {k: v for k, v in err.items() if k != '__task_error__'}
+        if isinstance(err, dict) and err.get(_TAG_TASK_ERROR):
+            err = {k: v for k, v in err.items() if k != _TAG_TASK_ERROR}
+        elif isinstance(err, dict) and err.get('__task_error__'):
+            return Err(SerializationError(
+                f'Legacy serde tag {"__task_error__"!r} encountered: '
+                f'payload was serialized by a pre-namespace horsies version. '
+                f'Drain queues and finish in-flight workflows before upgrading.',
+                code=OperationalErrorCode.LEGACY_SERDE_TAG_UNSUPPORTED,
+            ))
         try:
             task_err = TaskError.model_validate(err)
         except (ValidationError, Exception) as exc:
@@ -578,9 +851,11 @@ def task_result_from_json(j: Json) -> SerdeResult[TaskResult[Any, TaskError]]:
 # ---------------------------------------------------------------------------
 
 # Last-resort JSON when serializing an error payload itself fails.
-# Hardcoded to avoid infinite recursion in error handlers.
+# Hardcoded to avoid infinite recursion in error handlers.  Uses the new
+# ``__h_*`` namespace; ``__builtin_task_code__`` stays outside the namespace
+# because it is a TaskError-internal discriminator.
 FALLBACK_ERROR_JSON = (
-    '{"__task_result__":true,"ok":null,"err":'
+    '{"' + _TAG_TASK_RESULT + '":true,"ok":null,"err":'
     '{"error_code":{"__builtin_task_code__":"WORKER_SERIALIZATION_ERROR"},'
     '"message":"secondary serialization failure","data":null}}'
 )

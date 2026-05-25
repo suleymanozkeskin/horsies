@@ -137,7 +137,7 @@ class TestWorkflowCtx:
 
     def _build_ctx_from_kwargs(self, kwargs: dict[str, Any]) -> WorkflowContext:
         """Reconstruct WorkflowContext from injected kwargs."""
-        ctx_data_raw = kwargs.get('__horsies_workflow_ctx__')
+        ctx_data_raw = kwargs.get('__h_workflow_ctx__')
         if not _is_str_keyed_dict(ctx_data_raw):
             raise AssertionError('workflow_ctx data missing or invalid')
 
@@ -233,7 +233,7 @@ class TestWorkflowCtx:
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
-        assert '__horsies_workflow_ctx__' not in kwargs
+        assert '__h_workflow_ctx__' not in kwargs
 
     async def test_workflow_meta_injected_without_ctx_from(
         self,
@@ -264,7 +264,7 @@ class TestWorkflowCtx:
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
-        meta_raw = kwargs.get('__horsies_workflow_meta__')
+        meta_raw = kwargs.get('__h_workflow_meta__')
         assert isinstance(meta_raw, dict)
         assert meta_raw['workflow_id'] == handle.workflow_id
         assert meta_raw['task_index'] == 1
@@ -863,7 +863,7 @@ class TestWorkflowCtx:
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
-        assert '__horsies_workflow_ctx__' not in kwargs
+        assert '__h_workflow_ctx__' not in kwargs
 
     async def test_worker_skips_ctx_when_function_lacks_param(
         self,
@@ -880,7 +880,7 @@ class TestWorkflowCtx:
         # Build a workflow where node_b has workflow_ctx_from but the function
         # does NOT declare workflow_ctx. Normally WorkflowSpec validation rejects
         # this (HRS-010), so we bypass validation by manually injecting
-        # __horsies_workflow_ctx__ into the task's kwargs at the DB level.
+        # __h_workflow_ctx__ into the task's kwargs at the DB level.
         node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b: TaskNode[int] = TaskNode(
             fn=no_ctx_task,
@@ -894,7 +894,7 @@ class TestWorkflowCtx:
         handle = await start_ok(spec, broker)
         await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=5))
 
-        # Fetch task B's row and manually inject __horsies_workflow_ctx__ into kwargs
+        # Fetch task B's row and manually inject __h_workflow_ctx__ into kwargs
         task_row_result = await session.execute(
             text("""
                 SELECT t.id, t.task_name, t.args, t.kwargs
@@ -916,7 +916,7 @@ class TestWorkflowCtx:
         # Inject ctx data into kwargs to simulate the engine path
         original_kwargs = loads_json(kwargs_json).unwrap()
         assert isinstance(original_kwargs, dict)
-        original_kwargs['__horsies_workflow_ctx__'] = {
+        original_kwargs['__h_workflow_ctx__'] = {
             'workflow_id': handle.workflow_id,
             'task_index': 1,
             'task_name': 'skip_ctx_b',

@@ -726,7 +726,7 @@ class TestWorkflowHandleSubWorkflowFields:
             {'child_id': child_wf_id},
         )
         summary_json = (
-            '{"__dataclass__": true,'
+            '{"__h_dataclass__": true,'
             ' "module": "horsies.core.models.workflow.context",'
             ' "qualname": "SubWorkflowSummary",'
             ' "data": {"status": "COMPLETED", "output": null,'
@@ -1817,7 +1817,7 @@ class TestListenerFallbackContract:
         task_id = enqueue_r.ok_value
 
         # Complete the task directly in DB
-        result_json = '{"__task_result__":true,"ok":42,"err":null}'
+        result_json = '{"__h_task_result__":true,"ok":42,"err":null}'
         await session.execute(
             text("""
                 UPDATE horsies_tasks

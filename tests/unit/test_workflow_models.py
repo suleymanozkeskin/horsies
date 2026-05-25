@@ -1916,7 +1916,7 @@ class TestWorkflowContext:
 
         dumped = ctx.model_dump(mode='json')
         assert dumped['results_by_id']['node-0'] == {
-            '__task_result__': True,
+            '__h_task_result__': True,
             'ok': 42,
             'err': None,
         }
@@ -2810,7 +2810,7 @@ class TestWorkflowContextSummary:
         )
 
         dumped = ctx.model_dump(mode='json')
-        assert dumped['summaries_by_id']['sub-node']['__dataclass__'] is True
+        assert dumped['summaries_by_id']['sub-node']['__h_dataclass__'] is True
         assert (
             dumped['summaries_by_id']['sub-node']['data']['status']
             == WorkflowStatus.COMPLETED

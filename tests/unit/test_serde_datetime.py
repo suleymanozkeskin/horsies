@@ -26,13 +26,13 @@ class TestDatetimeSerialization:
     def test_naive_datetime(self) -> None:
         value = dt.datetime(2025, 6, 15, 10, 30, 45)
         result = to_jsonable(value).unwrap()
-        assert result == {'__datetime__': True, 'value': '2025-06-15T10:30:45'}
+        assert result == {'__h_datetime__': True, 'value': '2025-06-15T10:30:45'}
 
     def test_utc_datetime(self) -> None:
         value = dt.datetime(2025, 6, 15, 10, 30, 45, tzinfo=dt.timezone.utc)
         result = to_jsonable(value).unwrap()
         assert result == {
-            '__datetime__': True,
+            '__h_datetime__': True,
             'value': '2025-06-15T10:30:45+00:00',
         }
 
@@ -41,7 +41,7 @@ class TestDatetimeSerialization:
         value = dt.datetime(2025, 1, 1, 12, 0, 0, tzinfo=tz)
         result = to_jsonable(value).unwrap()
         assert result == {
-            '__datetime__': True,
+            '__h_datetime__': True,
             'value': '2025-01-01T12:00:00+05:30',
         }
 
@@ -50,7 +50,7 @@ class TestDatetimeSerialization:
         value = dt.datetime(2025, 12, 31, 23, 59, 59, tzinfo=tz)
         result = to_jsonable(value).unwrap()
         assert result == {
-            '__datetime__': True,
+            '__h_datetime__': True,
             'value': '2025-12-31T23:59:59-08:00',
         }
 
@@ -58,46 +58,46 @@ class TestDatetimeSerialization:
         value = dt.datetime(2025, 6, 15, 10, 30, 45, 123456)
         result = to_jsonable(value).unwrap()
         assert result == {
-            '__datetime__': True,
+            '__h_datetime__': True,
             'value': '2025-06-15T10:30:45.123456',
         }
 
     def test_date(self) -> None:
         value = dt.date(2025, 6, 15)
         result = to_jsonable(value).unwrap()
-        assert result == {'__date__': True, 'value': '2025-06-15'}
+        assert result == {'__h_date__': True, 'value': '2025-06-15'}
 
     def test_naive_time(self) -> None:
         value = dt.time(14, 30, 0)
         result = to_jsonable(value).unwrap()
-        assert result == {'__time__': True, 'value': '14:30:00'}
+        assert result == {'__h_time__': True, 'value': '14:30:00'}
 
     def test_tz_aware_time(self) -> None:
         value = dt.time(14, 30, 0, tzinfo=dt.timezone.utc)
         result = to_jsonable(value).unwrap()
-        assert result == {'__time__': True, 'value': '14:30:00+00:00'}
+        assert result == {'__h_time__': True, 'value': '14:30:00+00:00'}
 
     def test_time_with_microseconds(self) -> None:
         value = dt.time(14, 30, 0, 123456)
         result = to_jsonable(value).unwrap()
-        assert result == {'__time__': True, 'value': '14:30:00.123456'}
+        assert result == {'__h_time__': True, 'value': '14:30:00.123456'}
 
 
 @pytest.mark.unit
 class TestDatetimeSubclassOrdering:
-    """datetime is a subclass of date — ensure it serializes as __datetime__."""
+    """datetime is a subclass of date — ensure it serializes as __h_datetime__."""
 
     def test_datetime_not_tagged_as_date(self) -> None:
         value = dt.datetime(2025, 6, 15, 10, 0, 0)
         result = to_jsonable(value).unwrap()
-        assert '__datetime__' in result  # type: ignore[operator]
-        assert '__date__' not in result  # type: ignore[operator]
+        assert '__h_datetime__' in result  # type: ignore[operator]
+        assert '__h_date__' not in result  # type: ignore[operator]
 
     def test_date_tagged_as_date(self) -> None:
         value = dt.date(2025, 6, 15)
         result = to_jsonable(value).unwrap()
-        assert '__date__' in result  # type: ignore[operator]
-        assert '__datetime__' not in result  # type: ignore[operator]
+        assert '__h_date__' in result  # type: ignore[operator]
+        assert '__h_datetime__' not in result  # type: ignore[operator]
 
 
 # ---------------------------------------------------------------------------
@@ -297,9 +297,9 @@ class TestDatetimeRehydrationErrors:
     @pytest.mark.parametrize(
         'tagged_dict',
         [
-            pytest.param({'__datetime__': True, 'value': 'not-a-date'}, id='datetime'),
-            pytest.param({'__date__': True, 'value': 'not-a-date'}, id='date'),
-            pytest.param({'__time__': True, 'value': 'not-a-time'}, id='time'),
+            pytest.param({'__h_datetime__': True, 'value': 'not-a-date'}, id='datetime'),
+            pytest.param({'__h_date__': True, 'value': 'not-a-date'}, id='date'),
+            pytest.param({'__h_time__': True, 'value': 'not-a-time'}, id='time'),
         ],
     )
     def test_rehydrate_rejects_invalid_iso_string(
@@ -313,9 +313,9 @@ class TestDatetimeRehydrationErrors:
     @pytest.mark.parametrize(
         'tagged_dict',
         [
-            pytest.param({'__datetime__': True}, id='datetime'),
-            pytest.param({'__date__': True}, id='date'),
-            pytest.param({'__time__': True}, id='time'),
+            pytest.param({'__h_datetime__': True}, id='datetime'),
+            pytest.param({'__h_date__': True}, id='date'),
+            pytest.param({'__h_time__': True}, id='time'),
         ],
     )
     def test_rehydrate_rejects_missing_value_key(

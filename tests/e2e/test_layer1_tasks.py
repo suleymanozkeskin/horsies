@@ -848,7 +848,7 @@ async def test_malformed_pydantic_args(broker: PostgresBroker) -> None:
     task_id = str(uuid4())
     # Pydantic marker with data that fails model_validate (age is not coercible to int)
     corrupted_args = json.dumps([{
-        '__pydantic_model__': True,
+        '__h_pydantic__': True,
         'module': 'tests.e2e.tasks.basic',
         'qualname': 'UserInput',
         'data': {'name': 'Alice', 'age': 'not_a_number'},
@@ -1114,9 +1114,9 @@ async def test_pydantic_hydration_error(broker: PostgresBroker) -> None:
     task_id = str(uuid4())
     # Simulate a completed task whose result contains an unresolvable Pydantic model
     corrupted_result = json.dumps({
-        '__task_result__': True,
+        '__h_task_result__': True,
         'ok': {
-            '__pydantic_model__': True,
+            '__h_pydantic__': True,
             'module': 'nonexistent.module.that.does.not.exist',
             'qualname': 'FakeModel',
             'data': {'field': 'value'},

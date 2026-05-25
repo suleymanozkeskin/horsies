@@ -73,7 +73,7 @@ class KwargsChildWorkflow(WorkflowDefinition[int]):
         raw_value: Any = params.get('value', 0)
         if isinstance(raw_value, dict):
             raw_dict: dict[str, Any] = dict(raw_value)
-            if raw_dict.get('__horsies_taskresult__'):
+            if raw_dict.get('__h_taskresult_envelope__'):
                 data_str = raw_dict.get('data')
                 if isinstance(data_str, str):
                     from horsies.core.codec.serde import task_result_from_json
