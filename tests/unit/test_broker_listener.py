@@ -1,7 +1,7 @@
 """Tests for PostgresListener (horsies/core/brokers/listener.py).
 
 Strategy: mock psycopg.AsyncConnection.connect to avoid real PostgreSQL.
-Test internal state transitions, dispatcher distribution, fd monitoring,
+Test internal state transitions, dispatcher distribution, health monitoring,
 subscribe/unsubscribe flows, and graceful shutdown.
 """
 
@@ -94,11 +94,11 @@ class TestPostgresListenerInit:
         assert listener._dispatcher_task is None
         assert listener._health_check_task is None
 
-    def test_fd_not_registered_initially(self) -> None:
-        """File descriptor monitoring should not be active initially."""
+    def test_notification_activity_not_set_initially(self) -> None:
+        """Notification activity should not be signaled initially."""
         listener = _make_listener()
 
-        assert listener._fd_registered is False
+        assert listener._notification_activity.is_set() is False
 
     def test_stores_database_url(self) -> None:
         """Should store the provided database URL."""
@@ -205,22 +205,40 @@ class TestEnsureConnections:
         listener = _make_listener()
         dispatcher_conn = _make_mock_conn()
 
-        with (
-            patch(
-                'psycopg.AsyncConnection.connect',
-                new_callable=AsyncMock,
-                side_effect=[dispatcher_conn, OperationalError('command down')],
-            ),
-            patch.object(listener, '_unregister_fd_monitoring') as mock_unregister,
+        with patch(
+            'psycopg.AsyncConnection.connect',
+            new_callable=AsyncMock,
+            side_effect=[dispatcher_conn, OperationalError('command down')],
         ):
             result = await listener._ensure_connections()
 
         assert result.is_err()
         assert result.err_value.code == BrokerErrorCode.LISTENER_START_FAILED
         dispatcher_conn.close.assert_awaited_once()
-        mock_unregister.assert_called_once()
         assert listener._dispatcher_conn is None
         assert listener._command_conn is None
+
+    @pytest.mark.asyncio
+    async def test_does_not_register_dispatcher_fd_reader(self) -> None:
+        """The dispatcher fd belongs to psycopg's notifies() iterator, not the health monitor."""
+        listener = _make_listener()
+        dispatcher_conn = _make_mock_conn(fileno=7)
+        command_conn = _make_mock_conn(fileno=8)
+        mock_loop = MagicMock()
+
+        with (
+            patch(
+                'psycopg.AsyncConnection.connect',
+                new_callable=AsyncMock,
+                side_effect=[dispatcher_conn, command_conn],
+            ),
+            patch('asyncio.get_running_loop', return_value=mock_loop),
+        ):
+            result = await listener._ensure_connections()
+
+        assert result.is_ok()
+        dispatcher_conn.fileno.assert_not_called()
+        mock_loop.add_reader.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_concurrent_ensure_connections_does_not_leak_dispatcher_conn(
@@ -368,109 +386,6 @@ class TestCloseConnections:
 
 
 # ---------------------------------------------------------------------------
-# TestFdMonitoring
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestFdMonitoring:
-    """Tests for _register_fd_monitoring and _unregister_fd_monitoring."""
-
-    def test_register_sets_flag_on_success(self) -> None:
-        """Successful registration should set _fd_registered to True."""
-        listener = _make_listener()
-        mock_conn = _make_mock_conn(closed=False, fileno=7)
-        listener._dispatcher_conn = mock_conn
-
-        mock_loop = MagicMock()
-        with patch('asyncio.get_running_loop', return_value=mock_loop):
-            listener._register_fd_monitoring()
-
-        assert listener._fd_registered is True
-        mock_loop.add_reader.assert_called_once()
-
-    def test_register_noop_on_os_error(self) -> None:
-        """OSError from fileno() should leave _fd_registered False."""
-        listener = _make_listener()
-        mock_conn = _make_mock_conn(closed=False)
-        mock_conn.fileno = MagicMock(side_effect=OSError('bad fd'))
-        listener._dispatcher_conn = mock_conn
-
-        mock_loop = MagicMock()
-        with patch('asyncio.get_running_loop', return_value=mock_loop):
-            listener._register_fd_monitoring()
-
-        assert listener._fd_registered is False
-
-    def test_register_noop_when_no_conn(self) -> None:
-        """Should do nothing when dispatcher conn is None."""
-        listener = _make_listener()
-        listener._dispatcher_conn = None
-
-        listener._register_fd_monitoring()
-
-        assert listener._fd_registered is False
-
-    def test_register_noop_when_conn_closed(self) -> None:
-        """Should do nothing when dispatcher conn is closed."""
-        listener = _make_listener()
-        listener._dispatcher_conn = _make_mock_conn(closed=True)
-
-        listener._register_fd_monitoring()
-
-        assert listener._fd_registered is False
-
-    def test_register_noop_when_already_registered(self) -> None:
-        """Should not re-register if already registered."""
-        listener = _make_listener()
-        mock_conn = _make_mock_conn(closed=False)
-        listener._dispatcher_conn = mock_conn
-        listener._fd_registered = True
-
-        mock_loop = MagicMock()
-        with patch('asyncio.get_running_loop', return_value=mock_loop):
-            listener._register_fd_monitoring()
-
-        mock_loop.add_reader.assert_not_called()
-
-    def test_unregister_clears_flag(self) -> None:
-        """Successful unregistration should clear _fd_registered."""
-        listener = _make_listener()
-        listener._fd_registered = True
-        listener._dispatcher_conn = _make_mock_conn(closed=False, fileno=7)
-
-        mock_loop = MagicMock()
-        with patch('asyncio.get_running_loop', return_value=mock_loop):
-            listener._unregister_fd_monitoring()
-
-        assert listener._fd_registered is False
-        mock_loop.remove_reader.assert_called_once()
-
-    def test_unregister_clears_flag_on_error(self) -> None:
-        """Should still clear _fd_registered even when remove_reader raises."""
-        listener = _make_listener()
-        listener._fd_registered = True
-        listener._dispatcher_conn = _make_mock_conn(closed=False)
-
-        mock_loop = MagicMock()
-        mock_loop.remove_reader = MagicMock(side_effect=OSError('bad fd'))
-        with patch('asyncio.get_running_loop', return_value=mock_loop):
-            listener._unregister_fd_monitoring()
-
-        assert listener._fd_registered is False
-
-    def test_unregister_noop_when_not_registered(self) -> None:
-        """Should do nothing when _fd_registered is False."""
-        listener = _make_listener()
-        listener._fd_registered = False
-
-        # Should not raise or try to remove reader
-        listener._unregister_fd_monitoring()
-
-        assert listener._fd_registered is False
-
-
-# ---------------------------------------------------------------------------
 # TestHealthMonitor
 # ---------------------------------------------------------------------------
 
@@ -488,27 +403,24 @@ class TestHealthMonitor:
         cmd_conn.execute = AsyncMock(side_effect=OperationalError('dead'))
         listener._dispatcher_conn = disp_conn
         listener._command_conn = cmd_conn
-        listener._fd_registered = True
-        listener._fd_activity.set()
+        listener._notification_activity.set()
 
-        with patch.object(listener, '_unregister_fd_monitoring') as mock_unregister:
-            task = asyncio.create_task(listener._health_monitor())
-            try:
-                for _ in range(50):
-                    if (
-                        listener._dispatcher_conn is None
-                        and listener._command_conn is None
-                    ):
-                        break
-                    await asyncio.sleep(0)
-                else:
-                    pytest.fail('health monitor did not reset connections in time')
-            finally:
-                task.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await task
+        task = asyncio.create_task(listener._health_monitor())
+        try:
+            for _ in range(50):
+                if (
+                    listener._dispatcher_conn is None
+                    and listener._command_conn is None
+                ):
+                    break
+                await asyncio.sleep(0)
+            else:
+                pytest.fail('health monitor did not reset connections in time')
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
-        mock_unregister.assert_called_once()
         disp_conn.close.assert_awaited_once()
         cmd_conn.close.assert_awaited_once()
         assert listener._dispatcher_conn is None
@@ -599,10 +511,9 @@ class TestDispatcher:
         assert any('queue full' in rec.message for rec in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_cancelled_error_unregisters_fd_and_re_raises(self) -> None:
-        """CancelledError should unregister fd monitoring and propagate."""
+    async def test_cancelled_error_re_raises(self) -> None:
+        """CancelledError should propagate so dispatcher shutdown remains observable."""
         listener = _make_listener()
-        listener._fd_registered = True
 
         mock_conn = _make_mock_conn()
 
@@ -614,14 +525,8 @@ class TestDispatcher:
         mock_conn.notifies.return_value = _cancel_immediately()
         listener._dispatcher_conn = mock_conn
 
-        mock_loop = MagicMock()
-        with (
-            patch('asyncio.get_running_loop', return_value=mock_loop),
-            pytest.raises(asyncio.CancelledError),
-        ):
+        with pytest.raises(asyncio.CancelledError):
             await listener._dispatcher()
-
-        assert listener._fd_registered is False
 
 
 # ---------------------------------------------------------------------------
@@ -977,7 +882,7 @@ class TestUnsubscribe:
         listener._listen_channels.add(channel)
 
         health_task = asyncio.create_task(listener._health_monitor())
-        listener._fd_activity.set()
+        listener._notification_activity.set()
         await asyncio.wait_for(started.wait(), timeout=1.0)
 
         await asyncio.wait_for(listener.unsubscribe(channel, queue), timeout=1.0)
@@ -1062,20 +967,6 @@ class TestClose:
 
         mock_bind.assert_not_called()
         assert listener._owner_loop is None
-
-    @pytest.mark.asyncio
-    async def test_unregisters_fd_monitoring(self) -> None:
-        """close() should unregister fd monitoring."""
-        listener = _make_listener()
-        listener._fd_registered = True
-        listener._dispatcher_conn = _make_mock_conn()
-        listener._command_conn = _make_mock_conn()
-
-        mock_loop = MagicMock()
-        with patch('asyncio.get_running_loop', return_value=mock_loop):
-            await listener.close()
-
-        assert listener._fd_registered is False
 
     @pytest.mark.asyncio
     async def test_cross_loop_close_hands_off_to_owner_loop(self) -> None:
