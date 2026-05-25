@@ -19,20 +19,24 @@ from typing import (
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
-from horsies.core.logging import get_logger
-from horsies.core.utils.loop_runner import get_shared_runner, LoopRunnerError
-from horsies.core.utils.db import is_retryable_connection_error
-from horsies.core.codec.serde import loads_json, task_result_from_json
-from horsies.core.models.tasks import (
-    TaskResult,
-    TaskError,
-    BuiltInTaskCode,
-    OperationalErrorCode,
-    ContractCode,
-    RetrievalCode,
-    OutcomeCode,
+from horsies.core.codec.serde import (
+    loads_json,
+    task_error_from_json,
+    task_result_from_json,
 )
-from horsies.core.types.result import Ok, Err, is_err
+from horsies.core.logging import get_logger
+from horsies.core.models.tasks import (
+    BuiltInTaskCode,
+    ContractCode,
+    OperationalErrorCode,
+    OutcomeCode,
+    RetrievalCode,
+    TaskError,
+    TaskResult,
+)
+from horsies.core.types.result import Err, Ok, is_err
+from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.utils.loop_runner import LoopRunnerError, get_shared_runner
 
 from .context import SubWorkflowSummary
 from .enums import OkT, OutT, WorkflowStatus, WorkflowTaskStatus
@@ -45,6 +49,7 @@ _T = TypeVar('_T')
 
 if TYPE_CHECKING:
     from horsies.core.brokers.postgres import PostgresBroker
+
     from .nodes import TaskNode
 
 
@@ -483,24 +488,27 @@ class WorkflowHandle(Generic[OutT]):
                         )
                     error_data = loads_r.ok_value
                     if isinstance(error_data, dict):
-                        try:
-                            validated_err = TaskError.model_validate(error_data)
-                        except Exception as exc:
+                        err_result = task_error_from_json(error_data)
+                        if is_err(err_result):
                             logger.warning(
                                 'Workflow %s error payload validation failed: %s',
                                 self.workflow_id,
-                                exc,
+                                err_result.err_value,
                             )
                             return cast(
                                 'TaskResult[OutT, TaskError]',
                                 TaskResult(
                                     err=TaskError(
                                         error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                                        message=f'Workflow error payload validation failed: {exc}',
+                                        message=(
+                                            'Workflow error payload validation failed: '
+                                            f'{err_result.err_value}'
+                                        ),
                                         data={'workflow_id': self.workflow_id},
                                     ),
                                 ),
                             )
+                        validated_err = err_result.ok_value
                         return cast(
                             'TaskResult[OutT, TaskError]',
                             TaskResult(err=validated_err),

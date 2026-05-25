@@ -196,6 +196,14 @@ TaskResult(err=TaskError(...))
 # → {"__task_result__": true, "ok": null, "err": {"__task_error__": true, ...}}
 ```
 
+Built-in `TaskError` subclasses include a `__task_error_type__` discriminator
+so persisted errors rehydrate to the documented concrete type. For example,
+`SubWorkflowError` round-trips as `SubWorkflowError`, not plain `TaskError`.
+Only known library-owned subclasses are resolved from this tag.
+User-defined `TaskError` subclasses are not imported from persisted payloads;
+store custom fields under `TaskError.data` when they need to survive a
+database round-trip.
+
 ## Error Codes
 
 | Code | Cause |

@@ -15,7 +15,7 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.serde import dumps_json, loads_json, task_result_from_json
 from horsies.core.errors import WorkflowValidationError
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.tasks import SubWorkflowError, TaskResult, TaskError
 from horsies.core.models.workflow import (
     TaskNode,
     SubWorkflowNode,
@@ -474,7 +474,11 @@ class TestSubworkflowIntegration:
         assert tr is not None
         assert tr.is_err()
         assert tr.err is not None
+        assert isinstance(tr.err, SubWorkflowError)
         assert tr.err.error_code == 'SUBWORKFLOW_FAILED'
+        assert tr.err.sub_workflow_id == child_id
+        assert tr.err.sub_workflow_summary.status == WorkflowStatus.FAILED
+        assert tr.err.sub_workflow_summary.failed_tasks >= 1
 
         # sub_workflow_summary column should be populated
         summary_row = await session.execute(
@@ -493,6 +497,12 @@ class TestSubworkflowIntegration:
         assert summary.status == WorkflowStatus.FAILED
         assert summary.failed_tasks >= 1
         assert summary.error_summary is not None
+
+        workflow_result = await handle.get_async(timeout_ms=1000)
+        assert workflow_result.is_err()
+        assert isinstance(workflow_result.err, SubWorkflowError)
+        assert workflow_result.err.sub_workflow_id == child_id
+        assert workflow_result.err.sub_workflow_summary.status == WorkflowStatus.FAILED
 
     @pytest.mark.parametrize(
         'child_status',

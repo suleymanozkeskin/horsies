@@ -1,31 +1,35 @@
 # app/core/codec/serde.py
 from __future__ import annotations
+
+import dataclasses
+import datetime as dt
+import json
+import traceback as tb
+from importlib import import_module
 from typing import (
     Any,
     Dict,
     List,
-    Optional,
-    Type,
-    Union,
     Mapping,
+    Optional,
     Sequence,
+    Type,
     TypeGuard,
+    Union,
     cast,
 )
-import datetime as dt
-import json
-import traceback as tb
+
 from pydantic import BaseModel, ValidationError
-import dataclasses
+
+from horsies.core.logging import get_logger
 from horsies.core.models.tasks import (
+    ContractCode,
+    SubWorkflowError,
+    TaskError,
     TaskOptions,
     TaskResult,
-    TaskError,
-    ContractCode,
 )
-from horsies.core.types.result import Ok, Err, Result, is_err
-from importlib import import_module
-from horsies.core.logging import get_logger
+from horsies.core.types.result import Err, Ok, Result, is_err
 
 logger = get_logger('serde')
 
@@ -36,6 +40,14 @@ Union type for JSON-serializable values.
 """
 
 type SerdeResult[T] = Result[T, SerializationError]
+
+# Stable wire tags. If a tagged class moves, keep the old tag as a registry
+# alias so existing persisted rows continue to rehydrate.
+_TASK_ERROR_TYPE_KEY = '__task_error_type__'
+_SUBWORKFLOW_ERROR_TYPE = 'horsies.core.models.tasks.SubWorkflowError'
+_TASK_ERROR_TYPE_REGISTRY: dict[str, type[TaskError]] = {
+    _SUBWORKFLOW_ERROR_TYPE: SubWorkflowError,
+}
 
 
 class SerializationError(Exception):
@@ -85,7 +97,49 @@ def _task_error_to_json(err: TaskError) -> SerdeResult[Dict[str, Json]]:
     if ex_json is not None:
         data['exception'] = ex_json
 
-    return Ok({'__task_error__': True, **data})
+    payload: dict[str, Json] = {'__task_error__': True, **data}
+    if isinstance(err, SubWorkflowError):
+        payload[_TASK_ERROR_TYPE_KEY] = _SUBWORKFLOW_ERROR_TYPE
+
+    return Ok(payload)
+
+
+def task_error_from_json(j: Json | TaskError) -> SerdeResult[TaskError]:
+    """Rehydrate a TaskError, preserving known built-in subclasses."""
+    if isinstance(j, TaskError):
+        return Ok(j)
+    if not isinstance(j, dict):
+        return Err(SerializationError(
+            f'TaskError payload must be an object, got {type(j).__name__}',
+        ))
+
+    payload = dict(j)
+    payload.pop('__task_error__', None)
+    raw_error_type = payload.pop(_TASK_ERROR_TYPE_KEY, None)
+    error_cls: type[TaskError] = TaskError
+
+    if raw_error_type is not None:
+        if not isinstance(raw_error_type, str):
+            return Err(SerializationError(
+                f'{_TASK_ERROR_TYPE_KEY} must be str, got '
+                f'{type(raw_error_type).__name__}',
+            ))
+        registered_cls = _TASK_ERROR_TYPE_REGISTRY.get(raw_error_type)
+        if registered_cls is None:
+            return Err(SerializationError(
+                f'Unknown TaskError type tag: {raw_error_type!r}',
+            ))
+        error_cls = registered_cls
+    elif 'sub_workflow_id' in payload and 'sub_workflow_summary' in payload:
+        # Legacy SubWorkflowError payloads predate the explicit type tag.
+        error_cls = SubWorkflowError
+
+    try:
+        return Ok(error_cls.model_validate(payload))
+    except (ValidationError, Exception) as exc:
+        return Err(SerializationError(
+            f'Failed to validate {error_cls.__name__} from JSON: {exc}',
+        ))
 
 
 def _is_task_result(value: Any) -> TypeGuard[TaskResult[Any, TaskError]]:
@@ -546,14 +600,10 @@ def task_result_from_json(j: Json) -> SerdeResult[TaskResult[Any, TaskError]]:
 
     # Task returned an error
     if err is not None:
-        if isinstance(err, dict) and err.get('__task_error__'):
-            err = {k: v for k, v in err.items() if k != '__task_error__'}
-        try:
-            task_err = TaskError.model_validate(err)
-        except (ValidationError, Exception) as exc:
-            return Err(SerializationError(
-                f'Failed to validate TaskError from JSON: {exc}',
-            ))
+        task_err_result = task_error_from_json(err)
+        if is_err(task_err_result):
+            return Err(task_err_result.err_value)
+        task_err = task_err_result.ok_value
         return Ok(TaskResult(err=task_err))
 
     # Task returned a success — rehydrate the ok value
