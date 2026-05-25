@@ -9,7 +9,8 @@ from sqlalchemy import String, Text, Integer, DateTime, ForeignKey, UniqueConstr
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from horsies.core.models.task_pg import Base, utc_now
+from horsies.core.models.task_pg import Base
+from horsies.core.utils.time import utc_now
 
 
 class WorkflowModel(Base):
