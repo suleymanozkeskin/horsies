@@ -106,6 +106,7 @@ logger = get_logger('worker')
 _FINALIZE_STAGE_PHASE1 = 'phase1_persist'
 _FINALIZE_STAGE_PHASE2 = 'phase2_workflow'
 _FINALIZE_STAGE_FUTURE = 'future'
+_FINALIZE_FUTURE_MAX_RETRIES = 3
 _FINALIZE_PHASE1_MAX_RETRIES = 3
 _FINALIZE_PHASE2_MAX_RETRIES = 5
 _FINALIZE_RETRY_BASE_DELAY_S = 0.5
@@ -1112,7 +1113,7 @@ class Worker:
                     stage=_FINALIZE_STAGE_FUTURE,
                     message=f'Worker future failed before result: {exc}',
                     retryable=is_retryable_connection_error(exc)
-                    and requeue_outcome != _RequeueOutcome.REQUEUED,
+                    and requeue_outcome is _RequeueOutcome.DB_ERROR,
                     data={
                         'exception_type': type(exc).__name__,
                         'requeue_outcome': requeue_outcome.value,
@@ -1582,7 +1583,7 @@ class Worker:
             )
 
     async def _handle_finalize_error(self, err: Any) -> None:
-        """Handle finalize Result errors with bounded retries for phase1/phase2."""
+        """Handle finalize Result errors with bounded retries."""
         if not isinstance(err, _FinalizeError):
             logger.error(
                 f'Unexpected finalize error payload type: {type(err).__name__}'
@@ -1591,7 +1592,9 @@ class Worker:
 
         stage = err.stage
         task_id = err.task_id
-        if stage == _FINALIZE_STAGE_PHASE1:
+        if stage == _FINALIZE_STAGE_FUTURE:
+            max_attempts = _FINALIZE_FUTURE_MAX_RETRIES
+        elif stage == _FINALIZE_STAGE_PHASE1:
             max_attempts = _FINALIZE_PHASE1_MAX_RETRIES
         elif stage == _FINALIZE_STAGE_PHASE2:
             max_attempts = _FINALIZE_PHASE2_MAX_RETRIES
@@ -1630,7 +1633,13 @@ class Worker:
             f'({attempt_no}/{max_attempts}) in {delay:.1f}s: {err.message}'
         )
 
-        if stage == _FINALIZE_STAGE_PHASE1:
+        if stage == _FINALIZE_STAGE_FUTURE:
+            self._spawn_background(
+                self._retry_finalize_future(err, delay),
+                name=f'finalize-retry-future-{task_id}',
+                finalizer=True,
+            )
+        elif stage == _FINALIZE_STAGE_PHASE1:
             self._spawn_background(
                 self._retry_finalize_phase1(err, delay),
                 name=f'finalize-retry-phase1-{task_id}',
@@ -1642,6 +1651,38 @@ class Worker:
                 name=f'finalize-retry-phase2-{task_id}',
                 finalizer=True,
             )
+
+    async def _retry_finalize_future(self, err: _FinalizeError, delay_s: float) -> None:
+        """Retry requeue after a child future failed before producing an outcome."""
+        await self._sleep_with_stop(delay_s)
+        if self._stop.is_set():
+            return
+
+        outcome = await self._requeue_claimed_task(
+            err.task_id,
+            f'Retry after future-stage finalize error: {err.message}',
+        )
+        if outcome is _RequeueOutcome.REQUEUED:
+            self._clear_finalize_retry_attempts(err.task_id, _FINALIZE_STAGE_FUTURE)
+            return
+        if outcome is _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED:
+            logger.warning(
+                f'Future-stage finalize retry found no owned in-flight row for task {err.task_id}'
+            )
+            self._clear_finalize_retry_attempts(err.task_id, _FINALIZE_STAGE_FUTURE)
+            return
+
+        data = dict(err.data or {})
+        data['requeue_outcome'] = outcome.value
+        await self._handle_finalize_error(
+            self._make_finalize_error(
+                task_id=err.task_id,
+                stage=_FINALIZE_STAGE_FUTURE,
+                message=err.message,
+                retryable=True,
+                data=data,
+            )
+        )
 
     async def _retry_finalize_phase1(self, err: _FinalizeError, delay_s: float) -> None:
         """Retry phase-1 terminal persistence from captured child outcome payload."""
