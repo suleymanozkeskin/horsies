@@ -293,7 +293,10 @@ def serialize_task_options(task_options: TaskOptions) -> SerdeResult[str]:
     """Serialize TaskOptions to a JSON string."""
     return dumps_json(
         {
-            'retry_policy': task_options.retry_policy.model_dump(mode='json')
+            'retry_policy': task_options.retry_policy.model_dump(
+                mode='json',
+                exclude_none=True,
+            )
             if task_options.retry_policy
             else None,
             'good_until': task_options.good_until.isoformat()

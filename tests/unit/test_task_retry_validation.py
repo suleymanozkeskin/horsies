@@ -7,11 +7,12 @@ from functools import wraps
 import pytest
 
 from horsies.core.app import Horsies
+from horsies.core.codec.serde import serialize_task_options
 from pydantic import ValidationError
 from horsies.core.errors import TaskDefinitionError, ErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import TaskError, TaskResult, RetryPolicy
+from horsies.core.models.tasks import TaskError, TaskOptions, TaskResult, RetryPolicy
 
 
 def _make_app() -> Horsies:
@@ -37,6 +38,57 @@ class TestRetryPolicyValidation:
         """RetryPolicy rejects empty auto_retry_for list."""
         with pytest.raises(ValueError, match='at least 1 item'):
             RetryPolicy.fixed([5], auto_retry_for=[])
+
+    def test_exponential_accepts_max_delay_seconds(self) -> None:
+        """RetryPolicy supports an opt-in maximum delay for exponential backoff."""
+        policy = RetryPolicy.exponential(
+            base_seconds=60,
+            max_retries=5,
+            max_delay_seconds=600,
+            auto_retry_for=['TRANSIENT'],
+            jitter=False,
+        )
+
+        assert policy.max_delay_seconds == 600
+        assert policy.model_dump(mode='json')['max_delay_seconds'] == 600
+
+    def test_max_delay_seconds_must_be_positive(self) -> None:
+        """RetryPolicy rejects non-positive max_delay_seconds values."""
+        with pytest.raises(ValueError, match='greater than 0'):
+            RetryPolicy.exponential(
+                base_seconds=60,
+                max_retries=5,
+                max_delay_seconds=0,
+                auto_retry_for=['TRANSIENT'],
+            )
+
+    def test_max_delay_seconds_serializes_only_when_set(self) -> None:
+        """TaskOptions serialization omits a null max delay but preserves an explicit cap."""
+        uncapped = RetryPolicy.exponential(
+            base_seconds=60,
+            max_retries=5,
+            auto_retry_for=['TRANSIENT'],
+        )
+        capped = RetryPolicy.exponential(
+            base_seconds=60,
+            max_retries=5,
+            max_delay_seconds=600,
+            auto_retry_for=['TRANSIENT'],
+        )
+
+        uncapped_json = serialize_task_options(
+            TaskOptions(task_name='uncapped', retry_policy=uncapped)
+        )
+        capped_json = serialize_task_options(
+            TaskOptions(task_name='capped', retry_policy=capped)
+        )
+
+        assert uncapped_json.is_ok()
+        assert capped_json.is_ok()
+        uncapped_payload = json.loads(uncapped_json.ok_value)
+        capped_payload = json.loads(capped_json.ok_value)
+        assert 'max_delay_seconds' not in uncapped_payload['retry_policy']
+        assert capped_payload['retry_policy']['max_delay_seconds'] == 600
 
     def test_appconfig_rejects_mutation_after_construction(self) -> None:
         """AppConfig frozen=True rejects attribute assignment."""
