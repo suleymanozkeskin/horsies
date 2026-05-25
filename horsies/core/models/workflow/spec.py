@@ -284,10 +284,13 @@ class WorkflowSpec(Generic[OutT]):
                 for k, v in node_copy.args_from.items()
             }
             if node_copy.workflow_ctx_from is not None:
-                node_copy.workflow_ctx_from = [
+                # Dedupe for symmetry with waits_for. Downstream validators
+                # already tolerate duplicates via set(id(...)), so this is
+                # cosmetic — guards against future readers expecting uniqueness.
+                node_copy.workflow_ctx_from = self._unique_node_refs([
                     old_to_new.get(id(ref), ref)
                     for ref in node_copy.workflow_ctx_from
-                ]
+                ])
 
         self.tasks = copied_tasks
 
@@ -336,7 +339,7 @@ class WorkflowSpec(Generic[OutT]):
     def _unique_node_refs(
         refs: Sequence[TaskNode[Any] | SubWorkflowNode[Any]],
     ) -> list[TaskNode[Any] | SubWorkflowNode[Any]]:
-        '''Return node refs de-duplicated by identity, preserving first-seen order.'''
+        """Return node refs de-duplicated by identity, preserving first-seen order."""
         seen: set[int] = set()
         unique: list[TaskNode[Any] | SubWorkflowNode[Any]] = []
         for ref in refs:
@@ -606,39 +609,45 @@ class WorkflowSpec(Generic[OutT]):
                         )
                     )
 
-        # 3. Cycle detection (Kahn's algorithm) over valid dependencies only
-        in_degree: dict[int, int] = {}
+        # 3. Cycle detection (Kahn's algorithm) over valid dependencies only.
+        # Identity-set per task collapses duplicate waits_for refs to one edge,
+        # so the algorithm is robust independent of _unique_node_refs upstream
+        # and avoids recomputing dep indices on every outer visit.
+        dep_indices_by_task: dict[int, set[int]] = {}
         for task in self.tasks:
-            idx = task.index
-            if idx is None:
+            if task.index is None:
                 continue
-            in_degree[idx] = 0
+            dep_ids: set[int] = set()
+            dep_indices: set[int] = set()
             for dep in task.waits_for:
-                if id(dep) in task_ids and dep.index is not None:
-                    in_degree[idx] += 1
+                dep_key = id(dep)
+                if dep_key in dep_ids:
+                    continue
+                dep_ids.add(dep_key)
+                if dep_key in task_ids and dep.index is not None:
+                    dep_indices.add(dep.index)
+            dep_indices_by_task[id(task)] = dep_indices
 
-        queue = [
-            t.index
-            for t in self.tasks
-            if t.index is not None and in_degree.get(t.index, 0) == 0
-        ]
+        in_degree: dict[int, int] = {
+            task.index: len(dep_indices_by_task[id(task)])
+            for task in self.tasks
+            if task.index is not None
+        }
+
+        queue = [idx for idx, deg in in_degree.items() if deg == 0]
         visited = 0
 
         while queue:
             node_idx = queue.pop(0)
             visited += 1
             for task in self.tasks:
-                dep_indices = [
-                    d.index
-                    for d in task.waits_for
-                    if id(d) in task_ids and d.index is not None
-                ]
-                if node_idx in dep_indices:
-                    task_idx = task.index
-                    if task_idx is not None:
-                        in_degree[task_idx] -= 1
-                        if in_degree[task_idx] == 0:
-                            queue.append(task_idx)
+                task_idx = task.index
+                if task_idx is None:
+                    continue
+                if node_idx in dep_indices_by_task[id(task)]:
+                    in_degree[task_idx] -= 1
+                    if in_degree[task_idx] == 0:
+                        queue.append(task_idx)
 
         if visited != len(self.tasks):
             cycle_nodes = [
