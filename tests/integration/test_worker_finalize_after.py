@@ -15,8 +15,6 @@ from __future__ import annotations
 import asyncio
 import uuid
 from concurrent.futures.process import BrokenProcessPool
-from datetime import datetime, timezone
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -24,7 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from horsies.core.codec.serde import dumps_json
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskResult
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import (
@@ -71,6 +69,34 @@ async def _insert_running_task(session: AsyncSession) -> str:
                  0, NOW(), :enqueue_sha)
         """),
         {'id': task_id, 'sent_at': sent_at, 'enqueue_sha': sha},
+    )
+    await session.commit()
+    return task_id
+
+
+async def _insert_owned_running_task(session: AsyncSession, worker_id: str) -> str:
+    """Insert a RUNNING task owned by a specific worker."""
+    task_id = str(uuid.uuid4())
+    sent_at, sha = compute_test_enqueue_sha(task_name='finalize_after_owned_test')
+    await session.execute(
+        text("""
+            INSERT INTO horsies_tasks
+                (id, task_name, queue_name, priority, args, kwargs,
+                 status, sent_at, created_at, updated_at, claimed, retry_count,
+                 max_retries, started_at, enqueue_sha, claimed_by_worker_id,
+                 worker_hostname, worker_pid, worker_process_name)
+            VALUES
+                (:id, 'finalize_after_owned_test', 'default', 100, '[]', '{}',
+                 'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
+                 0, NOW(), :enqueue_sha, :worker_id,
+                 'stale-host', 1234, 'stale-process')
+        """),
+        {
+            'id': task_id,
+            'sent_at': sent_at,
+            'enqueue_sha': sha,
+            'worker_id': worker_id,
+        },
     )
     await session.commit()
     return task_id
@@ -278,6 +304,42 @@ async def test_broken_process_pool_returns_err(
     assert err.retryable is False
     assert 'Broken process pool' in err.message
     worker._handle_broken_pool.assert_awaited_once()
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_broken_process_pool_requeues_owned_running_task(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """BrokenProcessPool requeues owned RUNNING tasks, not only CLAIMED tasks."""
+    worker = _make_worker(engine)
+    worker._restart_executor = AsyncMock()  # type: ignore[method-assign]
+    task_id = await _insert_owned_running_task(session, worker.worker_instance_id)
+
+    await worker._handle_broken_pool(task_id, BrokenProcessPool('pool is dead'))
+
+    row = (
+        await session.execute(
+            text("""
+                SELECT status, claimed, claimed_by_worker_id, started_at,
+                       worker_hostname, worker_pid, worker_process_name
+                FROM horsies_tasks
+                WHERE id = :id
+            """),
+            {'id': task_id},
+        )
+    ).fetchone()
+
+    assert row is not None
+    assert row.status == 'PENDING'
+    assert row.claimed is False
+    assert row.claimed_by_worker_id is None
+    assert row.started_at is None
+    assert row.worker_hostname is None
+    assert row.worker_pid is None
+    assert row.worker_process_name is None
+    worker._restart_executor.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

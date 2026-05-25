@@ -947,11 +947,15 @@ class Worker:
             return _RequeueOutcome.DB_ERROR
 
         if requeued:
-            logger.warning('Requeued CLAIMED task %s: %s', task_id, reason)
+            logger.warning(
+                'Requeued worker-owned in-flight task %s: %s',
+                task_id,
+                reason,
+            )
             return _RequeueOutcome.REQUEUED
         else:
             logger.warning(
-                'Failed to requeue task %s (not CLAIMED or owner mismatch): %s',
+                'Failed to requeue task %s (not owned or not requeueable): %s',
                 task_id,
                 reason,
             )
@@ -964,7 +968,7 @@ class Worker:
         )
         if outcome is _RequeueOutcome.DB_ERROR:
             logger.critical(
-                'Requeue DB_ERROR: task %s may remain orphaned CLAIMED '
+                'Requeue DB_ERROR: task %s may remain orphaned in-flight '
                 '(worker=%s, reason=broken pool: %s)',
                 task_id,
                 self.worker_instance_id,
