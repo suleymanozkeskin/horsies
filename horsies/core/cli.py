@@ -81,6 +81,12 @@ async def _ensure_schema_with_retry(
         await asyncio.sleep(delay_s)
 
 
+async def _close_broker(broker: Any, logger: logging.Logger) -> None:
+    close_result = await broker.close_async()
+    if is_err(close_result):
+        logger.error(f'Broker close failed: {close_result.err_value.message}')
+
+
 def _resolve_module_argument(args: argparse.Namespace) -> str:
     """Return module path from --module or positional, error if missing."""
     module_path = getattr(args, 'module', None) or getattr(args, 'module_pos', None)
@@ -444,29 +450,24 @@ def worker_command(args: argparse.Namespace) -> None:
                     pass
 
             try:
-                logger.info('Ensuring Postgres schema and triggers are initialized...')
-                await _ensure_schema_with_retry(
-                    broker,
-                    app.config.resilience,
-                    logger,
-                )
-            except asyncio.CancelledError:
-                logger.info('Worker startup interrupted')
-                return
-            except Exception as e:
-                logger.error(f'Failed to initialize database schema: {e}')
-                raise
+                try:
+                    logger.info('Ensuring Postgres schema and triggers are initialized...')
+                    await _ensure_schema_with_retry(
+                        broker,
+                        app.config.resilience,
+                        logger,
+                    )
+                except asyncio.CancelledError:
+                    logger.info('Worker startup interrupted')
+                    return
+                except Exception as e:
+                    logger.error(f'Failed to initialize database schema: {e}')
+                    raise
 
-            worker = Worker(broker.session_factory, broker.listener, worker_config)
-
-            try:
+                worker = Worker(broker.session_factory, broker.listener, worker_config)
                 await worker.run_forever()
             finally:
-                close_result = await broker.close_async()
-                if is_err(close_result):
-                    logger.error(
-                        f'Broker close failed: {close_result.err_value.message}'
-                    )
+                await _close_broker(broker, logger)
 
         try:
             asyncio.run(run_worker())
@@ -552,6 +553,7 @@ def scheduler_command(args: argparse.Namespace) -> None:
         async def run_scheduler() -> None:
             loop = asyncio.get_running_loop()
             run_task = asyncio.current_task()
+            broker: Any | None = None
             scheduler: Scheduler | None = None
 
             def signal_handler() -> None:
@@ -580,9 +582,13 @@ def scheduler_command(args: argparse.Namespace) -> None:
 
             except asyncio.CancelledError:
                 logger.info('Scheduler startup interrupted')
+                if broker is not None:
+                    await _close_broker(broker, logger)
                 return
             except Exception as e:
                 logger.error(f'Scheduler error: {e}', exc_info=True)
+                if broker is not None:
+                    await _close_broker(broker, logger)
                 raise
 
             try:
@@ -590,6 +596,8 @@ def scheduler_command(args: argparse.Namespace) -> None:
                 await scheduler.run_forever()
             except Exception as e:
                 logger.error(f'Scheduler error: {e}', exc_info=True)
+                if scheduler is None and broker is not None:
+                    await _close_broker(broker, logger)
                 raise
 
         try:

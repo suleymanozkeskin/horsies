@@ -1721,6 +1721,41 @@ class TestRunWorkerCoroutine:
         # Act / Assert — coroutine should raise RuntimeError
         with pytest.raises(RuntimeError, match='fatal'):
             await captured_coro[0]
+        broker.close_async.assert_awaited_once()
+
+    @patch('horsies.core.cli.Worker', autospec=True)
+    @patch('horsies.core.cli.print_banner', autospec=True)
+    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
+    @patch('horsies.core.cli.setup_logging', autospec=True)
+    @patch('horsies.core.cli.discover_app', autospec=True)
+    async def test_run_worker_constructor_failure_closes_broker(
+        self,
+        mock_discover: MagicMock,
+        _mock_logging: MagicMock,
+        _mock_url: MagicMock,
+        _mock_banner: MagicMock,
+        mock_worker_cls: MagicMock,
+    ) -> None:
+        """Broker is closed if Worker construction fails after schema init."""
+        app = _make_mock_app()
+        broker = _make_mock_broker()
+        app.get_broker.return_value = broker
+        mock_discover.return_value = (app, 'app', 'my.mod', '/project')
+        mock_worker_cls.side_effect = RuntimeError('worker init failed')
+        args = _make_worker_namespace()
+
+        captured_coro: list[Any] = []
+
+        def capture_run(coro: Any) -> None:
+            captured_coro.append(coro)
+            raise KeyboardInterrupt
+
+        with patch('horsies.core.cli.asyncio.run', side_effect=capture_run):
+            worker_command(args)
+
+        with pytest.raises(RuntimeError, match='worker init failed'):
+            await captured_coro[0]
+        broker.close_async.assert_awaited_once()
 
     @patch('horsies.core.cli.Worker', autospec=True)
     @patch('horsies.core.cli.print_banner', autospec=True)
@@ -1890,3 +1925,68 @@ class TestRunSchedulerCoroutine:
         # Act / Assert
         with pytest.raises(RuntimeError, match='scheduler boom'):
             await captured_coro[0]
+
+    @patch('horsies.core.cli.Scheduler', autospec=True)
+    @patch('horsies.core.cli.print_banner', autospec=True)
+    @patch('horsies.core.cli.setup_logging', autospec=True)
+    @patch('horsies.core.cli.discover_app', autospec=True)
+    async def test_run_scheduler_schema_failure_closes_preflight_broker(
+        self,
+        mock_discover: MagicMock,
+        _mock_logging: MagicMock,
+        _mock_banner: MagicMock,
+        _mock_scheduler_cls: MagicMock,
+    ) -> None:
+        """Scheduler preflight broker is closed if schema init fails."""
+        app = _make_mock_app()
+        broker = _make_mock_broker()
+        err_obj = _make_schema_err(retryable=False, message='fatal')
+        broker.ensure_schema_initialized = AsyncMock(return_value=Err(err_obj))
+        app.get_broker.return_value = broker
+        mock_discover.return_value = (app, 'app', 'my.mod', None)
+        args = _make_scheduler_namespace()
+
+        captured_coro: list[Any] = []
+
+        def capture_run(coro: Any) -> None:
+            captured_coro.append(coro)
+            raise KeyboardInterrupt
+
+        with patch('horsies.core.cli.asyncio.run', side_effect=capture_run):
+            scheduler_command(args)
+
+        with pytest.raises(RuntimeError, match='fatal'):
+            await captured_coro[0]
+        broker.close_async.assert_awaited_once()
+
+    @patch('horsies.core.cli.Scheduler', autospec=True)
+    @patch('horsies.core.cli.print_banner', autospec=True)
+    @patch('horsies.core.cli.setup_logging', autospec=True)
+    @patch('horsies.core.cli.discover_app', autospec=True)
+    async def test_run_scheduler_constructor_failure_closes_preflight_broker(
+        self,
+        mock_discover: MagicMock,
+        _mock_logging: MagicMock,
+        _mock_banner: MagicMock,
+        mock_scheduler_cls: MagicMock,
+    ) -> None:
+        """Scheduler preflight broker is closed if Scheduler construction fails."""
+        app = _make_mock_app()
+        broker = _make_mock_broker()
+        app.get_broker.return_value = broker
+        mock_discover.return_value = (app, 'app', 'my.mod', None)
+        mock_scheduler_cls.side_effect = RuntimeError('scheduler init failed')
+        args = _make_scheduler_namespace()
+
+        captured_coro: list[Any] = []
+
+        def capture_run(coro: Any) -> None:
+            captured_coro.append(coro)
+            raise KeyboardInterrupt
+
+        with patch('horsies.core.cli.asyncio.run', side_effect=capture_run):
+            scheduler_command(args)
+
+        with pytest.raises(RuntimeError, match='scheduler init failed'):
+            await captured_coro[0]
+        broker.close_async.assert_awaited_once()
