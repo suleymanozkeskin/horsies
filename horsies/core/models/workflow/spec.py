@@ -48,6 +48,21 @@ from .typing_utils import (
     _format_type_name,
 )
 
+
+def unique_node_refs(
+    refs: Sequence[TaskNode[Any] | SubWorkflowNode[Any]],
+) -> list[TaskNode[Any] | SubWorkflowNode[Any]]:
+    """Return node refs de-duplicated by identity, preserving first-seen order."""
+    seen: set[int] = set()
+    unique: list[TaskNode[Any] | SubWorkflowNode[Any]] = []
+    for ref in refs:
+        ref_id = id(ref)
+        if ref_id in seen:
+            continue
+        seen.add(ref_id)
+        unique.append(ref)
+    return unique
+
 if TYPE_CHECKING:
     from horsies.core.brokers.postgres import PostgresBroker
     from horsies.core.models.workflow.handle import WorkflowHandle
@@ -276,7 +291,7 @@ class WorkflowSpec(Generic[OutT]):
             copied_tasks.append(node_copy)
 
         for node_copy in copied_tasks:
-            node_copy.waits_for = self._unique_node_refs([
+            node_copy.waits_for = unique_node_refs([
                 old_to_new.get(id(ref), ref) for ref in node_copy.waits_for
             ])
             node_copy.args_from = {
@@ -287,7 +302,7 @@ class WorkflowSpec(Generic[OutT]):
                 # Dedupe for symmetry with waits_for. Downstream validators
                 # already tolerate duplicates via set(id(...)), so this is
                 # cosmetic — guards against future readers expecting uniqueness.
-                node_copy.workflow_ctx_from = self._unique_node_refs([
+                node_copy.workflow_ctx_from = unique_node_refs([
                     old_to_new.get(id(ref), ref)
                     for ref in node_copy.workflow_ctx_from
                 ])
@@ -334,21 +349,6 @@ class WorkflowSpec(Generic[OutT]):
             object.__setattr__(self, '_build_call_token', token_val)
 
         return originals
-
-    @staticmethod
-    def _unique_node_refs(
-        refs: Sequence[TaskNode[Any] | SubWorkflowNode[Any]],
-    ) -> list[TaskNode[Any] | SubWorkflowNode[Any]]:
-        """Return node refs de-duplicated by identity, preserving first-seen order."""
-        seen: set[int] = set()
-        unique: list[TaskNode[Any] | SubWorkflowNode[Any]] = []
-        for ref in refs:
-            ref_id = id(ref)
-            if ref_id in seen:
-                continue
-            seen.add(ref_id)
-            unique.append(ref)
-        return unique
 
     def _snapshot_kwargs_values(self) -> None:
         """Snapshot kwargs values via serde round-trip for deep by-value isolation.
@@ -611,7 +611,7 @@ class WorkflowSpec(Generic[OutT]):
 
         # 3. Cycle detection (Kahn's algorithm) over valid dependencies only.
         # Identity-set per task collapses duplicate waits_for refs to one edge,
-        # so the algorithm is robust independent of _unique_node_refs upstream
+        # so the algorithm is robust independent of unique_node_refs upstream
         # and avoids recomputing dep indices on every outer visit.
         dep_indices_by_task: dict[int, set[int]] = {}
         for task in self.tasks:
