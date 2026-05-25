@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import String, Text, Integer, DateTime, ForeignKey, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from horsies.core.models.task_pg import Base
+from horsies.core.models.task_pg import Base, utc_now
 
 
 class WorkflowModel(Base):
@@ -90,7 +90,7 @@ class WorkflowModel(Base):
         server_default=text('NOW()'),
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc)
+        DateTime(timezone=True), nullable=False, default=utc_now
     )
     started_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -101,8 +101,8 @@ class WorkflowModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.now(timezone.utc),
-        onupdate=datetime.now(timezone.utc),
+        default=utc_now,
+        onupdate=utc_now,
         index=True,
     )
 
@@ -220,7 +220,7 @@ class WorkflowTaskModel(Base):
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc)
+        DateTime(timezone=True), nullable=False, default=utc_now
     )
     started_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True

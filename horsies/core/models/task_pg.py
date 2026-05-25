@@ -29,6 +29,12 @@ class Base(DeclarativeBase):
     pass
 
 
+def utc_now() -> datetime:
+    """Per-row UTC timestamp. Used as a SQLAlchemy default/onupdate callable
+    so timestamps are evaluated at insert/update time, not frozen at import."""
+    return datetime.now(timezone.utc)
+
+
 class TaskModel(Base):
     """
     SQLAlchemy model for storing tasks in the database.
@@ -152,14 +158,14 @@ class TaskModel(Base):
     # Metadata
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=datetime.now(timezone.utc),
+        default=utc_now,
         server_default=text('NOW()'),
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=datetime.now(timezone.utc),
+        default=utc_now,
         server_default=text('NOW()'),
-        onupdate=datetime.now(timezone.utc),
+        onupdate=utc_now,
     )
 
 
@@ -201,7 +207,7 @@ class TaskAttemptModel(Base):
     worker_process_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=datetime.now(timezone.utc),
+        default=utc_now,
         server_default=text('NOW()'),
     )
 
@@ -224,7 +230,7 @@ class TaskHeartbeatModel(Base):
     sender_id: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     sent_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.now(timezone.utc), nullable=False
+        DateTime(timezone=True), default=utc_now, nullable=False
     )
     hostname: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     pid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -248,7 +254,7 @@ class WorkerStateModel(Base):
         DateTime(timezone=True),
         nullable=False,
         index=True,
-        default=datetime.now(timezone.utc),
+        default=utc_now,
     )
 
     # Identity
@@ -324,8 +330,8 @@ class ScheduleStateModel(Base):
     config_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=datetime.now(timezone.utc),
-        onupdate=datetime.now(timezone.utc),
+        default=utc_now,
+        onupdate=utc_now,
         nullable=False,
     )
 
