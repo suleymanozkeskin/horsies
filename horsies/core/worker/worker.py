@@ -1595,11 +1595,13 @@ class Worker:
             self._spawn_background(
                 self._retry_finalize_phase1(err, delay),
                 name=f'finalize-retry-phase1-{task_id}',
+                finalizer=True,
             )
         else:
             self._spawn_background(
                 self._retry_finalize_phase2(err, delay),
                 name=f'finalize-retry-phase2-{task_id}',
+                finalizer=True,
             )
 
     async def _retry_finalize_phase1(self, err: _FinalizeError, delay_s: float) -> None:

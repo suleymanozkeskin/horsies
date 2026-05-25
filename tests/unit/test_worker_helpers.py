@@ -1273,6 +1273,35 @@ class TestHandleFinalizeError:
         assert len(spawned_names) == 1
         assert 'finalize-retry-phase2' in spawned_names[0]
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('stage', 'expected_name'),
+        [
+            (_FINALIZE_STAGE_PHASE1, 'finalize-retry-phase1'),
+            (_FINALIZE_STAGE_PHASE2, 'finalize-retry-phase2'),
+        ],
+    )
+    async def test_retryable_errors_spawn_retry_as_finalizer(
+        self,
+        stage: str,
+        expected_name: str,
+    ) -> None:
+        """Finalize retry coroutines must drain in Worker.stop(), not be service tasks."""
+        worker = _make_worker()
+        spawned: list[tuple[str, dict[str, Any]]] = []
+
+        def _capture_spawn(coro: Any, *, name: str, **kwargs: Any) -> MagicMock:
+            spawned.append((name, kwargs))
+            coro.close()
+            return MagicMock()
+
+        worker._spawn_background = _capture_spawn  # type: ignore[assignment]
+        err = _make_finalize_error(retryable=True, stage=stage)
+
+        await worker._handle_finalize_error(err)
+
+        assert spawned == [(f'{expected_name}-{err.task_id}', {'finalizer': True})]
+
     # --- U-2h: backoff delay grows with attempt number, capped ---
 
     @pytest.mark.asyncio
