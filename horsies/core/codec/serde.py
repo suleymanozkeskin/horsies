@@ -104,10 +104,8 @@ def _task_error_to_json(err: TaskError) -> SerdeResult[Dict[str, Json]]:
     return Ok(payload)
 
 
-def task_error_from_json(j: Json | TaskError) -> SerdeResult[TaskError]:
+def task_error_from_json(j: Json) -> SerdeResult[TaskError]:
     """Rehydrate a TaskError, preserving known built-in subclasses."""
-    if isinstance(j, TaskError):
-        return Ok(j)
     if not isinstance(j, dict):
         return Err(SerializationError(
             f'TaskError payload must be an object, got {type(j).__name__}',
