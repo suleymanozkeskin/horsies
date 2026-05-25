@@ -426,6 +426,44 @@ class TestHealthMonitor:
         assert listener._dispatcher_conn is None
         assert listener._command_conn is None
 
+    @pytest.mark.asyncio
+    async def test_health_disconnect_pauses_dispatcher_before_closing(self) -> None:
+        """Health reset should not close the dispatcher connection under the dispatcher."""
+        listener = _make_listener()
+        listener._listen_channels.add('task_new')
+        dispatcher_cancelled = asyncio.Event()
+        never_stop = asyncio.Event()
+
+        async def _running_dispatcher() -> None:
+            try:
+                await never_stop.wait()
+            except asyncio.CancelledError:
+                dispatcher_cancelled.set()
+                raise
+
+        dispatcher_task = asyncio.create_task(_running_dispatcher())
+        listener._dispatcher_task = dispatcher_task
+        await asyncio.sleep(0)
+
+        async def _close_connections_after_dispatcher_pause() -> None:
+            assert dispatcher_cancelled.is_set()
+
+        listener._close_connections = AsyncMock(  # type: ignore[method-assign]
+            side_effect=_close_connections_after_dispatcher_pause
+        )
+        listener._start_dispatcher_if_needed = MagicMock()  # type: ignore[method-assign]
+
+        try:
+            await listener._handle_health_disconnect()
+        finally:
+            if not dispatcher_task.done():
+                dispatcher_task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await dispatcher_task
+
+        assert listener._dispatcher_task is None
+        listener._start_dispatcher_if_needed.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # TestDispatcher
