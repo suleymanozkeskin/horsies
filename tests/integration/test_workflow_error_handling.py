@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import pytest
@@ -23,6 +24,7 @@ from horsies.core.errors import WorkflowValidationError
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.workflows.engine import (
     _fail_enqueued_task,
+    _fail_subworkflow_load,
     start_workflow_async,
     on_workflow_task_complete,
     enqueue_workflow_task,
@@ -161,11 +163,25 @@ class TestOnErrorFail:
         error = await _get_workflow_error(session, handle.workflow_id)
         assert error is None
 
-    async def test_late_enqueue_failure_does_not_overwrite_completed_task(
+    @pytest.mark.parametrize(
+        'initial_status',
+        ['COMPLETED', 'FAILED', 'SKIPPED'],
+        ids=['from_completed', 'from_failed', 'from_skipped'],
+    )
+    async def test_late_enqueue_failure_does_not_overwrite_terminal_task(
         self,
         setup: _SetupTuple,
+        initial_status: str,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Failure fallback must not overwrite an already terminal workflow task."""
+        """Failure fallback must not overwrite a workflow task already in a terminal state.
+
+        Covers all three terminal states (COMPLETED, FAILED, SKIPPED) to pin the SQL
+        guard against partial regressions (e.g. an accidental status='COMPLETED' filter).
+        The COMPLETED case drives the real success flow; FAILED/SKIPPED are forced via
+        direct SQL since they cannot be reached cleanly through public APIs for a single-
+        task workflow.
+        """
         session, broker, app = setup
         task_a = make_simple_task(app, 'terminal_guard_task')
         node_a = TaskNode(fn=task_a, kwargs={'value': 21})
@@ -178,15 +194,40 @@ class TestOnErrorFail:
         )
         handle = await start_ok(spec, broker)
 
-        await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=42))
-        await _fail_enqueued_task(
-            session,
-            handle.workflow_id,
-            0,
-            'late enqueue failure should not overwrite terminal task',
-            broker,
-        )
-        await session.commit()
+        sentinel_result_for_forced: str | None = None
+        if initial_status == 'COMPLETED':
+            await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=42))
+        else:
+            sentinel_result_for_forced = f'pre-existing-{initial_status.lower()}-payload'
+            await session.execute(
+                text("""
+                    UPDATE horsies_workflow_tasks
+                    SET status = :status, result = :result, completed_at = NOW()
+                    WHERE workflow_id = :wf_id AND task_index = 0
+                """),
+                {
+                    'status': initial_status,
+                    'result': sentinel_result_for_forced,
+                    'wf_id': handle.workflow_id,
+                },
+            )
+            await session.commit()
+
+        engine_logger = logging.getLogger('horsies.workflow.engine')
+        engine_logger.propagate = True
+        caplog.clear()
+        try:
+            with caplog.at_level(logging.WARNING, logger='horsies.workflow.engine'):
+                await _fail_enqueued_task(
+                    session,
+                    handle.workflow_id,
+                    0,
+                    'late enqueue failure should not overwrite terminal task',
+                    broker,
+                )
+                await session.commit()
+        finally:
+            engine_logger.propagate = False
 
         row = (
             await session.execute(
@@ -198,12 +239,122 @@ class TestOnErrorFail:
                 {'wf_id': handle.workflow_id},
             )
         ).one()
-        assert row.status == 'COMPLETED'
+        assert row.status == initial_status
 
-        loaded = task_result_from_json(loads_json(row.result).unwrap()).unwrap()
-        assert loaded.is_ok()
-        assert loaded.unwrap() == 42
-        assert await _get_workflow_status(session, handle.workflow_id) == 'COMPLETED'
+        if initial_status == 'COMPLETED':
+            loaded = task_result_from_json(loads_json(row.result).unwrap()).unwrap()
+            assert loaded.is_ok()
+            assert loaded.unwrap() == 42
+        else:
+            assert row.result == sentinel_result_for_forced
+
+        warning_messages = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any(
+            'Skipped failure mark for terminal workflow task' in msg
+            for msg in warning_messages
+        ), f'Expected guard warning, got: {warning_messages}'
+
+        # CAS-miss must short-circuit before _handle_workflow_task_failure, so the
+        # workflow's error column stays untouched regardless of the starting state.
+        assert await _get_workflow_error(session, handle.workflow_id) is None
+
+    @pytest.mark.parametrize(
+        'initial_status',
+        ['COMPLETED', 'FAILED', 'SKIPPED'],
+        ids=['from_completed', 'from_failed', 'from_skipped'],
+    )
+    async def test_subworkflow_load_failure_does_not_overwrite_terminal_task(
+        self,
+        setup: _SetupTuple,
+        initial_status: str,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Subworkflow load-failure fallback must not overwrite an already terminal row.
+
+        Exercises the second CAS-guard call site by invoking `_fail_subworkflow_load`
+        directly across all three terminal states. The helper is the chokepoint used
+        by `enqueue_subworkflow_task` when `_load_workflow_def_from_key` returns None.
+        """
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'subworkflow_terminal_guard_task')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 7})
+        spec = make_workflow_spec(
+            broker=broker,
+            name='subworkflow_terminal_guard_workflow',
+            tasks=[node_a],
+            output=node_a,
+            on_error=OnError.FAIL,
+        )
+        handle = await start_ok(spec, broker)
+
+        sentinel_result_for_forced: str | None = None
+        if initial_status == 'COMPLETED':
+            await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=99))
+        else:
+            sentinel_result_for_forced = (
+                f'pre-existing-subworkflow-{initial_status.lower()}-payload'
+            )
+            await session.execute(
+                text("""
+                    UPDATE horsies_workflow_tasks
+                    SET status = :status, result = :result, completed_at = NOW()
+                    WHERE workflow_id = :wf_id AND task_index = 0
+                """),
+                {
+                    'status': initial_status,
+                    'result': sentinel_result_for_forced,
+                    'wf_id': handle.workflow_id,
+                },
+            )
+            await session.commit()
+
+        engine_logger = logging.getLogger('horsies.workflow.engine')
+        engine_logger.propagate = True
+        caplog.clear()
+        try:
+            with caplog.at_level(logging.WARNING, logger='horsies.workflow.engine'):
+                await _fail_subworkflow_load(
+                    session,
+                    broker,
+                    handle.workflow_id,
+                    0,
+                    'subworkflow_terminal_guard_workflow',
+                    'tests.unregistered_child.v1',
+                )
+                await session.commit()
+        finally:
+            engine_logger.propagate = False
+
+        row = (
+            await session.execute(
+                text("""
+                    SELECT status, result
+                    FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf_id AND task_index = 0
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+        ).one()
+        assert row.status == initial_status
+
+        if initial_status == 'COMPLETED':
+            loaded = task_result_from_json(loads_json(row.result).unwrap()).unwrap()
+            assert loaded.is_ok()
+            assert loaded.unwrap() == 99
+        else:
+            assert row.result == sentinel_result_for_forced
+
+        warning_messages = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any(
+            'Skipped subworkflow load failure mark for terminal workflow task' in msg
+            for msg in warning_messages
+        ), f'Expected subworkflow guard warning, got: {warning_messages}'
+
+        # CAS-miss must short-circuit before _handle_workflow_task_failure.
         assert await _get_workflow_error(session, handle.workflow_id) is None
 
     async def test_fail_stores_error_keeps_running(

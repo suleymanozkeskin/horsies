@@ -116,6 +116,12 @@ async def _mark_workflow_task_failed_if_nonterminal(
     task_index: int,
     result: str,
 ) -> bool:
+    """Mark the workflow task FAILED with `result` only if the row is not already terminal.
+
+    Returns True if the row transitioned to FAILED; False if the row was already
+    COMPLETED/FAILED/SKIPPED. Callers must skip failure propagation on False, because
+    whichever path set the terminal state has already propagated the appropriate outcome.
+    """
     mark_result = await session.execute(
         MARK_WORKFLOW_TASK_FAILED_SQL,
         {
@@ -153,17 +159,24 @@ async def _fail_enqueued_task(
             data={'workflow_id': workflow_id, 'task_index': task_index},
         ),
     )
+    failure_payload = serialize_error_payload(tr)
     marked_failed = await _mark_workflow_task_failed_if_nonterminal(
         session,
         workflow_id,
         task_index,
-        serialize_error_payload(tr),
+        failure_payload,
     )
     if not marked_failed:
         logger.warning(
             'Skipped failure mark for terminal workflow task %s:%s',
             workflow_id,
             task_index,
+        )
+        logger.debug(
+            'Dropped failure payload for %s:%s: %s',
+            workflow_id,
+            task_index,
+            failure_payload,
         )
         return
     if broker is not None:
@@ -175,6 +188,56 @@ async def _fail_enqueued_task(
             await check_workflow_completion(session, workflow_id, broker)
 
 
+async def _fail_subworkflow_load(
+    session: AsyncSession,
+    broker: 'PostgresBroker',
+    workflow_id: str,
+    task_index: int,
+    workflow_name: str,
+    sub_definition_key: str | None,
+) -> None:
+    """Mark a SubWorkflowNode FAILED when its child definition cannot be loaded.
+
+    Mirrors `_fail_enqueued_task`: writes FAILED via the terminal-state CAS guard,
+    then runs the failure-propagation chain. On CAS-miss (row already terminal),
+    skips propagation because whichever path set the terminal state has already
+    propagated the appropriate outcome.
+    """
+    from horsies.core.models.tasks import TaskError, TaskResult
+
+    error = TaskError(
+        error_code=OperationalErrorCode.SUBWORKFLOW_LOAD_FAILED,
+        message=f'Failed to load subworkflow definition for {workflow_name}:{task_index}',
+        data={'definition_key': sub_definition_key},
+    )
+    failure_payload: str = _ser(
+        dumps_json(TaskResult(err=error)), 'subworkflow load error', fallback='null',
+    ) or 'null'
+    marked_failed = await _mark_workflow_task_failed_if_nonterminal(
+        session, workflow_id, task_index, failure_payload,
+    )
+    if not marked_failed:
+        logger.warning(
+            'Skipped subworkflow load failure mark for terminal workflow task %s:%s',
+            workflow_id,
+            task_index,
+        )
+        logger.debug(
+            'Dropped subworkflow load failure payload for %s:%s: %s',
+            workflow_id,
+            task_index,
+            failure_payload,
+        )
+        return
+    logger.error(f'SubWorkflowNode load failed for {workflow_name}:{task_index}')
+
+    failure_result: TaskResult[Any, TaskError] = TaskResult(err=error)
+    should_continue = await _handle_workflow_task_failure(
+        session, workflow_id, task_index, failure_result,
+    )
+    if should_continue:
+        await _process_dependents(session, workflow_id, task_index, broker)
+        await check_workflow_completion(session, workflow_id, broker)
 
 
 
@@ -466,37 +529,9 @@ async def enqueue_subworkflow_task(
     if workflow_def is None:
         # Critical: Revert ENQUEUED → FAILED to prevent stuck task
         # This can happen if the child definition_key is not registered.
-        from horsies.core.models.tasks import TaskError, TaskResult
-
-        error = TaskError(
-            error_code=OperationalErrorCode.SUBWORKFLOW_LOAD_FAILED,
-            message=f'Failed to load subworkflow definition for {workflow_name}:{task_index}',
-            data={'definition_key': sub_definition_key},
+        await _fail_subworkflow_load(
+            session, broker, workflow_id, task_index, workflow_name, sub_definition_key,
         )
-        marked_failed = await _mark_workflow_task_failed_if_nonterminal(
-            session,
-            workflow_id,
-            task_index,
-            _ser(dumps_json(TaskResult(err=error)), 'subworkflow load error', fallback='null'),
-        )
-        if not marked_failed:
-            logger.warning(
-                'Skipped subworkflow load failure mark for terminal workflow task %s:%s',
-                workflow_id,
-                task_index,
-            )
-            return None
-        logger.error(f'SubWorkflowNode load failed for {workflow_name}:{task_index}')
-
-        # Handle failure and propagate to dependents
-        failure_result: TaskResult[Any, TaskError] = TaskResult(err=error)
-        should_continue = await _handle_workflow_task_failure(
-            session, workflow_id, task_index, failure_result
-        )
-        if should_continue:
-            await _process_dependents(session, workflow_id, task_index, broker)
-            await check_workflow_completion(session, workflow_id, broker)
-
         return None
 
     # 3. Parse static kwargs and merge args_from
