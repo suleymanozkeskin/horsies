@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1636,6 +1635,51 @@ class TestCheckScheduleAdditionalPaths:
 
         state_manager.update_after_run.assert_not_awaited()
         session.rollback.assert_awaited_once()
+
+    async def test_normal_run_advances_next_run_from_slot_time(self) -> None:
+        """A late interval tick should not shift the schedule anchor forward."""
+        schedule = TaskSchedule(
+            name='s',
+            task_name='my_task',
+            pattern=IntervalSchedule(seconds=5),
+            catch_up_missed=False,
+        )
+        config = ScheduleConfig(schedules=[schedule])
+        app = _make_app(schedule_config=config)
+        scheduler = Scheduler(app)
+
+        session, broker = _make_session_and_broker()
+        scheduler.broker = broker
+
+        due_slot = _utc(2025, 6, 1, 12, 0, 0)
+        state = MagicMock()
+        state.next_run_at = due_slot
+
+        state_manager = MagicMock()
+        state_manager.get_state = AsyncMock(return_value=state)
+        state_manager.update_after_run = AsyncMock()
+        scheduler.state_manager = state_manager
+
+        slot_times: list[datetime] = []
+
+        async def _mock_enqueue(sched: object, *, slot_time: datetime) -> Ok[str]:
+            slot_times.append(slot_time)
+            return Ok('task-0')
+
+        scheduler._enqueue_scheduled_task = AsyncMock(side_effect=_mock_enqueue)  # type: ignore[method-assign]
+
+        now = _utc(2025, 6, 1, 12, 0, 17)
+        with patch(
+            'horsies.core.scheduler.service.should_run_now',
+            return_value=True,
+        ):
+            await scheduler._check_schedule(schedule, now)
+
+        assert slot_times == [due_slot]
+        state_manager.update_after_run.assert_awaited_once()
+        update_kwargs = state_manager.update_after_run.await_args.kwargs
+        assert update_kwargs['next_run_at'] == _utc(2025, 6, 1, 12, 0, 5)
+        session.commit.assert_awaited_once()
 
     async def test_normal_run_permanent_failure_rollback(self) -> None:
         """Normal run: non-retryable Err → error logged, rollback."""
