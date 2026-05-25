@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import types
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1639,6 +1640,52 @@ class TestRunWorkerCoroutine:
         mock_worker.run_forever.assert_awaited_once()
         broker.close_async.assert_awaited_once()
 
+    @patch('horsies.core.cli.asyncio.get_running_loop', autospec=True)
+    @patch('horsies.core.cli.Worker', autospec=True)
+    @patch('horsies.core.cli.print_banner', autospec=True)
+    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
+    @patch('horsies.core.cli.setup_logging', autospec=True)
+    @patch('horsies.core.cli.discover_app', autospec=True)
+    async def test_run_worker_signal_handlers_installed_before_schema_init(
+        self,
+        mock_discover: MagicMock,
+        _mock_logging: MagicMock,
+        _mock_url: MagicMock,
+        _mock_banner: MagicMock,
+        mock_worker_cls: MagicMock,
+        mock_get_loop: MagicMock,
+    ) -> None:
+        """SIGTERM/SIGINT handlers are active while schema init can block."""
+        app = _make_mock_app()
+        broker = _make_mock_broker()
+        app.get_broker.return_value = broker
+        mock_discover.return_value = (app, 'app', 'my.mod', '/project')
+        args = _make_worker_namespace()
+
+        fake_loop = MagicMock()
+        mock_get_loop.return_value = fake_loop
+
+        async def ensure_schema() -> Any:
+            handled = [call.args[0] for call in fake_loop.add_signal_handler.call_args_list]
+            assert handled == [signal.SIGTERM, signal.SIGINT]
+            return Ok(None)
+
+        broker.ensure_schema_initialized = AsyncMock(side_effect=ensure_schema)
+        mock_worker = MagicMock()
+        mock_worker.run_forever = AsyncMock()
+        mock_worker_cls.return_value = mock_worker
+
+        captured_coro: list[Any] = []
+
+        def capture_run(coro: Any) -> None:
+            captured_coro.append(coro)
+            raise KeyboardInterrupt
+
+        with patch('horsies.core.cli.asyncio.run', side_effect=capture_run):
+            worker_command(args)
+
+        await captured_coro[0]
+
     @patch('horsies.core.cli.Worker', autospec=True)
     @patch('horsies.core.cli.print_banner', autospec=True)
     @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
@@ -1763,6 +1810,50 @@ class TestRunSchedulerCoroutine:
         broker.ensure_schema_initialized.assert_awaited_once()
         mock_scheduler_cls.assert_called_once_with(app)
         mock_scheduler.run_forever.assert_awaited_once()
+
+    @patch('horsies.core.cli.asyncio.get_running_loop', autospec=True)
+    @patch('horsies.core.cli.Scheduler', autospec=True)
+    @patch('horsies.core.cli.print_banner', autospec=True)
+    @patch('horsies.core.cli.setup_logging', autospec=True)
+    @patch('horsies.core.cli.discover_app', autospec=True)
+    async def test_run_scheduler_signal_handlers_installed_before_schema_init(
+        self,
+        mock_discover: MagicMock,
+        _mock_logging: MagicMock,
+        _mock_banner: MagicMock,
+        mock_scheduler_cls: MagicMock,
+        mock_get_loop: MagicMock,
+    ) -> None:
+        """SIGTERM/SIGINT handlers are active while scheduler schema init can block."""
+        app = _make_mock_app()
+        broker = _make_mock_broker()
+        app.get_broker.return_value = broker
+        mock_discover.return_value = (app, 'app', 'my.mod', None)
+        args = _make_scheduler_namespace()
+
+        fake_loop = MagicMock()
+        mock_get_loop.return_value = fake_loop
+
+        async def ensure_schema() -> Any:
+            handled = [call.args[0] for call in fake_loop.add_signal_handler.call_args_list]
+            assert handled == [signal.SIGTERM, signal.SIGINT]
+            return Ok(None)
+
+        broker.ensure_schema_initialized = AsyncMock(side_effect=ensure_schema)
+        mock_scheduler = MagicMock()
+        mock_scheduler.run_forever = AsyncMock()
+        mock_scheduler_cls.return_value = mock_scheduler
+
+        captured_coro: list[Any] = []
+
+        def capture_run(coro: Any) -> None:
+            captured_coro.append(coro)
+            raise KeyboardInterrupt
+
+        with patch('horsies.core.cli.asyncio.run', side_effect=capture_run):
+            scheduler_command(args)
+
+        await captured_coro[0]
 
     @patch('horsies.core.cli.Scheduler', autospec=True)
     @patch('horsies.core.cli.print_banner', autospec=True)
