@@ -954,6 +954,133 @@ class TestSubworkflowIntegration:
         finally:
             unregister_workflow_definition(CorruptOptionsChildWorkflow.definition_key)
 
+    async def test_nested_subworkflow_prepare_failure_does_not_commit_partial_child(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A SubWorkflowNode-branch prep failure must not leave a partial child workflow.
+
+        Mirrors `test_child_task_prepare_failure_does_not_commit_partial_child`
+        but exercises the OTHER branch of the prepare loop in
+        `enqueue_subworkflow_task` — the one that handles nested
+        SubWorkflowNode children. WorkflowSpec validation makes the natural
+        trigger (unserializable kwargs) unreachable from userland because
+        the snapshot rejects bad kwargs at build time. To exercise the
+        structural invariant of PR #24 (no DB writes before the prepare
+        loop completes) on this branch, we selectively patch the engine's
+        `_ser` helper to fail only for the `'child sub kwargs'` call site.
+
+        The load-bearing assertion is `child_count == 0`: no orphan child
+        workflow row may be committed when the SubWorkflowNode branch's
+        `_fail_enqueued_task` path executes.
+        """
+        session, broker, app = setup
+        parent_task = make_simple_task(app, 'nested_sub_partial_parent_task')
+
+        class NestedSubGrandchildWorkflow(WorkflowDefinition[int]):
+            name = 'nested_sub_partial_grandchild'
+            definition_key = 'tests.nested_sub_partial_grandchild.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
+                _ = args, params
+
+                @app.task(task_name='nested_sub_partial_grandchild_task')
+                def grandchild_task() -> TaskResult[int, TaskError]:
+                    return TaskResult(ok=3)
+
+                node = TaskNode(fn=grandchild_task)
+                return app.workflow(
+                    name=cls.name,
+                    tasks=[node],
+                    output=node,
+                    on_error=OnError.FAIL,
+                    definition_key=cls.definition_key,
+                )
+
+        class NestedSubChildWorkflow(WorkflowDefinition[int]):
+            name = 'nested_sub_partial_child'
+            definition_key = 'tests.nested_sub_partial_child.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
+                _ = args, params
+
+                @app.task(task_name='nested_sub_partial_child_first_task')
+                def first_task() -> TaskResult[int, TaskError]:
+                    return TaskResult(ok=1)
+
+                node_first = TaskNode(fn=first_task)
+                node_nested_sub: SubWorkflowNode[int] = SubWorkflowNode(
+                    workflow_def=NestedSubGrandchildWorkflow,
+                    waits_for=[node_first],
+                )
+                return app.workflow(
+                    name=cls.name,
+                    tasks=[node_first, node_nested_sub],
+                    output=node_nested_sub,
+                    on_error=OnError.FAIL,
+                    definition_key=cls.definition_key,
+                )
+
+        register_workflow_definition(NestedSubGrandchildWorkflow)
+
+        import horsies.core.workflows.engine as engine_mod
+        real_ser = engine_mod._ser
+
+        def _ser_fail_child_sub_kwargs(
+            result: Any, context: str, fallback: str | None = None,
+        ) -> str | None:
+            if context == 'child sub kwargs':
+                return None
+            return real_ser(result, context, fallback)
+
+        monkeypatch.setattr(engine_mod, '_ser', _ser_fail_child_sub_kwargs)
+
+        node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 1})
+        node_child: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=NestedSubChildWorkflow,
+            waits_for=[node_a],
+        )
+        spec = _workflow(
+            app,
+            name='parent_nested_sub_prepare_failure',
+            tasks=[node_a, node_child],
+            output=node_child,
+            on_error=OnError.FAIL,
+        )
+        handle = await start_ok(spec, broker)
+
+        try:
+            await self._complete_task(
+                session, broker, handle.workflow_id, 0, TaskResult(ok=1),
+            )
+
+            parent_row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+            assert parent_row is not None
+            status, child_id, result_json = parent_row
+            assert status == 'FAILED'
+            assert child_id is None
+
+            tr = _decode_task_result(result_json)
+            assert tr is not None and tr.is_err()
+            assert tr.err is not None
+            assert tr.err.error_code == 'WORKER_SERIALIZATION_ERROR'
+
+            child_count = await session.scalar(
+                text("""
+                    SELECT COUNT(*)
+                    FROM horsies_workflows
+                    WHERE parent_workflow_id = :wf_id
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+            assert child_count == 0
+        finally:
+            unregister_workflow_definition(NestedSubChildWorkflow.definition_key)
+            unregister_workflow_definition(NestedSubGrandchildWorkflow.definition_key)
+
     async def test_parallel_child_one_fails_downstream_skipped(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],

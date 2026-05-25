@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import TextClause
 
 from horsies.core.codec.serde import dumps_json, loads_json, task_result_from_json, serialize_error_payload, SerdeResult
 from horsies.core.utils.fingerprint import enqueue_fingerprint
@@ -658,7 +659,7 @@ async def enqueue_subworkflow_task(
     child_output_index = child_spec.output.index if child_spec.output else None
     child_sent_at = datetime.now(timezone.utc)
 
-    child_workflow_task_inserts: list[tuple[Any, dict[str, Any]]] = []
+    child_workflow_task_inserts: list[tuple[TextClause, dict[str, Any]]] = []
     for child_node in child_spec.tasks:
         child_dep_indices = [
             d.index for d in child_node.waits_for if d.index is not None
