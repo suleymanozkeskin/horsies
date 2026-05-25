@@ -55,14 +55,14 @@ Serialized form:
 
 ```json
 {
-  "__pydantic_model__": true,
+  "__h_pydantic__": true,
   "module": "myapp.models",
   "qualname": "Order",
   "data": {"id": 1, "items": ["widget"]}
 }
 ```
 
-Rehydration uses `model_validate()` on the resolved class — Pydantic handles type coercion (including ISO strings back to `datetime` for model fields).
+Rehydration looks the `(module, qualname)` pair up in the [serde class registry](#serde-class-registry) and calls `model_validate()` on the resolved class — Pydantic handles type coercion (including ISO strings back to `datetime` for model fields). There is no fallback `import_module` path; an unregistered type returns `Err(SerializationError(code=UNREGISTERED_REHYDRATION_TYPE))`.
 
 ### Pydantic Models in Workflows
 
@@ -134,7 +134,7 @@ Serialized form:
 
 ```json
 {
-  "__dataclass__": true,
+  "__h_dataclass__": true,
   "module": "myapp.models",
   "qualname": "Metrics",
   "data": {"page_count": 5, "total_words": 1200}
@@ -161,9 +161,9 @@ def record_event() -> TaskResult[dict, TaskError]:
 Serialized forms:
 
 ```json
-{"__datetime__": true, "value": "2025-06-15T10:30:00+00:00"}
-{"__date__": true, "value": "2025-06-15"}
-{"__time__": true, "value": "14:30:00"}
+{"__h_datetime__": true, "value": "2025-06-15T10:30:00+00:00"}
+{"__h_date__": true, "value": "2025-06-15"}
+{"__h_time__": true, "value": "14:30:00"}
 ```
 
 Timezone offsets are preserved. `isoformat()` produces the offset (e.g. `+00:00`, `+05:30`), and `fromisoformat()` restores it. Naive datetimes (no timezone) round-trip as naive.
@@ -189,12 +189,59 @@ Attempting to serialize an unsupported type returns `Err(SerializationError)`.
 ```python
 # Success
 TaskResult(ok=value)
-# → {"__task_result__": true, "ok": <serialized_value>, "err": null}
+# → {"__h_task_result__": true, "ok": <serialized_value>, "err": null}
 
 # Error
 TaskResult(err=TaskError(...))
-# → {"__task_result__": true, "ok": null, "err": {"__task_error__": true, ...}}
+# → {"__h_task_result__": true, "ok": null, "err": {"__h_task_error__": true, ...}}
 ```
+
+## Reserved Key Namespace
+
+All internal serde envelopes and engine transport keys live under the `__h_*` namespace. The serializer (`to_jsonable`) rejects any user-supplied dict key matching `^__h_` with `SerializationError(code=RESERVED_KEY_IN_USER_DATA)`. `__builtin_task_code__` (a Pydantic discriminator on `TaskError.error_code`) is also reserved.
+
+The recursive rejection applies to model field data too — `BaseModel.model_dump()` output is scanned for `__h_*` keys before being embedded in the envelope. This closes the smuggling vector where a `dict[str, Any]` model field would carry a forged tag through Pydantic's serializer.
+
+Reserved tags (do not use as dict keys in user data):
+
+| Tag | Purpose |
+| --- | ------- |
+| `__h_pydantic__` | BaseModel envelope |
+| `__h_dataclass__` | Dataclass envelope |
+| `__h_task_result__` | TaskResult envelope |
+| `__h_task_error__` | TaskError envelope |
+| `__h_datetime__` / `__h_date__` / `__h_time__` | Datetime envelopes |
+| `__h_workflow_ctx__` / `__h_workflow_meta__` | Workflow transport keys |
+| `__h_taskresult_envelope__` | Engine `args_from` envelope |
+| `__builtin_task_code__` | TaskError.error_code discriminator |
+
+## Serde Class Registry
+
+Rehydration looks types up in a process-local registry keyed by `f"{module}:{qualname}"`. The registry replaces dynamic `import_module` / `getattr` so payloads can only construct types the application has opted in to.
+
+Two registration paths populate the registry:
+
+1. **Signature walker** at `@app.task` registration. A conservative recursive walk over parameter and return annotations: BaseModel and dataclass subclasses reachable from the signature are auto-registered, including types nested in `Optional` / `Union` / `list` / `dict` / `tuple` / `Annotated` / Pydantic `model_fields` / dataclass field annotations. `TaskResult[OkT, TaskError]` is unwrapped to walk `OkT`.
+
+2. **Explicit registration** via `@horsies_serdetype` (decorator) or `app.register_serde_type(cls)` (call). Use when the walker can't see the type — for example, types only carried inside `dict[str, Any]` fields, or types used by code that doesn't appear in any task signature.
+
+   ```python
+   from horsies import horsies_serdetype
+
+   @horsies_serdetype
+   class SharedConfig(BaseModel):
+       feature_flag: str
+   ```
+
+The registry is append-only. Re-registering the same class is a no-op; a different class under the same `(module, qualname)` key raises `ValueError`. `TaskError` and `TaskResult` are baseline-registered at module import so user code never has to touch them.
+
+Pure-consumer processes (monitoring services, ops tools) that don't import the result types can use [`raw_result`](#raw-result-escape-hatch) instead of registering.
+
+## Raw Result Escape Hatch
+
+`TaskHandle.raw_result()` / `raw_result_async()` and `WorkflowHandle.raw_result()` / `raw_result_async()` return the underlying stored JSON dict, skipping `rehydrate_value` entirely. The returned dict is the un-rehydrated `__h_task_result__` envelope — nested `__h_pydantic__` / `__h_dataclass__` payloads inside `ok` come back as plain dicts.
+
+Use this when the consumer process doesn't import the task return types and therefore can't populate the registry.
 
 ## Error Codes
 
@@ -203,6 +250,10 @@ TaskResult(err=TaskError(...))
 | `WORKER_SERIALIZATION_ERROR` | Task result could not be serialized to JSON |
 | `PYDANTIC_HYDRATION_ERROR` | Task succeeded but return value could not be rehydrated to declared type |
 | `RESULT_DESERIALIZATION_ERROR` | Stored result JSON is corrupt or could not be deserialized |
+| `RESERVED_KEY_IN_USER_DATA` | A user dict carried a `__h_*` or `__builtin_task_code__` key |
+| `UNREGISTERED_REHYDRATION_TYPE` | A payload referenced a type not in the serde class registry |
+| `LEGACY_SERDE_TAG_UNSUPPORTED` | A payload carried a pre-namespace tag (`__pydantic_model__`, etc.) |
+| `UNKNOWN_SERDE_TAG` | A payload carried an unrecognised `__h_*` tag (newer producer) |
 
 ## Return Type Validation
 
@@ -218,6 +269,20 @@ def typed() -> TaskResult[int, TaskError]:
 
 **Don't return bare custom classes.** Use Pydantic `BaseModel` or `@dataclass` for task arguments and results. The codec needs type metadata for rehydration.
 
-**Don't define result types in `__main__`.** Workers import types by module path. Classes defined in the entrypoint script cannot be resolved. Move them to a separate module.
+**Don't define result types in `__main__`.** The registry key includes the module name. Classes defined in the entrypoint script can't be rehydrated by workers because their `__module__` is `__main__`. Move them to a separate module.
 
-**Don't define result types inside functions.** Local classes have `<locals>` in their qualname and cannot be imported by workers.
+**Don't define result types inside functions.** Local classes have `<locals>` in their qualname and can't be registered by the signature walker.
+
+**Don't use `__h_*` or `__builtin_task_code__` as dict keys in user data.** They are reserved for horsies internals. The serializer fails closed with `RESERVED_KEY_IN_USER_DATA` when it sees them.
+
+**Don't put Pydantic models inside `dict[str, Any]` task arguments expecting them to round-trip.** The signature walker can't see types reached only through `Any`. Either widen the signature to a typed `Union[...]` so the walker registers each variant, or use `@horsies_serdetype` to register the type explicitly.
+
+## Migration from Pre-Namespace Releases
+
+The internal tag names changed in this release. Pre-namespace payloads (with `__pydantic_model__`, `__dataclass__`, `__task_result__`, `__datetime__`, `__date__`, `__time__`, `__task_error__`) fail closed with `LEGACY_SERDE_TAG_UNSUPPORTED` on rehydration. Same for the old engine transport keys (`__horsies_workflow_ctx__`, `__horsies_workflow_meta__`, `__horsies_taskresult__`).
+
+To upgrade:
+
+1. Drain enqueued tasks and finish in-flight workflows before deploying the new release.
+2. After deployment, register any types not reachable from a task signature using `@horsies_serdetype` or `app.register_serde_type()`.
+3. Pure-consumer services that don't import task definitions can use `handle.raw_result()` instead of `handle.get()` for read-only access.
