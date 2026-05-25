@@ -1839,6 +1839,45 @@ class TestWorkflowContext:
         assert result.is_ok()
         assert result.unwrap() == 7
 
+    def test_model_dump_round_trips_results(self) -> None:
+        """model_dump() preserves dependency results through model_validate()."""
+        result_0: TaskResult[int, TaskError] = TaskResult(ok=42)
+        ctx = WorkflowContext.from_serialized(
+            workflow_id='wf-123',
+            task_index=1,
+            task_name='consumer',
+            results_by_id={'node-0': result_0},
+        )
+
+        dumped = ctx.model_dump()
+        assert dumped['results_by_id']['node-0'] is result_0
+
+        restored = WorkflowContext.model_validate(dumped)
+        restored_result = restored.result_for(NodeKey[int]('node-0'))
+        assert restored_result.is_ok()
+        assert restored_result.unwrap() == 42
+
+    def test_model_dump_json_round_trips_results(self) -> None:
+        """model_dump(mode='json') preserves dependency results in JSONable form."""
+        ctx = WorkflowContext.from_serialized(
+            workflow_id='wf-123',
+            task_index=1,
+            task_name='consumer',
+            results_by_id={'node-0': TaskResult(ok=42)},
+        )
+
+        dumped = ctx.model_dump(mode='json')
+        assert dumped['results_by_id']['node-0'] == {
+            '__task_result__': True,
+            'ok': 42,
+            'err': None,
+        }
+
+        restored = WorkflowContext.model_validate(dumped)
+        restored_result = restored.result_for(NodeKey[int]('node-0'))
+        assert restored_result.is_ok()
+        assert restored_result.unwrap() == 42
+
     def test_result_for_raises_on_missing_id(self) -> None:
         """result_for(node) raises RuntimeError if node has no node_id."""
         ctx = WorkflowContext.from_serialized(
@@ -2660,6 +2699,94 @@ class TestWorkflowContextSummary:
         assert result.status == WorkflowStatus.COMPLETED
         assert result.output == 42
         assert result.total_tasks == 3
+
+    def test_model_dump_round_trips_summaries(self) -> None:
+        """model_dump() preserves subworkflow summaries through model_validate()."""
+        summary = SubWorkflowSummary(
+            status=WorkflowStatus.COMPLETED,
+            output=42,
+            total_tasks=3,
+            completed_tasks=3,
+            failed_tasks=0,
+            skipped_tasks=0,
+        )
+
+        ctx = WorkflowContext.from_serialized(
+            workflow_id='wf-123',
+            task_index=1,
+            task_name='consumer',
+            results_by_id={},
+            summaries_by_id={'sub-node': summary},
+        )
+
+        dumped = ctx.model_dump()
+        assert dumped['summaries_by_id']['sub-node'] is summary
+
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        class ChildWorkflow(WorkflowDefinition[int]):
+            name = 'child_summary_dump'
+            definition_key = _definition_key('child_summary_dump')
+            child = TaskNode(fn=fn_a)
+
+            class Meta:
+                output = None
+
+        ChildWorkflow.Meta.output = ChildWorkflow.child
+
+        node = SubWorkflowNode(workflow_def=ChildWorkflow, node_id='sub-node')
+        restored = WorkflowContext.model_validate(dumped)
+
+        restored_summary = restored.summary_for(node)
+        assert restored_summary.status == WorkflowStatus.COMPLETED
+        assert restored_summary.output == 42
+        assert restored_summary.total_tasks == 3
+
+    def test_model_dump_json_round_trips_summaries(self) -> None:
+        """model_dump(mode='json') preserves summaries in JSONable form."""
+        summary = SubWorkflowSummary(
+            status=WorkflowStatus.COMPLETED,
+            output=42,
+            total_tasks=3,
+            completed_tasks=3,
+            failed_tasks=0,
+            skipped_tasks=0,
+        )
+
+        ctx = WorkflowContext.from_serialized(
+            workflow_id='wf-123',
+            task_index=1,
+            task_name='consumer',
+            results_by_id={},
+            summaries_by_id={'sub-node': summary},
+        )
+
+        dumped = ctx.model_dump(mode='json')
+        assert dumped['summaries_by_id']['sub-node']['__dataclass__'] is True
+        assert (
+            dumped['summaries_by_id']['sub-node']['data']['status']
+            == WorkflowStatus.COMPLETED
+        )
+
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        class ChildWorkflow(WorkflowDefinition[int]):
+            name = 'child_summary_json_dump'
+            definition_key = _definition_key('child_summary_json_dump')
+            child = TaskNode(fn=fn_a)
+
+            class Meta:
+                output = None
+
+        ChildWorkflow.Meta.output = ChildWorkflow.child
+
+        node = SubWorkflowNode(workflow_def=ChildWorkflow, node_id='sub-node')
+        restored = WorkflowContext.model_validate(dumped)
+
+        restored_summary = restored.summary_for(node)
+        assert restored_summary.status == WorkflowStatus.COMPLETED
+        assert restored_summary.output == 42
+        assert restored_summary.total_tasks == 3
 
     def test_summary_for_raises_on_missing_node_id(self) -> None:
         """summary_for(node) raises RuntimeError if node_id is None."""
