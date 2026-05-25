@@ -71,6 +71,12 @@ from horsies.core.workflows.sql import (
 
 logger = get_logger('workflow.engine')
 
+# CAS-miss log-level convention:
+#   warning — when failure-handling code hits a terminal-state CAS guard
+#     (exceptional-on-exceptional: _fail_enqueued_task, _fail_subworkflow_load).
+#   debug — when routine completion paths hit one (broker callback redelivery /
+#     replay: on_workflow_task_complete, on_subworkflow_complete).
+
 from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode
 
 if TYPE_CHECKING:
@@ -1618,10 +1624,13 @@ async def on_subworkflow_complete(
         },
     )
     if update_result.fetchone() is None:
+        # Identity-only log: never log the dropped result/summary payloads, since
+        # they carry arbitrary user task output. Operators can recover the source
+        # row via horsies_workflows.id = child_workflow_id when needed.
         logger.debug(
             'Parent workflow task already terminal, skipping subworkflow progression: '
-            'parent_workflow=%s task_index=%s child_workflow=%s',
-            parent_wf_id, parent_task_idx, child_workflow_id,
+            'parent_workflow=%s task_index=%s child_workflow=%s attempted_status=%s',
+            parent_wf_id, parent_task_idx, child_workflow_id, parent_node_status,
         )
         return
 
