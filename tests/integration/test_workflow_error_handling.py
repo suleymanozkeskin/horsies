@@ -22,13 +22,14 @@ from horsies.core.models.workflow import (
 from horsies.core.errors import WorkflowValidationError
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.workflows.engine import (
+    _fail_enqueued_task,
     start_workflow_async,
     on_workflow_task_complete,
     enqueue_workflow_task,
     enqueue_subworkflow_task,
 )
 from horsies.core.workflows.start_types import WorkflowStartErrorCode
-from horsies.core.codec.serde import loads_json
+from horsies.core.codec.serde import loads_json, task_result_from_json
 
 from .conftest import (
     make_simple_task,
@@ -159,6 +160,51 @@ class TestOnErrorFail:
         # No error stored
         error = await _get_workflow_error(session, handle.workflow_id)
         assert error is None
+
+    async def test_late_enqueue_failure_does_not_overwrite_completed_task(
+        self,
+        setup: _SetupTuple,
+    ) -> None:
+        """Failure fallback must not overwrite an already terminal workflow task."""
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'terminal_guard_task')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 21})
+        spec = make_workflow_spec(
+            broker=broker,
+            name='terminal_guard_workflow',
+            tasks=[node_a],
+            output=node_a,
+            on_error=OnError.FAIL,
+        )
+        handle = await start_ok(spec, broker)
+
+        await _complete_task(session, handle.workflow_id, 0, TaskResult(ok=42))
+        await _fail_enqueued_task(
+            session,
+            handle.workflow_id,
+            0,
+            'late enqueue failure should not overwrite terminal task',
+            broker,
+        )
+        await session.commit()
+
+        row = (
+            await session.execute(
+                text("""
+                    SELECT status, result
+                    FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf_id AND task_index = 0
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+        ).one()
+        assert row.status == 'COMPLETED'
+
+        loaded = task_result_from_json(loads_json(row.result).unwrap()).unwrap()
+        assert loaded.is_ok()
+        assert loaded.unwrap() == 42
+        assert await _get_workflow_status(session, handle.workflow_id) == 'COMPLETED'
+        assert await _get_workflow_error(session, handle.workflow_id) is None
 
     async def test_fail_stores_error_keeps_running(
         self,
