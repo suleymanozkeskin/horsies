@@ -784,7 +784,6 @@ class PostgresBroker:
 
         Called when INSERT ... ON CONFLICT DO NOTHING returns no row.
         """
-        logger = get_logger('broker')
         try:
             async with self.session_factory() as session:
                 row = (
@@ -809,15 +808,20 @@ class PostgresBroker:
             )
 
         if row is None:
-            # Task existed and was already cleaned up (completed and purged).
-            # The original send succeeded and the work was done.
-            logger.warning(
-                'enqueue conflict for task_id=%s (%s) but row no longer exists — '
-                'original send succeeded and task was purged',
-                task_id,
-                task_name,
+            # The insert observed a conflict, but the row disappeared before we
+            # could compare enqueue_sha. Without the stored fingerprint, this
+            # cannot be proven idempotent.
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.ENQUEUE_FAILED,
+                    message=(
+                        f'task_id {task_id} conflict detected but row disappeared '
+                        f'before verification for {task_name}; cannot verify payload identity'
+                    ),
+                    retryable=False,
+                    exception=None,
+                )
             )
-            return Ok(task_id)
 
         existing_sha: str = row.enqueue_sha
         # enqueue_sha is NOT NULL — defensive assertion against data corruption.
