@@ -120,6 +120,11 @@ class SnapshotPayload:
     items: list[int]
 
 
+from horsies.core.codec.serde_registry import register_serde_type as _register_serde_type
+
+_register_serde_type(SnapshotPayload)
+
+
 _definition_key_counter = 0
 
 

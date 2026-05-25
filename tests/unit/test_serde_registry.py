@@ -312,3 +312,85 @@ class TestWalkerTolerance:
 
         # Should not raise.
         walk_callable_for_serde_types(fn, registry=registry)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: registry-driven rehydration
+# ---------------------------------------------------------------------------
+
+
+class _RegisteredEcho(BaseModel):
+    value: int
+    name: str
+
+
+register_serde_type(_RegisteredEcho)
+
+
+@dataclasses.dataclass
+class _RegisteredDC:
+    a: int
+    b: str
+
+
+register_serde_type(_RegisteredDC)
+
+
+@pytest.mark.unit
+class TestRegistryDrivenRehydration:
+    """Confirms rehydrate_value resolves types through the registry, not import."""
+
+    def test_registered_pydantic_round_trips(self) -> None:
+        from horsies.core.codec.serde import rehydrate_value, to_jsonable
+
+        original = _RegisteredEcho(value=42, name='ok')
+        jsonable = to_jsonable(original).unwrap()
+        restored = rehydrate_value(jsonable).unwrap()
+        assert isinstance(restored, _RegisteredEcho)
+        assert restored.value == 42
+        assert restored.name == 'ok'
+
+    def test_registered_dataclass_round_trips(self) -> None:
+        from horsies.core.codec.serde import rehydrate_value, to_jsonable
+
+        original = _RegisteredDC(a=7, b='dc')
+        jsonable = to_jsonable(original).unwrap()
+        restored = rehydrate_value(jsonable).unwrap()
+        assert isinstance(restored, _RegisteredDC)
+        assert restored.a == 7
+        assert restored.b == 'dc'
+
+    def test_unregistered_pydantic_payload_fails(self) -> None:
+        from horsies.core.codec.serde import SerializationError, rehydrate_value
+        from horsies.core.models.tasks import ContractCode
+        from horsies.core.types.result import is_err
+
+        raw = {
+            '__h_pydantic__': True,
+            'module': 'tests.unit.test_serde_registry',
+            'qualname': '_NeverRegisteredModel',
+            'data': {'x': 1},
+        }
+        result = rehydrate_value(raw)
+        assert is_err(result)
+        err = result.err_value
+        assert isinstance(err, SerializationError)
+        assert err.code == ContractCode.UNREGISTERED_REHYDRATION_TYPE
+        assert 'not registered' in str(err)
+
+    def test_unregistered_dataclass_payload_fails(self) -> None:
+        from horsies.core.codec.serde import SerializationError, rehydrate_value
+        from horsies.core.models.tasks import ContractCode
+        from horsies.core.types.result import is_err
+
+        raw = {
+            '__h_dataclass__': True,
+            'module': 'tests.unit.test_serde_registry',
+            'qualname': '_NeverRegisteredDC',
+            'data': {},
+        }
+        result = rehydrate_value(raw)
+        assert is_err(result)
+        err = result.err_value
+        assert isinstance(err, SerializationError)
+        assert err.code == ContractCode.UNREGISTERED_REHYDRATION_TYPE

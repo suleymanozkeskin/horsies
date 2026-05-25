@@ -9,9 +9,37 @@ from unittest.mock import patch
 
 import pytest
 
+import dataclasses as _dataclasses_module
+from types import ModuleType
+
+from pydantic import BaseModel as _BaseModel
+
 from horsies.core.codec.serde import rehydrate_value, to_jsonable
+from horsies.core.codec.serde_registry import register_serde_type
 from horsies.core.types.result import is_err
 from horsies.core.worker.worker import import_by_path
+
+
+def _register_serde_types_from_module(mod: ModuleType) -> None:
+    """Register every dataclass / BaseModel subclass defined in ``mod``.
+
+    Tests that import dataclasses/models from temp packages need them in
+    the serde registry before round-tripping; rehydrate_value no longer
+    falls back to import_module.  This helper saves each test from a
+    chain of explicit register_serde_type calls.
+    """
+    for _name in dir(mod):
+        if _name.startswith('_'):
+            continue
+        obj = getattr(mod, _name, None)
+        if not isinstance(obj, type):
+            continue
+        if obj.__module__ != mod.__name__:
+            continue
+        if _dataclasses_module.is_dataclass(obj) or (
+            issubclass(obj, _BaseModel) and obj is not _BaseModel
+        ):
+            register_serde_type(obj)
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +72,7 @@ class Simple:
         original_path = sys.path.copy()
         try:
             mod = import_by_path(str(mod_file))
+            _register_serde_types_from_module(mod)
             result = to_jsonable(mod.Simple(x=42, name='hello')).unwrap()
 
             assert isinstance(result, dict)
@@ -84,6 +113,7 @@ class OuterDC:
         original_path = sys.path.copy()
         try:
             mod = import_by_path(str(mod_file))
+            _register_serde_types_from_module(mod)
             outer = mod.OuterDC(
                 dc_field=mod.InnerDC(value=7),
                 model_field=mod.InnerModel(label='ok'),
@@ -136,6 +166,7 @@ class MainPayload:
         original_path = sys.path.copy()
         try:
             mod = import_by_path(str(mod_file))
+            _register_serde_types_from_module(mod)
             instance = mod.MainPayload(value=1)
 
             with patch.object(type(instance), '__module__', '__main__'):
@@ -193,6 +224,7 @@ class SimpleDC:
         original_path = sys.path.copy()
         try:
             mod = import_by_path(str(mod_file))
+            _register_serde_types_from_module(mod)
             original = mod.SimpleDC(x=99, name='round-trip')
 
             json_data = to_jsonable(original).unwrap()
@@ -225,6 +257,7 @@ class InitFalseDC:
         original_path = sys.path.copy()
         try:
             mod = import_by_path(str(mod_file))
+            _register_serde_types_from_module(mod)
             instance = mod.InitFalseDC(3)
             instance.y = 9
 
@@ -266,6 +299,7 @@ class OuterDC:
         original_path = sys.path.copy()
         try:
             mod = import_by_path(str(mod_file))
+            _register_serde_types_from_module(mod)
             outer = mod.OuterDC(
                 inner=mod.InnerDC(7),
                 model=mod.InnerModel(name='ok'),
@@ -307,6 +341,7 @@ class Container:
         original_path = sys.path.copy()
         try:
             mod = import_by_path(str(mod_file))
+            _register_serde_types_from_module(mod)
             container = mod.Container(
                 items=[mod.Item(label='a'), mod.Item(label='b')],
                 lookup={'key': mod.Item(label='c')},
@@ -390,8 +425,11 @@ class TestDataclassRehydrationErrors:
         assert is_err(result)
         assert 'Malformed Pydantic payload' in str(result.err_value)
 
-    def test_rehydrate_import_error(self) -> None:
-        """Bad module name returns Err(SerializationError) matching 'Could not import'."""
+    def test_rehydrate_unregistered_type(self) -> None:
+        """Unregistered type returns Err with UNREGISTERED_REHYDRATION_TYPE."""
+        from horsies.core.codec.serde import SerializationError
+        from horsies.core.models.tasks import ContractCode
+
         raw = {
             '__h_dataclass__': True,
             'module': 'nonexistent.module.xyz',
@@ -400,19 +438,30 @@ class TestDataclassRehydrationErrors:
         }
         result = rehydrate_value(raw)
         assert is_err(result)
-        assert 'Could not import' in str(result.err_value)
+        err = result.err_value
+        assert isinstance(err, SerializationError)
+        assert err.code == ContractCode.UNREGISTERED_REHYDRATION_TYPE
+        assert 'not registered' in str(err)
 
-    def test_rehydrate_not_a_dataclass(self) -> None:
-        """Module exists but name is not a dataclass returns Err(SerializationError)."""
+    def test_rehydrate_registered_type_not_a_dataclass(self) -> None:
+        """Type registered but resolved class isn't a dataclass → Err."""
+        from horsies.core.codec.serde_registry import register_serde_type
+        from pydantic import BaseModel
+
+        class _NotADataclass(BaseModel):
+            value: int
+
+        register_serde_type(_NotADataclass)
+
         raw = {
             '__h_dataclass__': True,
-            'module': 'os.path',
-            'qualname': 'join',
+            'module': _NotADataclass.__module__,
+            'qualname': _NotADataclass.__qualname__,
             'data': {},
         }
         result = rehydrate_value(raw)
         assert is_err(result)
-        assert 'is not a dataclass' in str(result.err_value)
+        assert 'not a dataclass' in str(result.err_value)
 
     def test_rehydrate_data_not_dict(self, tmp_path: Path) -> None:
         """data field as a list raises SerializationError matching 'must be a dict'."""
@@ -434,6 +483,7 @@ class Payload:
         original_path = sys.path.copy()
         try:
             mod = import_by_path(str(mod_file))
+            _register_serde_types_from_module(mod)
             module_name = type(mod.Payload(x=1)).__module__
 
             raw = {
@@ -468,6 +518,7 @@ class Minimal:
         original_path = sys.path.copy()
         try:
             mod = import_by_path(str(mod_file))
+            _register_serde_types_from_module(mod)
             # Serialize normally first
             json_data = to_jsonable(mod.Minimal(x=10)).unwrap()
 
@@ -506,6 +557,7 @@ class Strict:
         original_path = sys.path.copy()
         try:
             mod = import_by_path(str(mod_file))
+            _register_serde_types_from_module(mod)
             module_name = type(mod.Strict(x=1)).__module__
 
             raw = {

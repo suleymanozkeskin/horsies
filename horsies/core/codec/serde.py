@@ -5,7 +5,6 @@ from typing import (
     Dict,
     List,
     Optional,
-    Type,
     Union,
     Mapping,
     Sequence,
@@ -26,7 +25,7 @@ from horsies.core.models.tasks import (
     TaskError,
 )
 from horsies.core.types.result import Ok, Err, Result, is_err
-from importlib import import_module
+from horsies.core.codec.serde_registry import get_registered_type
 from horsies.core.logging import get_logger
 
 logger = get_logger('serde')
@@ -224,26 +223,14 @@ def _is_task_result(value: Any) -> TypeGuard[TaskResult[Any, TaskError]]:
 
 
 # ---------------------------------------------------------------------------
-# Caches
+# Rehydration uses the class registry, not dynamic import_module
 # ---------------------------------------------------------------------------
 #
-# These caches sit alongside ``import_module`` in the deserialization path
-# below.  They are replaced by the class registry in the follow-up commit
-# that rewrites ``rehydrate_value`` to registry-only lookup.
-
-_CLASS_CACHE: Dict[
-    str, Type[BaseModel]
-] = {}  # cache of resolved Pydantic classes by module name and qualname
-
-_DATACLASS_CACHE: Dict[
-    str, type
-] = {}  # cache of resolved dataclass types by module name and qualname
-
-
-def clear_serde_caches() -> None:
-    """Clear module-level rehydration caches."""
-    _CLASS_CACHE.clear()
-    _DATACLASS_CACHE.clear()
+# Class lookup happens through ``serde_registry.get_registered_type``.  The
+# registry is populated by ``@horsies_task`` (signature walker) and by
+# explicit ``@horsies_serdetype`` decoration.  There is no fallback to
+# ``import_module`` — unregistered types fail closed with
+# ``UNREGISTERED_REHYDRATION_TYPE``.
 
 
 # ---------------------------------------------------------------------------
@@ -575,37 +562,34 @@ def rehydrate_value(value: Json) -> SerdeResult[Any]:
                 'Malformed Pydantic payload: missing or non-string "module"/"qualname"',
             ))
         data = value.get('data')
-        cache_key = f'{module_name}:{qualname}'
+        registry_key = f'{module_name}:{qualname}'
+
+        cls = get_registered_type(registry_key)
+        if cls is None:
+            return Err(SerializationError(
+                f"Cannot rehydrate {registry_key!r}: type is not registered "
+                f'with the serde class registry. Register it via '
+                f'@horsies_serdetype, app.register_serde_type(), or by using '
+                f'it in a task signature (the @app.task signature walker '
+                f'auto-registers reachable types).',
+                code=ContractCode.UNREGISTERED_REHYDRATION_TYPE,
+            ))
+        if not (isinstance(cls, type) and issubclass(cls, BaseModel)):
+            return Err(SerializationError(
+                f"Registered type {registry_key!r} is not a BaseModel "
+                f'subclass (got {cls!r}).',
+            ))
 
         try:
-            if cache_key in _CLASS_CACHE:
-                cls = _CLASS_CACHE[cache_key]
-            else:
-                try:
-                    mod = import_module(module_name)
-                except ImportError as e:
-                    return Err(SerializationError(
-                        f"Could not import module '{module_name}'. "
-                        f'Did you move the file without leaving a re-export shim? Error: {e}',
-                    ))
-
-                resolved_cls: Any = mod
-                for part in qualname.split('.'):
-                    resolved_cls = getattr(resolved_cls, part)
-
-                if not (isinstance(resolved_cls, type) and issubclass(resolved_cls, BaseModel)):
-                    return Err(SerializationError(f'{cache_key} is not a BaseModel'))
-
-                cls = resolved_cls
-                _CLASS_CACHE[cache_key] = cls
-
             return Ok(cls.model_validate(data))
-
         except Exception as e:
             logger.error(
-                f'Failed to rehydrate Pydantic model {cache_key}: {type(e).__name__}: {e}',
+                f'Failed to rehydrate Pydantic model {registry_key}: '
+                f'{type(e).__name__}: {e}',
             )
-            return Err(SerializationError(f'Failed to rehydrate {cache_key}: {e}'))
+            return Err(SerializationError(
+                f'Failed to rehydrate {registry_key}: {e}',
+            ))
 
     # Dataclass rehydration
     if isinstance(value, dict) and value.get(_TAG_DATACLASS):
@@ -616,30 +600,25 @@ def rehydrate_value(value: Json) -> SerdeResult[Any]:
                 'Malformed dataclass payload: missing or non-string "module"/"qualname"',
             ))
         data = value.get('data')
-        cache_key = f'{module_name}:{qualname}'
+        registry_key = f'{module_name}:{qualname}'
+
+        dc_cls = get_registered_type(registry_key)
+        if dc_cls is None:
+            return Err(SerializationError(
+                f"Cannot rehydrate {registry_key!r}: type is not registered "
+                f'with the serde class registry. Register it via '
+                f'@horsies_serdetype, app.register_serde_type(), or by using '
+                f'it in a task signature (the @app.task signature walker '
+                f'auto-registers reachable types).',
+                code=ContractCode.UNREGISTERED_REHYDRATION_TYPE,
+            ))
+        if not (isinstance(dc_cls, type) and dataclasses.is_dataclass(dc_cls)):
+            return Err(SerializationError(
+                f"Registered type {registry_key!r} is not a dataclass "
+                f'(got {dc_cls!r}).',
+            ))
 
         try:
-            if cache_key in _DATACLASS_CACHE:
-                dc_cls = _DATACLASS_CACHE[cache_key]
-            else:
-                try:
-                    mod = import_module(module_name)
-                except ImportError as e:
-                    return Err(SerializationError(
-                        f"Could not import module '{module_name}'. "
-                        f'Did you move the file without leaving a re-export shim? Error: {e}',
-                    ))
-
-                resolved: Any = mod
-                for part in qualname.split('.'):
-                    resolved = getattr(resolved, part)
-
-                if not isinstance(resolved, type) or not dataclasses.is_dataclass(resolved):
-                    return Err(SerializationError(f'{cache_key} is not a dataclass'))
-
-                dc_cls = resolved
-                _DATACLASS_CACHE[cache_key] = dc_cls
-
             if not isinstance(data, dict):
                 return Err(SerializationError(
                     f'Dataclass data must be a dict, got {type(data)}',
@@ -673,9 +652,12 @@ def rehydrate_value(value: Json) -> SerdeResult[Any]:
 
         except Exception as e:
             logger.error(
-                f'Failed to rehydrate dataclass {cache_key}: {type(e).__name__}: {e}',
+                f'Failed to rehydrate dataclass {registry_key}: '
+                f'{type(e).__name__}: {e}',
             )
-            return Err(SerializationError(f'Failed to rehydrate dataclass {cache_key}: {e}'))
+            return Err(SerializationError(
+                f'Failed to rehydrate dataclass {registry_key}: {e}',
+            ))
 
     # Datetime rehydration (datetime before date — subclass ordering)
     if isinstance(value, dict) and value.get(_TAG_DATETIME):

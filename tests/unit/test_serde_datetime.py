@@ -247,6 +247,9 @@ class Event:
         original_path = sys.path.copy()
         try:
             mod = import_by_path(str(mod_file))
+            from horsies.core.codec.serde_registry import register_serde_type
+
+            register_serde_type(mod.Event)
             original = mod.Event(
                 name='deploy',
                 occurred_at=dt.datetime(2025, 6, 15, 10, 0, 0, tzinfo=dt.timezone.utc),
