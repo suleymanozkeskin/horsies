@@ -124,6 +124,9 @@ UNCLAIM_PAUSED_TASKS_SQL = text("""
         claim_expires_at = NULL,
         updated_at = NOW()
     WHERE id = ANY(:ids)
+      AND status = 'CLAIMED'
+      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
+    RETURNING id
 """)
 
 UNCLAIM_CLAIMED_TASK_SQL = text("""
@@ -158,7 +161,9 @@ CANCEL_CANCELLED_WORKFLOW_TASKS_SQL = text("""
         claim_expires_at = NULL,
         updated_at = NOW()
     WHERE id = ANY(:ids)
-      AND status IN ('CLAIMED', 'PENDING')
+      AND status = 'CLAIMED'
+      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
+    RETURNING id
 """)
 
 SKIP_CANCELLED_WORKFLOW_TASKS_SQL = text("""
