@@ -715,8 +715,8 @@ class TestEnqueueIdempotency:
         assert result.err_value.retryable is False
 
     @pytest.mark.asyncio
-    async def test_enqueue_same_id_row_deleted_returns_ok_with_warning(self) -> None:
-        """INSERT conflicts, SELECT returns no row (purged) -> Ok(task_id)."""
+    async def test_enqueue_same_id_row_deleted_returns_non_retryable_err(self) -> None:
+        """INSERT conflicts, SELECT returns no row -> cannot verify payload identity."""
         broker = _make_broker()
         session = _make_conflict_session(row_exists=False)
         broker.session_factory = MagicMock(return_value=session)
@@ -727,8 +727,10 @@ class TestEnqueueIdempotency:
             enqueue_sha='test-sha',
         )
 
-        assert is_ok(result)
-        assert result.ok_value == 'dup-id'
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.ENQUEUE_FAILED
+        assert result.err_value.retryable is False
+        assert 'cannot verify payload identity' in result.err_value.message
 
     @pytest.mark.asyncio
     async def test_enqueue_same_id_select_fails_returns_retryable_err(self) -> None:
