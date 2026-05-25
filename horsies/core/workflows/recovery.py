@@ -344,7 +344,6 @@ async def recover_stuck_workflows(
             session,
             workflow_id,
             broker,
-            preserve_existing_error=True,
         )
         logger.info(f'Recovered terminal workflow via completion check: {workflow_id}')
         recovered += 1
