@@ -311,6 +311,8 @@ UPDATE_PARENT_NODE_RESULT_SQL = text("""
     UPDATE horsies_workflow_tasks
     SET status = :status, result = :result, sub_workflow_summary = :summary, completed_at = NOW()
     WHERE workflow_id = :wf_id AND task_index = :idx
+      AND NOT (status = ANY(:terminal_states))
+    RETURNING task_index
 """)
 # -- SQL constants for evaluate_workflow_success --
 
