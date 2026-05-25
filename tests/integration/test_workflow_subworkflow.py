@@ -34,7 +34,7 @@ from horsies.core.workflows.registry import (
     unregister_workflow_spec,
 )
 
-from .conftest import make_simple_task, start_ok
+from .conftest import make_failing_task, make_simple_task, start_ok
 
 
 # =============================================================================
@@ -595,6 +595,59 @@ class TestSubworkflowIntegration:
         )
         wf_status = wf_row.scalar_one()
         assert wf_status == 'PAUSED'
+
+    async def test_parent_pause_on_error_cascades_to_running_child(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        session, broker, app = setup
+
+        task_fail = make_failing_task(app, 'pause_parent_fail_sibling')
+        node_child: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=StartChildWorkflow,
+        )
+        node_fail: TaskNode[Any] = TaskNode(fn=task_fail)
+
+        spec = _workflow(
+            app,
+            name='parent_pause_cascades_child',
+            tasks=[node_child, node_fail],
+            on_error=OnError.PAUSE,
+        )
+
+        handle = await start_ok(spec, broker)
+
+        parent_child_row = await self._get_workflow_task_row(
+            session, handle.workflow_id, 0
+        )
+        assert parent_child_row is not None
+        child_status, child_id, _ = parent_child_row
+        assert child_status == 'RUNNING'
+        assert isinstance(child_id, str)
+
+        await self._complete_task(
+            session,
+            broker,
+            handle.workflow_id,
+            1,
+            TaskResult(err=TaskError(error_code='PARENT_FAIL', message='parent failed')),
+        )
+
+        statuses = await session.execute(
+            text("""
+                SELECT
+                    parent.status AS parent_status,
+                    child.status AS child_status
+                FROM horsies_workflows parent
+                JOIN horsies_workflows child ON child.id = :child_id
+                WHERE parent.id = :parent_id
+            """),
+            {'parent_id': handle.workflow_id, 'child_id': child_id},
+        )
+        row = statuses.fetchone()
+        assert row is not None
+        assert row.parent_status == 'PAUSED'
+        assert row.child_status == 'PAUSED'
 
     async def test_parent_completes_when_child_output_succeeds(
         self,
