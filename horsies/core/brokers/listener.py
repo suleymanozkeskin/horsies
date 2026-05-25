@@ -311,7 +311,11 @@ class PostgresListener:
 
     async def _handle_health_disconnect(self) -> None:
         """Reset listener connections after health monitor detects a dead connection."""
-        await self._close_connections()
+        async with self._lock:
+            dispatcher_was_running = await self._pause_dispatcher()
+            await self._close_connections()
+            if dispatcher_was_running and self._listen_channels:
+                self._start_dispatcher_if_needed()
 
     async def _health_monitor(self) -> None:
         """
