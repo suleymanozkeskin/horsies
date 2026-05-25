@@ -1270,16 +1270,33 @@ class WorkflowSpec(Generic[OutT]):
         visited: set[str] = set()
         stack: set[str] = set()
 
-        def visit(workflow_name: str, workflow_class: type[Any]) -> None:
+        def workflow_key(workflow_class: type[Any]) -> str:
+            """Return the identity used for nested workflow cycle detection."""
+            definition_key = workflow_class.__dict__.get('definition_key')
+            if isinstance(definition_key, str) and definition_key.strip():
+                return definition_key
+            return (
+                f'{workflow_class.__module__}.'
+                f'{workflow_class.__qualname__}:{id(workflow_class)}'
+            )
+
+        def workflow_label(workflow_class: type[Any]) -> str:
+            workflow_name = getattr(workflow_class, 'name', workflow_class.__qualname__)
+            return str(workflow_name)
+
+        def visit(workflow_class: type[Any]) -> None:
             """DFS visit with cycle detection via recursion stack."""
-            if workflow_name in stack:
+            key = workflow_key(workflow_class)
+            if key in stack:
                 # Found a back-edge - this is a cycle
                 errors.append(
                     WorkflowValidationError(
                         message='cycle detected in nested workflows',
                         code=ErrorCode.WORKFLOW_CYCLE_DETECTED,
                         notes=[
-                            f"workflow '{workflow_name}' creates a circular reference",
+                            f"workflow '{workflow_label(workflow_class)}' "
+                            'creates a circular reference',
+                            f"definition key: '{key}'",
                             'cycles in nested workflows are not allowed',
                         ],
                         help_text='remove the circular SubWorkflowNode reference',
@@ -1287,12 +1304,12 @@ class WorkflowSpec(Generic[OutT]):
                 )
                 return
 
-            if workflow_name in visited:
+            if key in visited:
                 # Already fully explored this workflow, no cycle through here
                 return
 
-            visited.add(workflow_name)
-            stack.add(workflow_name)
+            visited.add(key)
+            stack.add(key)
 
             # Check all SubWorkflowNodes in this workflow's definition
             nodes = workflow_class.get_workflow_nodes()
@@ -1301,16 +1318,15 @@ class WorkflowSpec(Generic[OutT]):
                     if isinstance(wf_node, SubWorkflowNode):
                         wf_node_any = cast(SubWorkflowNode[Any], wf_node)
                         workflow_def = wf_node_any.workflow_def
-                        child_name: str = workflow_def.name
-                        visit(child_name, workflow_def)
+                        visit(workflow_def)
 
             # Done exploring this workflow
-            stack.remove(workflow_name)
+            stack.remove(key)
 
         # Start DFS from each SubWorkflowNode in this workflow's tasks
         for node in self.tasks:
             if isinstance(node, SubWorkflowNode):
-                visit(node.workflow_def.name, node.workflow_def)
+                visit(node.workflow_def)
 
         return errors
 
