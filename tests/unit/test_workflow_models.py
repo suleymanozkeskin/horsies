@@ -734,6 +734,19 @@ class TestWorkflowSpecValidation:
         assert 'task_b' in cycle_error.notes[0]
         assert 'task_c' in cycle_error.notes[0]
 
+    def test_duplicate_waits_for_edge_is_not_a_cycle(self) -> None:
+        '''Duplicate waits_for refs are one graph edge, not a cycle.'''
+        fn_a = MockTaskWrapper(task_name="task_a")
+        fn_b = MockTaskWrapper(task_name="task_b")
+
+        node_a = TaskNode(fn=fn_a)
+        node_b = TaskNode(fn=fn_b, waits_for=[node_a, node_a])
+
+        spec = WorkflowSpec(name="duplicate_dep", tasks=[node_a, node_b])
+
+        assert len(spec.tasks[1].waits_for) == 1
+        assert spec.tasks[1].waits_for[0] is spec.tasks[0]
+
     def test_invalid_dep_reference(self) -> None:
         """Dep not in tasks list raises WORKFLOW_INVALID_DEPENDENCY."""
         fn_a = MockTaskWrapper(task_name='task_a')
