@@ -276,9 +276,9 @@ class WorkflowSpec(Generic[OutT]):
             copied_tasks.append(node_copy)
 
         for node_copy in copied_tasks:
-            node_copy.waits_for = [
+            node_copy.waits_for = self._unique_node_refs([
                 old_to_new.get(id(ref), ref) for ref in node_copy.waits_for
-            ]
+            ])
             node_copy.args_from = {
                 k: old_to_new.get(id(v), v)
                 for k, v in node_copy.args_from.items()
@@ -331,6 +331,21 @@ class WorkflowSpec(Generic[OutT]):
             object.__setattr__(self, '_build_call_token', token_val)
 
         return originals
+
+    @staticmethod
+    def _unique_node_refs(
+        refs: Sequence[TaskNode[Any] | SubWorkflowNode[Any]],
+    ) -> list[TaskNode[Any] | SubWorkflowNode[Any]]:
+        '''Return node refs de-duplicated by identity, preserving first-seen order.'''
+        seen: set[int] = set()
+        unique: list[TaskNode[Any] | SubWorkflowNode[Any]] = []
+        for ref in refs:
+            ref_id = id(ref)
+            if ref_id in seen:
+                continue
+            seen.add(ref_id)
+            unique.append(ref)
+        return unique
 
     def _snapshot_kwargs_values(self) -> None:
         """Snapshot kwargs values via serde round-trip for deep by-value isolation.
