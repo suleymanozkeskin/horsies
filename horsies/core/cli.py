@@ -369,7 +369,7 @@ def worker_command(args: argparse.Namespace) -> None:
     # Get discovered task modules
     discovered_modules = app.get_discovered_task_modules()
     if discovered_modules:
-        logger.info(f'Using discovered task modules')
+        logger.info('Using discovered task modules')
     else:
         logger.warning('No task modules discovered.')
 
@@ -425,23 +425,16 @@ def worker_command(args: argparse.Namespace) -> None:
     try:
 
         async def run_worker() -> None:
-            try:
-                logger.info('Ensuring Postgres schema and triggers are initialized...')
-                await _ensure_schema_with_retry(
-                    broker,
-                    app.config.resilience,
-                    logger,
-                )
-            except Exception as e:
-                logger.error(f'Failed to initialize database schema: {e}')
-                raise
-
-            worker = Worker(broker.session_factory, broker.listener, worker_config)
-
             loop = asyncio.get_running_loop()
+            run_task = asyncio.current_task()
+            worker: Worker | None = None
 
             def signal_handler() -> None:
                 logger.info('Received interrupt signal, stopping worker...')
+                if worker is None:
+                    if run_task is not None:
+                        run_task.cancel()
+                    return
                 worker.request_stop()
 
             for sig in (signal.SIGTERM, signal.SIGINT):
@@ -449,6 +442,22 @@ def worker_command(args: argparse.Namespace) -> None:
                     loop.add_signal_handler(sig, signal_handler)
                 except NotImplementedError:
                     pass
+
+            try:
+                logger.info('Ensuring Postgres schema and triggers are initialized...')
+                await _ensure_schema_with_retry(
+                    broker,
+                    app.config.resilience,
+                    logger,
+                )
+            except asyncio.CancelledError:
+                logger.info('Worker startup interrupted')
+                return
+            except Exception as e:
+                logger.error(f'Failed to initialize database schema: {e}')
+                raise
+
+            worker = Worker(broker.session_factory, broker.listener, worker_config)
 
             try:
                 await worker.run_forever()
@@ -541,6 +550,24 @@ def scheduler_command(args: argparse.Namespace) -> None:
     try:
 
         async def run_scheduler() -> None:
+            loop = asyncio.get_running_loop()
+            run_task = asyncio.current_task()
+            scheduler: Scheduler | None = None
+
+            def signal_handler() -> None:
+                logger.info('Received interrupt signal, stopping scheduler...')
+                if scheduler is None:
+                    if run_task is not None:
+                        run_task.cancel()
+                    return
+                scheduler.request_stop()
+
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                try:
+                    loop.add_signal_handler(sig, signal_handler)
+                except NotImplementedError:
+                    pass
+
             try:
                 # Ensure schema exists with retry, same as worker path
                 broker = app.get_broker()
@@ -551,22 +578,16 @@ def scheduler_command(args: argparse.Namespace) -> None:
                     logger,
                 )
 
+            except asyncio.CancelledError:
+                logger.info('Scheduler startup interrupted')
+                return
+            except Exception as e:
+                logger.error(f'Scheduler error: {e}', exc_info=True)
+                raise
+
+            try:
                 scheduler = Scheduler(app)
-
-                loop = asyncio.get_running_loop()
-
-                def signal_handler() -> None:
-                    logger.info('Received interrupt signal, stopping scheduler...')
-                    scheduler.request_stop()
-
-                for sig in (signal.SIGTERM, signal.SIGINT):
-                    try:
-                        loop.add_signal_handler(sig, signal_handler)
-                    except NotImplementedError:
-                        pass
-
                 await scheduler.run_forever()
-
             except Exception as e:
                 logger.error(f'Scheduler error: {e}', exc_info=True)
                 raise
