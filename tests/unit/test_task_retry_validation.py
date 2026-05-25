@@ -127,8 +127,8 @@ class TestTaskDecoratorValidation:
 
         assert exc_info.value.code == ErrorCode.TASK_PREDECORATED_NOT_SUPPORTED
 
-    def test_inner_decorator_without_wraps_rejected(self) -> None:
-        """Task pre-decorated without @wraps is rejected."""
+    def test_inner_decorator_without_wraps_missing_return_type_rejected(self) -> None:
+        """A no-wraps wrapper is rejected if it no longer satisfies the task contract."""
         app = _make_app()
 
         def passthrough(fn):  # type: ignore[no-untyped-def]
@@ -144,7 +144,7 @@ class TestTaskDecoratorValidation:
             def predecorated_no_wraps() -> TaskResult[str, TaskError]:
                 return TaskResult(ok='ok')
 
-        assert exc_info.value.code == ErrorCode.TASK_PREDECORATED_NOT_SUPPORTED
+        assert exc_info.value.code == ErrorCode.TASK_NO_RETURN_TYPE
 
 
 @pytest.mark.unit
