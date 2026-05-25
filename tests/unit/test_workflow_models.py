@@ -735,17 +735,65 @@ class TestWorkflowSpecValidation:
         assert 'task_c' in cycle_error.notes[0]
 
     def test_duplicate_waits_for_edge_is_not_a_cycle(self) -> None:
-        '''Duplicate waits_for refs are one graph edge, not a cycle.'''
-        fn_a = MockTaskWrapper(task_name="task_a")
-        fn_b = MockTaskWrapper(task_name="task_b")
+        """Duplicate waits_for refs are one graph edge, not a cycle.
+
+        Regression: C1 / HRS-007 false positive
+        (see ignored-content/audits/24-05-2026/claude.md).
+        """
+        fn_a = MockTaskWrapper(task_name='task_a')
+        fn_b = MockTaskWrapper(task_name='task_b')
 
         node_a = TaskNode(fn=fn_a)
         node_b = TaskNode(fn=fn_b, waits_for=[node_a, node_a])
 
-        spec = WorkflowSpec(name="duplicate_dep", tasks=[node_a, node_b])
+        spec = WorkflowSpec(name='duplicate_dep', tasks=[node_a, node_b])
 
         assert len(spec.tasks[1].waits_for) == 1
         assert spec.tasks[1].waits_for[0] is spec.tasks[0]
+
+    def test_duplicate_waits_for_preserves_first_seen_order(self) -> None:
+        """Mixed duplicates collapse to first-seen order, matching the helper's contract."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+        fn_b = MockTaskWrapper(task_name='task_b')
+        fn_c = MockTaskWrapper(task_name='task_c')
+
+        node_a = TaskNode(fn=fn_a)
+        node_b = TaskNode(fn=fn_b)
+        node_c = TaskNode(fn=fn_c, waits_for=[node_a, node_b, node_a])
+
+        spec = WorkflowSpec(name='ordered_dupes', tasks=[node_a, node_b, node_c])
+
+        deps = spec.tasks[2].waits_for
+        assert len(deps) == 2
+        assert deps[0] is spec.tasks[0]
+        assert deps[1] is spec.tasks[1]
+
+    def test_collect_dag_errors_robust_to_duplicate_waits_for(self) -> None:
+        """_collect_dag_errors handles duplicate refs without relying on _unique_node_refs.
+
+        Constructs a valid spec, then bypasses the _isolate_inputs dedupe invariant
+        by re-injecting duplicate refs post-construction. Proves the Kahn's-algorithm
+        implementation is self-sufficient against duplicate edges.
+        """
+        fn_a = MockTaskWrapper(task_name='task_a')
+        fn_b = MockTaskWrapper(task_name='task_b')
+
+        node_a = TaskNode(fn=fn_a)
+        node_b = TaskNode(fn=fn_b, waits_for=[node_a])
+
+        spec = WorkflowSpec(name='post_construction_dupe', tasks=[node_a, node_b])
+
+        # Bypass _freeze_graph + _unique_node_refs to expose the algorithm
+        # to duplicates directly.
+        copied_b = spec.tasks[1]
+        object.__setattr__(
+            copied_b,
+            'waits_for',
+            (spec.tasks[0], spec.tasks[0], spec.tasks[0]),
+        )
+
+        errors = spec._collect_dag_errors()
+        assert errors == []
 
     def test_invalid_dep_reference(self) -> None:
         """Dep not in tasks list raises WORKFLOW_INVALID_DEPENDENCY."""
