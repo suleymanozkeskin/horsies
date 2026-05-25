@@ -25,7 +25,6 @@ from horsies.core.models.tasks import (
 from horsies.core.models.workflow import WorkflowContextMissingIdError
 from horsies.core.task_decorator import (
     FromNodeMarker,
-    NodeFactory,
     TaskHandle,
     create_task_wrapper,
     effective_priority,
@@ -529,6 +528,59 @@ class TestCreateTaskWrapperValidation:
         assert wrapper.task_name == 'test.good_fn'
         assert callable(wrapper)
 
+    def test_factory_task_can_close_over_helper_function(self) -> None:
+        """A factory-local helper function is a valid task dependency."""
+        def make_task():
+            def helper(value: int) -> int:
+                return value + 1
+
+            def good_fn(x: int) -> TaskResult[int, TaskError]:
+                return TaskResult(ok=helper(x))
+
+            return good_fn
+
+        app = _make_app()
+        wrapper = create_task_wrapper(make_task(), app, 'test.helper_closure')
+
+        result = wrapper(41)
+        assert result.is_ok()
+        assert result.ok == 42
+
+    def test_factory_task_can_close_over_lambda_helper(self) -> None:
+        """A factory-local lambda helper is a valid task dependency."""
+        def make_task():
+            helper = lambda value: value + 1  # noqa: E731
+
+            def good_fn(x: int) -> TaskResult[int, TaskError]:
+                return TaskResult(ok=helper(x))
+
+            return good_fn
+
+        app = _make_app()
+        wrapper = create_task_wrapper(make_task(), app, 'test.lambda_helper_closure')
+
+        result = wrapper(41)
+        assert result.is_ok()
+        assert result.ok == 42
+
+    def test_factory_task_named_wrapper_can_close_over_helper(self) -> None:
+        """Function names and variadic params do not imply a decorator wrapper."""
+        def make_task():
+            def helper(values: tuple[int, ...]) -> int:
+                return sum(values)
+
+            def wrapper(*values: int) -> TaskResult[int, TaskError]:
+                return TaskResult(ok=helper(values))
+
+            return wrapper
+
+        app = _make_app()
+        wrapper = create_task_wrapper(make_task(), app, 'test.variadic_helper_closure')
+
+        result = wrapper(20, 22)
+        assert result.is_ok()
+        assert result.ok == 42
+
     def test_predecorated_with_wraps_rejected(self) -> None:
         """Wrapper chain via __wrapped__ is rejected."""
 
@@ -549,8 +601,8 @@ class TestCreateTaskWrapperValidation:
 
         assert exc_info.value.code == ErrorCode.TASK_PREDECORATED_NOT_SUPPORTED
 
-    def test_predecorated_without_wraps_rejected(self) -> None:
-        """Closure-based decorator wrapper is rejected."""
+    def test_decorator_without_wraps_missing_return_type_rejected(self) -> None:
+        """A no-wraps wrapper is rejected if it no longer satisfies the task contract."""
 
         def passthrough(fn):  # type: ignore[no-untyped-def]
             def wrapper(*args, **kwargs):  # type: ignore[no-untyped-def]
@@ -566,7 +618,7 @@ class TestCreateTaskWrapperValidation:
         with pytest.raises(TaskDefinitionError) as exc_info:
             create_task_wrapper(bad_fn, app, 'test.bad_fn')  # type: ignore[arg-type]
 
-        assert exc_info.value.code == ErrorCode.TASK_PREDECORATED_NOT_SUPPORTED
+        assert exc_info.value.code == ErrorCode.TASK_NO_RETURN_TYPE
 
 
 # =============================================================================

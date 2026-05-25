@@ -662,29 +662,6 @@ def create_task_wrapper(
             help_text='remove inner decorators and apply @app.task() directly to the raw function',
         )
 
-    closure_cells = getattr(fn, '__closure__', None)
-    closure_callable = None
-    if closure_cells:
-        for cell in closure_cells:
-            try:
-                value = cell.cell_contents
-            except ValueError:
-                continue
-            if inspect.isfunction(value) or inspect.ismethod(value):
-                closure_callable = value
-                break
-    if closure_callable is not None:
-        raise TaskDefinitionError(
-            message='task function must not be pre-decorated',
-            code=ErrorCode.TASK_PREDECORATED_NOT_SUPPORTED,
-            location=fn_location,
-            notes=[
-                f"task '{task_name}' closes over callable '{type(closure_callable).__name__}'",
-                'this usually indicates an inner decorator wrapper',
-            ],
-            help_text='remove inner decorators and apply @app.task() directly to the raw function',
-        )
-
     hints = get_type_hints(fn)
 
     # Validate that return type is TaskResult[*, TaskError]
