@@ -1612,34 +1612,25 @@ async def on_subworkflow_complete(
         parent_node_result = _ser(dumps_json(TaskResult(err=error)), 'parent node error', fallback='null')
 
     # 4. Update parent node
-    parent_summary_payload = _ser(
-        dumps_json(child_summary), 'child summary', fallback='null',
-    )
     update_result = await session.execute(
         UPDATE_PARENT_NODE_RESULT_SQL,
         {
             'status': parent_node_status,
             'result': parent_node_result,
-            'summary': parent_summary_payload,
+            'summary': _ser(dumps_json(child_summary), 'child summary', fallback='null'),
             'wf_id': parent_wf_id,
             'idx': parent_task_idx,
             'terminal_states': WF_TASK_TERMINAL_VALUES,
         },
     )
     if update_result.fetchone() is None:
+        # Identity-only log: never log the dropped result/summary payloads, since
+        # they carry arbitrary user task output. Operators can recover the source
+        # row via horsies_workflows.id = child_workflow_id when needed.
         logger.debug(
             'Parent workflow task already terminal, skipping subworkflow progression: '
-            'parent_workflow=%s task_index=%s child_workflow=%s',
-            parent_wf_id, parent_task_idx, child_workflow_id,
-        )
-        logger.debug(
-            'Dropped parent node update for %s:%s (child=%s) status=%s result=%s summary=%s',
-            parent_wf_id,
-            parent_task_idx,
-            child_workflow_id,
-            parent_node_status,
-            parent_node_result,
-            parent_summary_payload,
+            'parent_workflow=%s task_index=%s child_workflow=%s attempted_status=%s',
+            parent_wf_id, parent_task_idx, child_workflow_id, parent_node_status,
         )
         return
 
