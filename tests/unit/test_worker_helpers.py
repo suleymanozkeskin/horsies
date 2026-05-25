@@ -35,10 +35,12 @@ from horsies.core.worker.worker import (
     _dedupe_paths,
     _derive_sys_path_roots_from_file,
     _FinalizeError,
+    _FINALIZE_FUTURE_MAX_RETRIES,
     _FINALIZE_PHASE1_MAX_RETRIES,
     _FINALIZE_PHASE2_MAX_RETRIES,
     _FINALIZE_RETRY_BASE_DELAY_S,
     _FINALIZE_RETRY_MAX_DELAY_S,
+    _FINALIZE_STAGE_FUTURE,
     _FINALIZE_STAGE_PHASE1,
     _FINALIZE_STAGE_PHASE2,
     _is_retryable_db_error,
@@ -820,10 +822,10 @@ class TestFinalizeAfterRequeueOutcome:
         assert err.data['requeue_outcome'] == 'DB_ERROR'
 
     @pytest.mark.asyncio
-    async def test_future_transient_error_requeue_not_owner_retryable(self) -> None:
-        """Transient connection error + NOT_OWNER_OR_NOT_CLAIMED → retryable=True.
+    async def test_future_transient_error_requeue_not_owner_not_retryable(self) -> None:
+        """Transient connection error + NOT_OWNER_OR_NOT_CLAIMED → retryable=False.
 
-        The task was not requeued (guard failed), so finalize should retry.
+        The DB update succeeded and this worker no longer owns an in-flight row.
         """
         worker = _make_worker()
 
@@ -837,7 +839,7 @@ class TestFinalizeAfterRequeueOutcome:
 
         assert isinstance(result, Err)
         err: _FinalizeError = result.err_value
-        assert err.retryable is True
+        assert err.retryable is False
         assert err.data is not None
         assert err.data['requeue_outcome'] == 'NOT_OWNER_OR_NOT_CLAIMED'
 
@@ -1221,6 +1223,28 @@ class TestHandleFinalizeError:
         await worker._handle_finalize_error(err)
         assert spawn_count == 1
 
+    @pytest.mark.asyncio
+    async def test_future_at_max_attempts_uses_future_limit(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Future-stage errors use their own bounded retry limit."""
+        worker = _make_worker()
+        worker._spawn_background = MagicMock()  # type: ignore[assignment]
+        err = _make_finalize_error(retryable=True, stage=_FINALIZE_STAGE_FUTURE)
+        key = (err.task_id, _FINALIZE_STAGE_FUTURE)
+        worker._finalize_retry_attempts[key] = _FINALIZE_FUTURE_MAX_RETRIES
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.CRITICAL, logger=self._LOGGER_NAME):
+                await worker._handle_finalize_error(err)
+        finally:
+            _logger.propagate = False
+
+        assert 'retries exhausted' in caplog.text.lower()
+        assert key not in worker._finalize_retry_attempts
+        assert worker._spawn_background.call_count == 0
+
     # --- U-2f: phase1 retryable → spawns _retry_finalize_phase1 ---
 
     @pytest.mark.asyncio
@@ -1265,11 +1289,31 @@ class TestHandleFinalizeError:
         assert 'finalize-retry-phase2' in spawned_names[0]
 
     @pytest.mark.asyncio
+    async def test_future_retryable_spawns_future_retry(self) -> None:
+        """Future-stage retryable error spawns _retry_finalize_future."""
+        worker = _make_worker()
+        spawned_names: list[str] = []
+
+        def _capture_spawn(coro: Any, *, name: str, **kwargs: Any) -> MagicMock:
+            spawned_names.append(name)
+            coro.close()
+            return MagicMock()
+
+        worker._spawn_background = _capture_spawn  # type: ignore[assignment]
+        err = _make_finalize_error(retryable=True, stage=_FINALIZE_STAGE_FUTURE)
+
+        await worker._handle_finalize_error(err)
+
+        assert len(spawned_names) == 1
+        assert 'finalize-retry-future' in spawned_names[0]
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ('stage', 'expected_name'),
         [
             (_FINALIZE_STAGE_PHASE1, 'finalize-retry-phase1'),
             (_FINALIZE_STAGE_PHASE2, 'finalize-retry-phase2'),
+            (_FINALIZE_STAGE_FUTURE, 'finalize-retry-future'),
         ],
     )
     async def test_retryable_errors_spawn_retry_as_finalizer(
@@ -1345,7 +1389,7 @@ class TestHandleFinalizeError:
 
 
 # ---------------------------------------------------------------------------
-# 15. _retry_finalize_phase1 / _retry_finalize_phase2 — orchestration
+# 15. _retry_finalize_future / _retry_finalize_phase1 / _retry_finalize_phase2 — orchestration
 # ---------------------------------------------------------------------------
 
 
@@ -1358,6 +1402,88 @@ _SENTINEL_FINALIZE_ERR = _FinalizeError(
 )
 
 _SENTINEL_TASK_RESULT = MagicMock(name='TaskResult')
+
+
+@pytest.mark.unit
+class TestRetryFinalizeFuture:
+    """Tests for Worker._retry_finalize_future."""
+
+    def _make_err(self, *, task_id: str = 'task-rff-1') -> _FinalizeError:
+        return _FinalizeError(
+            error_code='TEST',
+            message='future failed',
+            stage=_FINALIZE_STAGE_FUTURE,
+            task_id=task_id,
+            retryable=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_stop_set_returns_without_requeue(self) -> None:
+        """When stop is set during sleep, no requeue is attempted."""
+        worker = _make_worker()
+        worker._stop.set()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        worker._requeue_claimed_task = AsyncMock()  # type: ignore[assignment]
+
+        await worker._retry_finalize_future(self._make_err(), 1.0)
+
+        worker._requeue_claimed_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_requeue_success_clears_future_attempts(self) -> None:
+        """Successful requeue clears future-stage retry attempts."""
+        worker = _make_worker()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        worker._requeue_claimed_task = AsyncMock(  # type: ignore[assignment]
+            return_value=_RequeueOutcome.REQUEUED,
+        )
+        err = self._make_err()
+        key = (err.task_id, _FINALIZE_STAGE_FUTURE)
+        worker._finalize_retry_attempts[key] = 2
+
+        await worker._retry_finalize_future(err, 0.0)
+
+        worker._requeue_claimed_task.assert_awaited_once()
+        assert key not in worker._finalize_retry_attempts
+
+    @pytest.mark.asyncio
+    async def test_requeue_db_error_delegates_to_handle_finalize_error(self) -> None:
+        """Repeated DB_ERROR requeue failures stay on the future-stage retry path."""
+        worker = _make_worker()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        worker._requeue_claimed_task = AsyncMock(  # type: ignore[assignment]
+            return_value=_RequeueOutcome.DB_ERROR,
+        )
+        worker._handle_finalize_error = AsyncMock()  # type: ignore[assignment]
+        err = self._make_err()
+
+        await worker._retry_finalize_future(err, 0.0)
+
+        worker._handle_finalize_error.assert_awaited_once()
+        retry_err = worker._handle_finalize_error.await_args.args[0]
+        assert isinstance(retry_err, _FinalizeError)
+        assert retry_err.stage == _FINALIZE_STAGE_FUTURE
+        assert retry_err.retryable is True
+        assert retry_err.data is not None
+        assert retry_err.data['requeue_outcome'] == 'DB_ERROR'
+
+    @pytest.mark.asyncio
+    async def test_requeue_not_owner_clears_future_attempts(self) -> None:
+        """Ownership miss means this worker has no in-flight row to recover."""
+        worker = _make_worker()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        worker._requeue_claimed_task = AsyncMock(  # type: ignore[assignment]
+            return_value=_RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED,
+        )
+        worker._handle_finalize_error = AsyncMock()  # type: ignore[assignment]
+        err = self._make_err()
+        key = (err.task_id, _FINALIZE_STAGE_FUTURE)
+        worker._finalize_retry_attempts[key] = 1
+
+        await worker._retry_finalize_future(err, 0.0)
+
+        worker._handle_finalize_error.assert_not_called()
+        assert key not in worker._finalize_retry_attempts
 
 
 @pytest.mark.unit
