@@ -23,7 +23,6 @@ from horsies.core.models.workflow import (
     WorkflowTaskStatus,
     OnError,
     HandleErrorCode,
-    SubWorkflowSummary,
 )
 from horsies.core.types.result import is_ok, is_err
 from horsies.core.workflows.engine import on_workflow_task_complete
@@ -1074,7 +1073,19 @@ class TestWorkflowHandleCancel:
         assert row is not None and row[0] is not None
         task_id = row[0]
 
-        # Simulate claim/cancel race: task is CLAIMED while workflow is CANCELLED.
+        cfg = WorkerConfig(
+            dsn=broker.config.database_url,
+            psycopg_dsn=broker.listener.database_url,
+            queues=['default'],
+        )
+        worker = Worker(
+            session_factory=broker.session_factory,
+            listener=MagicMock(),
+            cfg=cfg,
+        )
+
+        # Simulate claim/cancel race: this worker owns a CLAIMED task while
+        # the workflow is CANCELLED.
         await session.execute(
             text("""
                 UPDATE horsies_workflows
@@ -1089,25 +1100,15 @@ class TestWorkflowHandleCancel:
                 SET status = 'CLAIMED',
                     claimed = TRUE,
                     claimed_at = NOW(),
-                    claimed_by_worker_id = 'worker-race',
+                    claimed_by_worker_id = :worker_id,
                     claim_expires_at = NOW() + INTERVAL '5 minutes',
                     updated_at = NOW()
                 WHERE id = :task_id
             """),
-            {'task_id': task_id},
+            {'task_id': task_id, 'worker_id': worker.worker_instance_id},
         )
         await session.commit()
 
-        cfg = WorkerConfig(
-            dsn=broker.config.database_url,
-            psycopg_dsn=broker.listener.database_url,
-            queues=['default'],
-        )
-        worker = Worker(
-            session_factory=broker.session_factory,
-            listener=MagicMock(),
-            cfg=cfg,
-        )
         filtered = await worker._filter_nonrunnable_workflow_tasks(
             [{'id': task_id}],
         )

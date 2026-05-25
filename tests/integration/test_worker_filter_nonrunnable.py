@@ -8,7 +8,6 @@ horsies_tasks and horsies_workflow_tasks rows accordingly.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -39,7 +38,11 @@ def _make_worker(engine: AsyncEngine) -> Worker:
     return Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
 
 
-async def _insert_claimed_task(session: AsyncSession) -> str:
+async def _insert_claimed_task(
+    session: AsyncSession,
+    *,
+    claimed_by_worker_id: str | None = None,
+) -> str:
     """Insert a horsies_tasks row in CLAIMED state (post-claim)."""
     task_id = str(uuid.uuid4())
     sent_at, sha = compute_test_enqueue_sha(task_name='filter_test')
@@ -48,13 +51,18 @@ async def _insert_claimed_task(session: AsyncSession) -> str:
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, claimed_at, enqueue_sha)
+                 max_retries, claimed_at, claimed_by_worker_id, enqueue_sha)
             VALUES
                 (:id, 'filter_test', 'default', 100, '[]', '{}',
                  'CLAIMED', :sent_at, NOW(), NOW(), TRUE, 0,
-                 0, NOW(), :enqueue_sha)
+                 0, NOW(), :claimed_by_worker_id, :enqueue_sha)
         """),
-        {'id': task_id, 'sent_at': sent_at, 'enqueue_sha': sha},
+        {
+            'id': task_id,
+            'sent_at': sent_at,
+            'claimed_by_worker_id': claimed_by_worker_id,
+            'enqueue_sha': sha,
+        },
     )
     return task_id
 
@@ -111,6 +119,22 @@ async def _get_task_status(session: AsyncSession, task_id: str) -> str:
     return str(row[0])
 
 
+async def _get_task_claim_row(session: AsyncSession, task_id: str) -> tuple[str, bool, str | None]:
+    """Read task status/claim ownership fields for a task."""
+    row = (
+        await session.execute(
+            text("""
+                SELECT status, claimed, claimed_by_worker_id
+                FROM horsies_tasks
+                WHERE id = :id
+            """),
+            {'id': task_id},
+        )
+    ).fetchone()
+    assert row is not None, f'Task {task_id} not found'
+    return str(row[0]), bool(row[1]), row[2]
+
+
 def _make_rows(*task_ids: str) -> list[dict[str, Any]]:
     """Build the minimal claimed-row dicts the method expects."""
     return [{'id': tid, 'task_name': 'filter_test', 'args': '[]', 'kwargs': '{}'} for tid in task_ids]
@@ -159,11 +183,14 @@ async def test_paused_workflow_unclaims_and_resets(
 ) -> None:
     """Task in a PAUSED workflow → excluded from return,
     horsies_tasks → PENDING, horsies_workflow_tasks → READY with task_id=NULL."""
-    tid = await _insert_claimed_task(session)
+    worker = _make_worker(engine)
+    tid = await _insert_claimed_task(
+        session,
+        claimed_by_worker_id=worker.worker_instance_id,
+    )
     await _link_task_to_workflow(session, tid, wf_status='PAUSED')
     await session.commit()
 
-    worker = _make_worker(engine)
     rows = _make_rows(tid)
 
     result = await worker._filter_nonrunnable_workflow_tasks(rows)
@@ -207,11 +234,14 @@ async def test_cancelled_workflow_cancels_and_skips(
 ) -> None:
     """Task in a CANCELLED workflow → excluded from return,
     horsies_tasks → CANCELLED, horsies_workflow_tasks → SKIPPED."""
-    tid = await _insert_claimed_task(session)
+    worker = _make_worker(engine)
+    tid = await _insert_claimed_task(
+        session,
+        claimed_by_worker_id=worker.worker_instance_id,
+    )
     wf_id = await _link_task_to_workflow(session, tid, wf_status='CANCELLED')
     await session.commit()
 
-    worker = _make_worker(engine)
     rows = _make_rows(tid)
 
     result = await worker._filter_nonrunnable_workflow_tasks(rows)
@@ -249,16 +279,22 @@ async def test_mixed_runnable_paused_cancelled(
 ) -> None:
     """Mix of no-workflow, PAUSED, and CANCELLED tasks →
     only the no-workflow task is returned."""
+    worker = _make_worker(engine)
     tid_ok = await _insert_claimed_task(session)
-    tid_paused = await _insert_claimed_task(session)
-    tid_cancelled = await _insert_claimed_task(session)
+    tid_paused = await _insert_claimed_task(
+        session,
+        claimed_by_worker_id=worker.worker_instance_id,
+    )
+    tid_cancelled = await _insert_claimed_task(
+        session,
+        claimed_by_worker_id=worker.worker_instance_id,
+    )
 
     # tid_ok: no workflow link (should pass through)
     await _link_task_to_workflow(session, tid_paused, wf_status='PAUSED')
     wf_id_cancelled = await _link_task_to_workflow(session, tid_cancelled, wf_status='CANCELLED')
     await session.commit()
 
-    worker = _make_worker(engine)
     rows = _make_rows(tid_ok, tid_paused, tid_cancelled)
 
     result = await worker._filter_nonrunnable_workflow_tasks(rows)
@@ -284,3 +320,75 @@ async def test_mixed_runnable_paused_cancelled(
     ).fetchone()
     assert wt_row is not None
     assert wt_row[0] == 'SKIPPED'
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_paused_workflow_does_not_reset_task_owned_by_another_worker(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """A worker must not unclaim another worker's PAUSED workflow task."""
+    worker = _make_worker(engine)
+    other_worker_id = f'{worker.worker_instance_id}-other'
+    tid = await _insert_claimed_task(session, claimed_by_worker_id=other_worker_id)
+    wf_id = await _link_task_to_workflow(session, tid, wf_status='PAUSED')
+    await session.commit()
+
+    result = await worker._filter_nonrunnable_workflow_tasks(_make_rows(tid))
+
+    assert result == []
+    assert await _get_task_claim_row(session, tid) == (
+        'CLAIMED',
+        True,
+        other_worker_id,
+    )
+    wt_row = (
+        await session.execute(
+            text("""
+                SELECT status, task_id
+                FROM horsies_workflow_tasks
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {'wf_id': wf_id},
+        )
+    ).fetchone()
+    assert wt_row is not None
+    assert wt_row[0] == 'ENQUEUED'
+    assert wt_row[1] == tid
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_cancelled_workflow_does_not_reset_task_owned_by_another_worker(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """A worker must not cancel another worker's CANCELLED workflow task."""
+    worker = _make_worker(engine)
+    other_worker_id = f'{worker.worker_instance_id}-other'
+    tid = await _insert_claimed_task(session, claimed_by_worker_id=other_worker_id)
+    wf_id = await _link_task_to_workflow(session, tid, wf_status='CANCELLED')
+    await session.commit()
+
+    result = await worker._filter_nonrunnable_workflow_tasks(_make_rows(tid))
+
+    assert result == []
+    assert await _get_task_claim_row(session, tid) == (
+        'CLAIMED',
+        True,
+        other_worker_id,
+    )
+    wt_row = (
+        await session.execute(
+            text("""
+                SELECT status, task_id
+                FROM horsies_workflow_tasks
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {'wf_id': wf_id},
+        )
+    ).fetchone()
+    assert wt_row is not None
+    assert wt_row[0] == 'ENQUEUED'
+    assert wt_row[1] == tid
