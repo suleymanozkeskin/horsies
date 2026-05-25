@@ -1,5 +1,5 @@
 from __future__ import annotations
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Optional
 from sqlalchemy import (
     String,
@@ -21,18 +21,13 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import JSONB
 
 from horsies.core.types.status import TaskStatus
+from horsies.core.utils.time import utc_now
 
 
 class Base(DeclarativeBase):
     """SQLAlchemy declarative base for PostgreSQL models"""
 
     pass
-
-
-def utc_now() -> datetime:
-    """Per-row UTC timestamp. Used as a SQLAlchemy default/onupdate callable
-    so timestamps are evaluated at insert/update time, not frozen at import."""
-    return datetime.now(timezone.utc)
 
 
 class TaskModel(Base):
