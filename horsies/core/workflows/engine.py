@@ -1844,6 +1844,13 @@ async def _handle_workflow_task_failure(
     Note: The failed task's result is already stored. Dependents will receive
     the TaskResult with is_err()=True if they have args_from pointing to this task.
     """
+    lock_result = await session.execute(
+        LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
+        {'wf_id': workflow_id},
+    )
+    if lock_result.fetchone() is None:
+        return True
+
     # Get workflow's on_error policy
     wf_result = await session.execute(
         GET_WORKFLOW_ON_ERROR_SQL,
@@ -1863,9 +1870,12 @@ async def _handle_workflow_task_failure(
         # Store error but keep status RUNNING until DAG fully resolves
         # This allows allow_failed_deps tasks to run and produce meaningful final result
         # Status will be set to FAILED in check_workflow_completion when all tasks are terminal
+        first_failure_payload = await get_workflow_failure_error(
+            session, workflow_id, None
+        )
         await session.execute(
             SET_WORKFLOW_ERROR_SQL,
-            {'wf_id': workflow_id, 'error': error_payload},
+            {'wf_id': workflow_id, 'error': first_failure_payload or error_payload},
         )
         return True  # Continue dependency propagation
 

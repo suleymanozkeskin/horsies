@@ -491,11 +491,11 @@ class TestOnErrorFail:
         # Should NOT have 'ok' or top-level TaskResult structure
         assert 'ok' not in error_data
 
-    async def test_fail_multiple_failures_last_overwrites_error(
+    async def test_fail_multiple_failures_keep_first_error(
         self,
         setup: _SetupTuple,
     ) -> None:
-        """Second failure overwrites workflow error (SET_WORKFLOW_ERROR_SQL is unconditional)."""
+        """Multiple failures store the first failed task's error by task index."""
         session, broker, app = setup
         task_a = make_failing_task(app, 'multi_fail_a')
         task_b = make_failing_task(app, 'multi_fail_b')
@@ -532,15 +532,8 @@ class TestOnErrorFail:
         # Workflow is FAILED
         assert await _get_workflow_status(session, handle.workflow_id) == 'FAILED'
 
-        # SET_WORKFLOW_ERROR_SQL does unconditional SET error = :error,
-        # but MARK_WORKFLOW_FAILED_SQL uses COALESCE(:error, error).
-        # At finalization, get_workflow_failure_error is called with no success_policy,
-        # which returns first failed task's error (ORDER BY task_index ASC).
-        # However, COALESCE(:error, error) means: if new error is non-null, use it;
-        # if null, keep existing. So the finalization error (first task's) wins.
         error_data = await _get_workflow_error(session, handle.workflow_id)
         assert error_data is not None
-        # The finalization recomputes error from first failed task (task_index=0)
         assert error_data['error_code'] == 'FIRST_ERROR'
 
     async def test_fail_with_allow_failed_deps_output(

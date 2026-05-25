@@ -947,6 +947,67 @@ class TestSubworkflowIntegration:
         assert post_row is not None
         assert post_row[0] == 'SKIPPED'
 
+    async def test_parallel_child_failures_keep_first_parent_error(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        session, broker, app = setup
+
+        node_child1: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=StartChildWorkflow,
+        )
+        node_child2: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=ImportableChildWorkflow,
+        )
+
+        blocker_task = make_simple_task(app, 'parallel_fail_blocker')
+        node_blocker: TaskNode[int] = TaskNode(fn=blocker_task, kwargs={'value': 1})
+
+        spec = _workflow(
+            app,
+            name='parent_parallel_failures_first_error',
+            tasks=[node_child1, node_child2, node_blocker],
+            on_error=OnError.FAIL,
+        )
+
+        handle = await start_ok(spec, broker)
+
+        row1 = await self._get_workflow_task_row(session, handle.workflow_id, 0)
+        row2 = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+        assert row1 is not None and row2 is not None
+        child1_id = row1[1]
+        child2_id = row2[1]
+        assert isinstance(child1_id, str) and isinstance(child2_id, str)
+
+        await self._complete_child_workflow(
+            session,
+            broker,
+            handle.workflow_id,
+            0,
+            TaskResult(err=TaskError(error_code='C1_FAIL', message='child 1 failed')),
+        )
+        await self._complete_child_workflow(
+            session,
+            broker,
+            handle.workflow_id,
+            1,
+            TaskResult(err=TaskError(error_code='C2_FAIL', message='child 2 failed')),
+        )
+
+        wf_row = await session.execute(
+            text("""
+                SELECT status, error
+                FROM horsies_workflows
+                WHERE id = :wf_id
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        status, error_json = wf_row.one()
+        assert status == 'RUNNING'
+        assert isinstance(error_json, str)
+        assert child1_id in error_json
+        assert child2_id not in error_json
+
     async def test_allow_failed_deps_subworkflow_still_starts(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],

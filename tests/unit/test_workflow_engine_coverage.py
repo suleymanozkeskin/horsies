@@ -56,6 +56,7 @@ from horsies.core.workflows.sql import (
     GET_WORKFLOW_TASK_BY_TASK_ID_SQL,
     LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
     MARK_TASK_READY_SQL,
+    SET_WORKFLOW_ERROR_SQL,
     UPDATE_WORKFLOW_TASK_RESULT_SQL,
 )
 
@@ -1390,6 +1391,48 @@ class TestHandleWorkflowTaskFailure:
         result = await _handle_workflow_task_failure(session, 'wf-1', 0, result_tr)
         assert result is True
 
+    @pytest.mark.asyncio
+    async def test_fail_policy_locks_and_uses_first_failed_error(self) -> None:
+        from horsies.core.codec.serde import dumps_json as real_dumps
+
+        set_error_params: dict[str, Any] = {}
+        statements: list[Any] = []
+        first_error = real_dumps(
+            TaskResult(
+                err=TaskError(error_code='FIRST_ERROR', message='first failure')
+            )
+        ).unwrap()
+
+        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
+            statements.append(stmt)
+            if stmt is LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL:
+                return _one_result(SimpleNamespace(id='wf-1'))
+            if stmt is GET_WORKFLOW_ON_ERROR_SQL:
+                return _one_result(SimpleNamespace(on_error='fail'))
+            if stmt is GET_FIRST_FAILED_TASK_RESULT_SQL:
+                return _one_result(SimpleNamespace(result=first_error))
+            if stmt is SET_WORKFLOW_ERROR_SQL:
+                set_error_params.update(params)
+                return _one_result(SimpleNamespace())
+            return _one_result(SimpleNamespace())
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=_dispatch)
+        latest_result = TaskResult(
+            err=TaskError(error_code='SECOND_ERROR', message='second failure')
+        )
+
+        result = await _handle_workflow_task_failure(
+            session, 'wf-1', 1, latest_result
+        )
+
+        assert result is True
+        assert statements.index(LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL) < statements.index(
+            SET_WORKFLOW_ERROR_SQL
+        )
+        assert 'FIRST_ERROR' in set_error_params['error']
+        assert 'SECOND_ERROR' not in set_error_params['error']
+
 
 # ── 13. check_workflow_completion ────────────────────────────────────
 
@@ -1474,6 +1517,8 @@ class TestOnChildWorkflowComplete:
                 return _one_result(row)
             if stmt is GET_WORKFLOW_ON_ERROR_SQL:
                 return _one_result(SimpleNamespace(on_error='fail'))
+            if stmt is GET_FIRST_FAILED_TASK_RESULT_SQL:
+                return _one_result(None)
             if stmt is GET_WORKFLOW_STATUS_SQL:
                 return _one_result(SimpleNamespace(status='RUNNING'))
             return _one_result(SimpleNamespace())
