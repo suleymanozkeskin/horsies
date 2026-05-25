@@ -54,6 +54,10 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from horsies.core.utils.imports import import_by_path
 from horsies.core.codec.serde import loads_json
+from horsies.core.codec.serde_registry import (
+    register_serde_type,
+    walk_callable_for_serde_types,
+)
 from horsies.core.types.result import is_err
 
 if TYPE_CHECKING:
@@ -304,6 +308,20 @@ class Horsies:
                 default_unhandled_error_code=default_unhandled_error_code,
             )
 
+            # Populate the serde class registry from this task's signature.
+            # BaseModel/dataclass types reachable from parameter and return
+            # annotations are auto-registered so rehydrate_value can resolve
+            # them by (module, qualname) without ever calling import_module.
+            # Best-effort: walker failures don't block task registration —
+            # users can fall back to @horsies_serdetype for unreachable types.
+            try:
+                walk_callable_for_serde_types(fn)
+            except Exception as exc:
+                self.logger.warning(
+                    f"Failed to walk serde types for task '{task_name}': "
+                    f'{type(exc).__name__}: {exc}',
+                )
+
             # Register task with this app, passing source for duplicate detection
             # Normalize path with realpath to handle symlinks and relative paths
             source_str = (
@@ -321,6 +339,26 @@ class Horsies:
         else:
             # Called without arguments: @app.task
             return decorator(func)
+
+    def register_serde_type(self, cls: type) -> type:
+        """Register a class for serde rehydration.
+
+        Use this when the signature walker can't see the type — for example,
+        a Pydantic model that's only carried inside a ``dict[str, Any]``
+        field, or a type used by code that doesn't appear in any task
+        signature.  Most types are registered automatically when ``@app.task``
+        scans signatures.
+
+        Returns the class unchanged so the call can be used as a decorator::
+
+            @app.register_serde_type
+            class SharedModel(BaseModel):
+                ...
+
+        Re-registering the same class is a no-op; a different class under
+        the same ``(module, qualname)`` key raises ``ValueError``.
+        """
+        return register_serde_type(cls)
 
     def check(self, *, live: bool = False) -> list[HorsiesError]:
         """Orchestrate phased validation and return all errors found.
