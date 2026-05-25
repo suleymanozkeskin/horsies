@@ -407,6 +407,7 @@ class RetryPolicy(BaseModel):
         intervals: delay intervals in seconds between retry attempts
         backoff_strategy: 'fixed' uses intervals as-is, 'exponential' uses intervals[0] as base
         jitter: whether to add ±25% randomization to delays
+        max_delay_seconds: optional maximum delay after backoff and jitter
         auto_retry_for: error codes that trigger automatic retries
     """
 
@@ -426,6 +427,10 @@ class RetryPolicy(BaseModel):
     ] = [60, 300, 900]  # seconds: 1min, 5min, 15min
     backoff_strategy: Literal['fixed', 'exponential'] = 'fixed'
     jitter: bool = True
+    max_delay_seconds: Annotated[
+        Optional[PositiveInt],
+        Field(description='Optional maximum retry delay in seconds'),
+    ] = None
     auto_retry_for: Annotated[
         list[Union[str, BuiltInTaskCode]],
         Field(min_length=1),
@@ -490,16 +495,19 @@ class RetryPolicy(BaseModel):
         max_retries: int,
         auto_retry_for: list[Union[str, BuiltInTaskCode]],
         jitter: bool = True,
+        max_delay_seconds: int | None = None,
     ) -> 'RetryPolicy':
         """Create an exponential backoff policy using a single base interval.
 
-        The policy uses base_seconds * 2**(attempt-1) per attempt.
+        The policy uses base_seconds * 2**(attempt-1) per attempt, optionally
+        capped by max_delay_seconds.
         """
         return cls(
             max_retries=max_retries,
             intervals=[base_seconds],
             backoff_strategy='exponential',
             jitter=jitter,
+            max_delay_seconds=max_delay_seconds,
             auto_retry_for=auto_retry_for,
         )
 
