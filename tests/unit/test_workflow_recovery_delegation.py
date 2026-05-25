@@ -61,5 +61,5 @@ class TestWorkflowRecoveryDelegation:
 
         assert recovered == 1
         mock_check_completion.assert_awaited_once_with(
-            session, 'wf-1', broker, preserve_existing_error=True
+            session, 'wf-1', broker
         )
