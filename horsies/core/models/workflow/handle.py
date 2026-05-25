@@ -418,6 +418,70 @@ class WorkflowHandle(Generic[OutT]):
             if note.payload == self.workflow_id:
                 return
 
+    async def raw_result_async(self) -> HandleResult[dict[str, Any] | None]:
+        """Return the workflow result as a raw JSON dict, skipping rehydration.
+
+        Escape hatch for pure consumers that don't import the task /
+        workflow result types (the serde class registry only knows types
+        the consumer process imported).  Returns ``Ok(None)`` if the
+        workflow has no stored result yet — does not poll.
+
+        The returned dict is the un-rehydrated ``__h_task_result__``
+        envelope (with ``ok`` / ``err`` fields).  Caller is responsible
+        for interpreting it; nothing inside is rehydrated, so
+        ``__h_pydantic__`` / ``__h_dataclass__`` envelopes inside ``ok``
+        appear as plain dicts.
+        """
+        try:
+            async with self.broker.session_factory() as session:
+                result = await session.execute(
+                    GET_WORKFLOW_RESULT_SQL,
+                    {'wf_id': self.workflow_id},
+                )
+                row = result.fetchone()
+                if not row or not row.result:
+                    return Ok(None)
+                loads_r = loads_json(row.result)
+                if is_err(loads_r):
+                    return Err(HandleOperationError(
+                        code=HandleErrorCode.DB_OPERATION_FAILED,
+                        message=(
+                            f'Workflow result JSON corrupt: '
+                            f'{loads_r.err_value}'
+                        ),
+                        retryable=False,
+                        workflow_id=self.workflow_id,
+                    ))
+                value = loads_r.ok_value
+                if value is None:
+                    return Ok(None)
+                if not isinstance(value, dict):
+                    return Err(HandleOperationError(
+                        code=HandleErrorCode.DB_OPERATION_FAILED,
+                        message=(
+                            f'Workflow result is not a JSON object '
+                            f'(got {type(value).__name__})'
+                        ),
+                        retryable=False,
+                        workflow_id=self.workflow_id,
+                    ))
+                return Ok(value)
+        except SQLAlchemyError as exc:
+            return Err(HandleOperationError(
+                code=HandleErrorCode.DB_OPERATION_FAILED,
+                message=(
+                    f'DB query failed fetching raw result for workflow '
+                    f'{self.workflow_id}: {exc}'
+                ),
+                retryable=is_retryable_connection_error(exc),
+                workflow_id=self.workflow_id,
+                exception=exc,
+            ))
+
+    def raw_result(self) -> HandleResult[dict[str, Any] | None]:
+        """Synchronous wrapper for :meth:`raw_result_async`."""
+        return self._sync_call(self.raw_result_async, 'raw_result')
+
     async def _get_result(self) -> TaskResult[OutT, TaskError]:
         """Fetch completed workflow result."""
         try:

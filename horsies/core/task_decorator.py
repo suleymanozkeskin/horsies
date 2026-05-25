@@ -398,6 +398,51 @@ class TaskHandle(Generic[T]):
         self._cached_result = result
         self._result_fetched = True
 
+    async def raw_result_async(self) -> dict[str, Any] | None:
+        """Return the task's stored result as a raw JSON dict, no rehydration.
+
+        Escape hatch for pure-consumer processes that don't import the
+        task return types (the serde class registry only knows types the
+        consumer's process imported).  Returns ``None`` if the task has
+        no stored result yet — does not poll for completion.
+
+        The returned dict is the un-rehydrated ``__h_task_result__``
+        envelope: ``{"__h_task_result__": True, "ok": ..., "err": ...}``.
+        Any ``__h_pydantic__`` / ``__h_dataclass__`` envelopes inside
+        ``ok`` appear as plain dicts.
+        """
+        from sqlalchemy import text
+
+        from horsies.core.codec.serde import loads_json
+        from horsies.core.types.result import is_err
+
+        if self._app is None:
+            return None
+        broker = self._app.get_broker()
+        async with broker.session_factory() as session:
+            result = await session.execute(
+                text('SELECT result FROM horsies_tasks WHERE id = :id'),
+                {'id': self.task_id},
+            )
+            row = result.fetchone()
+            if row is None or row.result is None:
+                return None
+            loads_r = loads_json(row.result)
+            if is_err(loads_r):
+                return None
+            value = loads_r.ok_value
+            if isinstance(value, dict):
+                return value
+            return None
+
+    def raw_result(self) -> dict[str, Any] | None:
+        """Synchronous wrapper for :meth:`raw_result_async`."""
+        from horsies.core.utils.loop_runner import get_shared_runner
+
+        if self._app is None:
+            return None
+        return get_shared_runner().call(self.raw_result_async)
+
 
 class NodeFactory(Generic[P, T]):
     """
