@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -493,10 +494,27 @@ class TestSubworkflowIntegration:
         assert summary.failed_tasks >= 1
         assert summary.error_summary is not None
 
+    @pytest.mark.parametrize(
+        'child_status',
+        ['COMPLETED', 'FAILED'],
+        ids=['child_completed', 'child_failed'],
+    )
     async def test_subworkflow_completion_does_not_rewrite_terminal_parent_node(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
+        child_status: str,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
+        """Regression for audit finding H4: a replayed subworkflow callback must not
+        overwrite the parent node's terminal state.
+
+        Covers both child outcomes — child_completed exercises the parent_node_status =
+        'COMPLETED' branch in on_subworkflow_complete, and child_failed exercises the
+        parent_node_status = 'FAILED' branch. The FAILED branch is the load-bearing one:
+        the CAS-miss early return is what skips _handle_workflow_task_failure on an
+        already-terminal parent. Without that, a replay would write a workflow-level
+        error to a workflow whose tasks are all COMPLETED.
+        """
         session, broker, app = setup
 
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
@@ -518,6 +536,10 @@ class TestSubworkflowIntegration:
         assert status == 'RUNNING'
         assert isinstance(child_id, str)
 
+        # Pin the parent task to a terminal state with a sentinel completed_at.
+        # The UPDATE_PARENT_NODE_RESULT_SQL would `SET completed_at = NOW()`, so
+        # any tick of completed_at off this fixed past timestamp proves the CAS
+        # guard failed.
         preserved_result = dumps_json(TaskResult(ok=11)).unwrap()
         await session.execute(
             text("""
@@ -529,20 +551,48 @@ class TestSubworkflowIntegration:
             """),
             {'wf_id': handle.workflow_id, 'result': preserved_result},
         )
-        await session.execute(
-            text("""
-                UPDATE horsies_workflows
-                SET status = 'COMPLETED',
-                    result = :result,
-                    completed_at = NOW()
-                WHERE id = :child_id
-            """),
-            {'child_id': child_id, 'result': dumps_json(TaskResult(ok=99)).unwrap()},
-        )
+        if child_status == 'COMPLETED':
+            await session.execute(
+                text("""
+                    UPDATE horsies_workflows
+                    SET status = 'COMPLETED',
+                        result = :result,
+                        completed_at = NOW()
+                    WHERE id = :child_id
+                """),
+                {
+                    'child_id': child_id,
+                    'result': dumps_json(TaskResult(ok=99)).unwrap(),
+                },
+            )
+        else:
+            child_error_payload = dumps_json(
+                TaskError(
+                    error_code='SUBWORKFLOW_REPLAY_PROBE',
+                    message='child failed for replay-guard test',
+                ),
+            ).unwrap()
+            await session.execute(
+                text("""
+                    UPDATE horsies_workflows
+                    SET status = 'FAILED',
+                        error = :error,
+                        completed_at = NOW()
+                    WHERE id = :child_id
+                """),
+                {'child_id': child_id, 'error': child_error_payload},
+            )
         await session.commit()
 
-        await on_subworkflow_complete(session, child_id, broker)
-        await session.commit()
+        engine_logger = logging.getLogger('horsies.workflow.engine')
+        engine_logger.propagate = True
+        caplog.clear()
+        try:
+            with caplog.at_level(logging.DEBUG, logger='horsies.workflow.engine'):
+                await on_subworkflow_complete(session, child_id, broker)
+                await session.commit()
+        finally:
+            engine_logger.propagate = False
 
         parent_row = await session.execute(
             text("""
@@ -562,6 +612,28 @@ class TestSubworkflowIntegration:
         assert replayed[1] == preserved_result
         assert replayed[2] is None
         assert replayed[3] is True
+
+        # caplog: operators rely on the debug log as the signal that the guard fired.
+        debug_messages = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG
+        ]
+        assert any(
+            'Parent workflow task already terminal, skipping subworkflow progression'
+            in msg
+            for msg in debug_messages
+        ), f'Expected guard debug log, got: {debug_messages}'
+
+        # CAS-miss must short-circuit before _handle_workflow_task_failure, so the
+        # parent workflow's error column stays untouched. This is the load-bearing
+        # assertion for the child_failed parametrization: without the early return,
+        # the FAILED branch would write a workflow-level error here.
+        parent_error_row = await session.execute(
+            text('SELECT error FROM horsies_workflows WHERE id = :wf_id'),
+            {'wf_id': handle.workflow_id},
+        )
+        parent_error_entry = parent_error_row.fetchone()
+        assert parent_error_entry is not None
+        assert parent_error_entry[0] is None
 
     async def test_child_failure_with_on_error_pause(
         self,
