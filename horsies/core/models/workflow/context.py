@@ -6,7 +6,10 @@ from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     Generic,
+    Literal,
+    Self,
     TypeGuard,
     cast,
 )
@@ -84,10 +87,13 @@ class SubWorkflowSummary(Generic[OkT_co]):
             return int(value) if isinstance(value, (int, float)) else default
 
         status_val = payload.get('status')
-        try:
-            status = WorkflowStatus(str(status_val))
-        except Exception:
-            status = WorkflowStatus.FAILED
+        if isinstance(status_val, WorkflowStatus):
+            status = status_val
+        else:
+            try:
+                status = WorkflowStatus(str(status_val))
+            except Exception:
+                status = WorkflowStatus.FAILED
 
         error_val = payload.get('error_summary')
 
@@ -186,6 +192,213 @@ class WorkflowContext(BaseModel):
         # Store results internally (not exposed as Pydantic field)
         object.__setattr__(self, '_results_by_id', results_by_id or {})
         object.__setattr__(self, '_summaries_by_id', summaries_by_id or {})
+
+    @staticmethod
+    def _dump_payload_map(
+        payload: dict[str, Any],
+        *,
+        mode: Literal['json', 'python'] | str,
+    ) -> dict[str, Any]:
+        """Dump private context payloads in the same mode as model_dump()."""
+        if mode != 'json':
+            return dict(payload)
+
+        from horsies.core.codec.serde import to_jsonable
+        from horsies.core.types.result import is_err
+
+        serialized: dict[str, Any] = {}
+        for key, value in payload.items():
+            result = to_jsonable(value)
+            if is_err(result):
+                raise ValueError(
+                    f'Failed to serialize WorkflowContext payload {key!r}: '
+                    f'{result.err_value}'
+                )
+            serialized[key] = result.ok_value
+        return serialized
+
+    @staticmethod
+    def _should_dump_payload_field(
+        field_name: str,
+        *,
+        include: Any,
+        exclude: Any,
+    ) -> bool:
+        """Respect top-level include/exclude for synthetic payload fields."""
+        if include is not None:
+            if isinstance(include, (set, frozenset)) and field_name not in include:
+                return False
+            if isinstance(include, dict):
+                include_map = cast(dict[Any, Any], include)
+                include_value: Any = include_map.get(field_name)
+                if include_value is None or include_value is False:
+                    return False
+
+        if exclude is not None:
+            if isinstance(exclude, (set, frozenset)) and field_name in exclude:
+                return False
+            if isinstance(exclude, dict):
+                exclude_map = cast(dict[Any, Any], exclude)
+                if exclude_map.get(field_name) is True:
+                    return False
+
+        return True
+
+    @classmethod
+    def _coerce_results_by_id(
+        cls,
+        raw_results: Any,
+    ) -> dict[str, TaskResult[Any, TaskError]]:
+        from horsies.core.codec.serde import task_result_from_json
+        from horsies.core.models.tasks import TaskResult
+        from horsies.core.types.result import is_err
+
+        if raw_results is None:
+            return {}
+        if not isinstance(raw_results, dict):
+            raise ValueError('WorkflowContext results_by_id must be a dict')
+
+        results: dict[str, TaskResult[Any, TaskError]] = {}
+        raw_result_map = cast(dict[Any, Any], raw_results)
+        for key, value in raw_result_map.items():
+            if not isinstance(key, str):
+                raise ValueError('WorkflowContext results_by_id keys must be strings')
+            if isinstance(value, TaskResult):
+                results[key] = value
+                continue
+
+            result = task_result_from_json(value)
+            if is_err(result):
+                raise ValueError(
+                    f'Invalid WorkflowContext TaskResult for {key!r}: {result.err_value}'
+                )
+            results[key] = result.ok_value
+        return results
+
+    @classmethod
+    def _coerce_summaries_by_id(
+        cls,
+        raw_summaries: Any,
+    ) -> dict[str, SubWorkflowSummary[Any]]:
+        if raw_summaries is None:
+            return {}
+        if not isinstance(raw_summaries, dict):
+            raise ValueError('WorkflowContext summaries_by_id must be a dict')
+
+        summaries: dict[str, SubWorkflowSummary[Any]] = {}
+        raw_summary_map = cast(dict[Any, Any], raw_summaries)
+        for key, value in raw_summary_map.items():
+            if not isinstance(key, str):
+                raise ValueError('WorkflowContext summaries_by_id keys must be strings')
+            if isinstance(value, SubWorkflowSummary):
+                summaries[key] = value
+                continue
+            if not isinstance(value, dict):
+                raise ValueError(f'Invalid WorkflowContext SubWorkflowSummary for {key!r}')
+            summaries[key] = SubWorkflowSummary.from_json(cast(dict[str, Any], value))
+        return summaries
+
+    def model_dump(
+        self,
+        *,
+        mode: Literal['json', 'python'] | str = 'python',
+        include: Any = None,
+        exclude: Any = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        exclude_unset: bool = False,
+        exclude_defaults: bool = False,
+        exclude_none: bool = False,
+        exclude_computed_fields: bool = False,
+        round_trip: bool = False,
+        warnings: bool | Literal['none', 'warn', 'error'] = True,
+        fallback: Callable[[Any], Any] | None = None,
+        serialize_as_any: bool = False,
+        polymorphic_serialization: bool | None = None,
+    ) -> dict[str, Any]:
+        data = super().model_dump(
+            mode=mode,
+            include=include,
+            exclude=exclude,
+            context=context,
+            by_alias=by_alias,
+            exclude_unset=exclude_unset,
+            exclude_defaults=exclude_defaults,
+            exclude_none=exclude_none,
+            exclude_computed_fields=exclude_computed_fields,
+            round_trip=round_trip,
+            warnings=warnings,
+            fallback=fallback,
+            serialize_as_any=serialize_as_any,
+            polymorphic_serialization=polymorphic_serialization,
+        )
+
+        if self._should_dump_payload_field(
+            'results_by_id',
+            include=include,
+            exclude=exclude,
+        ):
+            data['results_by_id'] = self._dump_payload_map(self._results_by_id, mode=mode)
+        if self._should_dump_payload_field(
+            'summaries_by_id',
+            include=include,
+            exclude=exclude,
+        ):
+            data['summaries_by_id'] = self._dump_payload_map(self._summaries_by_id, mode=mode)
+
+        return data
+
+    @classmethod
+    def model_validate(
+        cls,
+        obj: Any,
+        *,
+        strict: bool | None = None,
+        extra: Any | None = None,
+        from_attributes: bool | None = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+    ) -> Self:
+        if not isinstance(obj, dict):
+            return super().model_validate(
+                obj,
+                strict=strict,
+                extra=extra,
+                from_attributes=from_attributes,
+                context=context,
+                by_alias=by_alias,
+                by_name=by_name,
+            )
+
+        data: dict[str, Any] = dict(cast(dict[str, Any], obj))
+        raw_results: Any = data.pop('results_by_id', None)
+        if raw_results is None and '_results_by_id' in data:
+            raw_results = data.pop('_results_by_id')
+        raw_summaries: Any = data.pop('summaries_by_id', None)
+        if raw_summaries is None and '_summaries_by_id' in data:
+            raw_summaries = data.pop('_summaries_by_id')
+
+        ctx = super().model_validate(
+            data,
+            strict=strict,
+            extra=extra,
+            from_attributes=from_attributes,
+            context=context,
+            by_alias=by_alias,
+            by_name=by_name,
+        )
+        object.__setattr__(
+            ctx,
+            '_results_by_id',
+            cls._coerce_results_by_id(raw_results),
+        )
+        object.__setattr__(
+            ctx,
+            '_summaries_by_id',
+            cls._coerce_summaries_by_id(raw_summaries),
+        )
+        return ctx
 
     def result_for(
         self,
