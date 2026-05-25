@@ -23,7 +23,10 @@ from horsies.core.models.workflow import (
     WorkflowStatus,
     OnError,
 )
-from horsies.core.workflows.engine import on_workflow_task_complete
+from horsies.core.workflows.engine import (
+    on_subworkflow_complete,
+    on_workflow_task_complete,
+)
 from horsies.core.workflows.registry import (
     register_workflow_definition,
     unregister_workflow_definition,
@@ -488,6 +491,76 @@ class TestSubworkflowIntegration:
         assert summary.status == WorkflowStatus.FAILED
         assert summary.failed_tasks >= 1
         assert summary.error_summary is not None
+
+    async def test_subworkflow_completion_does_not_rewrite_terminal_parent_node(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        session, broker, app = setup
+
+        node_child: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=StartChildWorkflow,
+        )
+
+        spec = _workflow(
+            app,
+            name='parent_terminal_replay_guard',
+            tasks=[node_child],
+            output=node_child,
+        )
+
+        handle = await start_ok(spec, broker)
+
+        row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
+        assert row is not None
+        status, child_id, _ = row
+        assert status == 'RUNNING'
+        assert isinstance(child_id, str)
+
+        preserved_result = dumps_json(TaskResult(ok=11)).unwrap()
+        await session.execute(
+            text("""
+                UPDATE horsies_workflow_tasks
+                SET status = 'COMPLETED',
+                    result = :result,
+                    completed_at = TIMESTAMPTZ '2026-01-01 00:00:00+00'
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {'wf_id': handle.workflow_id, 'result': preserved_result},
+        )
+        await session.execute(
+            text("""
+                UPDATE horsies_workflows
+                SET status = 'COMPLETED',
+                    result = :result,
+                    completed_at = NOW()
+                WHERE id = :child_id
+            """),
+            {'child_id': child_id, 'result': dumps_json(TaskResult(ok=99)).unwrap()},
+        )
+        await session.commit()
+
+        await on_subworkflow_complete(session, child_id, broker)
+        await session.commit()
+
+        parent_row = await session.execute(
+            text("""
+                SELECT status,
+                       result,
+                       sub_workflow_summary,
+                       completed_at = TIMESTAMPTZ '2026-01-01 00:00:00+00'
+                           AS completed_at_preserved
+                FROM horsies_workflow_tasks
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        replayed = parent_row.fetchone()
+        assert replayed is not None
+        assert replayed[0] == 'COMPLETED'
+        assert replayed[1] == preserved_result
+        assert replayed[2] is None
+        assert replayed[3] is True
 
     async def test_child_failure_with_on_error_pause(
         self,

@@ -1544,7 +1544,7 @@ async def on_subworkflow_complete(
         parent_node_result = _ser(dumps_json(TaskResult(err=error)), 'parent node error', fallback='null')
 
     # 4. Update parent node
-    await session.execute(
+    update_result = await session.execute(
         UPDATE_PARENT_NODE_RESULT_SQL,
         {
             'status': parent_node_status,
@@ -1552,8 +1552,16 @@ async def on_subworkflow_complete(
             'summary': _ser(dumps_json(child_summary), 'child summary', fallback='null'),
             'wf_id': parent_wf_id,
             'idx': parent_task_idx,
+            'terminal_states': WF_TASK_TERMINAL_VALUES,
         },
     )
+    if update_result.fetchone() is None:
+        logger.debug(
+            'Parent workflow task already terminal, skipping subworkflow progression: '
+            'parent_workflow=%s task_index=%s child_workflow=%s',
+            parent_wf_id, parent_task_idx, child_workflow_id,
+        )
+        return
 
     # 5. Handle failure (same as task failure)
     if parent_node_status == 'FAILED':
