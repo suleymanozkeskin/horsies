@@ -18,7 +18,7 @@ from horsies.core.errors import ErrorCode, WorkflowValidationError
 
 from .enums import OkT_co, OnError
 from .nodes import TaskNode, SubWorkflowNode, AnyNode, SuccessPolicy, SuccessCase
-from .spec import WorkflowSpec
+from .spec import WorkflowSpec, unique_node_refs
 from .typing_utils import validate_workflow_generic_output_match
 
 if TYPE_CHECKING:
@@ -239,19 +239,22 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
             tasks.append(node_copy)
 
         # Remap cross-references to point at copies, not class-level originals.
+        # Dedupe by identity for symmetry with WorkflowSpec._isolate_inputs;
+        # WorkflowSpec re-isolates the tasks list below, so this is belt-and-
+        # suspenders rather than load-bearing.
         for node_copy in tasks:
-            node_copy.waits_for = [
+            node_copy.waits_for = unique_node_refs([
                 old_to_new.get(id(ref), ref) for ref in node_copy.waits_for
-            ]
+            ])
             node_copy.args_from = {
                 k: old_to_new.get(id(v), v)
                 for k, v in node_copy.args_from.items()
             }
             if node_copy.workflow_ctx_from is not None:
-                node_copy.workflow_ctx_from = [
+                node_copy.workflow_ctx_from = unique_node_refs([
                     old_to_new.get(id(ref), ref)
                     for ref in node_copy.workflow_ctx_from
-                ]
+                ])
 
         # Get Meta configuration, remapping output/success_policy refs to copies.
         output: TaskNode[OkT_co] | SubWorkflowNode[OkT_co] | None = None
