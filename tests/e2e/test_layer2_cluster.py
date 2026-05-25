@@ -705,7 +705,6 @@ async def test_retry_works_across_multiple_workers(broker: PostgresBroker) -> No
         )
 
         # Verify all tasks failed with correct retry count
-        worker_ids_seen: set[str] = set()
         async with broker.session_factory() as session:
             for task_id in task_ids:
                 task = await session.get(TaskModel, task_id)
@@ -716,8 +715,42 @@ async def test_retry_works_across_multiple_workers(broker: PostgresBroker) -> No
                 assert task.retry_count == 3, (
                     f'Task {task_id} has retry_count {task.retry_count}, expected 3'
                 )
-                if task.claimed_by_worker_id:
-                    worker_ids_seen.add(task.claimed_by_worker_id)
+
+            # claimed_by_worker_id is the mutable current/last owner on the
+            # task row. Retry execution history lives in horsies_task_attempts,
+            # so use that table to prove worker participation across attempts.
+            attempt_counts_result = await session.execute(
+                text("""
+                    SELECT task_id, COUNT(*) AS attempt_count
+                    FROM horsies_task_attempts
+                    WHERE task_id = ANY(:ids)
+                    GROUP BY task_id
+                """),
+                {'ids': task_ids},
+            )
+            attempt_counts = {
+                str(row[0]): int(row[1])
+                for row in attempt_counts_result.fetchall()
+            }
+
+            worker_ids_result = await session.execute(
+                text("""
+                    SELECT DISTINCT worker_id
+                    FROM horsies_task_attempts
+                    WHERE task_id = ANY(:ids)
+                      AND worker_id IS NOT NULL
+                """),
+                {'ids': task_ids},
+            )
+            worker_ids_seen = {str(row[0]) for row in worker_ids_result.fetchall()}
+
+        expected_attempts_per_task = 4  # initial attempt + 3 retries
+        assert attempt_counts == {
+            task_id: expected_attempts_per_task for task_id in task_ids
+        }, (
+            f'Expected {expected_attempts_per_task} attempts for each task, got '
+            f'{attempt_counts}'
+        )
 
         # Prove multiple workers participated
         assert len(worker_ids_seen) >= 2, (
