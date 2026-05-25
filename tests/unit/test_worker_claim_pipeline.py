@@ -25,6 +25,7 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.worker.sql import (
+    CANCEL_CANCELLED_WORKFLOW_TASKS_SQL,
     CLAIM_SQL,
     COUNT_CLAIMED_FOR_WORKER_SQL,
     COUNT_GLOBAL_IN_FLIGHT_SQL,
@@ -426,6 +427,22 @@ class TestUnclaimSqlClearsLeaseExpiry:
         normalised = ' '.join(sql_text.split())
         assert "status IN ('CLAIMED', 'RUNNING')" in normalised
         assert 'claimed_by_worker_id = CAST(:wid AS VARCHAR)' in normalised
+
+    def test_unclaim_paused_tasks_matches_only_current_worker_claims(self) -> None:
+        """Paused workflow cleanup must only unclaim rows owned by this worker."""
+        sql_text = UNCLAIM_PAUSED_TASKS_SQL.text
+        normalised = ' '.join(sql_text.split())
+        assert "status = 'CLAIMED'" in normalised
+        assert 'claimed_by_worker_id = CAST(:wid AS VARCHAR)' in normalised
+        assert 'RETURNING id' in normalised
+
+    def test_cancel_cancelled_workflow_tasks_matches_only_current_worker_claims(self) -> None:
+        """Cancelled workflow cleanup must only cancel rows owned by this worker."""
+        sql_text = CANCEL_CANCELLED_WORKFLOW_TASKS_SQL.text
+        normalised = ' '.join(sql_text.split())
+        assert "status = 'CLAIMED'" in normalised
+        assert 'claimed_by_worker_id = CAST(:wid AS VARCHAR)' in normalised
+        assert 'RETURNING id' in normalised
 
     def test_unclaim_claimed_task_clears_runtime_metadata(self) -> None:
         """RUNNING task requeue must clear stale runtime metadata."""

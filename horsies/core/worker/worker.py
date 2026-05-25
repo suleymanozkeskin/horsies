@@ -826,27 +826,35 @@ class Worker:
 
             if paused_task_ids:
                 # Unclaim paused-workflow tasks so they can be picked up on resume.
-                await s.execute(
+                paused_res = await s.execute(
                     UNCLAIM_PAUSED_TASKS_SQL,
-                    {'ids': list(paused_task_ids)},
+                    {'ids': list(paused_task_ids), 'wid': self.worker_instance_id},
                 )
+                unclaimed_paused_task_ids = [
+                    str(task_id) for task_id in paused_res.scalars().all()
+                ]
                 # Keep workflow_task metadata consistent with unclaimed tasks.
-                await s.execute(
-                    RESET_PAUSED_WORKFLOW_TASKS_SQL,
-                    {'ids': list(paused_task_ids)},
-                )
+                if unclaimed_paused_task_ids:
+                    await s.execute(
+                        RESET_PAUSED_WORKFLOW_TASKS_SQL,
+                        {'ids': unclaimed_paused_task_ids},
+                    )
 
             if cancelled_task_ids:
-                # Cancel claimed/pending task rows so they are no longer claimable.
-                await s.execute(
+                # Cancel this worker's claimed task rows so they are no longer claimable.
+                cancelled_res = await s.execute(
                     CANCEL_CANCELLED_WORKFLOW_TASKS_SQL,
-                    {'ids': list(cancelled_task_ids)},
+                    {'ids': list(cancelled_task_ids), 'wid': self.worker_instance_id},
                 )
+                cancelled_owned_task_ids = [
+                    str(task_id) for task_id in cancelled_res.scalars().all()
+                ]
                 # Ensure workflow_task rows no longer sit in enqueueable states.
-                await s.execute(
-                    SKIP_CANCELLED_WORKFLOW_TASKS_SQL,
-                    {'ids': list(cancelled_task_ids)},
-                )
+                if cancelled_owned_task_ids:
+                    await s.execute(
+                        SKIP_CANCELLED_WORKFLOW_TASKS_SQL,
+                        {'ids': cancelled_owned_task_ids},
+                    )
 
             if paused_task_ids or cancelled_task_ids:
                 await s.commit()
