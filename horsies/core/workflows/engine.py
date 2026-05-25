@@ -1880,10 +1880,14 @@ async def _handle_workflow_task_failure(
 
     elif on_error == 'pause':
         # Pause workflow for manual intervention - STOP all processing
-        await session.execute(
+        pause_result = await session.execute(
             PAUSE_WORKFLOW_ON_ERROR_SQL,
             {'wf_id': workflow_id, 'error': error_payload},
         )
+        if pause_result.fetchone() is None:
+            return False
+
+        await cascade_pause_to_children(session, workflow_id)
 
         # Notify of pause (so clients can react via get())
         await session.execute(
