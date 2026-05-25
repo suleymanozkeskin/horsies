@@ -32,6 +32,7 @@ def calculate_retry_delay(
     )  # 1min, 5min, 15min
     backoff_strategy = retry_policy_data.get('backoff_strategy', 'fixed')
     jitter = retry_policy_data.get('jitter', True)
+    max_delay_seconds = retry_policy_data.get('max_delay_seconds')
 
     if backoff_strategy == 'fixed':
         clamped_index = min(retry_attempt - 1, len(intervals) - 1)
@@ -45,6 +46,9 @@ def calculate_retry_delay(
     if jitter:
         jitter_range = base_delay * 0.25
         base_delay += random.uniform(-jitter_range, jitter_range)
+
+    if isinstance(max_delay_seconds, int) and max_delay_seconds > 0:
+        base_delay = min(base_delay, max_delay_seconds)
 
     return float(max(1.0, base_delay))
 

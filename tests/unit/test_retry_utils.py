@@ -35,6 +35,29 @@ class TestCalculateRetryDelay:
         assert calculate_retry_delay(2, policy) == 20.0
         assert calculate_retry_delay(3, policy) == 40.0
 
+    def test_exponential_without_max_delay_remains_uncapped(self) -> None:
+        policy = {'intervals': [60], 'backoff_strategy': 'exponential', 'jitter': False}
+        assert calculate_retry_delay(20, policy) == 31_457_280.0
+
+    def test_exponential_max_delay_caps_large_attempts(self) -> None:
+        policy = {
+            'intervals': [60],
+            'backoff_strategy': 'exponential',
+            'jitter': False,
+            'max_delay_seconds': 600,
+        }
+        assert calculate_retry_delay(20, policy) == 600.0
+
+    def test_max_delay_caps_after_jitter(self) -> None:
+        policy = {
+            'intervals': [60],
+            'backoff_strategy': 'exponential',
+            'jitter': True,
+            'max_delay_seconds': 600,
+        }
+        for _ in range(50):
+            assert calculate_retry_delay(5, policy) <= 600.0
+
     def test_jitter_varies_result(self) -> None:
         policy = {'intervals': [100], 'backoff_strategy': 'fixed', 'jitter': True}
         results = {calculate_retry_delay(1, policy) for _ in range(50)}
