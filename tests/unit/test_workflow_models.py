@@ -1521,6 +1521,54 @@ class TestWorkflowSpecValidation:
         # Should not raise
         WorkflowSpec(name='subworkflow_kwargs_ok', tasks=[child_node])
 
+    def test_subworkflow_cycle_detection_allows_same_name_distinct_definitions(self) -> None:
+        """Same workflow name in distinct definitions is not a cycle."""
+        fn_leaf = MockTaskWrapper(task_name='same_name_leaf')
+
+        class SameNameLeafWorkflow(WorkflowDefinition[int]):
+            name = 'same_name_child'
+            definition_key = _definition_key('same_name_leaf')
+            leaf = TaskNode(fn=fn_leaf)
+
+        class SameNameParentWorkflow(WorkflowDefinition[int]):
+            name = 'same_name_child'
+            definition_key = _definition_key('same_name_parent')
+            child = SubWorkflowNode(workflow_def=SameNameLeafWorkflow)
+
+        parent_node = SubWorkflowNode(workflow_def=SameNameParentWorkflow)
+
+        WorkflowSpec(name='same_name_distinct_definitions', tasks=[parent_node])
+
+    def test_subworkflow_cycle_detection_does_not_skip_same_name_cycle(self) -> None:
+        """Visited same-name definitions must not hide a real later cycle."""
+        fn_safe = MockTaskWrapper(task_name='same_name_safe_leaf')
+
+        class SafeSharedNameWorkflow(WorkflowDefinition[int]):
+            name = 'shared_workflow_name'
+            definition_key = _definition_key('safe_shared_name')
+            leaf = TaskNode(fn=fn_safe)
+
+        class CyclicSharedNameWorkflow(WorkflowDefinition[int]):
+            name = 'shared_workflow_name'
+            definition_key = _definition_key('cyclic_shared_name')
+
+        class CycleMiddleWorkflow(WorkflowDefinition[int]):
+            name = 'cycle_middle'
+            definition_key = _definition_key('cycle_middle')
+            child = SubWorkflowNode(workflow_def=CyclicSharedNameWorkflow)
+
+        CyclicSharedNameWorkflow._workflow_nodes = [
+            ('middle', SubWorkflowNode(workflow_def=CycleMiddleWorkflow)),
+        ]
+
+        safe_node = SubWorkflowNode(workflow_def=SafeSharedNameWorkflow)
+        cyclic_node = SubWorkflowNode(workflow_def=CyclicSharedNameWorkflow)
+
+        with pytest.raises(WorkflowValidationError) as exc_info:
+            WorkflowSpec(name='same_name_cycle_not_skipped', tasks=[safe_node, cyclic_node])
+
+        assert exc_info.value.code == ErrorCode.WORKFLOW_CYCLE_DETECTED
+
     def test_output_not_in_workflow(self) -> None:
         """output task not in tasks raises HRS-011."""
         fn_a = MockTaskWrapper(task_name='task_a')
