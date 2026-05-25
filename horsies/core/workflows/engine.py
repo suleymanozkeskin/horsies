@@ -602,7 +602,9 @@ async def enqueue_subworkflow_task(
         )
         return None
 
-    # 5. Create child workflow with parent reference
+    # 5. Prepare all child workflow_task inserts before creating the child
+    # workflow row. Any validation/serialization failure below must not leave a
+    # committed child workflow with only a partial task set.
     child_id = str(uuid.uuid4())
 
     # Serialize child's success_policy
@@ -628,26 +630,7 @@ async def enqueue_subworkflow_task(
     child_output_index = child_spec.output.index if child_spec.output else None
     child_sent_at = datetime.now(timezone.utc)
 
-    await session.execute(
-        INSERT_CHILD_WORKFLOW_SQL,
-        {
-            'id': child_id,
-            'name': child_spec.name,
-            'on_error': child_spec.on_error.value,
-            'output_idx': child_output_index,
-            'success_policy': _ser(dumps_json(child_success_policy_json), 'child success_policy')
-            if child_success_policy_json
-            else None,
-            'definition_key': child_spec.definition_key,
-            'parent_wf_id': workflow_id,
-            'parent_idx': task_index,
-            'depth': parent_depth + 1,
-            'root_wf_id': root_workflow_id,
-            'sent_at': child_sent_at,
-        },
-    )
-
-    # 6. Insert child workflow_tasks
+    child_workflow_task_inserts: list[tuple[Any, dict[str, Any]]] = []
     for child_node in child_spec.tasks:
         child_dep_indices = [
             d.index for d in child_node.waits_for if d.index is not None
@@ -689,7 +672,7 @@ async def enqueue_subworkflow_task(
                     error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
                 )
                 return None
-            await session.execute(
+            child_workflow_task_inserts.append((
                 INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL,
                 {
                     'id': child_wt_id,
@@ -714,7 +697,7 @@ async def enqueue_subworkflow_task(
                     'sub_wf_name': child_sub.workflow_def.name,
                     'sub_def_key': child_sub.workflow_def._require_definition_key(),
                 },
-            )
+            ))
         else:
             child_task = child_node
             try:
@@ -762,7 +745,7 @@ async def enqueue_subworkflow_task(
                             error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
                         )
                         return None
-                    child_base_options = parsed
+                    child_base_options = cast(dict[str, Any], parsed)
                 child_base_options['good_until'] = child_task.good_until.isoformat()
                 child_task_options_json = _ser(dumps_json(child_base_options), 'child task_options')
 
@@ -774,7 +757,7 @@ async def enqueue_subworkflow_task(
                     error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
                 )
                 return None
-            await session.execute(
+            child_workflow_task_inserts.append((
                 INSERT_WORKFLOW_TASK_SQL,
                 {
                     'id': child_wt_id,
@@ -801,7 +784,31 @@ async def enqueue_subworkflow_task(
                     'task_options': child_task_options_json,
                     'status': 'PENDING' if child_dep_indices else 'READY',
                 },
-            )
+            ))
+
+    # 6. Create child workflow with parent reference, then insert its complete
+    # task set.
+    await session.execute(
+        INSERT_CHILD_WORKFLOW_SQL,
+        {
+            'id': child_id,
+            'name': child_spec.name,
+            'on_error': child_spec.on_error.value,
+            'output_idx': child_output_index,
+            'success_policy': _ser(dumps_json(child_success_policy_json), 'child success_policy')
+            if child_success_policy_json
+            else None,
+            'definition_key': child_spec.definition_key,
+            'parent_wf_id': workflow_id,
+            'parent_idx': task_index,
+            'depth': parent_depth + 1,
+            'root_wf_id': root_workflow_id,
+            'sent_at': child_sent_at,
+        },
+    )
+
+    for stmt, params in child_workflow_task_inserts:
+        await session.execute(stmt, params)
 
     # 7. Update parent's workflow_task with child_workflow_id and mark RUNNING
     await session.execute(

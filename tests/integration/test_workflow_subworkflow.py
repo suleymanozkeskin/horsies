@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -745,6 +746,87 @@ class TestSubworkflowIntegration:
             assert tr.err.error_code == 'SUBWORKFLOW_LOAD_FAILED'
         finally:
             register_workflow_definition(ImportableChildWorkflow)
+
+    async def test_child_task_prepare_failure_does_not_commit_partial_child(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """A later child task prep failure must not leave a partial child workflow."""
+        session, broker, app = setup
+        parent_task = make_simple_task(app, 'partial_child_parent_task')
+
+        class CorruptOptionsChildWorkflow(WorkflowDefinition[int]):
+            name = 'corrupt_options_child_workflow'
+            definition_key = 'tests.corrupt_options_child_workflow.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
+                _ = args, params
+
+                @app.task(task_name='partial_child_first_task')
+                def child_first() -> TaskResult[int, TaskError]:
+                    return TaskResult(ok=1)
+
+                @app.task(task_name='partial_child_later_task')
+                def child_later() -> TaskResult[int, TaskError]:
+                    return TaskResult(ok=2)
+
+                node_first = TaskNode(fn=child_first)
+                node_later = TaskNode(
+                    fn=child_later,
+                    waits_for=[node_first],
+                    good_until=datetime(2030, 1, 1, tzinfo=timezone.utc),
+                )
+                child_later.task_options_json = '{broken'
+                return app.workflow(
+                    name=cls.name,
+                    tasks=[node_first, node_later],
+                    output=node_later,
+                    on_error=OnError.FAIL,
+                    definition_key=cls.definition_key,
+                )
+
+        node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 1})
+        node_child: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=CorruptOptionsChildWorkflow,
+            waits_for=[node_a],
+        )
+        spec = _workflow(
+            app,
+            name='parent_partial_child_prepare_failure',
+            tasks=[node_a, node_child],
+            output=node_child,
+            on_error=OnError.FAIL,
+        )
+        handle = await start_ok(spec, broker)
+
+        try:
+            await self._complete_task(
+                session, broker, handle.workflow_id, 0, TaskResult(ok=1),
+            )
+
+            parent_row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+            assert parent_row is not None
+            status, child_id, result_json = parent_row
+            assert status == 'FAILED'
+            assert child_id is None
+
+            tr = _decode_task_result(result_json)
+            assert tr is not None and tr.is_err()
+            assert tr.err is not None
+            assert tr.err.error_code == 'WORKER_SERIALIZATION_ERROR'
+
+            child_count = await session.scalar(
+                text("""
+                    SELECT COUNT(*)
+                    FROM horsies_workflows
+                    WHERE parent_workflow_id = :wf_id
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+            assert child_count == 0
+        finally:
+            unregister_workflow_definition(CorruptOptionsChildWorkflow.definition_key)
 
     async def test_parallel_child_one_fails_downstream_skipped(
         self,
