@@ -109,6 +109,24 @@ def _validate_args_from_map(raw: dict[str, Any]) -> dict[str, int] | None:
     return cast(dict[str, int], raw)
 
 
+async def _mark_workflow_task_failed_if_nonterminal(
+    session: Any,
+    workflow_id: str,
+    task_index: int,
+    result: str,
+) -> bool:
+    mark_result = await session.execute(
+        MARK_WORKFLOW_TASK_FAILED_SQL,
+        {
+            'wf_id': workflow_id,
+            'idx': task_index,
+            'result': result,
+            'terminal_states': WF_TASK_TERMINAL_VALUES,
+        },
+    )
+    return mark_result.fetchone() is not None
+
+
 async def _fail_enqueued_task(
     session: Any,
     workflow_id: str,
@@ -134,14 +152,19 @@ async def _fail_enqueued_task(
             data={'workflow_id': workflow_id, 'task_index': task_index},
         ),
     )
-    await session.execute(
-        MARK_WORKFLOW_TASK_FAILED_SQL,
-        {
-            'wf_id': workflow_id,
-            'idx': task_index,
-            'result': serialize_error_payload(tr),
-        },
+    marked_failed = await _mark_workflow_task_failed_if_nonterminal(
+        session,
+        workflow_id,
+        task_index,
+        serialize_error_payload(tr),
     )
+    if not marked_failed:
+        logger.warning(
+            'Skipped failure mark for terminal workflow task %s:%s',
+            workflow_id,
+            task_index,
+        )
+        return
     if broker is not None:
         should_continue = await _handle_workflow_task_failure(
             session, workflow_id, task_index, tr,
@@ -449,14 +472,19 @@ async def enqueue_subworkflow_task(
             message=f'Failed to load subworkflow definition for {workflow_name}:{task_index}',
             data={'definition_key': sub_definition_key},
         )
-        await session.execute(
-            MARK_WORKFLOW_TASK_FAILED_SQL,
-            {
-                'wf_id': workflow_id,
-                'idx': task_index,
-                'result': _ser(dumps_json(TaskResult(err=error)), 'subworkflow load error', fallback='null'),
-            },
+        marked_failed = await _mark_workflow_task_failed_if_nonterminal(
+            session,
+            workflow_id,
+            task_index,
+            _ser(dumps_json(TaskResult(err=error)), 'subworkflow load error', fallback='null'),
         )
+        if not marked_failed:
+            logger.warning(
+                'Skipped subworkflow load failure mark for terminal workflow task %s:%s',
+                workflow_id,
+                task_index,
+            )
+            return None
         logger.error(f'SubWorkflowNode load failed for {workflow_name}:{task_index}')
 
         # Handle failure and propagate to dependents

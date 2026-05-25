@@ -135,6 +135,8 @@ MARK_WORKFLOW_TASK_FAILED_SQL = text("""
     UPDATE horsies_workflow_tasks
     SET status = 'FAILED', result = :result, completed_at = NOW()
     WHERE workflow_id = :wf_id AND task_index = :idx
+      AND NOT (status = ANY(:terminal_states))
+    RETURNING task_index
 """)
 INSERT_CHILD_WORKFLOW_SQL = text("""
     INSERT INTO horsies_workflows
