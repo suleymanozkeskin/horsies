@@ -19,10 +19,13 @@ from pydantic import BaseModel
 from horsies.core.codec.serde import (
     SerializationError,
     dumps_json,
-    dumps_json_horsies_internal,
     rehydrate_value,
     to_jsonable,
 )
+# Tests exercise the engine-internal variant directly to confirm the
+# strict-vs-internal asymmetry; outside of tests this private name must
+# only be imported by the workflow engine.
+from horsies.core.codec.serde import _dumps_json_horsies_internal  # pyright: ignore[reportPrivateUsage]
 from horsies.core.models.tasks import ContractCode, OperationalErrorCode
 from horsies.core.types.result import is_err
 
@@ -232,7 +235,7 @@ class TestHorsiesInternalSerializer:
             '__h_workflow_ctx__': {'workflow_id': 'wf-1', 'task_index': 0},
             '__h_workflow_meta__': {'workflow_id': 'wf-1'},
         }
-        result = dumps_json_horsies_internal(kwargs)
+        result = _dumps_json_horsies_internal(kwargs)
         assert not is_err(result)
         assert '__h_workflow_ctx__' in result.ok_value
 

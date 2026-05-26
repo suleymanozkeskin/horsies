@@ -348,7 +348,7 @@ class TestEnqueueWorkflowTask:
         # horsies-internal variant (which allows __h_* control keys).
         # Patch that to fail and confirm the engine handles it.
         with patch(
-            'horsies.core.workflows.engine.dumps_json_horsies_internal',
+            'horsies.core.workflows.engine._dumps_json_horsies_internal',
             side_effect=lambda value: Err(Exception('kwargs ser fail')),
         ):
             result = await enqueue_workflow_task(session, 'wf-1', 0, {})
@@ -713,7 +713,7 @@ class TestEnqueueSubworkflowTask:
         # Child sub kwargs serialization goes through the horsies-internal
         # variant (which allows __h_* control keys propagated from
         # build_with).  Patch that to fail on the child kwargs.
-        original_internal = engine.dumps_json_horsies_internal
+        original_internal = engine._dumps_json_horsies_internal
 
         def _internal_failing(value: Any) -> Any:
             if isinstance(value, dict) and 'k' in value:
@@ -731,7 +731,7 @@ class TestEnqueueSubworkflowTask:
         ), patch(
             'horsies.core.workflows.engine.guard_no_positional_args',
         ), patch(
-            'horsies.core.workflows.engine.dumps_json_horsies_internal',
+            'horsies.core.workflows.engine._dumps_json_horsies_internal',
             side_effect=_internal_failing,
         ), patch(
             'horsies.core.workflows.engine._fail_enqueued_task',
@@ -928,7 +928,7 @@ class TestEnqueueSubworkflowTask:
         original_dumps = engine.dumps_json
 
         # Child task kwargs go through the horsies-internal serializer.
-        original_internal = engine.dumps_json_horsies_internal
+        original_internal = engine._dumps_json_horsies_internal
 
         def _internal_failing(value: Any) -> Any:
             if isinstance(value, dict) and 'data' in value:
@@ -946,7 +946,7 @@ class TestEnqueueSubworkflowTask:
         ), patch(
             'horsies.core.workflows.engine.guard_no_positional_args',
         ), patch(
-            'horsies.core.workflows.engine.dumps_json_horsies_internal',
+            'horsies.core.workflows.engine._dumps_json_horsies_internal',
             side_effect=_internal_failing,
         ), patch(
             'horsies.core.workflows.engine._fail_enqueued_task',

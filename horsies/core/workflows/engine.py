@@ -10,7 +10,19 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import TextClause
 
-from horsies.core.codec.serde import dumps_json, dumps_json_horsies_internal, loads_json, task_result_from_json, serialize_error_payload, SerdeResult
+from horsies.core.codec.serde import (
+    SerdeResult,
+    dumps_json,
+    loads_json,
+    serialize_error_payload,
+    task_result_from_json,
+)
+
+# ``_dumps_json_horsies_internal`` is module-private to serde; the engine is
+# the sole legitimate caller because it produces post-injection kwargs that
+# contain horsies-internal ``__h_*`` control keys.  Importing it from any
+# other module is a pyright error by design — use ``dumps_json`` instead.
+from horsies.core.codec.serde import _dumps_json_horsies_internal  # pyright: ignore[reportPrivateUsage]
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 from horsies.core.types.result import is_err
 from horsies.core.logging import get_logger
@@ -418,7 +430,7 @@ async def enqueue_workflow_task(
     # serializer that allows the namespace.  The user-supplied portion of
     # this dict was validated through strict dumps_json at WorkflowSpec
     # construction (see spec.py _validate_serializability_and_snapshot).
-    kwargs_json = _ser(dumps_json_horsies_internal(kwargs), 'workflow task kwargs')
+    kwargs_json = _ser(_dumps_json_horsies_internal(kwargs), 'workflow task kwargs')
     if kwargs_json is None:
         await _fail_enqueued_task(
             session, workflow_id, task_index,
@@ -741,7 +753,7 @@ async def enqueue_subworkflow_task(
                 return None
             # child_sub.kwargs may carry __h_taskresult_envelope__ entries
             # propagated by the parent's args_from injection through build_with.
-            child_kwargs_json = _ser(dumps_json_horsies_internal(child_sub.kwargs), 'child sub kwargs')
+            child_kwargs_json = _ser(_dumps_json_horsies_internal(child_sub.kwargs), 'child sub kwargs')
             if child_kwargs_json is None:
                 await _fail_enqueued_task(
                     session, workflow_id, task_index,
@@ -828,7 +840,7 @@ async def enqueue_subworkflow_task(
 
             # child_task.kwargs may carry __h_taskresult_envelope__ entries
             # propagated by the parent's args_from injection through build_with.
-            child_kwargs_json = _ser(dumps_json_horsies_internal(child_task.kwargs), 'child task kwargs')
+            child_kwargs_json = _ser(_dumps_json_horsies_internal(child_task.kwargs), 'child task kwargs')
             if child_kwargs_json is None:
                 await _fail_enqueued_task(
                     session, workflow_id, task_index,

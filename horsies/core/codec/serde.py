@@ -442,7 +442,7 @@ def dumps_json(value: Any) -> SerdeResult[str]:
         return Err(SerializationError(f'json.dumps failed: {exc}'))
 
 
-def dumps_json_horsies_internal(value: Any) -> SerdeResult[str]:
+def _dumps_json_horsies_internal(value: Any) -> SerdeResult[str]:  # pyright: ignore[reportUnusedFunction]
     """Serialize a value containing horsies-internal ``__h_*`` keys.
 
     Engine-only.  Bypasses the user-key validation that ``dumps_json``
