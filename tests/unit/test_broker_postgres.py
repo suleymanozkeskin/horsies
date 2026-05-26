@@ -986,6 +986,237 @@ class TestGetResultAsync:
 
 
 # ---------------------------------------------------------------------------
+# TestGetRawResultRecordAsync — strict-serde phase 6 broker primitive
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestGetRawResultRecordAsync:
+    """Cover ``PostgresBroker.get_raw_result_record_async`` directly.
+
+    Replaces the removed ``get_result_async`` semantics at the broker
+    layer. Typed-decode coverage lives at the ``Horsies.get_result_async``
+    layer; broker tests only verify the raw envelope-fetch contract.
+    """
+
+    @pytest.mark.asyncio
+    async def test_missing_row_returns_ok_none(self) -> None:
+        """Row absent → Ok(None); no INVALID_JSON_PAYLOAD."""
+        broker = _make_broker()
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.get = AsyncMock(return_value=None)
+        broker.session_factory = MagicMock(return_value=session)
+
+        result = await broker.get_raw_result_record_async('missing-id')
+
+        assert is_ok(result)
+        assert result.unwrap() is None
+
+    @pytest.mark.asyncio
+    async def test_terminal_row_with_valid_envelope_returns_record(self) -> None:
+        """COMPLETED row with parseable envelope → Ok(RawResultRecord)."""
+        from horsies.core.brokers.result_types import RawResultRecord
+
+        broker = _make_broker()
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+
+        row = _make_task_row(
+            status=TaskStatus.COMPLETED,
+            result='{"__h_task_result__":true,"ok":42,"err":null}',
+        )
+        session.get = AsyncMock(return_value=row)
+        broker.session_factory = MagicMock(return_value=session)
+
+        result = await broker.get_raw_result_record_async('task-123')
+
+        assert is_ok(result)
+        record = result.unwrap()
+        assert isinstance(record, RawResultRecord)
+        assert record.task_id == 'task-123'
+        assert record.task_name == 'my_task'
+        assert record.status == TaskStatus.COMPLETED
+        assert record.raw_result == {
+            '__h_task_result__': True,
+            'ok': 42,
+            'err': None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_cancelled_row_returns_record_with_none_payload(self) -> None:
+        """CANCELLED row → Ok(RawResultRecord(raw_result=None))."""
+        from horsies.core.brokers.result_types import RawResultRecord
+
+        broker = _make_broker()
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+
+        row = _make_task_row(status=TaskStatus.CANCELLED, result=None)
+        session.get = AsyncMock(return_value=row)
+        broker.session_factory = MagicMock(return_value=session)
+
+        result = await broker.get_raw_result_record_async('task-123')
+
+        assert is_ok(result)
+        record = result.unwrap()
+        assert isinstance(record, RawResultRecord)
+        assert record.status == TaskStatus.CANCELLED
+        assert record.raw_result is None
+
+    @pytest.mark.asyncio
+    async def test_non_terminal_timeout_returns_record_with_none_payload(
+        self,
+    ) -> None:
+        """Timeout fires with row still non-terminal → Ok(record, raw=None).
+
+        Caller maps this to WAIT_TIMEOUT; broker layer stays agnostic.
+        """
+        from horsies.core.brokers.result_types import RawResultRecord
+
+        broker = _make_broker()
+        broker.listener.listen = AsyncMock(
+            side_effect=RuntimeError('listener down; force polling'),
+        )
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        running_row = _make_task_row(status=TaskStatus.RUNNING, result=None)
+        session.get = AsyncMock(return_value=running_row)
+        broker.session_factory = MagicMock(return_value=session)
+
+        with patch(
+            'horsies.core.brokers.postgres.asyncio.sleep', new=AsyncMock(),
+        ):
+            result = await broker.get_raw_result_record_async(
+                'task-123', timeout_ms=10,
+            )
+
+        assert is_ok(result)
+        record = result.unwrap()
+        assert isinstance(record, RawResultRecord)
+        assert record.status == TaskStatus.RUNNING
+        assert record.raw_result is None
+
+    @pytest.mark.asyncio
+    async def test_malformed_json_returns_invalid_json_payload(self) -> None:
+        """Result column with malformed JSON → Err(INVALID_JSON_PAYLOAD)."""
+        broker = _make_broker()
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        row = _make_task_row(
+            status=TaskStatus.COMPLETED,
+            result='{not valid json',
+        )
+        session.get = AsyncMock(return_value=row)
+        broker.session_factory = MagicMock(return_value=session)
+
+        result = await broker.get_raw_result_record_async('task-123')
+
+        assert is_err(result)
+        err = result.unwrap_err()
+        assert err.code == BrokerErrorCode.INVALID_JSON_PAYLOAD
+        assert err.retryable is False
+        assert 'task-123' in err.message
+
+    @pytest.mark.asyncio
+    async def test_non_object_envelope_returns_invalid_json_payload(self) -> None:
+        """Result column parses to a non-object JSON value → Err(INVALID_JSON_PAYLOAD).
+
+        Envelope grammar requires a JSON object at the top level; a bare
+        scalar (e.g. ``42``) is a contract violation distinct from a
+        parse failure.
+        """
+        broker = _make_broker()
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        row = _make_task_row(status=TaskStatus.COMPLETED, result='42')
+        session.get = AsyncMock(return_value=row)
+        broker.session_factory = MagicMock(return_value=session)
+
+        result = await broker.get_raw_result_record_async('task-123')
+
+        assert is_err(result)
+        err = result.unwrap_err()
+        assert err.code == BrokerErrorCode.INVALID_JSON_PAYLOAD
+        assert 'not a JSON object' in err.message
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self) -> None:
+        """``asyncio.CancelledError`` must re-raise; no broker-error wrap."""
+        broker = _make_broker()
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.get = AsyncMock(side_effect=asyncio.CancelledError)
+        broker.session_factory = MagicMock(return_value=session)
+
+        with pytest.raises(asyncio.CancelledError):
+            await broker.get_raw_result_record_async('task-123')
+
+    @pytest.mark.asyncio
+    async def test_cancellation_still_completes_unsubscribe_cleanup(self) -> None:
+        """Cancellation while unsubscribe is in-flight must still cleanup.
+
+        Regression test for the listener finally-path: a second cancel
+        while ``listener.unsubscribe`` is awaiting should not interrupt
+        the cleanup before it finishes.
+        """
+        broker = _make_broker()
+        q: asyncio.Queue[Any] = asyncio.Queue()
+        broker.listener.listen = AsyncMock(return_value=Ok(q))
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.get = AsyncMock(
+            return_value=_make_task_row(status=TaskStatus.RUNNING),
+        )
+        broker.session_factory = MagicMock(return_value=session)
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def _unsubscribe(_channel: str, _queue: object) -> None:
+            started.set()
+            await release.wait()
+            finished.set()
+
+        broker.listener.unsubscribe = AsyncMock(side_effect=_unsubscribe)
+
+        task = asyncio.create_task(
+            broker.get_raw_result_record_async(
+                'task-123', timeout_ms=60_000,
+            )
+        )
+
+        for _ in range(50):
+            if broker.listener.listen.await_count > 0:
+                break
+            await asyncio.sleep(0)
+
+        task.cancel()
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        task.cancel()
+        await asyncio.sleep(0)
+
+        assert finished.is_set() is False
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert finished.is_set() is True
+        broker.listener.unsubscribe.assert_awaited_once_with('task_done', q)
+
+
+# ---------------------------------------------------------------------------
 # TestMonitoringQueries
 # ---------------------------------------------------------------------------
 

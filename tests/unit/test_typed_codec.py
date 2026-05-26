@@ -19,6 +19,7 @@ import enum
 import uuid
 from typing import (
     Annotated,
+    Any,
     Literal,
     Optional,
     TypeAlias,
@@ -38,8 +39,12 @@ from horsies.core.codec.typed import (
     _get_adapter,  # pyright: ignore[reportPrivateUsage]
     _scan_reserved_keys,  # pyright: ignore[reportPrivateUsage]
     _scan_wire_json,  # pyright: ignore[reportPrivateUsage]
+    decode_task_error,
+    decode_task_result,
     decode_value,
+    encode_task_result,
     encode_value,
+    validate_task_result_envelope,
 )
 
 
@@ -749,3 +754,239 @@ class TestAdapterCache:
         a1 = _get_adapter(list[int])
         a2 = _get_adapter(list[int])
         assert a1 is a2
+
+
+# ---------------------------------------------------------------------------
+# TaskResult envelope primitives — phase 5/6 regression coverage
+# ---------------------------------------------------------------------------
+
+
+class TestValidateTaskResultEnvelope:
+    """Shape-only validation used by every err-fast / typed-decode path.
+
+    A malformed envelope must fail closed *before* per-slot decoding so
+    callers can't smuggle the wrong shape through the err-fast route.
+    """
+
+    def test_accepts_canonical_ok_envelope(self) -> None:
+        envelope = validate_task_result_envelope(
+            cast(Json, {'__h_task_result__': True, 'ok': 1, 'err': None}),
+        )
+        assert envelope.get('ok') == 1
+        assert envelope.get('err') is None
+
+    def test_accepts_canonical_err_envelope(self) -> None:
+        envelope = validate_task_result_envelope(
+            cast(Json, {
+                '__h_task_result__': True,
+                'ok': None,
+                'err': {
+                    'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
+                    'message': 'm',
+                    'data': None,
+                    'exception': None,
+                },
+            }),
+        )
+        assert envelope.get('ok') is None
+        assert isinstance(envelope.get('err'), dict)
+
+    def test_rejects_non_dict(self) -> None:
+        with pytest.raises(StrictJsonError):
+            validate_task_result_envelope(cast(Json, 42))
+
+    def test_rejects_missing_marker(self) -> None:
+        with pytest.raises(StrictJsonError):
+            validate_task_result_envelope(
+                cast(Json, {'ok': 1, 'err': None}),
+            )
+
+    def test_rejects_marker_false(self) -> None:
+        with pytest.raises(StrictJsonError):
+            validate_task_result_envelope(
+                cast(Json, {'__h_task_result__': False, 'ok': 1, 'err': None}),
+            )
+
+    def test_rejects_missing_ok_key(self) -> None:
+        with pytest.raises(StrictJsonError):
+            validate_task_result_envelope(
+                cast(Json, {'__h_task_result__': True, 'err': None}),
+            )
+
+    def test_rejects_missing_err_key(self) -> None:
+        with pytest.raises(StrictJsonError):
+            validate_task_result_envelope(
+                cast(Json, {'__h_task_result__': True, 'ok': 1}),
+            )
+
+    def test_rejects_both_slots_populated(self) -> None:
+        with pytest.raises(StrictJsonError):
+            validate_task_result_envelope(
+                cast(Json, {
+                    '__h_task_result__': True,
+                    'ok': 1,
+                    'err': {
+                        'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
+                        'message': 'm',
+                    },
+                }),
+            )
+
+
+class TestTaskResultEnvelopeRoundTrip:
+    """`encode_task_result` / `decode_task_result` round-trip with shape
+    enforcement. Covers the strict-serde phase 5 primitive used by
+    worker persistence, engine emit, handle decode."""
+
+    def test_ok_envelope_round_trips(self) -> None:
+        from horsies.core.models.tasks import TaskError, TaskResult
+
+        tr: TaskResult[int, TaskError] = TaskResult(ok=42)
+        encoded = encode_task_result(tr, int)
+        assert encoded == {
+            '__h_task_result__': True,
+            'ok': 42,
+            'err': None,
+        }
+        decoded = decode_task_result(encoded, int)
+        assert decoded.ok == 42
+        assert decoded.err is None
+
+    def test_decode_rejects_missing_marker(self) -> None:
+        # User-visible regression of the strict shape check — a payload
+        # that looks like an envelope but lacks the marker must fail.
+        with pytest.raises(StrictJsonError):
+            decode_task_result(cast(Json, {'ok': 1, 'err': None}), int)
+
+    def test_decode_rejects_partial_envelope(self) -> None:
+        # ``decode_task_result({"__h_task_result__": True}, type(None))``
+        # previously returned ``ok=None`` instead of raising; the missing
+        # ``ok`` / ``err`` keys must be a hard error.
+        with pytest.raises(StrictJsonError):
+            decode_task_result(
+                cast(Json, {'__h_task_result__': True}),
+                type(None),
+            )
+
+
+class TestDecodeTaskErrorPolymorphic:
+    """`decode_task_error` must preserve SubWorkflowError subclass fields.
+
+    Plain ``TypeAdapter(TaskError)`` would silently drop
+    ``sub_workflow_id`` / ``sub_workflow_summary`` on read. The
+    discriminator-by-payload routing keeps the err-slot useful for
+    workflow code that pattern-matches on the subclass.
+    """
+
+    def test_plain_task_error_decodes(self) -> None:
+        from horsies.core.models.tasks import (
+            OperationalErrorCode,
+            SubWorkflowError,
+            TaskError,
+        )
+
+        payload: Json = cast(Json, {
+            'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
+            'message': 'plain',
+            'data': None,
+            'exception': None,
+        })
+        decoded = decode_task_error(payload)
+        assert isinstance(decoded, TaskError)
+        assert not isinstance(decoded, SubWorkflowError)
+        assert decoded.error_code == OperationalErrorCode.BROKER_ERROR
+        assert decoded.message == 'plain'
+
+    def test_sub_workflow_error_preserves_subclass_fields(self) -> None:
+        from horsies.core.models.tasks import (
+            OperationalErrorCode,
+            SubWorkflowError,
+            TaskError,
+        )
+        from horsies.core.models.workflow.context import SubWorkflowSummary
+        from horsies.core.models.workflow.enums import WorkflowStatus
+
+        summary: SubWorkflowSummary[Any] = SubWorkflowSummary(
+            status=WorkflowStatus.FAILED,
+            output=None,
+            total_tasks=3,
+            completed_tasks=1,
+            failed_tasks=2,
+            skipped_tasks=0,
+            error_summary='child boom',
+        )
+        original = SubWorkflowError(
+            error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+            message='subworkflow failed',
+            sub_workflow_id='wf-abc',
+            sub_workflow_summary=summary,
+        )
+
+        encoded = encode_value(original, SubWorkflowError)
+        decoded = decode_task_error(encoded)
+
+        # Polymorphic routing must return the concrete subclass, not
+        # the base TaskError.
+        assert isinstance(decoded, SubWorkflowError)
+        assert isinstance(decoded, TaskError)
+        assert decoded.sub_workflow_id == 'wf-abc'
+        assert decoded.sub_workflow_summary.status == WorkflowStatus.FAILED
+        assert decoded.sub_workflow_summary.failed_tasks == 2
+        assert decoded.sub_workflow_summary.error_summary == 'child boom'
+
+    def test_sub_workflow_error_round_trips_via_engine_emit_shape(self) -> None:
+        """End-to-end: SubWorkflowError survives the engine's emit path
+        through the consumer-side decode used by WorkflowHandle.
+
+        Mirrors `engine.on_subworkflow_complete`, which writes the err
+        slot via ``error.model_dump(mode='json')`` rather than
+        ``encode_task_result`` so subclass fields are preserved on the
+        wire. The handle reads them back via
+        ``validate_task_result_envelope`` + ``decode_task_error``.
+
+        The ``encode_task_result(_, TaskError)`` path deliberately strips
+        subclass fields (statically typed at the base class) — that is
+        why the engine bypasses it for sub-workflow failures. Locking
+        the engine-shape contract here prevents a future refactor from
+        silently breaking sub-workflow err propagation.
+        """
+        from horsies.core.models.tasks import (
+            OperationalErrorCode,
+            SubWorkflowError,
+        )
+        from horsies.core.models.workflow.context import SubWorkflowSummary
+        from horsies.core.models.workflow.enums import WorkflowStatus
+
+        summary: SubWorkflowSummary[Any] = SubWorkflowSummary(
+            status=WorkflowStatus.FAILED,
+            output=None,
+            total_tasks=1,
+            completed_tasks=0,
+            failed_tasks=1,
+            skipped_tasks=0,
+            error_summary='child failed',
+        )
+        original_err = SubWorkflowError(
+            error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+            message='boom',
+            sub_workflow_id='wf-xyz',
+            sub_workflow_summary=summary,
+        )
+        # Mirror the engine: dump the err directly and wrap into the
+        # envelope by hand. ``ok=None`` is the outputless shape; the
+        # err slot carries the full subclass dump.
+        wire: dict[str, Any] = {
+            '__h_task_result__': True,
+            'ok': None,
+            'err': original_err.model_dump(mode='json'),
+        }
+
+        envelope = validate_task_result_envelope(cast(Json, wire))
+        err_slot = envelope.get('err')
+        assert isinstance(err_slot, dict)
+        decoded = decode_task_error(cast(Json, err_slot))
+
+        assert isinstance(decoded, SubWorkflowError)
+        assert decoded.sub_workflow_id == 'wf-xyz'
+        assert decoded.sub_workflow_summary.failed_tasks == 1
+        assert decoded.sub_workflow_summary.error_summary == 'child failed'

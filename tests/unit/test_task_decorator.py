@@ -379,6 +379,226 @@ class TestTaskHandleGetAsync:
 
 
 # =============================================================================
+# TaskHandle._record_to_task_result — phase 5/6 envelope guard
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestTaskHandleRecordToTaskResult:
+    """Direct unit tests for the strict-serde phase 6 envelope-decode
+    routine. Constructs ``BrokerResult[RawResultRecord]`` fixtures
+    rather than mocking the broker, so the envelope-shape contract is
+    exercised independently of the broker layer.
+
+    Locks in the regressions found in the post-PR review:
+
+    1. Err-fast-path must NOT bypass ``validate_task_result_envelope``.
+       A payload like ``{"__h_task_result__": True, "err": {...}}`` is
+       missing ``ok`` and must fail closed before the err slot is
+       touched.
+
+    2. ``decode_task_result``-driven path must reject malformed envelopes
+       on the ok slot for typed handles too.
+
+    3. A terminal record with ``raw_result=None`` must map to
+       ``RESULT_NOT_AVAILABLE`` (terminal, cacheable) — not
+       ``WAIT_TIMEOUT``, which is transient.
+    """
+
+    @staticmethod
+    def _record(
+        *,
+        status: Any,
+        raw_result: Any,
+        task_name: str = 'my_task',
+        task_id: str = 'task-x',
+    ) -> Any:
+        from horsies.core.brokers.result_types import RawResultRecord
+
+        return RawResultRecord(
+            task_id=task_id,
+            task_name=task_name,
+            status=status,
+            raw_result=raw_result,
+        )
+
+    def test_malformed_envelope_err_fast_rejected(self) -> None:
+        """Envelope missing the ``ok`` key fails closed on err-fast-path.
+
+        Regression: an earlier implementation read ``envelope['err']``
+        before validating shape, so a malformed envelope (marker present,
+        ``ok`` missing, ``err`` populated) decoded via the err-fast-path
+        even though the payload was illegal.
+        """
+        from horsies.core.types.result import Ok
+        from horsies.core.types.status import TaskStatus
+
+        # Marker + err slot, but ``ok`` key absent → invalid envelope.
+        malformed = {
+            '__h_task_result__': True,
+            'err': {
+                'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
+                'message': 'sneak',
+                'data': None,
+                'exception': None,
+            },
+        }
+        handle: TaskHandle[int] = TaskHandle('task-x', ok_type=int)
+        broker_result = Ok(self._record(
+            status=TaskStatus.FAILED, raw_result=malformed,
+        ))
+
+        result = handle._record_to_task_result(broker_result, timeout_ms=None)
+
+        assert result.is_err()
+        assert result.err is not None
+        assert (
+            result.err.error_code
+            == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        )
+
+    def test_envelope_with_both_slots_populated_rejected(self) -> None:
+        """Both ``ok`` and ``err`` populated → invalid envelope; can't
+        smuggle a typed value past the err-fast-path."""
+        from horsies.core.types.result import Ok
+        from horsies.core.types.status import TaskStatus
+
+        malformed = {
+            '__h_task_result__': True,
+            'ok': 42,
+            'err': {
+                'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
+                'message': 'both',
+                'data': None,
+                'exception': None,
+            },
+        }
+        handle: TaskHandle[int] = TaskHandle('task-x', ok_type=int)
+        broker_result = Ok(self._record(
+            status=TaskStatus.FAILED, raw_result=malformed,
+        ))
+
+        result = handle._record_to_task_result(broker_result, timeout_ms=None)
+
+        assert result.is_err()
+        assert result.err is not None
+        assert (
+            result.err.error_code
+            == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        )
+
+    def test_envelope_missing_marker_rejected(self) -> None:
+        """Plain dict without the marker isn't a TaskResult envelope."""
+        from horsies.core.types.result import Ok
+        from horsies.core.types.status import TaskStatus
+
+        raw = {'ok': 1, 'err': None}
+        handle: TaskHandle[int] = TaskHandle('task-x', ok_type=int)
+        broker_result = Ok(self._record(
+            status=TaskStatus.COMPLETED, raw_result=raw,
+        ))
+
+        result = handle._record_to_task_result(broker_result, timeout_ms=None)
+
+        assert result.is_err()
+        assert result.err is not None
+        assert (
+            result.err.error_code
+            == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        )
+
+    def test_terminal_status_with_none_payload_is_result_not_available(
+        self,
+    ) -> None:
+        """Terminal row with empty result column → cacheable
+        ``RESULT_NOT_AVAILABLE``, not transient ``WAIT_TIMEOUT``.
+
+        Regression: an earlier implementation always mapped
+        ``raw_result=None`` to ``WAIT_TIMEOUT`` even for terminal rows
+        (engine never wrote a payload), which produced wrong retry
+        semantics.
+        """
+        from horsies.core.types.result import Ok
+        from horsies.core.types.status import TaskStatus
+
+        handle: TaskHandle[int] = TaskHandle('task-x', ok_type=int)
+        broker_result = Ok(self._record(
+            status=TaskStatus.COMPLETED, raw_result=None,
+        ))
+
+        result = handle._record_to_task_result(broker_result, timeout_ms=None)
+
+        assert result.is_err()
+        assert result.err is not None
+        assert result.err.error_code == RetrievalCode.RESULT_NOT_AVAILABLE
+
+    def test_non_terminal_status_with_none_payload_is_wait_timeout(self) -> None:
+        """Non-terminal row + raw_result=None → ``WAIT_TIMEOUT``
+        (timeout fired before terminalization)."""
+        from horsies.core.types.result import Ok
+        from horsies.core.types.status import TaskStatus
+
+        handle: TaskHandle[int] = TaskHandle('task-x', ok_type=int)
+        broker_result = Ok(self._record(
+            status=TaskStatus.RUNNING, raw_result=None,
+        ))
+
+        result = handle._record_to_task_result(broker_result, timeout_ms=100)
+
+        assert result.is_err()
+        assert result.err is not None
+        assert result.err.error_code == RetrievalCode.WAIT_TIMEOUT
+
+    def test_err_fast_path_polymorphic_sub_workflow_error(self) -> None:
+        """End-to-end: a parent task's err slot carrying a
+        ``SubWorkflowError`` shape (the engine's emit) round-trips
+        through ``_record_to_task_result`` as a ``SubWorkflowError``,
+        not a plain ``TaskError``."""
+        from horsies.core.models.tasks import (
+            OperationalErrorCode as _OpCode,
+            SubWorkflowError,
+        )
+        from horsies.core.models.workflow.context import SubWorkflowSummary
+        from horsies.core.models.workflow.enums import WorkflowStatus
+        from horsies.core.types.result import Ok
+        from horsies.core.types.status import TaskStatus
+
+        original = SubWorkflowError(
+            error_code=_OpCode.UNHANDLED_EXCEPTION,
+            message='child failed',
+            sub_workflow_id='wf-1',
+            sub_workflow_summary=SubWorkflowSummary(
+                status=WorkflowStatus.FAILED,
+                output=None,
+                total_tasks=1,
+                completed_tasks=0,
+                failed_tasks=1,
+                skipped_tasks=0,
+                error_summary='downstream',
+            ),
+        )
+        wire = {
+            '__h_task_result__': True,
+            'ok': None,
+            'err': original.model_dump(mode='json'),
+        }
+        handle: TaskHandle[int] = TaskHandle('parent-task', ok_type=int)
+        broker_result = Ok(self._record(
+            status=TaskStatus.FAILED, raw_result=wire,
+        ))
+
+        result = handle._record_to_task_result(broker_result, timeout_ms=None)
+
+        assert result.is_err()
+        assert isinstance(result.err, SubWorkflowError)
+        assert result.err is not None
+        sub = result.err
+        assert isinstance(sub, SubWorkflowError)
+        assert sub.sub_workflow_id == 'wf-1'
+        assert sub.sub_workflow_summary.error_summary == 'downstream'
+
+
+# =============================================================================
 # TaskHandle.info / info_async
 # =============================================================================
 
