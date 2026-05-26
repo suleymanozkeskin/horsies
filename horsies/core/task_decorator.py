@@ -26,10 +26,13 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from datetime import datetime, timezone
 from pydantic import TypeAdapter, ValidationError
+from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.kwargs import encode_kwargs
 from horsies.core.codec.serde import (
     serialize_task_options,
     args_to_json,
-    kwargs_to_json,
+    dumps_json,
+    kwargs_to_json,  # noqa: F401 — retained for legacy non-typed paths
 )
 from horsies.core.codec.signature_check import (
     SignatureValidationError,
@@ -1163,14 +1166,25 @@ def create_task_wrapper(
 
             args_json = args_r.ok_value
 
-        # Serialize kwargs
+        # Serialize kwargs — strict-serde phase 3 routes through encode_kwargs
+        # using the receiver's declared parameter types.
         kwargs_json: str | None = None
         if kwargs_dict:
-            kwargs_r = kwargs_to_json(kwargs_dict)
+            try:
+                encoded_kwargs = encode_kwargs(fn, kwargs_dict)
+            except (StrictJsonError, ValidationError) as exc:
+                return Err(TaskSendError(
+                    code=TaskSendErrorCode.VALIDATION_FAILED,
+                    message=f'Failed to encode kwargs for {task_name}: {exc}',
+                    retryable=False,
+                    task_id=task_id,
+                    exception=exc,
+                ))
+            kwargs_r = dumps_json(encoded_kwargs)
             if is_err(kwargs_r):
                 return Err(TaskSendError(
                     code=TaskSendErrorCode.VALIDATION_FAILED,
-                    message=f'Failed to serialize kwargs for {task_name}: {kwargs_r.err_value}',
+                    message=f'Failed to serialize encoded kwargs for {task_name}: {kwargs_r.err_value}',
                     retryable=False,
                     task_id=task_id,
                     exception=kwargs_r.err_value if isinstance(kwargs_r.err_value, BaseException) else None,

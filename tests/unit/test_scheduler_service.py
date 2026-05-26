@@ -2041,7 +2041,12 @@ class TestEnqueueScheduledTask:
         assert 'serialize args' in result.err_value.message
 
     async def test_kwargs_serialization_failure_returns_err(self) -> None:
-        """kwargs_to_json returns Err → Err(BrokerOperationError)."""
+        """dumps_json returning Err on encoded kwargs → Err(BrokerOperationError).
+
+        Strict-serde phase 3 routes scheduler kwargs through `encode_kwargs`
+        then `dumps_json`; this test patches the final stringification step
+        (the only post-encoding failure surface) to verify error wrapping.
+        """
         schedule = TaskSchedule(
             name='s',
             task_name='my_task',
@@ -2055,7 +2060,7 @@ class TestEnqueueScheduledTask:
         scheduler.broker = _make_broker_mock()
 
         with patch(
-            'horsies.core.scheduler.service.kwargs_to_json',
+            'horsies.core.scheduler.service.dumps_json',
             return_value=Err(TypeError('bad kwargs')),
         ):
             result = await scheduler._enqueue_scheduled_task(
@@ -2065,7 +2070,7 @@ class TestEnqueueScheduledTask:
 
         assert is_err(result)
         assert result.err_value.code == BrokerErrorCode.ENQUEUE_FAILED
-        assert 'serialize kwargs' in result.err_value.message
+        assert 'kwargs' in result.err_value.message
 
     async def test_happy_path_calls_broker_with_correct_params(self) -> None:
         """Full success: broker.enqueue_async called with deterministic task_id and sent_at=slot_time."""

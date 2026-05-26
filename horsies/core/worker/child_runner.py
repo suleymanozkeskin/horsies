@@ -17,7 +17,11 @@ from psycopg import Connection, Cursor, InterfaceError, OperationalError
 from psycopg.rows import namedtuple_row
 from psycopg.errors import DeadlockDetected, SerializationFailure
 
+from pydantic import ValidationError
+
 from horsies.core.app import Horsies
+from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.kwargs import decode_kwargs
 from horsies.core.codec.serde import (
     loads_json,
     json_to_args,
@@ -727,10 +731,31 @@ def _run_task_entry(
             return _serialization_error_response(
                 task_name, kwargs_json_result.err_value
             )
-        kwargs_result = json_to_kwargs(kwargs_json_result.ok_value)
-        if is_err(kwargs_result):
-            return _serialization_error_response(task_name, kwargs_result.err_value)
-        kwargs = kwargs_result.ok_value
+        raw_kwargs = kwargs_json_result.ok_value
+        if not isinstance(raw_kwargs, dict):
+            return _serialization_error_response(
+                task_name,
+                SerializationError(
+                    f'kwargs must be a JSON object, got '
+                    f'{type(raw_kwargs).__name__}',
+                ),
+            )
+
+        # Strict-serde phase 3+4: decode user kwargs using the receiver's
+        # declared parameter types. Engine-private transport keys
+        # (`__horsies_workflow_ctx__`, ...) and args_from envelopes
+        # (TaskResult-typed kwargs) pass through unchanged for downstream
+        # handling below.
+        underlying_fn = getattr(task, '_original_fn', getattr(task, '_fn', task))
+        try:
+            kwargs = decode_kwargs(underlying_fn, cast('dict[str, Any]', raw_kwargs))
+        except (StrictJsonError, ValidationError) as exc:
+            return _serialization_error_response(
+                task_name,
+                SerializationError(
+                    f'Failed to decode kwargs for {task_name}: {exc}',
+                ),
+            )
 
         # Deserialize injected TaskResults from workflow args_from
         for key, value in list(kwargs.items()):

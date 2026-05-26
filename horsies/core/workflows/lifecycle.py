@@ -13,6 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from typing import Final
 
+from pydantic import ValidationError as _PydanticValidationError
+
+from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.kwargs import encode_kwargs
 from horsies.core.codec.serde import dumps_json, loads_json, SerializationError, SerdeResult
 from horsies.core.types.result import Ok, Err, is_err as _is_err
 from horsies.core.logging import get_logger
@@ -69,6 +73,23 @@ def _ser_or_raise(result: SerdeResult[str], context: str) -> str:
     if _is_err(result):
         raise SerializationError(f'Failed to serialize {context}: {result.err_value}')
     return result.ok_value
+
+
+def _encode_node_kwargs_or_raise(task: Any) -> dict[str, Any]:
+    """Encode a TaskNode's static kwargs through strict-serde phase 3.
+
+    Routes through `encode_kwargs(task.fn, task.kwargs)` so each kwarg is
+    encoded against its declared parameter type. Raises
+    ``SerializationError`` on encode failure so the caller's existing
+    transaction-zone handling converts it to ``SERIALIZATION_FAILED``.
+    """
+    underlying = getattr(task.fn, '_original_fn', getattr(task.fn, '_fn', task.fn))
+    try:
+        return dict(encode_kwargs(underlying, task.kwargs))
+    except (StrictJsonError, _PydanticValidationError) as exc:
+        raise SerializationError(
+            f'Failed to encode kwargs for node {task.name}: {exc}',
+        ) from exc
 
 
 if TYPE_CHECKING:
@@ -377,7 +398,12 @@ async def start_workflow_async(
                                 'node_id': task.node_id,
                                 'name': task.name,
                                 'args': _ser_or_raise(dumps_json(()), 'positional args'),  # kwargs-only: positional args not persisted
-                                'kwargs': _ser_or_raise(dumps_json(task.kwargs), f'kwargs for node {task.name}'),
+                                'kwargs': _ser_or_raise(
+                                    dumps_json(
+                                        _encode_node_kwargs_or_raise(task),
+                                    ),
+                                    f'kwargs for node {task.name}',
+                                ),
                                 # Queue: use override, else task's declared queue, else "default"
                                 'queue': task.queue
                                 or getattr(task.fn, 'task_queue_name', None)

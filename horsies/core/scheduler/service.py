@@ -17,7 +17,11 @@ from horsies.core.scheduler.state import ScheduleStateManager
 from horsies.core.scheduler.calculator import calculate_next_run, should_run_now
 from horsies.core.logging import get_logger
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError, BrokerResult
-from horsies.core.codec.serde import args_to_json, kwargs_to_json
+from pydantic import ValidationError as _PydanticValidationError
+
+from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.kwargs import encode_kwargs
+from horsies.core.codec.serde import args_to_json, dumps_json, kwargs_to_json  # noqa: F401
 from horsies.core.utils.fingerprint import enqueue_fingerprint, schedule_slot_task_id
 from horsies.core.types.result import Err, is_err
 from horsies.core.worker.worker import import_by_path
@@ -643,11 +647,23 @@ class Scheduler:
 
         kwargs_json: str | None = None
         if schedule.kwargs:
-            kwargs_r = kwargs_to_json(schedule.kwargs)
+            # Strict-serde phase 3 routes through encode_kwargs.
+            task = self.app.tasks.get(schedule.task_name)
+            task_fn = getattr(task, '_original_fn', getattr(task, '_fn', task))
+            try:
+                encoded_kwargs = encode_kwargs(task_fn, schedule.kwargs)
+            except (StrictJsonError, _PydanticValidationError) as exc:
+                return Err(BrokerOperationError(
+                    code=BrokerErrorCode.ENQUEUE_FAILED,
+                    message=f"Failed to encode kwargs for schedule '{schedule.name}': {exc}",
+                    retryable=False,
+                    exception=exc,
+                ))
+            kwargs_r = dumps_json(encoded_kwargs)
             if is_err(kwargs_r):
                 return Err(BrokerOperationError(
                     code=BrokerErrorCode.ENQUEUE_FAILED,
-                    message=f"Failed to serialize kwargs for schedule '{schedule.name}': {kwargs_r.err_value}",
+                    message=f"Failed to serialize encoded kwargs for schedule '{schedule.name}': {kwargs_r.err_value}",
                     retryable=False,
                     exception=kwargs_r.err_value if isinstance(kwargs_r.err_value, BaseException) else None,
                 ))
