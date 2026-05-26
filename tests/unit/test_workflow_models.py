@@ -1905,8 +1905,16 @@ class TestWorkflowContext:
         assert restored_result.is_ok()
         assert restored_result.unwrap() == 42
 
-    def test_model_dump_json_round_trips_results(self) -> None:
-        """model_dump(mode='json') preserves dependency results in JSONable form."""
+    def test_model_dump_json_emits_payload_for_results(self) -> None:
+        """``model_dump(mode='json')`` emits a JSON-shaped TaskResult payload.
+
+        Strict-serde phase 5/6: ``model_validate(dumped)`` no longer
+        round-trips. The validator rejects raw dicts in
+        ``results_by_id`` because typed decode requires knowing each
+        node's ``ok_type``, which only the engine/worker boundary has.
+        WorkflowContext must be reconstructed from pre-typed
+        ``TaskResult`` instances via ``from_serialized``.
+        """
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
             task_index=1,
@@ -1915,16 +1923,19 @@ class TestWorkflowContext:
         )
 
         dumped = ctx.model_dump(mode='json')
-        assert dumped['results_by_id']['node-0'] == {
-            '__task_result__': True,
-            'ok': 42,
-            'err': None,
-        }
+        # The dumped shape is JSONable (round-trippable through json.dumps),
+        # but is NOT the strict-serde wire envelope — that one
+        # (``__h_task_result__``) is produced by ``encode_task_result``
+        # at the codec layer.
+        node_payload = dumped['results_by_id']['node-0']
+        assert node_payload['ok'] == 42
+        assert node_payload['err'] is None
 
-        restored = WorkflowContext.model_validate(dumped)
-        restored_result = restored.result_for(NodeKey[int]('node-0'))
-        assert restored_result.is_ok()
-        assert restored_result.unwrap() == 42
+        # The new contract: model_validate must reject a raw-dict
+        # results_by_id payload. Decoding happens at the engine/worker
+        # boundary, not inside the model validator.
+        with pytest.raises(ValueError, match='must be a TaskResult instance'):
+            WorkflowContext.model_validate(dumped)
 
     def test_result_for_raises_on_missing_id(self) -> None:
         """result_for(node) raises RuntimeError if node has no node_id."""

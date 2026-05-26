@@ -189,30 +189,49 @@ class TestTaskHandleGet:
         assert result.err.error_code == RetrievalCode.RESULT_NOT_AVAILABLE
 
     def test_broker_mode_success(self) -> None:
-        """Broker mode: successful get_result is cached and returned."""
+        """Broker mode: terminal envelope decodes via ok_type and caches.
+
+        Strict-serde phase 6: TaskHandle.get pulls a RawResultRecord from
+        ``broker.get_raw_result_record`` and runs the typed decode itself.
+        """
+        from horsies.core.brokers.result_types import RawResultRecord
+        from horsies.core.types.status import TaskStatus
+
         app = _make_app()
         broker = MagicMock()
-        broker_result = TaskResult[int, TaskError](ok=99)
-        broker.get_result.return_value = broker_result
+        broker.get_raw_result_record.return_value = Ok(RawResultRecord(
+            task_id='t-4',
+            task_name='my_task',
+            status=TaskStatus.COMPLETED,
+            raw_result={
+                '__h_task_result__': True,
+                'ok': 99,
+                'err': None,
+            },
+        ))
         app.get_broker.return_value = broker
 
-        handle: TaskHandle[int] = TaskHandle('t-4', app=app, broker_mode=True)
+        handle: TaskHandle[int] = TaskHandle(
+            't-4', app=app, broker_mode=True, ok_type=int,
+        )
 
         result = handle.get(timeout_ms=5000)
 
         assert result.is_ok()
         assert result.ok == 99
         assert handle._result_fetched is True
-        broker.get_result.assert_called_once_with('t-4', 5000)
+        broker.get_raw_result_record.assert_called_once_with('t-4', 5000)
 
     def test_broker_mode_exception_returns_broker_error(self) -> None:
-        """Broker mode: exception from broker returns BROKER_ERROR."""
+        """Broker mode: exception from broker fetch returns BROKER_ERROR."""
         app = _make_app()
         broker = MagicMock()
-        broker.get_result.side_effect = ConnectionError('db down')
+        broker.get_raw_result_record.side_effect = ConnectionError('db down')
         app.get_broker.return_value = broker
 
-        handle: TaskHandle[int] = TaskHandle('t-5', app=app, broker_mode=True)
+        handle: TaskHandle[int] = TaskHandle(
+            't-5', app=app, broker_mode=True, ok_type=int,
+        )
 
         result = handle.get()
 
@@ -222,21 +241,40 @@ class TestTaskHandleGet:
         assert result.err.exception is not None
 
     def test_wait_timeout_not_cached(self) -> None:
-        """WAIT_TIMEOUT is transient; subsequent get() must re-query the broker."""
+        """WAIT_TIMEOUT is transient; subsequent get() must re-query.
+
+        Non-terminal status + raw_result=None → WAIT_TIMEOUT at the
+        handle layer; the cache stays empty so the next get() call
+        revisits the broker.
+        """
+        from horsies.core.brokers.result_types import RawResultRecord
+        from horsies.core.types.status import TaskStatus
+
         app = _make_app()
         broker = MagicMock()
-        timeout_result: TaskResult[int, TaskError] = TaskResult(
-            err=TaskError(
-                error_code=RetrievalCode.WAIT_TIMEOUT,
-                message='timed out',
-                data={},
-            ),
-        )
-        success_result: TaskResult[int, TaskError] = TaskResult(ok=42)
-        broker.get_result.side_effect = [timeout_result, success_result]
+        broker.get_raw_result_record.side_effect = [
+            Ok(RawResultRecord(
+                task_id='t-6',
+                task_name='my_task',
+                status=TaskStatus.RUNNING,
+                raw_result=None,
+            )),
+            Ok(RawResultRecord(
+                task_id='t-6',
+                task_name='my_task',
+                status=TaskStatus.COMPLETED,
+                raw_result={
+                    '__h_task_result__': True,
+                    'ok': 42,
+                    'err': None,
+                },
+            )),
+        ]
         app.get_broker.return_value = broker
 
-        handle: TaskHandle[int] = TaskHandle('t-6', app=app, broker_mode=True)
+        handle: TaskHandle[int] = TaskHandle(
+            't-6', app=app, broker_mode=True, ok_type=int,
+        )
 
         first = handle.get(timeout_ms=1000)
         assert first.is_err()
@@ -249,7 +287,7 @@ class TestTaskHandleGet:
         assert second.ok == 42
         assert handle._result_fetched is True
 
-        assert broker.get_result.call_count == 2
+        assert broker.get_raw_result_record.call_count == 2
 
 
 # =============================================================================
@@ -300,14 +338,29 @@ class TestTaskHandleGetAsync:
 
     @pytest.mark.asyncio
     async def test_broker_mode_success(self) -> None:
-        """Broker mode: successful async result is cached."""
+        """Broker mode: terminal envelope decodes via ok_type and caches."""
+        from horsies.core.brokers.result_types import RawResultRecord
+        from horsies.core.types.status import TaskStatus
+
         app = _make_app()
         broker = MagicMock()
-        broker_result = TaskResult[str, TaskError](ok='async-ok')
-        broker.get_result_async = AsyncMock(return_value=broker_result)
+        broker.get_raw_result_record_async = AsyncMock(return_value=Ok(
+            RawResultRecord(
+                task_id='t-4',
+                task_name='my_task',
+                status=TaskStatus.COMPLETED,
+                raw_result={
+                    '__h_task_result__': True,
+                    'ok': 'async-ok',
+                    'err': None,
+                },
+            ),
+        ))
         app.get_broker.return_value = broker
 
-        handle: TaskHandle[str] = TaskHandle('t-4', app=app, broker_mode=True)
+        handle: TaskHandle[str] = TaskHandle(
+            't-4', app=app, broker_mode=True, ok_type=str,
+        )
 
         result = await handle.get_async()
 
@@ -317,13 +370,17 @@ class TestTaskHandleGetAsync:
 
     @pytest.mark.asyncio
     async def test_broker_mode_exception_returns_broker_error(self) -> None:
-        """Broker mode: exception from broker returns BROKER_ERROR."""
+        """Broker mode: exception from broker fetch returns BROKER_ERROR."""
         app = _make_app()
         broker = MagicMock()
-        broker.get_result_async = AsyncMock(side_effect=ConnectionError('oops'))
+        broker.get_raw_result_record_async = AsyncMock(
+            side_effect=ConnectionError('oops'),
+        )
         app.get_broker.return_value = broker
 
-        handle: TaskHandle[str] = TaskHandle('t-5', app=app, broker_mode=True)
+        handle: TaskHandle[str] = TaskHandle(
+            't-5', app=app, broker_mode=True, ok_type=str,
+        )
 
         result = await handle.get_async()
 
@@ -336,33 +393,54 @@ class TestTaskHandleGetAsync:
         """CancelledError is re-raised, not caught as BROKER_ERROR."""
         app = _make_app()
         broker = MagicMock()
-        broker.get_result_async = AsyncMock(side_effect=asyncio.CancelledError)
+        broker.get_raw_result_record_async = AsyncMock(
+            side_effect=asyncio.CancelledError,
+        )
         app.get_broker.return_value = broker
 
-        handle: TaskHandle[str] = TaskHandle('t-6', app=app, broker_mode=True)
+        handle: TaskHandle[str] = TaskHandle(
+            't-6', app=app, broker_mode=True, ok_type=str,
+        )
 
         with pytest.raises(asyncio.CancelledError):
             await handle.get_async()
 
     @pytest.mark.asyncio
     async def test_wait_timeout_not_cached(self) -> None:
-        """WAIT_TIMEOUT is transient; subsequent get_async() must re-query the broker."""
+        """WAIT_TIMEOUT is transient; subsequent get_async() must re-query.
+
+        Non-terminal status + raw_result=None → WAIT_TIMEOUT at the
+        handle layer; the cache stays empty so the next call revisits
+        the broker.
+        """
+        from horsies.core.brokers.result_types import RawResultRecord
+        from horsies.core.types.status import TaskStatus
+
         app = _make_app()
         broker = MagicMock()
-        timeout_result: TaskResult[str, TaskError] = TaskResult(
-            err=TaskError(
-                error_code=RetrievalCode.WAIT_TIMEOUT,
-                message='timed out',
-                data={},
-            ),
-        )
-        success_result: TaskResult[str, TaskError] = TaskResult(ok='done')
-        broker.get_result_async = AsyncMock(
-            side_effect=[timeout_result, success_result],
-        )
+        broker.get_raw_result_record_async = AsyncMock(side_effect=[
+            Ok(RawResultRecord(
+                task_id='t-7',
+                task_name='my_task',
+                status=TaskStatus.RUNNING,
+                raw_result=None,
+            )),
+            Ok(RawResultRecord(
+                task_id='t-7',
+                task_name='my_task',
+                status=TaskStatus.COMPLETED,
+                raw_result={
+                    '__h_task_result__': True,
+                    'ok': 'done',
+                    'err': None,
+                },
+            )),
+        ])
         app.get_broker.return_value = broker
 
-        handle: TaskHandle[str] = TaskHandle('t-7', app=app, broker_mode=True)
+        handle: TaskHandle[str] = TaskHandle(
+            't-7', app=app, broker_mode=True, ok_type=str,
+        )
 
         first = await handle.get_async(timeout_ms=1000)
         assert first.is_err()
@@ -375,7 +453,7 @@ class TestTaskHandleGetAsync:
         assert second.ok == 'done'
         assert handle._result_fetched is True
 
-        assert broker.get_result_async.call_count == 2
+        assert broker.get_raw_result_record_async.call_count == 2
 
 
 # =============================================================================
@@ -633,19 +711,22 @@ class TestTaskHandleInfo:
         assert err.retryable is False
 
     def test_info_with_broker_delegates(self) -> None:
-        """info() with broker mode delegates to broker.get_task_info."""
+        """info() with broker mode delegates to ``app.get_task_info``.
+
+        Strict-serde phase 6: TaskHandle.info routes through Horsies so
+        the typed ``decoded_result`` field gets populated. The handle no
+        longer talks to ``broker.get_task_info`` directly.
+        """
         app = _make_app()
-        broker = MagicMock()
         sentinel = object()
-        broker.get_task_info.return_value = sentinel
-        app.get_broker.return_value = broker
+        app.get_task_info = MagicMock(return_value=sentinel)
 
         handle: TaskHandle[int] = TaskHandle('t-3', app=app, broker_mode=True)
 
         result = handle.info(include_result=True)
 
         assert result is sentinel
-        broker.get_task_info.assert_called_once_with(
+        app.get_task_info.assert_called_once_with(
             't-3',
             include_result=True,
             include_failed_reason=False,
@@ -654,19 +735,17 @@ class TestTaskHandleInfo:
 
     @pytest.mark.asyncio
     async def test_info_async_with_broker_delegates(self) -> None:
-        """info_async() with broker mode delegates to broker.get_task_info_async."""
+        """info_async() routes through ``app.get_task_info_async``."""
         app = _make_app()
-        broker = MagicMock()
         sentinel = object()
-        broker.get_task_info_async = AsyncMock(return_value=sentinel)
-        app.get_broker.return_value = broker
+        app.get_task_info_async = AsyncMock(return_value=sentinel)
 
         handle: TaskHandle[int] = TaskHandle('t-4', app=app, broker_mode=True)
 
         result = await handle.info_async(include_failed_reason=True)
 
         assert result is sentinel
-        broker.get_task_info_async.assert_called_once_with(
+        app.get_task_info_async.assert_called_once_with(
             't-4',
             include_result=False,
             include_failed_reason=True,

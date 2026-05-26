@@ -388,7 +388,8 @@ class TestEnqueueSubworkflowTask:
         session.execute = AsyncMock(return_value=_empty_result())
         broker = MagicMock()
         result = await enqueue_subworkflow_task(
-            session, broker, 'wf-1', 0, {}, 0, 'root-wf',
+            session, broker, 'wf-1', 0, {},
+            parent_depth=0, root_workflow_id='root-wf',
         )
         assert result is None
 
@@ -411,7 +412,8 @@ class TestEnqueueSubworkflowTask:
             new=AsyncMock(),
         ):
             result = await enqueue_subworkflow_task(
-                session, broker, 'wf-1', 0, {}, 0, 'root-wf',
+                session, broker, 'wf-1', 0, {},
+                parent_depth=0, root_workflow_id='root-wf',
             )
         assert result is None
 
@@ -441,7 +443,8 @@ class TestEnqueueSubworkflowTask:
             new=AsyncMock(),
         ):
             result = await enqueue_subworkflow_task(
-                session, broker, 'wf-1', 0, {}, 0, 'root-wf',
+                session, broker, 'wf-1', 0, {},
+                parent_depth=0, root_workflow_id='root-wf',
             )
         assert result is None
 
@@ -471,7 +474,8 @@ class TestEnqueueSubworkflowTask:
             new=AsyncMock(),
         ):
             result = await enqueue_subworkflow_task(
-                session, broker, 'wf-1', 0, {}, 0, 'root-wf',
+                session, broker, 'wf-1', 0, {},
+                parent_depth=0, root_workflow_id='root-wf',
             )
         assert result is None
 
@@ -502,7 +506,8 @@ class TestEnqueueSubworkflowTask:
             new=AsyncMock(),
         ):
             result = await enqueue_subworkflow_task(
-                session, broker, 'wf-1', 0, {}, 0, 'root-wf',
+                session, broker, 'wf-1', 0, {},
+                parent_depth=0, root_workflow_id='root-wf',
             )
         assert result is None
 
@@ -535,7 +540,8 @@ class TestEnqueueSubworkflowTask:
             new=AsyncMock(),
         ):
             result = await enqueue_subworkflow_task(
-                session, broker, 'wf-1', 0, {0: TaskResult(ok='val')}, 0, 'root-wf',
+                session, broker, 'wf-1', 0, {0: TaskResult(ok='val')},
+                parent_depth=0, root_workflow_id='root-wf',
             )
         assert result is None
 
@@ -568,7 +574,8 @@ class TestEnqueueSubworkflowTask:
             new=AsyncMock(),
         ):
             result = await enqueue_subworkflow_task(
-                session, broker, 'wf-1', 0, {0: TaskResult(ok='val')}, 0, 'root-wf',
+                session, broker, 'wf-1', 0, {0: TaskResult(ok='val')},
+                parent_depth=0, root_workflow_id='root-wf',
             )
         assert result is None
 
@@ -606,7 +613,8 @@ class TestEnqueueSubworkflowTask:
             new=AsyncMock(),
         ):
             result = await enqueue_subworkflow_task(
-                session, broker, 'wf-1', 0, {}, 0, 'root-wf',
+                session, broker, 'wf-1', 0, {},
+                parent_depth=0, root_workflow_id='root-wf',
             )
         assert result is None
 
@@ -670,7 +678,8 @@ class TestEnqueueSubworkflowTask:
             new=AsyncMock(),
         ):
             result = await enqueue_subworkflow_task(
-                session, broker, 'wf-1', 0, {}, 0, 'root-wf',
+                session, broker, 'wf-1', 0, {},
+                parent_depth=0, root_workflow_id='root-wf',
             )
         assert result is None
 
@@ -746,7 +755,8 @@ class TestEnqueueSubworkflowTask:
             new=AsyncMock(),
         ):
             result = await enqueue_subworkflow_task(
-                session, broker, 'wf-1', 0, {}, 0, 'root-wf',
+                session, broker, 'wf-1', 0, {},
+                parent_depth=0, root_workflow_id='root-wf',
             )
         assert result is None
 
@@ -807,7 +817,8 @@ class TestEnqueueSubworkflowTask:
             new=AsyncMock(),
         ):
             result = await enqueue_subworkflow_task(
-                session, broker, 'wf-1', 0, {}, 0, 'root-wf',
+                session, broker, 'wf-1', 0, {},
+                parent_depth=0, root_workflow_id='root-wf',
             )
         assert result is None
 
@@ -879,7 +890,8 @@ class TestEnqueueSubworkflowTask:
             new=AsyncMock(return_value='child-task-id'),
         ):
             result = await enqueue_subworkflow_task(
-                session, broker, 'wf-1', 0, {}, 0, 'root-wf',
+                session, broker, 'wf-1', 0, {},
+                parent_depth=0, root_workflow_id='root-wf',
             )
         # Should succeed — child workflow created
         assert result is not None
@@ -959,7 +971,8 @@ class TestEnqueueSubworkflowTask:
             new=AsyncMock(),
         ):
             result = await enqueue_subworkflow_task(
-                session, broker, 'wf-1', 0, {}, 0, 'root-wf',
+                session, broker, 'wf-1', 0, {},
+                parent_depth=0, root_workflow_id='root-wf',
             )
         assert result is None
 
@@ -1087,14 +1100,25 @@ class TestCheckAndPromoteTask:
 class TestGetDependencyResults:
     @pytest.mark.asyncio
     async def test_empty_indices_returns_empty(self) -> None:
+        """No indices → empty results dict + empty names dict.
+
+        Strict-serde phase 6: ``get_dependency_results`` now returns a
+        ``(results_by_index, task_names_by_index)`` tuple.
+        """
         session = AsyncMock()
-        result = await get_dependency_results(session, 'wf-1', [])
-        assert result == {}
+        results, names = await get_dependency_results(session, 'wf-1', [])
+        assert results == {}
+        assert names == {}
 
     @pytest.mark.asyncio
     async def test_corrupt_result_json_injects_deser_error(self) -> None:
+        """Malformed JSON in the result column → RESULT_DESERIALIZATION_ERROR
+        sentinel folded into the per-index TaskResult."""
         row = SimpleNamespace(
-            task_index=0, status='COMPLETED', result='not{json',
+            task_index=0,
+            task_name='task_a',
+            status='COMPLETED',
+            result='not{json',
         )
 
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
@@ -1102,16 +1126,34 @@ class TestGetDependencyResults:
 
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
-        results = await get_dependency_results(session, 'wf-1', [0])
+        results, names = await get_dependency_results(session, 'wf-1', [0])
         assert 0 in results
         assert results[0].is_err()
         assert results[0].err.error_code == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert names[0] == 'task_a'
 
     @pytest.mark.asyncio
-    async def test_task_result_from_json_fails_injects_deser_error(self) -> None:
-        # Valid JSON but not a TaskResult shape
+    async def test_task_result_decode_fails_injects_deser_error(self) -> None:
+        """When ``decode_task_result`` rejects the envelope (e.g. shape
+        violation, missing marker) the dependency entry becomes a
+        ``RESULT_DESERIALIZATION_ERROR`` sentinel.
+
+        Strict-serde phase 6: replaces the old patched-out
+        ``task_result_from_json`` test path. We exercise the real decode
+        path against a payload that parses as JSON but isn't a valid
+        ``__h_task_result__`` envelope.
+        """
+        app = MagicMock()
+        source_task = MagicMock()
+        source_task.task_ok_type = int
+        app.tasks.get = MagicMock(return_value=source_task)
+
         row = SimpleNamespace(
-            task_index=0, status='COMPLETED', result='{"unexpected": "shape"}',
+            task_index=0,
+            task_name='task_a',
+            status='COMPLETED',
+            # Valid JSON, but envelope marker is missing → decode rejects.
+            result='{"unexpected": "shape"}',
         )
 
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
@@ -1120,14 +1162,13 @@ class TestGetDependencyResults:
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
 
-        with patch(
-            'horsies.core.workflows.engine.task_result_from_json',
-            return_value=Err('parse failed'),
-        ):
-            results = await get_dependency_results(session, 'wf-1', [0])
+        results, names = await get_dependency_results(
+            session, 'wf-1', [0], app=app,
+        )
         assert 0 in results
         assert results[0].is_err()
         assert results[0].err.error_code == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert names[0] == 'task_a'
 
 
 # ── 8. get_dependency_results_with_names ─────────────────────────────
@@ -1160,7 +1201,20 @@ class TestGetDependencyResultsWithNames:
         assert results.by_index[0].err.error_code == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
 
     @pytest.mark.asyncio
-    async def test_task_result_from_json_fails(self) -> None:
+    async def test_task_result_decode_fails(self) -> None:
+        """Envelope shape failure folds into a per-node
+        ``RESULT_DESERIALIZATION_ERROR`` sentinel.
+
+        Strict-serde phase 6: replaces the patched-out
+        ``task_result_from_json`` test path. Real decode path is
+        exercised — the payload parses as JSON but lacks the
+        ``__h_task_result__`` marker.
+        """
+        app = MagicMock()
+        source_task = MagicMock()
+        source_task.task_ok_type = int
+        app.tasks.get = MagicMock(return_value=source_task)
+
         row = SimpleNamespace(
             task_index=0, task_name='task_a', node_id='node-0',
             status='COMPLETED', result='{"valid": "json"}',
@@ -1172,13 +1226,15 @@ class TestGetDependencyResultsWithNames:
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
 
-        with patch(
-            'horsies.core.workflows.engine.task_result_from_json',
-            return_value=Err('parse failed'),
-        ):
-            results = await get_dependency_results_with_names(session, 'wf-1', ['node-0'])
+        results = await get_dependency_results_with_names(
+            session, 'wf-1', ['node-0'], app=app,
+        )
         assert 0 in results.by_index
         assert results.by_index[0].is_err()
+        assert (
+            results.by_index[0].err.error_code
+            == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        )
 
     @pytest.mark.asyncio
     async def test_no_stored_result_skipped(self) -> None:
@@ -1259,13 +1315,18 @@ class TestEvaluateWorkflowSuccess:
 class TestGetWorkflowFailureError:
     @pytest.mark.asyncio
     async def test_no_policy_extracts_first_failed_error(self) -> None:
-        """No success_policy → extract first failed task's error."""
+        """No success_policy → extract first failed task's error.
+
+        Strict-serde phase 5/6: stored payloads use the
+        ``__h_task_result__`` envelope shape — ``serialize_error_payload``
+        is the canonical emit helper for library-built TaskError
+        payloads, so we seed the DB row with that.
+        """
+        from horsies.core.codec.serde import serialize_error_payload
+
         error = TaskError(error_code='TEST_ERR', message='test failure')
-        tr = TaskResult(err=error)
-        # Serialize the TaskResult as it would be stored in DB
-        from horsies.core.codec.serde import dumps_json as real_dumps
-        ser = real_dumps(tr)
-        stored = ser.ok_value if not ser.is_err() else None
+        tr: TaskResult[Any, TaskError] = TaskResult(err=error)
+        stored = serialize_error_payload(tr)
 
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is GET_FIRST_FAILED_TASK_RESULT_SQL:
@@ -1337,13 +1398,26 @@ class TestGetWorkflowFinalResult:
 
     @pytest.mark.asyncio
     async def test_task_result_parse_fails_stores_none(self) -> None:
+        """Envelope-shape failure on a per-node row → engine still
+        produces a (non-None) final result without crashing.
+
+        Strict-serde phase 5/6: the patched ``task_result_from_json``
+        helper no longer exists. Real decode path is exercised — the
+        payload parses as JSON but lacks the ``__h_task_result__``
+        marker, so per-node decode folds into a sentinel and the
+        outer aggregation still completes.
+        """
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is GET_WORKFLOW_OUTPUT_INDEX_SQL:
                 return _one_result(SimpleNamespace(output_task_index=None))
             if stmt is GET_TERMINAL_TASK_RESULTS_SQL:
+                # Strict-serde phase 6: the SQL projection now includes
+                # ``task_name`` for the outputless envelope's embedded
+                # task_name_by_id map.
                 return _rows_result([
                     SimpleNamespace(
                         node_id='node-0', task_index=0,
+                        task_name='task_a',
                         result='{"valid": "but_not_taskresult"}',
                     ),
                 ])
@@ -1352,11 +1426,7 @@ class TestGetWorkflowFinalResult:
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
 
-        with patch(
-            'horsies.core.workflows.engine.task_result_from_json',
-            return_value=Err('parse failed'),
-        ):
-            result = await get_workflow_final_result(session, 'wf-1')
+        result = await get_workflow_final_result(session, 'wf-1')
         assert result is not None
 
 
@@ -1393,15 +1463,23 @@ class TestHandleWorkflowTaskFailure:
 
     @pytest.mark.asyncio
     async def test_fail_policy_locks_and_uses_first_failed_error(self) -> None:
-        from horsies.core.codec.serde import dumps_json as real_dumps
+        """fail policy: SET_WORKFLOW_ERROR payload comes from the first
+        failed task's stored row, not the most recent failure.
+
+        Strict-serde phase 5/6: stored TaskError payloads use the
+        ``__h_task_result__`` envelope — emit via
+        ``serialize_error_payload`` so the engine's decode path can
+        round-trip the inner error code.
+        """
+        from horsies.core.codec.serde import serialize_error_payload
 
         set_error_params: dict[str, Any] = {}
         statements: list[Any] = []
-        first_error = real_dumps(
+        first_error = serialize_error_payload(
             TaskResult(
                 err=TaskError(error_code='FIRST_ERROR', message='first failure')
             )
-        ).unwrap()
+        )
 
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             statements.append(stmt)

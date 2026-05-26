@@ -1032,10 +1032,16 @@ class TestRunTaskEntryErrorPaths:
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """Task returning a plain value → wrapped into TaskResult(ok=value)."""
+        """Task returning a plain value → wrapped into TaskResult(ok=value).
+
+        Strict-serde phase 5: encoding routes through
+        ``encode_task_result(out, task.task_ok_type)``, so the mock task
+        must declare a real ``task_ok_type`` (pydantic-resolvable).
+        """
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_ok_type = int
         mock_task.return_value = 42
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
@@ -1045,7 +1051,9 @@ class TestRunTaskEntryErrorPaths:
         assert ok is True
         assert reason is None
         parsed = _parse_task_result(payload)
-        assert parsed.get('ok') == 42 or parsed.get('__task_result__') is not None
+        # Phase 5 wire format: ``__h_task_result__`` envelope.
+        assert parsed.get('__h_task_result__') is True
+        assert parsed.get('ok') == 42
 
     def test_task_returns_task_result_ok(
         self,
@@ -1091,6 +1099,7 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_ok_type = str
         mock_task.return_value = TaskResult(ok='data')
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
@@ -1111,6 +1120,7 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_ok_type = int
         mock_task.return_value = 42
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
@@ -1171,39 +1181,12 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
 
-    def test_workflow_ctx_results_by_id_bad_json(
-        self,
-        _run_entry_defaults: dict[str, Any],
-    ) -> None:
-        """workflow_ctx with invalid results_by_id JSON → serde error."""
-
-        def _task_with_ctx(workflow_ctx: Any = None) -> TaskResult[str, TaskError]:
-            return TaskResult(ok='done')
-
-        patches = _make_run_task_patches(task_fn=_task_with_ctx)
-        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
-        mock_task = MagicMock()
-        mock_task.return_value = TaskResult(ok='done')
-        mock_task._original_fn = _task_with_ctx
-        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
-
-        _run_entry_defaults['kwargs_json'] = json.dumps({
-            '__h_workflow_ctx__': {
-                'workflow_id': 'wf-1',
-                'task_index': 0,
-                'task_name': 'my_task',
-                'results_by_id': {
-                    'node_a': '{{{invalid',
-                },
-                'summaries_by_id': {},
-            },
-        })
-
-        with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
-
-        assert ok is True
-        assert reason is not None and 'SerializationError' in reason
+    # (test_workflow_ctx_results_by_id_bad_json removed: the strict-serde
+    # phase 5/6 rewrite of workflow_ctx kwarg decode no longer raises
+    # SerializationError on per-node decode failure. Per-node failures
+    # now fold into a sentinel TaskResult(err=RESULT_DESERIALIZATION_ERROR)
+    # so the workflow_ctx stays typed. New contract is covered by
+    # test_workflow_handle_decode.py and the integration tests.)
 
     def test_workflow_ctx_summaries_by_id_bad_json(
         self,
@@ -1555,44 +1538,11 @@ class TestWorkflowTaskRunningSyncFailureAborts:
 # ===================================================================
 
 
-@pytest.mark.unit
-class TestWorkflowCtxTaskResultFromJsonError:
-    """workflow_ctx results_by_id with valid JSON but invalid TaskResult shape."""
-
-    def test_workflow_ctx_results_by_id_not_task_result(
-        self,
-        _run_entry_defaults: dict[str, Any],
-    ) -> None:
-        """results_by_id value is valid JSON but not a TaskResult → serde error."""
-
-        def _task_with_ctx(workflow_ctx: Any = None) -> TaskResult[str, TaskError]:
-            return TaskResult(ok='done')
-
-        patches = _make_run_task_patches()
-        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
-        mock_task = MagicMock()
-        mock_task.return_value = TaskResult(ok='done')
-        mock_task._original_fn = _task_with_ctx
-        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
-
-        # Valid JSON string, but not a TaskResult shape (just a number)
-        _run_entry_defaults['kwargs_json'] = json.dumps({
-            '__h_workflow_ctx__': {
-                'workflow_id': 'wf-1',
-                'task_index': 0,
-                'task_name': 'my_task',
-                'results_by_id': {
-                    'node_a': '42',
-                },
-                'summaries_by_id': {},
-            },
-        })
-
-        with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
-
-        assert ok is True
-        assert reason is not None and 'SerializationError' in reason
+# (TestWorkflowCtxTaskResultFromJsonError removed: the legacy
+# JSON-string-shape protection has been replaced by the strict-serde
+# per-node decode fold — see the comment above
+# test_workflow_ctx_summaries_by_id_bad_json. Per-node decode failures
+# are exercised at the model layer in test_workflow_handle_decode.py.)
 
 
 # ===================================================================
@@ -1608,22 +1558,48 @@ class TestRunTaskEntryWorkflowHappyPaths:
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """__h_taskresult_envelope__ with valid TaskResult JSON → kwarg replaced."""
+        """``__h_taskresult_envelope__`` (args_from) decodes via the
+        registered source task's ``task_ok_type``.
+
+        Strict-serde phase 5/6 wire format:
+
+            {
+                '__h_taskresult_envelope__': True,
+                'source_task_name': '<upstream>',
+                'inner': <encode_task_result(tr, source_ok_type)>,
+            }
+        """
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
-        mock_task = MagicMock()
-        mock_task.return_value = TaskResult(ok='processed')
-        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
-        # Valid serialized TaskResult
-        valid_tr_json = json.dumps({
-            '__task_result__': True,
-            'ok': 'upstream_value',
-        })
+        # Source task (provides ok_type for the upstream envelope's inner).
+        source_task = MagicMock()
+        source_task.task_ok_type = str
+
+        # Consumer task whose kwarg gets injected. Real type for its
+        # own return-encoding too.
+        mock_task = MagicMock()
+        mock_task.task_ok_type = str
+        mock_task.return_value = TaskResult(ok='processed')
+
+        def _task_lookup(name: str) -> Any:
+            if name == 'upstream_task':
+                return source_task
+            return mock_task
+
+        mock_app.tasks.__getitem__ = MagicMock(side_effect=_task_lookup)
+        mock_app.tasks.get = MagicMock(side_effect=_task_lookup)
+
+        # New envelope: source_task_name + inner = full task-result envelope.
         _run_entry_defaults['kwargs_json'] = json.dumps({
             'upstream': {
                 '__h_taskresult_envelope__': True,
-                'data': valid_tr_json,
+                'source_task_name': 'upstream_task',
+                'inner': {
+                    '__h_task_result__': True,
+                    'ok': 'upstream_value',
+                    'err': None,
+                },
             },
         })
 
@@ -1681,42 +1657,11 @@ class TestRunTaskEntryWorkflowHappyPaths:
         assert ok is True
         assert reason is None
 
-    def test_workflow_ctx_results_by_id_task_result_from_json_error(
-        self,
-        _run_entry_defaults: dict[str, Any],
-    ) -> None:
-        """results_by_id value deserializes as JSON but task_result_from_json fails."""
-
-        def _task_with_ctx(workflow_ctx: Any = None) -> TaskResult[str, TaskError]:
-            return TaskResult(ok='done')
-
-        patches = _make_run_task_patches()
-        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
-        mock_task = MagicMock()
-        mock_task.return_value = TaskResult(ok='done')
-        mock_task._original_fn = _task_with_ctx
-        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
-
-        # Valid JSON dict but missing __task_result__ key (and no ok/err)
-        bad_tr = json.dumps({'random': 'data'})
-        _run_entry_defaults['kwargs_json'] = json.dumps({
-            '__h_workflow_ctx__': {
-                'workflow_id': 'wf-1',
-                'task_index': 0,
-                'task_name': 'my_task',
-                'results_by_id': {
-                    'node_a': bad_tr,
-                },
-                'summaries_by_id': {},
-            },
-        })
-
-        with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
-
-        assert ok is True
-        assert reason is not None and 'SerializationError' in reason
-
+    # (test_workflow_ctx_results_by_id_task_result_from_json_error removed:
+    # the patched-out ``task_result_from_json`` helper no longer exists
+    # in the strict-serde rebuild. Per-node decode failure now folds
+    # into a RESULT_DESERIALIZATION_ERROR sentinel — covered at the
+    # model layer in test_workflow_handle_decode.py.)
 
 # ===================================================================
 # P. _start_heartbeat_thread
