@@ -28,7 +28,7 @@ from horsies.core.codec.serde import loads_json
 from horsies.core.codec.typed import (
     Json,
     TypeAnnotation,
-    _decode_task_error_polymorphic,
+    decode_task_error,
     decode_task_result,
     decode_value,
 )
@@ -328,7 +328,7 @@ def _decode_workflow_envelope(
         # the engine for failed parent nodes; plain TaskError decode
         # would drop them.
         try:
-            err = _decode_task_error_polymorphic(err_slot)
+            err = decode_task_error(err_slot)
         except (StrictJsonError, ValidationError) as exc:
             return TaskResult(
                 err=TaskError(

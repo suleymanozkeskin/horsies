@@ -34,7 +34,7 @@ from horsies.core.codec.serde import (
 )
 from horsies.core.codec.typed import (
     TypeAnnotation,
-    _decode_task_error_polymorphic,
+    decode_task_error,
     decode_task_result,
     decode_value,
     validate_task_result_envelope,
@@ -349,7 +349,7 @@ class TaskHandle(Generic[T]):
         # err and ok are not both populated.
         if err_slot is not None:
             try:
-                err_value = _decode_task_error_polymorphic(err_slot)
+                err_value = decode_task_error(err_slot)
             except (StrictJsonError, ValidationError) as exc:
                 return self._error_result(
                     error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,

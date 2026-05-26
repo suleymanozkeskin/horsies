@@ -31,6 +31,7 @@ from horsies.core.models.tasks import SubWorkflowError, TaskError, TaskResult
 __all__ = [
     'Json',
     'TypeAnnotation',
+    'decode_task_error',
     'decode_task_result',
     'decode_value',
     'encode_task_result',
@@ -282,8 +283,13 @@ def encode_task_result(
     }
 
 
-def _decode_task_error_polymorphic(err_slot: Json) -> TaskError:
+def decode_task_error(err_slot: Json) -> TaskError:
     """Decode an err-slot payload into the right concrete TaskError class.
+
+    Public shared helper used by every err-slot decode site (typed
+    codec, task handle err-fast-path, app err-fast-path, workflow
+    handle err slot). Single implementation so the discriminator
+    rules can never drift between callers.
 
     The strict codec uses ``TypeAdapter(TaskError)`` which drops fields
     declared only on subclasses (notably ``SubWorkflowError``'s
@@ -422,7 +428,7 @@ def decode_task_result(
         # (``sub_workflow_id`` / ``sub_workflow_summary``). The engine
         # emits these at ``on_subworkflow_complete``; without subclass
         # routing TypeAdapter(TaskError) would drop them.
-        return TaskResult(err=_decode_task_error_polymorphic(err_slot))
+        return TaskResult(err=decode_task_error(err_slot))
     decoded_ok = decode_value(ok_slot, ok_type)
     return TaskResult(ok=decoded_ok)
 
