@@ -443,13 +443,6 @@ class TaskHandle(Generic[T]):
                 retryable=is_retryable_connection_error(exc),
                 exception=exc,
             ))
-        except Exception as exc:
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
-                message=f'Failed fetching raw result for task {self.task_id}: {exc}',
-                retryable=False,
-                exception=exc,
-            ))
 
         if row is None or row.result is None:
             return Ok(None)

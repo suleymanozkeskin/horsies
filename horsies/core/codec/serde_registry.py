@@ -86,6 +86,9 @@ class SerdeTypeRegistry:
     def __contains__(self, key: str) -> bool:
         return key in self._classes
 
+    def __len__(self) -> int:
+        return len(self._classes)
+
     def keys(self) -> list[str]:
         """Snapshot of registered keys, for diagnostics."""
         return list(self._classes.keys())
@@ -304,7 +307,7 @@ def walk_callable_for_serde_types(
     except (TypeError, ValueError):
         return 0
 
-    before_count = len(target.keys())
+    before_count = len(target)
 
     for param in sig.parameters.values():
         annotation = type_hints.get(param.name, param.annotation)
@@ -316,4 +319,4 @@ def walk_callable_for_serde_types(
     if return_annotation is not inspect.Signature.empty:
         _walk_annotation(return_annotation, visited=visited, registry=target)
 
-    return len(target.keys()) - before_count
+    return len(target) - before_count
