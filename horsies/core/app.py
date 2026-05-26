@@ -997,7 +997,11 @@ class Horsies:
             BrokerOperationError,
         )
         from horsies.core.codec.json_value import StrictJsonError
-        from horsies.core.codec.typed import decode_task_result, decode_value
+        from horsies.core.codec.typed import (
+            _decode_task_error_polymorphic,
+            decode_task_result,
+            validate_task_result_envelope,
+        )
         from horsies.core.models.tasks import (
             OperationalErrorCode,
             OutcomeCode,
@@ -1070,12 +1074,28 @@ class Horsies:
                     },
                 ),
             ))
+        # Validate envelope shape before either fast-path or full
+        # decode — a malformed envelope (missing marker, both ok and
+        # err populated, extras) must fail closed before we read the
+        # err slot.
         raw = record.raw_result
-        # Err-fast-path: TaskError is fixed-schema; decodable without ok_type.
-        err_slot = raw.get('err') if isinstance(raw, dict) else None
+        try:
+            envelope = validate_task_result_envelope(raw)
+        except StrictJsonError as exc:
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                message=(
+                    f'TaskResult envelope invalid for {task_id}: {exc}'
+                ),
+                retryable=False,
+            ))
+        err_slot = envelope.get('err')
+        # Err-fast-path: TaskError is fixed-schema; decodable without
+        # ok_type. ``validate_task_result_envelope`` already guarantees
+        # err and ok are not both populated.
         if err_slot is not None:
             try:
-                err_value = decode_value(err_slot, TaskError)
+                err_value = _decode_task_error_polymorphic(err_slot)
             except (StrictJsonError, ValidationError) as exc:
                 return Err(BrokerOperationError(
                     code=BrokerErrorCode.INVALID_JSON_PAYLOAD,

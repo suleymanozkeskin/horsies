@@ -28,6 +28,7 @@ from horsies.core.codec.serde import loads_json
 from horsies.core.codec.typed import (
     Json,
     TypeAnnotation,
+    _decode_task_error_polymorphic,
     decode_task_result,
     decode_value,
 )
@@ -289,10 +290,45 @@ def _decode_workflow_envelope(
                 ),
             ),
         )
+
+    # Strict-serde phase 6: outputless wire-vs-type must agree before
+    # any per-slot decoding. A mismatch (typed out_type with
+    # outputless payload, or outputless handle reading a typed
+    # payload) is a contract violation — the workflow definition
+    # changed between produce and consume, or the caller wired the
+    # wrong handle. Fail closed instead of silently coercing to the
+    # wrong shape. Checking this before the err-fast-path ensures a
+    # smuggled outputless flag on a typed envelope can't slip through
+    # via the err route either.
+    wire_outputless = envelope.get('__h_outputless_terminals__') is True
+    handle_outputless = out_type is _OUTPUTLESS_TERMINALS
+    if wire_outputless != handle_outputless:
+        return TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=(
+                    f'Workflow {workflow_id} outputless/typed envelope '
+                    f'mismatch: wire_outputless={wire_outputless}, '
+                    f'handle_outputless={handle_outputless}. Workflow '
+                    f'definition likely changed between produce and '
+                    f'consume.'
+                ),
+                data={
+                    'workflow_id': workflow_id,
+                    'wire_outputless': wire_outputless,
+                    'handle_outputless': handle_outputless,
+                },
+            ),
+        )
+
     err_slot = envelope.get('err')
     if err_slot is not None:
+        # Polymorphic decode preserves SubWorkflowError fields
+        # (``sub_workflow_id`` / ``sub_workflow_summary``) emitted by
+        # the engine for failed parent nodes; plain TaskError decode
+        # would drop them.
         try:
-            err = decode_value(err_slot, TaskError)
+            err = _decode_task_error_polymorphic(err_slot)
         except (StrictJsonError, ValidationError) as exc:
             return TaskResult(
                 err=TaskError(
@@ -300,10 +336,10 @@ def _decode_workflow_envelope(
                     message=f'TaskError decode failed: {exc}',
                 ),
             )
-        return TaskResult(err=cast('TaskError', err))
+        return TaskResult(err=err)
 
     # Outputless workflow path.
-    if envelope.get('__h_outputless_terminals__') is True or out_type is _OUTPUTLESS_TERMINALS:
+    if handle_outputless:
         ok_slot = envelope.get('ok')
         if not isinstance(ok_slot, dict):
             return TaskResult(

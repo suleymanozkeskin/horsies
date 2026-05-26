@@ -25,7 +25,7 @@ from horsies.core.codec.json_value import (
     StrictJsonError,
     _validate_json_native,
 )
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import SubWorkflowError, TaskError, TaskResult
 
 
 __all__ = [
@@ -35,6 +35,7 @@ __all__ = [
     'decode_value',
     'encode_task_result',
     'encode_value',
+    'validate_task_result_envelope',
 ]
 
 
@@ -281,37 +282,69 @@ def encode_task_result(
     }
 
 
-def decode_task_result(
-    raw: Json,
-    ok_type: TypeAnnotation,
-) -> TaskResult[Any, TaskError]:
-    """Decode a wire envelope back to `TaskResult[OkT, TaskError]`.
+def _decode_task_error_polymorphic(err_slot: Json) -> TaskError:
+    """Decode an err-slot payload into the right concrete TaskError class.
 
-    Validates the envelope shape strictly (must be a dict carrying
-    `__h_task_result__: True`, with exactly the keys
-    `{__h_task_result__, ok, err}`). Discriminates on the err slot —
-    `err is None` → ok path, `err is not None` → err path. Both slots
-    populated, or the envelope marker missing, raises
-    ``StrictJsonError``; legacy envelopes (`__task_result__`,
-    `__task_error__`, …) fall under the same rejection because they
-    don't carry the `__h_task_result__` marker.
+    The strict codec uses ``TypeAdapter(TaskError)`` which drops fields
+    declared only on subclasses (notably ``SubWorkflowError``'s
+    ``sub_workflow_id`` / ``sub_workflow_summary``). The engine emits
+    subworkflow failures via ``SubWorkflowError.model_dump(...)`` at
+    ``engine.py::on_subworkflow_complete``; without polymorphic decode
+    those subclass fields would be silently lost when downstream
+    consumers read the parent node's TaskResult.
 
-    The ok slot routes through `decode_value(slot, ok_type)`; the err
-    slot routes through `decode_value(slot, TaskError)`.
+    Discriminator: inspect the payload's keys. SubWorkflowError-specific
+    fields (``sub_workflow_id``) identify the subclass; everything else
+    decodes as plain ``TaskError``. The reserved-key scan
+    (``_scan_task_error_user_fields``) still applies in both branches
+    via ``decode_value``.
 
     Args:
-        raw: The JSON-shaped envelope, typically from
-            `json.loads(...)` on the broker's stored payload.
-        ok_type: Declared `OkT` for the ok-slot decoding.
+        err_slot: The raw err-slot value from a TaskResult envelope.
 
     Returns:
-        The reconstructed `TaskResult`.
+        A ``TaskError`` (or ``SubWorkflowError``) instance.
 
     Raises:
-        StrictJsonError: on envelope shape failure or reserved-key
-            smuggling inside ok / err payloads.
+        StrictJsonError: on reserved-key smuggling inside the err
+            payload.
         pydantic.ValidationError: when the payload doesn't satisfy the
-            declared shape.
+            chosen concrete class.
+    """
+    if (
+        isinstance(err_slot, dict)
+        and 'sub_workflow_id' in cast('dict[str, Json]', err_slot)
+    ):
+        decoded = decode_value(err_slot, SubWorkflowError)
+        if not isinstance(decoded, SubWorkflowError):
+            # Defensive: TypeAdapter should always return the concrete
+            # class. If it ever doesn't, refuse to silently downgrade.
+            raise StrictJsonError(
+                f'SubWorkflowError decode returned '
+                f'{type(decoded).__name__!r}',
+            )
+        return decoded
+    decoded_base = decode_value(err_slot, TaskError)
+    if not isinstance(decoded_base, TaskError):
+        raise StrictJsonError(
+            f'TaskError decode returned {type(decoded_base).__name__!r}',
+        )
+    return decoded_base
+
+
+def validate_task_result_envelope(raw: Json) -> dict[str, Json]:
+    """Validate the wire shape of a ``__h_task_result__`` envelope.
+
+    Returns the envelope as ``dict[str, Json]`` on success; raises
+    ``StrictJsonError`` otherwise. Used by ``decode_task_result`` and
+    by err-fast-path callers (handle / app ``get_result``) that decode
+    only the err slot but still must reject malformed envelopes —
+    a payload carrying both ok and err, missing the marker, or
+    carrying extras would otherwise slip past the fast path.
+
+    Strict-serde §5: the envelope must carry exactly the keys
+    ``{__h_task_result__, ok, err}``, ``__h_task_result__: True``, and
+    at most one of ``ok`` / ``err`` populated.
     """
     if not isinstance(raw, dict):
         raise StrictJsonError(
@@ -346,14 +379,50 @@ def decode_task_result(
             'TaskResult envelope has both ok and err populated; exactly '
             'one must be set',
         )
+    return envelope
+
+
+def decode_task_result(
+    raw: Json,
+    ok_type: TypeAnnotation,
+) -> TaskResult[Any, TaskError]:
+    """Decode a wire envelope back to `TaskResult[OkT, TaskError]`.
+
+    Validates the envelope shape strictly (must be a dict carrying
+    `__h_task_result__: True`, with exactly the keys
+    `{__h_task_result__, ok, err}`). Discriminates on the err slot —
+    `err is None` → ok path, `err is not None` → err path. Both slots
+    populated, or the envelope marker missing, raises
+    ``StrictJsonError``; legacy envelopes (`__task_result__`,
+    `__task_error__`, …) fall under the same rejection because they
+    don't carry the `__h_task_result__` marker.
+
+    The ok slot routes through `decode_value(slot, ok_type)`; the err
+    slot routes through `decode_value(slot, TaskError)`.
+
+    Args:
+        raw: The JSON-shaped envelope, typically from
+            `json.loads(...)` on the broker's stored payload.
+        ok_type: Declared `OkT` for the ok-slot decoding.
+
+    Returns:
+        The reconstructed `TaskResult`.
+
+    Raises:
+        StrictJsonError: on envelope shape failure or reserved-key
+            smuggling inside ok / err payloads.
+        pydantic.ValidationError: when the payload doesn't satisfy the
+            declared shape.
+    """
+    envelope = validate_task_result_envelope(raw)
+    ok_slot = envelope.get('ok')
+    err_slot = envelope.get('err')
     if err_slot is not None:
-        err_value = decode_value(err_slot, TaskError)
-        if not isinstance(err_value, TaskError):
-            raise StrictJsonError(
-                f'TaskError decode produced non-TaskError value: '
-                f'{type(err_value).__name__}',
-            )
-        return TaskResult(err=err_value)
+        # Polymorphic decode preserves SubWorkflowError subclass fields
+        # (``sub_workflow_id`` / ``sub_workflow_summary``). The engine
+        # emits these at ``on_subworkflow_complete``; without subclass
+        # routing TypeAdapter(TaskError) would drop them.
+        return TaskResult(err=_decode_task_error_polymorphic(err_slot))
     decoded_ok = decode_value(ok_slot, ok_type)
     return TaskResult(ok=decoded_ok)
 

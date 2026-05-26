@@ -34,8 +34,10 @@ from horsies.core.codec.serde import (
 )
 from horsies.core.codec.typed import (
     TypeAnnotation,
+    _decode_task_error_polymorphic,
     decode_task_result,
     decode_value,
+    validate_task_result_envelope,
 )
 from horsies.core.codec.signature_check import (
     SignatureValidationError,
@@ -327,16 +329,27 @@ class TaskHandle(Generic[T]):
             )
             return tr_timeout
 
-        # Terminal record with payload. Decode.
+        # Terminal record with payload. Validate the envelope shape
+        # before any per-slot decoding — both fast-path and full-decode
+        # routes share the same validator so a malformed envelope
+        # (missing marker, both slots populated, extras) fails closed
+        # before we touch the err slot.
         raw = record.raw_result
-        # Err-fast-path: if the err slot is populated, decode it
-        # without needing ok_type (TaskError has a fixed schema).
-        err_slot = raw.get('err') if isinstance(raw, dict) else None
+        try:
+            envelope = validate_task_result_envelope(raw)
+        except StrictJsonError as exc:
+            return self._error_result(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=f'TaskResult envelope invalid: {exc}',
+                data={'task_id': self.task_id},
+            )
+        err_slot = envelope.get('err')
+        # Err-fast-path: TaskError is fixed-schema; decodable without
+        # ok_type. ``validate_task_result_envelope`` already guarantees
+        # err and ok are not both populated.
         if err_slot is not None:
-            from horsies.core.models.tasks import TaskError as _TaskError
-
             try:
-                err_value = decode_value(err_slot, _TaskError)
+                err_value = _decode_task_error_polymorphic(err_slot)
             except (StrictJsonError, ValidationError) as exc:
                 return self._error_result(
                     error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,

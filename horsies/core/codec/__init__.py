@@ -18,6 +18,7 @@ from horsies.core.codec.typed import (
     decode_value,
     encode_task_result,
     encode_value,
+    validate_task_result_envelope,
 )
 
 
@@ -30,4 +31,5 @@ __all__ = [
     'decode_value',
     'encode_task_result',
     'encode_value',
+    'validate_task_result_envelope',
 ]
