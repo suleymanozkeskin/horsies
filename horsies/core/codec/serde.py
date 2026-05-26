@@ -610,11 +610,22 @@ def serialize_error_payload(tr: TaskResult[Any, TaskError]) -> str:
     slot is encoded against the fixed ``TaskError`` schema (path-aware
     scan for the built-in code discriminator).
 
+    ``TaskError.exception`` is declared as ``dict[str, Any] | BaseException
+    | None``: the in-memory form lets the worker pass a live exception
+    (see ``child_runner.py:1054``) for local diagnostics, but the strict
+    codec can't serialize a raw ``BaseException``. Flatten a live
+    exception to a structured dict before encoding so the err payload
+    survives the round-trip with its ``error_code`` / ``message``
+    intact — otherwise we'd silently downgrade every task-raised
+    exception to ``WORKER_SERIALIZATION_ERROR``.
+
     Returns the JSON string on success, or a hardcoded fallback if
-    serialization somehow fails (should never happen for library-
-    constructed TaskError payloads, but we refuse to raise).
+    serialization still fails after the flatten (should never happen
+    for library-constructed TaskError payloads, but we refuse to raise).
     """
     from horsies.core.codec.typed import encode_task_result
+
+    tr = _flatten_task_error_exception(tr)
 
     try:
         envelope = encode_task_result(tr, type(None))
@@ -628,3 +639,30 @@ def serialize_error_payload(tr: TaskResult[Any, TaskError]) -> str:
         logger.error(f'Secondary serialization failure: {result.err_value}')
         return FALLBACK_ERROR_JSON
     return result.ok_value
+
+
+def _flatten_task_error_exception(
+    tr: TaskResult[Any, TaskError],
+) -> TaskResult[Any, TaskError]:
+    """Normalize ``tr.err.exception`` to a wire-safe dict.
+
+    ``TaskError.exception`` accepts a live ``BaseException`` for
+    in-process diagnostics; the strict codec can only emit JSON-native
+    values. When the field carries an exception object, replace it with
+    a small structured dict ``{type, module, message, repr}`` so
+    encoding succeeds and downstream consumers still get the diagnostic
+    context.
+    """
+    if not tr.is_err():
+        return tr
+    err = tr.err
+    if err is None or not isinstance(err.exception, BaseException):
+        return tr
+    exc = err.exception
+    flattened = {
+        'type': type(exc).__name__,
+        'module': type(exc).__module__,
+        'message': str(exc),
+        'repr': repr(exc),
+    }
+    return TaskResult(err=err.model_copy(update={'exception': flattened}))
