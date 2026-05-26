@@ -417,7 +417,14 @@ def _apply_json_value_fence(
             return
         try:
             hints = _dataclass_hints(expected_type)
-        except Exception:  # noqa: BLE001 — forward-ref resolution failures
+        except (NameError, TypeError):
+            # Forward-ref resolution failure (NameError: missing globalns
+            # entry; TypeError: unsupported annotation form). The strict
+            # signature validator at registration already accepted this
+            # dataclass, so reaching here means the fence couldn't
+            # introspect a field — skip the JsonValue walk for it rather
+            # than raise; TypeAdapter's later dump will still surface a
+            # concrete error if the field is genuinely malformed.
             return
         next_visited = visited | {expected_type}
         for field_name, field_type in hints.items():

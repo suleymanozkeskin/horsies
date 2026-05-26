@@ -20,7 +20,7 @@ from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationEr
 from pydantic import ValidationError as _PydanticValidationError
 
 from horsies.core.codec.json_value import StrictJsonError
-from horsies.core.codec.kwargs import encode_kwargs
+from horsies.core.codec.kwargs import encode_kwargs, underlying_task_fn
 from horsies.core.codec.serde import dumps_json
 from horsies.core.utils.fingerprint import enqueue_fingerprint, schedule_slot_task_id
 from horsies.core.types.result import Err, is_err
@@ -652,7 +652,7 @@ class Scheduler:
         if schedule.kwargs:
             # Strict-serde phase 3 routes through encode_kwargs.
             task = self.app.tasks.get(schedule.task_name)
-            task_fn = getattr(task, '_original_fn', getattr(task, '_fn', task))
+            task_fn = underlying_task_fn(task)
             try:
                 encoded_kwargs = encode_kwargs(task_fn, schedule.kwargs)
             except (StrictJsonError, _PydanticValidationError) as exc:

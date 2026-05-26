@@ -33,7 +33,27 @@ from horsies.core.codec.typed import Json, decode_value, encode_value
 from horsies.core.models.tasks import TaskResult
 
 
-__all__ = ['decode_kwargs', 'encode_kwargs']
+__all__ = ['decode_kwargs', 'encode_kwargs', 'underlying_task_fn']
+
+
+def underlying_task_fn(task: Any) -> Callable[..., Any]:
+    """Return the original user function wrapped by ``@app.task``.
+
+    The decorator stores the user's callable under ``_original_fn``; older
+    builds used ``_fn``. Tests sometimes pass a bare callable. One helper
+    so producer (``.send`` / scheduler / workflow lifecycle / workflow
+    engine child enqueue) and worker (`_run_task_entry`) all bind against
+    the same callable — drift here means the strict signature validator
+    runs against a different function than `encode_kwargs` / `decode_kwargs`.
+
+    Args:
+        task: The decorated task wrapper, or a bare callable.
+
+    Returns:
+        The underlying callable to introspect for ``get_type_hints`` and
+        ``inspect.signature``.
+    """
+    return getattr(task, '_original_fn', getattr(task, '_fn', task))
 
 
 _INJECTED_PARAM_NAMES: frozenset[str] = frozenset({

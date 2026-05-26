@@ -339,6 +339,13 @@ def _classify(
             # type" still fires — otherwise the substituted field annotation
             # would reach `_walk_model_fields` already concretized to
             # JsonValue (boundary position) and get silently accepted.
+            #
+            # Defense-in-depth: even if a future Pydantic resolves the
+            # alias to its underlying `None | bool | ... | list[JsonValue]
+            # | dict[str, JsonValue]` union, that union still descends
+            # into `_classify_union` at non-boundary position and lands
+            # on "mixed union types are rejected" (the union has a non-
+            # primitive member). Probe verified both rejection paths.
             generic_meta = getattr(annot_cls, '__pydantic_generic_metadata__', None)
             if generic_meta is not None:
                 for arg in generic_meta.get('args', ()):

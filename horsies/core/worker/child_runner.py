@@ -21,7 +21,7 @@ from pydantic import ValidationError
 
 from horsies.core.app import Horsies
 from horsies.core.codec.json_value import StrictJsonError
-from horsies.core.codec.kwargs import decode_kwargs
+from horsies.core.codec.kwargs import decode_kwargs, underlying_task_fn
 from horsies.core.codec.serde import (
     loads_json,
     dumps_json,
@@ -758,7 +758,7 @@ def _run_task_entry(
         # (`__horsies_workflow_ctx__`, ...) and args_from envelopes
         # (TaskResult-typed kwargs) pass through unchanged for downstream
         # handling below.
-        underlying_fn = getattr(task, '_original_fn', getattr(task, '_fn', task))
+        underlying_fn = underlying_task_fn(task)
         try:
             kwargs = decode_kwargs(underlying_fn, cast('dict[str, Any]', raw_kwargs))
         except (StrictJsonError, ValidationError) as exc:
@@ -797,7 +797,7 @@ def _run_task_entry(
         if workflow_ctx_data is not None or workflow_meta_data is not None:
             import inspect
 
-            underlying_fn = getattr(task, '_original_fn', getattr(task, '_fn', task))
+            underlying_fn = underlying_task_fn(task)
             sig = inspect.signature(underlying_fn)
             if workflow_ctx_data is not None and 'workflow_ctx' in sig.parameters:
                 from horsies.core.models.workflow import (

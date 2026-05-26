@@ -608,23 +608,34 @@ class _UserContainer(BaseModel, Generic[_T]):
 
 
 class TestJsonValuePositions:
-    @pytest.mark.skip(
-        reason=(
-            'Generic BaseModel JsonValue-arg rejection depends on Pydantic '
-            "preserving the TypeAliasType identity in the model's "
-            '`__pydantic_generic_metadata__.args`. Different Pydantic minors '
-            "resolve the alias to its union, breaking the `is JsonValue` "
-            "check in the generic-arg walker. The §3 misuse is still caught "
-            "via the strict validator's recursive field walk (which sees "
-            '`payload: _T`, an unsubstituted TypeVar, and rejects). Tracked '
-            'as a Pydantic-version-fragility item; revisit when '
-            '__pydantic_generic_metadata__ semantics stabilize.'
-        ),
-    )
     def test_jsonvalue_as_user_generic_param_rejected(self) -> None:
+        # Direct path: Pydantic 2.13+ preserves the `TypeAliasType`
+        # identity in `__pydantic_generic_metadata__.args`, so the
+        # generic-arg walker sees `JsonValue` and rejects via the
+        # "JsonValue may not appear as a generic parameter of a user
+        # type" branch in `_classify`.
         def f(c: _UserContainer[JsonValue]) -> TaskResult[int, TaskError]: ...
         with pytest.raises(SignatureValidationError):
             _check(f)
+
+    def test_resolved_jsonvalue_alias_still_rejected_in_generic_position(self) -> None:
+        # Defense-in-depth: if a future Pydantic minor resolves the
+        # `TypeAliasType` to its underlying union before stashing in
+        # `__pydantic_generic_metadata__.args`, `_classify` would receive
+        # `None | bool | int | float | str | list[JsonValue] | dict[str,
+        # JsonValue]` at non-boundary position. The union descent in
+        # `_classify_union` still rejects (the union has non-primitive
+        # members — `list[...]` and `dict[...]` — so it's classified as
+        # a mixed union). Exercise that path directly so a regression
+        # surfaces even if Pydantic changes generic-arg resolution.
+        from horsies.core.codec.signature_check import (  # noqa: PLC0415
+            _RejectedError,  # pyright: ignore[reportPrivateUsage]
+            _classify,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        resolved = JsonValue.__value__  # the union form
+        with pytest.raises(_RejectedError):
+            _classify(resolved, json_value_allowed_position=False)
 
 
 # ---------------------------------------------------------------------------

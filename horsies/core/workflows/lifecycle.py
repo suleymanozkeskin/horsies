@@ -16,7 +16,7 @@ from typing import Final
 from pydantic import ValidationError as _PydanticValidationError
 
 from horsies.core.codec.json_value import StrictJsonError
-from horsies.core.codec.kwargs import encode_kwargs
+from horsies.core.codec.kwargs import encode_kwargs, underlying_task_fn
 from horsies.core.codec.serde import dumps_json, loads_json, SerializationError, SerdeResult
 from horsies.core.types.result import Ok, Err, is_err as _is_err
 from horsies.core.logging import get_logger
@@ -83,7 +83,7 @@ def _encode_node_kwargs_or_raise(task: Any) -> dict[str, Any]:
     ``SerializationError`` on encode failure so the caller's existing
     transaction-zone handling converts it to ``SERIALIZATION_FAILED``.
     """
-    underlying = getattr(task.fn, '_original_fn', getattr(task.fn, '_fn', task.fn))
+    underlying = underlying_task_fn(task.fn)
     try:
         return dict(encode_kwargs(underlying, task.kwargs))
     except (StrictJsonError, _PydanticValidationError) as exc:
@@ -345,6 +345,16 @@ async def start_workflow_async(
                                 'node_id': node.node_id,
                                 'name': node.name,
                                 'args': _ser_or_raise(dumps_json(()), 'positional args'),  # kwargs-only: positional args not persisted
+                                # TODO(strict-serde): route SubWorkflowNode
+                                # static kwargs through `encode_kwargs`
+                                # against the child `build_with` signature
+                                # (see consolidation commit 222957b item 7
+                                # and design-doc §12 phase 6). Deferred
+                                # because `build_with` consumes these in-
+                                # process at engine-side expansion and they
+                                # don't reach worker decode — smuggling
+                                # path is closed without migration, but the
+                                # strictness invariant is incomplete here.
                                 'kwargs': _ser_or_raise(dumps_json(node.kwargs), f'kwargs for node {node.name}'),
                                 'queue': 'default',  # SubWorkflowNode doesn't have queue
                                 'priority': 100,  # SubWorkflowNode doesn't have priority

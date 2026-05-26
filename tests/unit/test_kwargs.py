@@ -18,8 +18,9 @@ from __future__ import annotations
 from typing import cast
 
 import pytest
+from pydantic import BaseModel
 
-from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.json_value import JsonValue, StrictJsonError
 from horsies.core.codec.kwargs import decode_kwargs, encode_kwargs
 from horsies.core.codec.typed import Json
 from horsies.core.models.tasks import TaskError, TaskResult
@@ -35,6 +36,33 @@ def _task_with_ctx(value: int, workflow_ctx: object) -> TaskResult[int, TaskErro
 
 def _task_with_upstream(
     upstream_result: TaskResult[int, TaskError],
+) -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
+    ...
+
+
+# Module-level fixtures for the wire-round-trip smoke. `dumps_json`
+# refuses to serialize classes defined inside a test function ("local
+# class can't be imported by the worker"), so the round-trip target
+# must live at module scope.
+
+
+class _RoundTripEnvelope(BaseModel):
+    stream_id: str
+    metadata: dict[str, JsonValue]
+
+
+class _SmuggleEnvelope(BaseModel):
+    metadata: dict[str, JsonValue]
+
+
+def _ingest_round_trip(
+    payload: _RoundTripEnvelope,
+) -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
+    ...
+
+
+def _ingest_smuggle(
+    payload: _SmuggleEnvelope,
 ) -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
     ...
 
@@ -131,6 +159,82 @@ class TestNoHintsFallback:
 
         decoded = decode_kwargs(f, {'value': 42, 'anything': 'goes'})
         assert decoded == {'value': 42, 'anything': 'goes'}
+
+
+class TestWireRoundTripNestedJsonValue:
+    """Integration-level smoke for the strict-serde wire contract.
+
+    The broker is opaque storage — it round-trips bytes. The actual
+    serde surface is `encode_kwargs → dumps_json → loads_json →
+    decode_kwargs`. Exercise that pipeline against a Pydantic model
+    carrying nested `dict[str, JsonValue]` (the §3 raw-JSON-inside-
+    Pydantic-field shape that motivated the recursive JsonValue
+    fence). If this round-trip passes, the producer-to-worker flow
+    is sound for the same payload at any broker.
+
+    Why this is the right level: a real broker round-trip would add
+    postgres setup but verify nothing more — the wire format is a
+    string, and `dumps_json` / `loads_json` are the storage interface.
+    """
+
+    def test_pydantic_field_with_nested_jsonvalue_round_trips(self) -> None:
+        from horsies.core.codec.serde import dumps_json, loads_json  # noqa: PLC0415
+        from horsies.core.types.result import is_ok  # noqa: PLC0415
+
+        payload = _RoundTripEnvelope(
+            stream_id='s-1',
+            metadata={
+                'source': 'webhook',
+                'received_at': '2026-05-26T12:00:00Z',
+                'attrs': {
+                    'retries': 3,
+                    'tags': ['urgent', 'verified'],
+                    'flags': {'idempotent': True, 'fanout': None},
+                },
+                'history': [
+                    {'step': 1, 'ok': True},
+                    {'step': 2, 'ok': False, 'error': 'transient'},
+                ],
+            },
+        )
+
+        # Producer pipeline.
+        encoded = encode_kwargs(_ingest_round_trip, {'payload': payload})
+        dumped_r = dumps_json(encoded)
+        assert is_ok(dumped_r)
+        wire = dumped_r.ok_value
+        assert isinstance(wire, str)
+
+        # Storage round-trip: in production this is a postgres column
+        # write/read; here it's just `loads_json` straight back from the
+        # wire string, which is the same JSON-decode the worker runs.
+        loaded_r = loads_json(wire)
+        assert is_ok(loaded_r)
+        raw_kwargs = cast('dict[str, Json]', loaded_r.ok_value)
+
+        # Worker pipeline.
+        decoded = decode_kwargs(_ingest_round_trip, raw_kwargs)
+        assert 'payload' in decoded
+        decoded_payload = decoded['payload']
+        assert isinstance(decoded_payload, _RoundTripEnvelope)
+        assert decoded_payload == payload
+        # Spot-check the nested JsonValue survives intact across the
+        # wire (no Pydantic coercion of nested ints / bools / nulls).
+        assert decoded_payload.metadata['attrs'] == {
+            'retries': 3,
+            'tags': ['urgent', 'verified'],
+            'flags': {'idempotent': True, 'fanout': None},
+        }
+
+    def test_pydantic_field_with_nested_jsonvalue_rejects_smuggled_reserved_key(
+        self,
+    ) -> None:
+        """If a producer sneaks `__h_*` into a `dict[str, JsonValue]`
+        field at any depth, the encode-side reserved-key scan rejects
+        before the value reaches the broker."""
+        bad = _SmuggleEnvelope(metadata={'outer': {'__h_evil__': 1}})
+        with pytest.raises(StrictJsonError, match='reserved key'):
+            encode_kwargs(_ingest_smuggle, {'payload': bad})
 
 
 class TestLegacyHorsiesPrefixSmuggleClosed:

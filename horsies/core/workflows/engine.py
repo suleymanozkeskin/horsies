@@ -13,7 +13,7 @@ from sqlalchemy.sql.elements import TextClause
 from pydantic import ValidationError as _PydanticValidationError
 
 from horsies.core.codec.json_value import StrictJsonError
-from horsies.core.codec.kwargs import encode_kwargs
+from horsies.core.codec.kwargs import encode_kwargs, underlying_task_fn
 from horsies.core.codec.serde import dumps_json, loads_json, task_result_from_json, serialize_error_payload, SerdeResult
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 from horsies.core.types.result import is_err
@@ -548,6 +548,15 @@ async def enqueue_subworkflow_task(
     # Compat: new writes store [] for task_args (kwargs-only).
     # Old persisted rows may still carry positional args for build_with();
     # they are passed through via *task_args to preserve backward compat.
+    #
+    # TODO(strict-serde): kwargs read here are passed to
+    # `build_with(app, *task_args, **kwargs)` without typed decoding
+    # against the build_with signature. Producer-side encoding is also
+    # currently `dumps_json(node.kwargs)` at lifecycle.py — see the
+    # mirror TODO there. Closing the loop means encode_kwargs at
+    # producer + decode_kwargs here. Deferred pending a real
+    # build_with-signature introspection path; tracked in design-doc
+    # §12 phase 6 deferred list.
     raw_args = _deser_json(task_args_json, 'subworkflow args', fallback=[])
     task_args: tuple[Any, ...] = ()
     if isinstance(raw_args, list):
@@ -830,10 +839,7 @@ async def enqueue_subworkflow_task(
             # reach the worker via `child_runner.py`'s args_from path
             # and route to legacy `rehydrate_value` (class-identity import).
             try:
-                child_task_underlying_fn = getattr(
-                    child_task.fn, '_original_fn',
-                    getattr(child_task.fn, '_fn', child_task.fn),
-                )
+                child_task_underlying_fn = underlying_task_fn(child_task.fn)
                 encoded_child_task_kwargs = dict(
                     encode_kwargs(child_task_underlying_fn, child_task.kwargs),
                 )
