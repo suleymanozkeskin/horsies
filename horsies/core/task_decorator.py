@@ -36,7 +36,6 @@ from horsies.core.codec.typed import (
     TypeAnnotation,
     decode_task_error,
     decode_task_result,
-    decode_value,
     validate_task_result_envelope,
 )
 from horsies.core.codec.signature_check import (

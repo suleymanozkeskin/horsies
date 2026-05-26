@@ -443,9 +443,12 @@ class Horsies:
         return errors
 
     def _check_workflow_definitions(self) -> list[HorsiesError]:
-        """Validate imported WorkflowDefinition subclasses."""
-        from horsies.core.models.workflow.definition import WorkflowDefinition
+        """Validate imported WorkflowDefinition subclasses.
 
+        The actual class lookup happens inside
+        ``_collect_module_workflow_definitions``; this method only walks
+        the discovered modules and forwards validation calls.
+        """
         errors: list[HorsiesError] = []
         seen: set[type[Any]] = set()
 
@@ -937,10 +940,6 @@ class Horsies:
         use this to inspect payloads without importing user task
         modules.
         """
-        from horsies.core.brokers.result_types import (
-            BrokerErrorCode,
-            BrokerOperationError,
-        )
         from horsies.core.types.result import Err, Ok, is_err
 
         broker = self.get_broker()
@@ -960,10 +959,6 @@ class Horsies:
         timeout_ms: int | None = None,
     ) -> 'BrokerResult[dict[str, Any] | None]':
         """Synchronous version of ``get_raw_result_async``."""
-        from horsies.core.brokers.result_types import (
-            BrokerErrorCode,
-            BrokerOperationError,
-        )
         from horsies.core.types.result import Err, Ok, is_err
 
         broker = self.get_broker()
@@ -1003,7 +998,6 @@ class Horsies:
             validate_task_result_envelope,
         )
         from horsies.core.models.tasks import (
-            OperationalErrorCode,
             OutcomeCode,
             RetrievalCode,
             TaskError,

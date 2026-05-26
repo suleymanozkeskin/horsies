@@ -30,7 +30,6 @@ from horsies.core.codec.typed import (
     TypeAnnotation,
     decode_task_error,
     decode_task_result,
-    decode_value,
 )
 from horsies.core.models.tasks import (
     TaskResult,
