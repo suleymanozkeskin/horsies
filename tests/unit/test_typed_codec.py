@@ -586,6 +586,62 @@ class TestTaskErrorRoundTrip:
         with pytest.raises(StrictJsonError, match='reserved key'):
             decode_value(smuggled, TaskError)
 
+    def test_extra_nonreserved_key_under_error_code_rejected(self) -> None:
+        # Pydantic would silently DROP the extra `"other"` key during
+        # error_code validation (TypeAdapter ignores unknown keys), so
+        # the typed scan has to enforce the shape itself. If we only
+        # rejected reserved-key extras, `{"__builtin_task_code__": "X",
+        # "other": "y"}` would round-trip with `"other"` quietly gone.
+        bogus: Json = cast(Json, {
+            'error_code': {
+                '__builtin_task_code__': 'BROKER_ERROR',
+                'other': 'y',
+            },
+            'message': None,
+            'data': None,
+            'exception': None,
+        })
+        from horsies.core.models.tasks import TaskError
+
+        with pytest.raises(
+            StrictJsonError,
+            match='invalid TaskError.error_code shape',
+        ):
+            decode_value(bogus, TaskError)
+
+    def test_empty_dict_under_error_code_rejected(self) -> None:
+        # `{}` isn't the discriminator shape either.
+        bogus: Json = cast(Json, {
+            'error_code': {},
+            'message': None,
+            'data': None,
+            'exception': None,
+        })
+        from horsies.core.models.tasks import TaskError
+
+        with pytest.raises(
+            StrictJsonError,
+            match='invalid TaskError.error_code shape',
+        ):
+            decode_value(bogus, TaskError)
+
+    def test_non_string_discriminator_value_rejected(self) -> None:
+        # `{"__builtin_task_code__": 42}` is single-key but the value
+        # isn't a string; not the documented shape.
+        bogus: Json = cast(Json, {
+            'error_code': {'__builtin_task_code__': 42},
+            'message': None,
+            'data': None,
+            'exception': None,
+        })
+        from horsies.core.models.tasks import TaskError
+
+        with pytest.raises(
+            StrictJsonError,
+            match='invalid TaskError.error_code shape',
+        ):
+            decode_value(bogus, TaskError)
+
 
 # ---------------------------------------------------------------------------
 # Lower-level scans tested directly

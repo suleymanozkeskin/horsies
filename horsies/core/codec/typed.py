@@ -224,24 +224,31 @@ def _scan_task_error_user_fields(dumped_json: Json) -> None:
 def _scan_task_error_error_code(value: Json) -> None:
     """Path-aware scan for TaskError.error_code.
 
-    The TaskError serializer emits one of three shapes:
+    The TaskError serializer emits one of exactly three shapes:
     - `None` (no error code set)
     - `"some_user_code"` (plain string for user codes)
     - `{"__builtin_task_code__": "BUILTIN_NAME"}` (single-key dict for
       built-in codes)
 
-    Any other dict shape under `error_code` — extra keys, alternate
-    reserved keys alongside the discriminator — is smuggled data
-    (cross-version producer, manual write, etc.) and must be rejected
-    so user types with `error_code` exposure can't sneak `__h_*` /
-    `__horsies_*` through.
+    Any other dict shape under `error_code` is malformed and must be
+    rejected. The earlier version of this scan relied on TypeAdapter
+    to surface a shape error for the
+    `{"__builtin_task_code__": "X", "other": "y"}` case, but Pydantic
+    silently drops unknown keys during error_code validation — so an
+    extra non-reserved key would pass through unobserved. Reject any
+    deviation from the documented three shapes here.
+
+    When the deviation includes a reserved key (e.g.
+    `{"__builtin_task_code__": "X", "__h_extra__": 1}`), prefer the
+    reserved-key message: it tells operators they're looking at a
+    smuggle attempt, not just a shape bug.
     """
     if value is None:
         return
     if isinstance(value, str):
         return
     if not isinstance(value, dict):
-        # Unexpected shape; let TypeAdapter surface a clearer error.
+        # Unexpected non-dict; let TypeAdapter surface a clearer error.
         return
     d = cast('dict[str, Json]', value)
     is_exact_discriminator = (
@@ -251,22 +258,22 @@ def _scan_task_error_error_code(value: Json) -> None:
     )
     if is_exact_discriminator:
         return
-    # Any other dict — scan strictly. The discriminator key is skipped
-    # so the error names the actually-smuggled key (e.g. for
-    # `{"__builtin_task_code__": "X", "__h_extra__": 1}` the rejection
-    # cites `__h_extra__`, not the legitimate discriminator). Cases:
-    # - `{"__builtin_task_code__": "X", "__h_extra__": 1}` → rejects `__h_extra__`
-    # - `{"__h_evil__": 1}` → rejects `__h_evil__`
-    # - `{"__builtin_task_code__": "X", "other": "y"}` → scan accepts (the
-    #   shape is wrong but TypeAdapter validation surfaces that error)
-    for key, sub_value in d.items():
+    # Not the exact discriminator shape. If any non-discriminator key
+    # is reserved, name it first (smuggle attempt — actionable). If
+    # all non-discriminator keys are unreserved, raise a shape error
+    # (TypeAdapter would silently drop them otherwise).
+    for key in d:
         if key == _RESERVED_DISCRIMINATOR:
             continue
         if any(key.startswith(p) for p in _RESERVED_KEY_PREFIXES):
             raise StrictJsonError(
                 f'reserved key {key!r} in user-originated data',
             )
-        _scan_reserved_keys(sub_value)
+    raise StrictJsonError(
+        f'invalid TaskError.error_code shape: expected None, a plain '
+        f'string, or {{"__builtin_task_code__": "<str>"}}; got dict '
+        f'with keys {sorted(d.keys())}',
+    )
 
 
 # ---------------------------------------------------------------------------
