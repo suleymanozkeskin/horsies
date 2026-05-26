@@ -24,8 +24,6 @@ from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import decode_kwargs
 from horsies.core.codec.serde import (
     loads_json,
-    json_to_args,
-    json_to_kwargs,
     dumps_json,
     serialize_error_payload,
     SerializationError,
@@ -717,27 +715,28 @@ def _run_task_entry(
             )
             return (True, serialize_error_payload(tr), f'{type(e).__name__}: {e}')
 
-        # Deserialize task arguments
+        # Deserialize task arguments. Strict-serde: positional args are
+        # rejected at every producer; the wire shape for args is always
+        # `null` or `[]`. Inspect the raw loaded JSON FIRST — `json_to_args`
+        # routes through legacy `rehydrate_value`, which would import
+        # `__pydantic_model__` / `__dataclass__` payloads from pre-strict
+        # rows and trigger class-identity rehydration before our positional
+        # check could fire. Skipping the legacy decoder entirely for args
+        # also makes the post-strict args path trivially smuggle-safe.
         args_json_result = loads_json(args_json)
         if is_err(args_json_result):
             return _serialization_error_response(task_name, args_json_result.err_value)
-        args_result = json_to_args(args_json_result.ok_value)
-        if is_err(args_result):
-            return _serialization_error_response(task_name, args_result.err_value)
-        args = args_result.ok_value
-        # Strict-serde: positional args are rejected at every producer.
-        # A worker row carrying any positional values came from a pre-strict
-        # producer (or an unknown writer) and is treated as a corrupt row
-        # rather than being executed under partial typing.
-        if args:
+        raw_args = args_json_result.ok_value
+        if raw_args is not None and raw_args != []:
             return _serialization_error_response(
                 task_name,
                 SerializationError(
-                    f'Task {task_name!r} row carries {len(args)} positional '
-                    f'arg(s); strict-serde rejects positional args. '
+                    f'Task {task_name!r} row carries positional args; '
+                    f'strict-serde rejects positional args. '
                     f'Drop in-flight pre-strict rows before upgrading.',
                 ),
             )
+        args: tuple[Any, ...] = ()
 
         kwargs_json_result = loads_json(kwargs_json)
         if is_err(kwargs_json_result):

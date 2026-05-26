@@ -521,6 +521,26 @@ class TestVariadics:
         with pytest.raises(SignatureValidationError):
             _check(f)  # pyright: ignore[reportUnknownArgumentType]
 
+    def test_positional_only_rejected(self) -> None:
+        # `def f(x, /)` is positional-only; strict-serde rejects positional
+        # args at every producer, so a positional-only param would
+        # register cleanly but could never be invoked via the queue's
+        # kwargs-only path. Reject at registration to fail loudly.
+        def f(x: int, /) -> TaskResult[int, TaskError]: ...
+        with pytest.raises(
+            SignatureValidationError,
+            match='positional-only',
+        ):
+            _check(f)
+
+    def test_positional_only_mixed_with_keyword_rejected(self) -> None:
+        def f(x: int, /, y: int) -> TaskResult[int, TaskError]: ...
+        with pytest.raises(
+            SignatureValidationError,
+            match='positional-only',
+        ):
+            _check(f)
+
 
 # ---------------------------------------------------------------------------
 # BaseModel/dataclass recursive walk catches smuggled Any

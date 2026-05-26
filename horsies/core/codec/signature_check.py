@@ -111,14 +111,14 @@ def check_task_signature(
     sig = inspect.signature(fn)
 
     for param_name, param in sig.parameters.items():
-        # Variadic params (`*args` / `**kwargs`) rejected for v1.
-        # Positional args have no wire support (kwargs-only is the
-        # documented usage); `**kwargs` defeats signature binding at
-        # the producer (encode_kwargs must bind every key against a
-        # declared parameter, with no catch-all). Earlier phase 1c
-        # relaxation of typed variadics is reverted per the strict-mode
-        # consolidation: every kwarg name must correspond to a named
-        # parameter.
+        # Variadic and positional-only params rejected for v1.
+        # Strict-serde rejects positional args at every producer; only
+        # kwargs reach the wire. A positional-only param (`def f(x, /)`)
+        # would register cleanly but could never be invoked through the
+        # queue, since `encode_kwargs` binds against named parameters
+        # only. `**kwargs` defeats producer-side signature binding for
+        # the same reason — every wire kwarg name must correspond to a
+        # declared parameter, with no catch-all.
         if param.kind is inspect.Parameter.VAR_POSITIONAL:
             raise SignatureValidationError(_format_error(
                 task_name=task_name,
@@ -134,6 +134,14 @@ def check_task_signature(
                 banned='**kwargs (VAR_KEYWORD)',
                 reason='catch-all kwargs defeat producer-side signature binding',
                 fix='declare each accepted kwarg as a named parameter',
+            ))
+        if param.kind is inspect.Parameter.POSITIONAL_ONLY:
+            raise SignatureValidationError(_format_error(
+                task_name=task_name,
+                position=f"parameter '{param_name}' (positional-only)",
+                banned='positional-only parameter (`def f(x, /)`)',
+                reason='strict-serde rejects positional args; positional-only params cannot be bound by keyword',
+                fix='remove the `/` from the signature so the parameter is keyword-bindable',
             ))
 
         annot = hints.get(param_name)

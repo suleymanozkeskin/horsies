@@ -914,6 +914,50 @@ class TestRunTaskEntryErrorPaths:
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
 
+    def test_positional_args_rejected_before_rehydration(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        """A non-empty positional-args list is rejected BEFORE the legacy
+        `rehydrate_value` decoder runs.
+
+        Before this fix, the worker called `json_to_args(...)` (which
+        recurses through `rehydrate_value`) before checking `if args`,
+        so a pre-strict row carrying a `__pydantic_model__` envelope
+        would trigger class-identity import / rehydration even though
+        the row would ultimately be rejected. The fix inspects the raw
+        loaded JSON first and never invokes the legacy decoder for the
+        args path. Patch `rehydrate_value` to assert it isn't called.
+        """
+        patches = _make_run_task_patches()
+        # Pre-strict shape: a legacy `__pydantic_model__` envelope
+        # inside a positional list. If the worker still called
+        # `json_to_args`, the patch below would record the call.
+        _run_entry_defaults['args_json'] = (
+            '[{"__pydantic_model__": true, "module": "x", "qualname": "Y", '
+            '"data": {}}]'
+        )
+
+        with _apply_patches(patches), patch(
+            'horsies.core.codec.serde.rehydrate_value',
+        ) as mock_rehydrate:
+            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+
+        # rehydrate_value MUST NOT have been called for the positional
+        # payload — strict-serde rejects positional args before any
+        # legacy decode runs.
+        assert mock_rehydrate.call_count == 0
+        assert ok is True
+        assert reason is not None and 'SerializationError' in reason
+        parsed = _parse_task_result(payload)
+        err = parsed.get('err') or parsed.get('error')
+        assert (
+            err['error_code']
+            == {'__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value}
+        )
+        msg = err.get('message') or ''
+        assert 'positional' in msg.lower()
+
     def test_kwargs_json_invalid(
         self,
         _run_entry_defaults: dict[str, Any],

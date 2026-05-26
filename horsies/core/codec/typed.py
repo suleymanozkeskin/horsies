@@ -201,19 +201,71 @@ def _is_task_error_type(expected_type: TypeAnnotation) -> bool:
 
 
 def _scan_task_error_user_fields(dumped_json: Json) -> None:
-    """Scan only the user-controlled fields of a TaskError dump.
+    """Scan a TaskError dump with the path-specific allowance for
+    `error_code`'s built-in-code discriminator.
 
-    TaskError's `error_code` serializer emits
-    `{"__builtin_task_code__": "..."}` for built-in codes; that's the
-    one path-specific allowance. `data` is user-controlled and gets
-    full strict scan; `exception` and `message` likewise.
+    TaskError's `error_code` serializer emits exactly
+    `{"__builtin_task_code__": "<str>"}` for built-in codes and a
+    plain string (or None) for user codes. Anything else under
+    `error_code` — additional keys, other reserved keys alongside the
+    discriminator — is rejected as smuggled. `data`, `exception`, and
+    `message` are user-controlled and get the full strict scan.
     """
     if not isinstance(dumped_json, dict):
         return
     d = cast('dict[str, Json]', dumped_json)
     for key, sub_value in d.items():
         if key == 'error_code':
+            _scan_task_error_error_code(sub_value)
             continue
+        _scan_reserved_keys(sub_value)
+
+
+def _scan_task_error_error_code(value: Json) -> None:
+    """Path-aware scan for TaskError.error_code.
+
+    The TaskError serializer emits one of three shapes:
+    - `None` (no error code set)
+    - `"some_user_code"` (plain string for user codes)
+    - `{"__builtin_task_code__": "BUILTIN_NAME"}` (single-key dict for
+      built-in codes)
+
+    Any other dict shape under `error_code` — extra keys, alternate
+    reserved keys alongside the discriminator — is smuggled data
+    (cross-version producer, manual write, etc.) and must be rejected
+    so user types with `error_code` exposure can't sneak `__h_*` /
+    `__horsies_*` through.
+    """
+    if value is None:
+        return
+    if isinstance(value, str):
+        return
+    if not isinstance(value, dict):
+        # Unexpected shape; let TypeAdapter surface a clearer error.
+        return
+    d = cast('dict[str, Json]', value)
+    is_exact_discriminator = (
+        len(d) == 1
+        and '__builtin_task_code__' in d
+        and isinstance(d['__builtin_task_code__'], str)
+    )
+    if is_exact_discriminator:
+        return
+    # Any other dict — scan strictly. The discriminator key is skipped
+    # so the error names the actually-smuggled key (e.g. for
+    # `{"__builtin_task_code__": "X", "__h_extra__": 1}` the rejection
+    # cites `__h_extra__`, not the legitimate discriminator). Cases:
+    # - `{"__builtin_task_code__": "X", "__h_extra__": 1}` → rejects `__h_extra__`
+    # - `{"__h_evil__": 1}` → rejects `__h_evil__`
+    # - `{"__builtin_task_code__": "X", "other": "y"}` → scan accepts (the
+    #   shape is wrong but TypeAdapter validation surfaces that error)
+    for key, sub_value in d.items():
+        if key == _RESERVED_DISCRIMINATOR:
+            continue
+        if any(key.startswith(p) for p in _RESERVED_KEY_PREFIXES):
+            raise StrictJsonError(
+                f'reserved key {key!r} in user-originated data',
+            )
         _scan_reserved_keys(sub_value)
 
 

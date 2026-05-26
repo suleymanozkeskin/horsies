@@ -531,6 +531,61 @@ class TestTaskErrorRoundTrip:
         with pytest.raises(StrictJsonError, match='reserved key'):
             encode_value(err, TaskError)
 
+    def test_smuggled_reserved_key_alongside_error_code_discriminator_rejected(
+        self,
+    ) -> None:
+        # The error_code path-aware allowance is for the EXACT
+        # `{"__builtin_task_code__": "<str>"}` shape only. A payload
+        # that pairs the discriminator with another reserved key
+        # (cross-version producer, manual write to the result column)
+        # would otherwise smuggle past the scan because TypeAdapter
+        # silently drops unknown dict entries during error_code
+        # validation.
+        smuggled: Json = cast(Json, {
+            'error_code': {
+                '__builtin_task_code__': 'BROKER_ERROR',
+                '__h_extra__': 1,
+            },
+            'message': 'x',
+            'data': None,
+            'exception': None,
+        })
+        from horsies.core.models.tasks import TaskError
+
+        with pytest.raises(StrictJsonError, match='reserved key'):
+            decode_value(smuggled, TaskError)
+
+    def test_smuggled_legacy_prefix_alongside_error_code_discriminator_rejected(
+        self,
+    ) -> None:
+        smuggled: Json = cast(Json, {
+            'error_code': {
+                '__builtin_task_code__': 'BROKER_ERROR',
+                '__horsies_evil__': 1,
+            },
+            'message': None,
+            'data': None,
+            'exception': None,
+        })
+        from horsies.core.models.tasks import TaskError
+
+        with pytest.raises(StrictJsonError, match='reserved key'):
+            decode_value(smuggled, TaskError)
+
+    def test_lone_reserved_key_under_error_code_rejected(self) -> None:
+        # No legitimate discriminator at all — just a reserved key
+        # smuggled under error_code.
+        smuggled: Json = cast(Json, {
+            'error_code': {'__h_evil__': 1},
+            'message': None,
+            'data': None,
+            'exception': None,
+        })
+        from horsies.core.models.tasks import TaskError
+
+        with pytest.raises(StrictJsonError, match='reserved key'):
+            decode_value(smuggled, TaskError)
+
 
 # ---------------------------------------------------------------------------
 # Lower-level scans tested directly
