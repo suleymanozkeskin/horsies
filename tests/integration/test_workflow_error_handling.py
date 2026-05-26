@@ -1881,7 +1881,7 @@ class TestAllowFailedDeps:
 
         @app.task(task_name='partial_receiver')
         def partial_receiver(
-            failed_input: TaskResult[Any, TaskError],
+            failed_input: TaskResult[int, TaskError],
             success_input: TaskResult[int, TaskError],
         ) -> TaskResult[int, TaskError]:
             if failed_input.is_err() and success_input.is_ok():

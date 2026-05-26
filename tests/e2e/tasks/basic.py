@@ -130,13 +130,18 @@ def slow_task(duration_ms: int) -> TaskResult[str, TaskError]:
 
 
 @app.task(task_name='e2e_unserializable')
-def unserializable_result_task() -> TaskResult[Any, TaskError]:
-    """Task returning unserializable value for error handling tests."""
+def unserializable_result_task() -> TaskResult[int, TaskError]:
+    """Task that declares int return but actually returns a callable.
+
+    Exists to drive RETURN_TYPE_MISMATCH error-handling tests: the runtime
+    `ok_type_adapter.validate_python` rejects the callable against the
+    declared `int` slot, returning an Err.
+    """
 
     def identity(x: Any) -> Any:
         return x
 
-    return TaskResult(ok=identity)
+    return TaskResult(ok=identity)  # type: ignore[arg-type]
 
 
 @app.task(task_name='e2e_idempotent')

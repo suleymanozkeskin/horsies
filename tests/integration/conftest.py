@@ -19,6 +19,7 @@ from horsies.core.models.schedule import ScheduleConfig  # noqa: F401 - needed f
 
 # Rebuild AppConfig to resolve forward references
 AppConfig.model_rebuild()
+from horsies.core.codec.json_value import JsonValue
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.workflow import (
     TaskNode,
@@ -142,7 +143,7 @@ def make_failing_task(app: Horsies, name: str = 'failing_task') -> Any:
     """Create a task that always fails."""
 
     @app.task(task_name=name)
-    def failing_task() -> TaskResult[Any, TaskError]:
+    def failing_task() -> TaskResult[int, TaskError]:
         return TaskResult(
             err=TaskError(error_code='DELIBERATE_FAIL', message='Test failure')
         )
@@ -154,7 +155,7 @@ def make_identity_task(app: Horsies, name: str = 'identity_task') -> Any:
     """Create a task that returns its input unchanged."""
 
     @app.task(task_name=name)
-    def identity_task(value: Any = None) -> TaskResult[Any, TaskError]:
+    def identity_task(value: JsonValue = None) -> TaskResult[JsonValue, TaskError]:
         return TaskResult(ok=value)
 
     return identity_task
@@ -201,7 +202,7 @@ def make_ctx_receiver_task(app: Horsies, name: str = 'ctx_receiver') -> Any:
     @app.task(task_name=name)
     def ctx_receiver(
         workflow_ctx: WorkflowContext | None = None,
-    ) -> TaskResult[dict[str, Any], TaskError]:
+    ) -> TaskResult[dict[str, JsonValue], TaskError]:
         if workflow_ctx is None:
             return TaskResult(ok={'ctx': None})
         return TaskResult(
@@ -209,7 +210,7 @@ def make_ctx_receiver_task(app: Horsies, name: str = 'ctx_receiver') -> Any:
                 'workflow_id': workflow_ctx.workflow_id,
                 'task_index': workflow_ctx.task_index,
                 'task_name': workflow_ctx.task_name,
-                'result_keys': workflow_ctx._results_by_id.keys(),
+                'result_keys': list(workflow_ctx._results_by_id.keys()),
             }
         )
 
