@@ -78,8 +78,18 @@ Strict-serde §8 narrows the engine-emitted namespace to ``__h_*`` only;
 the legacy ``__horsies_*`` prefix has been renamed across all engine
 emitters and is rejected at decode by `_scan_reserved_keys` if it
 appears in user data. Pass-through here lets the worker entry point pop
-the engine-injected keys (`__h_workflow_ctx__`, `__h_workflow_meta__`,
-`__h_taskresult_envelope__`) before invoking the user task.
+the engine-injected keys before invoking the user task.
+
+Engine-emitted ``__h_*`` keys after phase 6:
+- ``__h_workflow_ctx__`` (engine → worker, kwarg position)
+- ``__h_workflow_meta__`` (engine → worker, kwarg position)
+- ``__h_taskresult_envelope__`` (args_from wrapper, kwarg position)
+- ``__h_task_result__`` (workflow / task result envelope, not in kwargs)
+- ``__h_outputless_terminals__`` (outputless workflow result envelope
+  marker, not in kwargs)
+
+See ``codec/typed.py::_RESERVED_INTERNAL_KEYS`` for the authoritative
+list.
 """
 
 

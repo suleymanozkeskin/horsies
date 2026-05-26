@@ -378,9 +378,12 @@ async def _fail_subworkflow_load(
         message=f'Failed to load subworkflow definition for {workflow_name}:{task_index}',
         data={'definition_key': sub_definition_key},
     )
-    failure_payload: str = _ser(
-        dumps_json(TaskResult(err=error)), 'subworkflow load error', fallback='null',
-    ) or 'null'
+    # Strict-serde §5: emit through ``serialize_error_payload`` (which
+    # routes ok=None / err=TaskError through ``encode_task_result``
+    # into the ``__h_task_result__`` envelope). ``dumps_json(TaskResult(...))``
+    # would route through the legacy ``__task_result__`` /
+    # ``__task_error__`` envelope that the strict decoder rejects.
+    failure_payload: str = serialize_error_payload(TaskResult(err=error))
     marked_failed = await _mark_workflow_task_failed_if_nonterminal(
         session, workflow_id, task_index, failure_payload,
     )
@@ -1950,7 +1953,22 @@ async def on_subworkflow_complete(
             sub_workflow_id=child_workflow_id,
             sub_workflow_summary=child_summary,
         )
-        parent_node_result = _ser(dumps_json(TaskResult(err=error)), 'parent node error', fallback='null')
+        # Strict-serde §5: build the `__h_task_result__` envelope
+        # directly. ``serialize_error_payload`` runs the err slot
+        # through ``encode_value(err, TaskError)`` which drops the
+        # SubWorkflowError-specific fields (``sub_workflow_id`` /
+        # ``sub_workflow_summary``); ``model_dump`` on the concrete
+        # class preserves them. The reserved-key scan isn't applied
+        # here because this is an engine-internal emit, not user data.
+        parent_node_result = _ser(
+            dumps_json({
+                '__h_task_result__': True,
+                'ok': None,
+                'err': error.model_dump(mode='json'),
+            }),
+            'parent node error',
+            fallback='null',
+        )
 
     # 4. Update parent node
     update_result = await session.execute(

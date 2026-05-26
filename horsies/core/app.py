@@ -1033,6 +1033,29 @@ class Horsies:
                 ),
             ))
         if record.raw_result is None:
+            # Disambiguate: terminal status without a payload is
+            # RESULT_NOT_AVAILABLE (engine didn't write); non-terminal
+            # is WAIT_TIMEOUT (timeout before the row terminalized).
+            terminal_statuses = (
+                TaskStatus.COMPLETED,
+                TaskStatus.FAILED,
+                TaskStatus.EXPIRED,
+            )
+            if record.status in terminal_statuses:
+                return Ok(TaskResult(
+                    err=TaskError(
+                        error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
+                        message=(
+                            f'Task {task_id} reached terminal status '
+                            f'{record.status.value} but stored no '
+                            f'result payload'
+                        ),
+                        data={
+                            'task_id': task_id,
+                            'status': record.status.value,
+                        },
+                    ),
+                ))
             return Ok(TaskResult(
                 err=TaskError(
                     error_code=RetrievalCode.WAIT_TIMEOUT,

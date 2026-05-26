@@ -238,15 +238,24 @@ async def recover_stuck_workflows(
             cast(list[int], raw_deps) if isinstance(raw_deps, list) else []
         )
 
-        # Fetch dependency results and re-enqueue
-        dep_results: dict[
-            int, 'TaskResult[Any, TaskError]'
-        ] = await get_dependency_results(session, workflow_id, dependencies)
+        # Fetch dependency results and re-enqueue. Strict-serde phase 6
+        # changed ``get_dependency_results`` to return a tuple of
+        # (results_by_index, task_names_by_index) so the engine can
+        # encode args_from envelopes with source-task metadata.
+        recovery_app = broker.app if broker is not None else None
+        dep_results, dep_task_names = await get_dependency_results(
+            session, workflow_id, dependencies, app=recovery_app,
+        )
 
         from horsies.core.workflows.engine import enqueue_workflow_task
 
         task_id = await enqueue_workflow_task(
-            session, workflow_id, task_index, dep_results, broker
+            session,
+            workflow_id,
+            task_index,
+            dep_results,
+            dep_task_names,
+            broker,
         )
         if task_id:
             logger.info(
@@ -276,11 +285,18 @@ async def recover_stuck_workflows(
             dep_indices: list[int] = (
                 cast(list[int], dependencies) if isinstance(dependencies, list) else []
             )
-            dep_results = await get_dependency_results(
-                session, workflow_id, dep_indices
+            dep_results, dep_task_names = await get_dependency_results(
+                session, workflow_id, dep_indices, app=broker.app,
             )
             await enqueue_subworkflow_task(
-                session, broker, workflow_id, task_index, dep_results, depth, root_wf_id
+                session,
+                broker,
+                workflow_id,
+                task_index,
+                dep_results,
+                dep_task_names,
+                depth,
+                root_wf_id,
             )
             logger.info(
                 f'Recovered stuck READY subworkflow (started): '

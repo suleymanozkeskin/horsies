@@ -71,6 +71,7 @@ from horsies.core.models.tasks import (
     OperationalErrorCode,
     ContractCode,
     RetrievalCode,
+    OutcomeCode,
 )
 from horsies.core.models.workflow import WorkflowContextMissingIdError
 from horsies.core.exception_mapper import (
@@ -281,9 +282,34 @@ class TaskHandle(Generic[T]):
                 data={'task_id': self.task_id},
             )
         if record.raw_result is None:
-            # Non-terminal status with no payload — timeout fired
-            # before the row reached a terminal state. Don't cache —
-            # the next call should retry.
+            # ``raw_result is None`` covers two distinct cases per the
+            # broker's ``get_raw_result_record`` contract:
+            #   1. Terminal status (COMPLETED / FAILED / EXPIRED) but
+            #      the result column is empty — engine never wrote a
+            #      payload, so map to RESULT_NOT_AVAILABLE (terminal,
+            #      cache the error).
+            #   2. Non-terminal status (PENDING / CLAIMED / RUNNING /
+            #      etc.) and the timeout fired before the row reached
+            #      a terminal state — map to WAIT_TIMEOUT (transient,
+            #      don't cache so a follow-up call can succeed).
+            terminal_statuses = (
+                _TaskStatus.COMPLETED,
+                _TaskStatus.FAILED,
+                _TaskStatus.EXPIRED,
+            )
+            if record.status in terminal_statuses:
+                return self._error_result(
+                    error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
+                    message=(
+                        f'Task {self.task_id} reached terminal status '
+                        f'{record.status.value} but stored no result '
+                        f'payload'
+                    ),
+                    data={
+                        'task_id': self.task_id,
+                        'status': record.status.value,
+                    },
+                )
             tr_timeout: TaskResult[T, TaskError] = TaskResult(
                 err=TaskError(
                     error_code=RetrievalCode.WAIT_TIMEOUT,
@@ -474,8 +500,12 @@ class TaskHandle(Generic[T]):
                 retryable=False,
             ))
 
-        broker = self._app.get_broker()
-        return broker.get_task_info(
+        # Strict-serde phase 6: route through the app-level typed
+        # decode so ``include_result=True`` populates
+        # ``decoded_result`` / ``result_decoded`` whenever the task is
+        # locally registered. The broker-level ``get_task_info`` returns
+        # raw_result only.
+        return self._app.get_task_info(
             self.task_id,
             include_result=include_result,
             include_failed_reason=include_failed_reason,
@@ -504,8 +534,8 @@ class TaskHandle(Generic[T]):
                 retryable=False,
             ))
 
-        broker = self._app.get_broker()
-        return await broker.get_task_info_async(
+        # Strict-serde phase 6: same routing as the sync variant.
+        return await self._app.get_task_info_async(
             self.task_id,
             include_result=include_result,
             include_failed_reason=include_failed_reason,
