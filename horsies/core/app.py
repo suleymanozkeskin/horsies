@@ -58,7 +58,7 @@ from horsies.core.types.result import is_err
 
 if TYPE_CHECKING:
     from horsies.core.task_decorator import TaskFunction
-    from horsies.core.models.tasks import TaskResult, TaskError
+    from horsies.core.models.tasks import TaskInfo, TaskResult, TaskError
     from horsies.core.brokers.result_types import BrokerResult
 
 P = ParamSpec('P')
@@ -974,7 +974,7 @@ class Horsies:
         self,
         task_id: str,
         timeout_ms: int | None = None,
-    ) -> 'BrokerResult[Any]':
+    ) -> 'BrokerResult[TaskResult[Any, TaskError]]':
         """Fetch and typed-decode a task's stored result.
 
         Returns ``Ok(TaskResult[Any, TaskError])``: success path
@@ -1123,7 +1123,7 @@ class Horsies:
         self,
         task_id: str,
         timeout_ms: int | None = None,
-    ) -> 'BrokerResult[Any]':
+    ) -> 'BrokerResult[TaskResult[Any, TaskError]]':
         """Synchronous version of ``get_result_async``."""
         broker = self.get_broker()
         try:
@@ -1151,7 +1151,7 @@ class Horsies:
         include_result: bool = False,
         include_failed_reason: bool = False,
         include_attempts: bool = False,
-    ) -> 'BrokerResult[Any]':
+    ) -> 'BrokerResult[TaskInfo | None]':
         """Fetch task metadata, including typed-decoded result when possible.
 
         Wraps ``broker.get_task_info_async`` and adds the
@@ -1208,7 +1208,7 @@ class Horsies:
         include_result: bool = False,
         include_failed_reason: bool = False,
         include_attempts: bool = False,
-    ) -> 'BrokerResult[Any]':
+    ) -> 'BrokerResult[TaskInfo | None]':
         """Synchronous version of ``get_task_info_async``."""
         broker = self.get_broker()
         try:
