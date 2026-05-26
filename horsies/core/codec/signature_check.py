@@ -110,7 +110,32 @@ def check_task_signature(
     hints = get_type_hints(fn, include_extras=True)
     sig = inspect.signature(fn)
 
-    for param_name in sig.parameters:
+    for param_name, param in sig.parameters.items():
+        # Variadic params (`*args` / `**kwargs`) rejected for v1.
+        # Positional args have no wire support (kwargs-only is the
+        # documented usage); `**kwargs` defeats signature binding at
+        # the producer (encode_kwargs must bind every key against a
+        # declared parameter, with no catch-all). Earlier phase 1c
+        # relaxation of typed variadics is reverted per the strict-mode
+        # consolidation: every kwarg name must correspond to a named
+        # parameter.
+        if param.kind is inspect.Parameter.VAR_POSITIONAL:
+            raise SignatureValidationError(_format_error(
+                task_name=task_name,
+                position=f"parameter '*{param_name}'",
+                banned='*args (VAR_POSITIONAL)',
+                reason='variadic positional params have no wire support in v1',
+                fix='accept named kwargs only: `def f(items: list[T]) -> ...`',
+            ))
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            raise SignatureValidationError(_format_error(
+                task_name=task_name,
+                position=f"parameter '**{param_name}'",
+                banned='**kwargs (VAR_KEYWORD)',
+                reason='catch-all kwargs defeat producer-side signature binding',
+                fix='declare each accepted kwarg as a named parameter',
+            ))
+
         annot = hints.get(param_name)
         if annot is None:
             # Reject missing annotations here. The earlier "deferred to an

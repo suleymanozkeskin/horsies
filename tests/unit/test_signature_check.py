@@ -490,23 +490,36 @@ class TestRejectedReturnShape:
 
 
 class TestVariadics:
-    def test_var_positional_with_concrete_type_accepted(self) -> None:
+    # Variadics are rejected for v1: positional args have no wire support
+    # (kwargs-only is the documented usage), and `**kwargs` defeats
+    # producer-side signature binding. Earlier phase 1c relaxation is
+    # reverted.
+
+    def test_var_positional_rejected_even_when_typed(self) -> None:
         def f(*values: int) -> TaskResult[int, TaskError]: ...
-        _check(f)
+        with pytest.raises(
+            SignatureValidationError,
+            match=r'\*args \(VAR_POSITIONAL\)',
+        ):
+            _check(f)
 
-    def test_var_keyword_with_concrete_type_accepted(self) -> None:
+    def test_var_keyword_rejected_even_when_typed(self) -> None:
         def f(**values: int) -> TaskResult[int, TaskError]: ...
-        _check(f)
-
-    def test_var_positional_with_banned_element_rejected(self) -> None:
-        def f(*values: Any) -> TaskResult[int, TaskError]: ...
-        with pytest.raises(SignatureValidationError, match='Any'):
+        with pytest.raises(
+            SignatureValidationError,
+            match=r'\*\*kwargs \(VAR_KEYWORD\)',
+        ):
             _check(f)
 
-    def test_var_keyword_with_banned_element_rejected(self) -> None:
-        def f(**values: Any) -> TaskResult[int, TaskError]: ...
-        with pytest.raises(SignatureValidationError, match='Any'):
-            _check(f)
+    def test_var_positional_untyped_rejected(self) -> None:
+        def f(*args) -> TaskResult[int, TaskError]: ...  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+        with pytest.raises(SignatureValidationError):
+            _check(f)  # pyright: ignore[reportUnknownArgumentType]
+
+    def test_var_keyword_untyped_rejected(self) -> None:
+        def f(**kw) -> TaskResult[int, TaskError]: ...  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+        with pytest.raises(SignatureValidationError):
+            _check(f)  # pyright: ignore[reportUnknownArgumentType]
 
 
 # ---------------------------------------------------------------------------
@@ -710,11 +723,13 @@ class TestErrorMessageShape:
             check_task_signature(f, task_name='my_task')
         assert 'return' in str(exc_info.value).lower()
 
-    def test_error_for_banned_var_positional_element_names_param(self) -> None:
+    def test_error_for_banned_var_positional_names_param(self) -> None:
+        # `*args` now rejected at the variadic check before the element-type
+        # check is reached; the error names the variadic position.
         def f(*args: Any) -> TaskResult[int, TaskError]: ...
         with pytest.raises(SignatureValidationError) as exc_info:
             check_task_signature(f, task_name='my_task')
-        assert "parameter 'args'" in str(exc_info.value)
+        assert "parameter '*args'" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------

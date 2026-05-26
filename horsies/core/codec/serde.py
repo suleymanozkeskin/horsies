@@ -17,6 +17,10 @@ import json
 import traceback as tb
 from pydantic import BaseModel, ValidationError
 import dataclasses
+from horsies.core.codec.json_value import (
+    StrictJsonError,
+    _reject_nonstandard_json_constant,
+)
 from horsies.core.models.tasks import (
     TaskOptions,
     TaskResult,
@@ -316,11 +320,18 @@ def loads_json(s: Optional[str]) -> SerdeResult[Json]:
 
     Returns Ok(None) for empty/None input. Wraps json.JSONDecodeError
     as SerializationError so callers handle a single error type.
+
+    Routes through `parse_constant=_reject_nonstandard_json_constant`
+    so Python's lenient acceptance of `NaN` / `Infinity` / `-Infinity`
+    (not RFC 8259) fails closed at every raw-load site instead of
+    smuggling non-finite floats past the producer-side strict fence.
     """
     if not s:
         return Ok(None)
     try:
-        return Ok(json.loads(s))
+        return Ok(json.loads(s, parse_constant=_reject_nonstandard_json_constant))
+    except StrictJsonError as exc:
+        return Err(SerializationError(f'JSON parse failed: {exc}'))
     except (json.JSONDecodeError, ValueError) as exc:
         return Err(SerializationError(f'JSON parse failed: {exc}'))
 

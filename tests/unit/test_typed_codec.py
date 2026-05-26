@@ -454,6 +454,83 @@ class TestReservedKeyScan:
         with pytest.raises(StrictJsonError, match='reserved key'):
             encode_value({'__h_evil__': 'oops'}, JsonValue)
 
+    def test_legacy_horsies_prefix_rejected_in_user_dict(self) -> None:
+        # `__horsies_*` is the legacy transport prefix (still in active
+        # engine use). User-originated data carrying it would smuggle
+        # an envelope past the worker's args_from handler into legacy
+        # `task_result_from_json` / `rehydrate_value` (the old
+        # class-identity importer). Reject at encode time.
+        with pytest.raises(StrictJsonError, match='reserved key'):
+            encode_value(
+                {'__horsies_taskresult__': True, 'data': 'evil'},
+                JsonValue,
+            )
+
+    def test_legacy_horsies_prefix_rejected_nested(self) -> None:
+        with pytest.raises(StrictJsonError, match='reserved key'):
+            encode_value(
+                {'metadata': {'__horsies_workflow_ctx__': 'oops'}},
+                dict[str, JsonValue],
+            )
+
+
+# ---------------------------------------------------------------------------
+# TaskError: path-aware encode/decode (the validator + codec must agree).
+# ---------------------------------------------------------------------------
+
+
+class TestTaskErrorRoundTrip:
+    """TaskError is in INTERNAL_CODEC_TYPES (the validator skips its
+    field walk). Encode/decode must also handle it cleanly — TaskError's
+    `error_code` field legitimately emits `{"__builtin_task_code__":
+    "..."}` for built-in codes; the generic scan would falsely reject
+    that. Path-aware allowance scans only the user-controlled fields."""
+
+    def test_builtin_code_round_trips(self) -> None:
+        from horsies.core.models.tasks import OperationalErrorCode, TaskError
+
+        err = TaskError(
+            error_code=OperationalErrorCode.BROKER_ERROR,
+            message='m',
+            data={'k': 'v'},
+        )
+        encoded = encode_value(err, TaskError)
+        decoded = decode_value(encoded, TaskError)
+        assert isinstance(decoded, TaskError)
+        assert decoded.error_code == OperationalErrorCode.BROKER_ERROR
+        assert decoded.data == {'k': 'v'}
+        assert decoded.message == 'm'
+
+    def test_user_string_error_code_round_trips(self) -> None:
+        from horsies.core.models.tasks import TaskError
+
+        err = TaskError(error_code='my_user_code', message='ok')
+        encoded = encode_value(err, TaskError)
+        decoded = decode_value(encoded, TaskError)
+        assert isinstance(decoded, TaskError)
+        assert decoded.error_code == 'my_user_code'
+
+    def test_reserved_key_in_data_still_rejected(self) -> None:
+        from horsies.core.models.tasks import OperationalErrorCode, TaskError
+
+        # `data` is user-controlled and gets the full reserved-key scan.
+        err = TaskError(
+            error_code=OperationalErrorCode.BROKER_ERROR,
+            data={'__h_evil__': 1},
+        )
+        with pytest.raises(StrictJsonError, match='reserved key'):
+            encode_value(err, TaskError)
+
+    def test_legacy_prefix_in_data_still_rejected(self) -> None:
+        from horsies.core.models.tasks import OperationalErrorCode, TaskError
+
+        err = TaskError(
+            error_code=OperationalErrorCode.BROKER_ERROR,
+            data={'__horsies_taskresult__': True},
+        )
+        with pytest.raises(StrictJsonError, match='reserved key'):
+            encode_value(err, TaskError)
+
 
 # ---------------------------------------------------------------------------
 # Lower-level scans tested directly

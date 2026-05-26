@@ -725,6 +725,19 @@ def _run_task_entry(
         if is_err(args_result):
             return _serialization_error_response(task_name, args_result.err_value)
         args = args_result.ok_value
+        # Strict-serde: positional args are rejected at every producer.
+        # A worker row carrying any positional values came from a pre-strict
+        # producer (or an unknown writer) and is treated as a corrupt row
+        # rather than being executed under partial typing.
+        if args:
+            return _serialization_error_response(
+                task_name,
+                SerializationError(
+                    f'Task {task_name!r} row carries {len(args)} positional '
+                    f'arg(s); strict-serde rejects positional args. '
+                    f'Drop in-flight pre-strict rows before upgrading.',
+                ),
+            )
 
         kwargs_json_result = loads_json(kwargs_json)
         if is_err(kwargs_json_result):

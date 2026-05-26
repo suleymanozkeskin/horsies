@@ -25,6 +25,7 @@ from horsies.core.codec.json_value import (
     StrictJsonError,
     _validate_json_native,
 )
+from horsies.core.models.tasks import TaskError
 
 
 __all__ = [
@@ -70,7 +71,16 @@ design-doc §0.
 # ---------------------------------------------------------------------------
 
 
-_RESERVED_KEY_PREFIX = '__h_'
+# Reserved namespace per §2 + the legacy `__horsies_*` prefix still in
+# active engine use (workflow_ctx / workflow_meta / taskresult transport
+# keys at `workflows/engine.py`). Rejecting `__horsies_*` in user data
+# closes the smuggle path through `child_runner.py`'s args_from envelope
+# handling — that path keys off `__horsies_taskresult__` inside a kwarg
+# dict and routes to legacy `task_result_from_json` / `rehydrate_value`,
+# which would still run the old class-identity importer. Engine-internal
+# uses are encode-side direct dict construction (not via `encode_value`),
+# so this restriction only fires for user-originated data.
+_RESERVED_KEY_PREFIXES: tuple[str, ...] = ('__h_', '__horsies_')
 _RESERVED_DISCRIMINATOR = '__builtin_task_code__'
 
 
@@ -141,7 +151,14 @@ def encode_value(value: object, expected_type: TypeAnnotation) -> Json:
     dumped = adapter.dump_python(value, mode='json')
     dumped_json = cast(Json, dumped)
     _scan_wire_json(dumped_json)
-    _scan_reserved_keys(dumped_json)
+    if _is_task_error_type(expected_type):
+        # TaskError's own `error_code` field legitimately emits
+        # `{"__builtin_task_code__": "..."}` for built-in codes.
+        # Path-aware allowance: scan only the user-controlled fields
+        # (`data`, `exception`, `message`) and skip `error_code`.
+        _scan_task_error_user_fields(dumped_json)
+    else:
+        _scan_reserved_keys(dumped_json)
     return dumped_json
 
 
@@ -171,9 +188,33 @@ def decode_value(json_value: Json, expected_type: TypeAnnotation) -> object:
         pydantic.ValidationError: when `json_value` doesn't satisfy
             `expected_type`.
     """
-    _scan_reserved_keys(json_value)
+    if _is_task_error_type(expected_type):
+        _scan_task_error_user_fields(json_value)
+    else:
+        _scan_reserved_keys(json_value)
     adapter = _get_adapter(expected_type)
     return adapter.validate_python(json_value)
+
+
+def _is_task_error_type(expected_type: TypeAnnotation) -> bool:
+    return isinstance(expected_type, type) and issubclass(expected_type, TaskError)
+
+
+def _scan_task_error_user_fields(dumped_json: Json) -> None:
+    """Scan only the user-controlled fields of a TaskError dump.
+
+    TaskError's `error_code` serializer emits
+    `{"__builtin_task_code__": "..."}` for built-in codes; that's the
+    one path-specific allowance. `data` is user-controlled and gets
+    full strict scan; `exception` and `message` likewise.
+    """
+    if not isinstance(dumped_json, dict):
+        return
+    d = cast('dict[str, Json]', dumped_json)
+    for key, sub_value in d.items():
+        if key == 'error_code':
+            continue
+        _scan_reserved_keys(sub_value)
 
 
 # ---------------------------------------------------------------------------
@@ -405,7 +446,7 @@ def _scan_reserved_keys(dumped_json: Json) -> None:
         case dict() as mapping:
             for key, sub_value in cast('dict[str, Json]', mapping).items():
                 if (
-                    key.startswith(_RESERVED_KEY_PREFIX)
+                    any(key.startswith(p) for p in _RESERVED_KEY_PREFIXES)
                     or key == _RESERVED_DISCRIMINATOR
                 ):
                     raise StrictJsonError(

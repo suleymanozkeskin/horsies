@@ -21,7 +21,7 @@ from pydantic import ValidationError as _PydanticValidationError
 
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import encode_kwargs
-from horsies.core.codec.serde import args_to_json, dumps_json, kwargs_to_json  # noqa: F401
+from horsies.core.codec.serde import dumps_json
 from horsies.core.utils.fingerprint import enqueue_fingerprint, schedule_slot_task_id
 from horsies.core.types.result import Err, is_err
 from horsies.core.worker.worker import import_by_path
@@ -632,18 +632,21 @@ class Scheduler:
 
         task_id = schedule_slot_task_id(schedule.name, slot_time)
 
-        # Pre-serialize args/kwargs
+        # Pre-serialize args/kwargs.
+        # Strict-serde: positional args have no typed wire representation;
+        # the scheduler rejects schedules carrying any. Schedules must
+        # use kwargs-only (the same contract `.send()` enforces).
         args_json: str | None = None
         if schedule.args:
-            args_r = args_to_json(schedule.args)
-            if is_err(args_r):
-                return Err(BrokerOperationError(
-                    code=BrokerErrorCode.ENQUEUE_FAILED,
-                    message=f"Failed to serialize args for schedule '{schedule.name}': {args_r.err_value}",
-                    retryable=False,
-                    exception=args_r.err_value if isinstance(args_r.err_value, BaseException) else None,
-                ))
-            args_json = args_r.ok_value
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.ENQUEUE_FAILED,
+                message=(
+                    f"Schedule {schedule.name!r} carries "
+                    f"{len(schedule.args)} positional arg(s); strict-serde "
+                    f"rejects positional args. Use kwargs-only."
+                ),
+                retryable=False,
+            ))
 
         kwargs_json: str | None = None
         if schedule.kwargs:

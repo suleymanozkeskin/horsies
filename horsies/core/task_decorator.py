@@ -30,9 +30,7 @@ from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import encode_kwargs
 from horsies.core.codec.serde import (
     serialize_task_options,
-    args_to_json,
     dumps_json,
-    kwargs_to_json,  # noqa: F401 — retained for legacy non-typed paths
 )
 from horsies.core.codec.signature_check import (
     SignatureValidationError,
@@ -1151,20 +1149,22 @@ def create_task_wrapper(
             return options_result
         good_until, task_options_json = options_result.ok_value
 
-        # Serialize args
-        args_json: str | None = None
+        # Strict-serde: positional args have no typed wire representation
+        # and are rejected at every producer entry point. The receiver
+        # always binds against the kwargs signature; positional values
+        # would defeat that binding.
         if args:
-            args_r = args_to_json(args)
-            if is_err(args_r):
-                return Err(TaskSendError(
-                    code=TaskSendErrorCode.VALIDATION_FAILED,
-                    message=f'Failed to serialize args for {task_name}: {args_r.err_value}',
-                    retryable=False,
-                    task_id=task_id,
-                    exception=args_r.err_value if isinstance(args_r.err_value, BaseException) else None,
-                ))
-
-            args_json = args_r.ok_value
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.VALIDATION_FAILED,
+                message=(
+                    f"Task {task_name!r} received {len(args)} positional "
+                    f"arg(s); strict-serde rejects positional args. "
+                    f"Pass every argument by keyword."
+                ),
+                retryable=False,
+                task_id=task_id,
+            ))
+        args_json: str | None = None
 
         # Serialize kwargs — strict-serde phase 3 routes through encode_kwargs
         # using the receiver's declared parameter types.

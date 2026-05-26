@@ -250,3 +250,50 @@ class TestTypeAdapterCoercionMotivation:
     def test_type_adapter_silently_coerces_decimal_in_dict(self) -> None:
         result = _ADAPTER.validate_python({'x': Decimal('1.2')})
         assert result == {'x': 1.2}
+
+
+# ---------------------------------------------------------------------------
+# loads_json parse hardening: rejects NaN / Infinity / -Infinity at parse
+# ---------------------------------------------------------------------------
+
+
+class TestLoadsJsonParseHardening:
+    """`serde.loads_json` routes every raw `json.loads` site through
+    `parse_constant=_reject_nonstandard_json_constant` so Python's
+    lenient acceptance of `NaN` / `Infinity` / `-Infinity` (not RFC
+    8259) fails closed end-to-end. Without this, payloads written by
+    other languages, by horsies versions predating the strict
+    producer, or by manual writes to the result column could smuggle
+    non-finite floats past the producer-side fence."""
+
+    def test_nan_rejected(self) -> None:
+        from horsies.core.codec.serde import loads_json
+        from horsies.core.types.result import is_err
+
+        result = loads_json('{"x": NaN}')
+        assert is_err(result)
+        assert 'NaN' in str(result.err_value)
+
+    def test_infinity_rejected(self) -> None:
+        from horsies.core.codec.serde import loads_json
+        from horsies.core.types.result import is_err
+
+        result = loads_json('{"x": Infinity}')
+        assert is_err(result)
+        assert 'Infinity' in str(result.err_value)
+
+    def test_neg_infinity_rejected(self) -> None:
+        from horsies.core.codec.serde import loads_json
+        from horsies.core.types.result import is_err
+
+        result = loads_json('{"x": -Infinity}')
+        assert is_err(result)
+        assert '-Infinity' in str(result.err_value)
+
+    def test_normal_payload_passes(self) -> None:
+        from horsies.core.codec.serde import loads_json
+        from horsies.core.types.result import is_err
+
+        result = loads_json('{"x": 1.0, "y": [null, true, "s"]}')
+        assert not is_err(result)
+        assert result.ok_value == {'x': 1.0, 'y': [None, True, 's']}

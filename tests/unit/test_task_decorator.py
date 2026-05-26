@@ -564,20 +564,27 @@ class TestCreateTaskWrapperValidation:
         assert result.ok == 42
 
     def test_factory_task_named_wrapper_can_close_over_helper(self) -> None:
-        """Function names and variadic params do not imply a decorator wrapper."""
+        """Function-named-wrapper does not imply a decorator wrapper.
+
+        Originally exercised `*values: int` to confirm typed variadics
+        registered cleanly; strict-serde now rejects variadics at v1
+        (see TestVariadics in test_signature_check.py). Test still
+        asserts the original concern — a factory-returned `wrapper`
+        closing over a helper is accepted — using kwargs-only.
+        """
         def make_task():
             def helper(values: tuple[int, ...]) -> int:
                 return sum(values)
 
-            def wrapper(*values: int) -> TaskResult[int, TaskError]:
+            def wrapper(values: tuple[int, int]) -> TaskResult[int, TaskError]:
                 return TaskResult(ok=helper(values))
 
             return wrapper
 
         app = _make_app()
-        wrapper = create_task_wrapper(make_task(), app, 'test.variadic_helper_closure')
+        wrapper = create_task_wrapper(make_task(), app, 'test.kwarg_helper_closure')
 
-        result = wrapper(20, 22)
+        result = wrapper(values=(20, 22))
         assert result.is_ok()
         assert result.ok == 42
 
@@ -754,7 +761,7 @@ class TestCreateTaskWrapperSend:
         app = _make_app(suppress_sends=True)
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.send(1)
+        result = wrapper.send(x=1)
 
         assert is_err(result)
         assert result.err_value.code == TaskSendErrorCode.SEND_SUPPRESSED
@@ -774,7 +781,7 @@ class TestCreateTaskWrapperSend:
         )
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.send(1)
+        result = wrapper.send(x=1)
 
         assert is_err(result)
         assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
@@ -791,7 +798,7 @@ class TestCreateTaskWrapperSend:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.send(1)
+        result = wrapper.send(x=1)
 
         assert is_ok(result)
         handle = result.ok_value
@@ -815,7 +822,7 @@ class TestCreateTaskWrapperSend:
         )
         deadline = datetime(2030, 1, 1, tzinfo=timezone.utc)
 
-        result = wrapper.with_options(good_until=deadline).send(1)
+        result = wrapper.with_options(good_until=deadline).send(x=1)
 
         assert is_ok(result)
         call_kwargs = broker.enqueue.call_args.kwargs
@@ -833,7 +840,7 @@ class TestCreateTaskWrapperSend:
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
         naive_deadline = datetime(2030, 1, 1)
 
-        result = wrapper.with_options(good_until=naive_deadline).send(1)
+        result = wrapper.with_options(good_until=naive_deadline).send(x=1)
 
         assert is_err(result)
         assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
@@ -857,7 +864,7 @@ class TestCreateTaskWrapperSend:
             TaskOptions(task_name='test.good_fn', good_until=stale_deadline),
         )
 
-        result = wrapper.with_options(good_until=None).send(1)
+        result = wrapper.with_options(good_until=None).send(x=1)
 
         assert is_ok(result)
         call_kwargs = broker.enqueue.call_args.kwargs
@@ -880,7 +887,7 @@ class TestCreateTaskWrapperSend:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.send(1)
+        result = wrapper.send(x=1)
 
         assert is_err(result)
         err = result.err_value
@@ -909,7 +916,7 @@ class TestCreateTaskWrapperSendAsync:
         app = _make_app(suppress_sends=True)
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = await wrapper.send_async(1)
+        result = await wrapper.send_async(x=1)
 
         assert is_err(result)
         assert result.err_value.code == TaskSendErrorCode.SEND_SUPPRESSED
@@ -926,7 +933,7 @@ class TestCreateTaskWrapperSendAsync:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = await wrapper.send_async(1)
+        result = await wrapper.send_async(x=1)
 
         assert is_ok(result)
         handle = result.ok_value
@@ -951,7 +958,7 @@ class TestCreateTaskWrapperSendAsync:
         )
         deadline = datetime(2030, 1, 1, tzinfo=timezone.utc)
 
-        result = await wrapper.with_options(good_until=deadline).send_async(1)
+        result = await wrapper.with_options(good_until=deadline).send_async(x=1)
 
         assert is_ok(result)
         call_kwargs = broker.enqueue_async.call_args.kwargs
@@ -975,7 +982,7 @@ class TestCreateTaskWrapperSendAsync:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = await wrapper.send_async(1)
+        result = await wrapper.send_async(x=1)
 
         assert is_err(result)
         assert result.err_value.code == TaskSendErrorCode.ENQUEUE_FAILED
@@ -993,7 +1000,7 @@ class TestCreateTaskWrapperSendAsync:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = await wrapper.send_async(1)
+        result = await wrapper.send_async(x=1)
 
         assert is_err(result)
         err = result.err_value
@@ -1014,7 +1021,7 @@ class TestCreateTaskWrapperSendAsync:
         )
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = await wrapper.send_async(1)
+        result = await wrapper.send_async(x=1)
 
         assert is_err(result)
         assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
@@ -1037,7 +1044,7 @@ class TestCreateTaskWrapperSchedule:
         app = _make_app(suppress_sends=True)
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.schedule(60, 1)
+        result = wrapper.schedule(60, x=1)
 
         assert is_err(result)
         assert result.err_value.code == TaskSendErrorCode.SEND_SUPPRESSED
@@ -1053,7 +1060,7 @@ class TestCreateTaskWrapperSchedule:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.schedule(60, 1)
+        result = wrapper.schedule(60, x=1)
 
         assert is_ok(result)
         handle = result.ok_value
@@ -1081,7 +1088,7 @@ class TestCreateTaskWrapperSchedule:
         )
         deadline = datetime(2030, 1, 1, tzinfo=timezone.utc)
 
-        result = wrapper.with_options(good_until=deadline).schedule(60, 1)
+        result = wrapper.with_options(good_until=deadline).schedule(60, x=1)
 
         assert is_ok(result)
         call_kwargs = broker.enqueue.call_args.kwargs
@@ -1105,7 +1112,7 @@ class TestCreateTaskWrapperSchedule:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.schedule(60, 1)
+        result = wrapper.schedule(60, x=1)
 
         assert is_err(result)
         assert result.err_value.code == TaskSendErrorCode.ENQUEUE_FAILED
@@ -1122,7 +1129,7 @@ class TestCreateTaskWrapperSchedule:
         )
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.schedule(60, 1)
+        result = wrapper.schedule(60, x=1)
 
         assert is_err(result)
         assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
@@ -1393,7 +1400,7 @@ class TestAutoRetry:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.send(1)
+        result = wrapper.send(x=1)
 
         assert is_ok(result)
         assert result.ok_value.task_id == 'task-ok'
@@ -1416,7 +1423,7 @@ class TestAutoRetry:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.send(1)
+        result = wrapper.send(x=1)
 
         assert is_err(result)
         assert result.err_value.code == TaskSendErrorCode.ENQUEUE_FAILED
@@ -1438,7 +1445,7 @@ class TestAutoRetry:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.send(1)
+        result = wrapper.send(x=1)
 
         assert is_err(result)
         assert broker.enqueue.call_count == 1
@@ -1458,7 +1465,7 @@ class TestAutoRetry:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.send(1)
+        result = wrapper.send(x=1)
 
         assert is_err(result)
         assert result.err_value.code == TaskSendErrorCode.PAYLOAD_MISMATCH
@@ -1480,7 +1487,7 @@ class TestAutoRetry:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.send(1)
+        result = wrapper.send(x=1)
 
         assert is_ok(result)
         assert broker.enqueue.call_count == 2  # 1 failed + 1 retry
@@ -1496,7 +1503,7 @@ class TestAutoRetry:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.send(1)
+        result = wrapper.send(x=1)
 
         assert is_err(result)
         assert result.err_value.code == TaskSendErrorCode.ENQUEUE_FAILED
@@ -1530,7 +1537,7 @@ class TestPayloadMismatchClassification:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.send(1)
+        result = wrapper.send(x=1)
 
         assert is_err(result)
         assert result.err_value.code == TaskSendErrorCode.PAYLOAD_MISMATCH
@@ -1554,7 +1561,7 @@ class TestPayloadMismatchClassification:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.send(1)
+        result = wrapper.send(x=1)
 
         assert is_err(result)
         assert result.err_value.code == TaskSendErrorCode.ENQUEUE_FAILED

@@ -10,6 +10,10 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import TextClause
 
+from pydantic import ValidationError as _PydanticValidationError
+
+from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.kwargs import encode_kwargs
 from horsies.core.codec.serde import dumps_json, loads_json, task_result_from_json, serialize_error_payload, SerdeResult
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 from horsies.core.types.result import is_err
@@ -819,7 +823,35 @@ async def enqueue_subworkflow_task(
                 child_base_options['good_until'] = child_task.good_until.isoformat()
                 child_task_options_json = _ser(dumps_json(child_base_options), 'child task_options')
 
-            child_kwargs_json = _ser(dumps_json(child_task.kwargs), 'child task kwargs')
+            # Strict-serde: route child TaskNode kwargs through the typed
+            # codec so legacy `__horsies_*` keys in user-data positions
+            # fail closed before storage. Without this, smuggled
+            # `__horsies_taskresult__` envelopes in static kwargs would
+            # reach the worker via `child_runner.py`'s args_from path
+            # and route to legacy `rehydrate_value` (class-identity import).
+            try:
+                child_task_underlying_fn = getattr(
+                    child_task.fn, '_original_fn',
+                    getattr(child_task.fn, '_fn', child_task.fn),
+                )
+                encoded_child_task_kwargs = dict(
+                    encode_kwargs(child_task_underlying_fn, child_task.kwargs),
+                )
+            except (StrictJsonError, _PydanticValidationError) as exc:
+                await _fail_enqueued_task(
+                    session, workflow_id, task_index,
+                    (
+                        f'Failed to encode kwargs for child task '
+                        f'{child_task.name}: {exc}'
+                    ),
+                    broker,
+                    error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+                )
+                return None
+            child_kwargs_json = _ser(
+                dumps_json(encoded_child_task_kwargs),
+                'child task kwargs',
+            )
             if child_kwargs_json is None:
                 await _fail_enqueued_task(
                     session, workflow_id, task_index,
