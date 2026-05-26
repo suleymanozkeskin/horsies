@@ -59,6 +59,7 @@ from horsies.core.types.result import is_err
 if TYPE_CHECKING:
     from horsies.core.task_decorator import TaskFunction
     from horsies.core.models.tasks import TaskResult, TaskError
+    from horsies.core.brokers.result_types import BrokerResult
 
 P = ParamSpec('P')
 T = TypeVar('T')
@@ -920,6 +921,280 @@ class Horsies:
                 code=ErrorCode.BROKER_INIT_FAILED,
                 notes=[str(e)],
             ) from e
+
+    # ─── Strict-serde phase 6b: app-level result APIs ──────────────
+
+    async def get_raw_result_async(
+        self,
+        task_id: str,
+        timeout_ms: int | None = None,
+    ) -> 'BrokerResult[dict[str, Any] | None]':
+        """Fetch the raw stored result envelope without typed decode.
+
+        Thin wrapper around ``broker.get_raw_result_record_async``.
+        Returns the raw envelope dict (or ``None`` for absent/non-
+        terminal rows). Cross-process monitoring / debugging callers
+        use this to inspect payloads without importing user task
+        modules.
+        """
+        from horsies.core.brokers.result_types import (
+            BrokerErrorCode,
+            BrokerOperationError,
+        )
+        from horsies.core.types.result import Err, Ok, is_err
+
+        broker = self.get_broker()
+        record_result = await broker.get_raw_result_record_async(
+            task_id, timeout_ms,
+        )
+        if is_err(record_result):
+            return Err(record_result.err_value)
+        record = record_result.ok_value
+        if record is None:
+            return Ok(None)
+        return Ok(record.raw_result)
+
+    def get_raw_result(
+        self,
+        task_id: str,
+        timeout_ms: int | None = None,
+    ) -> 'BrokerResult[dict[str, Any] | None]':
+        """Synchronous version of ``get_raw_result_async``."""
+        from horsies.core.brokers.result_types import (
+            BrokerErrorCode,
+            BrokerOperationError,
+        )
+        from horsies.core.types.result import Err, Ok, is_err
+
+        broker = self.get_broker()
+        record_result = broker.get_raw_result_record(task_id, timeout_ms)
+        if is_err(record_result):
+            return Err(record_result.err_value)
+        record = record_result.ok_value
+        if record is None:
+            return Ok(None)
+        return Ok(record.raw_result)
+
+    async def get_result_async(
+        self,
+        task_id: str,
+        timeout_ms: int | None = None,
+    ) -> 'BrokerResult[Any]':
+        """Fetch and typed-decode a task's stored result.
+
+        Returns ``Ok(TaskResult[Any, TaskError])``: success path
+        materializes the typed result using the local task catalog's
+        ``task_ok_type``; failed-task results decode without ``ok_type``
+        (TaskError has a fixed schema).
+
+        Returns ``Err(BrokerOperationError(NO_TYPE_AVAILABLE))`` only
+        when the ok slot is populated and ``task_name`` isn't in the
+        local registry. Cross-process callers inspecting failed tasks
+        can therefore decode without importing user code.
+        """
+        from horsies.core.brokers.result_types import (
+            BrokerErrorCode,
+            BrokerOperationError,
+        )
+        from horsies.core.codec.json_value import StrictJsonError
+        from horsies.core.codec.typed import decode_task_result, decode_value
+        from horsies.core.models.tasks import (
+            OperationalErrorCode,
+            OutcomeCode,
+            RetrievalCode,
+            TaskError,
+            TaskResult,
+        )
+        from horsies.core.types.result import Err, Ok, is_err
+        from horsies.core.types.status import TaskStatus
+        from pydantic import ValidationError
+
+        broker = self.get_broker()
+        record_result = await broker.get_raw_result_record_async(
+            task_id, timeout_ms,
+        )
+        if is_err(record_result):
+            return Err(record_result.err_value)
+        record = record_result.ok_value
+        if record is None:
+            return Ok(TaskResult(
+                err=TaskError(
+                    error_code=RetrievalCode.TASK_NOT_FOUND,
+                    message=f'Task {task_id} not found',
+                    data={'task_id': task_id},
+                ),
+            ))
+        if record.status == TaskStatus.CANCELLED:
+            return Ok(TaskResult(
+                err=TaskError(
+                    error_code=OutcomeCode.TASK_CANCELLED,
+                    message=f'Task {task_id} was cancelled before completion',
+                    data={'task_id': task_id},
+                ),
+            ))
+        if record.raw_result is None:
+            return Ok(TaskResult(
+                err=TaskError(
+                    error_code=RetrievalCode.WAIT_TIMEOUT,
+                    message=(
+                        f'Timed out waiting for task {task_id}; status '
+                        f'is {record.status.value}'
+                    ),
+                    data={
+                        'task_id': task_id,
+                        'timeout_ms': timeout_ms,
+                        'status': record.status.value,
+                    },
+                ),
+            ))
+        raw = record.raw_result
+        # Err-fast-path: TaskError is fixed-schema; decodable without ok_type.
+        err_slot = raw.get('err') if isinstance(raw, dict) else None
+        if err_slot is not None:
+            try:
+                err_value = decode_value(err_slot, TaskError)
+            except (StrictJsonError, ValidationError) as exc:
+                return Err(BrokerOperationError(
+                    code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                    message=f'TaskError decode failed for {task_id}: {exc}',
+                    retryable=False,
+                ))
+            return Ok(TaskResult(err=err_value))
+        # Ok slot — needs ok_type from local registry.
+        task = self.tasks.get(record.task_name)
+        ok_type = getattr(task, 'task_ok_type', None) if task is not None else None
+        if ok_type is None:
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.NO_TYPE_AVAILABLE,
+                message=(
+                    f'Task {record.task_name!r} is not locally registered; '
+                    f'cannot decode successful result. Use '
+                    f'get_raw_result(...) or import the task module.'
+                ),
+                retryable=False,
+            ))
+        try:
+            return Ok(decode_task_result(raw, ok_type))
+        except (StrictJsonError, ValidationError) as exc:
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                message=f'decode_task_result failed for {task_id}: {exc}',
+                retryable=False,
+            ))
+
+    def get_result(
+        self,
+        task_id: str,
+        timeout_ms: int | None = None,
+    ) -> 'BrokerResult[Any]':
+        """Synchronous version of ``get_result_async``."""
+        broker = self.get_broker()
+        try:
+            return broker._loop_runner.call(
+                self.get_result_async, task_id, timeout_ms,
+            )
+        except Exception as exc:
+            from horsies.core.brokers.result_types import (
+                BrokerErrorCode,
+                BrokerOperationError,
+            )
+            from horsies.core.types.result import Err
+
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+                message=f'Sync bridge failed for get_result: {exc}',
+                retryable=False,
+                exception=exc,
+            ))
+
+    async def get_task_info_async(
+        self,
+        task_id: str,
+        *,
+        include_result: bool = False,
+        include_failed_reason: bool = False,
+        include_attempts: bool = False,
+    ) -> 'BrokerResult[Any]':
+        """Fetch task metadata, including typed-decoded result when possible.
+
+        Wraps ``broker.get_task_info_async`` and adds the
+        ``decoded_result`` / ``result_decoded`` fields when the task is
+        registered locally and decode succeeds.
+        """
+        from horsies.core.brokers.result_types import (
+            BrokerErrorCode,
+            BrokerOperationError,
+        )
+        from horsies.core.codec.json_value import StrictJsonError
+        from horsies.core.codec.typed import decode_task_result
+        from horsies.core.types.result import Err, Ok, is_err
+        from pydantic import ValidationError
+
+        broker = self.get_broker()
+        info_result = await broker.get_task_info_async(
+            task_id,
+            include_result=include_result,
+            include_failed_reason=include_failed_reason,
+            include_attempts=include_attempts,
+        )
+        if is_err(info_result):
+            return Err(info_result.err_value)
+        info = info_result.ok_value
+        if info is None:
+            return Ok(None)
+        if not include_result or info.raw_result is None:
+            return Ok(info)
+        task = self.tasks.get(info.task_name)
+        ok_type = getattr(task, 'task_ok_type', None) if task is not None else None
+        if ok_type is None:
+            # Task not registered locally — leave decoded_result=None,
+            # result_decoded=False (already the broker's default).
+            return Ok(info)
+        try:
+            decoded = decode_task_result(info.raw_result, ok_type)
+        except (StrictJsonError, ValidationError) as exc:
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                message=(
+                    f'get_task_info decode failed for {task_id}: {exc}'
+                ),
+                retryable=False,
+            ))
+        info.decoded_result = decoded
+        info.result_decoded = True
+        return Ok(info)
+
+    def get_task_info(
+        self,
+        task_id: str,
+        *,
+        include_result: bool = False,
+        include_failed_reason: bool = False,
+        include_attempts: bool = False,
+    ) -> 'BrokerResult[Any]':
+        """Synchronous version of ``get_task_info_async``."""
+        broker = self.get_broker()
+        try:
+            return broker._loop_runner.call(
+                self.get_task_info_async,
+                task_id,
+                include_result=include_result,
+                include_failed_reason=include_failed_reason,
+                include_attempts=include_attempts,
+            )
+        except Exception as exc:
+            from horsies.core.brokers.result_types import (
+                BrokerErrorCode,
+                BrokerOperationError,
+            )
+            from horsies.core.types.result import Err
+
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+                message=f'Sync bridge failed for get_task_info: {exc}',
+                retryable=False,
+                exception=exc,
+            ))
 
     def discover_tasks(
         self,

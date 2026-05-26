@@ -114,10 +114,10 @@ class TestDecodeStrictBinding:
     def test_engine_transport_keys_pass_through(self) -> None:
         decoded = decode_kwargs(
             _task_with_ctx,
-            {'value': 1, '__horsies_workflow_ctx__': {'wf': 'id'}},
+            {'value': 1, '__h_workflow_ctx__': {'wf': 'id'}},
         )
         assert decoded['value'] == 1
-        assert decoded['__horsies_workflow_ctx__'] == {'wf': 'id'}
+        assert decoded['__h_workflow_ctx__'] == {'wf': 'id'}
 
     def test_new_h_prefix_transport_keys_pass_through(self) -> None:
         # `__h_*` is the design's target transport prefix. Decode-side
@@ -130,7 +130,7 @@ class TestDecodeStrictBinding:
 
     def test_taskresult_typed_kwarg_envelope_passes_through(self) -> None:
         envelope: dict[str, Json] = {
-            '__horsies_taskresult__': True,
+            '__h_taskresult_envelope__': True,
             'data': '{"ok":42}',
         }
         decoded = decode_kwargs(
@@ -239,7 +239,7 @@ class TestWireRoundTripNestedJsonValue:
 
 class TestLegacyHorsiesPrefixSmuggleClosed:
     """The smuggling path the design closes: a user-supplied kwarg
-    value carrying `__horsies_taskresult__` would reach the worker
+    value carrying `__h_taskresult_envelope__` would reach the worker
     args_from handler and route to legacy class-identity rehydration.
     `encode_value` rejects the legacy prefix at user positions; this
     test confirms encode_kwargs propagates that rejection."""
@@ -251,5 +251,5 @@ class TestLegacyHorsiesPrefixSmuggleClosed:
         with pytest.raises(StrictJsonError, match='reserved key'):
             encode_kwargs(
                 task,
-                {'payload': {'__horsies_taskresult__': True, 'data': 'evil'}},
+                {'payload': {'__h_taskresult_envelope__': True, 'data': 'evil'}},
             )

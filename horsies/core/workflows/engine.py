@@ -14,7 +14,12 @@ from pydantic import ValidationError as _PydanticValidationError
 
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import encode_kwargs, underlying_task_fn
-from horsies.core.codec.serde import dumps_json, loads_json, task_result_from_json, serialize_error_payload, SerdeResult
+from horsies.core.codec.serde import dumps_json, loads_json, serialize_error_payload, SerdeResult
+from horsies.core.codec.typed import (
+    Json,
+    decode_task_result,
+    encode_task_result,
+)
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 from horsies.core.types.result import is_err
 from horsies.core.logging import get_logger
@@ -84,10 +89,163 @@ logger = get_logger('workflow.engine')
 from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode
 
 if TYPE_CHECKING:
+    from horsies.core.app import Horsies
     from horsies.core.brokers.postgres import PostgresBroker
     from horsies.core.models.tasks import TaskResult, TaskError
 
 OutT = TypeVar('OutT')
+
+
+# Wire keys for engine-injected transport (strict-serde §8). Renamed
+# from the legacy `__horsies_*` prefix in this phase; user data carrying
+# either prefix is rejected by `_scan_reserved_keys` so we keep the
+# emit/consume convention narrow.
+_ENGINE_KEY_WORKFLOW_CTX = '__h_workflow_ctx__'
+_ENGINE_KEY_WORKFLOW_META = '__h_workflow_meta__'
+_ENGINE_KEY_TASKRESULT_ENVELOPE = '__h_taskresult_envelope__'
+
+
+def _decode_stored_task_result(
+    stored_result: str,
+    *,
+    app: 'Horsies | None',
+    task_name: str,
+    context: dict[str, Any],
+) -> 'TaskResult[Any, TaskError]':
+    """Decode a stored TaskResult JSON payload using the local task's OkT.
+
+    Strict-serde phase 6 replaces ``task_result_from_json`` for every
+    engine-side decode of a worker-emitted TaskResult. The expected
+    ``ok_type`` is derived from ``app.tasks[task_name].task_ok_type``;
+    when ``app`` is unavailable (legacy callers) or the task isn't
+    registered, the failure becomes a sentinel ``TaskError`` so the
+    upstream caller still sees a TaskResult shape.
+
+    Args:
+        stored_result: The raw JSON text from the result column.
+        app: The Horsies app instance for task registry lookup.
+        task_name: The source task's registered name.
+        context: Diagnostic metadata embedded into the sentinel error
+            (workflow_id, task_index, status, etc.).
+
+    Returns:
+        The decoded TaskResult; a ``RESULT_DESERIALIZATION_ERROR``
+        TaskResult on any failure.
+    """
+    from horsies.core.models.tasks import TaskError, TaskResult
+
+    deser = _deser_json(stored_result, 'task result json')
+    if deser is None:
+        return TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=(
+                    f'Stored TaskResult JSON corrupt for task '
+                    f'{task_name!r}'
+                ),
+                data={**context, 'stage': 'json_parse'},
+            ),
+        )
+    if app is None:
+        return TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=(
+                    f'No app context available to decode result for '
+                    f'task {task_name!r}'
+                ),
+                data={**context, 'stage': 'no_app'},
+            ),
+        )
+    source_task = app.tasks.get(task_name)
+    if source_task is None:
+        return TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=(
+                    f'Task {task_name!r} is not registered in this '
+                    f'process; cannot decode stored TaskResult'
+                ),
+                data={**context, 'stage': 'task_not_registered'},
+            ),
+        )
+    ok_type = getattr(source_task, 'task_ok_type', None)
+    if ok_type is None:
+        return TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=(
+                    f'Task {task_name!r} has no `task_ok_type`; '
+                    f'cannot decode stored TaskResult'
+                ),
+                data={**context, 'stage': 'no_ok_type'},
+            ),
+        )
+    try:
+        return decode_task_result(deser, ok_type)
+    except (StrictJsonError, _PydanticValidationError) as exc:
+        return TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=(
+                    f'decode_task_result failed for task {task_name!r}: '
+                    f'{exc}'
+                ),
+                data={**context, 'stage': 'decode'},
+            ),
+        )
+
+
+def _resolve_source_ok_type(
+    app: 'Horsies | None',
+    task_name: str,
+) -> Any | None:
+    """Look up the source task's ``task_ok_type`` for envelope encoding.
+
+    Returns ``None`` when the app context is missing or the task isn't
+    registered locally; callers fall back to passing the raw TaskResult
+    through ``dumps_json`` (legacy path) or surface a serialization
+    error.
+    """
+    if app is None:
+        return None
+    source_task = app.tasks.get(task_name)
+    if source_task is None:
+        return None
+    return getattr(source_task, 'task_ok_type', None)
+
+
+def _decode_err_only(
+    stored_result: str,
+) -> 'TaskResult[Any, TaskError] | None':
+    """Decode the err slot of a stored TaskResult envelope without ok_type.
+
+    Mirrors the app-layer err-without-ok-type fast path (design §6):
+    ``TaskError`` is a fixed-schema internal type, so an err-only
+    payload can be reconstructed even when the source task isn't
+    registered locally. Returns ``None`` if the envelope is missing,
+    malformed, or carries an ok payload (caller must supply ok_type for
+    those).
+    """
+    from horsies.core.models.tasks import TaskError, TaskResult
+
+    deser = _deser_json(stored_result, 'err-only result json')
+    if not isinstance(deser, dict):
+        return None
+    envelope = cast('dict[str, Any]', deser)
+    if envelope.get('__h_task_result__') is not True:
+        return None
+    err_slot = envelope.get('err')
+    if err_slot is None:
+        return None
+    try:
+        from horsies.core.codec.typed import decode_value as _decode_value
+        decoded_err = _decode_value(err_slot, TaskError)
+    except (StrictJsonError, _PydanticValidationError):
+        return None
+    if not isinstance(decoded_err, TaskError):
+        return None
+    return TaskResult(err=decoded_err)
 
 
 def _ser(result: SerdeResult[str], context: str, fallback: str | None = None) -> str | None:
@@ -257,6 +415,7 @@ async def enqueue_workflow_task(
     workflow_id: str,
     task_index: int,
     all_dep_results: dict[int, 'TaskResult[Any, TaskError]'],
+    all_dep_task_names: dict[int, str] | None = None,
     broker: 'PostgresBroker | None' = None,
 ) -> str | None:
     """
@@ -380,19 +539,62 @@ async def enqueue_workflow_task(
                     return None
                 dep_result = all_dep_results.get(dep_index)
                 if dep_result is not None:
-                    # Serialize TaskResult for transport
-                    dep_ser = _ser(dumps_json(dep_result), f'dep_result for {kwarg_name}')
-                    if dep_ser is None:
+                    source_task_name = (
+                        all_dep_task_names.get(dep_index)
+                        if all_dep_task_names is not None
+                        else None
+                    )
+                    if source_task_name is None:
                         await _fail_enqueued_task(
                             session, workflow_id, task_index,
-                            f'Failed to serialize dep_result for kwarg {kwarg_name!r} (task {task_index})',
+                            (
+                                f'Missing source task name for dep_index '
+                                f'{dep_index} (kwarg {kwarg_name!r}, '
+                                f'task {task_index}); cannot encode '
+                                f'args_from envelope'
+                            ),
+                            broker,
+                            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+                        )
+                        return None
+                    app = broker.app if broker is not None else None
+                    source_ok_type = _resolve_source_ok_type(
+                        app, source_task_name,
+                    )
+                    if source_ok_type is None:
+                        await _fail_enqueued_task(
+                            session, workflow_id, task_index,
+                            (
+                                f'Source task {source_task_name!r} not '
+                                f'registered or missing task_ok_type; '
+                                f'cannot encode args_from envelope for '
+                                f'kwarg {kwarg_name!r} (task '
+                                f'{task_index})'
+                            ),
+                            broker,
+                            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+                        )
+                        return None
+                    try:
+                        inner = encode_task_result(
+                            dep_result, source_ok_type,
+                        )
+                    except (StrictJsonError, _PydanticValidationError) as exc:
+                        await _fail_enqueued_task(
+                            session, workflow_id, task_index,
+                            (
+                                f'encode_task_result failed for '
+                                f'kwarg {kwarg_name!r} (task '
+                                f'{task_index}): {exc}'
+                            ),
                             broker,
                             error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
                         )
                         return None
                     kwargs[kwarg_name] = {
-                        '__horsies_taskresult__': True,
-                        'data': dep_ser,
+                        _ENGINE_KEY_TASKRESULT_ENVELOPE: True,
+                        'source_task_name': source_task_name,
+                        'inner': inner,
                     }
 
     # Inject workflow_ctx if workflow_ctx_from is set
@@ -404,13 +606,14 @@ async def enqueue_workflow_task(
             task_index=task_index,
             task_name=row.task_name,
             ctx_from_ids=ctx_from_ids,
+            app=broker.app if broker is not None else None,
         )
         # Will be filtered out by worker if task doesn't declare workflow_ctx param
-        kwargs['__horsies_workflow_ctx__'] = ctx_data
+        kwargs[_ENGINE_KEY_WORKFLOW_CTX] = ctx_data
 
     # Inject workflow metadata for tasks that declare workflow_meta.
     # Worker will filter it out if the function does not accept workflow_meta.
-    kwargs['__horsies_workflow_meta__'] = {
+    kwargs[_ENGINE_KEY_WORKFLOW_META] = {
         'workflow_id': workflow_id,
         'task_index': task_index,
         'task_name': row.task_name,
@@ -481,8 +684,9 @@ async def enqueue_subworkflow_task(
     workflow_id: str,
     task_index: int,
     all_dep_results: dict[int, 'TaskResult[Any, TaskError]'],
-    parent_depth: int,
-    root_workflow_id: str,
+    all_dep_task_names: dict[int, str] | None = None,
+    parent_depth: int = 0,
+    root_workflow_id: str | None = None,
 ) -> str | None:
     """
     Start a child workflow for a SubWorkflowNode.
@@ -618,19 +822,60 @@ async def enqueue_subworkflow_task(
                     return None
                 dep_result = all_dep_results.get(dep_index)
                 if dep_result is not None:
-                    # Serialize TaskResult for transport
-                    dep_ser = _ser(dumps_json(dep_result), f'dep_result for {kwarg_name}')
-                    if dep_ser is None:
+                    source_task_name = (
+                        all_dep_task_names.get(dep_index)
+                        if all_dep_task_names is not None
+                        else None
+                    )
+                    if source_task_name is None:
                         await _fail_enqueued_task(
                             session, workflow_id, task_index,
-                            f'Failed to serialize dep_result for kwarg {kwarg_name!r} (subworkflow task {task_index})',
+                            (
+                                f'Missing source task name for dep_index '
+                                f'{dep_index} (kwarg {kwarg_name!r}, '
+                                f'subworkflow task {task_index})'
+                            ),
+                            broker,
+                            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+                        )
+                        return None
+                    source_ok_type = _resolve_source_ok_type(
+                        broker.app, source_task_name,
+                    )
+                    if source_ok_type is None:
+                        await _fail_enqueued_task(
+                            session, workflow_id, task_index,
+                            (
+                                f'Source task {source_task_name!r} not '
+                                f'registered or missing task_ok_type; '
+                                f'cannot encode args_from envelope for '
+                                f'kwarg {kwarg_name!r} (subworkflow '
+                                f'task {task_index})'
+                            ),
+                            broker,
+                            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+                        )
+                        return None
+                    try:
+                        inner = encode_task_result(
+                            dep_result, source_ok_type,
+                        )
+                    except (StrictJsonError, _PydanticValidationError) as exc:
+                        await _fail_enqueued_task(
+                            session, workflow_id, task_index,
+                            (
+                                f'encode_task_result failed for kwarg '
+                                f'{kwarg_name!r} (subworkflow task '
+                                f'{task_index}): {exc}'
+                            ),
                             broker,
                             error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
                         )
                         return None
                     kwargs[kwarg_name] = {
-                        '__horsies_taskresult__': True,
-                        'data': dep_ser,
+                        _ENGINE_KEY_TASKRESULT_ENVELOPE: True,
+                        'source_task_name': source_task_name,
+                        'inner': inner,
                     }
 
     # 4. Build child WorkflowSpec (parameterized)
@@ -833,11 +1078,11 @@ async def enqueue_subworkflow_task(
                 child_task_options_json = _ser(dumps_json(child_base_options), 'child task_options')
 
             # Strict-serde: route child TaskNode kwargs through the typed
-            # codec so legacy `__horsies_*` keys in user-data positions
-            # fail closed before storage. Without this, smuggled
-            # `__horsies_taskresult__` envelopes in static kwargs would
+            # codec so reserved-namespace keys (`__h_*` / `__horsies_*`)
+            # in user-data positions fail closed before storage. Without
+            # this, smuggled args_from envelopes in static kwargs would
             # reach the worker via `child_runner.py`'s args_from path
-            # and route to legacy `rehydrate_value` (class-identity import).
+            # and bypass the typed decode there.
             try:
                 child_task_underlying_fn = underlying_task_fn(child_task.fn)
                 encoded_child_task_kwargs = dict(
@@ -935,11 +1180,14 @@ async def enqueue_subworkflow_task(
                     child_id,
                     child_root.index,
                     {},
+                    {},
                     parent_depth + 1,
                     root_workflow_id,
                 )
             else:
-                await enqueue_workflow_task(session, child_id, child_root.index, {}, broker)
+                await enqueue_workflow_task(
+                    session, child_id, child_root.index, {}, {}, broker,
+                )
 
     logger.info(f'Started child workflow {child_id} for {workflow_name}:{task_index}')
     return child_id
@@ -953,6 +1201,8 @@ async def _build_workflow_context_data(
     task_index: int,
     task_name: str,
     ctx_from_ids: list[str],
+    *,
+    app: 'Horsies | None' = None,
 ) -> dict[str, Any]:
     """
     Build serializable workflow context data.
@@ -962,17 +1212,40 @@ async def _build_workflow_context_data(
 
     Results are keyed by node_id for stable lookup in WorkflowContext.
     Also fetches SubWorkflowSummary for SubWorkflowNodes.
+
+    Strict-serde phase 6: each entry in ``results_by_id`` is the wire
+    envelope produced by ``encode_task_result(tr, source_ok_type)``,
+    not the legacy `dumps_json(tr)` string. The worker decodes per
+    entry against the source-node ``task_ok_type``.
     """
     # Fetch results for the specified node_ids
     dep_results = await get_dependency_results_with_names(
-        session, workflow_id, ctx_from_ids
+        session, workflow_id, ctx_from_ids, app=app,
     )
 
-    results_by_id: dict[str, str] = {}
+    results_by_id: dict[str, dict[str, Json] | None] = {}
     for node_id, result in dep_results.by_id.items():
-        ser = _ser(dumps_json(result), 'workflow ctx result', fallback='null')
-        if ser is not None:
-            results_by_id[node_id] = ser
+        source_task_name = dep_results.task_name_by_id.get(node_id)
+        source_ok_type = (
+            _resolve_source_ok_type(app, source_task_name)
+            if source_task_name is not None
+            else None
+        )
+        if source_ok_type is None:
+            # No typed encode possible — store None; downstream worker
+            # surfaces a sentinel TaskError when this entry is read.
+            results_by_id[node_id] = None
+            continue
+        try:
+            results_by_id[node_id] = encode_task_result(
+                result, source_ok_type,
+            )
+        except (StrictJsonError, _PydanticValidationError) as exc:
+            logger.warning(
+                f'encode_task_result failed for ctx node {node_id!r}: '
+                f'{exc}; storing null'
+            )
+            results_by_id[node_id] = None
 
     # Fetch summaries for SubWorkflowNodes
     summaries_by_id: dict[str, str] = {}
@@ -992,6 +1265,10 @@ async def _build_workflow_context_data(
         'task_index': task_index,
         'task_name': task_name,
         'results_by_id': results_by_id,
+        # Strict-serde phase 6: child runner needs task names per
+        # node_id to look up source `task_ok_type` for typed decode of
+        # each envelope in `results_by_id`.
+        'task_name_by_id': dict(dep_results.task_name_by_id),
         'summaries_by_id': summaries_by_id,
     }
 
@@ -1276,17 +1553,25 @@ async def try_make_ready_and_enqueue(
             return
 
     # 6. Fetch dependency results and enqueue
-    dep_results = await get_dependency_results(session, workflow_id, dependencies)
+    dep_results, dep_task_names = await get_dependency_results(
+        session,
+        workflow_id,
+        dependencies,
+        app=broker.app if broker is not None else None,
+    )
 
     if is_subworkflow and broker is not None:
         # SubWorkflowNode: start child workflow
         actual_root = root_workflow_id or workflow_id
         await enqueue_subworkflow_task(
-            session, broker, workflow_id, task_index, dep_results, depth, actual_root
+            session, broker, workflow_id, task_index, dep_results,
+            dep_task_names, depth, actual_root,
         )
     else:
         # Regular TaskNode: enqueue as task
-        await enqueue_workflow_task(session, workflow_id, task_index, dep_results, broker)
+        await enqueue_workflow_task(
+            session, workflow_id, task_index, dep_results, dep_task_names, broker,
+        )
 
 
 
@@ -1298,6 +1583,11 @@ class DependencyResults:
         self.by_index: dict[int, 'TaskResult[Any, TaskError]'] = {}
         self.by_name: dict[str, 'TaskResult[Any, TaskError]'] = {}
         self.by_id: dict[str, 'TaskResult[Any, TaskError]'] = {}
+        # node_id → task_name mapping. Strict-serde phase 6 needs the
+        # task name per node so the engine can look up
+        # ``task_ok_type`` for per-entry ``encode_task_result``
+        # encoding when building the workflow_ctx_data envelope.
+        self.task_name_by_id: dict[str, str] = {}
 
 
 
@@ -1306,17 +1596,33 @@ async def get_dependency_results(
     session: AsyncSession,
     workflow_id: str,
     dependency_indices: list[int],
-) -> dict[int, 'TaskResult[Any, TaskError]']:
+    *,
+    app: 'Horsies | None' = None,
+) -> tuple[dict[int, 'TaskResult[Any, TaskError]'], dict[int, str]]:
     """
     Fetch TaskResults for dependencies in terminal states.
 
     - COMPLETED/FAILED: returns actual TaskResult from stored result
     - SKIPPED: returns sentinel TaskResult with UPSTREAM_SKIPPED error
+
+    Strict-serde phase 6: decode each row's stored result via
+    ``decode_task_result(raw, ok_type)`` where ``ok_type`` comes from the
+    locally registered task identified by ``task_name``. ``app`` is
+    required for typed decode; when omitted (legacy callers), falls
+    back to a ``RESULT_DESERIALIZATION_ERROR`` sentinel so the caller
+    keeps explicit failure visibility instead of silently returning
+    wrongly-typed values.
+
+    Returns:
+        Tuple of:
+          - dict mapping task_index → TaskResult
+          - dict mapping task_index → task_name (for envelope source
+            metadata during args_from emission)
     """
     from horsies.core.models.tasks import TaskError, TaskResult
 
     if not dependency_indices:
-        return {}
+        return ({}, {})
 
     result = await session.execute(
         GET_DEPENDENCY_RESULTS_SQL,
@@ -1328,10 +1634,13 @@ async def get_dependency_results(
     )
 
     results: dict[int, TaskResult[Any, TaskError]] = {}
+    task_names_by_index: dict[int, str] = {}
     for row in result.fetchall():
         task_index = row.task_index
+        task_name = row.task_name
         status = row.status
         stored_result = row.result
+        task_names_by_index[task_index] = task_name
 
         if status == WorkflowTaskStatus.SKIPPED.value:
             # Inject sentinel TaskResult for SKIPPED dependencies
@@ -1343,29 +1652,19 @@ async def get_dependency_results(
                 )
             )
         elif stored_result:
-            deser = _deser_json(stored_result, 'dep result json')
-            if deser is None:
-                results[task_index] = TaskResult(
-                    err=TaskError(
-                        error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                        message=f'Dependency result JSON corrupt (task_index={task_index})',
-                        data={'workflow_id': workflow_id, 'task_index': task_index, 'stage': 'json_parse', 'status': status},
-                    ),
-                )
-                continue
-            parsed_tr = task_result_from_json(deser)
-            if is_err(parsed_tr):
-                results[task_index] = TaskResult(
-                    err=TaskError(
-                        error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                        message=f'Dependency result deser failed (task_index={task_index}): {parsed_tr.err_value}',
-                        data={'workflow_id': workflow_id, 'task_index': task_index, 'stage': 'task_result_parse', 'status': status},
-                    ),
-                )
-                continue
-            results[task_index] = parsed_tr.ok_value
+            decoded_tr = _decode_stored_task_result(
+                stored_result,
+                app=app,
+                task_name=task_name,
+                context={
+                    'workflow_id': workflow_id,
+                    'task_index': task_index,
+                    'status': status,
+                },
+            )
+            results[task_index] = decoded_tr
 
-    return results
+    return (results, task_names_by_index)
 
 
 
@@ -1374,6 +1673,8 @@ async def get_dependency_results_with_names(
     session: AsyncSession,
     workflow_id: str,
     dependency_node_ids: list[str],
+    *,
+    app: 'Horsies | None' = None,
 ) -> DependencyResults:
     """
     Fetch TaskResults with index, name, and node_id mappings.
@@ -1381,6 +1682,12 @@ async def get_dependency_results_with_names(
 
     - COMPLETED/FAILED: returns actual TaskResult from stored result
     - SKIPPED: returns sentinel TaskResult with UPSTREAM_SKIPPED error
+
+    Strict-serde phase 6: each stored result is decoded via
+    ``decode_task_result`` against the source task's ``task_ok_type``
+    (looked up by ``task_name`` in ``app.tasks``). ``app`` is required
+    for typed decode; when omitted, decode failures surface as
+    ``RESULT_DESERIALIZATION_ERROR`` sentinels.
     """
     from horsies.core.models.tasks import TaskError, TaskResult
 
@@ -1415,33 +1722,23 @@ async def get_dependency_results_with_names(
                 )
             )
         elif stored_result:
-            deser = _deser_json(stored_result, 'dep result with names json')
-            if deser is None:
-                task_result = TaskResult(
-                    err=TaskError(
-                        error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                        message=f'Dependency result JSON corrupt (task_index={task_index})',
-                        data={'workflow_id': workflow_id, 'task_index': task_index, 'stage': 'json_parse', 'status': status},
-                    ),
-                )
-            else:
-                parsed_tr = task_result_from_json(deser)
-                if is_err(parsed_tr):
-                    task_result = TaskResult(
-                        err=TaskError(
-                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                            message=f'Dependency result deser failed (task_index={task_index}): {parsed_tr.err_value}',
-                            data={'workflow_id': workflow_id, 'task_index': task_index, 'stage': 'task_result_parse', 'status': status},
-                        ),
-                    )
-                else:
-                    task_result = parsed_tr.ok_value
+            task_result = _decode_stored_task_result(
+                stored_result,
+                app=app,
+                task_name=task_name,
+                context={
+                    'workflow_id': workflow_id,
+                    'task_index': task_index,
+                    'status': status,
+                },
+            )
         else:
             continue  # No result to include
 
         dep_results.by_index[task_index] = task_result
         if node_id is not None:
             dep_results.by_id[node_id] = task_result
+            dep_results.task_name_by_id[node_id] = task_name
         # Use unique key to avoid collisions when same task appears multiple times
         unique_key = f'{task_name}#{task_index}'
         dep_results.by_name[unique_key] = task_result
@@ -1603,15 +1900,21 @@ async def on_subworkflow_complete(
         return
 
     # 2. Build SubWorkflowSummary
+    # SubWorkflowSummary.output is `Any` — typed decode is the parent
+    # task's concern (it'll get the value through args_from / ctx_from
+    # with the workflow's declared OutT). Here we extract the raw ok
+    # payload from the envelope without typed decode; the parent
+    # decodes properly when it consumes the summary downstream.
     child_output: Any = None
     if child_result_json:
         deser = _deser_json(child_result_json, 'child result json')
-        if deser is not None:
-            parsed_tr = task_result_from_json(deser)
-            if not is_err(parsed_tr):
-                parsed_result = parsed_tr.ok_value
-                if parsed_result.is_ok():
-                    child_output = parsed_result.ok
+        if isinstance(deser, dict) and deser.get('__h_task_result__') is True:
+            envelope = cast('dict[str, Any]', deser)
+            ok_slot = envelope.get('ok')
+            err_slot = envelope.get('err')
+            if err_slot is None:
+                # Success path — ok slot is the raw encoded value.
+                child_output = ok_slot
 
     error_summary: str | None = None
     if child_error:
@@ -1789,13 +2092,13 @@ async def get_workflow_failure_error(
         )
         row = result.fetchone()
         if row and row.result:
-            deser = _deser_json(row.result, 'first failed task result')
-            if deser is not None:
-                parsed_tr = task_result_from_json(deser)
-                if not is_err(parsed_tr):
-                    task_result = parsed_tr.ok_value
-                    if task_result.is_err() and task_result.err:
-                        return _ser(dumps_json(task_result.err), 'task error', fallback='null')
+            # Failed-task path needs only the err slot — TaskError has a
+            # fixed schema so decode without ok_type via _decode_err_only.
+            err_tr = _decode_err_only(row.result)
+            if err_tr is not None and err_tr.is_err() and err_tr.err:
+                return _ser(
+                    dumps_json(err_tr.err), 'task error', fallback='null',
+                )
         return None
 
     # Guard: JSONB may come back as string depending on driver
@@ -1822,13 +2125,13 @@ async def get_workflow_failure_error(
         )
         row = result.fetchone()
         if row and row.result:
-            deser = _deser_json(row.result, 'first failed required task result')
-            if deser is not None:
-                parsed_tr = task_result_from_json(deser)
-                if not is_err(parsed_tr):
-                    task_result = parsed_tr.ok_value
-                    if task_result.is_err() and task_result.err:
-                        return _ser(dumps_json(task_result.err), 'task error', fallback='null')
+            # Failed-required-task path needs only the err slot (TaskError
+            # has a fixed schema; ok_type not needed).
+            err_tr = _decode_err_only(row.result)
+            if err_tr is not None and err_tr.is_err() and err_tr.err:
+                return _ser(
+                    dumps_json(err_tr.err), 'task error', fallback='null',
+                )
 
     # No required task failed, but no case was satisfied (all SKIPPED?)
     return _ser(
@@ -1873,40 +2176,56 @@ async def get_workflow_final_result(
         output_row = output_result.fetchone()
         return output_row.result if output_row and output_row.result else 'null'
 
-    # Find terminal tasks (not in any other task's dependencies)
+    # Find terminal tasks (not in any other task's dependencies).
+    # Strict-serde phase 5/6: each row already carries a
+    # `__h_task_result__` envelope (worker emits these via
+    # `encode_task_result`). Per-node typed decode happens at the
+    # WorkflowHandle layer using the spec's source-node ok_types.
+    # Here we store the raw envelopes verbatim into the workflow's
+    # outer envelope so the handle can dispatch on them.
     terminal_results = await session.execute(
         GET_TERMINAL_TASK_RESULTS_SQL,
         {'wf_id': workflow_id},
     )
 
-    # Build dict of terminal results, keyed by node_id
-    # This ensures WorkflowHandle.get() returns dict[str, TaskResult], not raw dicts
-    results_dict: dict[str, Any] = {}
+    results_dict: dict[str, Json] = {}
+    task_name_by_id: dict[str, str] = {}
     for row in terminal_results.fetchall():
         node_id = row.node_id
         if not isinstance(node_id, str):
             continue
-        unique_key = node_id
+        task_name_by_id[node_id] = row.task_name
         if row.result:
-            # Rehydrate to TaskResult and serialize back (will be parsed on get())
             deser = _deser_json(row.result, 'terminal task result json')
-            if deser is not None:
-                parsed_tr = task_result_from_json(deser)
-                if not is_err(parsed_tr):
-                    results_dict[unique_key] = parsed_tr.ok_value
-                else:
-                    logger.warning(f'task_result_from_json failed (terminal task): {parsed_tr.err_value}')
-                    results_dict[unique_key] = None
+            if isinstance(deser, dict) and deser.get('__h_task_result__') is True:
+                results_dict[node_id] = cast('Json', deser)
             else:
-                results_dict[unique_key] = None
+                # Corrupt / pre-strict row — store null; handle layer
+                # surfaces a RESULT_DESERIALIZATION_ERROR per-entry.
+                logger.warning(
+                    f'Terminal task {node_id!r} result is not a '
+                    f'strict-serde envelope; storing null'
+                )
+                results_dict[node_id] = None
         else:
-            results_dict[unique_key] = None
+            results_dict[node_id] = None
 
-    # Wrap in TaskResult so WorkflowHandle._get_result() can parse it
-    from horsies.core.models.tasks import TaskResult
-
-    wrapped_result: TaskResult[dict[str, Any], Any] = TaskResult(ok=results_dict)
-    return _ser(dumps_json(wrapped_result), 'wrapped result', fallback='null')
+    # Outputless workflow envelope. Outer marker is the standard
+    # ``__h_outputless_terminals__`` so the handle's decode path can
+    # distinguish from a normal-output workflow. Each entry in
+    # ``results_by_id`` is itself a ``__h_task_result__`` envelope;
+    # ``task_name_by_id`` lets the handle look up per-node ok_type for
+    # typed decode.
+    outer_envelope: dict[str, Json] = {
+        '__h_task_result__': True,
+        '__h_outputless_terminals__': True,
+        'ok': cast('Json', {
+            'results_by_id': cast('Json', results_dict),
+            'task_name_by_id': cast('Json', task_name_by_id),
+        }),
+        'err': None,
+    }
+    return _ser(dumps_json(outer_envelope), 'outputless workflow result', fallback='null')
 
 
 

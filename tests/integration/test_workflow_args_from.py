@@ -145,7 +145,7 @@ class TestArgsFromInjection:
         # Check wrapper: key present with TaskResult marker
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
         assert 'input_result' in kwargs
-        assert kwargs['input_result']['__horsies_taskresult__'] is True
+        assert kwargs['input_result']['__h_taskresult_envelope__'] is True
 
         # Check inner data: full TaskResult with ok value
         injected = loads_json(kwargs['input_result']['data']).unwrap()
@@ -185,8 +185,8 @@ class TestArgsFromInjection:
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 2)
         assert 'first' in kwargs
         assert 'second' in kwargs
-        assert kwargs['first']['__horsies_taskresult__'] is True
-        assert kwargs['second']['__horsies_taskresult__'] is True
+        assert kwargs['first']['__h_taskresult_envelope__'] is True
+        assert kwargs['second']['__h_taskresult_envelope__'] is True
 
     async def test_args_from_err_result(
         self,
@@ -361,7 +361,7 @@ class TestArgsFromInjection:
         # Check C's kwargs contain UPSTREAM_SKIPPED sentinel for B
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 2)
         assert 'input_result' in kwargs
-        assert kwargs['input_result']['__horsies_taskresult__'] is True
+        assert kwargs['input_result']['__h_taskresult_envelope__'] is True
 
         # Parse the injected TaskResult
         injected_data = loads_json(kwargs['input_result']['data']).unwrap()
@@ -407,7 +407,7 @@ class TestArgsFromInjection:
         # Check B's kwargs contain A's original error (not UPSTREAM_SKIPPED)
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
         assert 'input_result' in kwargs
-        assert kwargs['input_result']['__horsies_taskresult__'] is True
+        assert kwargs['input_result']['__h_taskresult_envelope__'] is True
 
         # Parse the injected TaskResult
         injected_data = loads_json(kwargs['input_result']['data']).unwrap()
@@ -569,7 +569,7 @@ class TestArgsFromInjection:
         # No TaskResult markers injected
         for value in kwargs.values():
             if isinstance(value, dict):
-                assert '__horsies_taskresult__' not in value
+                assert '__h_taskresult_envelope__' not in value
 
     async def test_worker_deserializes_err_taskresult(
         self,
@@ -765,11 +765,11 @@ class TestArgsFromInjection:
         # Check C's kwargs: only 'from_a' injected, nothing from B
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 2)
         assert 'from_a' in kwargs
-        assert kwargs['from_a']['__horsies_taskresult__'] is True
+        assert kwargs['from_a']['__h_taskresult_envelope__'] is True
 
         # Exactly one TaskResult marker in kwargs — B's result not leaked
         taskresult_keys = [
             k for k, v in kwargs.items()
-            if isinstance(v, dict) and v.get('__horsies_taskresult__')
+            if isinstance(v, dict) and v.get('__h_taskresult_envelope__')
         ]
         assert taskresult_keys == ['from_a']

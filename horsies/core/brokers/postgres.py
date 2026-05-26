@@ -12,6 +12,7 @@ from horsies.core.brokers.result_types import (
     BrokerErrorCode,
     BrokerOperationError,
     BrokerResult,
+    RawResultRecord,
 )
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.task_pg import TaskModel, Base
@@ -21,10 +22,7 @@ from horsies.core.models.workflow_pg import (
 )
 from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.types.result import Err, Ok, is_err
-from horsies.core.codec.serde import (
-    loads_json,
-    task_result_from_json,
-)
+from horsies.core.codec.serde import loads_json
 from horsies.core.models.tasks import TaskInfo, TaskAttemptInfo
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.utils.loop_runner import LoopRunner
@@ -332,8 +330,8 @@ class PostgresBroker:
     PostgreSQL-based task broker with LISTEN/NOTIFY for real-time updates.
 
     Provides both async and sync APIs:
-      - Async: enqueue_async(), get_result_async()
-      - Sync: enqueue(), get_result() (run in background event loop)
+      - Async: enqueue_async(), get_raw_result_record_async()
+      - Sync: enqueue(), get_raw_result_record() (run in background loop)
 
     Features:
       - Real-time notifications via PostgreSQL triggers
@@ -846,96 +844,110 @@ class PostgresBroker:
             )
         )
 
-    async def get_result_async(
-        self, task_id: str, timeout_ms: Optional[int] = None
-    ) -> 'TaskResult[Any, TaskError]':
+
+    def _build_raw_result_record(
+        self,
+        row: TaskModel,
+        task_id: str,
+    ) -> BrokerResult[RawResultRecord | None]:
+        """Decode the result column into a ``RawResultRecord``.
+
+        Returns ``Err(INVALID_JSON_PAYLOAD)`` when the stored JSON is
+        malformed (parser failure, NaN / Infinity rejected by the
+        parse-constant guard) or when the top-level payload is neither
+        ``None`` nor a JSON object (the envelope grammar requires a
+        ``dict``). Otherwise wraps the loaded value into the record.
         """
-        Get task result, waiting if necessary.
+        _lr = loads_json(row.result)
+        if is_err(_lr):
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                message=(
+                    f'Result JSON parse failed for task {task_id}: '
+                    f'{_lr.err_value}'
+                ),
+                retryable=False,
+            ))
+        raw_value = _lr.ok_value
+        if raw_value is not None and not isinstance(raw_value, dict):
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                message=(
+                    f'Result for task {task_id} is not a JSON object; '
+                    f'got {type(raw_value).__name__}'
+                ),
+                retryable=False,
+            ))
+        return Ok(RawResultRecord(
+            task_id=task_id,
+            task_name=row.task_name,
+            status=row.status,
+            raw_result=raw_value,
+        ))
 
-        Returns TaskResult for task completion and retrieval outcomes:
-        - Success: TaskResult(ok=value) from task execution
-        - Task error: TaskResult(err=TaskError) from task execution
-        - Retrieval error: TaskResult(err=TaskError) with WAIT_TIMEOUT, TASK_NOT_FOUND, or TASK_CANCELLED
+    async def get_raw_result_record_async(
+        self,
+        task_id: str,
+        timeout_ms: Optional[int] = None,
+    ) -> BrokerResult[RawResultRecord | None]:
+        """Raw broker fetch of a task's stored result envelope.
 
-        Broker failures (e.g., database errors) are returned as BROKER_ERROR.
+        Strict-serde phase 6a primitive. The broker performs no typed
+        decoding; callers at the handle/app layer derive ``ok_type``
+        from ``record.task_name`` and call
+        ``decode_task_result(record.raw_result, ok_type)``.
+
+        Semantics:
+
+        - ``Ok(None)``: row truly absent (no ``TaskModel`` row for
+          ``task_id``).
+        - ``Ok(RawResultRecord(status=COMPLETED|FAILED|EXPIRED, raw_result=<dict>))``:
+          terminal row with a stored payload.
+        - ``Ok(RawResultRecord(status=CANCELLED, raw_result=None))``:
+          task was cancelled before completion.
+        - ``Ok(RawResultRecord(status=<non-terminal>, raw_result=None))``:
+          timeout fired before the row reached a terminal state.
+        - ``Err(BrokerOperationError(INVALID_JSON_PAYLOAD, ...))``:
+          stored JSON failed strict parse (malformed, non-finite
+          float, non-object envelope).
+        - ``Err(...)`` with other codes for DB / listener failures.
         """
-        from horsies.core.models.tasks import (
-            TaskResult,
-            TaskError,
-            OperationalErrorCode,
-            RetrievalCode,
-            OutcomeCode,
-        )
-
         try:
             await self._ensure_initialized()
 
             start_time = asyncio.get_event_loop().time()
 
-            # Convert milliseconds to seconds for internal use
             timeout_seconds: Optional[float] = None
             if timeout_ms is not None:
                 timeout_seconds = timeout_ms / 1000.0
 
-            # Quick path - check if task is already completed
+            # Quick path: row may already be terminal.
             async with self.session_factory() as session:
                 row = await session.get(TaskModel, task_id)
                 if row is None:
-                    self.logger.error(f'Task {task_id} not found')
-                    return TaskResult(
-                        err=TaskError(
-                            error_code=RetrievalCode.TASK_NOT_FOUND,
-                            message=f'Task {task_id} not found in database',
-                            data={'task_id': task_id},
-                        )
-                    )
+                    return Ok(None)
                 if row.status in (
                     TaskStatus.COMPLETED,
                     TaskStatus.FAILED,
                     TaskStatus.EXPIRED,
                 ):
-                    self.logger.info(f'Task {task_id} already completed')
-                    _lr = loads_json(row.result)
-                    if is_err(_lr):
-                        return TaskResult(
-                            err=TaskError(
-                                error_code=OperationalErrorCode.BROKER_ERROR,
-                                message=f'Result JSON corrupt: {_lr.err_value}',
-                                data={'task_id': task_id},
-                            )
-                        )
-                    _trr = task_result_from_json(_lr.ok_value)
-                    if is_err(_trr):
-                        return TaskResult(
-                            err=TaskError(
-                                error_code=OperationalErrorCode.BROKER_ERROR,
-                                message=f'Result deser failed: {_trr.err_value}',
-                                data={'task_id': task_id},
-                            )
-                        )
-                    return _trr.ok_value
+                    return self._build_raw_result_record(row, task_id)
                 if row.status == TaskStatus.CANCELLED:
-                    self.logger.info(f'Task {task_id} was cancelled')
-                    return TaskResult(
-                        err=TaskError(
-                            error_code=OutcomeCode.TASK_CANCELLED,
-                            message=f'Task {task_id} was cancelled before completion',
-                            data={'task_id': task_id},
-                        )
-                    )
+                    return Ok(RawResultRecord(
+                        task_id=task_id,
+                        task_name=row.task_name,
+                        status=row.status,
+                        raw_result=None,
+                    ))
 
-            # Listen for task completion notifications when listener loop ownership permits.
-            # Cross-loop RuntimeError (programming error) or infrastructure Err both
-            # fall back to pure DB polling.
-            q = None
+            # Listen + poll loop.
+            q: asyncio.Queue[Any] | None = None
             try:
                 listen_r = await self.listener.listen('task_done')
             except RuntimeError as e:
                 self.logger.debug(
-                    'LISTEN unavailable; falling back to polling for task_done. '
-                    'If using PgBouncer transaction pooling, configure '
-                    'PostgresConfig.session_database_url with a direct/session-capable '
-                    'Postgres URL. Original error: %s',
+                    'LISTEN unavailable; falling back to polling for '
+                    'task_done. Original error: %s',
                     e,
                 )
             else:
@@ -944,34 +956,48 @@ class PostgresBroker:
                         q = queue
                     case Err(listen_err):
                         self.logger.debug(
-                            'LISTEN unavailable; falling back to polling for task_done. '
-                            'If using PgBouncer transaction pooling, configure '
-                            'PostgresConfig.session_database_url with a direct/session-capable '
-                            'Postgres URL. Original error: %s',
+                            'LISTEN unavailable; falling back to polling '
+                            'for task_done. Original error: %s',
                             listen_err.message,
                         )
+
             try:
                 poll_interval = 5.0 if q is not None else 0.2
-
                 while True:
-                    # Calculate remaining timeout
-                    remaining_timeout = None
-                    if timeout_seconds:
-                        elapsed = asyncio.get_event_loop().time() - start_time
+                    remaining_timeout: float | None = None
+                    if timeout_seconds is not None:
+                        elapsed = (
+                            asyncio.get_event_loop().time() - start_time
+                        )
                         remaining_timeout = timeout_seconds - elapsed
                         if remaining_timeout <= 0:
-                            return TaskResult(
-                                err=TaskError(
-                                    error_code=RetrievalCode.WAIT_TIMEOUT,
-                                    message=f'Timed out waiting for task {task_id} after {timeout_ms}ms. Task may still be running.',
-                                    data={'task_id': task_id, 'timeout_ms': timeout_ms},
-                                )
-                            )
+                            # Timeout. Surface current row state so the
+                            # caller can map to WAIT_TIMEOUT / outcome
+                            # codes per their UX. The row may have moved
+                            # to terminal between checks; one more read
+                            # to capture the latest snapshot.
+                            async with self.session_factory() as session:
+                                row = await session.get(TaskModel, task_id)
+                                if row is None:
+                                    return Ok(None)
+                                if row.status in (
+                                    TaskStatus.COMPLETED,
+                                    TaskStatus.FAILED,
+                                    TaskStatus.EXPIRED,
+                                ):
+                                    return self._build_raw_result_record(
+                                        row, task_id,
+                                    )
+                                return Ok(RawResultRecord(
+                                    task_id=task_id,
+                                    task_name=row.task_name,
+                                    status=row.status,
+                                    raw_result=None,
+                                ))
 
-                    # Wait for NOTIFY or timeout (whichever comes first)
                     wait_time = (
                         min(poll_interval, remaining_timeout)
-                        if remaining_timeout
+                        if remaining_timeout is not None
                         else poll_interval
                     )
 
@@ -979,88 +1005,71 @@ class PostgresBroker:
                         try:
 
                             async def _wait_for_task() -> None:
-                                # Filter notifications: only process our specific task_id
                                 while True:
-                                    note = (
-                                        await q.get()
-                                    )  # Blocks until any task_done notification
-                                    if (
-                                        note.payload == task_id
-                                    ):  # Check if it's for our task
-                                        return  # Found our task completion!
+                                    note = await q.get()
+                                    if note.payload == task_id:
+                                        return
 
-                            # Wait for our specific task notification with timeout
-                            await asyncio.wait_for(_wait_for_task(), timeout=wait_time)
+                            await asyncio.wait_for(
+                                _wait_for_task(), timeout=wait_time,
+                            )
                         except asyncio.TimeoutError:
                             pass
                     else:
                         await asyncio.sleep(wait_time)
 
-                    # Poll database each cycle (notification path still polls to avoid
-                    # races where NOTIFY arrives slightly before terminal row commit).
                     async with self.session_factory() as session:
                         row = await session.get(TaskModel, task_id)
                         if row is None:
-                            return TaskResult(
-                                err=TaskError(
-                                    error_code=RetrievalCode.TASK_NOT_FOUND,
-                                    message=f'Task {task_id} not found in database',
-                                    data={'task_id': task_id},
-                                )
-                            )
+                            return Ok(None)
                         if row.status in (
                             TaskStatus.COMPLETED,
                             TaskStatus.FAILED,
                             TaskStatus.EXPIRED,
                         ):
-                            self.logger.debug(
-                                f'Task {task_id} completed, polling database'
-                            )
-                            _lr = loads_json(row.result)
-                            if is_err(_lr):
-                                return TaskResult(
-                                    err=TaskError(
-                                        error_code=OperationalErrorCode.BROKER_ERROR,
-                                        message=f'Result JSON corrupt: {_lr.err_value}',
-                                        data={'task_id': task_id},
-                                    )
-                                )
-                            _trr = task_result_from_json(_lr.ok_value)
-                            if is_err(_trr):
-                                return TaskResult(
-                                    err=TaskError(
-                                        error_code=OperationalErrorCode.BROKER_ERROR,
-                                        message=f'Result deser failed: {_trr.err_value}',
-                                        data={'task_id': task_id},
-                                    )
-                                )
-                            return _trr.ok_value
+                            return self._build_raw_result_record(row, task_id)
                         if row.status == TaskStatus.CANCELLED:
-                            self.logger.error(f'Task {task_id} was cancelled')
-                            return TaskResult(
-                                err=TaskError(
-                                    error_code=OutcomeCode.TASK_CANCELLED,
-                                    message=f'Task {task_id} was cancelled before completion',
-                                    data={'task_id': task_id},
-                                )
-                            )
-
+                            return Ok(RawResultRecord(
+                                task_id=task_id,
+                                task_name=row.task_name,
+                                status=row.status,
+                                raw_result=None,
+                            ))
             finally:
-                # Clean up subscription. If this was the last local waiter,
-                # listener.unsubscribe() also drops server-side LISTEN state.
                 if q is not None:
                     await self._unsubscribe_task_done_safely(q)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self.logger.exception('Broker error while retrieving task result')
-            return TaskResult(
-                err=TaskError(
-                    error_code=OperationalErrorCode.BROKER_ERROR,
-                    message='Broker error while retrieving task result',
-                    data={'task_id': task_id, 'timeout_ms': timeout_ms},
-                    exception=exc,
-                )
+            self.logger.exception(
+                'Broker error while retrieving raw task result record',
+            )
+            return _broker_err(
+                BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+                f'Broker error while retrieving task {task_id}: {exc}',
+                exc,
+            )
+
+    def get_raw_result_record(
+        self,
+        task_id: str,
+        timeout_ms: Optional[int] = None,
+    ) -> BrokerResult[RawResultRecord | None]:
+        """Synchronous wrapper around ``get_raw_result_record_async``.
+
+        Runs the async path on the broker's background event loop via
+        ``LoopRunner``.
+        """
+        try:
+            return self._loop_runner.call(
+                self.get_raw_result_record_async, task_id, timeout_ms,
+            )
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+                f'Sync bridge failed for raw result fetch ({task_id}): '
+                f'{exc}',
+                exc,
             )
 
     async def _unsubscribe_task_done_safely(self, q: asyncio.Queue[Any]) -> None:
@@ -1524,38 +1533,6 @@ class PostgresBroker:
                 exc,
             )
 
-    def get_result(
-        self, task_id: str, timeout_ms: Optional[int] = None
-    ) -> 'TaskResult[Any, TaskError]':
-        """
-        Synchronous result retrieval (runs get_result_async in background loop).
-
-        Args:
-            task_id: The task ID to retrieve result for
-            timeout_ms: Maximum time to wait for result (milliseconds)
-
-        Returns:
-            TaskResult - success, task error, retrieval error, or broker error
-        """
-        from horsies.core.models.tasks import (
-            TaskResult,
-            TaskError,
-            OperationalErrorCode,
-        )
-
-        try:
-            return self._loop_runner.call(self.get_result_async, task_id, timeout_ms)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            return TaskResult(
-                err=TaskError(
-                    error_code=OperationalErrorCode.BROKER_ERROR,
-                    message='Broker error while retrieving task result',
-                    data={'task_id': task_id, 'timeout_ms': timeout_ms},
-                    exception=exc,
-                )
-            )
 
     async def get_task_info_async(
         self,
@@ -1611,7 +1588,7 @@ class PostgresBroker:
                 if row is None:
                     return Ok(None)
 
-                result_value = None
+                raw_result_value: dict[str, Any] | None = None
                 failed_reason = None
 
                 idx = 0
@@ -1653,24 +1630,39 @@ class PostgresBroker:
                 idx += 1
 
                 if include_result:
-                    raw_result = row[idx]
+                    raw_result_text = row[idx]
                     idx += 1
-                    if raw_result:
-                        _lr = loads_json(raw_result)
+                    if raw_result_text:
+                        _lr = loads_json(raw_result_text)
                         if is_err(_lr):
-                            return _broker_err(
-                                BrokerErrorCode.TASK_INFO_QUERY_FAILED,
-                                f'Result JSON corrupt: {_lr.err_value}',
-                                _lr.err_value,
-                            )
-                        _trr = task_result_from_json(_lr.ok_value)
-                        if is_err(_trr):
-                            return _broker_err(
-                                BrokerErrorCode.TASK_INFO_QUERY_FAILED,
-                                f'Result deser failed: {_trr.err_value}',
-                                _trr.err_value,
-                            )
-                        result_value = _trr.ok_value
+                            return Err(BrokerOperationError(
+                                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                                message=(
+                                    f'Result JSON parse failed for task '
+                                    f'{task_id}: {_lr.err_value}'
+                                ),
+                                retryable=False,
+                            ))
+                        loaded = _lr.ok_value
+                        if loaded is not None and not isinstance(loaded, dict):
+                            return Err(BrokerOperationError(
+                                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                                message=(
+                                    f'Result for task {task_id} is not a '
+                                    f'JSON object; got '
+                                    f'{type(loaded).__name__}'
+                                ),
+                                retryable=False,
+                            ))
+                        # Broker stays infrastructure: no typed decode
+                        # here. The app-level `get_task_info` does the
+                        # `decode_task_result` step using the local task
+                        # catalog. (Strict-serde design §6.)
+                        raw_result_value = loaded
+                    else:
+                        raw_result_value = None
+                else:
+                    raw_result_value = None
 
                 if include_failed_reason:
                     failed_reason = row[idx]
@@ -1721,7 +1713,9 @@ class PostgresBroker:
                         worker_pid=worker_pid,
                         worker_process_name=worker_process_name,
                         error_code=error_code_value,
-                        result=result_value,
+                        raw_result=raw_result_value,
+                        decoded_result=None,
+                        result_decoded=False,
                         failed_reason=failed_reason,
                         attempts=attempts,
                     )

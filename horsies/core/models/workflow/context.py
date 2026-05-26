@@ -249,9 +249,17 @@ class WorkflowContext(BaseModel):
         cls,
         raw_results: Any,
     ) -> dict[str, TaskResult[Any, TaskError]]:
-        from horsies.core.codec.serde import task_result_from_json
+        """Strict-serde phase 6 (design §6 / plan §H).
+
+        ``WorkflowContext`` no longer decodes raw envelopes inside this
+        validator — decode happens at the engine/child-runner boundary
+        where ``node_id → ok_type`` is known via the workflow spec
+        and local task registry. Here we accept only pre-typed
+        ``TaskResult`` instances (the shape produced upstream) and
+        reject raw dicts so a cross-version producer can't slip a
+        wrong-shape value past the type system.
+        """
         from horsies.core.models.tasks import TaskResult
-        from horsies.core.types.result import is_err
 
         if raw_results is None:
             return {}
@@ -263,16 +271,14 @@ class WorkflowContext(BaseModel):
         for key, value in raw_result_map.items():
             if not isinstance(key, str):
                 raise ValueError('WorkflowContext results_by_id keys must be strings')
-            if isinstance(value, TaskResult):
-                results[key] = value
-                continue
-
-            result = task_result_from_json(value)
-            if is_err(result):
+            if not isinstance(value, TaskResult):
                 raise ValueError(
-                    f'Invalid WorkflowContext TaskResult for {key!r}: {result.err_value}'
+                    f'WorkflowContext results_by_id[{key!r}] must be a '
+                    f'TaskResult instance; got {type(value).__name__}. '
+                    f'Strict-serde decodes raw envelopes at the engine/'
+                    f'worker boundary, not inside the model validator.'
                 )
-            results[key] = result.ok_value
+            results[key] = value
         return results
 
     @classmethod

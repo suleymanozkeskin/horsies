@@ -32,6 +32,11 @@ from horsies.core.codec.serde import (
     serialize_task_options,
     dumps_json,
 )
+from horsies.core.codec.typed import (
+    TypeAnnotation,
+    decode_task_result,
+    decode_value,
+)
 from horsies.core.codec.signature_check import (
     SignatureValidationError,
     check_task_signature,
@@ -181,11 +186,22 @@ class TaskHandle(Generic[T]):
     """
 
     def __init__(
-        self, task_id: str, app: Optional['Horsies'] = None, broker_mode: bool = False
+        self,
+        task_id: str,
+        app: Optional['Horsies'] = None,
+        broker_mode: bool = False,
+        ok_type: TypeAnnotation | None = None,
     ):
         self.task_id = task_id
         self._app = app
         self._broker_mode = broker_mode
+        # Strict-serde phase 6: declared OkT for typed decode. ``.send()``
+        # / ``.send_async()`` populate this from the wrapper's
+        # ``task_ok_type``. By-id reconstruction without an app or
+        # registered task leaves this ``None``; ``.get()`` then folds
+        # NO_TYPE_AVAILABLE into the err slot when an ok payload is
+        # present.
+        self.ok_type: TypeAnnotation | None = ok_type
         self._cached_result: Optional[TaskResult[T, TaskError]] = None
         self._result_fetched = False
 
@@ -208,6 +224,129 @@ class TaskHandle(Generic[T]):
         self._cached_result = error_result
         self._result_fetched = True
         return error_result
+
+    def _record_to_task_result(
+        self,
+        broker_result: Any,
+        timeout_ms: Optional[int],
+    ) -> TaskResult[T, TaskError]:
+        """Strict-serde phase 6: map a ``BrokerResult[RawResultRecord | None]``
+        to the typed ``TaskResult`` shape ``.get()`` returns.
+
+        Folds:
+        - ``Err(BrokerOperationError)`` → ``TaskResult(err=BROKER_ERROR)``
+          (or NO_TYPE_AVAILABLE / RESULT_DESERIALIZATION_ERROR for the
+          two strict-serde codes when surfaced by the broker layer).
+        - ``Ok(None)`` → ``TASK_NOT_FOUND``.
+        - ``Ok(record)`` with cancellation status → ``TASK_CANCELLED``.
+        - ``Ok(record)`` with non-terminal status (timeout fired) →
+          ``WAIT_TIMEOUT``.
+        - ``Ok(record)`` with raw_result populated → decode via
+          ``decode_task_result(record.raw_result, self.ok_type)``.
+          When ``ok_type is None`` and the err slot is populated, the
+          err is decoded directly (fast-path). When ``ok_type is None``
+          and the ok slot is populated, return ``NO_TYPE_AVAILABLE``.
+        """
+        from horsies.core.types.result import is_err as _is_err
+        from horsies.core.models.tasks import ContractCode
+
+        if _is_err(broker_result):
+            broker_err = broker_result.err_value
+            code = broker_err.code
+            if code == BrokerErrorCode.NO_TYPE_AVAILABLE:
+                err_code: BuiltInTaskCode = ContractCode.NO_TYPE_AVAILABLE
+            elif code == BrokerErrorCode.INVALID_JSON_PAYLOAD:
+                err_code = OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+            else:
+                err_code = OperationalErrorCode.BROKER_ERROR
+            return self._error_result(
+                error_code=err_code,
+                message=broker_err.message,
+                data={'task_id': self.task_id, 'broker_code': code.value},
+                exception=broker_err.exception,
+            )
+        record = broker_result.ok_value
+        if record is None:
+            return self._error_result(
+                error_code=RetrievalCode.TASK_NOT_FOUND,
+                message=f'Task {self.task_id} not found in database',
+                data={'task_id': self.task_id},
+            )
+        from horsies.core.types.status import TaskStatus as _TaskStatus
+
+        if record.status == _TaskStatus.CANCELLED:
+            return self._error_result(
+                error_code=OutcomeCode.TASK_CANCELLED,
+                message=f'Task {self.task_id} was cancelled before completion',
+                data={'task_id': self.task_id},
+            )
+        if record.raw_result is None:
+            # Non-terminal status with no payload — timeout fired
+            # before the row reached a terminal state. Don't cache —
+            # the next call should retry.
+            tr_timeout: TaskResult[T, TaskError] = TaskResult(
+                err=TaskError(
+                    error_code=RetrievalCode.WAIT_TIMEOUT,
+                    message=(
+                        f'Timed out waiting for task {self.task_id} '
+                        f'after {timeout_ms}ms. Task may still be '
+                        f'running.'
+                    ),
+                    data={
+                        'task_id': self.task_id,
+                        'timeout_ms': timeout_ms,
+                        'status': record.status.value,
+                    },
+                ),
+            )
+            return tr_timeout
+
+        # Terminal record with payload. Decode.
+        raw = record.raw_result
+        # Err-fast-path: if the err slot is populated, decode it
+        # without needing ok_type (TaskError has a fixed schema).
+        err_slot = raw.get('err') if isinstance(raw, dict) else None
+        if err_slot is not None:
+            from horsies.core.models.tasks import TaskError as _TaskError
+
+            try:
+                err_value = decode_value(err_slot, _TaskError)
+            except (StrictJsonError, ValidationError) as exc:
+                return self._error_result(
+                    error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                    message=f'Failed to decode TaskError: {exc}',
+                    data={'task_id': self.task_id},
+                )
+            decoded_err: TaskResult[T, TaskError] = TaskResult(
+                err=cast('TaskError', err_value),
+            )
+            self._cached_result = decoded_err
+            self._result_fetched = True
+            return decoded_err
+
+        # Ok slot path — needs ok_type.
+        if self.ok_type is None:
+            return self._error_result(
+                error_code=ContractCode.NO_TYPE_AVAILABLE,
+                message=(
+                    f'Task {self.task_id} ok-result decode requires '
+                    f'a declared OkT; the handle has none (task not '
+                    f'locally registered). Use raw_result() instead.'
+                ),
+                data={'task_id': self.task_id},
+            )
+        try:
+            decoded = decode_task_result(raw, self.ok_type)
+        except (StrictJsonError, ValidationError) as exc:
+            return self._error_result(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=f'decode_task_result failed: {exc}',
+                data={'task_id': self.task_id},
+            )
+        decoded_tr = cast('TaskResult[T, TaskError]', decoded)
+        self._cached_result = decoded_tr
+        self._result_fetched = True
+        return decoded_tr
 
     def get(
         self,
@@ -235,23 +374,11 @@ class TaskHandle(Generic[T]):
                     return result
 
         if self._broker_mode and self._app:
-            # Fetch from app's broker - broker now returns TaskResult for all cases
             broker = self._app.get_broker()
             try:
-                result = broker.get_result(self.task_id, timeout_ms)
-                # WAIT_TIMEOUT is transient ("not done yet"), not terminal.
-                # Caching it would prevent subsequent get() calls from ever
-                # seeing the real result once the task completes.
-                err_value = result.err
-                is_wait_timeout = (
-                    result.is_err()
-                    and err_value is not None
-                    and err_value.error_code == RetrievalCode.WAIT_TIMEOUT
+                broker_result = broker.get_raw_result_record(
+                    self.task_id, timeout_ms,
                 )
-                if not is_wait_timeout:
-                    self._cached_result = result
-                    self._result_fetched = True
-                return result
             except Exception as exc:
                 return self._error_result(
                     error_code=OperationalErrorCode.BROKER_ERROR,
@@ -259,6 +386,7 @@ class TaskHandle(Generic[T]):
                     data={'task_id': self.task_id},
                     exception=exc,
                 )
+            return self._record_to_task_result(broker_result, timeout_ms)
         else:
             # For synchronous/immediate execution, result should already be set
             match self._cached_result:
@@ -297,23 +425,11 @@ class TaskHandle(Generic[T]):
                     return result
 
         if self._broker_mode and self._app:
-            # Fetch from app's broker - broker now returns TaskResult for all cases
             broker = self._app.get_broker()
             try:
-                result = await broker.get_result_async(self.task_id, timeout_ms)
-                # WAIT_TIMEOUT is transient ("not done yet"), not terminal.
-                # Caching it would prevent subsequent get_async() calls from
-                # ever seeing the real result once the task completes.
-                err_value = result.err
-                is_wait_timeout = (
-                    result.is_err()
-                    and err_value is not None
-                    and err_value.error_code == RetrievalCode.WAIT_TIMEOUT
+                broker_result = await broker.get_raw_result_record_async(
+                    self.task_id, timeout_ms,
                 )
-                if not is_wait_timeout:
-                    self._cached_result = result
-                    self._result_fetched = True
-                return result
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -323,6 +439,7 @@ class TaskHandle(Generic[T]):
                     data={'task_id': self.task_id},
                     exception=exc,
                 )
+            return self._record_to_task_result(broker_result, timeout_ms)
         else:
             # For synchronous/immediate execution, result should already be set
             match self._cached_result:
@@ -954,7 +1071,7 @@ def create_task_wrapper(
                     continue
                 return mapped
 
-            return Ok(TaskHandle(result.ok_value, app, broker_mode=True))
+            return Ok(TaskHandle(result.ok_value, app, broker_mode=True, ok_type=ok_type))
 
         # Exhausted all attempts
         if last_err is not None:
@@ -1030,7 +1147,7 @@ def create_task_wrapper(
                     continue
                 return mapped
 
-            return Ok(TaskHandle(result.ok_value, app, broker_mode=True))
+            return Ok(TaskHandle(result.ok_value, app, broker_mode=True, ok_type=ok_type))
 
         # Exhausted all attempts
         if last_err is not None:
@@ -1106,7 +1223,7 @@ def create_task_wrapper(
                     continue
                 return mapped
 
-            return Ok(TaskHandle(result.ok_value, app, broker_mode=True))
+            return Ok(TaskHandle(result.ok_value, app, broker_mode=True, ok_type=ok_type))
 
         if last_err is not None:
             return Err(last_err)

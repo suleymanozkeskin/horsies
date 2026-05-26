@@ -15,17 +15,87 @@ from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import text
 
-from horsies.core.codec.serde import loads_json, task_result_from_json
+from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.serde import loads_json
+from horsies.core.codec.typed import decode_task_result
 from horsies.core.logging import get_logger
 from horsies.core.types.result import is_err
 from horsies.core.models.workflow import WF_TASK_TERMINAL_VALUES
+from pydantic import ValidationError
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+    from horsies.core.app import Horsies
     from horsies.core.brokers.postgres import PostgresBroker
     from horsies.core.models.tasks import TaskResult, TaskError
 
 logger = get_logger('workflow.recovery')
+
+
+def _decode_recovered_task_result(
+    raw_task_result: str,
+    *,
+    app: 'Horsies | None',
+    task_name: str | None,
+    task_id: str,
+    task_status: str,
+) -> 'TaskResult[Any, TaskError]':
+    """Decode a stored TaskResult during workflow recovery.
+
+    Strict-serde phase 6: typed decode via ``decode_task_result`` using
+    the source task's ``task_ok_type``. Recovery is best-effort — any
+    failure (corrupt JSON, missing task registration, decode error)
+    falls back to a synthetic ``WORKER_CRASHED`` TaskError so the
+    workflow recovery flow keeps progressing.
+    """
+    from horsies.core.models.tasks import (
+        TaskResult,
+        TaskError,
+        OperationalErrorCode,
+    )
+
+    synthetic: 'TaskResult[Any, TaskError]' = TaskResult(
+        err=TaskError(
+            error_code=OperationalErrorCode.WORKER_CRASHED,
+            message='Stored task result could not be decoded during recovery',
+            data={
+                'task_id': task_id,
+                'task_status': task_status,
+                'recovery': 'case_1_7',
+            },
+        ),
+    )
+
+    loaded_r = loads_json(raw_task_result)
+    if is_err(loaded_r):
+        logger.warning(
+            f'Recovery: task {task_id} result JSON corrupt: '
+            f'{loaded_r.err_value}'
+        )
+        return synthetic
+    source_task = (
+        app.tasks.get(task_name)
+        if (app is not None and isinstance(task_name, str))
+        else None
+    )
+    source_ok_type = (
+        getattr(source_task, 'task_ok_type', None)
+        if source_task is not None
+        else None
+    )
+    if source_ok_type is None:
+        logger.warning(
+            f'Recovery: task {task_id} ({task_name!r}) not registered or '
+            f'missing task_ok_type; using synthetic error'
+        )
+        return synthetic
+    try:
+        return decode_task_result(loaded_r.ok_value, source_ok_type)
+    except (StrictJsonError, ValidationError) as exc:
+        logger.warning(
+            f'Recovery: task {task_id} decode_task_result failed: {exc}'
+        )
+        return synthetic
 
 
 GET_PENDING_WITH_TERMINAL_DEPS_SQL = text("""
@@ -80,7 +150,7 @@ GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL = text("""
 """)
 
 GET_CRASHED_WORKER_TASKS_SQL = text("""
-    SELECT wt.workflow_id, wt.task_index, wt.task_id,
+    SELECT wt.workflow_id, wt.task_index, wt.task_id, wt.task_name,
            UPPER(t.status) as task_status, t.result as task_result
     FROM horsies_workflow_tasks wt
     JOIN horsies_tasks t ON t.id = wt.task_id
@@ -262,29 +332,24 @@ async def recover_stuck_workflows(
         workflow_id = row.workflow_id
         task_index = row.task_index
         task_id = row.task_id
+        task_name = row.task_name
         task_status = row.task_status  # uppercase: COMPLETED, FAILED, CANCELLED, or EXPIRED
         raw_task_result = row.task_result
 
         from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode, RetrievalCode, OutcomeCode
 
-        # Deserialize TaskResult from tasks.result, or build a synthetic one
+        # Strict-serde phase 6: typed decode against the source task's
+        # ``task_ok_type``. Recovery has no direct app reference; resolve
+        # via the broker that owns this recovery cycle.
+        recovery_app = broker.app if broker is not None else None
         if raw_task_result is not None:
-            _loads_r = loads_json(raw_task_result)
-            _tr_r = task_result_from_json(_loads_r.ok_value) if not is_err(_loads_r) else None
-            if _tr_r is not None and not is_err(_tr_r):
-                result: TaskResult[Any, TaskError] = _tr_r.ok_value
-            else:
-                # Stored result is corrupt — treat as a crash with no usable result
-                logger.warning(
-                    f'Recovery: task {task_id} has corrupt result JSON, building synthetic error',
-                )
-                result = TaskResult(
-                    err=TaskError(
-                        error_code=OperationalErrorCode.WORKER_CRASHED,
-                        message='Stored task result is corrupt and could not be deserialized',
-                        data={'task_id': task_id, 'task_status': task_status, 'recovery': 'case_1_7'},
-                    ),
-                )
+            result = _decode_recovered_task_result(
+                raw_task_result,
+                app=recovery_app,
+                task_name=task_name,
+                task_id=task_id,
+                task_status=task_status,
+            )
         else:
             # No result stored (e.g. crash before result, DB issue, or cancellation)
             if task_status == 'CANCELLED':

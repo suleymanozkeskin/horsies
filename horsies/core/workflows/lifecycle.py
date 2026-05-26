@@ -25,6 +25,8 @@ from horsies.core.models.workflow import (
     SubWorkflowNode,
     validate_workflow_generic_output_match,
 )
+from horsies.core.models.workflow.handle import _OUTPUTLESS_TERMINALS
+from horsies.core.models.workflow.typing_utils import _resolve_source_node_ok_type
 from horsies.core.errors import WorkflowValidationError, MultipleValidationErrors, ErrorCode
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.models.workflow.handle_types import (
@@ -312,7 +314,15 @@ async def start_workflow_async(
                     )
                     return Ok(cast(
                         'WorkflowHandle[OutT]',
-                        WorkflowHandle(workflow_id=wf_id, broker=broker),
+                        WorkflowHandle(
+                workflow_id=wf_id,
+                broker=broker,
+                out_type=(
+                    _resolve_source_node_ok_type(spec.output)
+                    if spec.output is not None
+                    else _OUTPUTLESS_TERMINALS
+                ),
+            ),
                     ))
 
                 # 2. Insert all workflow_tasks
@@ -486,7 +496,15 @@ async def start_workflow_async(
         # Success — exit retry loop.
         return Ok(cast(
             'WorkflowHandle[OutT]',
-            WorkflowHandle(workflow_id=wf_id, broker=broker),
+            WorkflowHandle(
+                workflow_id=wf_id,
+                broker=broker,
+                out_type=(
+                    _resolve_source_node_ok_type(spec.output)
+                    if spec.output is not None
+                    else _OUTPUTLESS_TERMINALS
+                ),
+            ),
         ))
 
     # Exhausted all attempts (should not reach here, but satisfy type checker).

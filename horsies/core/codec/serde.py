@@ -589,22 +589,41 @@ def task_result_from_json(j: Json) -> SerdeResult[TaskResult[Any, TaskError]]:
 # ---------------------------------------------------------------------------
 
 # Last-resort JSON when serializing an error payload itself fails.
+# Hardcoded to the strict-serde envelope shape (``__h_task_result__``)
+# so the wire stays consistent even when the primary encode path fails.
 # Hardcoded to avoid infinite recursion in error handlers.
 FALLBACK_ERROR_JSON = (
-    '{"__task_result__":true,"ok":null,"err":'
+    '{"__h_task_result__":true,"ok":null,"err":'
     '{"error_code":{"__builtin_task_code__":"WORKER_SERIALIZATION_ERROR"},'
-    '"message":"secondary serialization failure","data":null}}'
+    '"message":"secondary serialization failure","data":null,'
+    '"exception":null}}'
 )
 
 
 def serialize_error_payload(tr: TaskResult[Any, TaskError]) -> str:
     """Serialize a library-constructed TaskResult for error responses.
 
+    Strict-serde phase 5 routes through ``encode_task_result`` (not the
+    legacy ``dumps_json(tr)`` path) so the emitted envelope matches the
+    worker's success path. The ok slot is always ``None`` here — these
+    are err-only payloads built by the library itself — and the err
+    slot is encoded against the fixed ``TaskError`` schema (path-aware
+    scan for the built-in code discriminator).
+
     Returns the JSON string on success, or a hardcoded fallback if
-    serialization somehow fails (should never happen for string-only
-    TaskError payloads, but we refuse to raise).
+    serialization somehow fails (should never happen for library-
+    constructed TaskError payloads, but we refuse to raise).
     """
-    result = dumps_json(tr)
+    from horsies.core.codec.typed import encode_task_result
+
+    try:
+        envelope = encode_task_result(tr, type(None))
+    except Exception as exc:
+        logger.error(
+            f'encode_task_result failed for library error payload: {exc}',
+        )
+        return FALLBACK_ERROR_JSON
+    result = dumps_json(envelope)
     if is_err(result):
         logger.error(f'Secondary serialization failure: {result.err_value}')
         return FALLBACK_ERROR_JSON

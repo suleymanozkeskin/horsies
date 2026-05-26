@@ -1137,11 +1137,11 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """__horsies_taskresult__ with invalid 'data' string → serde error."""
+        """__h_taskresult_envelope__ with invalid 'data' string → serde error."""
         patches = _make_run_task_patches()
         _run_entry_defaults['kwargs_json'] = json.dumps({
             'upstream': {
-                '__horsies_taskresult__': True,
+                '__h_taskresult_envelope__': True,
                 'data': '{{{invalid',
             },
         })
@@ -1156,11 +1156,11 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """__horsies_taskresult__ with valid JSON but not TaskResult shape → serde error."""
+        """__h_taskresult_envelope__ with valid JSON but not TaskResult shape → serde error."""
         patches = _make_run_task_patches()
         _run_entry_defaults['kwargs_json'] = json.dumps({
             'upstream': {
-                '__horsies_taskresult__': True,
+                '__h_taskresult_envelope__': True,
                 'data': '"just a string"',
             },
         })
@@ -1188,7 +1188,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         _run_entry_defaults['kwargs_json'] = json.dumps({
-            '__horsies_workflow_ctx__': {
+            '__h_workflow_ctx__': {
                 'workflow_id': 'wf-1',
                 'task_index': 0,
                 'task_name': 'my_task',
@@ -1222,7 +1222,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         _run_entry_defaults['kwargs_json'] = json.dumps({
-            '__horsies_workflow_ctx__': {
+            '__h_workflow_ctx__': {
                 'workflow_id': 'wf-1',
                 'task_index': 0,
                 'task_name': 'my_task',
@@ -1259,7 +1259,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         _run_entry_defaults['kwargs_json'] = json.dumps({
-            '__horsies_workflow_meta__': {
+            '__h_workflow_meta__': {
                 'workflow_id': 'wf-1',
                 'task_index': 3,
                 'task_name': 'my_task',
@@ -1577,7 +1577,7 @@ class TestWorkflowCtxTaskResultFromJsonError:
 
         # Valid JSON string, but not a TaskResult shape (just a number)
         _run_entry_defaults['kwargs_json'] = json.dumps({
-            '__horsies_workflow_ctx__': {
+            '__h_workflow_ctx__': {
                 'workflow_id': 'wf-1',
                 'task_index': 0,
                 'task_name': 'my_task',
@@ -1608,7 +1608,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """__horsies_taskresult__ with valid TaskResult JSON → kwarg replaced."""
+        """__h_taskresult_envelope__ with valid TaskResult JSON → kwarg replaced."""
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
@@ -1622,7 +1622,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         })
         _run_entry_defaults['kwargs_json'] = json.dumps({
             'upstream': {
-                '__horsies_taskresult__': True,
+                '__h_taskresult_envelope__': True,
                 'data': valid_tr_json,
             },
         })
@@ -1662,7 +1662,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
             'skipped_tasks': 0,
         })
         _run_entry_defaults['kwargs_json'] = json.dumps({
-            '__horsies_workflow_ctx__': {
+            '__h_workflow_ctx__': {
                 'workflow_id': 'wf-1',
                 'task_index': 0,
                 'task_name': 'my_task',
@@ -1700,7 +1700,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         # Valid JSON dict but missing __task_result__ key (and no ok/err)
         bad_tr = json.dumps({'random': 'data'})
         _run_entry_defaults['kwargs_json'] = json.dumps({
-            '__horsies_workflow_ctx__': {
+            '__h_workflow_ctx__': {
                 'workflow_id': 'wf-1',
                 'task_index': 0,
                 'task_name': 'my_task',

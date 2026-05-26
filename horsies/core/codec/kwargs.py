@@ -12,9 +12,9 @@ user-supplied TaskResult-typed kwargs (the engine populates those via
 `args_from`) all fail closed producer-side.
 
 Decode-side mirrors the producer: unknown kwarg names on the wire fail
-closed. Engine transport keys (`__horsies_*` / `__h_*` prefix) and
-TaskResult-typed envelopes (args_from) pass through unchanged so the
-worker entry point's downstream logic can handle them.
+closed. Engine transport keys (`__h_*` prefix) and TaskResult-typed
+envelopes (args_from) pass through unchanged so the worker entry
+point's downstream logic can unpack them.
 
 The signature validator now rejects `*args` / `**kwargs` (see
 `signature_check.py`), so this module doesn't need a catch-all decode
@@ -63,22 +63,23 @@ _INJECTED_PARAM_NAMES: frozenset[str] = frozenset({
 """User-facing parameter names the engine fills in at worker time.
 
 Producers must never supply values for these — the engine pre-populates
-them on the wire under the `__horsies_*` transport prefix, and the
-worker unpacks them into the named parameter before calling the user
+them on the wire under the `__h_*` transport prefix, and the worker
+unpacks them into the named parameter before calling the user
 function. A producer-side value would either be silently overwritten
 or collide with the engine injection; rejecting at encode is the
 honest contract.
 """
 
 
-_TRANSPORT_KEY_PREFIXES: tuple[str, ...] = ('__horsies_', '__h_')
-"""Engine transport-key prefixes preserved by decode_kwargs.
+_TRANSPORT_KEY_PREFIXES: tuple[str, ...] = ('__h_',)
+"""Engine transport-key prefix preserved by decode_kwargs.
 
-`__horsies_*` is the legacy form still in active engine use
-(`workflows/engine.py` emits `__horsies_workflow_ctx__` etc.). `__h_*`
-is the design's target prefix once the rename lands. Both are accepted
-as pass-through on decode; the worker entry pops them before calling
-the user function.
+Strict-serde §8 narrows the engine-emitted namespace to ``__h_*`` only;
+the legacy ``__horsies_*`` prefix has been renamed across all engine
+emitters and is rejected at decode by `_scan_reserved_keys` if it
+appears in user data. Pass-through here lets the worker entry point pop
+the engine-injected keys (`__h_workflow_ctx__`, `__h_workflow_meta__`,
+`__h_taskresult_envelope__`) before invoking the user task.
 """
 
 
@@ -189,10 +190,10 @@ def decode_kwargs(
     """Decode raw wire kwargs against the receiver's declared types.
 
     Strict binding mirrors encode: unknown kwarg names on the wire fail
-    closed. Engine transport keys (`__horsies_*` / `__h_*` prefix) pass
-    through verbatim; TaskResult-typed kwargs pass through raw because
-    the wire form is an `__horsies_taskresult__` envelope that the
-    worker entry point unpacks downstream.
+    closed. Engine transport keys (`__h_*` prefix) pass through
+    verbatim; TaskResult-typed kwargs pass through raw because the wire
+    form is an `__h_taskresult_envelope__` envelope that the worker
+    entry point unpacks downstream.
 
     Args:
         task_fn: The task callable; inspected via `get_type_hints` and

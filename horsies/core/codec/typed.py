@@ -25,15 +25,24 @@ from horsies.core.codec.json_value import (
     StrictJsonError,
     _validate_json_native,
 )
-from horsies.core.models.tasks import TaskError
+from horsies.core.models.tasks import TaskError, TaskResult
 
 
 __all__ = [
     'Json',
     'TypeAnnotation',
+    'decode_task_result',
     'decode_value',
+    'encode_task_result',
     'encode_value',
 ]
+
+
+# Wire envelope key for the typed `TaskResult` payload (§5 / §8). The
+# only reserved-namespace key the codec layer emits directly; user-
+# originated dumps that try to inject this key are rejected by
+# `_scan_reserved_keys`.
+_TASK_RESULT_ENVELOPE_KEY = '__h_task_result__'
 
 
 # ---------------------------------------------------------------------------
@@ -71,15 +80,13 @@ design-doc §0.
 # ---------------------------------------------------------------------------
 
 
-# Reserved namespace per §2 + the legacy `__horsies_*` prefix still in
-# active engine use (workflow_ctx / workflow_meta / taskresult transport
-# keys at `workflows/engine.py`). Rejecting `__horsies_*` in user data
-# closes the smuggle path through `child_runner.py`'s args_from envelope
-# handling — that path keys off `__horsies_taskresult__` inside a kwarg
-# dict and routes to legacy `task_result_from_json` / `rehydrate_value`,
-# which would still run the old class-identity importer. Engine-internal
-# uses are encode-side direct dict construction (not via `encode_value`),
-# so this restriction only fires for user-originated data.
+# Reserved namespace per §2 + the legacy `__horsies_*` prefix retained
+# for defense-in-depth even after strict-serde phase 6 renamed every
+# engine emitter to ``__h_*``. `__horsies_*` in user data still indicates
+# a smuggle attempt against the pre-phase-6 envelope shape; rejecting
+# at any depth keeps the codec strict against cross-version producers.
+# Engine-internal emits don't route through `encode_value`, so this
+# restriction only fires for user-originated data.
 _RESERVED_KEY_PREFIXES: tuple[str, ...] = ('__h_', '__horsies_')
 _RESERVED_DISCRIMINATOR = '__builtin_task_code__'
 
@@ -194,6 +201,126 @@ def decode_value(json_value: Json, expected_type: TypeAnnotation) -> object:
         _scan_reserved_keys(json_value)
     adapter = _get_adapter(expected_type)
     return adapter.validate_python(json_value)
+
+
+def encode_task_result(
+    result: TaskResult[Any, TaskError],
+    ok_type: TypeAnnotation,
+) -> dict[str, Json]:
+    """Encode a `TaskResult[OkT, TaskError]` into the wire envelope.
+
+    Envelope shape:
+        ``{"__h_task_result__": True, "ok": <encoded ok> | None,
+           "err": <encoded TaskError dict> | None}``
+
+    Exactly one slot carries data (matching `TaskResult`'s constructor
+    invariant). The ok slot may legitimately be `None` when
+    `ok_type` permits it (e.g. `TaskResult[None, TaskError]`); decode
+    discriminates on the err slot — `err is None` → ok path,
+    `err is not None` → err path.
+
+    The ok slot routes through `encode_value(value, ok_type)` and inherits
+    the JsonValue fence, wire scan, and reserved-key scan. The err slot
+    routes through `encode_value(value, TaskError)` and picks up the
+    path-aware TaskError scan (built-in code discriminator allowed under
+    `error_code`; smuggle attempts in `data` rejected).
+
+    Args:
+        result: The task result to encode.
+        ok_type: Declared `OkT` for the ok-slot encoding. Required even
+            when the result is an err so the envelope shape is uniform.
+
+    Returns:
+        The wire-shaped envelope dict.
+
+    Raises:
+        StrictJsonError: on JsonValue fence rejection, non-finite floats,
+            or reserved-key smuggling inside ok / err payloads.
+        pydantic.ValidationError: when the carried value doesn't satisfy
+            its declared shape.
+    """
+    if result.is_err():
+        encoded_err = encode_value(result.err_value, TaskError)
+        return {
+            _TASK_RESULT_ENVELOPE_KEY: True,
+            'ok': None,
+            'err': encoded_err,
+        }
+    encoded_ok = encode_value(result.ok_value, ok_type)
+    return {
+        _TASK_RESULT_ENVELOPE_KEY: True,
+        'ok': encoded_ok,
+        'err': None,
+    }
+
+
+def decode_task_result(
+    raw: Json,
+    ok_type: TypeAnnotation,
+) -> TaskResult[Any, TaskError]:
+    """Decode a wire envelope back to `TaskResult[OkT, TaskError]`.
+
+    Validates the envelope shape strictly (must be a dict carrying
+    `__h_task_result__: True`, with exactly the keys
+    `{__h_task_result__, ok, err}`). Discriminates on the err slot —
+    `err is None` → ok path, `err is not None` → err path. Both slots
+    populated, or the envelope marker missing, raises
+    ``StrictJsonError``; legacy envelopes (`__task_result__`,
+    `__task_error__`, …) fall under the same rejection because they
+    don't carry the `__h_task_result__` marker.
+
+    The ok slot routes through `decode_value(slot, ok_type)`; the err
+    slot routes through `decode_value(slot, TaskError)`.
+
+    Args:
+        raw: The JSON-shaped envelope, typically from
+            `json.loads(...)` on the broker's stored payload.
+        ok_type: Declared `OkT` for the ok-slot decoding.
+
+    Returns:
+        The reconstructed `TaskResult`.
+
+    Raises:
+        StrictJsonError: on envelope shape failure or reserved-key
+            smuggling inside ok / err payloads.
+        pydantic.ValidationError: when the payload doesn't satisfy the
+            declared shape.
+    """
+    if not isinstance(raw, dict):
+        raise StrictJsonError(
+            f'TaskResult envelope must be a JSON object; got '
+            f'{type(raw).__name__}',
+        )
+    envelope = cast('dict[str, Json]', raw)
+    marker = envelope.get(_TASK_RESULT_ENVELOPE_KEY)
+    if marker is not True:
+        raise StrictJsonError(
+            f'TaskResult envelope missing {_TASK_RESULT_ENVELOPE_KEY!r} '
+            f'marker (or marker is not True); got keys '
+            f'{sorted(envelope.keys())}',
+        )
+    extra = set(envelope.keys()) - {_TASK_RESULT_ENVELOPE_KEY, 'ok', 'err'}
+    if extra:
+        raise StrictJsonError(
+            f'unexpected keys in TaskResult envelope: {sorted(extra)}',
+        )
+    ok_slot = envelope.get('ok')
+    err_slot = envelope.get('err')
+    if err_slot is not None and ok_slot is not None:
+        raise StrictJsonError(
+            'TaskResult envelope has both ok and err populated; exactly '
+            'one must be set',
+        )
+    if err_slot is not None:
+        err_value = decode_value(err_slot, TaskError)
+        if not isinstance(err_value, TaskError):
+            raise StrictJsonError(
+                f'TaskError decode produced non-TaskError value: '
+                f'{type(err_value).__name__}',
+            )
+        return TaskResult(err=err_value)
+    decoded_ok = decode_value(ok_slot, ok_type)
+    return TaskResult(ok=decoded_ok)
 
 
 def _is_task_error_type(expected_type: TypeAnnotation) -> bool:

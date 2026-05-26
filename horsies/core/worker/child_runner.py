@@ -27,8 +27,19 @@ from horsies.core.codec.serde import (
     dumps_json,
     serialize_error_payload,
     SerializationError,
-    task_result_from_json,
 )
+from horsies.core.codec.typed import (
+    decode_task_result,
+    encode_task_result,
+)
+
+
+# Engine transport keys (strict-serde §8). Pinned here so the worker
+# consumer stays in lockstep with the engine emitters in
+# ``horsies/core/workflows/engine.py``.
+_ENGINE_KEY_WORKFLOW_CTX = '__h_workflow_ctx__'
+_ENGINE_KEY_WORKFLOW_META = '__h_workflow_meta__'
+_ENGINE_KEY_TASKRESULT_ENVELOPE = '__h_taskresult_envelope__'
 from horsies.core.models.tasks import (
     TaskResult,
     TaskError,
@@ -755,9 +766,10 @@ def _run_task_entry(
 
         # Strict-serde phase 3+4: decode user kwargs using the receiver's
         # declared parameter types. Engine-private transport keys
-        # (`__horsies_workflow_ctx__`, ...) and args_from envelopes
-        # (TaskResult-typed kwargs) pass through unchanged for downstream
-        # handling below.
+        # (`__h_workflow_ctx__`, `__h_workflow_meta__`,
+        # `__h_taskresult_envelope__`) pass through ``decode_kwargs``
+        # unchanged because their leading prefix is in the transport
+        # allowlist; per-key unpacking happens immediately below.
         underlying_fn = underlying_task_fn(task)
         try:
             kwargs = decode_kwargs(underlying_fn, cast('dict[str, Any]', raw_kwargs))
@@ -769,31 +781,65 @@ def _run_task_entry(
                 ),
             )
 
-        # Deserialize injected TaskResults from workflow args_from
+        # Deserialize injected TaskResults from workflow args_from.
+        # Strict-serde envelope shape (engine.py emit sites):
+        #   {
+        #     '__h_taskresult_envelope__': True,
+        #     'source_task_name': '<upstream task name>',
+        #     'inner': <encode_task_result(tr, source_ok_type)>,
+        #   }
+        # The worker derives the upstream OkT from `app.tasks[source_task_name]`
+        # and decodes via `decode_task_result(inner, ok_type)`.
         for key, value in list(kwargs.items()):
-            if (
+            if not (
                 isinstance(value, dict)
-                and '__horsies_taskresult__' in value
-                and value['__horsies_taskresult__']
+                and value.get(_ENGINE_KEY_TASKRESULT_ENVELOPE) is True
             ):
-                task_result_dict = cast(dict[str, Any], value)
-                data_str = task_result_dict.get('data')
-                if isinstance(data_str, str):
-                    data_json_result = loads_json(data_str)
-                    if is_err(data_json_result):
-                        return _serialization_error_response(
-                            task_name, data_json_result.err_value
-                        )
-                    tr_result = task_result_from_json(data_json_result.ok_value)
-                    if is_err(tr_result):
-                        return _serialization_error_response(
-                            task_name, tr_result.err_value
-                        )
-                    kwargs[key] = tr_result.ok_value
+                continue
+            envelope = cast('dict[str, Any]', value)
+            source_task_name = envelope.get('source_task_name')
+            if not isinstance(source_task_name, str):
+                return _serialization_error_response(
+                    task_name,
+                    SerializationError(
+                        f'args_from envelope for kwarg {key!r} is missing '
+                        f'source_task_name'
+                    ),
+                )
+            inner = envelope.get('inner')
+            source_task = app.tasks.get(source_task_name)
+            if source_task is None:
+                return _serialization_error_response(
+                    task_name,
+                    SerializationError(
+                        f'args_from source task {source_task_name!r} is '
+                        f'not registered in this process; cannot decode '
+                        f'kwarg {key!r}'
+                    ),
+                )
+            source_ok_type = getattr(source_task, 'task_ok_type', None)
+            if source_ok_type is None:
+                return _serialization_error_response(
+                    task_name,
+                    SerializationError(
+                        f'args_from source task {source_task_name!r} has '
+                        f'no task_ok_type; cannot decode kwarg {key!r}'
+                    ),
+                )
+            try:
+                kwargs[key] = decode_task_result(inner, source_ok_type)
+            except (StrictJsonError, ValidationError) as exc:
+                return _serialization_error_response(
+                    task_name,
+                    SerializationError(
+                        f'decode_task_result failed for kwarg {key!r} '
+                        f'(source task {source_task_name!r}): {exc}'
+                    ),
+                )
 
         # Handle workflow injection payloads (workflow_ctx / workflow_meta).
-        workflow_ctx_data = kwargs.pop('__horsies_workflow_ctx__', None)
-        workflow_meta_data = kwargs.pop('__horsies_workflow_meta__', None)
+        workflow_ctx_data = kwargs.pop(_ENGINE_KEY_WORKFLOW_CTX, None)
+        workflow_meta_data = kwargs.pop(_ENGINE_KEY_WORKFLOW_META, None)
         if workflow_ctx_data is not None or workflow_meta_data is not None:
             import inspect
 
@@ -806,20 +852,93 @@ def _run_task_entry(
                 )
 
                 results_by_id_raw = workflow_ctx_data.get('results_by_id', {})
+                task_name_by_id = workflow_ctx_data.get('task_name_by_id', {})
                 results_by_id: dict[str, TaskResult[Any, TaskError]] = {}
-                for node_id, result_json in results_by_id_raw.items():
-                    if isinstance(result_json, str):
-                        rj = loads_json(result_json)
-                        if is_err(rj):
-                            return _serialization_error_response(
-                                task_name, rj.err_value
-                            )
-                        tr_r = task_result_from_json(rj.ok_value)
-                        if is_err(tr_r):
-                            return _serialization_error_response(
-                                task_name, tr_r.err_value
-                            )
-                        results_by_id[node_id] = tr_r.ok_value
+                for node_id, envelope in results_by_id_raw.items():
+                    if envelope is None:
+                        # Engine couldn't encode this entry (no
+                        # registered task or no ok_type); surface as a
+                        # sentinel TaskError so the context still has a
+                        # typed value.
+                        results_by_id[node_id] = TaskResult(
+                            err=TaskError(
+                                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                                message=(
+                                    f'workflow_ctx result for node '
+                                    f'{node_id!r} unavailable (source '
+                                    f'task not registered at encode '
+                                    f'time)'
+                                ),
+                                data={'node_id': node_id},
+                            ),
+                        )
+                        continue
+                    source_task_name = task_name_by_id.get(node_id)
+                    if not isinstance(source_task_name, str):
+                        results_by_id[node_id] = TaskResult(
+                            err=TaskError(
+                                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                                message=(
+                                    f'workflow_ctx missing task_name for '
+                                    f'node {node_id!r}; cannot decode'
+                                ),
+                                data={'node_id': node_id},
+                            ),
+                        )
+                        continue
+                    source_task = app.tasks.get(source_task_name)
+                    if source_task is None:
+                        results_by_id[node_id] = TaskResult(
+                            err=TaskError(
+                                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                                message=(
+                                    f'workflow_ctx source task '
+                                    f'{source_task_name!r} not '
+                                    f'registered in this process'
+                                ),
+                                data={
+                                    'node_id': node_id,
+                                    'source_task_name': source_task_name,
+                                },
+                            ),
+                        )
+                        continue
+                    source_ok_type = getattr(source_task, 'task_ok_type', None)
+                    if source_ok_type is None:
+                        results_by_id[node_id] = TaskResult(
+                            err=TaskError(
+                                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                                message=(
+                                    f'workflow_ctx source task '
+                                    f'{source_task_name!r} has no '
+                                    f'task_ok_type'
+                                ),
+                                data={
+                                    'node_id': node_id,
+                                    'source_task_name': source_task_name,
+                                },
+                            ),
+                        )
+                        continue
+                    try:
+                        results_by_id[node_id] = decode_task_result(
+                            envelope, source_ok_type,
+                        )
+                    except (StrictJsonError, ValidationError) as exc:
+                        results_by_id[node_id] = TaskResult(
+                            err=TaskError(
+                                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                                message=(
+                                    f'decode_task_result failed for '
+                                    f'workflow_ctx node {node_id!r}: '
+                                    f'{exc}'
+                                ),
+                                data={
+                                    'node_id': node_id,
+                                    'source_task_name': source_task_name,
+                                },
+                            ),
+                        )
 
                 summaries_by_id_raw = workflow_ctx_data.get('summaries_by_id', {})
                 summaries_by_id: dict[str, SubWorkflowSummary[Any]] = {}
@@ -866,8 +985,33 @@ def _run_task_entry(
         out = task(*args, **kwargs)  # __call__ returns TaskResult
         logger.info(f'Task execution completed: {[task_id]} : {[task_name]}')
 
+        # Strict-serde phase 5: result encoding routes through
+        # ``encode_task_result(result, ok_type)`` so the wire envelope
+        # uses ``__h_task_result__`` and the ok-slot is encoded against
+        # the task's declared ``OkT`` (path-aware reserved-key scan and
+        # JsonValue fence inherited from ``encode_value``).
+        ok_type = getattr(task, 'task_ok_type', None)
+        if ok_type is None:
+            return _serialization_error_response(
+                task_name,
+                SerializationError(
+                    f'Task {task_name!r} has no `task_ok_type`; '
+                    f'cannot encode return value'
+                ),
+            )
+
         if isinstance(out, TaskResult):
-            ser = dumps_json(out)
+            try:
+                envelope = encode_task_result(out, ok_type)
+            except (StrictJsonError, ValidationError) as exc:
+                return _serialization_error_response(
+                    task_name,
+                    SerializationError(
+                        f'encode_task_result failed for {task_name!r}: '
+                        f'{exc}'
+                    ),
+                )
+            ser = dumps_json(envelope)
             if is_err(ser):
                 return _serialization_error_response(task_name, ser.err_value)
             return (True, ser.ok_value, None)
@@ -883,7 +1027,18 @@ def _run_task_entry(
             return (True, serialize_error_payload(tr), 'Task returned None')
 
         # Plain value → wrap into success
-        ser = dumps_json(TaskResult(ok=out))
+        wrapped: TaskResult[Any, TaskError] = TaskResult(ok=out)
+        try:
+            envelope = encode_task_result(wrapped, ok_type)
+        except (StrictJsonError, ValidationError) as exc:
+            return _serialization_error_response(
+                task_name,
+                SerializationError(
+                    f'encode_task_result failed for {task_name!r} '
+                    f'(plain-value wrap): {exc}'
+                ),
+            )
+        ser = dumps_json(envelope)
         if is_err(ser):
             return _serialization_error_response(task_name, ser.err_value)
         return (True, ser.ok_value, None)

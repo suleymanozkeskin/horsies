@@ -462,14 +462,14 @@ class TestReservedKeyScan:
         # class-identity importer). Reject at encode time.
         with pytest.raises(StrictJsonError, match='reserved key'):
             encode_value(
-                {'__horsies_taskresult__': True, 'data': 'evil'},
+                {'__h_taskresult_envelope__': True, 'data': 'evil'},
                 JsonValue,
             )
 
     def test_legacy_horsies_prefix_rejected_nested(self) -> None:
         with pytest.raises(StrictJsonError, match='reserved key'):
             encode_value(
-                {'metadata': {'__horsies_workflow_ctx__': 'oops'}},
+                {'metadata': {'__h_workflow_ctx__': 'oops'}},
                 dict[str, JsonValue],
             )
 
@@ -526,7 +526,7 @@ class TestTaskErrorRoundTrip:
 
         err = TaskError(
             error_code=OperationalErrorCode.BROKER_ERROR,
-            data={'__horsies_taskresult__': True},
+            data={'__h_taskresult_envelope__': True},
         )
         with pytest.raises(StrictJsonError, match='reserved key'):
             encode_value(err, TaskError)
