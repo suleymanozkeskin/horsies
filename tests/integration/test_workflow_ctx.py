@@ -11,7 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.codec.serde import dumps_json, loads_json, task_result_from_json
+from horsies.core.codec.serde import loads_json, task_result_from_json
+# Engine-private serializer: needed by the simulated-engine-path test below
+# because strict dumps_json rejects __h_* user keys, but the engine itself
+# legitimately serializes kwargs carrying __h_workflow_ctx__ / __h_workflow_meta__.
+from horsies.core.codec.serde import _dumps_json_horsies_internal  # pyright: ignore[reportPrivateUsage]
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.errors import ErrorCode
 from horsies.core.models.workflow import (
@@ -922,7 +926,7 @@ class TestWorkflowCtx:
             'task_name': 'skip_ctx_b',
             'results_by_id': {},
         }
-        modified_kwargs_json = dumps_json(original_kwargs).unwrap()
+        modified_kwargs_json = _dumps_json_horsies_internal(original_kwargs).unwrap()
 
         await self._claim_task(session, task_id, 'test-worker')
 
