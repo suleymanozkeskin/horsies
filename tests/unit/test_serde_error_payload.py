@@ -65,8 +65,19 @@ class TestSerializeErrorPayloadFlattensException:
         codec couldn't serialize the exception field, so the encoder
         raised and the payload fell back to WORKER_SERIALIZATION_ERROR
         (losing the original TASK_EXCEPTION + message).
+
+        Locks the diagnostic-shape contract: the flattened dict carries
+        ``type`` / ``message`` / ``traceback`` (matching the legacy
+        ``_exception_to_json`` form so downstream tooling still works)
+        plus ``module`` and ``repr`` for disambiguation. ``traceback``
+        is the high-value field — it gets surfaced in logs and error
+        UIs — and must not regress.
         """
-        original = ValueError('boom')
+        try:
+            raise ValueError('boom')
+        except ValueError as caught:
+            original = caught
+
         tr: TaskResult[Any, TaskError] = TaskResult(
             err=TaskError(
                 error_code=OperationalErrorCode.TASK_EXCEPTION,
@@ -84,13 +95,18 @@ class TestSerializeErrorPayloadFlattensException:
         assert 'ValueError' in err['message']
         assert 'boom' in err['message']
 
-        # The exception field is flattened to a structured dict.
+        # The exception field is flattened to a structured dict that
+        # extends the legacy _exception_to_json shape.
         flattened = err['exception']
         assert isinstance(flattened, dict)
         assert flattened['type'] == 'ValueError'
         assert flattened['module'] == 'builtins'
         assert flattened['message'] == 'boom'
         assert flattened['repr'] == "ValueError('boom')"
+        # Traceback is the high-value diagnostic field; must survive.
+        assert isinstance(flattened['traceback'], str)
+        assert 'ValueError: boom' in flattened['traceback']
+        assert 'test_live_exception_flattened_to_dict' in flattened['traceback']
 
     def test_user_defined_exception_class_flattens(self) -> None:
         """Custom exception classes flatten to ``type`` + ``module``."""

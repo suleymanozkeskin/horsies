@@ -649,9 +649,15 @@ def _flatten_task_error_exception(
     ``TaskError.exception`` accepts a live ``BaseException`` for
     in-process diagnostics; the strict codec can only emit JSON-native
     values. When the field carries an exception object, replace it with
-    a small structured dict ``{type, module, message, repr}`` so
-    encoding succeeds and downstream consumers still get the diagnostic
-    context.
+    a structured dict so encoding succeeds.
+
+    The flattened shape extends the legacy ``_exception_to_json`` form
+    (which downstream tooling already understands — ``type``, ``message``,
+    ``traceback``) with ``module`` and ``repr``. ``traceback`` is the
+    high-value debugging field, so it must survive the strict-serde
+    rewrite; ``module`` disambiguates the exception class beyond just
+    its short name, and ``repr`` mirrors what a Python caller would see
+    if the exception had survived in-process.
     """
     if not tr.is_err():
         return tr
@@ -659,10 +665,7 @@ def _flatten_task_error_exception(
     if err is None or not isinstance(err.exception, BaseException):
         return tr
     exc = err.exception
-    flattened = {
-        'type': type(exc).__name__,
-        'module': type(exc).__module__,
-        'message': str(exc),
-        'repr': repr(exc),
-    }
+    flattened: dict[str, Json] = dict(_exception_to_json(exc))
+    flattened['module'] = type(exc).__module__
+    flattened['repr'] = repr(exc)
     return TaskResult(err=err.model_copy(update={'exception': flattened}))
