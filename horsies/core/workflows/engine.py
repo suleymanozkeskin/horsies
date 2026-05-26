@@ -1217,6 +1217,16 @@ async def try_make_ready_and_enqueue(
         if ctx_terminal < len(ctx_from_ids):
             return  # Context deps not ready; stay PENDING
 
+    will_skip_failed_all_deps = (
+        join_type == 'all'
+        and (failed + skipped) > 0
+        and not allow_failed_deps
+    )
+    if is_subworkflow and broker is None and not will_skip_failed_all_deps:
+        raise RuntimeError(
+            'SubWorkflowNode requires a broker to start its child workflow'
+        )
+
     # 4. Mark task as READY
     ready_result = await session.execute(
         MARK_TASK_READY_SQL,
@@ -1694,7 +1704,7 @@ async def evaluate_workflow_success(
     else:
         policy = success_policy_data
     if not isinstance(policy, dict):
-        logger.warning(f'Corrupt success_policy for workflow, treating as no policy')
+        logger.warning('Corrupt success_policy for workflow, treating as no policy')
         return not has_error and failed == 0
 
     # Build status map by task_index
@@ -1767,7 +1777,7 @@ async def get_workflow_failure_error(
     else:
         policy = success_policy_data
     if not isinstance(policy, dict):
-        logger.warning(f'Corrupt success_policy for workflow, treating as no policy')
+        logger.warning('Corrupt success_policy for workflow, treating as no policy')
         return None
 
     # With success_policy: find first failed required task or use sentinel error

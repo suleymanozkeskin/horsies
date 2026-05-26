@@ -40,8 +40,7 @@ from horsies.core.workflows.sql import (
     ENQUEUE_SUBWORKFLOW_TASK_SQL,
     ENQUEUE_WORKFLOW_TASK_SQL,
     GET_CHILD_WORKFLOW_INFO_SQL,
-    GET_DEPENDENCY_RESULTS_SQL,
-    GET_DEPENDENCY_RESULTS_WITH_NAMES_SQL,
+    GET_DEP_STATUS_COUNTS_SQL,
     GET_FIRST_FAILED_TASK_RESULT_SQL,
     GET_FIRST_FAILED_REQUIRED_TASK_SQL,
     GET_SUBWORKFLOW_SUMMARIES_SQL,
@@ -346,7 +345,6 @@ class TestEnqueueWorkflowTask:
 
         # First dumps_json call succeeds (for kwargs parsing),
         # but the final one for kwargs serialization fails
-        original_dumps = engine.dumps_json
         call_idx = 0
 
         def _dumps_side_effect(value: Any) -> Any:
@@ -1078,6 +1076,48 @@ class TestCheckAndPromoteTask:
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
         await try_make_ready_and_enqueue(session, None, 'wf-1', 0)
+
+    @pytest.mark.asyncio
+    async def test_subworkflow_without_broker_raises_before_regular_enqueue(self) -> None:
+        config_row = SimpleNamespace(
+            status='PENDING',
+            dependencies=[0],
+            allow_failed_deps=False,
+            join_type='all',
+            min_success=None,
+            workflow_ctx_from=None,
+            is_subworkflow=True,
+            wf_status='RUNNING',
+        )
+        dep_status_row = SimpleNamespace(status='COMPLETED', cnt=1)
+
+        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
+            if stmt is GET_TASK_CONFIG_SQL:
+                return _one_result(config_row)
+            if stmt is GET_DEP_STATUS_COUNTS_SQL:
+                return _rows_result([dep_status_row])
+            if stmt is MARK_TASK_READY_SQL:
+                return _one_result(SimpleNamespace(task_index=0))
+            return _rows_result([])
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=_dispatch)
+
+        with patch(
+            'horsies.core.workflows.engine.get_dependency_results',
+            new=AsyncMock(return_value={0: TaskResult(ok='dep')}),
+        ), patch(
+            'horsies.core.workflows.engine.enqueue_workflow_task',
+            new=AsyncMock(),
+        ) as regular_enqueue:
+            with pytest.raises(RuntimeError, match='SubWorkflowNode.*broker'):
+                await try_make_ready_and_enqueue(session, None, 'wf-1', 1)
+
+        regular_enqueue.assert_not_awaited()
+        assert all(
+            call.args[0] is not MARK_TASK_READY_SQL
+            for call in session.execute.await_args_list
+        )
 
 
 # ── 7. get_dependency_results ────────────────────────────────────────
