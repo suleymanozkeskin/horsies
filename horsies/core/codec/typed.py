@@ -13,10 +13,12 @@ that lands in phases 3-6.
 
 from __future__ import annotations
 
+import dataclasses
 import math
-from typing import Any, cast
+import types
+from typing import Any, Union, cast, get_args, get_origin
 
-from pydantic import TypeAdapter
+from pydantic import BaseModel, TypeAdapter
 
 from horsies.core.codec.json_value import (
     JsonValue,
@@ -108,10 +110,13 @@ def encode_value(value: object, expected_type: TypeAnnotation) -> Json:
     """Encode `value` to a JSON-shaped Python value under `expected_type`.
 
     Pipeline:
-    1. If `expected_type is JsonValue`, run the producer-side
-       `_validate_json_native` fence first to catch the silent coercions
-       `TypeAdapter(JsonValue)` would let through (bytes -> str,
-       Decimal -> float, ...).
+    1. Run the producer-side `_validate_json_native` fence at every
+       JsonValue position in `expected_type` (top-level, container
+       elements, `Optional[...]`, BaseModel / dataclass fields). The
+       fence catches silent coercions `TypeAdapter(JsonValue)` would let
+       through (bytes -> str, Decimal -> float, ...) at boundary
+       positions and at all the JsonValue-derivative positions §3
+       documents (`dict[str, JsonValue]`, `list[JsonValue]`, ...).
     2. `TypeAdapter(expected_type).dump_python(value, mode='json')`.
     3. `_scan_wire_json` rejects non-finite floats at any depth — TypeAdapter
        preserves NaN/Inf even with `mode='json'`.
@@ -131,8 +136,7 @@ def encode_value(value: object, expected_type: TypeAnnotation) -> Json:
         pydantic.ValidationError: when `value` doesn't satisfy
             `expected_type`.
     """
-    if expected_type is JsonValue:
-        _validate_json_native(value)
+    _apply_json_value_fence(value, expected_type)
     adapter = _get_adapter(expected_type)
     dumped = adapter.dump_python(value, mode='json')
     dumped_json = cast(Json, dumped)
@@ -148,6 +152,13 @@ def decode_value(json_value: Json, expected_type: TypeAnnotation) -> object:
     parse_constant=_reject_nonstandard_json_constant)` so non-RFC-8259
     constants were rejected upstream.
 
+    Reserved-key invariant is enforced symmetrically with `encode_value`:
+    payloads carrying `__h_*` or `__builtin_task_code__` at user-controlled
+    positions are rejected before TypeAdapter validation. Without this,
+    cross-version / cross-language producers (the same threat model the
+    decode-side `_reject_nonstandard_json_constant` hook exists for)
+    could smuggle reserved keys past a strict in-process producer.
+
     Args:
         json_value: The JSON-shaped input.
         expected_type: The declared type.
@@ -156,11 +167,181 @@ def decode_value(json_value: Json, expected_type: TypeAnnotation) -> object:
         The decoded Python value.
 
     Raises:
+        StrictJsonError: on reserved-key collision in user-positioned data.
         pydantic.ValidationError: when `json_value` doesn't satisfy
             `expected_type`.
     """
+    _scan_reserved_keys(json_value)
     adapter = _get_adapter(expected_type)
     return adapter.validate_python(json_value)
+
+
+# ---------------------------------------------------------------------------
+# Producer-side JsonValue fence: applied at *every* JsonValue position
+# ---------------------------------------------------------------------------
+
+
+def _apply_json_value_fence(
+    value: object,
+    expected_type: TypeAnnotation,
+    visited: frozenset[type] = frozenset(),
+) -> None:
+    """Walk `(value, expected_type)` and run `_validate_json_native` at
+    each JsonValue position.
+
+    This is the encode-time analogue of `signature_check._walk_model_fields`:
+    it descends through the declared type's container / union / model
+    structure and applies the strict producer-side fence wherever the
+    annotation is JsonValue. For non-JsonValue subtrees the walk is a
+    no-op; TypeAdapter's normal coercion within their declared shape is
+    fine.
+
+    Required because §3's JsonValue boundary positions include
+    `dict[str, JsonValue]`, `list[JsonValue]`, `Optional[JsonValue]`,
+    and JsonValue inside BaseModel / dataclass fields — TypeAdapter
+    silently coerces `bytes -> str` / `Decimal -> float` in all of those
+    positions, breaking the "raw JSON only" contract that the literal
+    `JsonValue` boundary already enforces.
+    """
+    if expected_type is JsonValue:
+        _validate_json_native(value)
+        return
+    if value is None:
+        return
+
+    origin = get_origin(expected_type)
+    args = get_args(expected_type)
+
+    # Annotated[T, meta...] — recurse into the underlying.
+    if origin is not None and hasattr(expected_type, '__metadata__'):
+        if args:
+            _apply_json_value_fence(value, args[0], visited)
+        return
+
+    # Optional / Union — JsonValue can appear as an alternative.
+    if origin is Union or origin is types.UnionType:
+        non_none = tuple(a for a in args if a is not type(None))
+        if len(non_none) == 1:
+            _apply_json_value_fence(value, non_none[0], visited)
+            return
+        # Mixed primitive unions etc. can't contain JsonValue (the
+        # signature validator already forbids cross-category unions), so
+        # nothing to fence here.
+        return
+
+    if origin is list and isinstance(value, list):
+        if not args:
+            return
+        item_t = args[0]
+        for item in cast('list[object]', value):
+            _apply_json_value_fence(item, item_t, visited)
+        return
+
+    if origin is dict and isinstance(value, dict):
+        if len(args) < 2:
+            return
+        val_t = args[1]
+        for v in cast('dict[str, object]', value).values():
+            _apply_json_value_fence(v, val_t, visited)
+        return
+
+    if origin is tuple and isinstance(value, tuple):
+        if not args:
+            return
+        items = cast('tuple[object, ...]', value)
+        if len(args) == 2 and args[1] is Ellipsis:
+            for item in items:
+                _apply_json_value_fence(item, args[0], visited)
+        else:
+            for item, arg_t in zip(items, args, strict=False):
+                _apply_json_value_fence(item, arg_t, visited)
+        return
+
+    # BaseModel — walk fields that mention JsonValue. Bounded by `visited`
+    # so self-referential models don't blow the stack here either.
+    if isinstance(expected_type, type) and issubclass(expected_type, BaseModel):
+        if expected_type in visited:
+            return
+        if not isinstance(value, expected_type):
+            return
+        next_visited = visited | {expected_type}
+        for field_name, field_info in expected_type.model_fields.items():
+            field_type = field_info.annotation
+            if field_type is None:
+                continue
+            _apply_json_value_fence(
+                getattr(value, field_name),
+                field_type,
+                next_visited,
+            )
+        return
+
+    # Parameterized BaseModel generic that didn't get caught above (e.g.
+    # Box[int] where annot is itself a ModelMetaclass — usually the
+    # branch above catches it, but the generic-alias path is here as a
+    # safety net using `model_fields` on the parameterized form).
+    if (
+        origin is not None
+        and isinstance(origin, type)
+        and issubclass(origin, BaseModel)
+        and isinstance(value, origin)
+    ):
+        target = (
+            expected_type
+            if isinstance(expected_type, type)
+            and issubclass(expected_type, BaseModel)
+            else origin
+        )
+        if target in visited:
+            return
+        next_visited = visited | {target}
+        for field_name, field_info in target.model_fields.items():
+            field_type = field_info.annotation
+            if field_type is None:
+                continue
+            _apply_json_value_fence(
+                getattr(value, field_name),
+                field_type,
+                next_visited,
+            )
+        return
+
+    # Dataclass — walk fields. Forward refs / generic substitutions in
+    # dataclasses are weaker than Pydantic's; use `get_type_hints` and
+    # accept that fully-generic dataclass parameterization isn't
+    # introspectable here.
+    if isinstance(expected_type, type) and dataclasses.is_dataclass(expected_type):
+        if expected_type in visited:
+            return
+        if not isinstance(value, expected_type):
+            return
+        try:
+            hints = _dataclass_hints(expected_type)
+        except Exception:  # noqa: BLE001 — forward-ref resolution failures
+            return
+        next_visited = visited | {expected_type}
+        for field_name, field_type in hints.items():
+            if field_name.startswith('_'):
+                continue
+            if not hasattr(value, field_name):
+                continue
+            _apply_json_value_fence(
+                getattr(value, field_name),
+                field_type,
+                next_visited,
+            )
+        return
+
+
+def _dataclass_hints(dc: type) -> dict[str, object]:
+    """Resolve dataclass field type hints to concrete annotations.
+
+    Pulled out so the fence walker can swallow forward-ref resolution
+    errors without losing structured type-hint extraction.
+    """
+    from typing import get_type_hints  # local: avoid module import cycle
+
+    return get_type_hints(dc, include_extras=True)
 
 
 # ---------------------------------------------------------------------------

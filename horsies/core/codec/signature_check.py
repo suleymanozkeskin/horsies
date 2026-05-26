@@ -113,11 +113,22 @@ def check_task_signature(
     for param_name in sig.parameters:
         annot = hints.get(param_name)
         if annot is None:
-            # Existing TASK_PARAM_NO_TYPE check covers missing annotations.
-            # Variadics with concrete element types are accepted: the wire
-            # representation (tuple-of-T for *args, dict-of-T for **kwargs)
-            # remains strictly typed at the element level.
-            continue
+            # Reject missing annotations here. The earlier "deferred to an
+            # existing TASK_PARAM_NO_TYPE check" comment was wrong — that
+            # error code does not exist (errors.py defines TASK_NO_RETURN_TYPE
+            # only). Without this gate, untyped params (incl. `*args` /
+            # `**kwargs`) silently passed the strict validator.
+            raise SignatureValidationError(_format_error(
+                task_name=task_name,
+                position=f"parameter '{param_name}'",
+                banned='<no annotation>',
+                reason='parameter has no type annotation',
+                fix=(
+                    f"add an explicit type annotation: "
+                    f"`{param_name}: YourType` "
+                    f"(use `JsonValue` for raw JSON)"
+                ),
+            ))
 
         try:
             _classify(annot, json_value_allowed_position=True)
@@ -132,7 +143,8 @@ def check_task_signature(
 
     return_hint = hints.get('return')
     if return_hint is None:
-        # Existing TASK_NO_RETURN_TYPE check covers this.
+        # Existing TASK_NO_RETURN_TYPE check (HRS-100, raised by
+        # `create_task_wrapper`) covers this.
         return
     _validate_return_annotation(return_hint, task_name=task_name)
 
@@ -187,7 +199,12 @@ def _validate_return_annotation(
 # ---------------------------------------------------------------------------
 
 
-def _classify(annot: object, *, json_value_allowed_position: bool) -> None:
+def _classify(
+    annot: object,
+    *,
+    json_value_allowed_position: bool,
+    visited: frozenset[type] = frozenset(),
+) -> None:
     """Classify `annot` per §2; raise `_RejectedError` if banned.
 
     Args:
@@ -196,6 +213,10 @@ def _classify(annot: object, *, json_value_allowed_position: bool) -> None:
             return ok slot) and inside BaseModel/dataclass fields. False
             when classifying generic parameters of a user type — JsonValue
             is rejected there.
+        visited: BaseModel / dataclass classes already in the active walk
+            path. Used by `_walk_model_fields` / `_walk_dataclass_fields`
+            to break recursive-model cycles (e.g. `class Node: child: Node`)
+            instead of blowing the Python stack at @app.task time.
     """
     if annot is JsonValue:
         if not json_value_allowed_position:
@@ -277,11 +298,27 @@ def _classify(annot: object, *, json_value_allowed_position: bool) -> None:
             ))
 
         if issubclass(annot_cls, BaseModel):
-            _walk_model_fields(annot_cls)
+            # Pydantic v2 generics: `Box[int]` is itself a ModelMetaclass
+            # instance, so it hits this branch (not the tail generic-alias
+            # branch). Pull the substituted args via Pydantic's metadata
+            # and classify each at non-boundary position, so §3's
+            # "JsonValue may not appear as a generic parameter of a user
+            # type" still fires — otherwise the substituted field annotation
+            # would reach `_walk_model_fields` already concretized to
+            # JsonValue (boundary position) and get silently accepted.
+            generic_meta = getattr(annot_cls, '__pydantic_generic_metadata__', None)
+            if generic_meta is not None:
+                for arg in generic_meta.get('args', ()):
+                    _classify(
+                        arg,
+                        json_value_allowed_position=False,
+                        visited=visited,
+                    )
+            _walk_model_fields(annot_cls, visited=visited)
             return
 
         if dataclasses.is_dataclass(annot_cls):
-            _walk_dataclass_fields(annot_cls)
+            _walk_dataclass_fields(annot_cls, visited=visited)
             return
 
         if issubclass(annot_cls, pathlib.PurePath):
@@ -323,7 +360,7 @@ def _classify(annot: object, *, json_value_allowed_position: bool) -> None:
                 reason=f'TaskResult error parameter must be TaskError, got {err_t!r}',
                 fix='use TaskResult[YourType, TaskError]',
             ))
-        _classify(ok_t, json_value_allowed_position=True)
+        _classify(ok_t, json_value_allowed_position=True, visited=visited)
         return
 
     # Annotated[T, meta...]
@@ -335,14 +372,23 @@ def _classify(annot: object, *, json_value_allowed_position: bool) -> None:
             discriminator = _find_discriminator(metadata)
             if discriminator is not None:
                 for branch in get_args(underlying):
-                    _classify(branch, json_value_allowed_position=False)
+                    _classify(
+                        branch,
+                        json_value_allowed_position=False,
+                        visited=visited,
+                    )
                 return
             _classify_union(
                 get_args(underlying),
                 json_value_allowed_position=json_value_allowed_position,
+                visited=visited,
             )
             return
-        _classify(underlying, json_value_allowed_position=json_value_allowed_position)
+        _classify(
+            underlying,
+            json_value_allowed_position=json_value_allowed_position,
+            visited=visited,
+        )
         return
 
     if origin is Literal:
@@ -368,7 +414,11 @@ def _classify(annot: object, *, json_value_allowed_position: bool) -> None:
                 fix='use list[T] with a concrete element type',
             ))
         for arg in args:
-            _classify(arg, json_value_allowed_position=json_value_allowed_position)
+            _classify(
+                arg,
+                json_value_allowed_position=json_value_allowed_position,
+                visited=visited,
+            )
         return
 
     if origin is dict:
@@ -385,7 +435,11 @@ def _classify(annot: object, *, json_value_allowed_position: bool) -> None:
                 reason=f'dict key type must be str, got {key_t!r}',
                 fix='JSON requires string keys; use dict[str, V]',
             ))
-        _classify(val_t, json_value_allowed_position=json_value_allowed_position)
+        _classify(
+            val_t,
+            json_value_allowed_position=json_value_allowed_position,
+            visited=visited,
+        )
         return
 
     if origin is tuple:
@@ -398,11 +452,19 @@ def _classify(annot: object, *, json_value_allowed_position: bool) -> None:
         for arg in args:
             if arg is Ellipsis:
                 continue
-            _classify(arg, json_value_allowed_position=json_value_allowed_position)
+            _classify(
+                arg,
+                json_value_allowed_position=json_value_allowed_position,
+                visited=visited,
+            )
         return
 
     if origin is Union or origin is types.UnionType:
-        _classify_union(args, json_value_allowed_position=json_value_allowed_position)
+        _classify_union(
+            args,
+            json_value_allowed_position=json_value_allowed_position,
+            visited=visited,
+        )
         return
 
     if origin is set or origin is frozenset:
@@ -420,10 +482,23 @@ def _classify(annot: object, *, json_value_allowed_position: bool) -> None:
         ))
 
     # Generic BaseModel: MyGeneric[int] etc.
+    #
+    # Pydantic v2 creates a concrete subclass for each parameterization
+    # (so `Box[int]` is itself a ModelMetaclass instance and is usually
+    # caught by the `isinstance(annot, type)` branch above). This tail
+    # branch handles edge cases where `annot` isn't recognized as a type
+    # but `get_origin(annot)` still returns a BaseModel subclass.
+    #
+    # Walk via the *parameterized* form (`annot` would have resolved
+    # field annotations if reachable here) — but `_walk_model_fields`
+    # uses `model_cls.model_fields[...].annotation`, which Pydantic
+    # resolves under generic substitution, so passing `origin` works
+    # for the unparameterized walk path and never sees raw TypeVars.
     if origin is not None and isinstance(origin, type) and issubclass(origin, BaseModel):
         for arg in args:
-            _classify(arg, json_value_allowed_position=False)
-        _walk_model_fields(origin)
+            _classify(arg, json_value_allowed_position=False, visited=visited)
+        target = annot if isinstance(annot, type) and issubclass(annot, BaseModel) else origin
+        _walk_model_fields(target, visited=visited)
         return
 
     raise _RejectedError(_Rejection(
@@ -437,6 +512,7 @@ def _classify_union(
     args: tuple[object, ...],
     *,
     json_value_allowed_position: bool,
+    visited: frozenset[type] = frozenset(),
 ) -> None:
     """Apply the syntactic union rules from §2."""
     non_none = [a for a in args if a is not type(None)]
@@ -445,7 +521,11 @@ def _classify_union(
         return
 
     if len(non_none) == 1:
-        _classify(non_none[0], json_value_allowed_position=json_value_allowed_position)
+        _classify(
+            non_none[0],
+            json_value_allowed_position=json_value_allowed_position,
+            visited=visited,
+        )
         return
 
     all_primitives = all(
@@ -479,20 +559,44 @@ def _classify_union(
 # ---------------------------------------------------------------------------
 
 
-def _walk_model_fields(model_cls: type[BaseModel]) -> None:
+def _walk_model_fields(
+    model_cls: type[BaseModel],
+    *,
+    visited: frozenset[type] = frozenset(),
+) -> None:
     """Recurse into a BaseModel subclass's field annotations.
 
     Skips walks for `INTERNAL_CODEC_TYPES` members (they have hand-maintained
     schemas that legitimately use Any).
+
+    Uses `model_cls.model_fields[...].annotation` rather than
+    `typing.get_type_hints(model_cls)` so that Pydantic's generic
+    substitution is honored — for `Box[int]`, `model_fields['value'].annotation`
+    is the concrete `int`, while `get_type_hints` would return the
+    unresolved `TypeVar`.
+
+    `visited` breaks cycles on self-referential models (`class Node:
+    child: Node`). Without it the walk recurses forever and the
+    @app.task decorator surfaces a RecursionError instead of a
+    SignatureValidationError.
     """
     if model_cls in INTERNAL_CODEC_TYPES:
         return
-    hints = get_type_hints(model_cls, include_extras=True)
-    for field_name, field_type in hints.items():
+    if model_cls in visited:
+        return
+    next_visited = visited | {model_cls}
+    for field_name, field_info in model_cls.model_fields.items():
         if field_name.startswith('_'):
             continue
+        field_type = field_info.annotation
+        if field_type is None:
+            continue
         try:
-            _classify(field_type, json_value_allowed_position=True)
+            _classify(
+                field_type,
+                json_value_allowed_position=True,
+                visited=next_visited,
+            )
         except _RejectedError as err:
             raise _RejectedError(_Rejection(
                 banned=err.rejection.banned,
@@ -501,16 +605,32 @@ def _walk_model_fields(model_cls: type[BaseModel]) -> None:
             )) from None
 
 
-def _walk_dataclass_fields(dc: type) -> None:
-    """Recurse into a dataclass's field annotations."""
+def _walk_dataclass_fields(
+    dc: type,
+    *,
+    visited: frozenset[type] = frozenset(),
+) -> None:
+    """Recurse into a dataclass's field annotations.
+
+    `visited` breaks cycles on self-referential dataclasses (same risk as
+    BaseModel — without it the walk would blow the Python stack and
+    surface a RecursionError at task registration).
+    """
     if dc in INTERNAL_CODEC_TYPES:
         return
+    if dc in visited:
+        return
+    next_visited = visited | {dc}
     hints = get_type_hints(dc, include_extras=True)
     for field_name, field_type in hints.items():
         if field_name.startswith('_'):
             continue
         try:
-            _classify(field_type, json_value_allowed_position=True)
+            _classify(
+                field_type,
+                json_value_allowed_position=True,
+                visited=next_visited,
+            )
         except _RejectedError as err:
             raise _RejectedError(_Rejection(
                 banned=err.rejection.banned,

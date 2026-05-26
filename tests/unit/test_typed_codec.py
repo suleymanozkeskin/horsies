@@ -324,6 +324,64 @@ class TestJsonValueBoundary:
             encode_value(float('nan'), JsonValue)
 
 
+class TestJsonValueDerivativePositions:
+    """`dict[str, JsonValue]` / `list[JsonValue]` / `Optional[JsonValue]` /
+    JsonValue inside BaseModel fields all carry the same raw-JSON
+    contract as the literal `JsonValue` boundary. Without the recursive
+    fence, TypeAdapter silently coerces (bytes -> str, Decimal -> float)
+    in these positions, defeating the strict-mode promise."""
+
+    def test_dict_str_jsonvalue_rejects_bytes(self) -> None:
+        with pytest.raises(StrictJsonError, match='bytes'):
+            encode_value({'data': b'abc'}, dict[str, JsonValue])
+
+    def test_dict_str_jsonvalue_rejects_decimal(self) -> None:
+        with pytest.raises(StrictJsonError, match='Decimal'):
+            encode_value({'price': decimal.Decimal('1.2')}, dict[str, JsonValue])
+
+    def test_list_jsonvalue_rejects_bytes(self) -> None:
+        with pytest.raises(StrictJsonError, match='bytes'):
+            encode_value([b'abc', b'def'], list[JsonValue])
+
+    def test_optional_jsonvalue_none_ok(self) -> None:
+        # `Optional[JsonValue]` with a None value short-circuits the fence
+        # walker (nothing to validate).
+        encoded = encode_value(None, Optional[JsonValue])
+        assert encoded is None
+
+    def test_optional_jsonvalue_rejects_bytes(self) -> None:
+        with pytest.raises(StrictJsonError, match='bytes'):
+            encode_value(b'abc', Optional[JsonValue])
+
+    def test_nested_dict_in_list_jsonvalue_rejects_decimal(self) -> None:
+        with pytest.raises(StrictJsonError, match='Decimal'):
+            encode_value(
+                [{'price': decimal.Decimal('1.2')}],
+                list[dict[str, JsonValue]],
+            )
+
+    def test_jsonvalue_inside_basemodel_field_via_model_construct(self) -> None:
+        # `WithBag(bag=b'oops')` would silently coerce bytes -> str at
+        # Pydantic construction time (before encode_value ever sees the
+        # value), so the fence can't catch normal-construction smuggle.
+        # `model_construct` bypasses validation, leaving raw bytes on the
+        # field — that's the case the BaseModel walk in
+        # `_apply_json_value_fence` actually protects.
+        class WithBag(BaseModel):
+            name: str
+            bag: JsonValue
+
+        smuggled = WithBag.model_construct(name='x', bag=b'oops')  # pyright: ignore[reportArgumentType]
+        with pytest.raises(StrictJsonError, match='bytes'):
+            encode_value(smuggled, WithBag)
+
+    def test_dict_str_jsonvalue_with_clean_payload_round_trips(self) -> None:
+        payload = {'a': 1, 'b': 'two', 'c': None, 'd': [1, 2]}
+        encoded = encode_value(payload, dict[str, JsonValue])
+        decoded = decode_value(encoded, dict[str, JsonValue])
+        assert decoded == payload
+
+
 # ---------------------------------------------------------------------------
 # Non-finite floats outside JsonValue — caught by _scan_wire_json
 # ---------------------------------------------------------------------------
@@ -445,6 +503,42 @@ class TestDecodeValidation:
     def test_decode_missing_required_field_raises(self) -> None:
         with pytest.raises(ValidationError):
             decode_value(cast(Json, {'name': 'Alice'}), _User)
+
+
+class TestDecodeReservedKeyScan:
+    """Symmetric to the encode-side scan: cross-version / cross-language
+    producers (the same threat model `_reject_nonstandard_json_constant`
+    addresses on decode) could land reserved keys at user-controlled
+    positions. The decoder must reject before TypeAdapter validates."""
+
+    def test_decode_rejects_h_prefix_at_top_level(self) -> None:
+        with pytest.raises(StrictJsonError, match='reserved key'):
+            decode_value(
+                cast(Json, {'__h_evil__': 1}),
+                dict[str, JsonValue],
+            )
+
+    def test_decode_rejects_builtin_task_code_in_user_dict(self) -> None:
+        with pytest.raises(StrictJsonError, match='reserved key'):
+            decode_value(
+                cast(Json, {'__builtin_task_code__': 'X'}),
+                dict[str, JsonValue],
+            )
+
+    def test_decode_rejects_nested_reserved_key(self) -> None:
+        with pytest.raises(StrictJsonError, match='reserved key'):
+            decode_value(
+                cast(Json, {'outer': [{'__h_inner__': 1}]}),
+                dict[str, JsonValue],
+            )
+
+    def test_decode_accepts_clean_payload(self) -> None:
+        decoded = decode_value(
+            cast(Json, {'name': 'Alice', 'age': 30}),
+            _User,
+        )
+        assert isinstance(decoded, _User)
+        assert decoded.name == 'Alice'
 
 
 # ---------------------------------------------------------------------------
