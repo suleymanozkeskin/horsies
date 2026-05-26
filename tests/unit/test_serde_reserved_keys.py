@@ -13,6 +13,8 @@ closed on legacy and unknown tags at deserialize time.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 from pydantic import BaseModel
 
@@ -226,6 +228,11 @@ class TestUnknownInternalTagFailClosed:
 # ---------------------------------------------------------------------------
 
 
+@dataclasses.dataclass
+class _InternalSerializerBox:
+    payload: dict[str, object]
+
+
 @pytest.mark.unit
 class TestHorsiesInternalSerializer:
     def test_internal_serializer_allows_transport_keys(self) -> None:
@@ -246,6 +253,47 @@ class TestHorsiesInternalSerializer:
         assert is_err(strict)
         assert isinstance(strict.err_value, SerializationError)
         assert strict.err_value.code == ContractCode.RESERVED_KEY_IN_USER_DATA
+
+    def test_internal_serializer_allows_direct_taskresult_envelope(self) -> None:
+        """args_from transport envelopes are allowed as direct kwarg values."""
+        kwargs = {
+            'upstream': {
+                '__h_taskresult_envelope__': True,
+                'data': '{"__h_task_result__":true,"ok":1,"err":null}',
+            },
+        }
+        result = _dumps_json_horsies_internal(kwargs)
+        assert not is_err(result)
+        assert '__h_taskresult_envelope__' in result.ok_value
+
+    def test_internal_serializer_rejects_nested_user_h_key(self) -> None:
+        """Internal serializer still uses strict user-data rules below kwargs."""
+        kwargs = {
+            'user_kwarg': {
+                'nested': {'__h_pydantic__': True, 'module': 'os', 'qualname': 'X'},
+            },
+        }
+        result = _dumps_json_horsies_internal(kwargs)
+        assert is_err(result)
+        assert isinstance(result.err_value, SerializationError)
+        assert result.err_value.code == ContractCode.RESERVED_KEY_IN_USER_DATA
+
+    def test_internal_serializer_rejects_dataclass_field_smuggling(self) -> None:
+        """A dataclass field containing dict[str, Any] cannot bypass the strict path."""
+        kwargs = {
+            'box': _InternalSerializerBox(
+                payload={
+                    '__h_pydantic__': True,
+                    'module': 'os',
+                    'qualname': 'PathLike',
+                    'data': {},
+                },
+            ),
+        }
+        result = _dumps_json_horsies_internal(kwargs)
+        assert is_err(result)
+        assert isinstance(result.err_value, SerializationError)
+        assert result.err_value.code == ContractCode.RESERVED_KEY_IN_USER_DATA
 
 
 # ---------------------------------------------------------------------------

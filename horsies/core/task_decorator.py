@@ -398,13 +398,13 @@ class TaskHandle(Generic[T]):
         self._cached_result = result
         self._result_fetched = True
 
-    async def raw_result_async(self) -> dict[str, Any] | None:
+    async def raw_result_async(self) -> BrokerResult[dict[str, Any] | None]:
         """Return the task's stored result as a raw JSON dict, no rehydration.
 
         Escape hatch for pure-consumer processes that don't import the
         task return types (the serde class registry only knows types the
-        consumer's process imported).  Returns ``None`` if the task has
-        no stored result yet — does not poll for completion.
+        consumer's process imported).  Returns ``Ok(None)`` if the task
+        has no stored result yet — does not poll for completion.
 
         The returned dict is the un-rehydrated ``__h_task_result__``
         envelope: ``{"__h_task_result__": True, "ok": ..., "err": ...}``.
@@ -412,35 +412,71 @@ class TaskHandle(Generic[T]):
         ``ok`` appear as plain dicts.
         """
         from sqlalchemy import text
+        from sqlalchemy.exc import SQLAlchemyError
 
         from horsies.core.codec.serde import loads_json
         from horsies.core.types.result import is_err
 
         if self._app is None:
-            return None
-        broker = self._app.get_broker()
-        async with broker.session_factory() as session:
-            result = await session.execute(
-                text('SELECT result FROM horsies_tasks WHERE id = :id'),
-                {'id': self.task_id},
-            )
-            row = result.fetchone()
-            if row is None or row.result is None:
-                return None
-            loads_r = loads_json(row.result)
-            if is_err(loads_r):
-                return None
-            value = loads_r.ok_value
-            if isinstance(value, dict):
-                return value
-            return None
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.NO_BROKER,
+                message=(
+                    'TaskHandle.raw_result_async() requires a broker-backed '
+                    'task handle (use .send() or .send_async())'
+                ),
+                retryable=False,
+            ))
+        try:
+            broker = self._app.get_broker()
+            async with broker.session_factory() as session:
+                result = await session.execute(
+                    text('SELECT result FROM horsies_tasks WHERE id = :id'),
+                    {'id': self.task_id},
+                )
+                row = result.fetchone()
+        except asyncio.CancelledError:
+            raise
+        except SQLAlchemyError as exc:
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+                message=f'DB query failed fetching raw result for task {self.task_id}: {exc}',
+                retryable=is_retryable_connection_error(exc),
+                exception=exc,
+            ))
+        except Exception as exc:
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+                message=f'Failed fetching raw result for task {self.task_id}: {exc}',
+                retryable=False,
+                exception=exc,
+            ))
 
-    def raw_result(self) -> dict[str, Any] | None:
+        if row is None or row.result is None:
+            return Ok(None)
+        loads_r = loads_json(row.result)
+        if is_err(loads_r):
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+                message=f'Task result JSON corrupt: {loads_r.err_value}',
+                retryable=False,
+                exception=loads_r.err_value,
+            ))
+        value = loads_r.ok_value
+        if not isinstance(value, dict):
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+                message=(
+                    f'Task result is not a JSON object '
+                    f'(got {type(value).__name__})'
+                ),
+                retryable=False,
+            ))
+        return Ok(value)
+
+    def raw_result(self) -> BrokerResult[dict[str, Any] | None]:
         """Synchronous wrapper for :meth:`raw_result_async`."""
         from horsies.core.utils.loop_runner import get_shared_runner
 
-        if self._app is None:
-            return None
         return get_shared_runner().call(self.raw_result_async)
 
 

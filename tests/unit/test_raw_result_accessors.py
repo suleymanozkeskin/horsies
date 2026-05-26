@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from horsies.core.task_decorator import TaskHandle
+from horsies.core.brokers.result_types import BrokerErrorCode
 from horsies.core.types.result import is_err, is_ok
 
 
@@ -61,9 +62,11 @@ class TestTaskHandleRawResult:
 
         result = await handle.raw_result_async()
 
-        assert result == raw
-        assert isinstance(result, dict)
-        ok_payload = result['ok']
+        assert is_ok(result)
+        raw_result = result.ok_value
+        assert raw_result == raw
+        assert isinstance(raw_result, dict)
+        ok_payload = raw_result['ok']
         assert isinstance(ok_payload, dict)
         assert ok_payload['__h_pydantic__'] is True
         assert ok_payload['module'] == 'pure.consumer.never.imported'
@@ -73,7 +76,9 @@ class TestTaskHandleRawResult:
         handle: TaskHandle[object] = TaskHandle(
             task_id='task-2', app=app, broker_mode=True,
         )
-        assert await handle.raw_result_async() is None
+        result = await handle.raw_result_async()
+        assert is_ok(result)
+        assert result.ok_value is None
 
     async def test_returns_none_on_missing_row(self) -> None:
         fetchone = MagicMock(return_value=None)
@@ -88,20 +93,26 @@ class TestTaskHandleRawResult:
         handle: TaskHandle[object] = TaskHandle(
             task_id='nope', app=app, broker_mode=True,
         )
-        assert await handle.raw_result_async() is None
+        result = await handle.raw_result_async()
+        assert is_ok(result)
+        assert result.ok_value is None
 
-    async def test_returns_none_on_corrupt_json(self) -> None:
+    async def test_returns_err_on_corrupt_json(self) -> None:
         app = _make_app_with_row('not json {')
         handle: TaskHandle[object] = TaskHandle(
             task_id='task-3', app=app, broker_mode=True,
         )
-        assert await handle.raw_result_async() is None
+        result = await handle.raw_result_async()
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.TASK_INFO_QUERY_FAILED
 
-    async def test_returns_none_when_app_missing(self) -> None:
+    async def test_returns_err_when_app_missing(self) -> None:
         handle: TaskHandle[object] = TaskHandle(
             task_id='task-4', app=None, broker_mode=True,
         )
-        assert await handle.raw_result_async() is None
+        result = await handle.raw_result_async()
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.NO_BROKER
 
 
 @pytest.mark.unit

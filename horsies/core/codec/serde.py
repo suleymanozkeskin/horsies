@@ -75,6 +75,10 @@ _TAG_DATETIME: str = '__h_datetime__'
 _TAG_DATE: str = '__h_date__'
 _TAG_TIME: str = '__h_time__'
 
+_TRANSPORT_TASKRESULT_ENVELOPE: str = '__h_taskresult_envelope__'
+_TRANSPORT_WORKFLOW_CTX: str = '__h_workflow_ctx__'
+_TRANSPORT_WORKFLOW_META: str = '__h_workflow_meta__'
+
 _KNOWN_INTERNAL_TAGS: frozenset[str] = frozenset({
     _TAG_PYDANTIC,
     _TAG_DATACLASS,
@@ -90,9 +94,14 @@ _KNOWN_INTERNAL_TAGS: frozenset[str] = frozenset({
 # through ``rehydrate_value`` as opaque dict keys without triggering the
 # unknown-tag fail-closed branch.
 _TRANSPORT_TAGS: frozenset[str] = frozenset({
-    '__h_taskresult_envelope__',
-    '__h_workflow_ctx__',
-    '__h_workflow_meta__',
+    _TRANSPORT_TASKRESULT_ENVELOPE,
+    _TRANSPORT_WORKFLOW_CTX,
+    _TRANSPORT_WORKFLOW_META,
+})
+
+_ROOT_TRANSPORT_TAGS: frozenset[str] = frozenset({
+    _TRANSPORT_WORKFLOW_CTX,
+    _TRANSPORT_WORKFLOW_META,
 })
 
 _RECOGNIZED_INTERNAL_TAGS: frozenset[str] = _KNOWN_INTERNAL_TAGS | _TRANSPORT_TAGS
@@ -178,6 +187,68 @@ def _validate_user_mapping_key(key: str) -> SerdeResult[None]:
             code=ContractCode.RESERVED_KEY_IN_USER_DATA,
         ))
     return Ok(None)
+
+
+def _taskresult_envelope_to_jsonable(value: Any) -> SerdeResult[Dict[str, Json]]:
+    """Validate and copy an engine ``args_from`` transport envelope.
+
+    The workflow engine stores upstream dependency results under arbitrary
+    kwarg names as ``{"__h_taskresult_envelope__": True, "data": <json>}``.
+    This is the only internal tag that is allowed directly under a user kwarg
+    name by the engine-private serializer.
+    """
+    if not isinstance(value, Mapping):
+        return Err(SerializationError(
+            'TaskResult transport envelope must be a mapping',
+            code=ContractCode.RESERVED_KEY_IN_USER_DATA,
+        ))
+
+    mapping = cast(Mapping[object, object], value)
+    normalized: Dict[str, object] = {}
+    original_keys: Dict[str, object] = {}
+    for key, item in mapping.items():
+        str_key = str(key)
+        if str_key in normalized:
+            return Err(SerializationError(
+                f"Mapping key collision: {key!r} and {original_keys[str_key]!r} "
+                f"both resolve to '{str_key}' after stringification",
+            ))
+        normalized[str_key] = item
+        original_keys[str_key] = key
+
+    allowed = {_TRANSPORT_TASKRESULT_ENVELOPE, 'data'}
+    extra = set(normalized) - allowed
+    missing = allowed - set(normalized)
+    if extra or missing:
+        return Err(SerializationError(
+            f'Malformed TaskResult transport envelope: expected exactly '
+            f'{sorted(allowed)!r}, got keys {sorted(normalized)!r}',
+            code=ContractCode.RESERVED_KEY_IN_USER_DATA,
+        ))
+    if normalized.get(_TRANSPORT_TASKRESULT_ENVELOPE) is not True:
+        return Err(SerializationError(
+            f'Malformed TaskResult transport envelope: '
+            f'{_TRANSPORT_TASKRESULT_ENVELOPE!r} must be true',
+            code=ContractCode.RESERVED_KEY_IN_USER_DATA,
+        ))
+    data = normalized.get('data')
+    if not isinstance(data, str):
+        return Err(SerializationError(
+            'Malformed TaskResult transport envelope: "data" must be a JSON string',
+            code=ContractCode.RESERVED_KEY_IN_USER_DATA,
+        ))
+    envelope: Dict[str, Json] = {
+        _TRANSPORT_TASKRESULT_ENVELOPE: True,
+        'data': data,
+    }
+    return Ok(envelope)
+
+
+def _is_taskresult_transport_envelope(value: Any) -> bool:
+    return (
+        isinstance(value, Mapping)
+        and cast(Mapping[Any, Any], value).get(_TRANSPORT_TASKRESULT_ENVELOPE) is True
+    )
 
 
 def _task_error_to_json(err: TaskError) -> SerdeResult[Dict[str, Json]]:
@@ -276,22 +347,17 @@ def _check_serialization_identity(
     module: str,
     qualname: str,
 ) -> SerdeResult[None]:
-    """Reject ``(module, qualname)`` strings that resolve in the registry to a
-    *different* class than ``runtime_cls``.
+    """Reject local class identity mismatches before serializing a typed value.
 
-    The envelope's ``module`` / ``qualname`` fields are pulled from the
-    runtime class's mutable ``__module__`` / ``__qualname__`` attributes.
-    An attacker with enqueue rights can mutate those on a fake BaseModel
-    or dataclass subclass to impersonate any registered app type, and
-    the worker would otherwise resolve the legitimate registered class
-    and call its ``model_validate`` / ``__post_init__`` against
-    attacker-controlled data — running whatever side-effectful
-    validators or constructors the real type carries.
+    The envelope's ``module`` / ``qualname`` fields come from mutable class
+    attributes.  This check catches same-process mistakes such as hot-reload
+    class redefinition or explicit ``__module__`` / ``__qualname__`` mutation
+    where the local registry already maps the resulting key to a different
+    class than the runtime value being serialized.
 
-    If the runtime class is not in the registry under this key, the
-    consumer's own ``UNREGISTERED_REHYDRATION_TYPE`` check is sufficient;
-    we only need to catch the case where the registry HAS something
-    under the key but it isn't the class we're about to serialize.
+    It is not cross-process authentication.  Consumers still trust only their
+    own local registry, perform no import from wire strings, and fail closed
+    with ``UNREGISTERED_REHYDRATION_TYPE`` when a key is absent.
     """
     key = f'{module}:{qualname}'
     registered = get_registered_type(key)
@@ -491,25 +557,62 @@ def dumps_json(value: Any) -> SerdeResult[str]:
 def _dumps_json_horsies_internal(value: Any) -> SerdeResult[str]:  # pyright: ignore[reportUnusedFunction]
     """Serialize a value containing horsies-internal ``__h_*`` keys.
 
-    Engine-only.  Bypasses the user-key validation that ``dumps_json``
-    applies, so engine-injected transport keys
-    (``__h_workflow_ctx__``, ``__h_workflow_meta__``,
-    ``__h_taskresult_envelope__``) round-trip without being rejected as
-    user smuggling.
+    Engine-only.  The public ``dumps_json`` path rejects every user mapping
+    key under ``__h_*``.  The workflow engine legitimately needs exactly
+    three transport shapes after dependency injection:
 
-    **The caller is responsible for ensuring no untrusted user-supplied
-    dict carries a ``__h_*`` key.**  In the engine's case the user-supplied
-    portion (``TaskNode.kwargs``) has already been validated through the
-    strict path at workflow construction (``WorkflowSpec`` validation
-    round-trips kwargs through ``dumps_json``), so the only fresh
-    ``__h_*`` keys at this point are the ones the engine itself added.
+    - top-level ``__h_workflow_ctx__``
+    - top-level ``__h_workflow_meta__``
+    - direct kwarg values shaped as ``__h_taskresult_envelope__``
+
+    Everything else still goes through strict ``to_jsonable`` so future
+    engine call sites cannot accidentally reopen user-data smuggling by
+    serializing an entire object graph with internal keys enabled.
     """
-    jsonable_result = _to_jsonable_impl(value, allow_internal_keys=True)
-    if is_err(jsonable_result):
-        return jsonable_result
+    if not isinstance(value, Mapping):
+        return Err(SerializationError(
+            '_dumps_json_horsies_internal expects workflow kwargs as a mapping',
+        ))
+
+    result_dict: Dict[str, Json] = {}
+    original_keys: Dict[str, object] = {}
+    mapping = cast(Mapping[object, object], value)
+    for key, item in mapping.items():
+        str_key = str(key)
+        if str_key in result_dict:
+            return Err(SerializationError(
+                f"Mapping key collision: {key!r} and {original_keys[str_key]!r} "
+                f"both resolve to '{str_key}' after stringification",
+            ))
+
+        item_json: Json
+        if str_key in _ROOT_TRANSPORT_TAGS:
+            item_result = _to_jsonable_impl(item, allow_internal_keys=True)
+            if is_err(item_result):
+                return item_result
+            item_json = item_result.ok_value
+        elif str_key.startswith(_INTERNAL_NAMESPACE_PREFIX):
+            return Err(SerializationError(
+                f'Internal serializer only allows root transport keys '
+                f'{sorted(_ROOT_TRANSPORT_TAGS)!r}; got {str_key!r}.',
+                code=ContractCode.RESERVED_KEY_IN_USER_DATA,
+            ))
+        elif _is_taskresult_transport_envelope(item):
+            item_result = _taskresult_envelope_to_jsonable(item)
+            if is_err(item_result):
+                return Err(item_result.err_value)
+            item_json = cast(Json, item_result.ok_value)
+        else:
+            item_result = to_jsonable(item)
+            if is_err(item_result):
+                return item_result
+            item_json = item_result.ok_value
+        original_keys[str_key] = key
+        result_dict[str_key] = item_json
+
     try:
         return Ok(json.dumps(
-            jsonable_result.ok_value,
+            result_dict,
             ensure_ascii=False,
             separators=(',', ':'),
             allow_nan=False,

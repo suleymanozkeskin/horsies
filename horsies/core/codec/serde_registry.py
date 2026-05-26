@@ -136,11 +136,6 @@ def get_registered_type(key: str) -> type | None:
     return _REGISTRY.get(key)
 
 
-def _get_module_registry() -> SerdeTypeRegistry:
-    """Internal accessor used by ``serde.py``.  Not for user code."""
-    return _REGISTRY
-
-
 # ---------------------------------------------------------------------------
 # Baseline registrations — horsies-internal types
 # ---------------------------------------------------------------------------
@@ -212,7 +207,7 @@ def _walk_annotation(
     args = get_args(annotation)
 
     # Annotated[T, ...] — drop the metadata, walk T.
-    if origin is not None and getattr(annotation, '__class__', None).__name__ == '_AnnotatedAlias':
+    if origin is typing.Annotated:
         if args:
             _walk_annotation(args[0], visited=visited, registry=registry)
         return
@@ -284,7 +279,7 @@ def walk_callable_for_serde_types(
     fn: Callable[..., Any],
     *,
     registry: SerdeTypeRegistry | None = None,
-) -> None:
+) -> int:
     """Walk ``fn``'s parameter and return annotations, registering reachable types.
 
     Called at task registration so most user types end up in the registry
@@ -301,13 +296,15 @@ def walk_callable_for_serde_types(
             f'serde walker: could not resolve type hints for {fn!r}: '
             f'{type(exc).__name__}: {exc}',
         )
-        return
+        return 0
 
     visited: set[int] = set()
     try:
         sig = inspect.signature(fn)
     except (TypeError, ValueError):
-        return
+        return 0
+
+    before_count = len(target.keys())
 
     for param in sig.parameters.values():
         annotation = type_hints.get(param.name, param.annotation)
@@ -318,3 +315,5 @@ def walk_callable_for_serde_types(
     return_annotation = type_hints.get('return', sig.return_annotation)
     if return_annotation is not inspect.Signature.empty:
         _walk_annotation(return_annotation, visited=visited, registry=target)
+
+    return len(target.keys()) - before_count

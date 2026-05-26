@@ -879,8 +879,43 @@ async def test_malformed_pydantic_args(broker: PostgresBroker) -> None:
 
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
+async def test_legacy_pydantic_args_fail_closed(broker: PostgresBroker) -> None:
+    """L1.7.9: Pre-namespace serde tags fail closed during worker arg hydration."""
+    task_id = str(uuid4())
+    legacy_args = json.dumps([{
+        '__pydantic_model__': True,
+        'module': 'tests.e2e.tasks.basic',
+        'qualname': 'UserInput',
+        'data': {'name': 'Alice', 'age': 30},
+    }])
+    sent_at, sha = compute_test_enqueue_sha(
+        task_name='e2e_pydantic', args_json=legacy_args,
+    )
+    async with broker.session_factory() as session:
+        await session.execute(
+            text("""
+                INSERT INTO horsies_tasks
+                    (id, task_name, queue_name, status, args, kwargs, priority, sent_at,
+                     claimed, retry_count, max_retries, enqueue_sha)
+                VALUES
+                    (:tid, 'e2e_pydantic', 'default', 'PENDING', :args, '{}', 100, :sent_at,
+                     FALSE, 0, 0, :enqueue_sha)
+            """),
+            {'tid': task_id, 'args': legacy_args, 'sent_at': sent_at, 'enqueue_sha': sha},
+        )
+        await session.commit()
+
+    with run_worker(
+        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+    ):
+        result = broker.get_result(task_id, timeout_ms=5000)
+        assert_err(result, expected_code=OperationalErrorCode.LEGACY_SERDE_TAG_UNSUPPORTED)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
 async def test_task_cancelled(broker: PostgresBroker) -> None:
-    """L1.7.9: Cancelled task returns TASK_CANCELLED from get_result."""
+    """L1.7.10: Cancelled task returns TASK_CANCELLED from get_result."""
     task_id = broker.enqueue(
         task_name='e2e_simple',
         args_json='[5]',

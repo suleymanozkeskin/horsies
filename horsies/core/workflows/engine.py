@@ -19,9 +19,9 @@ from horsies.core.codec.serde import (
 )
 
 # ``_dumps_json_horsies_internal`` is module-private to serde; the engine is
-# the sole legitimate caller because it produces post-injection kwargs that
-# contain horsies-internal ``__h_*`` control keys.  Importing it from any
-# other module is a pyright error by design — use ``dumps_json`` instead.
+# the sole production caller because it produces post-injection kwargs that
+# contain horsies-internal ``__h_*`` control keys.  Other code should use the
+# strict public ``dumps_json`` path.
 from horsies.core.codec.serde import _dumps_json_horsies_internal  # pyright: ignore[reportPrivateUsage]
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 from horsies.core.types.result import is_err

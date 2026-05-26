@@ -62,7 +62,7 @@ Serialized form:
 }
 ```
 
-Rehydration looks the `(module, qualname)` pair up in the [serde class registry](#serde-class-registry) and calls `model_validate()` on the resolved class — Pydantic handles type coercion (including ISO strings back to `datetime` for model fields). There is no fallback `import_module` path; an unregistered type returns `Err(SerializationError(code=UNREGISTERED_REHYDRATION_TYPE))`.
+Rehydration looks the `(module, qualname)` pair up in the [serde class registry](#serde-class-registry) and calls `model_validate()` on the resolved class — Pydantic handles type coercion (including ISO strings back to `datetime` for model fields). There is no fallback `import_module` path; an unregistered type returns `Err(SerializationError(code=UNREGISTERED_REHYDRATION_TYPE))`. This removes the dynamic-import RCE surface from typed payloads: wire data can no longer name an arbitrary importable module and cause its top-level code to run.
 
 ### Pydantic Models in Workflows
 
@@ -235,11 +235,13 @@ Two registration paths populate the registry:
 
 The registry is append-only. Re-registering the same class is a no-op; a different class under the same `(module, qualname)` key raises `ValueError`. `TaskError` and `TaskResult` are baseline-registered at module import so user code never has to touch them.
 
+The producer-side serializer also checks same-process identity: if a runtime class serializes as `(module, qualname)` but the local registry already maps that key to a different class, serialization fails with `SPOOFED_SERIALIZATION_IDENTITY`. This catches local class redefinition and `__module__` / `__qualname__` mutation mistakes. It is not a cross-process authentication mechanism; consumers still trust only their local registry and never import classes from wire strings.
+
 Pure-consumer processes (monitoring services, ops tools) that don't import the result types can use [`raw_result`](#raw-result-escape-hatch) instead of registering.
 
 ## Raw Result Escape Hatch
 
-`TaskHandle.raw_result()` / `raw_result_async()` and `WorkflowHandle.raw_result()` / `raw_result_async()` return the underlying stored JSON dict, skipping `rehydrate_value` entirely. The returned dict is the un-rehydrated `__h_task_result__` envelope — nested `__h_pydantic__` / `__h_dataclass__` payloads inside `ok` come back as plain dicts.
+`TaskHandle.raw_result()` / `raw_result_async()` and `WorkflowHandle.raw_result()` / `raw_result_async()` return `Result` values carrying the underlying stored JSON dict, skipping `rehydrate_value` entirely. The returned dict is the un-rehydrated `__h_task_result__` envelope — nested `__h_pydantic__` / `__h_dataclass__` payloads inside `ok` come back as plain dicts.
 
 Use this when the consumer process doesn't import the task return types and therefore can't populate the registry.
 
@@ -254,7 +256,7 @@ Use this when the consumer process doesn't import the task return types and ther
 | `UNREGISTERED_REHYDRATION_TYPE` | A payload referenced a type not in the serde class registry |
 | `LEGACY_SERDE_TAG_UNSUPPORTED` | A payload carried a pre-namespace tag (`__pydantic_model__`, etc.) |
 | `UNKNOWN_SERDE_TAG` | A payload carried an unrecognised `__h_*` tag (newer producer) |
-| `SPOOFED_SERIALIZATION_IDENTITY` | A class's `__module__`/`__qualname__` resolved in the registry to a different class (spoofing attempt or class redefinition) |
+| `SPOOFED_SERIALIZATION_IDENTITY` | A runtime class's `__module__`/`__qualname__` resolves in the producer's local registry to a different class |
 
 Note: `LEGACY_SERDE_TAG_UNSUPPORTED`, `UNKNOWN_SERDE_TAG`, and `UNREGISTERED_REHYDRATION_TYPE` propagate out of `task_result_from_json` as `Err(SerializationError)`. They are not folded into a successful `TaskResult` with a `PYDANTIC_HYDRATION_ERROR`, so workflow `allow_failed_deps` logic can't silently continue past them.
 
@@ -288,4 +290,4 @@ To upgrade:
 
 1. Drain enqueued tasks and finish in-flight workflows before deploying the new release.
 2. After deployment, register any types not reachable from a task signature using `@horsies_serdetype` or `app.register_serde_type()`.
-3. Pure-consumer services that don't import task definitions can use `handle.raw_result()` instead of `handle.get()` for read-only access.
+3. Pure-consumer services that don't import task definitions can use `handle.raw_result()` instead of `handle.get()` for read-only access and should handle the returned `Result`.

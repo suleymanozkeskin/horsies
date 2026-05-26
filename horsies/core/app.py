@@ -312,14 +312,23 @@ class Horsies:
             # BaseModel/dataclass types reachable from parameter and return
             # annotations are auto-registered so rehydrate_value can resolve
             # them by (module, qualname) without ever calling import_module.
-            # Best-effort: walker failures don't block task registration —
-            # users can fall back to @horsies_serdetype for unreachable types.
+            # Best-effort for unresolved annotations: users can fall back to
+            # @horsies_serdetype for unreachable types. Registry collisions are
+            # not swallowed; they indicate two different classes are claiming
+            # the same serde identity and must fail at definition time.
             try:
-                walk_callable_for_serde_types(fn)
+                serde_type_count = walk_callable_for_serde_types(fn)
+            except ValueError:
+                raise
             except Exception as exc:
                 self.logger.warning(
                     f"Failed to walk serde types for task '{task_name}': "
                     f'{type(exc).__name__}: {exc}',
+                )
+            else:
+                self.logger.debug(
+                    f"Serde signature walker registered {serde_type_count} "
+                    f"type(s) for task '{task_name}'",
                 )
 
             # Register task with this app, passing source for duplicate detection
