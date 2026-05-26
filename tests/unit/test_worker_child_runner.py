@@ -143,6 +143,26 @@ class TestSerializationErrorResponse:
         err_data = parsed.get('err') or parsed.get('error')
         assert err_data['data']['task_name'] == 'process_order'
 
+    def test_preserves_code_carried_by_serialization_error(self) -> None:
+        """When SerializationError carries a code (e.g. legacy transport key),
+        the TaskError must use that code instead of falling back to the
+        generic WORKER_SERIALIZATION_ERROR.  Otherwise the documented
+        codes (LEGACY_SERDE_TAG_UNSUPPORTED, UNREGISTERED_REHYDRATION_TYPE,
+        etc.) are not observable to consumers reading task results.
+        """
+        error = SerializationError(
+            'Legacy transport key encountered',
+            code=OperationalErrorCode.LEGACY_SERDE_TAG_UNSUPPORTED,
+        )
+        _, payload, _ = _serialization_error_response('legacy_task', error)
+
+        parsed = _parse_task_result(payload)
+        err_data = parsed.get('err') or parsed.get('error')
+        assert err_data['error_code'] == {
+            '__builtin_task_code__':
+            OperationalErrorCode.LEGACY_SERDE_TAG_UNSUPPORTED.value,
+        }
+
 
 # ===================================================================
 # B. _debug_imports_log

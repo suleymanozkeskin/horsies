@@ -246,3 +246,213 @@ class TestHorsiesInternalSerializer:
         assert is_err(strict)
         assert isinstance(strict.err_value, SerializationError)
         assert strict.err_value.code == ContractCode.RESERVED_KEY_IN_USER_DATA
+
+
+# ---------------------------------------------------------------------------
+# Identity spoofing: __module__ / __qualname__ are mutable class attributes
+# ---------------------------------------------------------------------------
+
+
+class _RegisteredVictim(BaseModel):
+    """Stand-in for an app-registered Pydantic model with side-effectful validators."""
+
+    payload: str
+
+
+from dataclasses import dataclass as _dataclass
+
+
+@_dataclass
+class _RegisteredDCVictim:
+    """Module-level dataclass victim for the dataclass spoof test."""
+
+    label: str
+
+
+@_dataclass
+class _FakeAttackerDC:
+    """Attacker's fake dataclass — totally unrelated to ``_RegisteredDCVictim``."""
+
+    label: str = 'attacker'
+
+
+class _UnregisteredButValidModel(BaseModel):
+    """Module-level Pydantic model that is intentionally NOT registered."""
+
+    x: int
+
+
+@pytest.mark.unit
+class TestSpoofingIdentityGuard:
+    """A producer must not be able to mutate __module__ / __qualname__ on a
+    fake BaseModel / dataclass subclass to make it impersonate a real
+    registered type at serialize time.  Without the identity guard the
+    worker resolves the registered class and runs its validators against
+    the fake instance's data.
+    """
+
+    def test_pydantic_spoofing_attempt_is_rejected(self) -> None:
+        from horsies.core.codec.serde_registry import register_serde_type
+
+        register_serde_type(_RegisteredVictim)
+
+        # Attacker's fake model — completely unrelated class hierarchy.
+        class _FakeAttackerModel(BaseModel):
+            payload: str = 'attacker'
+
+        # Mutate the class attributes to point at the registered victim.
+        _FakeAttackerModel.__module__ = _RegisteredVictim.__module__
+        _FakeAttackerModel.__qualname__ = _RegisteredVictim.__qualname__
+
+        fake = _FakeAttackerModel(payload='attacker controls this')
+
+        result = to_jsonable(fake)
+        assert is_err(result)
+        err = result.err_value
+        assert isinstance(err, SerializationError)
+        assert err.code == ContractCode.SPOOFED_SERIALIZATION_IDENTITY
+        assert 'spoofing attempt' in str(err)
+
+    def test_dataclass_spoofing_attempt_is_rejected(self) -> None:
+        from horsies.core.codec.serde_registry import register_serde_type
+
+        register_serde_type(_RegisteredDCVictim)
+
+        # Spoof: point the attacker class's module/qualname at the victim.
+        _FakeAttackerDC.__module__ = _RegisteredDCVictim.__module__
+        _FakeAttackerDC.__qualname__ = _RegisteredDCVictim.__qualname__
+        try:
+            fake = _FakeAttackerDC(label='attacker controls this')
+            result = to_jsonable(fake)
+            assert is_err(result)
+            err = result.err_value
+            assert isinstance(err, SerializationError)
+            assert err.code == ContractCode.SPOOFED_SERIALIZATION_IDENTITY
+        finally:
+            # Restore real attributes so subsequent tests aren't affected.
+            _FakeAttackerDC.__module__ = __name__
+            _FakeAttackerDC.__qualname__ = '_FakeAttackerDC'
+
+    def test_legitimate_registered_model_serializes(self) -> None:
+        """Sanity: the guard only fires on mismatch — registered class round-trips."""
+        from horsies.core.codec.serde_registry import register_serde_type
+
+        register_serde_type(_RegisteredVictim)
+
+        legitimate = _RegisteredVictim(payload='ok')
+        result = to_jsonable(legitimate)
+        assert not is_err(result)
+
+    def test_unregistered_type_is_not_blocked_at_serialize(self) -> None:
+        """If the (module, qualname) isn't in the registry, the consumer's
+        UNREGISTERED_REHYDRATION_TYPE check already handles it; the
+        serializer doesn't need to reject.
+
+        We can't actually exercise this without registering — every model
+        in this test file ends up walked/registered eventually — so we
+        only check that the model is constructible without the spoofing
+        guard firing.  The behavioural check for the unregistered path
+        is in test_serde_registry.py.
+        """
+        # Use a model that is NOT auto-registered by importing this test
+        # file.  See _UnregisteredButValidModel at module level.
+        instance = _UnregisteredButValidModel(x=1)
+        result = to_jsonable(instance)
+        assert not is_err(result)
+
+
+# ---------------------------------------------------------------------------
+# task_result_from_json fails closed on infra-level errors
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestTaskResultInfrastructureErrorPropagation:
+    """The ``ok`` branch of ``task_result_from_json`` must propagate
+    infrastructure-level deser failures (legacy tags, unknown tags,
+    unregistered types) as Err so callers see them distinctly from
+    task-level failures.  The previous behaviour wrapped everything as
+    PYDANTIC_HYDRATION_ERROR, letting workflow allow_failed_deps logic
+    treat a legacy payload as a normal task failure and continue past it.
+    """
+
+    def test_legacy_tag_in_ok_propagates_as_err(self) -> None:
+        from horsies.core.codec.serde import task_result_from_json
+
+        payload = {
+            '__h_task_result__': True,
+            'ok': {
+                '__pydantic_model__': True,  # legacy tag
+                'module': 'whatever',
+                'qualname': 'Whatever',
+                'data': {},
+            },
+            'err': None,
+        }
+        result = task_result_from_json(payload)
+        assert is_err(result)
+        err = result.err_value
+        assert isinstance(err, SerializationError)
+        assert err.code == OperationalErrorCode.LEGACY_SERDE_TAG_UNSUPPORTED
+
+    def test_unknown_h_tag_in_ok_propagates_as_err(self) -> None:
+        from horsies.core.codec.serde import task_result_from_json
+
+        payload = {
+            '__h_task_result__': True,
+            'ok': {'__h_future_thing__': True},
+            'err': None,
+        }
+        result = task_result_from_json(payload)
+        assert is_err(result)
+        err = result.err_value
+        assert isinstance(err, SerializationError)
+        assert err.code == OperationalErrorCode.UNKNOWN_SERDE_TAG
+
+    def test_unregistered_type_in_ok_propagates_as_err(self) -> None:
+        from horsies.core.codec.serde import task_result_from_json
+
+        payload = {
+            '__h_task_result__': True,
+            'ok': {
+                '__h_pydantic__': True,
+                'module': 'never.registered',
+                'qualname': 'Ghost',
+                'data': {},
+            },
+            'err': None,
+        }
+        result = task_result_from_json(payload)
+        assert is_err(result)
+        err = result.err_value
+        assert isinstance(err, SerializationError)
+        assert err.code == ContractCode.UNREGISTERED_REHYDRATION_TYPE
+
+    def test_genuine_return_type_drift_still_wraps_as_task_error(self) -> None:
+        """Non-infrastructure rehydration errors keep the
+        PYDANTIC_HYDRATION_ERROR wrapping (return-type drift between
+        worker and consumer versions)."""
+        from horsies.core.codec.serde import task_result_from_json
+        from horsies.core.codec.serde_registry import register_serde_type
+
+        class _DriftModel(BaseModel):
+            x: int  # required
+
+        register_serde_type(_DriftModel)
+
+        payload = {
+            '__h_task_result__': True,
+            'ok': {
+                '__h_pydantic__': True,
+                'module': _DriftModel.__module__,
+                'qualname': _DriftModel.__qualname__,
+                'data': {'y': 'not_an_int'},  # validation will fail
+            },
+            'err': None,
+        }
+        result = task_result_from_json(payload)
+        # NOT Err — task-level failure with PYDANTIC_HYDRATION_ERROR.
+        assert not is_err(result)
+        task_result = result.ok_value
+        assert task_result.is_err()
+        assert task_result.err.error_code == ContractCode.PYDANTIC_HYDRATION_ERROR

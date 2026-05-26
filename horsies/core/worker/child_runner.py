@@ -51,11 +51,20 @@ def _serialization_error_response(
     task_name: str,
     error: SerializationError,
 ) -> tuple[bool, str, str | None]:
-    """Build a WORKER_SERIALIZATION_ERROR response for a serde failure."""
+    """Build a TaskResult error response for a serde failure.
+
+    Preserves ``error.code`` (LEGACY_SERDE_TAG_UNSUPPORTED,
+    UNREGISTERED_REHYDRATION_TYPE, etc.) so callers can dispatch on the
+    actual cause rather than getting a generic
+    ``WORKER_SERIALIZATION_ERROR`` for every serde failure.  Errors that
+    don't tag a code (raw ``json.dumps`` failures, etc.) keep the
+    legacy code as a fallback.
+    """
+    code = error.code or OperationalErrorCode.WORKER_SERIALIZATION_ERROR
     logger.error(f'Serialization error for task {task_name}: {error}')
     tr: TaskResult[None, TaskError] = TaskResult(
         err=TaskError(
-            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            error_code=code,
             message=str(error),
             data={'task_name': task_name},
         ),

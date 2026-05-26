@@ -254,6 +254,9 @@ Use this when the consumer process doesn't import the task return types and ther
 | `UNREGISTERED_REHYDRATION_TYPE` | A payload referenced a type not in the serde class registry |
 | `LEGACY_SERDE_TAG_UNSUPPORTED` | A payload carried a pre-namespace tag (`__pydantic_model__`, etc.) |
 | `UNKNOWN_SERDE_TAG` | A payload carried an unrecognised `__h_*` tag (newer producer) |
+| `SPOOFED_SERIALIZATION_IDENTITY` | A class's `__module__`/`__qualname__` resolved in the registry to a different class (spoofing attempt or class redefinition) |
+
+Note: `LEGACY_SERDE_TAG_UNSUPPORTED`, `UNKNOWN_SERDE_TAG`, and `UNREGISTERED_REHYDRATION_TYPE` propagate out of `task_result_from_json` as `Err(SerializationError)`. They are not folded into a successful `TaskResult` with a `PYDANTIC_HYDRATION_ERROR`, so workflow `allow_failed_deps` logic can't silently continue past them.
 
 ## Return Type Validation
 

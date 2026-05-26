@@ -271,6 +271,42 @@ def _qualified_dataclass_path(instance: Any) -> SerdeResult[tuple[str, str]]:
     return _qualified_class_path(type(instance))
 
 
+def _check_serialization_identity(
+    runtime_cls: type,
+    module: str,
+    qualname: str,
+) -> SerdeResult[None]:
+    """Reject ``(module, qualname)`` strings that resolve in the registry to a
+    *different* class than ``runtime_cls``.
+
+    The envelope's ``module`` / ``qualname`` fields are pulled from the
+    runtime class's mutable ``__module__`` / ``__qualname__`` attributes.
+    An attacker with enqueue rights can mutate those on a fake BaseModel
+    or dataclass subclass to impersonate any registered app type, and
+    the worker would otherwise resolve the legitimate registered class
+    and call its ``model_validate`` / ``__post_init__`` against
+    attacker-controlled data — running whatever side-effectful
+    validators or constructors the real type carries.
+
+    If the runtime class is not in the registry under this key, the
+    consumer's own ``UNREGISTERED_REHYDRATION_TYPE`` check is sufficient;
+    we only need to catch the case where the registry HAS something
+    under the key but it isn't the class we're about to serialize.
+    """
+    key = f'{module}:{qualname}'
+    registered = get_registered_type(key)
+    if registered is None or runtime_cls is registered:
+        return Ok(None)
+    return Err(SerializationError(
+        f'Refusing to serialize runtime type {runtime_cls!r} under '
+        f'(module={module!r}, qualname={qualname!r}): a different class '
+        f'({registered!r}) is registered under that key. This is either '
+        f'a __module__/__qualname__ spoofing attempt or an unintended '
+        f'class redefinition (e.g. module reload).',
+        code=ContractCode.SPOOFED_SERIALIZATION_IDENTITY,
+    ))
+
+
 def to_jsonable(value: Any) -> SerdeResult[Json]:
     """Convert a Python value to a JSON-serializable form.
 
@@ -344,6 +380,11 @@ def _to_jsonable_impl(
         if is_err(path_result):
             return path_result
         module, qualname = path_result.ok_value
+        identity_check = _check_serialization_identity(
+            type(value), module, qualname,
+        )
+        if is_err(identity_check):
+            return Err(identity_check.err_value)
         dumped = value.model_dump(mode='json')
         scan = _scan_for_reserved_keys(cast(Json, dumped))
         if is_err(scan):
@@ -361,6 +402,11 @@ def _to_jsonable_impl(
         if is_err(path_result):
             return path_result
         module, qualname = path_result.ok_value
+        identity_check = _check_serialization_identity(
+            type(value), module, qualname,
+        )
+        if is_err(identity_check):
+            return Err(identity_check.err_value)
         field_data: Dict[str, Json] = {}
         for field in dataclasses.fields(value):
             field_value = getattr(value, field.name)
@@ -814,18 +860,39 @@ def task_result_from_json(j: Json) -> SerdeResult[TaskResult[Any, TaskError]]:
     # Task returned a success — rehydrate the ok value
     ok_result = rehydrate_value(ok)
     if is_err(ok_result):
-        # Rehydration failure becomes a domain-level error, not infrastructure error.
-        # The JSON was structurally valid but the ok value couldn't be restored
-        # (e.g., user's Pydantic model changed between versions).
-        logger.warning(f'PYDANTIC_HYDRATION_ERROR: {ok_result.err_value}')
+        err_value = ok_result.err_value
+        # Infrastructure-level deser failures (legacy tags, unknown tags,
+        # unregistered types) propagate as Err so callers see them
+        # distinctly from task-level failures.  Wrapping them as
+        # PYDANTIC_HYDRATION_ERROR would let workflow allow_failed_deps
+        # logic silently continue past a payload that should be treated
+        # as a hard deserialization failure (the migration doc explicitly
+        # promises legacy tags fail closed).
+        if err_value.code in _INFRASTRUCTURE_DESER_CODES:
+            return Err(err_value)
+        # Otherwise: return-type drift between worker and consumer
+        # versions — surface as a task-level error so callers see it as
+        # the task failing rather than as an infrastructure outage.
+        logger.warning(f'PYDANTIC_HYDRATION_ERROR: {err_value}')
         return Ok(TaskResult(
             err=TaskError(
                 error_code=ContractCode.PYDANTIC_HYDRATION_ERROR,
-                message=str(ok_result.err_value),
+                message=str(err_value),
                 data={},
             ),
         ))
     return Ok(TaskResult(ok=ok_result.ok_value))
+
+
+# Codes that ``task_result_from_json`` propagates as Err rather than folding
+# into a successful TaskResult with a PYDANTIC_HYDRATION_ERROR.  These are
+# the failures that can fire inside ``rehydrate_value`` and need to surface
+# as deser failures to the caller, not as task-level errors.
+_INFRASTRUCTURE_DESER_CODES: frozenset[BuiltInTaskCode] = frozenset({
+    OperationalErrorCode.LEGACY_SERDE_TAG_UNSUPPORTED,
+    OperationalErrorCode.UNKNOWN_SERDE_TAG,
+    ContractCode.UNREGISTERED_REHYDRATION_TYPE,
+})
 
 
 # ---------------------------------------------------------------------------
