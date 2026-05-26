@@ -6,6 +6,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Generic,
+    TypedDict,
     TypeVar,
     Optional,
     Literal,
@@ -133,6 +134,23 @@ _BUILTIN_FAMILIES = (
 )
 
 
+class FlattenedException(TypedDict):
+    """Wire-safe dict form of a ``BaseException``.
+
+    Produced by ``flatten_exception`` (``codec/error_payload.py``) before
+    a ``TaskError`` carrying a live exception is encoded. Keeps the
+    legacy ``type`` / ``message`` / ``traceback`` triple that downstream
+    tooling depends on and adds ``module`` / ``repr`` for class
+    disambiguation.
+    """
+
+    type: str
+    module: str
+    message: str
+    repr: str
+    traceback: str
+
+
 class TaskError(BaseModel):
     """The error payload for a TaskResult.
 
@@ -158,7 +176,7 @@ class TaskError(BaseModel):
 
     model_config = {'arbitrary_types_allowed': True}
 
-    exception: Optional[dict[str, Any] | BaseException] = None
+    exception: BaseException | FlattenedException | None = None
     error_code: Optional[Union[BuiltInTaskCode, str]] = None
     data: Optional[Any] = None
     message: Optional[str] = None

@@ -27,6 +27,7 @@ import pytest
 
 from horsies.core.codec.serde import serialize_error_payload
 from horsies.core.models.tasks import (
+    FlattenedException,
     OperationalErrorCode,
     SubWorkflowError,
     TaskError,
@@ -132,12 +133,22 @@ class TestSerializeErrorPayloadFlattensException:
         assert flattened['message'] == 'domain problem'
 
     def test_already_flattened_dict_passes_through(self) -> None:
-        """A pre-flattened ``exception`` dict is encoded as-is."""
-        pre_flattened: dict[str, Any] = {
+        """A pre-flattened ``exception`` dict is encoded as-is.
+
+        Strict-serde phase 7 promoted ``TaskError.exception`` to
+        ``BaseException | FlattenedException | None``. The dict variant
+        must carry the full ``FlattenedException`` shape — all five
+        keys (``type``, ``module``, ``message``, ``repr``, ``traceback``)
+        — or model validation rejects it. This is the intentional
+        tightening: callers building the dict by hand must produce the
+        same shape ``flatten_exception`` would produce.
+        """
+        pre_flattened: FlattenedException = {
             'type': 'ConnectionError',
             'module': 'builtins',
             'message': 'db down',
             'repr': "ConnectionError('db down')",
+            'traceback': 'Traceback (most recent call last):\n  ConnectionError: db down\n',
         }
         tr: TaskResult[Any, TaskError] = TaskResult(
             err=TaskError(

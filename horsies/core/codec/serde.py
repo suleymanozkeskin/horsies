@@ -81,7 +81,10 @@ def _task_error_to_json(err: TaskError) -> SerdeResult[Dict[str, Json]]:
     if isinstance(ex, BaseException):
         ex_json: Optional[Dict[str, Json]] = _exception_to_json(ex)
     elif isinstance(ex, dict) or ex is None:
-        ex_json = ex  # already JSON-like or absent (e.g. None)
+        # ``FlattenedException`` is structurally ``dict[str, str]`` which
+        # satisfies ``Dict[str, Json]``; pyright doesn't infer this
+        # narrowing through ``isinstance(ex, dict)`` on a TypedDict union.
+        ex_json = cast(Optional[Dict[str, Json]], ex)
     else:
         # Unknown type: coerce to a simple shape of string
         ex_json = {'type': type(ex).__name__, 'message': str(ex)}
@@ -610,11 +613,12 @@ def serialize_error_payload(tr: TaskResult[Any, TaskError]) -> str:
     slot is encoded against the fixed ``TaskError`` schema (path-aware
     scan for the built-in code discriminator).
 
-    ``TaskError.exception`` is declared as ``dict[str, Any] | BaseException
-    | None``: the in-memory form lets the worker pass a live exception
-    (see ``child_runner.py:1054``) for local diagnostics, but the strict
-    codec can't serialize a raw ``BaseException``. Flatten a live
-    exception to a structured dict before encoding so the err payload
+    ``TaskError.exception`` is declared as ``BaseException |
+    FlattenedException | None``: the in-memory form lets the worker pass
+    a live exception (see ``child_runner.py:1054``) for local
+    diagnostics, but the strict codec can't serialize a raw
+    ``BaseException``. Flatten a live exception to the structured
+    ``FlattenedException`` shape before encoding so the err payload
     survives the round-trip with its ``error_code`` / ``message``
     intact — otherwise we'd silently downgrade every task-raised
     exception to ``WORKER_SERIALIZATION_ERROR``.
@@ -623,9 +627,17 @@ def serialize_error_payload(tr: TaskResult[Any, TaskError]) -> str:
     serialization still fails after the flatten (should never happen
     for library-constructed TaskError payloads, but we refuse to raise).
     """
+    from horsies.core.codec.error_payload import flatten_exception
     from horsies.core.codec.typed import encode_task_result
 
-    tr = _flatten_task_error_exception(tr)
+    if tr.is_err():
+        err = tr.err
+        if err is not None and isinstance(err.exception, BaseException):
+            tr = TaskResult(
+                err=err.model_copy(
+                    update={'exception': flatten_exception(err.exception)},
+                ),
+            )
 
     try:
         envelope = encode_task_result(tr, type(None))
@@ -639,33 +651,3 @@ def serialize_error_payload(tr: TaskResult[Any, TaskError]) -> str:
         logger.error(f'Secondary serialization failure: {result.err_value}')
         return FALLBACK_ERROR_JSON
     return result.ok_value
-
-
-def _flatten_task_error_exception(
-    tr: TaskResult[Any, TaskError],
-) -> TaskResult[Any, TaskError]:
-    """Normalize ``tr.err.exception`` to a wire-safe dict.
-
-    ``TaskError.exception`` accepts a live ``BaseException`` for
-    in-process diagnostics; the strict codec can only emit JSON-native
-    values. When the field carries an exception object, replace it with
-    a structured dict so encoding succeeds.
-
-    The flattened shape extends the legacy ``_exception_to_json`` form
-    (which downstream tooling already understands — ``type``, ``message``,
-    ``traceback``) with ``module`` and ``repr``. ``traceback`` is the
-    high-value debugging field, so it must survive the strict-serde
-    rewrite; ``module`` disambiguates the exception class beyond just
-    its short name, and ``repr`` mirrors what a Python caller would see
-    if the exception had survived in-process.
-    """
-    if not tr.is_err():
-        return tr
-    err = tr.err
-    if err is None or not isinstance(err.exception, BaseException):
-        return tr
-    exc = err.exception
-    flattened: dict[str, Json] = dict(_exception_to_json(exc))
-    flattened['module'] = type(exc).__module__
-    flattened['repr'] = repr(exc)
-    return TaskResult(err=err.model_copy(update={'exception': flattened}))
