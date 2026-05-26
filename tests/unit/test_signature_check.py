@@ -485,19 +485,27 @@ class TestRejectedReturnShape:
 
 
 # ---------------------------------------------------------------------------
-# Rejected: *args / **kwargs
+# Variadics with concrete element types are accepted; element type is walked.
 # ---------------------------------------------------------------------------
 
 
-class TestRejectedVariadic:
-    def test_var_positional_rejected(self) -> None:
-        def f(*args: int) -> TaskResult[int, TaskError]: ...
-        with pytest.raises(SignatureValidationError, match='VAR_POSITIONAL'):
+class TestVariadics:
+    def test_var_positional_with_concrete_type_accepted(self) -> None:
+        def f(*values: int) -> TaskResult[int, TaskError]: ...
+        _check(f)
+
+    def test_var_keyword_with_concrete_type_accepted(self) -> None:
+        def f(**values: int) -> TaskResult[int, TaskError]: ...
+        _check(f)
+
+    def test_var_positional_with_banned_element_rejected(self) -> None:
+        def f(*values: Any) -> TaskResult[int, TaskError]: ...
+        with pytest.raises(SignatureValidationError, match='Any'):
             _check(f)
 
-    def test_var_keyword_rejected(self) -> None:
-        def f(**kwargs: int) -> TaskResult[int, TaskError]: ...
-        with pytest.raises(SignatureValidationError, match='VAR_KEYWORD'):
+    def test_var_keyword_with_banned_element_rejected(self) -> None:
+        def f(**values: Any) -> TaskResult[int, TaskError]: ...
+        with pytest.raises(SignatureValidationError, match='Any'):
             _check(f)
 
 
@@ -602,8 +610,8 @@ class TestErrorMessageShape:
             check_task_signature(f, task_name='my_task')
         assert 'return' in str(exc_info.value).lower()
 
-    def test_error_for_var_positional_names_args(self) -> None:
-        def f(*args: int) -> TaskResult[int, TaskError]: ...
+    def test_error_for_banned_var_positional_element_names_param(self) -> None:
+        def f(*args: Any) -> TaskResult[int, TaskError]: ...
         with pytest.raises(SignatureValidationError) as exc_info:
             check_task_signature(f, task_name='my_task')
         assert "parameter 'args'" in str(exc_info.value)

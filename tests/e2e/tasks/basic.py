@@ -7,6 +7,7 @@ from typing import Any, cast
 
 from pydantic import BaseModel
 
+from horsies.core.codec.json_value import JsonValue
 from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode
 
 from tests.e2e.tasks.instance import app
@@ -29,7 +30,7 @@ def primitives_task(
     s: str,
     b: bool,
     n: None,
-) -> TaskResult[dict[str, Any], TaskError]:
+) -> TaskResult[dict[str, JsonValue], TaskError]:
     return TaskResult(ok={'i': i, 'f': f, 's': s, 'b': b, 'n': n})
 
 
@@ -38,7 +39,7 @@ def collections_task(
     lst: list[int],
     dct: dict[str, int],
     tpl: tuple[int, ...],
-) -> TaskResult[dict[str, Any], TaskError]:
+) -> TaskResult[dict[str, JsonValue], TaskError]:
     return TaskResult(ok={'lst': lst, 'dct': dct, 'tpl': list(tpl)})
 
 

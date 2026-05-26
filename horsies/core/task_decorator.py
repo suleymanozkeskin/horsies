@@ -31,6 +31,10 @@ from horsies.core.codec.serde import (
     args_to_json,
     kwargs_to_json,
 )
+from horsies.core.codec.signature_check import (
+    SignatureValidationError,
+    check_task_signature,
+)
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 
@@ -702,6 +706,23 @@ def create_task_wrapper(
         )
 
     ok_type, err_type = type_args
+
+    # Strict signature validation per design-doc §2: every param / return
+    # annotation must use a type from the closed allow list. Runs AFTER the
+    # existing return-shape checks so HRS-100 / HRS-101 fire for missing /
+    # malformed return types; the strict validator catches banned content
+    # (Any, bare containers, set, bytes, Path, TypedDict, TypeVar, ...) and
+    # enforces ErrT is TaskError. Failure here is the documented breaking
+    # cut at app construction time.
+    try:
+        check_task_signature(fn, task_name=task_name)
+    except SignatureValidationError as exc:
+        raise TaskDefinitionError(
+            message=str(exc),
+            code=ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION,
+            location=fn_location,
+        ) from exc
+
     ok_type_adapter: TypeAdapter[Any] = TypeAdapter(ok_type)
     err_type_adapter: TypeAdapter[Any] = TypeAdapter(err_type)
 
