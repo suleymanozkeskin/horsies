@@ -266,7 +266,7 @@ class TestComposedPatterns:
         # Receiver task that accepts two injected results
         @app.task(task_name='dafd_d')
         def diamond_sink(
-            b_result: TaskResult[str, TaskError],
+            b_result: TaskResult[int, TaskError],
             c_result: TaskResult[int, TaskError],
         ) -> TaskResult[str, TaskError]:
             b_status = 'err' if b_result.is_err() else 'ok'
@@ -623,7 +623,7 @@ class TestComposedPatterns:
         # "Recovery" task that always fails too
         @app.task(task_name='rff_b')
         def failing_recovery(
-            input_result: TaskResult[str, TaskError],
+            input_result: TaskResult[int, TaskError],
         ) -> TaskResult[int, TaskError]:
             return TaskResult(
                 err=TaskError(error_code='RECOVERY_ALSO_FAILED', message='Recovery failed too'),
