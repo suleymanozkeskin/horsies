@@ -54,7 +54,13 @@ def _workflow(
 
 
 class KwargsChildWorkflow(WorkflowDefinition[int]):
-    """Child workflow that verifies it receives kwargs, not positional args."""
+    """Child workflow for the args_from contract: ``build_with`` receives a
+    ``TaskResult`` injected by the engine when an upstream node completes.
+
+    Static producer kwargs are rejected for this signature under strict-serde
+    (``TaskResult``-typed params are engine-populated); the sibling
+    ``StaticKwargsChildWorkflow`` is the persistence-shape variant.
+    """
 
     name = 'kwargs_child_workflow'
     definition_key = 'tests.kwargs_child.v1'
@@ -77,6 +83,34 @@ class KwargsChildWorkflow(WorkflowDefinition[int]):
         raw_value = value.unwrap() if value.is_ok() else 0
 
         node = TaskNode(fn=child_task, kwargs={'value': raw_value})
+        return app.workflow(
+            name=cls.name,
+            tasks=[node],
+            output=node,
+            on_error=OnError.FAIL,
+        )
+
+
+class StaticKwargsChildWorkflow(WorkflowDefinition[int]):
+    """Child workflow for the static-kwargs persistence-shape contract:
+    ``build_with`` takes a plain ``int`` supplied by the producer via
+    ``SubWorkflowNode(kwargs={'value': <int>})``.
+
+    The sibling ``KwargsChildWorkflow`` is the args_from variant — those
+    two contracts are deliberately separated under strict-serde so
+    ``TaskResult[...]`` only ever means engine-injected.
+    """
+
+    name = 'static_kwargs_child_workflow'
+    definition_key = 'tests.static_kwargs_child.v1'
+
+    @classmethod
+    def build_with(cls, app: Horsies, value: int) -> Any:
+        @app.task(task_name='static_kwargs_child_task')
+        def child_task(value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+
+        node = TaskNode(fn=child_task, kwargs={'value': value})
         return app.workflow(
             name=cls.name,
             tasks=[node],
@@ -154,7 +188,7 @@ class TestKwargsOnlyWrites:
         session, broker, app = setup
 
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=KwargsChildWorkflow,
+            workflow_def=StaticKwargsChildWorkflow,
             kwargs={'value': 99},
         )
 
