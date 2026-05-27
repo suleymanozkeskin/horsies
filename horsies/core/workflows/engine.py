@@ -114,12 +114,13 @@ def _decode_stored_task_result(
 ) -> 'TaskResult[Any, TaskError]':
     """Decode a stored TaskResult JSON payload using the local task's OkT.
 
-    Strict-serde phase 6 replaces ``task_result_from_json`` for every
-    engine-side decode of a worker-emitted TaskResult. The expected
-    ``ok_type`` is derived from ``app.tasks[task_name].task_ok_type``;
-    when ``app`` is unavailable (legacy callers) or the task isn't
-    registered, the failure becomes a sentinel ``TaskError`` so the
-    upstream caller still sees a TaskResult shape.
+    Strict-serde phase 6+7: every engine-side decode of a worker-emitted
+    TaskResult routes through ``decode_task_result`` (no legacy
+    rehydration). The expected ``ok_type`` is derived from
+    ``app.tasks[task_name].task_ok_type``; when ``app`` is unavailable
+    (legacy callers) or the task isn't registered, the failure becomes a
+    sentinel ``TaskError`` so the upstream caller still sees a
+    TaskResult shape.
 
     Args:
         stored_result: The raw JSON text from the result column.

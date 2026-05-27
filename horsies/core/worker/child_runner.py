@@ -728,12 +728,8 @@ def _run_task_entry(
 
         # Deserialize task arguments. Strict-serde: positional args are
         # rejected at every producer; the wire shape for args is always
-        # `null` or `[]`. Inspect the raw loaded JSON FIRST — `json_to_args`
-        # routes through legacy `rehydrate_value`, which would import
-        # `__pydantic_model__` / `__dataclass__` payloads from pre-strict
-        # rows and trigger class-identity rehydration before our positional
-        # check could fire. Skipping the legacy decoder entirely for args
-        # also makes the post-strict args path trivially smuggle-safe.
+        # `null` or `[]`. Inspect the raw loaded JSON to enforce this
+        # before any typed decode runs.
         args_json_result = loads_json(args_json)
         if is_err(args_json_result):
             return _serialization_error_response(task_name, args_json_result.err_value)
