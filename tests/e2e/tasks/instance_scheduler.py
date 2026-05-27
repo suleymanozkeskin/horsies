@@ -43,7 +43,7 @@ schedule_config = ScheduleConfig(
             name='e2e_schedule_with_args',
             task_name='e2e_scheduled_with_args',
             pattern=IntervalSchedule(seconds=2),
-            args=(42,),
+            kwargs={'value': 42},
         ),
         TaskSchedule(
             name='e2e_schedule_catch_up',
