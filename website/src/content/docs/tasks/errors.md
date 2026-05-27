@@ -123,10 +123,10 @@ Workflow-specific error codes are distributed across the four families above:
 Domain-specific errors use string codes:
 
 ```python
-from horsies import TaskResult, TaskError
+from horsies import TaskResult, TaskError, JsonValue
 
 @app.task("validate_order")
-def validate_order(order_id: str) -> TaskResult[dict, TaskError]:
+def validate_order(order_id: str) -> TaskResult[dict[str, JsonValue], TaskError]:
     order = get_order(order_id)
 
     if order.total > 10000:
@@ -146,7 +146,7 @@ User-defined codes are auto-retried when listed in `auto_retry_for`:
     "call_api",
     retry_policy=RetryPolicy.fixed([30, 60, 120], auto_retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"]),
 )
-def call_api(url: str) -> TaskResult[dict, TaskError]:
+def call_api(url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
     ...
 ```
 

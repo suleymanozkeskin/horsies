@@ -16,7 +16,7 @@ Define tasks by decorating functions with `@app.task()` and returning `TaskResul
 ### Basic Task
 
 ```python
-from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
+from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError, JsonValue
 
 config = AppConfig(
     broker=PostgresConfig(database_url="postgresql+psycopg://..."),
@@ -52,7 +52,7 @@ Domain errors (expected failures):
 
 ```python
 @app.task("validate_input")
-def validate_input(data: dict) -> TaskResult[dict, TaskError]:
+def validate_input(data: dict[str, JsonValue]) -> TaskResult[dict[str, JsonValue], TaskError]:
     if not data.get("email"):
         return TaskResult(err=TaskError(
             error_code="MISSING_EMAIL",
@@ -89,7 +89,7 @@ from horsies import RetryPolicy
         auto_retry_for=["TIMEOUT", "CONNECTION_ERROR"],
     ),
 )
-def some_api_call() -> TaskResult[dict, TaskError]:
+def some_api_call() -> TaskResult[dict[str, JsonValue], TaskError]:
     try:
         result = call_external_api()
         return TaskResult(ok=result)
@@ -114,7 +114,7 @@ Or with the exception mapper (no try/except needed):
         ConnectionError: "CONNECTION_ERROR",
     },
 )
-def some_api_call() -> TaskResult[dict, TaskError]:
+def some_api_call() -> TaskResult[dict[str, JsonValue], TaskError]:
     result = call_external_api()
     return TaskResult(ok=result)
 ```
@@ -153,7 +153,7 @@ def bad_task():
 
 # Correct
 @app.task("good_task")
-def good_task() -> TaskResult[dict, TaskError]:
+def good_task() -> TaskResult[dict[str, JsonValue], TaskError]:
     return TaskResult(ok={"status": "done"})
 ```
 

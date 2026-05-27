@@ -39,7 +39,7 @@ Handle errors when:
 The library handles retries automatically when `auto_retry_for` matches the error:
 
 ```python
-from horsies import RetryPolicy, TaskResult, TaskError
+from horsies import RetryPolicy, TaskResult, TaskError, JsonValue
 
 @app.task(
     "fetch_api_data",
@@ -49,7 +49,7 @@ from horsies import RetryPolicy, TaskResult, TaskError
         auto_retry_for=["TASK_EXCEPTION", "RATE_LIMITED"],
     ),
 )
-def fetch_api_data(url: str) -> TaskResult[dict, TaskError]:
+def fetch_api_data(url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
     # If this returns a RATE_LIMITED error or raises an unhandled exception,
     # the worker automatically retries up to 3 times
     ...
@@ -70,7 +70,7 @@ To avoid try/except boilerplate for mapping exceptions to error codes, use `exce
         TimeoutError: "TIMEOUT",
     },
 )
-def fetch_api_data(url: str) -> TaskResult[dict, TaskError]:
+def fetch_api_data(url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
     # Unhandled RateLimitError/TimeoutError automatically mapped and retried
     ...
 ```
@@ -195,7 +195,7 @@ from horsies import RetrievalCode, Ok, Err
 from instance import my_task
 
 def process_task() -> str | None:
-    match my_task.send(10, 20):
+    match my_task.send(x=10, y=20):
         case Err(send_err):
             print(f"Send failed: {send_err.code} - {send_err.message}")
             return None

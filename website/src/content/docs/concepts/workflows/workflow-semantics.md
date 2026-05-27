@@ -496,7 +496,7 @@ from horsies import RetryPolicy
         auto_retry_for=["TASK_EXCEPTION", "NETWORK_ERROR"],
     ),
 )
-def fetch_data(url: str) -> TaskResult[dict, TaskError]:
+def fetch_data(url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
     ...
 
 # This task will retry up to 3 times when used in a workflow

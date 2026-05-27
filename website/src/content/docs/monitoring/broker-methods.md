@@ -23,9 +23,9 @@ broker = app.get_broker()
 
 ## Methods
 
-### `get_result(task_id: str, timeout_ms: int | None = None) -> TaskResult[Any, TaskError]`
+### `get_raw_result_record_async(task_id: str, timeout_ms: int | None = None) -> BrokerResult[RawResultRecord | None]`
 
-Retrieve a task's result by ID, waiting if necessary. This is the broker-level equivalent of `TaskHandle.get()` — use it when you need to fetch a result by task ID without holding a `TaskHandle` (e.g. in HTTP endpoints that receive a task ID from the client).
+Fetch the raw stored result envelope for a task by ID, waiting if necessary. This is the broker's infrastructure-level result-fetch surface: it does no typed decoding and imports no user code. Callers that want a typed `TaskResult[T, TaskError]` should use [`app.get_result_async`](#app-level-typed-result-apis) instead — it composes a typed decode on top of this call.
 
 Uses PostgreSQL `LISTEN/NOTIFY` with a 1-second polling fallback.
 
@@ -34,25 +34,42 @@ Uses PostgreSQL `LISTEN/NOTIFY` with a 1-second polling fallback.
 | `task_id` | `str` | — | Task ID to retrieve result for |
 | `timeout_ms` | `int \| None` | `None` | Max wait time in milliseconds; `None` waits indefinitely |
 
-**Returns:** `TaskResult[Any, TaskError]` — never raises. Error codes on the error branch:
-- `WAIT_TIMEOUT` — timed out; task may still be running
-- `TASK_NOT_FOUND` — task ID does not exist
-- `TASK_CANCELLED` — task was cancelled
-- `BROKER_ERROR` — database/infrastructure failure
+**Returns:** `BrokerResult[RawResultRecord | None]` — `Ok(None)` if the row exists but has no terminal payload yet; `Err(BrokerOperationError)` on infrastructure failure. The `RawResultRecord` carries `task_id`, `task_name`, `status`, and `raw_result` (the decoded JSON envelope, or `None`).
 
-Async variant: `get_result_async(...)`.
-Sync variant: `get_result(...)` (runs the async version in a background loop).
+Sync variant: `get_raw_result_record(task_id, timeout_ms)` (runs the async version in a background loop).
 
 ```python
-# Async
-result = await broker.get_result_async("task-uuid-here", timeout_ms=5000)
-if result.is_ok():
-    print(f"Result: {result.ok_value}")
-elif result.err_value.error_code == RetrievalCode.WAIT_TIMEOUT:
-    print("Still running, try again later")
+# Async — broker-level raw fetch (no typed decode)
+result = await broker.get_raw_result_record_async("task-uuid-here", timeout_ms=5000)
+if is_ok(result):
+    record = result.ok_value
+    if record is None:
+        print("Task still running or no payload")
+    else:
+        print(f"status={record.status}, task_name={record.task_name}")
+        print(f"raw envelope: {record.raw_result}")
+elif is_err(result):
+    print(f"Broker error: {result.err_value.code} - {result.err_value.message}")
+```
+
+### App-level typed result APIs
+
+For most callers, prefer `app.get_result_async(task_id, timeout_ms)` over the raw record. It returns `BrokerResult[TaskResult[Any, TaskError]]` — the outer `BrokerResult` surfaces infrastructure failures (`INVALID_JSON_PAYLOAD`, `NO_TYPE_AVAILABLE`), while the inner `TaskResult` carries the typed domain result decoded via the local task catalog's `task_ok_type`.
+
+```python
+# Async — typed decode at the app layer
+outer = await app.get_result_async("task-uuid-here", timeout_ms=5000)
+if is_err(outer):
+    print(f"Infrastructure error: {outer.err_value.code}")
+else:
+    task_result = outer.ok_value  # TaskResult[Any, TaskError]
+    if task_result.is_ok():
+        print(f"Result: {task_result.ok_value}")
+    else:
+        print(f"Task error: {task_result.err_value.error_code}")
 
 # Sync
-result = broker.get_result("task-uuid-here", timeout_ms=5000)
+outer = app.get_result("task-uuid-here", timeout_ms=5000)
 ```
 
 ### `get_stale_tasks(stale_threshold_minutes: int = 2) -> BrokerResult[list[dict[str, Any]]]`

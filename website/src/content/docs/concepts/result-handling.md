@@ -35,7 +35,7 @@ def divide(a: int, b: int) -> TaskResult[float, TaskError]:
 ```python
 from horsies import Ok, Err
 
-match divide.send(10, 2):
+match divide.send(a=10, b=2):
     case Ok(handle):
         result = handle.get()
 

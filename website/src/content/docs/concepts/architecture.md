@@ -109,7 +109,7 @@ unavailable.
 
 ### Task Submission
 
-1. Producer calls `task.send(args)`
+1. Producer calls `task.send(**kwargs)` (keyword-only)
 2. Queue and arguments are validated
 3. Task row inserted into `tasks` table with status `PENDING`
 4. PostgreSQL trigger fires NOTIFY to wake workers

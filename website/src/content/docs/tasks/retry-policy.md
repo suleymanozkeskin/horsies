@@ -86,7 +86,7 @@ Retries only happen when specific conditions are met. Configure via `auto_retry_
     "api_call",
     retry_policy=RetryPolicy.fixed([30, 60, 120], auto_retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"]),
 )
-def api_call() -> TaskResult[dict, TaskError]:
+def api_call() -> TaskResult[dict[str, JsonValue], TaskError]:
     ...
 ```
 
@@ -111,7 +111,7 @@ Map unhandled exceptions to error codes without try/except boilerplate. When a t
         ConnectionError: "CONNECTION_ERROR",
     },
 )
-def call_api() -> TaskResult[dict, TaskError]:
+def call_api() -> TaskResult[dict[str, JsonValue], TaskError]:
     # No try/except needed — TimeoutError becomes "TIMEOUT" automatically
     response = requests.get("https://api.example.com", timeout=10)
     return TaskResult(ok=response.json())
@@ -213,7 +213,7 @@ RetryPolicy(
         auto_retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"],
     ),
 )
-def call_external_api() -> TaskResult[dict, TaskError]:
+def call_external_api() -> TaskResult[dict[str, JsonValue], TaskError]:
     try:
         response = requests.get("https://api.example.com")
         if response.status_code == 429:
