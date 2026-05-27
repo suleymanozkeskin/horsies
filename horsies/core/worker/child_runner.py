@@ -808,23 +808,18 @@ def _run_task_entry(
                     ),
                 )
             inner = envelope.get('inner')
-            source_task = app.tasks.get(source_task_name)
-            if source_task is None:
-                return _serialization_error_response(
-                    task_name,
-                    SerializationError(
-                        f'args_from source task {source_task_name!r} is '
-                        f'not registered in this process; cannot decode '
-                        f'kwarg {key!r}'
-                    ),
-                )
-            source_ok_type = getattr(source_task, 'task_ok_type', None)
+            from horsies.core.models.workflow.typing_utils import (
+                resolve_source_ok_type,
+            )
+
+            source_ok_type = resolve_source_ok_type(app, source_task_name)
             if source_ok_type is None:
                 return _serialization_error_response(
                     task_name,
                     SerializationError(
-                        f'args_from source task {source_task_name!r} has '
-                        f'no task_ok_type; cannot decode kwarg {key!r}'
+                        f'args_from source {source_task_name!r} is not '
+                        f'registered (no task or workflow definition with '
+                        f'this name); cannot decode kwarg {key!r}'
                     ),
                 )
             try:
@@ -887,32 +882,20 @@ def _run_task_entry(
                             ),
                         )
                         continue
-                    source_task = app.tasks.get(source_task_name)
-                    if source_task is None:
-                        results_by_id[node_id] = TaskResult(
-                            err=TaskError(
-                                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                                message=(
-                                    f'workflow_ctx source task '
-                                    f'{source_task_name!r} not '
-                                    f'registered in this process'
-                                ),
-                                data={
-                                    'node_id': node_id,
-                                    'source_task_name': source_task_name,
-                                },
-                            ),
-                        )
-                        continue
-                    source_ok_type = getattr(source_task, 'task_ok_type', None)
+                    from horsies.core.models.workflow.typing_utils import (
+                        resolve_source_ok_type as _resolve_src_ok,
+                    )
+
+                    source_ok_type = _resolve_src_ok(app, source_task_name)
                     if source_ok_type is None:
                         results_by_id[node_id] = TaskResult(
                             err=TaskError(
                                 error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                                 message=(
-                                    f'workflow_ctx source task '
-                                    f'{source_task_name!r} has no '
-                                    f'task_ok_type'
+                                    f'workflow_ctx source '
+                                    f'{source_task_name!r} not '
+                                    f'registered in this process (no task '
+                                    f'or workflow definition with this name)'
                                 ),
                                 data={
                                     'node_id': node_id,

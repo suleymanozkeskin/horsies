@@ -166,28 +166,21 @@ def _decode_stored_task_result(
                 data={**context, 'stage': 'no_app'},
             ),
         )
-    source_task = app.tasks.get(task_name)
-    if source_task is None:
-        return TaskResult(
-            err=TaskError(
-                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                message=(
-                    f'Task {task_name!r} is not registered in this '
-                    f'process; cannot decode stored TaskResult'
-                ),
-                data={**context, 'stage': 'task_not_registered'},
-            ),
-        )
-    ok_type = getattr(source_task, 'task_ok_type', None)
+    from horsies.core.models.workflow.typing_utils import (
+        resolve_source_ok_type,
+    )
+
+    ok_type = resolve_source_ok_type(app, task_name)
     if ok_type is None:
         return TaskResult(
             err=TaskError(
                 error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                 message=(
-                    f'Task {task_name!r} has no `task_ok_type`; '
+                    f'Source {task_name!r} is not registered in this '
+                    f'process (not a known task or workflow definition); '
                     f'cannot decode stored TaskResult'
                 ),
-                data={**context, 'stage': 'no_ok_type'},
+                data={**context, 'stage': 'source_not_registered'},
             ),
         )
     try:
@@ -209,19 +202,20 @@ def _resolve_source_ok_type(
     app: 'Horsies | None',
     task_name: str,
 ) -> Any | None:
-    """Look up the source task's ``task_ok_type`` for envelope encoding.
+    """Look up the source OkT for envelope encoding.
 
-    Returns ``None`` when the app context is missing or the task isn't
-    registered locally; callers fall back to passing the raw TaskResult
-    through ``dumps_json`` (legacy path) or surface a serialization
-    error.
+    Resolves against both the task registry (``TaskNode`` source) and
+    the workflow definition registry (``SubWorkflowNode`` source — the
+    persisted ``task_name`` is the child workflow's ``.name`` for those
+    rows, not a registered task name).
+
+    Returns ``None`` when the name isn't known in either registry; the
+    engine encode path then writes ``envelope=None`` for that entry,
+    which the decode side surfaces as a sentinel TaskError.
     """
-    if app is None:
-        return None
-    source_task = app.tasks.get(task_name)
-    if source_task is None:
-        return None
-    return getattr(source_task, 'task_ok_type', None)
+    from horsies.core.models.workflow.typing_utils import resolve_source_ok_type
+
+    return resolve_source_ok_type(app, task_name)
 
 
 def _decode_err_only(

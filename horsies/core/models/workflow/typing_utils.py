@@ -193,6 +193,44 @@ def _resolve_workflow_def_ok_type(
     return None
 
 
+def resolve_source_ok_type(app: Any | None, name: str) -> Any | None:
+    """Resolve the source OkT for a persisted node by name.
+
+    The ``name`` is whatever was stored in ``horsies_workflow_tasks.task_name``:
+
+    - For TaskNode rows: a registered task name (``app.tasks`` key).
+    - For SubWorkflowNode rows: the child workflow's ``.name`` attribute,
+      not a task name. The persisted name is the workflow's display
+      name (see ``lifecycle.py`` ``sub_wf_name`` field).
+
+    Tries the task registry first; falls back to the workflow definition
+    registry (``WorkflowDefinition[OkT]`` generic). Returns ``None`` if
+    the name isn't known in either, or when ``app`` is unavailable AND
+    the workflow definition isn't registered process-locally.
+
+    Strict-serde phase 7+: this is the single source of truth for
+    OkT lookup at all decode boundaries (handle, engine, child_runner).
+    Pre-helper callers used ``app.tasks.get(name).task_ok_type`` directly,
+    which silently dropped SubWorkflowNode rows because subworkflow names
+    don't appear in the task registry.
+    """
+    if app is not None:
+        source_task = app.tasks.get(name)
+        if source_task is not None:
+            task_ok_type = getattr(source_task, 'task_ok_type', None)
+            if task_ok_type is not None:
+                return _normalize_resolved_ok_type(task_ok_type)
+
+    # SubWorkflowNode path: look up the workflow definition by its name
+    # in the workflow registry, then resolve OkT from its generic.
+    from horsies.core.workflows.registry import get_workflow_definition_by_name
+
+    workflow_def = get_workflow_definition_by_name(name)
+    if workflow_def is None:
+        return None
+    return _resolve_workflow_def_ok_type(workflow_def)
+
+
 def _resolve_source_node_ok_type(node: TaskNode[Any] | SubWorkflowNode[Any]) -> Any | None:
     """Resolve output ok-type for TaskNode/SubWorkflowNode source used in args_from."""
     if isinstance(node, TaskNode):
