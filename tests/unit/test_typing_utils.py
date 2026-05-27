@@ -24,6 +24,7 @@ from horsies.core.models.workflow.typing_utils import (
     _resolve_task_fn_ok_type,
     _resolve_workflow_def_ok_type,
     _resolve_source_node_ok_type,
+    resolve_source_ok_type,
     validate_workflow_generic_output_match,
     _format_type_name,
     _is_ok_type_compatible,
@@ -958,3 +959,155 @@ class TestIsOkTypeCompatible:
 
     def test_both_any(self) -> None:
         assert _is_ok_type_compatible(Any, Any) is True
+
+
+@pytest.mark.unit
+class TestResolveSourceOkType:
+    """Strict-serde phase 7+: resolve OkT for a persisted source name.
+
+    The persisted ``horsies_workflow_tasks.task_name`` carries either a
+    task name (TaskNode source) or a workflow's ``.name`` attribute
+    (SubWorkflowNode source). ``resolve_source_ok_type`` must handle
+    both: task registry first, workflow definition registry as fallback.
+
+    Pre-helper, decode paths only consulted ``app.tasks`` and silently
+    dropped SubWorkflowNode rows.
+    """
+
+    def setup_method(self) -> None:
+        from horsies.core.workflows.registry import (
+            clear_workflow_definition_registry,
+        )
+
+        clear_workflow_definition_registry()
+
+    def teardown_method(self) -> None:
+        from horsies.core.workflows.registry import (
+            clear_workflow_definition_registry,
+        )
+
+        clear_workflow_definition_registry()
+
+    def test_resolves_via_task_registry(self) -> None:
+        """TaskNode source: name in ``app.tasks`` → ``task_ok_type``."""
+        from unittest.mock import MagicMock
+
+        fake_task = MagicMock()
+        fake_task.task_ok_type = int
+
+        fake_app = MagicMock()
+        fake_app.tasks = MagicMock()
+        fake_app.tasks.get = lambda name: (  # type: ignore[assignment]
+            fake_task if name == 'my_task' else None
+        )
+
+        assert resolve_source_ok_type(fake_app, 'my_task') is int
+
+    def test_resolves_via_workflow_registry_fallback(self) -> None:
+        """SubWorkflowNode source: name in workflow def registry → OkT."""
+        from horsies.core.models.workflow.definition import WorkflowDefinition
+        from horsies.core.workflows.registry import register_workflow_definition
+
+        class MyChildWorkflow(WorkflowDefinition[str]):
+            name = 'my_child_workflow'
+            definition_key = 'tests.unit.typing_utils.my_child.v1'
+
+        register_workflow_definition(MyChildWorkflow)
+
+        from unittest.mock import MagicMock
+
+        fake_app = MagicMock()
+        fake_app.tasks = MagicMock()
+        fake_app.tasks.get = lambda name: None  # type: ignore[assignment]
+
+        assert resolve_source_ok_type(fake_app, 'my_child_workflow') is str
+
+    def test_task_registry_takes_precedence_when_both_match(self) -> None:
+        """Task registry hit wins over workflow registry hit on same name."""
+        from horsies.core.models.workflow.definition import WorkflowDefinition
+        from horsies.core.workflows.registry import register_workflow_definition
+
+        class CollidingWorkflow(WorkflowDefinition[str]):
+            name = 'colliding_name'
+            definition_key = 'tests.unit.typing_utils.colliding.v1'
+
+        register_workflow_definition(CollidingWorkflow)
+
+        from unittest.mock import MagicMock
+
+        fake_task = MagicMock()
+        fake_task.task_ok_type = int
+
+        fake_app = MagicMock()
+        fake_app.tasks = MagicMock()
+        fake_app.tasks.get = lambda name: (  # type: ignore[assignment]
+            fake_task if name == 'colliding_name' else None
+        )
+
+        assert resolve_source_ok_type(fake_app, 'colliding_name') is int
+
+    def test_returns_none_when_neither_registry_matches(self) -> None:
+        from unittest.mock import MagicMock
+
+        fake_app = MagicMock()
+        fake_app.tasks = MagicMock()
+        fake_app.tasks.get = lambda name: None  # type: ignore[assignment]
+
+        assert resolve_source_ok_type(fake_app, 'unknown_source') is None
+
+    def test_returns_none_when_app_none_and_workflow_not_registered(self) -> None:
+        """No app context and no workflow registration → cannot resolve."""
+        assert resolve_source_ok_type(None, 'anything') is None
+
+    def test_resolves_workflow_when_app_is_none(self) -> None:
+        """A registered workflow resolves even without app context.
+
+        Cross-process recovery / out-of-process handle reads may not
+        have an app reference. The workflow registry is process-local
+        but doesn't require app.
+        """
+        from horsies.core.models.workflow.definition import WorkflowDefinition
+        from horsies.core.workflows.registry import register_workflow_definition
+
+        class AppLessWorkflow(WorkflowDefinition[dict[str, int]]):
+            name = 'app_less_workflow'
+            definition_key = 'tests.unit.typing_utils.app_less.v1'
+
+        register_workflow_definition(AppLessWorkflow)
+
+        result = resolve_source_ok_type(None, 'app_less_workflow')
+        # Generic alias compares by repr; check args/origin
+        from typing import get_args, get_origin
+
+        assert get_origin(result) is dict
+        assert get_args(result) == (str, int)
+
+    def test_task_without_task_ok_type_falls_through_to_workflow_registry(
+        self,
+    ) -> None:
+        """A task hit without ``task_ok_type`` falls through to the workflow
+        registry — handles the case where someone registered a task object
+        without ok_type metadata but the same name also matches a workflow.
+        """
+        from horsies.core.models.workflow.definition import WorkflowDefinition
+        from horsies.core.workflows.registry import register_workflow_definition
+
+        class FallthroughWorkflow(WorkflowDefinition[float]):
+            name = 'fallthrough_name'
+            definition_key = 'tests.unit.typing_utils.fallthrough.v1'
+
+        register_workflow_definition(FallthroughWorkflow)
+
+        from unittest.mock import MagicMock
+
+        # Task exists but has no task_ok_type.
+        fake_task = MagicMock()
+        fake_task.task_ok_type = None
+
+        fake_app = MagicMock()
+        fake_app.tasks = MagicMock()
+        fake_app.tasks.get = lambda name: (  # type: ignore[assignment]
+            fake_task if name == 'fallthrough_name' else None
+        )
+
+        assert resolve_source_ok_type(fake_app, 'fallthrough_name') is float

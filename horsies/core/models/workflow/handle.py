@@ -215,21 +215,16 @@ def _decode_per_task_envelope(
                 data={'node_id': node_id},
             ),
         )
-    source_task = (
-        app.tasks.get(task_name) if app is not None else None
-    )
-    source_ok_type = (
-        getattr(source_task, 'task_ok_type', None)
-        if source_task is not None
-        else None
-    )
+    from .typing_utils import resolve_source_ok_type
+
+    source_ok_type = resolve_source_ok_type(app, task_name)
     if source_ok_type is None:
         return TaskResult(
             err=TaskError(
                 error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                 message=(
-                    f'Source task {task_name!r} not registered or '
-                    f'missing task_ok_type (node {node_id!r})'
+                    f'Source {task_name!r} not registered (no task or '
+                    f'workflow definition with this name) (node {node_id!r})'
                 ),
                 data={'node_id': node_id, 'task_name': task_name},
             ),
@@ -376,25 +371,18 @@ def _decode_workflow_envelope(
                     ),
                 )
                 continue
-            source_task = (
-                app.tasks.get(source_task_name)
-                if app is not None
-                else None
-            )
-            source_ok_type = (
-                getattr(source_task, 'task_ok_type', None)
-                if source_task is not None
-                else None
-            )
+            from .typing_utils import resolve_source_ok_type as _resolve_src_ok_type
+
+            source_ok_type = _resolve_src_ok_type(app, source_task_name)
             if source_ok_type is None:
                 decoded_results[node_id] = TaskResult(
                     err=TaskError(
                         error_code=ContractCode.NO_TYPE_AVAILABLE,
                         message=(
                             f'Outputless workflow {workflow_id} node '
-                            f'{node_id!r}: source task '
-                            f'{source_task_name!r} not registered or '
-                            f'missing task_ok_type'
+                            f'{node_id!r}: source '
+                            f'{source_task_name!r} is not a known task or '
+                            f'workflow definition'
                         ),
                         data={
                             'node_id': node_id,
