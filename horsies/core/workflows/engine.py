@@ -1241,11 +1241,18 @@ async def on_workflow_task_complete(
     session: AsyncSession,
     task_id: str,
     result: 'TaskResult[Any, TaskError]',
-    broker: 'PostgresBroker | None' = None,
+    broker: 'PostgresBroker | None',
 ) -> None:
     """
     Called from worker._finalize_after when a task completes.
     Handles workflow task status update and dependency resolution.
+
+    Strict-serde phase 7: ``broker`` is required (explicit `None` allowed for
+    unit-test branches that return before dependency propagation). Removing
+    the implicit default surfaces missing-broker bugs at the call site instead
+    of degrading to a `WORKER_SERIALIZATION_ERROR` during args_from envelope
+    encoding when `broker.app` is needed to resolve the source task's
+    `task_ok_type`.
     """
     # 1. Find workflow_task by task_id
     wt_result = await session.execute(

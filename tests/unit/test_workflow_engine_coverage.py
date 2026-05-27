@@ -992,7 +992,7 @@ class TestOnWorkflowTaskComplete:
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
         result = TaskResult(ok='done')
-        await on_workflow_task_complete(session, 'task-1', result)
+        await on_workflow_task_complete(session, 'task-1', result, None)
         # Should return without error
 
     @pytest.mark.asyncio
@@ -1007,7 +1007,7 @@ class TestOnWorkflowTaskComplete:
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
         result = TaskResult(ok='done')
-        await on_workflow_task_complete(session, 'task-1', result)
+        await on_workflow_task_complete(session, 'task-1', result, None)
 
     @pytest.mark.asyncio
     async def test_already_terminal_skips(self) -> None:
@@ -1023,7 +1023,7 @@ class TestOnWorkflowTaskComplete:
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
         result = TaskResult(ok='done')
-        await on_workflow_task_complete(session, 'task-1', result)
+        await on_workflow_task_complete(session, 'task-1', result, None)
 
 
 # ── 6. try_make_ready_and_enqueue ────────────────────────────────────
