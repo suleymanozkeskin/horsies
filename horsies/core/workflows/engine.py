@@ -825,61 +825,16 @@ async def enqueue_subworkflow_task(
                     return None
                 dep_result = all_dep_results.get(dep_index)
                 if dep_result is not None:
-                    source_task_name = (
-                        all_dep_task_names.get(dep_index)
-                        if all_dep_task_names is not None
-                        else None
-                    )
-                    if source_task_name is None:
-                        await _fail_enqueued_task(
-                            session, workflow_id, task_index,
-                            (
-                                f'Missing source task name for dep_index '
-                                f'{dep_index} (kwarg {kwarg_name!r}, '
-                                f'subworkflow task {task_index})'
-                            ),
-                            broker,
-                            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                        )
-                        return None
-                    source_ok_type = _resolve_source_ok_type(
-                        broker.app, source_task_name,
-                    )
-                    if source_ok_type is None:
-                        await _fail_enqueued_task(
-                            session, workflow_id, task_index,
-                            (
-                                f'Source task {source_task_name!r} not '
-                                f'registered or missing task_ok_type; '
-                                f'cannot encode args_from envelope for '
-                                f'kwarg {kwarg_name!r} (subworkflow '
-                                f'task {task_index})'
-                            ),
-                            broker,
-                            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                        )
-                        return None
-                    try:
-                        inner = encode_task_result(
-                            dep_result, source_ok_type,
-                        )
-                    except (StrictJsonError, _PydanticValidationError) as exc:
-                        await _fail_enqueued_task(
-                            session, workflow_id, task_index,
-                            (
-                                f'encode_task_result failed for kwarg '
-                                f'{kwarg_name!r} (subworkflow task '
-                                f'{task_index}): {exc}'
-                            ),
-                            broker,
-                            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                        )
-                        return None
-                    kwargs[kwarg_name] = {
-                        _ENGINE_KEY_TASKRESULT_ENVELOPE: True,
-                        'source_task_name': source_task_name,
-                        'inner': inner,
-                    }
+                    # Strict-serde phase 7: subworkflow ``build_with`` runs
+                    # in-process — no DB/worker boundary to cross. Pass the
+                    # typed ``TaskResult`` instance straight through;
+                    # ``build_with`` signatures bind against
+                    # ``TaskResult[T, TaskError]`` per the SubWorkflowNode
+                    # ``args_from`` contract (see SubWorkflowNode docstring).
+                    # The wire ``__h_taskresult_envelope__`` form is reserved
+                    # for the worker-bound TaskNode ``args_from`` path that
+                    # crosses the broker.
+                    kwargs[kwarg_name] = dep_result
 
     # 4. Build child WorkflowSpec (parameterized)
     try:
