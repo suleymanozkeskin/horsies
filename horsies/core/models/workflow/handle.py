@@ -766,7 +766,11 @@ class WorkflowHandle(Generic[OutT]):
                     error_data = loads_r.ok_value
                     if isinstance(error_data, dict):
                         try:
-                            validated_err = TaskError.model_validate(error_data)
+                            # Polymorphic decode preserves SubWorkflowError
+                            # subclass fields (sub_workflow_id /
+                            # sub_workflow_summary); TaskError.model_validate
+                            # would silently downcast.
+                            validated_err = decode_task_error(error_data)
                         except Exception as exc:
                             logger.warning(
                                 'Workflow %s error payload validation failed: %s',

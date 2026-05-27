@@ -17,6 +17,7 @@ from horsies.core.codec.kwargs import encode_kwargs, underlying_task_fn
 from horsies.core.codec.serde import dumps_json, loads_json, serialize_error_payload, SerdeResult
 from horsies.core.codec.typed import (
     Json,
+    decode_task_error,
     decode_task_result,
     encode_task_result,
     encode_value,
@@ -228,6 +229,11 @@ def _decode_err_only(
     registered locally. Returns ``None`` if the envelope is missing,
     malformed, or carries an ok payload (caller must supply ok_type for
     those).
+
+    Routes through ``decode_task_error`` (polymorphic) so subclass
+    types like ``SubWorkflowError`` survive the decode. The base
+    ``decode_value(_, TaskError)`` path would silently drop
+    subclass-only fields (`sub_workflow_id`, `sub_workflow_summary`).
     """
     from horsies.core.models.tasks import TaskError, TaskResult
 
@@ -241,8 +247,7 @@ def _decode_err_only(
     if err_slot is None:
         return None
     try:
-        from horsies.core.codec.typed import decode_value as _decode_value
-        decoded_err = _decode_value(err_slot, TaskError)
+        decoded_err = decode_task_error(err_slot)
     except (StrictJsonError, _PydanticValidationError):
         return None
     if not isinstance(decoded_err, TaskError):
@@ -2104,8 +2109,12 @@ async def get_workflow_failure_error(
             # fixed schema so decode without ok_type via _decode_err_only.
             err_tr = _decode_err_only(row.result)
             if err_tr is not None and err_tr.is_err() and err_tr.err:
+                # Re-encode using the runtime type so SubWorkflowError
+                # subclass fields (`sub_workflow_id` /
+                # `sub_workflow_summary`) survive the round-trip.
+                # `encode_value(err, TaskError)` would silently downcast.
                 return _ser(
-                    dumps_json(encode_value(err_tr.err, TaskError)),
+                    dumps_json(encode_value(err_tr.err, type(err_tr.err))),
                     'task error',
                     fallback='null',
                 )
@@ -2139,8 +2148,12 @@ async def get_workflow_failure_error(
             # has a fixed schema; ok_type not needed).
             err_tr = _decode_err_only(row.result)
             if err_tr is not None and err_tr.is_err() and err_tr.err:
+                # Re-encode using the runtime type so SubWorkflowError
+                # subclass fields (`sub_workflow_id` /
+                # `sub_workflow_summary`) survive the round-trip.
+                # `encode_value(err, TaskError)` would silently downcast.
                 return _ser(
-                    dumps_json(encode_value(err_tr.err, TaskError)),
+                    dumps_json(encode_value(err_tr.err, type(err_tr.err))),
                     'task error',
                     fallback='null',
                 )
