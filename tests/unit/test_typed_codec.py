@@ -979,16 +979,15 @@ class TestDecodeTaskErrorPolymorphic:
         through the consumer-side decode used by WorkflowHandle.
 
         Mirrors `engine.on_subworkflow_complete`, which writes the err
-        slot via ``error.model_dump(mode='json')`` rather than
-        ``encode_task_result`` so subclass fields are preserved on the
-        wire. The handle reads them back via
-        ``validate_task_result_envelope`` + ``decode_task_error``.
+        slot via ``error.model_dump(mode='json')``. The handle reads it
+        back via ``validate_task_result_envelope`` + ``decode_task_error``.
+        Locks the engine-shape contract here so a future refactor
+        cannot silently break sub-workflow err propagation.
 
-        The ``encode_task_result(_, TaskError)`` path deliberately strips
-        subclass fields (statically typed at the base class) — that is
-        why the engine bypasses it for sub-workflow failures. Locking
-        the engine-shape contract here prevents a future refactor from
-        silently breaking sub-workflow err propagation.
+        Note: ``encode_task_result`` now also preserves the subclass
+        (routes through ``encode_task_error``), so the engine's direct
+        ``model_dump`` and the codec path are interchangeable; see
+        ``test_encode_task_result_preserves_sub_workflow_error_subclass``.
         """
         from horsies.core.models.tasks import (
             OperationalErrorCode,
@@ -1030,3 +1029,55 @@ class TestDecodeTaskErrorPolymorphic:
         assert decoded.sub_workflow_id == 'wf-xyz'
         assert decoded.sub_workflow_summary.failed_tasks == 1
         assert decoded.sub_workflow_summary.error_summary == 'child failed'
+
+    def test_encode_task_result_preserves_sub_workflow_error_subclass(self) -> None:
+        """``encode_task_result`` routes through ``encode_task_error``
+        so a ``TaskResult(err=SubWorkflowError(...))`` round-trips with
+        ``sub_workflow_id`` / ``sub_workflow_summary`` intact.
+
+        Regression: pre-fix the encode side called
+        ``encode_value(err, TaskError)`` which silently stripped the
+        subclass-only fields, breaking pattern matching on
+        ``SubWorkflowError`` for any code path that round-tripped
+        through ``encode_task_result`` (notably ``args_from`` /
+        outputless-ctx envelopes and ``serialize_error_payload``).
+        """
+        from horsies.core.codec.typed import (
+            decode_task_result,
+            encode_task_result,
+        )
+        from horsies.core.models.tasks import (
+            OperationalErrorCode,
+            SubWorkflowError,
+            TaskResult,
+        )
+        from horsies.core.models.workflow.context import SubWorkflowSummary
+        from horsies.core.models.workflow.enums import WorkflowStatus
+
+        summary: SubWorkflowSummary[Any] = SubWorkflowSummary(
+            status=WorkflowStatus.FAILED,
+            output=None,
+            total_tasks=2,
+            completed_tasks=0,
+            failed_tasks=2,
+            skipped_tasks=0,
+            error_summary='both children boom',
+        )
+        original_err = SubWorkflowError(
+            error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+            message='subworkflow failed',
+            sub_workflow_id='wf-pq',
+            sub_workflow_summary=summary,
+        )
+        envelope = encode_task_result(
+            TaskResult(err=original_err),
+            ok_type=int,
+        )
+        decoded = decode_task_result(cast(Json, envelope), ok_type=int)
+
+        assert decoded.is_err()
+        assert isinstance(decoded.err, SubWorkflowError)
+        assert decoded.err.sub_workflow_id == 'wf-pq'
+        assert decoded.err.sub_workflow_summary.status == WorkflowStatus.FAILED
+        assert decoded.err.sub_workflow_summary.failed_tasks == 2
+        assert decoded.err.sub_workflow_summary.error_summary == 'both children boom'

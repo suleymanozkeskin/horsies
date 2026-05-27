@@ -19,6 +19,7 @@ from horsies.core.codec.typed import (
     Json,
     decode_task_error,
     decode_task_result,
+    encode_task_error,
     encode_task_result,
     encode_value,
 )
@@ -2295,11 +2296,13 @@ async def _handle_workflow_task_failure(
 
     on_error = wf_row.on_error
 
-    # Extract TaskError for storage (not the full TaskResult). Strict-serde
-    # phase 7: encode via ``encode_value(err, TaskError)`` so the stored
-    # JSON does not carry the retired ``__task_error__`` legacy marker.
+    # Extract TaskError for storage (not the full TaskResult). Route
+    # through ``encode_task_error`` so SubWorkflowError subclass fields
+    # (``sub_workflow_id`` / ``sub_workflow_summary``) survive the
+    # round-trip; ``encode_value(err, TaskError)`` would silently
+    # downcast.
     error_payload = (
-        _ser(dumps_json(encode_value(result.err, TaskError)), 'error payload')
+        _ser(dumps_json(encode_task_error(result.err)), 'error payload')
         if result.is_err() and result.err
         else None
     )

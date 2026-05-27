@@ -34,6 +34,7 @@ __all__ = [
     'decode_task_error',
     'decode_task_result',
     'decode_value',
+    'encode_task_error',
     'encode_task_result',
     'encode_value',
     'validate_task_result_envelope',
@@ -286,7 +287,7 @@ def encode_task_result(
             err = err.model_copy(
                 update={'exception': flatten_exception(err.exception)},
             )
-        encoded_err = encode_value(err, TaskError)
+        encoded_err = encode_task_error(err)
         return {
             _TASK_RESULT_ENVELOPE_KEY: True,
             'ok': None,
@@ -298,6 +299,31 @@ def encode_task_result(
         'ok': encoded_ok,
         'err': None,
     }
+
+
+def encode_task_error(err: TaskError) -> Json:
+    """Encode a TaskError (or subclass) preserving its concrete type.
+
+    Symmetric counterpart to ``decode_task_error``. Routes the encode
+    through ``TypeAdapter(type(err))`` so subclass-only fields (notably
+    ``SubWorkflowError.sub_workflow_id`` / ``sub_workflow_summary``)
+    survive the wire round-trip. ``encode_value(err, TaskError)`` would
+    silently strip them.
+
+    Args:
+        err: A ``TaskError`` instance — may be the base class or any
+            library-known subclass such as ``SubWorkflowError``.
+
+    Returns:
+        The encoded JSON payload carrying every field present on the
+        concrete runtime type.
+
+    Raises:
+        StrictJsonError / pydantic.ValidationError: on reserved-key
+            smuggling inside ``err.data`` or schema violations
+            (same surfaces as ``encode_value``).
+    """
+    return encode_value(err, type(err))
 
 
 def decode_task_error(err_slot: Json) -> TaskError:
