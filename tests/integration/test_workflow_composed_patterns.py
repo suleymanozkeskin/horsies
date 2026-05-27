@@ -313,13 +313,15 @@ class TestComposedPatterns:
 
         # Verify D's kwargs contain both injected results
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 3)
-        b_injected = cast(dict[str, Any], loads_json(kwargs['b_result']['data']).unwrap())
-        c_injected = cast(dict[str, Any], loads_json(kwargs['c_result']['data']).unwrap())
+        b_injected = cast(dict[str, Any], kwargs['b_result']['inner'])
+        c_injected = cast(dict[str, Any], kwargs['c_result']['inner'])
+        assert b_injected['__h_task_result__'] is True
+        assert c_injected['__h_task_result__'] is True
         # B failed → err present
-        assert 'err' in b_injected
+        assert b_injected['err'] is not None
         assert b_injected['err']['error_code'] == 'B_FAILED'
         # C succeeded → ok present
-        assert 'ok' in c_injected
+        assert c_injected['ok'] is not None
 
         # Complete D → workflow FAILED (B failed, no success_policy override)
         await self._complete_task(session, broker, handle.workflow_id, 3, TaskResult(ok='done'))

@@ -459,8 +459,9 @@ class TestOnErrorFail:
             {'tid': task_id},
         )
         kwargs = loads_json(task_result.fetchone()[0]).unwrap()
-        injected = loads_json(kwargs['input_result']['data']).unwrap()
-        assert 'err' in injected
+        injected = kwargs['input_result']['inner']
+        assert injected['__h_task_result__'] is True
+        assert injected['err'] is not None
         assert injected['err']['error_code'] == 'INJECTED_ERR'
 
     async def test_fail_allow_failed_deps_true_runs(
@@ -1801,8 +1802,9 @@ class TestAllowFailedDeps:
             {'tid': task_id},
         )
         kwargs = loads_json(task_result.fetchone()[0]).unwrap()
-        injected = loads_json(kwargs['input_result']['data']).unwrap()
-        assert 'err' in injected
+        injected = kwargs['input_result']['inner']
+        assert injected['__h_task_result__'] is True
+        assert injected['err'] is not None
 
     async def test_allow_failed_deps_can_recover(
         self,
@@ -2010,9 +2012,10 @@ class TestAllowFailedDeps:
 
         # input_result should be the sentinel
         assert 'input_result' in kwargs
-        injected = loads_json(kwargs['input_result']['data']).unwrap()
+        injected = kwargs['input_result']['inner']
+        assert injected['__h_task_result__'] is True
 
-        assert 'err' in injected
+        assert injected['err'] is not None
         assert injected['err']['error_code'] == {'__builtin_task_code__': 'UPSTREAM_SKIPPED'}
 
     async def test_allow_failed_deps_without_args_from(

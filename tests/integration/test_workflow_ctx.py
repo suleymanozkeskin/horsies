@@ -13,7 +13,7 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.serde import dumps_json, loads_json
 from horsies.core.codec.typed import decode_task_result
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.tasks import OperationalErrorCode, TaskResult, TaskError
 from horsies.core.errors import ErrorCode
 from horsies.core.models.workflow import (
     NodeKey,
@@ -35,16 +35,6 @@ def _is_str_keyed_dict(value: object) -> TypeGuard[dict[str, Any]]:
     value_keys: list[object] = list(value.keys())
     for key in value_keys:
         if not isinstance(key, str):
-            return False
-    return True
-
-
-def _is_str_to_str_dict(value: object) -> TypeGuard[dict[str, str]]:
-    if not isinstance(value, dict):
-        return False
-    value_items: list[tuple[object, object]] = list(value.items())
-    for key, val in value_items:
-        if not isinstance(key, str) or not isinstance(val, str):
             return False
     return True
 
@@ -138,8 +128,20 @@ class TestWorkflowCtx:
         return data if isinstance(data, dict) else {}
 
     def _build_ctx_from_kwargs(self, kwargs: dict[str, Any]) -> WorkflowContext:
-        """Reconstruct WorkflowContext from injected kwargs."""
-        ctx_data_raw = kwargs.get('__horsies_workflow_ctx__')
+        """Reconstruct WorkflowContext from injected kwargs.
+
+        Phase 6+ shape under ``__h_workflow_ctx__``:
+            { 'workflow_id': str,
+              'task_index': int,
+              'task_name': str,
+              'results_by_id': { node_id: <__h_task_result__ envelope> | None },
+              'task_name_by_id': { node_id: str },
+              'summaries_by_id': { node_id: <summary json> } }
+        ``None`` in ``results_by_id`` means the engine couldn't resolve a
+        source-task ``task_ok_type`` at encode time; surface that as a
+        sentinel ``TaskError`` so the context still holds a typed value.
+        """
+        ctx_data_raw = kwargs.get('__h_workflow_ctx__')
         if not _is_str_keyed_dict(ctx_data_raw):
             raise AssertionError('workflow_ctx data missing or invalid')
 
@@ -147,9 +149,21 @@ class TestWorkflowCtx:
 
         results_by_id: dict[str, TaskResult[Any, TaskError]] = {}
         raw_results = typed_ctx_data.get('results_by_id')
-        if _is_str_to_str_dict(raw_results):
-            for node_id, result_json in raw_results.items():
-                results_by_id[node_id] = decode_task_result(loads_json(result_json).unwrap(), Any)
+        if isinstance(raw_results, dict):
+            for node_id, envelope in raw_results.items():
+                if envelope is None:
+                    results_by_id[node_id] = TaskResult(
+                        err=TaskError(
+                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            message=(
+                                f'workflow_ctx result for node {node_id!r} unavailable '
+                                f'(engine could not encode at emit time)'
+                            ),
+                            data={'node_id': node_id},
+                        ),
+                    )
+                    continue
+                results_by_id[node_id] = decode_task_result(envelope, Any)
 
         return WorkflowContext.from_serialized(
             workflow_id=typed_ctx_data.get('workflow_id', ''),
@@ -235,7 +249,7 @@ class TestWorkflowCtx:
         await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
-        assert '__horsies_workflow_ctx__' not in kwargs
+        assert '__h_workflow_ctx__' not in kwargs
 
     async def test_workflow_meta_injected_without_ctx_from(
         self,
@@ -266,7 +280,7 @@ class TestWorkflowCtx:
         await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
-        meta_raw = kwargs.get('__horsies_workflow_meta__')
+        meta_raw = kwargs.get('__h_workflow_meta__')
         assert isinstance(meta_raw, dict)
         assert meta_raw['workflow_id'] == handle.workflow_id
         assert meta_raw['task_index'] == 1
@@ -867,7 +881,7 @@ class TestWorkflowCtx:
         await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
-        assert '__horsies_workflow_ctx__' not in kwargs
+        assert '__h_workflow_ctx__' not in kwargs
 
     async def test_worker_skips_ctx_when_function_lacks_param(
         self,
@@ -884,7 +898,7 @@ class TestWorkflowCtx:
         # Build a workflow where node_b has workflow_ctx_from but the function
         # does NOT declare workflow_ctx. Normally WorkflowSpec validation rejects
         # this (HRS-010), so we bypass validation by manually injecting
-        # __horsies_workflow_ctx__ into the task's kwargs at the DB level.
+        # __h_workflow_ctx__ into the task's kwargs at the DB level.
         node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b: TaskNode[int] = TaskNode(
             fn=no_ctx_task,
@@ -898,7 +912,7 @@ class TestWorkflowCtx:
         handle = await start_ok(spec, broker)
         await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=5))
 
-        # Fetch task B's row and manually inject __horsies_workflow_ctx__ into kwargs
+        # Fetch task B's row and manually inject __h_workflow_ctx__ into kwargs
         task_row_result = await session.execute(
             text("""
                 SELECT t.id, t.task_name, t.args, t.kwargs
@@ -920,7 +934,7 @@ class TestWorkflowCtx:
         # Inject ctx data into kwargs to simulate the engine path
         original_kwargs = loads_json(kwargs_json).unwrap()
         assert isinstance(original_kwargs, dict)
-        original_kwargs['__horsies_workflow_ctx__'] = {
+        original_kwargs['__h_workflow_ctx__'] = {
             'workflow_id': handle.workflow_id,
             'task_index': 1,
             'task_name': 'skip_ctx_b',

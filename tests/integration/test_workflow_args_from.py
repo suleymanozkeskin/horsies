@@ -150,8 +150,9 @@ class TestArgsFromInjection:
         assert kwargs['input_result']['__h_taskresult_envelope__'] is True
 
         # Check inner data: full TaskResult with ok value
-        injected = loads_json(kwargs['input_result']['data']).unwrap()
+        injected = kwargs['input_result']['inner']
         assert isinstance(injected, dict)
+        assert injected['__h_task_result__'] is True
         assert injected.get('ok') == 42
         assert 'err' not in injected or injected['err'] is None
 
@@ -234,8 +235,9 @@ class TestArgsFromInjection:
 
         # Get B's kwargs - should contain failed TaskResult
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
-        injected = loads_json(kwargs['input_result']['data']).unwrap()
-        assert 'err' in injected
+        injected = kwargs['input_result']['inner']
+        assert injected['__h_task_result__'] is True
+        assert injected['err'] is not None
 
     async def test_args_from_with_static_kwargs(
         self,
@@ -318,8 +320,9 @@ class TestArgsFromInjection:
         assert 'second_copy' in kwargs
 
         # Both should have same data
-        first_data = loads_json(kwargs['first_copy']['data']).unwrap()
-        second_data = loads_json(kwargs['second_copy']['data']).unwrap()
+        first_data = kwargs['first_copy']['inner']
+        second_data = kwargs['second_copy']['inner']
+        assert first_data['__h_task_result__'] is True
         assert first_data == second_data
 
     async def test_skipped_dep_injects_upstream_skipped_sentinel(
@@ -368,8 +371,9 @@ class TestArgsFromInjection:
         assert kwargs['input_result']['__h_taskresult_envelope__'] is True
 
         # Parse the injected TaskResult
-        injected_data = loads_json(kwargs['input_result']['data']).unwrap()
-        assert 'err' in injected_data
+        injected_data = kwargs['input_result']['inner']
+        assert injected_data['__h_task_result__'] is True
+        assert injected_data['err'] is not None
         assert injected_data['err']['error_code'] == {'__builtin_task_code__': 'UPSTREAM_SKIPPED'}
         assert injected_data['err']['data']['dependency_index'] == 1  # B's index
 
@@ -415,8 +419,9 @@ class TestArgsFromInjection:
         assert kwargs['input_result']['__h_taskresult_envelope__'] is True
 
         # Parse the injected TaskResult
-        injected_data = loads_json(kwargs['input_result']['data']).unwrap()
-        assert 'err' in injected_data
+        injected_data = kwargs['input_result']['inner']
+        assert injected_data['__h_task_result__'] is True
+        assert injected_data['err'] is not None
         assert (
             injected_data['err']['error_code'] == 'ORIGINAL_ERROR'
         )  # Original error preserved
