@@ -90,7 +90,7 @@ When the library itself encounters an error (not your task code), it uses one of
 | Code | When |
 | ---- | ---- |
 | `RETURN_TYPE_MISMATCH` | Returned value doesn't match declared type |
-| `PYDANTIC_HYDRATION_ERROR` | Task succeeded but return value could not be rehydrated to declared type |
+| `NO_TYPE_AVAILABLE` | A successful result could not be decoded because the caller does not have the task's declared success type locally registered |
 | `WORKFLOW_CTX_MISSING_ID` | Workflow context is missing required ID |
 
 ### RetrievalCode

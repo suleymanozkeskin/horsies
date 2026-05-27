@@ -24,7 +24,7 @@ Each execution attempt is also recorded in `horsies_task_attempts` with per-atte
 | `error_code` | `BuiltInTaskCode \| str \| None` | Library or domain error code |
 | `message` | `str \| None` | Human-readable description |
 | `data` | `Any \| None` | Additional context (task_id, etc.) |
-| `exception` | `dict[str, Any] \| BaseException \| None` | Original exception if applicable |
+| `exception` | `BaseException \| FlattenedException \| None` | Live exception in-process; flattened to a `FlattenedException` TypedDict (`module`, `qualname`, `str`, optional traceback) when serialized to the wire |
 
 ### BuiltInTaskCode (4-Family Split)
 
@@ -53,7 +53,7 @@ Errors from type/schema validation and structural contracts.
 | Code | Description | Auto-Retry? |
 | ---- | ----------- | ----------- |
 | `RETURN_TYPE_MISMATCH` | Task return type doesn't match declaration | No |
-| `PYDANTIC_HYDRATION_ERROR` | Task succeeded but its return value could not be rehydrated to the declared type | No |
+| `NO_TYPE_AVAILABLE` | Outputless workflow per-node decode: terminal task name not in the local registry, so no `task_ok_type` to decode with | No |
 | `WORKFLOW_CTX_MISSING_ID` | Workflow context is missing required ID | No |
 
 #### RetrievalCode
@@ -82,6 +82,20 @@ Terminal outcome codes for tasks and workflows.
 | `UPSTREAM_SKIPPED` | Upstream task in workflow was skipped | No |
 | `SUBWORKFLOW_FAILED` | Subworkflow failed | No |
 | `WORKFLOW_SUCCESS_CASE_NOT_MET` | Workflow success condition was not satisfied | No |
+
+### Broker Errors (BrokerResult)
+
+`app.get_result_async()` and the broker monitoring methods return `BrokerResult[T]` = `Result[T, BrokerOperationError]`. The outer `Err` is an infrastructure-level failure, distinct from the inner `TaskResult.err`.
+
+| Code | Description | Retryable |
+| ---- | ----------- | --------- |
+| `INVALID_JSON_PAYLOAD` | Raw `result` column does not parse as JSON | No |
+| `NO_TYPE_AVAILABLE` | Typed decode at the `app` layer needs an `ok_type`, but `task_name` is not in the local task registry | No |
+| `BROKER_ERROR` | Database or broker failure during the query | Varies |
+| `ENQUEUE_FAILED` | Enqueue or schedule path failed (transient) | Yes |
+| `LISTENER_START_FAILED` / `LISTENER_SUBSCRIBE_FAILED` | LISTEN/NOTIFY plumbing failed | No |
+
+Failed-task results decode without an `ok_type`, so `BrokerErrorCode.NO_TYPE_AVAILABLE` only fires for the success path. Reading failed tasks across processes that don't import the user code still works.
 
 ### Send Errors (TaskSendResult)
 
