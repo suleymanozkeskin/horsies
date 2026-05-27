@@ -352,6 +352,33 @@ def _signature_accepts_var_keyword(sig: inspect.Signature) -> bool:
     )
 
 
+_ADDRESSABLE_PARAM_KINDS: frozenset[int] = frozenset({
+    inspect.Parameter.POSITIONAL_OR_KEYWORD.value,
+    inspect.Parameter.KEYWORD_ONLY.value,
+})
+"""Parameter kinds that can be addressed by name in ``SubWorkflowNode.kwargs``.
+
+``VAR_POSITIONAL`` (``*args``) and ``VAR_KEYWORD`` (``**params``) param
+*names* show up in ``sig.parameters`` too, but they are NOT addressable
+by name — they only describe the catch-all slot. A static kwarg whose
+key happens to be ``"args"`` or ``"params"`` against
+``build_with(cls, app, *args: Any, **params: Any)`` must fall through
+to the ``JsonValue`` fallback, not pick up the catch-all's ``Any``
+annotation (which would bypass the strict-encode contract).
+"""
+
+
+def _is_addressable_named_param(param: inspect.Parameter) -> bool:
+    """Return True iff `param` is a normal named parameter (not *args/**kwargs).
+
+    Static ``SubWorkflowNode.kwargs`` keys can only bind to
+    positional-or-keyword and keyword-only params. VAR_POSITIONAL /
+    VAR_KEYWORD names match the catch-all slot, not an addressable
+    parameter — they must route through the opaque-kwargs fallback.
+    """
+    return param.kind.value in _ADDRESSABLE_PARAM_KINDS
+
+
 def encode_subworkflow_kwargs(
     workflow_def: Any,
     kwargs: Mapping[str, Any],
@@ -391,7 +418,8 @@ def encode_subworkflow_kwargs(
     accepts_var_kw = _signature_accepts_var_keyword(sig)
     encoded: dict[str, Json] = {}
     for key, value in kwargs.items():
-        if key in sig.parameters:
+        param = sig.parameters.get(key)
+        if param is not None and _is_addressable_named_param(param):
             annot = hints.get(key)
             if annot is None:
                 raise StrictJsonError(
@@ -408,6 +436,8 @@ def encode_subworkflow_kwargs(
             continue
         if accepts_var_kw:
             # Opaque ``**params: Any`` catch-all — JSON-native only.
+            # This also catches static kwargs whose key happens to be
+            # the VAR_POSITIONAL / VAR_KEYWORD param name itself.
             encoded[key] = encode_value(value, JsonValue)
             continue
         raise StrictJsonError(
@@ -449,7 +479,8 @@ def decode_subworkflow_kwargs(
     accepts_var_kw = _signature_accepts_var_keyword(sig)
     decoded: dict[str, Any] = {}
     for key, raw_value in raw_kwargs.items():
-        if key in sig.parameters:
+        param = sig.parameters.get(key)
+        if param is not None and _is_addressable_named_param(param):
             annot = hints.get(key)
             if annot is None:
                 raise StrictJsonError(

@@ -501,3 +501,57 @@ class TestDecodeSubworkflowKwargs:
             _TypedPydanticParamWorkflow, encoded,
         )
         assert decoded['payload'] == original
+
+
+class TestSubworkflowKwargsVarParamNameCollision:
+    """Regression: a static kwarg whose key happens to be the literal
+    VAR_POSITIONAL / VAR_KEYWORD param name must NOT pick up the
+    catch-all's ``Any`` annotation.
+
+    Pre-fix the kwarg-name check used a bare ``key in sig.parameters``,
+    which is True for the names of ``*args`` and ``**params`` themselves.
+    Combined with ``hints.get(name)`` returning ``Any`` for those slots,
+    a kwarg like ``kwargs={'args': pydantic_model}`` would route through
+    ``encode_value(value, Any)`` — bypassing the strict ``JsonValue``
+    fallback the design promises for opaque ``**params: Any`` shapes.
+    """
+
+    def test_kwarg_literally_named_args_routes_to_jsonvalue_fallback(
+        self,
+    ) -> None:
+        """kwargs={'args': pydantic_model} must fail closed via JsonValue,
+        not pick up `*args: Any`'s annotation."""
+        payload = _RoundTripEnvelope(stream_id='s', metadata={})
+        with pytest.raises(Exception):  # noqa: B017 - JsonValue rejection
+            encode_subworkflow_kwargs(
+                _OpaqueParamsWorkflow, {'args': payload},
+            )
+
+    def test_kwarg_literally_named_params_routes_to_jsonvalue_fallback(
+        self,
+    ) -> None:
+        """kwargs={'params': pydantic_model} must fail closed via JsonValue,
+        not pick up `**params: Any`'s annotation."""
+        payload = _RoundTripEnvelope(stream_id='s', metadata={})
+        with pytest.raises(Exception):  # noqa: B017 - JsonValue rejection
+            encode_subworkflow_kwargs(
+                _OpaqueParamsWorkflow, {'params': payload},
+            )
+
+    def test_kwarg_literally_named_args_accepts_json_native(self) -> None:
+        """JSON-native values for kwarg `'args'` survive — but via the
+        JsonValue route, not the catch-all annotation."""
+        result = encode_subworkflow_kwargs(
+            _OpaqueParamsWorkflow,
+            {'args': [1, 2, 3], 'params': {'nested': True}},
+        )
+        assert result == {'args': [1, 2, 3], 'params': {'nested': True}}
+
+    def test_decode_kwarg_literally_named_args_routes_to_jsonvalue(self) -> None:
+        """Decode side mirrors encode: kwargs whose key matches a
+        VAR_POSITIONAL / VAR_KEYWORD name route through JsonValue."""
+        result = decode_subworkflow_kwargs(
+            _OpaqueParamsWorkflow,
+            {'args': [1, 2, 3], 'params': {'nested': True}},
+        )
+        assert result == {'args': [1, 2, 3], 'params': {'nested': True}}
