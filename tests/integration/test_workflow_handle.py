@@ -1035,6 +1035,87 @@ class TestWorkflowHandleCancel:
         assert wf_task_row is not None
         assert wf_task_row[0] == 'SKIPPED'
 
+    async def test_cancel_locks_backing_task_before_workflow_status_update(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """Worker claim must not pick up a task while cancellation status update is blocked."""
+        task_a = make_simple_task(app, 'cancel_claim_race_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker, name='cancel_claim_race', tasks=[node_a],
+        )
+
+        handle = await start_ok(spec, broker)
+
+        await session.execute(
+            text("""
+                CREATE OR REPLACE FUNCTION public.horsies_test_sleep_on_cancel()
+                RETURNS trigger AS $$
+                BEGIN
+                    IF NEW.status = 'CANCELLED'
+                       AND OLD.status IS DISTINCT FROM NEW.status
+                       AND NEW.name = 'cancel_claim_race' THEN
+                        PERFORM pg_sleep(0.5);
+                    END IF;
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql;
+            """),
+        )
+        await session.execute(
+            text("""
+                DROP TRIGGER IF EXISTS horsies_test_sleep_on_cancel
+                ON horsies_workflows
+            """),
+        )
+        await session.execute(
+            text("""
+                CREATE TRIGGER horsies_test_sleep_on_cancel
+                BEFORE UPDATE OF status ON horsies_workflows
+                FOR EACH ROW
+                EXECUTE FUNCTION public.horsies_test_sleep_on_cancel()
+            """),
+        )
+        await session.commit()
+
+        cancel_task = asyncio.create_task(handle.cancel_async())
+        try:
+            await asyncio.sleep(0.1)
+
+            worker = Worker(
+                session_factory=broker.session_factory,
+                listener=MagicMock(),
+                cfg=WorkerConfig(
+                    dsn=broker.config.database_url,
+                    psycopg_dsn=broker.listener.database_url,
+                    queues=['default'],
+                ),
+            )
+            async with broker.session_factory() as claim_session:
+                claimed = await worker._claim_batch_locked(
+                    claim_session, 'default', 1,
+                )
+                await claim_session.commit()
+
+            assert claimed == []
+        finally:
+            cancel_r = await asyncio.wait_for(cancel_task, timeout=2)
+            await session.execute(
+                text("""
+                    DROP TRIGGER IF EXISTS horsies_test_sleep_on_cancel
+                    ON horsies_workflows
+                """),
+            )
+            await session.execute(
+                text("DROP FUNCTION IF EXISTS public.horsies_test_sleep_on_cancel()"),
+            )
+            await session.commit()
+        assert is_ok(cancel_r)
+
     async def test_cancel_nonexistent_returns_not_found(
         self,
         clean_workflow_tables: None,
@@ -1802,4 +1883,3 @@ class TestListenerFallbackContract:
         ):
             with pytest.raises(TypeError, match='test bug'):
                 await handle.get_async(timeout_ms=1000)
-
