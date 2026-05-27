@@ -1922,3 +1922,158 @@ class TestSubworkflowRecovery:
         )
         parent_status = parent_row.scalar_one()
         assert parent_status == 'FAILED'
+
+
+# =============================================================================
+# SubWorkflowNode.kwargs typed serde — strict-serde phase 6+ integration
+# =============================================================================
+
+
+from pydantic import BaseModel  # noqa: E402
+
+
+class _TypedPayload(BaseModel):
+    """Pydantic payload used to verify typed kwargs round-trip through DB."""
+
+    stream_id: str
+    count: int
+
+
+class TypedKwargsChildWorkflow(WorkflowDefinition[int]):
+    """Child workflow whose build_with takes a typed Pydantic kwarg.
+
+    Captures the received payload on a class attribute so an integration
+    test can assert the kwargs survived the lifecycle.py → DB →
+    enqueue_subworkflow_task round-trip as a typed instance.
+    """
+
+    name = 'typed_kwargs_child_workflow'
+    definition_key = 'tests.typed_kwargs_child.v1'
+
+    # Set by ``build_with`` each time the engine instantiates the child.
+    received_payload: '_TypedPayload | None' = None
+
+    @classmethod
+    def build_with(  # pyright: ignore[reportIncompatibleMethodOverride]
+        cls,
+        app: Horsies,
+        *,
+        payload: _TypedPayload,
+    ) -> Any:
+        cls.received_payload = payload
+
+        @app.task(task_name='typed_kwargs_child_task')
+        def child_task() -> TaskResult[int, TaskError]:
+            return TaskResult(ok=payload.count)
+
+        node = TaskNode(fn=child_task)
+        return app.workflow(
+            name=cls.name,
+            tasks=[node],
+            output=node,
+            on_error=OnError.FAIL,
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio(loop_scope='function')
+class TestSubworkflowKwargsTypedSerde:
+    """SubWorkflowNode.kwargs survive DB persistence with typed shape."""
+
+    @pytest_asyncio.fixture
+    async def setup(
+        self,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> tuple[AsyncSession, PostgresBroker, Horsies]:
+        await session.execute(
+            text(
+                'TRUNCATE horsies_workflow_tasks, horsies_workflows, '
+                'horsies_tasks CASCADE',
+            ),
+        )
+        await session.commit()
+        TypedKwargsChildWorkflow.received_payload = None
+        return session, broker, app
+
+    async def test_typed_pydantic_kwarg_round_trips_to_build_with(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """Typed Pydantic kwarg flows producer → DB → engine decode → child build_with.
+
+        Pre-fix the child's ``build_with`` received a raw ``dict``
+        because lifecycle.py wrote kwargs via untyped ``dumps_json`` and
+        engine.py read them back as raw. Now ``encode_subworkflow_kwargs``
+        / ``decode_subworkflow_kwargs`` route the value through
+        ``encode_value(payload, _TypedPayload)`` and back, so the child
+        sees the model instance.
+        """
+        session, broker, app = setup
+        original_payload = _TypedPayload(stream_id='stream-abc', count=7)
+
+        node_child: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=TypedKwargsChildWorkflow,
+            kwargs={'payload': original_payload},
+        )
+
+        spec = _workflow(
+            app,
+            name='parent_typed_kwargs',
+            tasks=[node_child],
+            output=node_child,
+        )
+
+        await start_ok(spec, broker)
+
+        # build_with fires at enqueue_subworkflow_task time. The child
+        # workflow's build_with captured the received value.
+        assert TypedKwargsChildWorkflow.received_payload is not None
+        assert isinstance(
+            TypedKwargsChildWorkflow.received_payload, _TypedPayload,
+        )
+        assert TypedKwargsChildWorkflow.received_payload == original_payload
+
+    async def test_kwargs_persisted_as_pydantic_dump_not_dict_passthrough(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """The persisted ``kwargs`` JSON column holds the Pydantic dump
+        of the payload (i.e. the typed encode actually fired)."""
+        session, broker, app = setup
+        original_payload = _TypedPayload(stream_id='stream-xyz', count=42)
+
+        node_child: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=TypedKwargsChildWorkflow,
+            kwargs={'payload': original_payload},
+        )
+
+        spec = _workflow(
+            app,
+            name='parent_typed_kwargs_persistence',
+            tasks=[node_child],
+            output=node_child,
+        )
+
+        handle = await start_ok(spec, broker)
+
+        res = await session.execute(
+            text(
+                'SELECT task_kwargs FROM horsies_workflow_tasks '
+                'WHERE workflow_id = :wf_id AND task_index = 0',
+            ),
+            {'wf_id': handle.workflow_id},
+        )
+        row = res.fetchone()
+        assert row is not None
+        kwargs_json = row[0]
+        parsed = loads_json(kwargs_json).unwrap()
+        assert isinstance(parsed, dict)
+        # The Pydantic model is dumped under its declared shape.
+        assert parsed == {
+            'payload': {
+                'stream_id': 'stream-xyz',
+                'count': 42,
+            },
+        }

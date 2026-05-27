@@ -13,7 +13,11 @@ from sqlalchemy.sql.elements import TextClause
 from pydantic import ValidationError as _PydanticValidationError
 
 from horsies.core.codec.json_value import StrictJsonError
-from horsies.core.codec.kwargs import encode_kwargs, underlying_task_fn
+from horsies.core.codec.kwargs import (
+    decode_subworkflow_kwargs,
+    encode_kwargs,
+    underlying_task_fn,
+)
 from horsies.core.codec.serde import dumps_json, loads_json, serialize_error_payload, SerdeResult
 from horsies.core.codec.typed import (
     Json,
@@ -771,15 +775,6 @@ async def enqueue_subworkflow_task(
     # Compat: new writes store [] for task_args (kwargs-only).
     # Old persisted rows may still carry positional args for build_with();
     # they are passed through via *task_args to preserve backward compat.
-    #
-    # TODO(strict-serde): kwargs read here are passed to
-    # `build_with(app, *task_args, **kwargs)` without typed decoding
-    # against the build_with signature. Producer-side encoding is also
-    # currently `dumps_json(node.kwargs)` at lifecycle.py — see the
-    # mirror TODO there. Closing the loop means encode_kwargs at
-    # producer + decode_kwargs here. Deferred pending a real
-    # build_with-signature introspection path; tracked in design-doc
-    # §12 phase 6 deferred list.
     raw_args = _deser_json(task_args_json, 'subworkflow args', fallback=[])
     task_args: tuple[Any, ...] = ()
     if isinstance(raw_args, list):
@@ -795,7 +790,29 @@ async def enqueue_subworkflow_task(
             error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
         )
         return None
-    kwargs: dict[str, Any] = raw_kwargs if isinstance(raw_kwargs, dict) else {}
+    raw_kwargs_dict: dict[str, Any] = (
+        raw_kwargs if isinstance(raw_kwargs, dict) else {}
+    )
+    # Typed decode against the child ``build_with`` signature. Annotated
+    # params decode via their declared type; opaque ``**params: Any``
+    # slots route through ``JsonValue`` (raw JSON-native shapes only).
+    try:
+        kwargs: dict[str, Any] = decode_subworkflow_kwargs(
+            workflow_def, raw_kwargs_dict,
+        )
+    except (StrictJsonError, _PydanticValidationError) as exc:
+        await _fail_enqueued_task(
+            session,
+            workflow_id,
+            task_index,
+            (
+                f'Typed decode of subworkflow kwargs failed for task '
+                f'{task_index}: {exc}'
+            ),
+            broker,
+            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+        )
+        return None
 
     if args_from_raw:
         # args_from is stored as JSONB, may come back as dict directly

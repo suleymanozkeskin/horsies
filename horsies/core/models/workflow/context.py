@@ -501,18 +501,30 @@ class WorkflowContext(BaseModel):
         """
         Get the SubWorkflowSummary for a completed SubWorkflowNode.
 
-        Type-safe: returns SubWorkflowSummary[T] where T matches the node's output type.
+        Type-safe: returns SubWorkflowSummary[T] where T matches the
+        node's output type. The summary's ``output`` field is decoded
+        against the child workflow's declared ``WorkflowDefinition[OkT]``
+        generic when resolvable; raw-JSON-decoded values returned by the
+        engine are run through ``decode_value(raw, OkT)`` so callers
+        observe the typed value, not the raw dict.
+
+        When the child workflow declares ``WorkflowDefinition[Any]`` (or
+        the generic can't be resolved), the raw value is passed through
+        unchanged — matching the previous behavior.
 
         Args:
             node: The SubWorkflowNode whose summary to retrieve. Must have been
                   included in workflow_ctx_from and have a node_id assigned.
 
         Returns:
-            The SubWorkflowSummary from the completed subworkflow.
+            A fresh ``SubWorkflowSummary[OkT]`` with the typed ``output``.
+            The stored raw summary is not mutated.
 
         Raises:
             KeyError: If the node's summary is not in this context.
             RuntimeError: If the node has no node_id assigned.
+            pydantic.ValidationError: If the raw output payload doesn't
+                satisfy the child workflow's declared output type.
         """
         node_id = node.node_id
 
@@ -527,8 +539,34 @@ class WorkflowContext(BaseModel):
                 'Ensure the node is included in workflow_ctx_from.'
             )
 
-        # Cast is safe because the generic parameter ensures type correctness
-        return cast('SubWorkflowSummary[OkT]', self._summaries_by_id[node_id])
+        raw_summary = self._summaries_by_id[node_id]
+
+        # Resolve the child workflow's declared output type. When
+        # unresolvable (no generic parameter) or explicitly ``Any``, fall
+        # through with the raw summary cast — matches legacy behavior.
+        from horsies.core.codec.typed import decode_value
+        from .typing_utils import _resolve_workflow_def_ok_type
+
+        output_type = _resolve_workflow_def_ok_type(node.workflow_def)
+        if output_type is None or output_type is Any:
+            return cast('SubWorkflowSummary[OkT]', raw_summary)
+
+        # Typed decode of the output slot. ``None`` (failed / no-output
+        # child) passes through unchanged; raw is what the engine stored.
+        if raw_summary.output is None:
+            decoded_output: Any = None
+        else:
+            decoded_output = decode_value(raw_summary.output, output_type)
+
+        return SubWorkflowSummary(
+            status=raw_summary.status,
+            output=decoded_output,
+            total_tasks=raw_summary.total_tasks,
+            completed_tasks=raw_summary.completed_tasks,
+            failed_tasks=raw_summary.failed_tasks,
+            skipped_tasks=raw_summary.skipped_tasks,
+            error_summary=raw_summary.error_summary,
+        )
 
     def has_summary(self, node: SubWorkflowNode[Any]) -> bool:
         """Check if a summary exists for the given SubWorkflowNode."""
