@@ -745,20 +745,24 @@ def _run_task_entry(
             )
         args: tuple[Any, ...] = ()
 
-        kwargs_json_result = loads_json(kwargs_json)
-        if is_err(kwargs_json_result):
-            return _serialization_error_response(
-                task_name, kwargs_json_result.err_value
-            )
-        raw_kwargs = kwargs_json_result.ok_value
-        if not isinstance(raw_kwargs, dict):
-            return _serialization_error_response(
-                task_name,
-                SerializationError(
-                    f'kwargs must be a JSON object, got '
-                    f'{type(raw_kwargs).__name__}',
-                ),
-            )
+        if kwargs_json is None:
+            raw_kwargs: dict[str, Any] = {}
+        else:
+            kwargs_json_result = loads_json(kwargs_json)
+            if is_err(kwargs_json_result):
+                return _serialization_error_response(
+                    task_name, kwargs_json_result.err_value
+                )
+            decoded_kwargs = kwargs_json_result.ok_value
+            if not isinstance(decoded_kwargs, dict):
+                return _serialization_error_response(
+                    task_name,
+                    SerializationError(
+                        f'kwargs must be a JSON object, got '
+                        f'{type(decoded_kwargs).__name__}',
+                    ),
+                )
+            raw_kwargs = decoded_kwargs
 
         # Strict-serde phase 3+4: decode user kwargs using the receiver's
         # declared parameter types. Engine-private transport keys
@@ -768,7 +772,7 @@ def _run_task_entry(
         # allowlist; per-key unpacking happens immediately below.
         underlying_fn = underlying_task_fn(task)
         try:
-            kwargs = decode_kwargs(underlying_fn, cast('dict[str, Any]', raw_kwargs))
+            kwargs = decode_kwargs(underlying_fn, raw_kwargs)
         except (StrictJsonError, ValidationError) as exc:
             return _serialization_error_response(
                 task_name,

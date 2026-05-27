@@ -959,6 +959,38 @@ class TestRunTaskEntryErrorPaths:
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
 
+    def test_kwargs_json_null_treated_as_empty(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        """kwargs_json=None (DB NULL) is accepted as empty kwargs.
+
+        Regression: ``.send()`` leaves kwargs_json=None for no-kwargs
+        calls (task_decorator.py emits NULL when ``kwargs_dict`` is
+        falsy); the child runner must mirror the args-NULL handling and
+        treat NULL kwargs_json as ``{}`` rather than rejecting it as
+        WORKER_SERIALIZATION_ERROR. Without this branch every no-kwargs
+        e2e task (healthcheck, return_none_task, etc.) fails at the
+        worker, deadlocking ``_make_ready_check`` in run_worker.
+        """
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_task = MagicMock()
+        mock_task.task_ok_type = int
+        mock_task.return_value = 42
+        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
+        _run_entry_defaults['kwargs_json'] = None
+
+        with _apply_patches(patches):
+            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+
+        assert ok is True
+        parsed = _parse_task_result(payload)
+        err = parsed.get('err') or parsed.get('error')
+        assert err is None, (
+            f'expected no error for NULL kwargs_json, got: {err}'
+        )
+
     def test_task_returns_none(
         self,
         _run_entry_defaults: dict[str, Any],
