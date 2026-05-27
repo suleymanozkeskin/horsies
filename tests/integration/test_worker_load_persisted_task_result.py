@@ -20,7 +20,7 @@ from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.serde import dumps_json
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import OperationalErrorCode, TaskError, TaskResult
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker, _FINALIZE_STAGE_PHASE2
@@ -236,7 +236,7 @@ async def test_invalid_task_result_structure_returns_err(
 
     assert is_err(result)
     err = result.err_value
-    assert 'stored result decode failed' in err.message
+    assert 'stored result envelope invalid' in err.message
     assert "__h_task_result__" in err.message
 
 
@@ -292,3 +292,70 @@ async def test_failed_err_result_returns_task_result(
     task_error = tr.unwrap_err()
     assert task_error.error_code == 'DELIBERATE_FAIL'
     assert task_error.message == 'test failure'
+
+
+# ---------------------------------------------------------------------------
+# Test 8: FAILED with err result for task NOT registered locally → Ok(TaskResult)
+#         via err-fast-path (regression: replay used to require task_ok_type
+#         lookup before reading the err slot, which masked the original
+#         error_code with WORKER_SERIALIZATION_ERROR).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_unknown_task_err_result_uses_fast_path(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """Err-slot decode must NOT require task_ok_type lookup.
+
+    Regression: ``_load_persisted_task_result`` previously looked up
+    ``task_ok_type`` from the local registry before branching on
+    ok-vs-err, so a row whose worker wrote
+    ``WORKER_RESOLUTION_ERROR`` (unknown task name, by definition not
+    in the local registry) was re-wrapped here as
+    ``WORKER_SERIALIZATION_ERROR: ...missing task_ok_type...``.
+    The err slot is fixed-schema (TaskError) and decodes without OkT;
+    the fix branches on the err slot first.
+    """
+    task_id = str(uuid.uuid4())
+    # Insert a row pretending the worker terminalized 'unknown_task_xyz'
+    # with WORKER_RESOLUTION_ERROR — using the strict envelope shape.
+    envelope = encode_task_result(
+        TaskResult(err=TaskError(
+            error_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR,
+            message='task not found in registry',
+        )),
+        JsonValue,
+    )
+    err_result_json = dumps_json(envelope).unwrap()
+    sent_at, sha = compute_test_enqueue_sha(task_name='unknown_task_xyz')
+    await session.execute(
+        text("""
+            INSERT INTO horsies_tasks
+                (id, task_name, queue_name, priority, args, kwargs,
+                 status, sent_at, created_at, updated_at, claimed, retry_count,
+                 max_retries, started_at, result, enqueue_sha)
+            VALUES
+                (:id, 'unknown_task_xyz', 'default', 100, '[]', '{}',
+                 'FAILED', :sent_at, NOW(), NOW(), FALSE, 0,
+                 0, NOW(), :result, :enqueue_sha)
+        """),
+        {'id': task_id, 'sent_at': sent_at, 'result': err_result_json, 'enqueue_sha': sha},
+    )
+    await session.commit()
+
+    worker = _make_worker(engine)
+
+    result = await worker._load_persisted_task_result(task_id)
+
+    assert is_ok(result), (
+        f'expected Ok(TaskResult(err)) via err-fast-path, got Err: '
+        f'{result.err_value if not is_ok(result) else None}'
+    )
+    tr = result.ok_value
+    assert tr.is_err()
+    task_error = tr.unwrap_err()
+    assert task_error.error_code == OperationalErrorCode.WORKER_RESOLUTION_ERROR
+    assert task_error.message == 'task not found in registry'
