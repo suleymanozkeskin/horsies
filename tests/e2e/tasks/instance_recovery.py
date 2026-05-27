@@ -45,6 +45,7 @@ config = AppConfig(
 app = Horsies(config)
 broker = PostgresBroker(config.broker)
 app._broker = broker
+broker.app = app
 
 
 def _workflow(*, name: str, tasks: list[TaskNode], **kwargs: object) -> object:
