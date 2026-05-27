@@ -17,7 +17,11 @@ from sqlalchemy import text
 
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.serde import loads_json
-from horsies.core.codec.typed import decode_task_result
+from horsies.core.codec.typed import (
+    decode_task_error,
+    decode_task_result,
+    validate_task_result_envelope,
+)
 from horsies.core.logging import get_logger
 from horsies.core.types.result import is_err
 from horsies.core.models.workflow import WF_TASK_TERMINAL_VALUES
@@ -43,10 +47,13 @@ def _decode_recovered_task_result(
     """Decode a stored TaskResult during workflow recovery.
 
     Strict-serde phase 6: typed decode via ``decode_task_result`` using
-    the source task's ``task_ok_type``. Recovery is best-effort — any
-    failure (corrupt JSON, missing task registration, decode error)
-    falls back to a synthetic ``WORKER_CRASHED`` TaskError so the
-    workflow recovery flow keeps progressing.
+    the source task's ``task_ok_type``. An err-only envelope is decoded
+    via ``decode_task_error`` *without* requiring ``task_ok_type`` —
+    ``TaskError`` is a fixed-schema internal type, so the real failure
+    survives even if the task isn't registered in the recovery process.
+    Only an ok-slot envelope without a registered ``task_ok_type`` (or
+    any decode failure) falls back to the synthetic ``WORKER_CRASHED``
+    error so the recovery flow keeps progressing.
     """
     from horsies.core.models.tasks import (
         TaskResult,
@@ -73,6 +80,27 @@ def _decode_recovered_task_result(
             f'{loaded_r.err_value}'
         )
         return synthetic
+
+    # Err-fast-path: TaskError is fixed-schema; an err-only payload is
+    # decodable without the source task's ok_type. Skips the
+    # registration check that would otherwise discard the real err.
+    try:
+        envelope = validate_task_result_envelope(loaded_r.ok_value)
+    except StrictJsonError as exc:
+        logger.warning(
+            f'Recovery: task {task_id} envelope invalid: {exc}'
+        )
+        return synthetic
+    err_slot = envelope.get('err')
+    if err_slot is not None:
+        try:
+            return TaskResult(err=decode_task_error(err_slot))
+        except (StrictJsonError, ValidationError) as exc:
+            logger.warning(
+                f'Recovery: task {task_id} decode_task_error failed: {exc}'
+            )
+            return synthetic
+
     source_task = (
         app.tasks.get(task_name)
         if (app is not None and isinstance(task_name, str))

@@ -22,6 +22,7 @@ from horsies.core.codec.typed import (
     encode_task_error,
     encode_task_result,
     encode_value,
+    validate_task_result_envelope,
 )
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 from horsies.core.types.result import is_err
@@ -231,6 +232,12 @@ def _decode_err_only(
     malformed, or carries an ok payload (caller must supply ok_type for
     those).
 
+    Envelope shape is checked via ``validate_task_result_envelope`` —
+    same strict criteria as ``decode_task_result``: exactly the keys
+    ``{__h_task_result__, ok, err}``, marker is True, at most one slot
+    populated. Malformed envelopes return ``None`` so the caller falls
+    through to legacy handling rather than crashing.
+
     Routes through ``decode_task_error`` (polymorphic) so subclass
     types like ``SubWorkflowError`` survive the decode. The base
     ``decode_value(_, TaskError)`` path would silently drop
@@ -239,10 +246,11 @@ def _decode_err_only(
     from horsies.core.models.tasks import TaskError, TaskResult
 
     deser = _deser_json(stored_result, 'err-only result json')
-    if not isinstance(deser, dict):
+    if deser is None:
         return None
-    envelope = cast('dict[str, Any]', deser)
-    if envelope.get('__h_task_result__') is not True:
+    try:
+        envelope = validate_task_result_envelope(deser)
+    except StrictJsonError:
         return None
     err_slot = envelope.get('err')
     if err_slot is None:
