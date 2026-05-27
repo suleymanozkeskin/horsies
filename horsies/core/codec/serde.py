@@ -343,31 +343,17 @@ def serialize_error_payload(tr: TaskResult[Any, TaskError]) -> str:
     slot is encoded against the fixed ``TaskError`` schema (path-aware
     scan for the built-in code discriminator).
 
-    ``TaskError.exception`` is declared as ``BaseException |
-    FlattenedException | None``: the in-memory form lets the worker pass
-    a live exception (see ``child_runner.py:1054``) for local
-    diagnostics, but the strict codec can't serialize a raw
-    ``BaseException``. Flatten a live exception to the structured
-    ``FlattenedException`` shape before encoding so the err payload
-    survives the round-trip with its ``error_code`` / ``message``
-    intact — otherwise we'd silently downgrade every task-raised
-    exception to ``WORKER_SERIALIZATION_ERROR``.
+    Live ``BaseException`` on ``TaskError.exception`` is flattened to
+    ``FlattenedException`` by ``encode_task_result`` itself (single
+    source of truth for that invariant), so callers can hand us
+    ``TaskResult(err=TaskError(exception=<live exc>))`` without
+    pre-flattening.
 
     Returns the JSON string on success, or a hardcoded fallback if
-    serialization still fails after the flatten (should never happen
-    for library-constructed TaskError payloads, but we refuse to raise).
+    serialization fails (should never happen for library-constructed
+    TaskError payloads, but we refuse to raise).
     """
-    from horsies.core.codec.error_payload import flatten_exception
     from horsies.core.codec.typed import encode_task_result
-
-    if tr.is_err():
-        err = tr.err
-        if err is not None and isinstance(err.exception, BaseException):
-            tr = TaskResult(
-                err=err.model_copy(
-                    update={'exception': flatten_exception(err.exception)},
-                ),
-            )
 
     try:
         envelope = encode_task_result(tr, type(None))

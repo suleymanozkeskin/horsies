@@ -254,6 +254,17 @@ def encode_task_result(
     path-aware TaskError scan (built-in code discriminator allowed under
     `error_code`; smuggle attempts in `data` rejected).
 
+    ``TaskError.exception`` is declared as ``BaseException |
+    FlattenedException | None``: the in-memory form lets producers
+    (task_decorator's catch blocks, library error builders) attach a
+    live exception for local diagnostics. Pydantic can't serialize a
+    raw ``BaseException``, so the err branch flattens it to the
+    structured ``FlattenedException`` shape via ``model_copy`` before
+    invoking ``encode_value``. This is the single source of truth for
+    the live-exception → flattened invariant; every wire emit
+    (worker finalize, engine args_from envelope, broker reaper /
+    expiry, library error payloads) goes through this function.
+
     Args:
         result: The task result to encode.
         ok_type: Declared `OkT` for the ok-slot encoding. Required even
@@ -269,7 +280,13 @@ def encode_task_result(
             its declared shape.
     """
     if result.is_err():
-        encoded_err = encode_value(result.err_value, TaskError)
+        err = result.err_value
+        if isinstance(err.exception, BaseException):
+            from horsies.core.codec.error_payload import flatten_exception
+            err = err.model_copy(
+                update={'exception': flatten_exception(err.exception)},
+            )
+        encoded_err = encode_value(err, TaskError)
         return {
             _TASK_RESULT_ENVELOPE_KEY: True,
             'ok': None,

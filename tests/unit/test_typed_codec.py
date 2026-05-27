@@ -868,6 +868,46 @@ class TestTaskResultEnvelopeRoundTrip:
                 type(None),
             )
 
+    def test_err_envelope_flattens_live_exception(self) -> None:
+        """Live ``BaseException`` on ``TaskError.exception`` is flattened.
+
+        Regression: ``task_decorator`` builds
+        ``TaskResult(err=TaskError(exception=<live exc>, ...))`` for
+        unhandled exceptions (and specifically for
+        ``WorkflowContextMissingIdError``). The worker hands that
+        TaskResult to ``encode_task_result`` directly; without the
+        in-encoder flatten the pydantic serializer rejects the live
+        exception with ``PydanticSerializationError`` and the wrapper
+        folds the failure to ``OperationalErrorCode.TASK_EXCEPTION``,
+        clobbering the producer's declared ``error_code``.
+        """
+        from horsies.core.models.tasks import TaskError, TaskResult
+
+        err = TaskError(
+            exception=ValueError('boom'),
+            error_code='X',
+            message='m',
+        )
+        tr: TaskResult[None, TaskError] = TaskResult(err=err)
+
+        encoded = encode_task_result(tr, type(None))
+        assert encoded['ok'] is None
+        err_slot = cast('dict[str, Json]', encoded['err'])
+        flat = err_slot['exception']
+        assert isinstance(flat, dict)
+        assert flat['type'] == 'ValueError'
+        assert flat['message'] == 'boom'
+        assert 'traceback' in flat
+        assert err_slot['error_code'] == 'X'
+        assert err_slot['message'] == 'm'
+
+        decoded = decode_task_result(encoded, type(None))
+        assert decoded.err is not None
+        assert decoded.err.error_code == 'X'
+        # Round-trip preserves the flattened dict shape (not a live exc).
+        assert isinstance(decoded.err.exception, dict)
+        assert decoded.err.exception['type'] == 'ValueError'
+
 
 class TestDecodeTaskErrorPolymorphic:
     """`decode_task_error` must preserve SubWorkflowError subclass fields.
