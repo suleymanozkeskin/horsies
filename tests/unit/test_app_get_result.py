@@ -261,3 +261,182 @@ class TestHorsiesGetResultEnvelopeGuards:
         sub = tr.err
         assert sub.sub_workflow_id == 'wf-abc'
         assert sub.sub_workflow_summary.failed_tasks == 2
+
+
+def _patch_broker_task_info(app: Horsies, task_info_result: Any) -> MagicMock:
+    """Replace `app.get_broker` with a mock returning the given task info result."""
+    broker = MagicMock()
+    broker.get_task_info_async = AsyncMock(return_value=task_info_result)
+    app.get_broker = MagicMock(return_value=broker)  # type: ignore[method-assign]
+    return broker
+
+
+def _make_task_info(
+    task_id: str,
+    task_name: str,
+    raw_result: Any,
+) -> 'Any':
+    """Build a minimal TaskInfo for tests; defaults satisfy required fields."""
+    import datetime
+
+    from horsies.core.models.tasks import TaskInfo
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return TaskInfo(
+        task_id=task_id,
+        task_name=task_name,
+        status=TaskStatus.FAILED,
+        queue_name='default',
+        priority=0,
+        retry_count=0,
+        max_retries=0,
+        next_retry_at=None,
+        sent_at=now,
+        enqueued_at=now,
+        claimed_at=now,
+        started_at=now,
+        completed_at=None,
+        failed_at=now,
+        worker_hostname=None,
+        worker_pid=None,
+        worker_process_name=None,
+        raw_result=raw_result,
+    )
+
+
+@pytest.mark.unit
+class TestHorsiesGetTaskInfoErrFastPath:
+    """`Horsies.get_task_info_async(include_result=True)` must surface
+    the decoded err even when the task isn't registered locally.
+
+    Pre-fix the function gated all decode on `ok_type` lookup. An
+    err-only payload from an unregistered task came back with
+    `decoded_result=None`, hiding the real failure from any cross-process
+    monitoring caller that didn't import the task module.
+    """
+
+    @pytest.mark.asyncio
+    async def test_err_only_decoded_for_unregistered_task(self) -> None:
+        """Unregistered task + err-only envelope → ``decoded_result``
+        populated via err-fast-path (no ok_type needed)."""
+        app = _make_app()
+        wire = {
+            '__h_task_result__': True,
+            'ok': None,
+            'err': {
+                'error_code': {'__builtin_task_code__': 'TASK_EXCEPTION'},
+                'message': 'boom',
+                'data': None,
+                'exception': None,
+            },
+        }
+        info = _make_task_info(
+            task_id='task-1', task_name='not.registered', raw_result=wire,
+        )
+        _patch_broker_task_info(app, Ok(info))
+
+        result = await app.get_task_info_async('task-1', include_result=True)
+
+        assert is_ok(result)
+        decoded_info = result.unwrap()
+        assert decoded_info is not None
+        assert decoded_info.result_decoded is True
+        assert decoded_info.decoded_result is not None
+        assert decoded_info.decoded_result.err is not None
+        assert decoded_info.decoded_result.err.message == 'boom'
+
+    @pytest.mark.asyncio
+    async def test_err_only_preserves_sub_workflow_error_subclass(self) -> None:
+        """Polymorphic decode path: SubWorkflowError survives via
+        ``decode_task_error``, even for an unregistered task."""
+        app = _make_app()
+        from horsies.core.models.workflow.context import SubWorkflowSummary
+        from horsies.core.models.workflow.enums import WorkflowStatus
+
+        original = SubWorkflowError(
+            error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+            message='child died',
+            sub_workflow_id='wf-xyz',
+            sub_workflow_summary=SubWorkflowSummary(
+                status=WorkflowStatus.FAILED,
+                output=None,
+                total_tasks=1,
+                completed_tasks=0,
+                failed_tasks=1,
+                skipped_tasks=0,
+                error_summary='child boom',
+            ),
+        )
+        wire = {
+            '__h_task_result__': True,
+            'ok': None,
+            'err': original.model_dump(mode='json'),
+        }
+        info = _make_task_info(
+            task_id='task-2', task_name='not.registered', raw_result=wire,
+        )
+        _patch_broker_task_info(app, Ok(info))
+
+        result = await app.get_task_info_async('task-2', include_result=True)
+
+        assert is_ok(result)
+        decoded_info = result.unwrap()
+        assert decoded_info is not None
+        assert decoded_info.result_decoded is True
+        assert decoded_info.decoded_result is not None
+        assert isinstance(decoded_info.decoded_result.err, SubWorkflowError)
+        assert decoded_info.decoded_result.err.sub_workflow_id == 'wf-xyz'
+
+    @pytest.mark.asyncio
+    async def test_ok_only_unregistered_task_leaves_decoded_result_none(
+        self,
+    ) -> None:
+        """Ok-only path still requires ok_type. Unregistered → undecoded."""
+        app = _make_app()
+        wire = {
+            '__h_task_result__': True,
+            'ok': 42,
+            'err': None,
+        }
+        info = _make_task_info(
+            task_id='task-3', task_name='not.registered', raw_result=wire,
+        )
+        _patch_broker_task_info(app, Ok(info))
+
+        result = await app.get_task_info_async('task-3', include_result=True)
+
+        assert is_ok(result)
+        decoded_info = result.unwrap()
+        assert decoded_info is not None
+        # No ok_type → decoded_result stays None, result_decoded False.
+        assert decoded_info.decoded_result is None
+        assert decoded_info.result_decoded is False
+
+    @pytest.mark.asyncio
+    async def test_malformed_envelope_returns_invalid_json_payload(
+        self,
+    ) -> None:
+        """Envelope shape failure must fail closed — same as get_result."""
+        app = _make_app()
+        malformed = {
+            '__h_task_result__': True,
+            # Both slots populated → invariant violation.
+            'ok': 1,
+            'err': {
+                'error_code': {'__builtin_task_code__': 'TASK_EXCEPTION'},
+                'message': 'boom',
+                'data': None,
+                'exception': None,
+            },
+        }
+        info = _make_task_info(
+            task_id='task-4', task_name='not.registered', raw_result=malformed,
+        )
+        _patch_broker_task_info(app, Ok(info))
+
+        result = await app.get_task_info_async('task-4', include_result=True)
+
+        assert is_err(result)
+        err = result.unwrap_err()
+        assert err.code == BrokerErrorCode.INVALID_JSON_PAYLOAD
+        assert err.retryable is False

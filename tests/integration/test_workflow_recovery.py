@@ -932,6 +932,103 @@ class TestWorkflowRecovery:
         assert task_result.err is not None
         assert task_result.err.error_code == RetrievalCode.RESULT_NOT_AVAILABLE
 
+    async def test_recover_crashed_worker_unregistered_task_err_fast_path(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """Case 1.7: err-only result for an unregistered task must surface
+        via the recovery err-fast-path.
+
+        Pre-fix ``_decode_recovered_task_result`` required the source task's
+        ``task_ok_type`` for *any* decode path. When recovery ran in a
+        process that hadn't imported the task (cross-process recovery), the
+        real failure was discarded in favor of a synthetic
+        ``WORKER_CRASHED``. The err-fast-path now uses
+        ``decode_task_error`` (no ok_type) so the real err survives.
+        """
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'recover_unregistered_err_a')
+
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        spec = make_workflow_spec(
+            broker=broker, name='recover_unregistered_err', tasks=[node_a]
+        )
+
+        handle = await start_ok(spec, broker)
+
+        wt_result = await session.execute(
+            text("""
+                SELECT task_id FROM horsies_workflow_tasks
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        task_id = wt_result.fetchone()[0]
+
+        # Store a real TASK_EXCEPTION (err-only) result, then simulate
+        # crash via workflow_tasks=RUNNING.
+        real_err_result = TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.TASK_EXCEPTION,
+                message='real failure to preserve through recovery',
+            ),
+        )
+        await session.execute(
+            text("""
+                UPDATE horsies_tasks
+                SET status = 'FAILED',
+                    result = :result
+                WHERE id = :tid
+            """),
+            {
+                'tid': task_id,
+                'result': _strict_result_json(real_err_result),
+            },
+        )
+        await session.execute(
+            text("""
+                UPDATE horsies_workflow_tasks
+                SET status = 'RUNNING'
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        await session.commit()
+
+        # Simulate cross-process recovery: the task isn't registered in
+        # the recovery worker's app.tasks. Pre-fix this discarded the
+        # real err and produced a synthetic WORKER_CRASHED.
+        app.tasks.unregister('recover_unregistered_err_a')
+        assert app.tasks.get('recover_unregistered_err_a') is None
+
+        recovered = await recover_stuck_workflows(session, broker)
+        await session.commit()
+
+        assert recovered == 1
+
+        wt_check = await session.execute(
+            text("""
+                SELECT status, result FROM horsies_workflow_tasks
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        status, result_json = wt_check.fetchone()
+        assert status == 'FAILED'
+
+        recovered_result = decode_task_result(
+            loads_json(result_json).unwrap(), Any,
+        )
+        assert recovered_result.is_err()
+        assert recovered_result.err is not None
+        # Critical: the real err survives, not the synthetic WORKER_CRASHED.
+        assert recovered_result.err.error_code == (
+            OperationalErrorCode.TASK_EXCEPTION
+        )
+        assert recovered_result.err.message == (
+            'real failure to preserve through recovery'
+        )
+
     # ── Case 0: PENDING tasks with all deps terminal ──
 
     async def test_recover_pending_deps_succeeded(
