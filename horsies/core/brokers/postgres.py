@@ -1196,6 +1196,7 @@ class PostgresBroker:
                 OperationalErrorCode,
             )
             from horsies.core.codec.serde import dumps_json
+            from horsies.core.codec.typed import encode_task_result
             from horsies.core.utils.retry import (
                 check_retry_eligibility,
                 calculate_retry_delay,
@@ -1369,7 +1370,14 @@ class PostgresBroker:
                             task_result: TaskResult[None, TaskError] = TaskResult(
                                 err=task_error
                             )
-                            ser_r = dumps_json(task_result)
+                            # Strict-serde phase 7: write the wire envelope so
+                            # downstream readers (worker finalizers, workflow
+                            # decoders) see ``__h_task_result__``. The crashed
+                            # task carries no ok payload (TaskResult[None, ...]),
+                            # so ``type(None)`` is the truthful ok_type.
+                            ser_r = dumps_json(
+                                encode_task_result(task_result, type(None)),
+                            )
                             if is_err(ser_r):
                                 self.logger.error(
                                     'Failed to serialize crash result for task %s: %s',
@@ -1437,13 +1445,17 @@ class PostgresBroker:
         try:
             from horsies.core.models.tasks import TaskResult, TaskError, OutcomeCode
             from horsies.core.codec.serde import dumps_json
+            from horsies.core.codec.typed import encode_task_result
 
             task_error = TaskError(
                 error_code=OutcomeCode.TASK_EXPIRED,
                 message='Task expired: good_until deadline passed before execution started',
             )
             task_result: TaskResult[None, TaskError] = TaskResult(err=task_error)
-            ser_r = dumps_json(task_result)
+            # Strict-serde phase 7: emit the wire envelope so downstream
+            # readers see ``__h_task_result__`` and the err slot decodes
+            # cleanly. Expired tasks carry no ok payload.
+            ser_r = dumps_json(encode_task_result(task_result, type(None)))
             if is_err(ser_r):
                 return _broker_err(
                     BrokerErrorCode.CLEANUP_FAILED,

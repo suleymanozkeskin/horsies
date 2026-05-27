@@ -19,6 +19,7 @@ from horsies.core.codec.typed import (
     Json,
     decode_task_result,
     encode_task_result,
+    encode_value,
 )
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 from horsies.core.types.result import is_err
@@ -1258,6 +1259,7 @@ async def on_workflow_task_complete(
 
     workflow_id = row.workflow_id
     task_index = row.task_index
+    task_name = row.task_name
 
     # Serialize completion handling per workflow so concurrent task completions
     # don't race dependency promotion (PENDING -> READY/SKIPPED).
@@ -1270,11 +1272,26 @@ async def on_workflow_task_complete(
 
     # 2. Update workflow_task status and store result (CAS: skip if already terminal)
     new_status = 'COMPLETED' if result.is_ok() else 'FAILED'
+    # Strict-serde phase 7: re-encode through the wire envelope so downstream
+    # readers (`_decode_stored_task_result`, `_decode_err_only`, child→parent
+    # pass-through at on_subworkflow_complete) see the `__h_task_result__`
+    # marker. Prefer the source task's declared `task_ok_type` for write-time
+    # validation; fall back to `Any` when the broker/app is unavailable
+    # (test/recovery paths) so completion never fails on missing type metadata.
+    ok_type_for_encode: Any = Any
+    if broker is not None and broker.app is not None:
+        resolved = _resolve_source_ok_type(broker.app, task_name)
+        if resolved is not None:
+            ok_type_for_encode = resolved
     update_result = await session.execute(
         UPDATE_WORKFLOW_TASK_RESULT_SQL,
         {
             'status': new_status,
-            'result': _ser(dumps_json(result), 'task completion result', fallback='null'),
+            'result': _ser(
+                dumps_json(encode_task_result(result, ok_type_for_encode)),
+                'task completion result',
+                fallback='null',
+            ),
             'wf_id': workflow_id,
             'idx': task_index,
             'terminal_states': WF_TASK_TERMINAL_VALUES,
@@ -2071,7 +2088,9 @@ async def get_workflow_failure_error(
             err_tr = _decode_err_only(row.result)
             if err_tr is not None and err_tr.is_err() and err_tr.err:
                 return _ser(
-                    dumps_json(err_tr.err), 'task error', fallback='null',
+                    dumps_json(encode_value(err_tr.err, TaskError)),
+                    'task error',
+                    fallback='null',
                 )
         return None
 
@@ -2104,16 +2123,21 @@ async def get_workflow_failure_error(
             err_tr = _decode_err_only(row.result)
             if err_tr is not None and err_tr.is_err() and err_tr.err:
                 return _ser(
-                    dumps_json(err_tr.err), 'task error', fallback='null',
+                    dumps_json(encode_value(err_tr.err, TaskError)),
+                    'task error',
+                    fallback='null',
                 )
 
     # No required task failed, but no case was satisfied (all SKIPPED?)
     return _ser(
         dumps_json(
-            TaskError(
-                error_code=OutcomeCode.WORKFLOW_SUCCESS_CASE_NOT_MET,
-                message='No success case was satisfied',
-            )
+            encode_value(
+                TaskError(
+                    error_code=OutcomeCode.WORKFLOW_SUCCESS_CASE_NOT_MET,
+                    message='No success case was satisfied',
+                ),
+                TaskError,
+            ),
         ),
         'success case not met error',
         fallback='null',
@@ -2220,6 +2244,8 @@ async def _handle_workflow_task_failure(
     Note: The failed task's result is already stored. Dependents will receive
     the TaskResult with is_err()=True if they have args_from pointing to this task.
     """
+    from horsies.core.models.tasks import TaskError
+
     lock_result = await session.execute(
         LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
         {'wf_id': workflow_id},
@@ -2239,8 +2265,14 @@ async def _handle_workflow_task_failure(
 
     on_error = wf_row.on_error
 
-    # Extract TaskError for storage (not the full TaskResult)
-    error_payload = _ser(dumps_json(result.err), 'error payload') if result.is_err() and result.err else None
+    # Extract TaskError for storage (not the full TaskResult). Strict-serde
+    # phase 7: encode via ``encode_value(err, TaskError)`` so the stored
+    # JSON does not carry the retired ``__task_error__`` legacy marker.
+    error_payload = (
+        _ser(dumps_json(encode_value(result.err, TaskError)), 'error payload')
+        if result.is_err() and result.err
+        else None
+    )
 
     if on_error == 'fail':
         # Store error but keep status RUNNING until DAG fully resolves

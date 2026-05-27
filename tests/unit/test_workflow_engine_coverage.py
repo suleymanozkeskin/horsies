@@ -999,7 +999,7 @@ class TestOnWorkflowTaskComplete:
     async def test_lock_acquisition_fails_returns_early(self) -> None:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is GET_WORKFLOW_TASK_BY_TASK_ID_SQL:
-                return _one_result(SimpleNamespace(workflow_id='wf-1', task_index=0))
+                return _one_result(SimpleNamespace(workflow_id='wf-1', task_index=0, task_name='task-a'))
             if stmt is LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL:
                 return _one_result(None)
             return _one_result(SimpleNamespace())
@@ -1013,7 +1013,7 @@ class TestOnWorkflowTaskComplete:
     async def test_already_terminal_skips(self) -> None:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is GET_WORKFLOW_TASK_BY_TASK_ID_SQL:
-                return _one_result(SimpleNamespace(workflow_id='wf-1', task_index=0))
+                return _one_result(SimpleNamespace(workflow_id='wf-1', task_index=0, task_name='task-a'))
             if stmt is LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL:
                 return _one_result(SimpleNamespace(id='wf-1'))
             if stmt is UPDATE_WORKFLOW_TASK_RESULT_SQL:

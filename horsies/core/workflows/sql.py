@@ -167,7 +167,7 @@ GET_SUBWORKFLOW_SUMMARIES_SQL = text("""
 # -- SQL constants for on_workflow_task_complete --
 
 GET_WORKFLOW_TASK_BY_TASK_ID_SQL = text("""
-    SELECT workflow_id, task_index
+    SELECT workflow_id, task_index, task_name
     FROM horsies_workflow_tasks
     WHERE task_id = :tid
 """)
