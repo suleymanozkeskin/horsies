@@ -2013,8 +2013,14 @@ class TestEnqueueScheduledTask:
                 slot_time=_utc(2025, 6, 1, 12, 0, 0),
             )
 
-    async def test_args_serialization_failure_returns_err(self) -> None:
-        """args_to_json returns Err → Err(BrokerOperationError)."""
+    async def test_positional_args_rejected_directly(self) -> None:
+        """Strict-serde rejects positional args at the scheduler.
+
+        Previously this test patched `args_to_json` to simulate a
+        serialization failure; under strict-serde positional args have
+        no typed wire representation and are rejected with
+        ENQUEUE_FAILED before any serialization runs.
+        """
         schedule = TaskSchedule(
             name='s',
             task_name='my_task',
@@ -2027,21 +2033,22 @@ class TestEnqueueScheduledTask:
         scheduler = Scheduler(app)
         scheduler.broker = _make_broker_mock()
 
-        with patch(
-            'horsies.core.scheduler.service.args_to_json',
-            return_value=Err(TypeError('bad args')),
-        ):
-            result = await scheduler._enqueue_scheduled_task(
-                schedule,
-                slot_time=_utc(2025, 6, 1, 12, 0, 0),
-            )
+        result = await scheduler._enqueue_scheduled_task(
+            schedule,
+            slot_time=_utc(2025, 6, 1, 12, 0, 0),
+        )
 
         assert is_err(result)
         assert result.err_value.code == BrokerErrorCode.ENQUEUE_FAILED
-        assert 'serialize args' in result.err_value.message
+        assert 'positional' in result.err_value.message
 
     async def test_kwargs_serialization_failure_returns_err(self) -> None:
-        """kwargs_to_json returns Err → Err(BrokerOperationError)."""
+        """dumps_json returning Err on encoded kwargs → Err(BrokerOperationError).
+
+        Strict-serde phase 3 routes scheduler kwargs through `encode_kwargs`
+        then `dumps_json`; this test patches the final stringification step
+        (the only post-encoding failure surface) to verify error wrapping.
+        """
         schedule = TaskSchedule(
             name='s',
             task_name='my_task',
@@ -2055,7 +2062,7 @@ class TestEnqueueScheduledTask:
         scheduler.broker = _make_broker_mock()
 
         with patch(
-            'horsies.core.scheduler.service.kwargs_to_json',
+            'horsies.core.scheduler.service.dumps_json',
             return_value=Err(TypeError('bad kwargs')),
         ):
             result = await scheduler._enqueue_scheduled_task(
@@ -2065,16 +2072,17 @@ class TestEnqueueScheduledTask:
 
         assert is_err(result)
         assert result.err_value.code == BrokerErrorCode.ENQUEUE_FAILED
-        assert 'serialize kwargs' in result.err_value.message
+        assert 'kwargs' in result.err_value.message
 
     async def test_happy_path_calls_broker_with_correct_params(self) -> None:
         """Full success: broker.enqueue_async called with deterministic task_id and sent_at=slot_time."""
+        # Strict-serde: positional args are rejected by the scheduler;
+        # kwargs-only is the documented usage.
         schedule = TaskSchedule(
             name='s',
             task_name='my_task',
             pattern=IntervalSchedule(seconds=5),
-            args=(1, 2),
-            kwargs={'key': 'val'},
+            kwargs={'a': 1, 'b': 2, 'key': 'val'},
         )
         config = ScheduleConfig(schedules=[schedule])
         task_mock = _make_task_mock(lambda a, b, key: None)

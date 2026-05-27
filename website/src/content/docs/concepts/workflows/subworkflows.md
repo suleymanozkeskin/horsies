@@ -25,19 +25,19 @@ Workflows provide:
 ### 2.1 Class-Based Definition (Recommended)
 
 ```python
-from horsies import Horsies, AppConfig, PostgresConfig, WorkflowDefinition, TaskNode, TaskResult, TaskError
+from horsies import Horsies, AppConfig, PostgresConfig, WorkflowDefinition, TaskNode, TaskResult, TaskError, JsonValue
 
 app = Horsies(AppConfig(
     broker=PostgresConfig(database_url="postgresql+psycopg://user:pass@localhost:5432/mydb"),
 ))
 
 @app.task(task_name="fetch_data")
-def fetch_data(url: str) -> TaskResult[dict, TaskError]:
+def fetch_data(url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
     # fetch logic...
     return TaskResult(ok={"data": "..."})
 
 @app.task(task_name="transform")
-def transform(raw: TaskResult[dict, TaskError]) -> TaskResult[str, TaskError]:
+def transform(raw: TaskResult[dict[str, JsonValue], TaskError]) -> TaskResult[str, TaskError]:
     if raw.is_err():
         return TaskResult(err=raw.err_value)
     return TaskResult(ok=str(raw.ok_value))

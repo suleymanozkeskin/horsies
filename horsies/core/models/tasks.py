@@ -6,6 +6,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Generic,
+    TypedDict,
     TypeVar,
     Optional,
     Literal,
@@ -60,6 +61,13 @@ class ContractCode(str, Enum):
     RETURN_TYPE_MISMATCH = 'RETURN_TYPE_MISMATCH'
     PYDANTIC_HYDRATION_ERROR = 'PYDANTIC_HYDRATION_ERROR'
     WORKFLOW_CTX_MISSING_ID = 'WORKFLOW_CTX_MISSING_ID'
+    # Strict-serde (design §8). Surfaces inside ``TaskError`` for
+    # handle-level APIs (``TaskHandle.get`` / ``WorkflowHandle.get``)
+    # when typed decode is requested but the OkT cannot be obtained
+    # — e.g. handle reconstructed by id without local task / workflow
+    # registration. The Result-returning sibling lives at
+    # ``BrokerErrorCode.NO_TYPE_AVAILABLE``.
+    NO_TYPE_AVAILABLE = 'NO_TYPE_AVAILABLE'
 
 
 class RetrievalCode(str, Enum):
@@ -126,6 +134,23 @@ _BUILTIN_FAMILIES = (
 )
 
 
+class FlattenedException(TypedDict):
+    """Wire-safe dict form of a ``BaseException``.
+
+    Produced by ``flatten_exception`` (``codec/error_payload.py``) before
+    a ``TaskError`` carrying a live exception is encoded. Keeps the
+    legacy ``type`` / ``message`` / ``traceback`` triple that downstream
+    tooling depends on and adds ``module`` / ``repr`` for class
+    disambiguation.
+    """
+
+    type: str
+    module: str
+    message: str
+    repr: str
+    traceback: str
+
+
 class TaskError(BaseModel):
     """The error payload for a TaskResult.
 
@@ -151,7 +176,7 @@ class TaskError(BaseModel):
 
     model_config = {'arbitrary_types_allowed': True}
 
-    exception: Optional[dict[str, Any] | BaseException] = None
+    exception: BaseException | FlattenedException | None = None
     error_code: Optional[Union[BuiltInTaskCode, str]] = None
     data: Optional[Any] = None
     message: Optional[str] = None
@@ -369,7 +394,23 @@ class TaskAttemptInfo:
 
 @dataclass
 class TaskInfo:
-    """Metadata for a broker-backed task."""
+    """Metadata for a broker-backed task.
+
+    Strict-serde (design §6) splits the legacy single ``result`` field
+    into a three-field shape so callers can dispatch cleanly on whether
+    typed decode succeeded:
+
+    - ``raw_result``: the JSON envelope as stored, always populated when
+      the task has a terminal payload. Available without any local task
+      registration — safe for cross-process monitoring / dashboards.
+    - ``decoded_result``: the typed ``TaskResult`` produced by
+      ``decode_task_result(raw_result, ok_type)``. Populated only when
+      the calling process has the task definition imported AND decode
+      succeeds.
+    - ``result_decoded``: ``True`` iff ``decoded_result`` was populated.
+      Lets callers branch without comparing for ``None`` (which is also
+      a valid ok-value for ``TaskResult[None, TaskError]``).
+    """
 
     task_id: str
     task_name: str
@@ -389,7 +430,9 @@ class TaskInfo:
     worker_pid: int | None
     worker_process_name: str | None
     error_code: str | None = None
-    result: TaskResult[Any, TaskError] | None = None
+    raw_result: 'dict[str, Any] | None' = None
+    decoded_result: TaskResult[Any, TaskError] | None = None
+    result_decoded: bool = False
     failed_reason: str | None = None
     attempts: list[TaskAttemptInfo] | None = None
 

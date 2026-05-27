@@ -35,7 +35,7 @@ def divide(a: int, b: int) -> TaskResult[float, TaskError]:
 ```python
 from horsies import Ok, Err
 
-match divide.send(10, 2):
+match divide.send(a=10, b=2):
     case Ok(handle):
         result = handle.get()
 
@@ -57,7 +57,7 @@ match divide.send(10, 2):
 | `error_code` | `str` or `BuiltInTaskCode` | Identifies the error type |
 | `message` | `str` | Human-readable description |
 | `data` | `Any` | Additional context (dict, list, etc.) |
-| `exception` | `BaseException` or `dict` | Original exception if applicable |
+| `exception` | `BaseException` or `FlattenedException` | Live exception in-process; flattened on the wire to `type`, `module`, `message`, `repr`, and `traceback` |
 
 ```python
 return TaskResult(err=TaskError(
@@ -90,7 +90,7 @@ When the library itself encounters an error (not your task code), it uses one of
 | Code | When |
 | ---- | ---- |
 | `RETURN_TYPE_MISMATCH` | Returned value doesn't match declared type |
-| `PYDANTIC_HYDRATION_ERROR` | Task succeeded but return value could not be rehydrated to declared type |
+| `NO_TYPE_AVAILABLE` | A successful result could not be decoded because the caller does not have the task's declared success type locally registered |
 | `WORKFLOW_CTX_MISSING_ID` | Workflow context is missing required ID |
 
 ### RetrievalCode

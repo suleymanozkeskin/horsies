@@ -21,8 +21,12 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from horsies.core.app import Horsies
+from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.serde import dumps_json
-from horsies.core.models.tasks import TaskResult
+from horsies.core.models.app import AppConfig
+from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import (
@@ -42,6 +46,35 @@ pytestmark = [pytest.mark.integration]
 # ---------------------------------------------------------------------------
 
 
+_TEST_APP: Horsies | None = None
+
+
+def _test_app() -> Horsies:
+    """Lazy-built Horsies app registering the task names this file inserts.
+
+    Production workers wire ``_app`` via ``_locate_app(cfg.app_locator)``;
+    these tests bypass preload and build ``Worker`` directly, so we
+    attach a minimal app here. Strict-serde phase 6 worker finalize
+    looks up ``task_ok_type`` via ``self._app.tasks[task_name]``.
+    """
+    global _TEST_APP
+    if _TEST_APP is None:
+        cfg = AppConfig(broker=PostgresConfig(
+            database_url='postgresql+psycopg://u:p@localhost/db',
+        ))
+        _TEST_APP = Horsies(cfg)
+
+        @_TEST_APP.task(task_name='finalize_after_test')
+        def _finalize_after_test() -> TaskResult[JsonValue, TaskError]:
+            return TaskResult(ok=None)
+
+        @_TEST_APP.task(task_name='finalize_after_owned_test')
+        def _finalize_after_owned_test() -> TaskResult[JsonValue, TaskError]:
+            return TaskResult(ok=None)
+
+    return _TEST_APP
+
+
 def _make_worker(engine: AsyncEngine) -> Worker:
     """Construct a Worker wired to the test DB."""
     sf = async_sessionmaker(engine, expire_on_commit=False)
@@ -50,7 +83,9 @@ def _make_worker(engine: AsyncEngine) -> Worker:
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
-    return Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
+    worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
+    worker._app = _test_app()
+    return worker
 
 
 async def _insert_running_task(session: AsyncSession) -> str:
@@ -137,8 +172,14 @@ def _make_failed_future(
 
 
 def _serialize_ok(value: object) -> str:
-    """Serialize TaskResult(ok=value) to JSON string."""
-    r = dumps_json(TaskResult(ok=value))
+    """Build the strict ``__h_task_result__`` envelope for a seeded ok value.
+
+    Mirrors production worker writes so the load / phase-2 replay paths
+    decode cleanly via the registered task's ``task_ok_type``.
+    ``JsonValue`` accepts the mixed ok payloads these tests use.
+    """
+    envelope = encode_task_result(TaskResult(ok=value), JsonValue)
+    r = dumps_json(envelope)
     assert not is_err(r), f'Serialization failed: {r}'
     return r.ok_value
 

@@ -1493,8 +1493,18 @@ class TestWorkflowSpecValidation:
         # Should not raise
         WorkflowSpec(name='kwargs_task_ok', tasks=[node_a])
 
-    def test_subworkflow_kwargs_validation_skipped_for_kwargs_build_with(self) -> None:
-        """Subworkflow build_with(**kwargs) should skip key validation."""
+    def test_subworkflow_kwargs_rejected_for_untyped_build_with(self) -> None:
+        """Subworkflow build_with(**kwargs) rejects unknown kwargs at strict snapshot.
+
+        Strict-serde phase 7: ``_snapshot_kwargs_values`` binds
+        SubWorkflowNode kwargs against ``workflow_def._original_build_with``
+        (or ``build_with``) the same way it binds TaskNode kwargs against
+        ``node.fn``. A ``build_with(cls, app, **kwargs)`` has no declared
+        named parameters beyond ``app``/``cls`` (engine-supplied), so a
+        user-supplied kwarg like ``unknown=1`` fails strict binding —
+        the strict-serde contract is that every kwarg must hit a typed
+        named parameter on the subworkflow's entry.
+        """
         fn_a = MockTaskWrapper(task_name='task_a')
 
         class ChildWorkflow(WorkflowDefinition[int]):
@@ -1518,8 +1528,9 @@ class TestWorkflowSpecValidation:
             args_from={},
         )
 
-        # Should not raise
-        WorkflowSpec(name='subworkflow_kwargs_ok', tasks=[child_node])
+        with pytest.raises(WorkflowValidationError) as exc:
+            WorkflowSpec(name='subworkflow_kwargs_ok', tasks=[child_node])
+        assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
     def test_subworkflow_cycle_detection_allows_same_name_distinct_definitions(self) -> None:
         """Same workflow name in distinct definitions is not a cycle."""
@@ -1905,8 +1916,14 @@ class TestWorkflowContext:
         assert restored_result.is_ok()
         assert restored_result.unwrap() == 42
 
-    def test_model_dump_json_round_trips_results(self) -> None:
-        """model_dump(mode='json') preserves dependency results in JSONable form."""
+    def test_model_dump_json_mode_raises_not_implemented(self) -> None:
+        """Strict-serde phase 7: model_dump(mode='json') is dropped.
+
+        WorkflowContext can't carry a wire form because per-result
+        ok_type lives at the engine/worker boundary, not on the model.
+        Reconstruction is via from_serialized with pre-typed TaskResult
+        instances.
+        """
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
             task_index=1,
@@ -1914,17 +1931,11 @@ class TestWorkflowContext:
             results_by_id={'node-0': TaskResult(ok=42)},
         )
 
-        dumped = ctx.model_dump(mode='json')
-        assert dumped['results_by_id']['node-0'] == {
-            '__task_result__': True,
-            'ok': 42,
-            'err': None,
-        }
+        with pytest.raises(NotImplementedError, match='not supported under strict-serde'):
+            ctx.model_dump(mode='json')
 
-        restored = WorkflowContext.model_validate(dumped)
-        restored_result = restored.result_for(NodeKey[int]('node-0'))
-        assert restored_result.is_ok()
-        assert restored_result.unwrap() == 42
+        with pytest.raises(NotImplementedError, match='not supported under strict-serde'):
+            ctx.model_dump_json()
 
     def test_result_for_raises_on_missing_id(self) -> None:
         """result_for(node) raises RuntimeError if node has no node_id."""
@@ -2790,8 +2801,14 @@ class TestWorkflowContextSummary:
         assert restored_summary.output == 42
         assert restored_summary.total_tasks == 3
 
-    def test_model_dump_json_round_trips_summaries(self) -> None:
-        """model_dump(mode='json') preserves summaries in JSONable form."""
+    def test_model_dump_json_summaries_raises_not_implemented(self) -> None:
+        """Strict-serde phase 7: model_dump(mode='json') drops legacy
+        ``__dataclass__`` envelope emission for SubWorkflowSummary too.
+
+        The summary side previously round-tripped via SubWorkflowSummary.from_json
+        on a legacy ``__dataclass__`` envelope. Reconstruction now happens
+        via from_serialized with pre-typed SubWorkflowSummary instances.
+        """
         summary = SubWorkflowSummary(
             status=WorkflowStatus.COMPLETED,
             output=42,
@@ -2809,12 +2826,13 @@ class TestWorkflowContextSummary:
             summaries_by_id={'sub-node': summary},
         )
 
-        dumped = ctx.model_dump(mode='json')
-        assert dumped['summaries_by_id']['sub-node']['__dataclass__'] is True
-        assert (
-            dumped['summaries_by_id']['sub-node']['data']['status']
-            == WorkflowStatus.COMPLETED
-        )
+        with pytest.raises(NotImplementedError, match='not supported under strict-serde'):
+            ctx.model_dump(mode='json')
+
+        # ``model_dump()`` (python mode) preserves identity — the canonical
+        # way callers should access summaries in-process.
+        dumped = ctx.model_dump()
+        assert dumped['summaries_by_id']['sub-node'] is summary
 
         fn_a = MockTaskWrapper(task_name='task_a')
 

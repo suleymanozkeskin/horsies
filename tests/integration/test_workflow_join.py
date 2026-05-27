@@ -68,7 +68,7 @@ class TestOrJoin:
         handle = await start_ok(spec, broker)
 
         # Complete just task A
-        await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
+        await complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
 
         # Aggregator should be ENQUEUED (join='any' satisfied by A)
         status_agg = await get_task_status(session, handle.workflow_id, 3)
@@ -104,12 +104,14 @@ class TestOrJoin:
         # Complete both tasks with failures
         await complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(err=TaskError(error_code='FAIL', message='A failed')),
         )
         await complete_task(
             session,
+            broker,
             handle.workflow_id,
             1,
             TaskResult(err=TaskError(error_code='FAIL', message='B failed')),
@@ -149,6 +151,7 @@ class TestOrJoin:
         # Complete A with failure
         await complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(err=TaskError(error_code='FAIL', message='A failed')),
@@ -159,7 +162,7 @@ class TestOrJoin:
         assert status_agg == 'PENDING'
 
         # Now complete B with success
-        await complete_task(session, handle.workflow_id, 1, TaskResult(ok=10))
+        await complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=10))
 
         # Aggregator should now be ENQUEUED
         status_agg = await get_task_status(session, handle.workflow_id, 2)
@@ -196,14 +199,14 @@ class TestOrJoin:
         handle = await start_ok(spec, broker)
 
         # Complete A only (join condition satisfied)
-        await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
+        await complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
 
         # Aggregator should remain PENDING until ctx deps are terminal
         status_agg = await get_task_status(session, handle.workflow_id, 2)
         assert status_agg == 'PENDING'
 
         # Complete B (ctx dep)
-        await complete_task(session, handle.workflow_id, 1, TaskResult(ok=4))
+        await complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=4))
 
         # Now aggregator can be ENQUEUED
         status_agg = await get_task_status(session, handle.workflow_id, 2)
@@ -235,7 +238,7 @@ class TestOrJoin:
         )
 
         handle = await start_ok(spec, broker)
-        await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
+        await complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
 
         status_agg = await get_task_status(session, handle.workflow_id, 1)
         assert status_agg == 'ENQUEUED'
@@ -267,6 +270,7 @@ class TestOrJoin:
         handle = await start_ok(spec, broker)
         await complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(err=TaskError(error_code='FAIL', message='A failed')),
@@ -312,6 +316,7 @@ class TestOrJoin:
         # A fails → B should be SKIPPED → C should be SKIPPED (cascade)
         await complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(err=TaskError(error_code='FAIL', message='A failed')),
@@ -350,12 +355,12 @@ class TestOrJoin:
         handle = await start_ok(spec, broker)
 
         # A succeeds → aggregator ENQUEUED
-        await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
+        await complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
         status_agg = await get_task_status(session, handle.workflow_id, 2)
         assert status_agg == 'ENQUEUED'
 
         # B succeeds → aggregator should still be ENQUEUED (guard at line 1457)
-        await complete_task(session, handle.workflow_id, 1, TaskResult(ok=4))
+        await complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=4))
         status_agg = await get_task_status(session, handle.workflow_id, 2)
         assert status_agg == 'ENQUEUED'
 
@@ -387,7 +392,7 @@ class TestOrJoin:
         handle = await start_ok(spec, broker)
 
         # Complete last dep (index 2) first
-        await complete_task(session, handle.workflow_id, 2, TaskResult(ok=6))
+        await complete_task(session, broker, handle.workflow_id, 2, TaskResult(ok=6))
 
         status_agg = await get_task_status(session, handle.workflow_id, 3)
         assert status_agg == 'ENQUEUED'
@@ -422,9 +427,10 @@ class TestOrJoin:
         handle = await start_ok(spec, broker)
 
         # A succeeds (join met) and B fails (ctx dep terminal)
-        await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
+        await complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
         await complete_task(
             session,
+            broker,
             handle.workflow_id,
             1,
             TaskResult(err=TaskError(error_code='FAIL', message='B failed')),
@@ -473,6 +479,7 @@ class TestOrJoin:
         # A fails → B gets SKIPPED (cascade), then C succeeds
         await complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(err=TaskError(error_code='FAIL', message='A failed')),
@@ -482,7 +489,7 @@ class TestOrJoin:
         assert status_b == 'SKIPPED'
 
         # C succeeds → join='any' met + ctx dep B is terminal (SKIPPED)
-        await complete_task(session, handle.workflow_id, 2, TaskResult(ok=4))
+        await complete_task(session, broker, handle.workflow_id, 2, TaskResult(ok=4))
 
         status_agg = await get_task_status(session, handle.workflow_id, 3)
         assert status_agg == 'ENQUEUED'
@@ -535,8 +542,8 @@ class TestQuorumJoin:
         handle = await start_ok(spec, broker)
 
         # Complete A and B
-        await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
-        await complete_task(session, handle.workflow_id, 1, TaskResult(ok=4))
+        await complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
+        await complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=4))
 
         # Aggregator should be ENQUEUED (2 >= min_success)
         status_agg = await get_task_status(session, handle.workflow_id, 3)
@@ -575,12 +582,14 @@ class TestQuorumJoin:
         # Complete A and B with failures
         await complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(err=TaskError(error_code='FAIL', message='A failed')),
         )
         await complete_task(
             session,
+            broker,
             handle.workflow_id,
             1,
             TaskResult(err=TaskError(error_code='FAIL', message='B failed')),
@@ -623,6 +632,7 @@ class TestQuorumJoin:
         # Complete A with failure
         await complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(err=TaskError(error_code='FAIL', message='A failed')),
@@ -633,14 +643,14 @@ class TestQuorumJoin:
         assert status_agg == 'PENDING'
 
         # Complete B with success
-        await complete_task(session, handle.workflow_id, 1, TaskResult(ok=4))
+        await complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=4))
 
         # Still PENDING (need one more)
         status_agg = await get_task_status(session, handle.workflow_id, 3)
         assert status_agg == 'PENDING'
 
         # Complete C with success
-        await complete_task(session, handle.workflow_id, 2, TaskResult(ok=6))
+        await complete_task(session, broker, handle.workflow_id, 2, TaskResult(ok=6))
 
         # Now ENQUEUED (2 >= min_success)
         status_agg = await get_task_status(session, handle.workflow_id, 3)
@@ -678,14 +688,14 @@ class TestQuorumJoin:
         handle = await start_ok(spec, broker)
 
         # Complete A only (quorum satisfied)
-        await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
+        await complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
 
         # Aggregator should remain PENDING until ctx deps are terminal
         status_agg = await get_task_status(session, handle.workflow_id, 2)
         assert status_agg == 'PENDING'
 
         # Complete B (ctx dep)
-        await complete_task(session, handle.workflow_id, 1, TaskResult(ok=4))
+        await complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=4))
 
         # Now aggregator can be ENQUEUED
         status_agg = await get_task_status(session, handle.workflow_id, 2)
@@ -722,14 +732,14 @@ class TestQuorumJoin:
         handle = await start_ok(spec, broker)
 
         # Complete A and B → still PENDING (need 3)
-        await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
-        await complete_task(session, handle.workflow_id, 1, TaskResult(ok=4))
+        await complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
+        await complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=4))
 
         status_agg = await get_task_status(session, handle.workflow_id, 3)
         assert status_agg == 'PENDING'
 
         # Complete C → now ENQUEUED (3 >= 3)
-        await complete_task(session, handle.workflow_id, 2, TaskResult(ok=6))
+        await complete_task(session, broker, handle.workflow_id, 2, TaskResult(ok=6))
 
         status_agg = await get_task_status(session, handle.workflow_id, 3)
         assert status_agg == 'ENQUEUED'
@@ -763,7 +773,7 @@ class TestQuorumJoin:
         handle = await start_ok(spec, broker)
 
         # First success → ENQUEUED immediately
-        await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
+        await complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
 
         status_agg = await get_task_status(session, handle.workflow_id, 3)
         assert status_agg == 'ENQUEUED'
@@ -808,12 +818,14 @@ class TestQuorumJoin:
         # A and B fail → D SKIPPED (max_possible=1 < min_success=2) → E SKIPPED
         await complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(err=TaskError(error_code='FAIL', message='A failed')),
         )
         await complete_task(
             session,
+            broker,
             handle.workflow_id,
             1,
             TaskResult(err=TaskError(error_code='FAIL', message='B failed')),
@@ -856,9 +868,10 @@ class TestQuorumJoin:
         handle = await start_ok(spec, broker)
 
         # A succeeds (quorum met) and B fails (ctx dep terminal)
-        await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
+        await complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
         await complete_task(
             session,
+            broker,
             handle.workflow_id,
             1,
             TaskResult(err=TaskError(error_code='FAIL', message='B failed')),
@@ -899,13 +912,14 @@ class TestQuorumJoin:
         handle = await start_ok(spec, broker)
 
         # A succeeds → completed=1, still PENDING (need 2)
-        await complete_task(session, handle.workflow_id, 0, TaskResult(ok=2))
+        await complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
         status_agg = await get_task_status(session, handle.workflow_id, 3)
         assert status_agg == 'PENDING'
 
         # B fails → completed=1, failed=1, remaining=1, max_possible=2 → still PENDING
         await complete_task(
             session,
+            broker,
             handle.workflow_id,
             1,
             TaskResult(err=TaskError(error_code='FAIL', message='B failed')),
@@ -914,6 +928,6 @@ class TestQuorumJoin:
         assert status_agg == 'PENDING'
 
         # C succeeds → completed=2 >= min_success=2 → ENQUEUED
-        await complete_task(session, handle.workflow_id, 2, TaskResult(ok=6))
+        await complete_task(session, broker, handle.workflow_id, 2, TaskResult(ok=6))
         status_agg = await get_task_status(session, handle.workflow_id, 3)
         assert status_agg == 'ENQUEUED'

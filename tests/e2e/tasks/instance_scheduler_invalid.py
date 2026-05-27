@@ -51,6 +51,7 @@ config = AppConfig(
 app = Horsies(config)
 broker = PostgresBroker(config.broker)
 app._broker = broker
+broker.app = app
 
 # NOTE: We intentionally do NOT register any tasks here.
 # The scheduler should fail at startup because 'this_task_does_not_exist_anywhere'

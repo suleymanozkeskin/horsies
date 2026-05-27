@@ -1,44 +1,120 @@
 ---
 title: Serialization
-summary: JSON serialization and rehydration for task arguments and results.
+summary: Wire envelope and type-driven decoding for task arguments and results.
 related: [../../tasks/defining-tasks, ../../concepts/result-handling]
-tags: [internals, serialization, JSON, Pydantic, dataclass, datetime]
+tags: [internals, serialization, codec, JsonValue, envelope]
 ---
 
-## Codec Module
+## Model
 
-Located at `horsies/core/codec/serde.py`. Handles serialization (`to_jsonable`) and rehydration (`rehydrate_value`) of task arguments, keyword arguments, and results.
+Strict-serde. The wire carries values plus one envelope marker. It does **not** carry class identity. The receiver's declared type drives every decode through `pydantic.TypeAdapter`.
 
-## Serialization Functions
+Two consequences:
 
-All serialization and deserialization functions return `SerdeResult[T]` (an alias for `Result[T, SerializationError]`) instead of raising exceptions. Callers check the result with `is_err()` and handle failures explicitly.
+- Tasks must declare every parameter and return type. Banned types (`Any`, `object`, bare `dict`/`list`/`tuple`, `TypeVar`, bare `BaseModel`, `TypedDict`, `bytes`, `set`/`frozenset`, `Callable`, and `pathlib.PurePath` subclasses) are rejected at `@app.task` registration.
+- `JsonValue` is the only untyped fence. Use it at task boundary positions or inside `BaseModel`/`@dataclass` fields when the payload is genuinely raw JSON.
 
-| Function | Returns | Purpose |
-| -------- | ------- | ------- |
-| `to_jsonable(value)` | `SerdeResult[Json]` | Convert a value to a JSON-serializable structure |
-| `rehydrate_value(value)` | `SerdeResult[Any]` | Restore typed objects from JSON structures |
-| `args_to_json(args)` | `SerdeResult[str]` | Serialize positional arguments |
-| `kwargs_to_json(kwargs)` | `SerdeResult[str]` | Serialize keyword arguments |
-| `dumps_json(value)` | `SerdeResult[str]` | Serialize a value to a JSON string |
-| `loads_json(json_str)` | `SerdeResult[Json]` | Deserialize a JSON string |
-| `task_result_from_json(j)` | `SerdeResult[TaskResult[Any, TaskError]]` | Deserialize a `TaskResult` |
-| `serialize_error_payload(tr)` | `str` | Serialize a `TaskResult` error with hardcoded fallback (never fails) |
+## Codec Layout
 
-## Supported Types
+| Module | Purpose |
+|--------|---------|
+| `horsies.core.codec.json_value` | `JsonValue` PEP 695 alias; `StrictJsonError`; strict JSON-native validators |
+| `horsies.core.codec.serde` | `dumps_json` / `loads_json` stringification helpers and library error-payload serialization |
+| `horsies.core.codec.signature_check` | `validate_task_signature` — rejects banned types at decorator time |
+| `horsies.core.codec.kwargs` | `encode_kwargs(task_fn, kwargs)` / `decode_kwargs(...)` for producer/consumer kwarg binding |
+| `horsies.core.codec.typed` | `encode_value` / `decode_value` / `encode_task_result` / `decode_task_result` / `decode_task_error` / `validate_task_result_envelope` |
 
-### Native JSON Types
+Re-exports: `from horsies import JsonValue, StrictJsonError`.
 
-- `str`, `int`, `float`, `bool`, `None`
-- `list`, `dict`
-- Nested combinations of the above
+## Wire Envelope
 
-### Pydantic BaseModel
+Every stored task result is one shape:
 
-Pydantic models serialize with type metadata for automatic rehydration. The codec stores the module path and class name so workers can reconstruct the exact type.
+```json
+{
+  "__h_task_result__": true,
+  "ok":  ...payload...,
+  "err": null
+}
+```
+
+- Marker `__h_task_result__: true` distinguishes a Horsies envelope from any other JSON in the row.
+- Exactly one of `ok` / `err` is non-null.
+- The `ok` slot carries a JSON value matching the task's declared `ok_type`. `BaseModel`/`@dataclass` instances are stored as their plain Pydantic JSON form (no per-value type tag) — the receiver reconstructs them by calling `decode_task_result(envelope, ok_type)`.
+- The `err` slot, when populated, carries the JSON form of `TaskError`, including `error_code`, `message`, `data`, and a flattened `exception` (a `FlattenedException` TypedDict, never a live `BaseException` on the wire).
+
+Outputless-workflow envelopes wrap an additional marker:
+
+```json
+{
+  "__h_task_result__": true,
+  "__h_outputless_terminals__": true,
+  "ok": {
+    "results_by_id":   {"<node_id>": <per-node envelope>, ...},
+    "task_name_by_id": {"<node_id>": "<task_name>", ...}
+  },
+  "err": null
+}
+```
+
+Each `results_by_id` entry is itself a `__h_task_result__` envelope; the consumer dispatches per-node decode using the task name to look up `task_ok_type` in the local registry.
+
+## Encoding (worker side)
+
+The worker calls `encode_task_result(result, ok_type)` after the user function returns. The codec:
+
+1. Validates `result.ok` against `ok_type` via `TypeAdapter` (raises `ValidationError` / `PydanticSerializationError` on shape mismatch).
+2. Emits the envelope.
+3. Flattens any live `BaseException` carried on `TaskError.exception` into a `FlattenedException` (`type`, `module`, `message`, `repr`, `traceback`).
+
+Encode failures surface as `WORKER_SERIALIZATION_ERROR`.
 
 ```python
+from horsies.core.codec.typed import encode_task_result
+from horsies import TaskResult, TaskError
+
+envelope = encode_task_result(
+    TaskResult[int, TaskError](ok=42),
+    ok_type=int,
+)
+# {"__h_task_result__": True, "ok": 42, "err": None}
+```
+
+## Decoding (consumer side)
+
+The consumer holds the declared `ok_type` (from the task registry) and calls `decode_task_result(envelope, ok_type)`:
+
+1. `validate_task_result_envelope` checks the marker and structural shape.
+2. If `err` is populated, `decode_task_error` runs first — no `ok_type` is required to surface failed tasks, including those whose task name is unknown locally.
+3. Otherwise `TypeAdapter[ok_type].validate_python(envelope["ok"])` materializes the typed value.
+
+Distinct decode-error surfaces:
+
+| Code | Source | When |
+|------|--------|------|
+| `BrokerErrorCode.INVALID_JSON_PAYLOAD` | broker/app result read | the stored result does not parse as JSON, is not a JSON object, has a malformed envelope, or fails typed slot decode through an app-level API |
+| `BrokerErrorCode.NO_TYPE_AVAILABLE` | `app.get_result_async` | `task_name` is not in the local task registry, so no `ok_type` available to decode the ok slot |
+| `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | handle / workflow / engine wrappers around typed decode | a wrapper catches a strict decode failure and folds it into a `TaskResult(err=...)` |
+| `ContractCode.NO_TYPE_AVAILABLE` | outputless workflow handle decode | per-node lookup failed inside `WorkflowHandle.get()` for a terminal task name not in the local registry |
+
+## Type Surface at the Boundary
+
+Values flowing through a task signature must classify as **one** of:
+
+- A JSON primitive (`None`, `bool`, `int`, `float`, `str`).
+- `datetime.datetime` / `date` / `time`, `uuid.UUID`, `decimal.Decimal` (Pydantic coerces these to/from JSON strings via the declared type).
+- `JsonValue` (at boundary positions only).
+- An `Enum` subclass.
+- A concrete `BaseModel` subclass (not bare `BaseModel`).
+- A `@dataclass`.
+- `list[T]`, `tuple[T, ...]`, `dict[str, T]`, `Literal[...]`, `Annotated[T, ...]`, `T | None`, or a discriminated union — recursively classified.
+- `TaskResult[T, TaskError]` (anywhere `T` is one of the above; `err_t` must be `TaskError`).
+
+Anything outside this surface raises `SignatureValidationError` at `@app.task` time. The error names the banned type and prints the documented fix.
+
+```python
+from horsies import Horsies, TaskResult, TaskError, JsonValue
 from pydantic import BaseModel
-from horsies import Horsies, TaskResult, TaskError
 
 app = Horsies(config)
 
@@ -46,27 +122,26 @@ class Order(BaseModel):
     id: int
     items: list[str]
 
-@app.task('process_order')
+@app.task("process_order")
 def process_order(order: Order) -> TaskResult[Order, TaskError]:
     return TaskResult(ok=order)
 ```
 
-Serialized form:
+The wire stores the Pydantic JSON form (`{"id": 1, "items": ["widget"]}`), with no per-value class tag. The worker decodes it back to `Order` because the registered task declared `Order` as the parameter type.
 
-```json
-{
-  "__pydantic_model__": true,
-  "module": "myapp.models",
-  "qualname": "Order",
-  "data": {"id": 1, "items": ["widget"]}
-}
+For raw JSON payloads where the inner shape is genuinely dynamic:
+
+```python
+@app.task("validate_input")
+def validate_input(
+    data: dict[str, JsonValue],
+) -> TaskResult[dict[str, JsonValue], TaskError]:
+    return TaskResult(ok=data)
 ```
 
-Rehydration uses `model_validate()` on the resolved class — Pydantic handles type coercion (including ISO strings back to `datetime` for model fields).
+## Pydantic Models in Workflows
 
-### Pydantic Models in Workflows
-
-Pydantic models flowing through `args_from` are serialized with `model_dump(mode="json")` and rehydrated with `model_validate()`. The downstream task receives the reconstructed model instance, not a dict.
+Models flowing through `args_from` ride through the same envelope. The downstream task declares `TaskResult[Model, TaskError]` (or an `Optional` / `Union` containing it) as the parameter type; the engine decodes the upstream envelope and binds a typed `TaskResult` into the consumer's kwargs.
 
 ```python
 from datetime import datetime, timezone
@@ -101,14 +176,14 @@ def create_order() -> TaskResult[Order, TaskError]:
     ))
 
 @app.task("process_order")
-def process_order(order_result: TaskResult[Order, TaskError]) -> TaskResult[str, TaskError]:
+def process_order(
+    order_result: TaskResult[Order, TaskError],
+) -> TaskResult[str, TaskError]:
     if order_result.is_err():
         return TaskResult(err=order_result.err_value)
-    order: Order = order_result.ok_value  # Rehydrated Order instance, not a dict
-    print(order.created_at)               # datetime object, not a string
+    order: Order = order_result.ok_value  # typed Order, not a dict
     return TaskResult(ok=f"Processed {order.item}")
 
-# Wiring
 node_create: TaskNode[Order] = TaskNode(fn=create_order)
 node_process: TaskNode[str] = TaskNode(
     fn=process_order,
@@ -117,107 +192,74 @@ node_process: TaskNode[str] = TaskNode(
 )
 ```
 
-### Dataclasses
+## API Reference
 
-Dataclasses serialize with the same metadata approach. Each field is recursively converted via `to_jsonable`, preserving nested Pydantic and dataclass types.
+### `encode_task_result(result, ok_type) -> dict[str, Json]`
 
-```python
-from dataclasses import dataclass
+Encode a `TaskResult[T, TaskError]` to the wire envelope.
 
-@dataclass
-class Metrics:
-    page_count: int
-    total_words: int
-```
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `result` | `TaskResult[T, TaskError]` | Domain result returned by the task |
+| `ok_type` | `TypeAnnotation` | Declared `T` from the task signature |
 
-Serialized form:
+**Raises:** `pydantic.ValidationError` or `PydanticSerializationError` if `result.ok` does not match `ok_type`; `StrictJsonError` for non-JSON-serializable structures.
 
-```json
-{
-  "__dataclass__": true,
-  "module": "myapp.models",
-  "qualname": "Metrics",
-  "data": {"page_count": 5, "total_words": 1200}
-}
-```
+### `decode_task_result(envelope, ok_type) -> TaskResult[T, TaskError]`
 
-Rehydration reconstructs the dataclass via its constructor. Fields with `init=False` are set directly on the instance after construction.
+Decode a wire envelope into a typed `TaskResult`.
 
-### Datetime Types
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `envelope` | `dict[str, Json]` | The `__h_task_result__` envelope |
+| `ok_type` | `TypeAnnotation` | Declared `T` from the task signature (only used when the `ok` slot is populated) |
 
-`datetime.datetime`, `datetime.date`, and `datetime.time` serialize as tagged dicts with ISO 8601 strings. This enables lossless round-trip rehydration — values come back as the correct Python type, not as plain strings.
+### `decode_task_error(err_slot) -> TaskError`
 
-```python
-import datetime as dt
+Decode the `err` slot independently of `ok_type`. Used by consumers reading failed tasks whose task name is unknown locally.
 
-@app.task('record_event')
-def record_event() -> TaskResult[dict, TaskError]:
-    return TaskResult(ok={
-        'occurred_at': dt.datetime(2025, 6, 15, 10, 30, 0, tzinfo=dt.timezone.utc),
-        'event_date': dt.date(2025, 6, 15),
-    })
-```
+### `validate_task_result_envelope(envelope) -> dict[str, Json]`
 
-Serialized forms:
+Cheap shape check before per-slot decode. Returns the envelope as `dict[str, Json]` on success; raises `StrictJsonError` if the marker is missing, the key set is wrong, or both slots are populated.
 
-```json
-{"__datetime__": true, "value": "2025-06-15T10:30:00+00:00"}
-{"__date__": true, "value": "2025-06-15"}
-{"__time__": true, "value": "14:30:00"}
-```
+### `encode_value(value, type) / decode_value(payload, type)`
 
-Timezone offsets are preserved. `isoformat()` produces the offset (e.g. `+00:00`, `+05:30`), and `fromisoformat()` restores it. Naive datetimes (no timezone) round-trip as naive.
+Primitive entry points for non-`TaskResult` values (workflow kwargs, success policies, args_from blocks). Same `TypeAdapter`-driven semantics.
 
-Datetime types also work as fields inside dataclasses and dicts — the recursive serialization handles them automatically.
-
-### Sequences and Mappings
-
-`Sequence` types (e.g. `tuple`, `list`) and `Mapping` types (e.g. `dict`, `OrderedDict`) are recursively serialized. `str`, `bytes`, and `bytearray` are excluded from sequence handling.
-
-### Unsupported
-
-- Custom classes without Pydantic or dataclass decoration
-- Classes defined in `__main__` (not importable by workers)
-- Local classes defined inside functions
-- File handles, connections
-- Functions, lambdas
-
-Attempting to serialize an unsupported type returns `Err(SerializationError)`.
-
-## TaskResult Serialization
+### `JsonValue`
 
 ```python
-# Success
-TaskResult(ok=value)
-# → {"__task_result__": true, "ok": <serialized_value>, "err": null}
-
-# Error
-TaskResult(err=TaskError(...))
-# → {"__task_result__": true, "ok": null, "err": {"__task_error__": true, ...}}
+type JsonValue = (
+    None | bool | int | float | str
+    | list[JsonValue]
+    | dict[str, JsonValue]
+)
 ```
 
-## Error Codes
+PEP 695 type alias. Re-exported as `horsies.JsonValue`.
 
-| Code | Cause |
-| ---- | ----- |
-| `WORKER_SERIALIZATION_ERROR` | Task result could not be serialized to JSON |
-| `PYDANTIC_HYDRATION_ERROR` | Task succeeded but return value could not be rehydrated to declared type |
-| `RESULT_DESERIALIZATION_ERROR` | Stored result JSON is corrupt or could not be deserialized |
+### `StrictJsonError`
 
-## Return Type Validation
-
-Return values are validated against declared types using Pydantic's `TypeAdapter` (in `horsies/core/task_decorator.py`):
-
-```python
-@app.task('typed')
-def typed() -> TaskResult[int, TaskError]:
-    return TaskResult(ok='not an int')  # RETURN_TYPE_MISMATCH
-```
+Raised by strict codec primitives and the JSON parse-constant guard for strict JSON violations. `dumps_json` / `loads_json` return `SerdeResult` and wrap stringification or parse failures as `SerializationError`. Re-exported as `horsies.StrictJsonError`.
 
 ## Things to Avoid
 
-**Don't return bare custom classes.** Use Pydantic `BaseModel` or `@dataclass` for task arguments and results. The codec needs type metadata for rehydration.
+**Don't use `Any`, `object`, or bare containers in task signatures.** They are rejected at registration time.
 
-**Don't define result types in `__main__`.** Workers import types by module path. Classes defined in the entrypoint script cannot be resolved. Move them to a separate module.
+```python
+# Wrong — raises SignatureValidationError
+@app.task("bad")
+def bad(data: dict) -> TaskResult[dict, TaskError]:
+    return TaskResult(ok=data)
 
-**Don't define result types inside functions.** Local classes have `<locals>` in their qualname and cannot be imported by workers.
+# Correct — declare the contents
+@app.task("good")
+def good(data: dict[str, JsonValue]) -> TaskResult[dict[str, JsonValue], TaskError]:
+    return TaskResult(ok=data)
+```
+
+**Don't define result types in `__main__` or inside functions.** Workers import types by module path; classes without an importable qualname cannot participate in typed decode.
+
+**Don't smuggle reserved keys into `TaskError.error_code` or `TaskError.data`.** `TaskError.error_code` accepts the built-in `OperationalErrorCode` / `RetrievalCode` / `ContractCode` enums or any non-reserved string. Reserved built-in codes passed as strings (e.g. `"WORKER_RESOLUTION_ERROR"`) are rejected — pass the enum member directly.
+
+**Don't expect class identity to survive the wire.** Two `BaseModel` subclasses with structurally identical fields decode interchangeably when the consumer's declared type matches either. The wire stores values, not classes.

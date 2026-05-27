@@ -45,8 +45,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from horsies.core.types.result import Result
+
+
+if TYPE_CHECKING:
+    from horsies.core.codec.typed import Json
+    from horsies.core.types.status import TaskStatus
 
 
 class BrokerErrorCode(str, Enum):
@@ -62,6 +68,15 @@ class BrokerErrorCode(str, Enum):
     LISTENER_START_FAILED = 'LISTENER_START_FAILED'
     LISTENER_SUBSCRIBE_FAILED = 'LISTENER_SUBSCRIBE_FAILED'
     NO_BROKER = 'NO_BROKER'
+    # Strict-serde additions (design §8). NO_TYPE_AVAILABLE fires when a
+    # typed-result decode is requested but the local task catalog can't
+    # supply the OkT (task not registered in the calling process).
+    # INVALID_JSON_PAYLOAD fires when raw wire JSON fails strict
+    # validation (malformed syntax, NaN / Infinity, envelope shape
+    # violations); distinct from existing TaskError-domain codes because
+    # this surfaces at the Result-returning app/broker layer.
+    NO_TYPE_AVAILABLE = 'NO_TYPE_AVAILABLE'
+    INVALID_JSON_PAYLOAD = 'INVALID_JSON_PAYLOAD'
 
 
 @dataclass(slots=True, frozen=True)
@@ -82,3 +97,33 @@ class BrokerOperationError:
 
 
 type BrokerResult[T] = Result[T, BrokerOperationError]
+
+
+@dataclass(slots=True, frozen=True)
+class RawResultRecord:
+    """Raw broker-level fetch of a task's stored result.
+
+    Returned by ``PostgresBroker.get_raw_result_record_async`` and its
+    sync wrapper. The broker stays infrastructure: no typed decoding, no
+    user-task imports. Callers (typed user APIs at the handle/app layer)
+    compose typed decode on top by deriving ``ok_type`` from
+    ``record.task_name`` and calling
+    ``decode_task_result(record.raw_result, ok_type)``.
+
+    Fields:
+        task_id: Task identifier.
+        task_name: Registered task name; used by app/handle to look up
+            ``ok_type`` from the local task catalog.
+        status: Current row status. Lets callers map non-terminal
+            outcomes (``CANCELLED``, ``WAIT_TIMEOUT``) into the
+            ``TaskResult`` / ``Result`` shape they expose.
+        raw_result: The decoded JSON envelope from the result column,
+            or ``None`` for rows that haven't reached a terminal state
+            yet, were cancelled before completion, or were terminal but
+            stored no payload.
+    """
+
+    task_id: str
+    task_name: str
+    status: 'TaskStatus'
+    raw_result: 'dict[str, Json] | None'

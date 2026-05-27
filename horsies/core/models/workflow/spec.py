@@ -13,11 +13,20 @@ from types import MappingProxyType
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     Generic,
     cast,
 )
 
-from horsies.core.codec.serde import dumps_json, loads_json, rehydrate_value
+from pydantic import ValidationError
+
+from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.kwargs import (
+    resolve_hints_and_sig,
+    resolve_producer_kwarg_binding,
+    underlying_task_fn,
+)
+from horsies.core.codec.typed import decode_value, encode_value
 from horsies.core.errors import (
     ErrorCode,
     SourceLocation,
@@ -67,6 +76,30 @@ if TYPE_CHECKING:
     from horsies.core.brokers.postgres import PostgresBroker
     from horsies.core.models.workflow.handle import WorkflowHandle
     from horsies.core.workflows.start_types import WorkflowStartError, WorkflowStartResult
+
+
+def _kwargs_target_callable(
+    node: TaskNode[Any] | SubWorkflowNode[Any],
+) -> Callable[..., Any]:
+    """Return the callable whose signature ``node.kwargs`` bind against.
+
+    ``TaskNode``: resolves through ``underlying_task_fn(node.fn)`` so the
+    bound callable matches the one ``@app.task`` strict-serde validation
+    ran against at registration.
+
+    ``SubWorkflowNode``: prefers ``workflow_def._original_build_with``
+    (the unwrapped user method captured at WorkflowDefinition class
+    construction) and falls back to ``build_with`` if the unwrapped
+    form is missing. ``cls`` / ``app`` are engine-supplied and don't
+    appear in user-supplied kwargs.
+    """
+    if isinstance(node, SubWorkflowNode):
+        wf_def = node.workflow_def
+        original = getattr(wf_def, '_original_build_with', None)
+        if original is not None:
+            return cast('Callable[..., Any]', original)
+        return cast('Callable[..., Any]', wf_def.build_with)
+    return underlying_task_fn(node.fn)
 
 
 # =============================================================================
@@ -351,58 +384,113 @@ class WorkflowSpec(Generic[OutT]):
         return originals
 
     def _snapshot_kwargs_values(self) -> None:
-        """Snapshot kwargs values via serde round-trip for deep by-value isolation.
+        """Snapshot kwargs values via strict-serde round-trip.
 
-        Runs after structural validators so validation-specific errors (for
-        example raw from_node markers) preserve their current semantics/codes.
-        Any serde failures are surfaced as workflow validation errors here,
-        before start/dispatch.
+        Strict-serde (phase 7) replaces the legacy
+        ``dumps_json -> loads_json -> rehydrate_value`` pipeline with
+        ``encode_value`` / ``decode_value`` bound against the node's
+        kwarg-target signature:
+
+        - ``TaskNode``: binds against ``node.fn`` (the user task).
+        - ``SubWorkflowNode``: binds against
+          ``workflow_def._original_build_with`` (or ``build_with``) —
+          the user's typed subworkflow entry. ``cls`` and ``app`` are
+          engine-supplied; user kwargs bind only against the remaining
+          declared parameters.
+
+        Producer-side rules apply (see
+        ``codec.kwargs.resolve_producer_kwarg_binding``): engine-injected
+        names (``workflow_ctx`` / ``workflow_meta``) and TaskResult-typed
+        kwargs (engine-populated via ``args_from``) fail closed here as
+        workflow validation errors, with per-key context preserved.
+
+        Runs after structural validators so validation-specific errors
+        (for example raw from_node markers) preserve their current
+        semantics/codes.
         """
         report = ValidationReport('workflow')
         snapshotted_by_index: list[tuple[int, dict[str, Any]]] = []
 
         for i, node in enumerate(self.tasks):
+            task_fn = _kwargs_target_callable(node)
+            resolved = resolve_hints_and_sig(task_fn)
+            if resolved is None or not resolved[0]:
+                # Test scaffolding (Mocks, lambdas, unresolvable forward
+                # refs). Production callables pass strict-serde
+                # validation at @app.task registration / WorkflowDefinition
+                # construction, so unresolved hints here are a known
+                # test-only case. Deep-copy values for by-value isolation
+                # since there's no type info to bind a strict round-trip
+                # against — preserves the legacy snapshot's caller/spec
+                # detachment guarantee.
+                snapshotted_by_index.append((
+                    i,
+                    {
+                        key: copy_module.deepcopy(value)
+                        for key, value in node.kwargs.items()
+                    },
+                ))
+                continue
+            hints, sig = resolved
             snapshotted: dict[str, Any] = {}
             for key, value in node.kwargs.items():
-                dumped = dumps_json(value)
-                if is_err(dumped):
+                binding = resolve_producer_kwarg_binding(
+                    task_fn, key, hints, sig,
+                )
+                if binding.kind == 'error':
                     report.add(WorkflowValidationError(
-                        message='TaskNode/SubWorkflowNode kwargs value is not serializable',
+                        message=(
+                            'TaskNode/SubWorkflowNode kwarg failed strict '
+                            'binding'
+                        ),
                         code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
                         notes=[
-                            f"node '{node.name}' kwargs['{key}'] failed serialization",
-                            f'serde error: {dumped.err_value}',
+                            f"node '{node.name}' kwargs[{key!r}]",
+                            binding.error_message or '',
                         ],
-                        help_text='use JSON-serializable kwargs values (or importable dataclass/BaseModel types)',
+                        help_text=(
+                            'every kwarg must bind to a declared, typed '
+                            'parameter on the node\'s callable; '
+                            'workflow_ctx / workflow_meta / TaskResult-'
+                            'typed kwargs are engine-populated'
+                        ),
                     ))
                     continue
-
-                loaded = loads_json(dumped.ok_value)
-                if is_err(loaded):
+                try:
+                    encoded = encode_value(value, binding.annotation)
+                except (StrictJsonError, ValidationError) as exc:
                     report.add(WorkflowValidationError(
-                        message='TaskNode/SubWorkflowNode kwargs value failed JSON parse after serialization',
+                        message=(
+                            'TaskNode/SubWorkflowNode kwarg value failed '
+                            'strict encode'
+                        ),
                         code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
                         notes=[
-                            f"node '{node.name}' kwargs['{key}'] serialized but failed parse",
-                            f'serde error: {loaded.err_value}',
+                            f"node '{node.name}' kwargs[{key!r}]",
+                            f'codec error: {exc}',
                         ],
+                        help_text=(
+                            'ensure the value matches its declared '
+                            'parameter type'
+                        ),
                     ))
                     continue
-
-                rehydrated = rehydrate_value(loaded.ok_value)
-                if is_err(rehydrated):
+                try:
+                    decoded = decode_value(encoded, binding.annotation)
+                except (StrictJsonError, ValidationError) as exc:
                     report.add(WorkflowValidationError(
-                        message='TaskNode/SubWorkflowNode kwargs value failed rehydration after serialization',
+                        message=(
+                            'TaskNode/SubWorkflowNode kwarg value failed '
+                            'strict decode after encode'
+                        ),
                         code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
                         notes=[
-                            f"node '{node.name}' kwargs['{key}'] failed rehydration",
-                            f'serde error: {rehydrated.err_value}',
+                            f"node '{node.name}' kwargs[{key!r}]",
+                            f'codec error: {exc}',
                         ],
                     ))
                     continue
-
-                snapshotted[key] = rehydrated.ok_value
-
+                snapshotted[key] = decoded
             snapshotted_by_index.append((i, snapshotted))
 
         raise_collected(report)

@@ -497,7 +497,7 @@ class TestWorkflowStart:
         )
         row = res.fetchone()
         assert row is not None
-        await on_workflow_task_complete(session, row[0], TaskResult(ok=10))
+        await on_workflow_task_complete(session, row[0], TaskResult(ok=10), broker)
         await session.commit()
 
         # Verify B task row has retry settings

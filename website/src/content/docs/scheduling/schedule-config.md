@@ -42,7 +42,6 @@ TaskSchedule(
     name="daily-report",
     task_name="generate_report",
     pattern=DailySchedule(time=time(9, 0, 0)),
-    args=(),
     kwargs={"format": "pdf"},
     queue_name=None,  # Use task's default queue
     enabled=True,
@@ -58,8 +57,7 @@ TaskSchedule(
 | `name` | `str` | required | Unique schedule identifier |
 | `task_name` | `str` | required | Registered task name |
 | `pattern` | `SchedulePattern` | required | When to run |
-| `args` | `tuple` | `()` | Positional arguments |
-| `kwargs` | `dict` | `{}` | Keyword arguments |
+| `kwargs` | `dict` | `{}` | Keyword arguments passed to the task. Schedules carrying any positional `args` are rejected at enqueue time with `ENQUEUE_FAILED` — use `kwargs` only. |
 | `queue_name` | `str` | `None` | Queue override (CUSTOM mode) |
 | `enabled` | `bool` | `True` | Enable/disable this schedule |
 | `timezone` | `str` | `"UTC"` | Timezone for schedule evaluation |
@@ -93,7 +91,7 @@ TaskSchedule(
 
 ### Arguments
 
-Pass arguments to the scheduled task:
+Pass arguments to the scheduled task via `kwargs`. Positional `args` are rejected at enqueue time with `ENQUEUE_FAILED` — the wire is keyword-only.
 
 ```python
 @app.task("process_region")
@@ -104,8 +102,7 @@ TaskSchedule(
     name="sync-us-east",
     task_name="process_region",
     pattern=IntervalSchedule(hours=1),
-    args=("us-east",),          # Positional
-    kwargs={"full_sync": True},  # Keyword
+    kwargs={"region": "us-east", "full_sync": True},
 )
 ```
 
@@ -223,6 +220,6 @@ TaskSchedule(
     name="bad",
     task_name="task_requiring_arg",  # def task_requiring_arg(required_param: str)
     pattern=...,
-    # Missing: args=("value",) or kwargs={"required_param": "value"}
+    # Missing: kwargs={"required_param": "value"}
 )
 ```

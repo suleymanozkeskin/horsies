@@ -21,7 +21,7 @@ uv add horsies
 Create `instance.py`:
 
 ```python
-from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
+from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError, JsonValue
 
 config = AppConfig(
     broker=PostgresConfig(
@@ -42,7 +42,7 @@ def add_numbers(a: int, b: int) -> TaskResult[int, TaskError]:
     return TaskResult(ok=a + b)
 
 @app.task("process_data")
-def process_data(data: dict) -> TaskResult[str, TaskError]:
+def process_data(data: dict[str, JsonValue]) -> TaskResult[str, TaskError]:
     if not data:
         return TaskResult(err=TaskError(
             error_code="EMPTY_DATA",
@@ -70,7 +70,7 @@ from horsies import Ok, Err
 from instance import app, add_numbers, process_data
 
 # Send and wait for result
-match add_numbers.send(5, 3):
+match add_numbers.send(a=5, b=3):
     case Ok(handle):
         result = handle.get()
         if result.is_ok():
@@ -105,7 +105,7 @@ from horsies import Ok, Err
 from instance import add_numbers
 
 async def my_endpoint():
-    match await add_numbers.send_async(10, 20):
+    match await add_numbers.send_async(a=10, b=20):
         case Ok(handle):
             result = await handle.get_async(timeout_ms=10000)
             return {"result": result.ok_value if result.is_ok() else None}

@@ -49,7 +49,7 @@ Every task returns `TaskResult[T, TaskError]`. Use `TaskResult(ok=value)` for su
 ```python
 from horsies import Ok, Err
 
-match validate_order.send(order):
+match validate_order.send(order=order):
     case Ok(handle):
         result = handle.get(timeout_ms=5000)  # blocks up to 5 seconds
     case Err(send_err):
@@ -65,7 +65,7 @@ match validate_order.send(order):
 ```python
 from horsies import Ok, Err
 
-match await validate_order.send_async(order):
+match await validate_order.send_async(order=order):
     case Ok(handle):
         result = await handle.get_async(timeout_ms=5000)
     case Err(send_err):
@@ -79,7 +79,7 @@ match await validate_order.send_async(order):
 ```python
 from horsies import Ok, Err
 
-match validate_order.schedule(5, order):
+match validate_order.schedule(5, order=order):
     case Ok(handle):
         print(f"Scheduled: {handle.task_id}")
     case Err(err):

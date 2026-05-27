@@ -24,8 +24,15 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.codec.serde import (
     loads_json,
-    task_result_from_json,
+    SerializationError,
 )
+from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.typed import (
+    decode_task_error,
+    decode_task_result,
+    validate_task_result_envelope,
+)
+from pydantic import ValidationError
 from horsies.core.models.tasks import (
     TaskResult,
     TaskError,
@@ -113,7 +120,7 @@ _FINALIZE_RETRY_BASE_DELAY_S = 0.5
 _FINALIZE_RETRY_MAX_DELAY_S = 15.0
 
 GET_TASK_STATUS_RESULT_SQL = text("""
-    SELECT status, result
+    SELECT status, task_name, result
     FROM horsies_tasks
     WHERE id = :id
 """)
@@ -482,15 +489,13 @@ class Worker:
             except Exception as e:
                 logger.error(f'Error shutting down executor: {e}')
             logger.info('Worker executor shutdown')
-        # Release per-process registries/caches on shutdown.
+        # Release per-process registries on shutdown.
         try:
             from horsies.core.workflows.registry import clear_workflow_registry
-            from horsies.core.codec.serde import clear_serde_caches
 
             clear_workflow_registry()
-            clear_serde_caches()
         except Exception as e:
-            logger.error(f'Error clearing workflow/serde registries: {e}')
+            logger.error(f'Error clearing workflow registry: {e}')
         logger.info('Worker stopped')
 
     def _preload_modules_main(self) -> None:
@@ -1292,15 +1297,61 @@ class Worker:
                     await s.commit()
                     return Ok(None)
 
-                _tr_r = task_result_from_json(_loads_r.ok_value)
-                if is_err(_tr_r):
+                # Strict-serde phase 6: decode the persisted envelope.
+                # Err-fast-path mirrors ``app.get_result_async``: validate
+                # envelope shape, then read the err slot first because
+                # TaskError is fixed-schema and decodes without OkT.
+                # ``task_ok_type`` is only required when the ok slot is
+                # populated. Without this branch a row whose worker
+                # wrote ``WORKER_RESOLUTION_ERROR`` (unknown task name)
+                # gets re-wrapped here as ``WORKER_SERIALIZATION_ERROR``
+                # because the local registry has no entry for that task.
+                task_name_for_decode = ctx_row.task_name
+                _decode_err: Exception | None = None
+                tr: TaskResult[Any, TaskError] | None = None
+                try:
+                    envelope = validate_task_result_envelope(_loads_r.ok_value)
+                except StrictJsonError as exc:
+                    _decode_err = exc
+                else:
+                    err_slot = envelope.get('err')
+                    if err_slot is not None:
+                        try:
+                            err_value = decode_task_error(err_slot)
+                            tr = TaskResult(err=err_value)
+                        except (StrictJsonError, ValidationError) as exc:
+                            _decode_err = exc
+                    else:
+                        source_task = (
+                            self._app.tasks.get(task_name_for_decode)
+                            if self._app is not None
+                            else None
+                        )
+                        source_ok_type = (
+                            getattr(source_task, 'task_ok_type', None)
+                            if source_task is not None
+                            else None
+                        )
+                        if source_ok_type is None:
+                            _decode_err = SerializationError(
+                                f'Task {task_name_for_decode!r} not registered or '
+                                f'missing task_ok_type during finalize'
+                            )
+                        else:
+                            try:
+                                tr = decode_task_result(
+                                    _loads_r.ok_value, source_ok_type,
+                                )
+                            except (StrictJsonError, ValidationError) as exc:
+                                _decode_err = exc
+                if _decode_err is not None:
                     logger.error(
-                        f'Task {task_id} result deser failed: {_tr_r.err_value}'
+                        f'Task {task_id} result decode failed: {_decode_err}'
                     )
                     _err_tr = TaskResult(
                         err=TaskError(
                             error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                            message=f'Result deser failed: {_tr_r.err_value}',
+                            message=f'Result decode failed: {_decode_err}',
                             data={'task_id': task_id},
                         ),
                     )
@@ -1314,7 +1365,7 @@ class Worker:
                             'started_at': attempt_started_at,
                             'finished_at': now,
                             'error_code': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
-                            'error_message': f'Result deser failed: {_tr_r.err_value}',
+                            'error_message': f'Result decode failed: {_decode_err}',
                             'failed_reason': None,
                             **attempt_worker,
                         },
@@ -1331,7 +1382,10 @@ class Worker:
                     await s.commit()
                     return Ok(None)
 
-                tr = _tr_r.ok_value
+                # `tr` is set by either the err-fast-path or the ok-slot
+                # typed decode above; the _decode_err early-return covers
+                # all failure paths, so tr is non-None here.
+                assert tr is not None
                 if tr.is_err():
                     task_error = tr.unwrap_err()
                     _raw_code = task_error.error_code if task_error else None
@@ -1557,17 +1611,84 @@ class Worker:
                             retryable=False,
                         )
                     )
-                tr_r = task_result_from_json(loads_r.ok_value)
-                if is_err(tr_r):
+                # Strict-serde phase 6: err-fast-path then typed ok decode.
+                # TaskError has a fixed schema and decodes without OkT,
+                # so we must read the err slot before requiring a local
+                # registry entry — otherwise a persisted err result for
+                # an unknown task name would be unrecoverable during
+                # replay (mirrors ``app.get_result_async`` ordering).
+                source_task_name = row.task_name
+                try:
+                    envelope = validate_task_result_envelope(loads_r.ok_value)
+                except StrictJsonError as exc:
                     return Err(
                         self._make_finalize_error(
                             task_id=task_id,
                             stage=_FINALIZE_STAGE_PHASE2,
-                            message=f'Cannot replay finalize phase-2: stored result deserialize failed: {tr_r.err_value}',
+                            message=(
+                                f'Cannot replay finalize phase-2: stored '
+                                f'result envelope invalid: {exc}'
+                            ),
                             retryable=False,
                         )
                     )
-                return Ok(tr_r.ok_value)
+                err_slot = envelope.get('err')
+                if err_slot is not None:
+                    try:
+                        err_value = decode_task_error(err_slot)
+                    except (StrictJsonError, ValidationError) as exc:
+                        return Err(
+                            self._make_finalize_error(
+                                task_id=task_id,
+                                stage=_FINALIZE_STAGE_PHASE2,
+                                message=(
+                                    f'Cannot replay finalize phase-2: '
+                                    f'stored err decode failed: {exc}'
+                                ),
+                                retryable=False,
+                            )
+                        )
+                    return Ok(TaskResult(err=err_value))
+                source_task = (
+                    self._app.tasks.get(source_task_name)
+                    if self._app is not None and source_task_name is not None
+                    else None
+                )
+                source_ok_type = (
+                    getattr(source_task, 'task_ok_type', None)
+                    if source_task is not None
+                    else None
+                )
+                if source_ok_type is None:
+                    return Err(
+                        self._make_finalize_error(
+                            task_id=task_id,
+                            stage=_FINALIZE_STAGE_PHASE2,
+                            message=(
+                                f'Cannot replay finalize phase-2: task '
+                                f'{source_task_name!r} not registered or '
+                                f'missing task_ok_type'
+                            ),
+                            retryable=False,
+                        )
+                    )
+                try:
+                    decoded_tr = decode_task_result(
+                        loads_r.ok_value, source_ok_type,
+                    )
+                except (StrictJsonError, ValidationError) as exc:
+                    return Err(
+                        self._make_finalize_error(
+                            task_id=task_id,
+                            stage=_FINALIZE_STAGE_PHASE2,
+                            message=(
+                                f'Cannot replay finalize phase-2: '
+                                f'stored result decode failed: {exc}'
+                            ),
+                            retryable=False,
+                        )
+                    )
+                return Ok(decoded_tr)
         except Exception as exc:
             return Err(
                 self._make_finalize_error(

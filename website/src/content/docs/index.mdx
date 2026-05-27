@@ -55,7 +55,7 @@ def add_numbers(a: int, b: int) -> TaskResult[int, TaskError]:
     return TaskResult(ok=a + b)
 
 # Send and get result
-match add_numbers.send(5, 3):
+match add_numbers.send(a=5, b=3):
     case Ok(handle):
         result = handle.get()
         if result.is_ok():

@@ -11,12 +11,41 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from horsies.core.app import Horsies
+from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.serde import dumps_json
-from horsies.core.models.tasks import TaskResult
+from horsies.core.models.app import AppConfig
+from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_err
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
 from tests.integration.conftest import compute_test_enqueue_sha
+
+
+_TEST_APP: Horsies | None = None
+
+
+def _test_app() -> Horsies:
+    """Lazy-built Horsies app registering ``two_phase_finalize_test``.
+
+    Production workers wire ``_app`` via ``_locate_app(cfg.app_locator)``;
+    this test bypasses preload and builds ``Worker`` directly, so the
+    strict-serde phase-2 replay path needs the task registered to
+    resolve ``task_ok_type``.
+    """
+    global _TEST_APP
+    if _TEST_APP is None:
+        cfg = AppConfig(broker=PostgresConfig(
+            database_url='postgresql+psycopg://u:p@localhost/db',
+        ))
+        _TEST_APP = Horsies(cfg)
+
+        @_TEST_APP.task(task_name='two_phase_finalize_test')
+        def _two_phase_finalize_test() -> TaskResult[JsonValue, TaskError]:
+            return TaskResult(ok=None)
+
+    return _TEST_APP
 
 pytestmark = [pytest.mark.integration]
 
@@ -58,13 +87,17 @@ async def test_finalize_phase2_failure_keeps_terminal_task_result_durable(
     )
     sf = async_sessionmaker(engine, expire_on_commit=False)
     worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
+    worker._app = _test_app()
 
     # Simulate workflow advancement failure after phase-1 task status persistence.
     worker._handle_workflow_task_if_needed = AsyncMock(
         side_effect=RuntimeError('phase-2 boom')
     )  # type: ignore[method-assign]
 
-    serialized = dumps_json(TaskResult(ok='phase-1-result'))
+    envelope = encode_task_result(
+        TaskResult(ok='phase-1-result'), JsonValue,
+    )
+    serialized = dumps_json(envelope)
     assert not is_err(serialized)
 
     loop = asyncio.get_running_loop()

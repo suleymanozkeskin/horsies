@@ -22,7 +22,15 @@ from sqlalchemy.exc import SQLAlchemyError
 from horsies.core.logging import get_logger
 from horsies.core.utils.loop_runner import get_shared_runner, LoopRunnerError
 from horsies.core.utils.db import is_retryable_connection_error
-from horsies.core.codec.serde import loads_json, task_result_from_json
+from pydantic import ValidationError
+from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.serde import loads_json
+from horsies.core.codec.typed import (
+    Json,
+    TypeAnnotation,
+    decode_task_error,
+    decode_task_result,
+)
 from horsies.core.models.tasks import (
     TaskResult,
     TaskError,
@@ -65,14 +73,14 @@ GET_WORKFLOW_ERROR_SQL = text("""
 """)
 
 GET_WORKFLOW_TASK_RESULTS_SQL = text("""
-    SELECT node_id, result
+    SELECT node_id, task_name, result
     FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id
       AND result IS NOT NULL
 """)
 
 GET_WORKFLOW_TASK_RESULT_BY_NODE_SQL = text("""
-    SELECT result
+    SELECT task_name, result
     FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id
       AND node_id = :node_id
@@ -167,6 +175,274 @@ def _broker_task_error(message: str) -> TaskResult[Any, TaskError]:
     )
 
 
+class _OutputlessTerminals:
+    """Sentinel ``out_type`` for workflows without an explicit output node.
+
+    Started handles set ``out_type = _OUTPUTLESS_TERMINALS`` when the
+    workflow spec's ``output`` is ``None``. ``WorkflowHandle.get()``
+    dispatches to a dedicated decode path that walks the per-node
+    ``results_by_id`` map embedded in the outer envelope.
+    """
+
+    __slots__ = ()
+
+
+_OUTPUTLESS_TERMINALS: Any = _OutputlessTerminals()
+
+
+def _decode_per_task_envelope(
+    loaded: Json,
+    *,
+    app: Any | None,
+    task_name: str | None,
+    node_id: str,
+) -> TaskResult[Any, TaskError]:
+    """Decode a single workflow_task row's envelope using the source
+    task's registered ``task_ok_type``.
+
+    Used by ``result_for``, ``results``, and ``tasks`` — each returns
+    per-node ``TaskResult`` values. Failure folds into a
+    ``RESULT_DESERIALIZATION_ERROR`` sentinel so the response stays
+    typed.
+    """
+    if not isinstance(task_name, str):
+        return TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=(
+                    f'Workflow task node {node_id!r} is missing task_name'
+                ),
+                data={'node_id': node_id},
+            ),
+        )
+    source_task = (
+        app.tasks.get(task_name) if app is not None else None
+    )
+    source_ok_type = (
+        getattr(source_task, 'task_ok_type', None)
+        if source_task is not None
+        else None
+    )
+    if source_ok_type is None:
+        return TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=(
+                    f'Source task {task_name!r} not registered or '
+                    f'missing task_ok_type (node {node_id!r})'
+                ),
+                data={'node_id': node_id, 'task_name': task_name},
+            ),
+        )
+    try:
+        return decode_task_result(loaded, source_ok_type)
+    except (StrictJsonError, ValidationError) as exc:
+        return TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=(
+                    f'decode_task_result failed for node {node_id!r}: '
+                    f'{exc}'
+                ),
+                data={'node_id': node_id, 'task_name': task_name},
+            ),
+        )
+
+
+def _decode_workflow_envelope(
+    raw: Json,
+    out_type: TypeAnnotation | None,
+    *,
+    app: Any | None,
+    workflow_id: str,
+) -> TaskResult[Any, TaskError]:
+    """Decode the workflow's stored result envelope into a TaskResult.
+
+    Routes:
+    - Err slot populated → decode TaskError (no out_type needed).
+    - out_type is ``_OUTPUTLESS_TERMINALS`` → per-node decode using
+      ``task_name_by_id`` embedded in the envelope and the local task
+      registry on ``app``.
+    - out_type is set → ``decode_task_result(raw, out_type)``.
+    - out_type is None and ok slot populated → NO_TYPE_AVAILABLE.
+    """
+    from horsies.core.models.tasks import ContractCode
+
+    if not isinstance(raw, dict):
+        return TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=(
+                    f'Workflow {workflow_id} result envelope is not a '
+                    f'dict; got {type(raw).__name__}'
+                ),
+            ),
+        )
+    envelope = cast('dict[str, Any]', raw)
+    if envelope.get('__h_task_result__') is not True:
+        return TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=(
+                    f'Workflow {workflow_id} result missing '
+                    f'__h_task_result__ envelope marker'
+                ),
+            ),
+        )
+
+    # Strict-serde phase 6: outputless wire-vs-type must agree before
+    # any per-slot decoding. A mismatch (typed out_type with
+    # outputless payload, or outputless handle reading a typed
+    # payload) is a contract violation — the workflow definition
+    # changed between produce and consume, or the caller wired the
+    # wrong handle. Fail closed instead of silently coercing to the
+    # wrong shape. Checking this before the err-fast-path ensures a
+    # smuggled outputless flag on a typed envelope can't slip through
+    # via the err route either.
+    wire_outputless = envelope.get('__h_outputless_terminals__') is True
+    handle_outputless = out_type is _OUTPUTLESS_TERMINALS
+    if wire_outputless != handle_outputless:
+        return TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=(
+                    f'Workflow {workflow_id} outputless/typed envelope '
+                    f'mismatch: wire_outputless={wire_outputless}, '
+                    f'handle_outputless={handle_outputless}. Workflow '
+                    f'definition likely changed between produce and '
+                    f'consume.'
+                ),
+                data={
+                    'workflow_id': workflow_id,
+                    'wire_outputless': wire_outputless,
+                    'handle_outputless': handle_outputless,
+                },
+            ),
+        )
+
+    err_slot = envelope.get('err')
+    if err_slot is not None:
+        # Polymorphic decode preserves SubWorkflowError fields
+        # (``sub_workflow_id`` / ``sub_workflow_summary``) emitted by
+        # the engine for failed parent nodes; plain TaskError decode
+        # would drop them.
+        try:
+            err = decode_task_error(err_slot)
+        except (StrictJsonError, ValidationError) as exc:
+            return TaskResult(
+                err=TaskError(
+                    error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                    message=f'TaskError decode failed: {exc}',
+                ),
+            )
+        return TaskResult(err=err)
+
+    # Outputless workflow path.
+    if handle_outputless:
+        ok_slot = envelope.get('ok')
+        if not isinstance(ok_slot, dict):
+            return TaskResult(
+                err=TaskError(
+                    error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                    message='Outputless workflow envelope ok slot malformed',
+                ),
+            )
+        results_raw = ok_slot.get('results_by_id', {})
+        task_names = ok_slot.get('task_name_by_id', {})
+        if not isinstance(results_raw, dict) or not isinstance(task_names, dict):
+            return TaskResult(
+                err=TaskError(
+                    error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                    message=(
+                        'Outputless workflow envelope missing or malformed '
+                        'results_by_id / task_name_by_id'
+                    ),
+                ),
+            )
+        decoded_results: dict[str, TaskResult[Any, TaskError]] = {}
+        for node_id, per_node_envelope in cast(
+            'dict[str, Any]', results_raw,
+        ).items():
+            source_task_name = task_names.get(node_id)
+            if per_node_envelope is None or not isinstance(source_task_name, str):
+                decoded_results[node_id] = TaskResult(
+                    err=TaskError(
+                        error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                        message=(
+                            f'Outputless workflow {workflow_id} node '
+                            f'{node_id!r} missing payload or task name'
+                        ),
+                        data={'node_id': node_id},
+                    ),
+                )
+                continue
+            source_task = (
+                app.tasks.get(source_task_name)
+                if app is not None
+                else None
+            )
+            source_ok_type = (
+                getattr(source_task, 'task_ok_type', None)
+                if source_task is not None
+                else None
+            )
+            if source_ok_type is None:
+                decoded_results[node_id] = TaskResult(
+                    err=TaskError(
+                        error_code=ContractCode.NO_TYPE_AVAILABLE,
+                        message=(
+                            f'Outputless workflow {workflow_id} node '
+                            f'{node_id!r}: source task '
+                            f'{source_task_name!r} not registered or '
+                            f'missing task_ok_type'
+                        ),
+                        data={
+                            'node_id': node_id,
+                            'source_task_name': source_task_name,
+                        },
+                    ),
+                )
+                continue
+            try:
+                decoded_results[node_id] = decode_task_result(
+                    per_node_envelope, source_ok_type,
+                )
+            except (StrictJsonError, ValidationError) as exc:
+                decoded_results[node_id] = TaskResult(
+                    err=TaskError(
+                        error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                        message=(
+                            f'decode_task_result failed for node '
+                            f'{node_id!r}: {exc}'
+                        ),
+                        data={'node_id': node_id},
+                    ),
+                )
+        return TaskResult(ok=decoded_results)
+
+    # Normal output workflow path.
+    if out_type is None:
+        return TaskResult(
+            err=TaskError(
+                error_code=ContractCode.NO_TYPE_AVAILABLE,
+                message=(
+                    f'Workflow {workflow_id} ok-result decode requires '
+                    f'a declared OutT; handle has none. Use '
+                    f'raw_result() instead.'
+                ),
+            ),
+        )
+    try:
+        return decode_task_result(raw, out_type)
+    except (StrictJsonError, ValidationError) as exc:
+        return TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=f'decode_task_result failed: {exc}',
+            ),
+        )
+
+
 @dataclass
 class WorkflowHandle(Generic[OutT]):
     """
@@ -191,6 +467,14 @@ class WorkflowHandle(Generic[OutT]):
 
     workflow_id: str
     broker: PostgresBroker
+    # Strict-serde phase 6: declared OutT for typed result decode.
+    # Started handles populate this from the workflow spec (see
+    # ``_resolve_source_node_ok_type(spec.output)``). For outputless
+    # workflows, the sentinel ``_OUTPUTLESS_TERMINALS`` routes through
+    # a dedicated per-node decode path. By-id reconstruction without a
+    # registered spec leaves this ``None`` and ``get()`` folds
+    # NO_TYPE_AVAILABLE into the err slot when the ok slot is present.
+    out_type: TypeAnnotation | None = None
 
     # ─── wrap-strategy sync helpers ──────────────────────────────────
 
@@ -436,15 +720,13 @@ class WorkflowHandle(Generic[OutT]):
                                 message=f'Workflow result JSON corrupt: {loads_r.err_value}',
                             ),
                         ))
-                    tr_r = task_result_from_json(loads_r.ok_value)
-                    if is_err(tr_r):
-                        return cast('TaskResult[OutT, TaskError]', TaskResult(
-                            err=TaskError(
-                                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                                message=f'Workflow result deser failed: {tr_r.err_value}',
-                            ),
-                        ))
-                    return cast('TaskResult[OutT, TaskError]', tr_r.ok_value)
+                    decoded = _decode_workflow_envelope(
+                        loads_r.ok_value,
+                        self.out_type,
+                        app=self.broker.app,
+                        workflow_id=self.workflow_id,
+                    )
+                    return cast('TaskResult[OutT, TaskError]', decoded)
                 return cast('TaskResult[OutT, TaskError]', TaskResult(ok=None))
         except SQLAlchemyError as exc:
             return cast(
@@ -612,15 +894,13 @@ class WorkflowHandle(Generic[OutT]):
                             message=f'Result JSON corrupt for node {node_id}: {loads_r.err_value}',
                         ),
                     ))
-                tr_r = task_result_from_json(loads_r.ok_value)
-                if is_err(tr_r):
-                    return cast('TaskResult[OkT, TaskError]', TaskResult(
-                        err=TaskError(
-                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                            message=f'Result deser failed for node {node_id}: {tr_r.err_value}',
-                        ),
-                    ))
-                return cast('TaskResult[OkT, TaskError]', tr_r.ok_value)
+                decoded = _decode_per_task_envelope(
+                    loads_r.ok_value,
+                    app=self.broker.app,
+                    task_name=row.task_name,
+                    node_id=node_id,
+                )
+                return cast('TaskResult[OkT, TaskError]', decoded)
         except SQLAlchemyError as exc:
             return cast(
                 'TaskResult[OkT, TaskError]',
@@ -666,16 +946,12 @@ class WorkflowHandle(Generic[OutT]):
                             ),
                         )
                         continue
-                    tr_r = task_result_from_json(loads_r.ok_value)
-                    if is_err(tr_r):
-                        out[row.node_id] = TaskResult(
-                            err=TaskError(
-                                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                                message=f'Result deser failed for node {row.node_id}: {tr_r.err_value}',
-                            ),
-                        )
-                        continue
-                    out[row.node_id] = tr_r.ok_value
+                    out[row.node_id] = _decode_per_task_envelope(
+                        loads_r.ok_value,
+                        app=self.broker.app,
+                        task_name=row.task_name,
+                        node_id=row.node_id,
+                    )
                 return Ok(out)
         except SQLAlchemyError as exc:
             return Err(HandleOperationError(
@@ -714,16 +990,12 @@ class WorkflowHandle(Generic[OutT]):
                                 ),
                             )
                         else:
-                            tr_r = task_result_from_json(loads_r.ok_value)
-                            if is_err(tr_r):
-                                task_result_value = TaskResult(
-                                    err=TaskError(
-                                        error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                                        message=f'Result deser failed: {tr_r.err_value}',
-                                    ),
-                                )
-                            else:
-                                task_result_value = tr_r.ok_value
+                            task_result_value = _decode_per_task_envelope(
+                                loads_r.ok_value,
+                                app=self.broker.app,
+                                task_name=row.task_name,
+                                node_id=row.node_id,
+                            )
 
                     summary: SubWorkflowSummary[Any] | None = None
                     if row.sub_workflow_summary:

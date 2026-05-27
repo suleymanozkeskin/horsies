@@ -10,25 +10,25 @@ For full scheduler documentation, see [Scheduler Overview](/scheduling/scheduler
 ## Scheduled Tasks
 
 ```python
-from horsies import TaskResult, TaskError
+from horsies import TaskResult, TaskError, JsonValue
 from .config import app
 
 @app.task("sync_inventory", queue_name="low")
-def sync_inventory() -> TaskResult[dict, TaskError]:
+def sync_inventory() -> TaskResult[dict[str, JsonValue], TaskError]:
     return TaskResult(ok={
         "synced_items": 150,
         "status": "completed",
     })
 
 @app.task("generate_shipping_report", queue_name="low")
-def generate_shipping_report() -> TaskResult[dict, TaskError]:
+def generate_shipping_report() -> TaskResult[dict[str, JsonValue], TaskError]:
     return TaskResult(ok={
         "report_id": "RPT-2024-001",
         "orders_shipped": 42,
     })
 
 @app.task("cleanup_completed_orders", queue_name="low")
-def cleanup_completed_orders() -> TaskResult[dict, TaskError]:
+def cleanup_completed_orders() -> TaskResult[dict[str, JsonValue], TaskError]:
     return TaskResult(ok={
         "archived_count": 100,
     })

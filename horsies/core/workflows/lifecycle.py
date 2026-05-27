@@ -13,6 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from typing import Final
 
+from pydantic import ValidationError as _PydanticValidationError
+
+from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.kwargs import encode_kwargs, underlying_task_fn
 from horsies.core.codec.serde import dumps_json, loads_json, SerializationError, SerdeResult
 from horsies.core.types.result import Ok, Err, is_err as _is_err
 from horsies.core.logging import get_logger
@@ -21,6 +25,8 @@ from horsies.core.models.workflow import (
     SubWorkflowNode,
     validate_workflow_generic_output_match,
 )
+from horsies.core.models.workflow.handle import _OUTPUTLESS_TERMINALS
+from horsies.core.models.workflow.typing_utils import _resolve_source_node_ok_type
 from horsies.core.errors import WorkflowValidationError, MultipleValidationErrors, ErrorCode
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.models.workflow.handle_types import (
@@ -69,6 +75,23 @@ def _ser_or_raise(result: SerdeResult[str], context: str) -> str:
     if _is_err(result):
         raise SerializationError(f'Failed to serialize {context}: {result.err_value}')
     return result.ok_value
+
+
+def _encode_node_kwargs_or_raise(task: Any) -> dict[str, Any]:
+    """Encode a TaskNode's static kwargs through strict-serde phase 3.
+
+    Routes through `encode_kwargs(task.fn, task.kwargs)` so each kwarg is
+    encoded against its declared parameter type. Raises
+    ``SerializationError`` on encode failure so the caller's existing
+    transaction-zone handling converts it to ``SERIALIZATION_FAILED``.
+    """
+    underlying = underlying_task_fn(task.fn)
+    try:
+        return dict(encode_kwargs(underlying, task.kwargs))
+    except (StrictJsonError, _PydanticValidationError) as exc:
+        raise SerializationError(
+            f'Failed to encode kwargs for node {task.name}: {exc}',
+        ) from exc
 
 
 if TYPE_CHECKING:
@@ -291,7 +314,15 @@ async def start_workflow_async(
                     )
                     return Ok(cast(
                         'WorkflowHandle[OutT]',
-                        WorkflowHandle(workflow_id=wf_id, broker=broker),
+                        WorkflowHandle(
+                workflow_id=wf_id,
+                broker=broker,
+                out_type=(
+                    _resolve_source_node_ok_type(spec.output)
+                    if spec.output is not None
+                    else _OUTPUTLESS_TERMINALS
+                ),
+            ),
                     ))
 
                 # 2. Insert all workflow_tasks
@@ -324,6 +355,16 @@ async def start_workflow_async(
                                 'node_id': node.node_id,
                                 'name': node.name,
                                 'args': _ser_or_raise(dumps_json(()), 'positional args'),  # kwargs-only: positional args not persisted
+                                # TODO(strict-serde): route SubWorkflowNode
+                                # static kwargs through `encode_kwargs`
+                                # against the child `build_with` signature
+                                # (see consolidation commit 222957b item 7
+                                # and design-doc §12 phase 6). Deferred
+                                # because `build_with` consumes these in-
+                                # process at engine-side expansion and they
+                                # don't reach worker decode — smuggling
+                                # path is closed without migration, but the
+                                # strictness invariant is incomplete here.
                                 'kwargs': _ser_or_raise(dumps_json(node.kwargs), f'kwargs for node {node.name}'),
                                 'queue': 'default',  # SubWorkflowNode doesn't have queue
                                 'priority': 100,  # SubWorkflowNode doesn't have priority
@@ -377,7 +418,12 @@ async def start_workflow_async(
                                 'node_id': task.node_id,
                                 'name': task.name,
                                 'args': _ser_or_raise(dumps_json(()), 'positional args'),  # kwargs-only: positional args not persisted
-                                'kwargs': _ser_or_raise(dumps_json(task.kwargs), f'kwargs for node {task.name}'),
+                                'kwargs': _ser_or_raise(
+                                    dumps_json(
+                                        _encode_node_kwargs_or_raise(task),
+                                    ),
+                                    f'kwargs for node {task.name}',
+                                ),
                                 # Queue: use override, else task's declared queue, else "default"
                                 'queue': task.queue
                                 or getattr(task.fn, 'task_queue_name', None)
@@ -404,11 +450,25 @@ async def start_workflow_async(
                         if isinstance(root_node, SubWorkflowNode):
                             # Start child workflow
                             await enqueue_subworkflow_task(
-                                session, broker, wf_id, root_node.index, {}, 0, wf_id
+                                session,
+                                broker,
+                                wf_id,
+                                root_node.index,
+                                all_dep_results={},
+                                all_dep_task_names={},
+                                parent_depth=0,
+                                root_workflow_id=wf_id,
                             )
                         else:
                             # Enqueue regular task
-                            await enqueue_workflow_task(session, wf_id, root_node.index, {}, broker)
+                            await enqueue_workflow_task(
+                                session,
+                                wf_id,
+                                root_node.index,
+                                all_dep_results={},
+                                all_dep_task_names={},
+                                broker=broker,
+                            )
 
                 await session.commit()
 
@@ -450,7 +510,15 @@ async def start_workflow_async(
         # Success — exit retry loop.
         return Ok(cast(
             'WorkflowHandle[OutT]',
-            WorkflowHandle(workflow_id=wf_id, broker=broker),
+            WorkflowHandle(
+                workflow_id=wf_id,
+                broker=broker,
+                out_type=(
+                    _resolve_source_node_ok_type(spec.output)
+                    if spec.output is not None
+                    else _OUTPUTLESS_TERMINALS
+                ),
+            ),
         ))
 
     # Exhausted all attempts (should not reach here, but satisfy type checker).
@@ -772,7 +840,7 @@ async def resume_workflow(
                 dep_indices: list[int] = (
                     cast(list[int], dependencies) if isinstance(dependencies, list) else []
                 )
-                dep_results = await get_dependency_results(
+                dep_results, dep_task_names = await get_dependency_results(
                     session, workflow_id, dep_indices,
                 )
 
@@ -782,13 +850,19 @@ async def resume_workflow(
                         broker,
                         workflow_id,
                         task_index,
-                        dep_results,
-                        depth,
-                        root_wf_id,
+                        all_dep_results=dep_results,
+                        all_dep_task_names=dep_task_names,
+                        parent_depth=depth,
+                        root_workflow_id=root_wf_id,
                     )
                 else:
                     await enqueue_workflow_task(
-                        session, workflow_id, task_index, dep_results, broker,
+                        session,
+                        workflow_id,
+                        task_index,
+                        all_dep_results=dep_results,
+                        all_dep_task_names=dep_task_names,
+                        broker=broker,
                     )
 
             # 4. Cascade resume to paused child workflows
@@ -883,7 +957,9 @@ async def cascade_resume_to_children(
                 dep_indices: list[int] = (
                     cast(list[int], deps) if isinstance(deps, list) else []
                 )
-                dep_res = await get_dependency_results(session, child_id, dep_indices)
+                dep_res, dep_names = await get_dependency_results(
+                    session, child_id, dep_indices,
+                )
 
                 if is_sub:
                     await enqueue_subworkflow_task(
@@ -891,12 +967,20 @@ async def cascade_resume_to_children(
                         broker,
                         child_id,
                         task_idx,
-                        dep_res,
-                        child_depth,
-                        child_root,
+                        all_dep_results=dep_res,
+                        all_dep_task_names=dep_names,
+                        parent_depth=child_depth,
+                        root_workflow_id=child_root,
                     )
                 else:
-                    await enqueue_workflow_task(session, child_id, task_idx, dep_res, broker)
+                    await enqueue_workflow_task(
+                        session,
+                        child_id,
+                        task_idx,
+                        all_dep_results=dep_res,
+                        all_dep_task_names=dep_names,
+                        broker=broker,
+                    )
 
             # Check completion: resume may transition all pending tasks to
             # SKIPPED/terminal without any subsequent callback to finalize.

@@ -131,6 +131,12 @@ export default defineConfig({
 						{ label: 'Serialization', slug: 'internals/serialization' },
 					],
 				},
+				{
+					label: 'Migrations',
+					items: [
+						{ label: 'Migrating to 0.1.2', slug: 'migrations/migration-to-0-1-2' },
+					],
+				},
 				],
 		}),
 	],

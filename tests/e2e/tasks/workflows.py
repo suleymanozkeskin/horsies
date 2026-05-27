@@ -9,6 +9,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from horsies.core.codec.json_value import JsonValue
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.workflow import TaskNode, SuccessPolicy, SuccessCase
 
@@ -45,14 +46,14 @@ def slow_step_task(step: str, delay_ms: int = 500) -> TaskResult[str, TaskError]
 
 
 @app.task(task_name='e2e_wf_final_result')
-def final_result_task() -> TaskResult[dict[str, Any], TaskError]:
+def final_result_task() -> TaskResult[dict[str, JsonValue], TaskError]:
     """Task returning a dict result for output task tests."""
     time.sleep(0.05)
     return TaskResult(ok={'final': 'result', 'count': 42})
 
 
 @app.task(task_name='e2e_wf_fail')
-def fail_task(error_code: str) -> TaskResult[Any, TaskError]:
+def fail_task(error_code: str) -> TaskResult[int, TaskError]:
     """Always fails with the specified error code."""
     time.sleep(0.05)
     return TaskResult(
@@ -328,7 +329,7 @@ def sum_two_task(
 
 
 @app.task(task_name='e2e_wf_fail_with')
-def fail_with_task(error_code: str) -> TaskResult[Any, TaskError]:
+def fail_with_task(error_code: str) -> TaskResult[int, TaskError]:
     """Returns an error with the specified code."""
     time.sleep(0.05)
     return TaskResult(
@@ -394,7 +395,7 @@ def ctx_sum_task(
 
 @app.task(task_name='e2e_wf_check_upstream_skipped')
 def check_upstream_skipped_task(
-    input_result: TaskResult[Any, TaskError],
+    input_result: TaskResult[int, TaskError],
 ) -> TaskResult[str, TaskError]:
     """Checks if input is UPSTREAM_SKIPPED error."""
     time.sleep(0.05)
@@ -443,7 +444,7 @@ def mixed_reader_task(
 
 
 @app.task(task_name='e2e_wf_produce_dict')
-def produce_dict_task(value: str) -> TaskResult[dict[str, Any], TaskError]:
+def produce_dict_task(value: str) -> TaskResult[dict[str, JsonValue], TaskError]:
     """Produces a dict with nested structure."""
     time.sleep(0.05)
     return TaskResult(ok={'key': value, 'count': 42, 'nested': {'inner': True}})
@@ -451,8 +452,8 @@ def produce_dict_task(value: str) -> TaskResult[dict[str, Any], TaskError]:
 
 @app.task(task_name='e2e_wf_receive_dict')
 def receive_dict_task(
-    input_result: TaskResult[dict[str, Any], TaskError],
-) -> TaskResult[dict[str, Any], TaskError]:
+    input_result: TaskResult[dict[str, JsonValue], TaskError],
+) -> TaskResult[dict[str, JsonValue], TaskError]:
     """Receives dict via args_from and returns it unchanged."""
     time.sleep(0.05)
     if input_result.is_err():

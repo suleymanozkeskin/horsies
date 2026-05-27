@@ -361,7 +361,7 @@ DELETE_EXPIRED_TASKS_SQL = text("""
 """)
 
 SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL = text("""
-    SELECT retry_count, started_at, claimed_by_worker_id,
+    SELECT task_name, retry_count, started_at, claimed_by_worker_id,
            worker_hostname, worker_pid, worker_process_name
     FROM horsies_tasks
     WHERE id = :id AND status = 'RUNNING'
