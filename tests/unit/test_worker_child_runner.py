@@ -1060,6 +1060,48 @@ class TestRunTaskEntryErrorPaths:
         assert parsed.get('__h_task_result__') is True
         assert parsed.get('ok') == 42
 
+    def test_unserializable_value_surfaces_as_serialization_error(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        """Task returning unserializable value → WORKER_SERIALIZATION_ERROR.
+
+        Regression: ``encode_task_result(out, ok_type)`` raises
+        ``pydantic_core.PydanticSerializationError`` for inputs that
+        don't fit the declared ``OkT`` (e.g. a function value carried
+        in an ``int`` slot). ``PydanticSerializationError`` is a
+        ``ValueError`` subclass — not a ``ValidationError`` — so the
+        existing catch ``except (StrictJsonError, ValidationError)``
+        did not cover it. The exception escaped and was wrapped as a
+        generic ``TASK_EXCEPTION`` by an outer handler, masking the
+        real cause (encoder mismatch). The fix adds
+        ``PydanticSerializationError`` to both encode-time catch tuples.
+        """
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_task = MagicMock()
+        mock_task.task_ok_type = int
+
+        def _identity(x: Any) -> Any:
+            return x
+
+        # Task wraps the callable as ok inside a TaskResult — same
+        # shape as ``unserializable_result_task`` in tests/e2e/tasks/basic.py.
+        mock_task.return_value = TaskResult(ok=_identity)
+        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
+
+        with _apply_patches(patches):
+            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+
+        assert ok is True
+        assert reason is not None and 'SerializationError' in reason
+        parsed = _parse_task_result(payload)
+        err = parsed.get('err') or parsed.get('error')
+        assert err is not None
+        assert err['error_code'] == {
+            '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
+        }
+
     def test_task_returns_task_result_ok(
         self,
         _run_entry_defaults: dict[str, Any],

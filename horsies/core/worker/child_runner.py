@@ -18,6 +18,7 @@ from psycopg.rows import namedtuple_row
 from psycopg.errors import DeadlockDetected, SerializationFailure
 
 from pydantic import ValidationError
+from pydantic_core import PydanticSerializationError
 
 from horsies.core.app import Horsies
 from horsies.core.codec.json_value import StrictJsonError
@@ -1003,7 +1004,11 @@ def _run_task_entry(
         if isinstance(out, TaskResult):
             try:
                 envelope = encode_task_result(out, ok_type)
-            except (StrictJsonError, ValidationError) as exc:
+            except (
+                StrictJsonError,
+                ValidationError,
+                PydanticSerializationError,
+            ) as exc:
                 return _serialization_error_response(
                     task_name,
                     SerializationError(
@@ -1030,7 +1035,11 @@ def _run_task_entry(
         wrapped: TaskResult[Any, TaskError] = TaskResult(ok=out)
         try:
             envelope = encode_task_result(wrapped, ok_type)
-        except (StrictJsonError, ValidationError) as exc:
+        except (
+            StrictJsonError,
+            ValidationError,
+            PydanticSerializationError,
+        ) as exc:
             return _serialization_error_response(
                 task_name,
                 SerializationError(
