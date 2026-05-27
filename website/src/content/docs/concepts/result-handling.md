@@ -57,7 +57,7 @@ match divide.send(a=10, b=2):
 | `error_code` | `str` or `BuiltInTaskCode` | Identifies the error type |
 | `message` | `str` | Human-readable description |
 | `data` | `Any` | Additional context (dict, list, etc.) |
-| `exception` | `BaseException` or `dict` | Original exception if applicable |
+| `exception` | `BaseException` or `FlattenedException` | Live exception in-process; flattened on the wire to `type`, `module`, `message`, `repr`, and `traceback` |
 
 ```python
 return TaskResult(err=TaskError(

@@ -24,7 +24,7 @@ Each execution attempt is also recorded in `horsies_task_attempts` with per-atte
 | `error_code` | `BuiltInTaskCode \| str \| None` | Library or domain error code |
 | `message` | `str \| None` | Human-readable description |
 | `data` | `Any \| None` | Additional context (task_id, etc.) |
-| `exception` | `BaseException \| FlattenedException \| None` | Live exception in-process; flattened to a `FlattenedException` TypedDict (`module`, `qualname`, `str`, optional traceback) when serialized to the wire |
+| `exception` | `BaseException \| FlattenedException \| None` | Live exception in-process; flattened to a `FlattenedException` TypedDict (`type`, `module`, `message`, `repr`, `traceback`) when serialized to the wire |
 
 ### BuiltInTaskCode (4-Family Split)
 
@@ -85,15 +85,22 @@ Terminal outcome codes for tasks and workflows.
 
 ### Broker Errors (BrokerResult)
 
-`app.get_result_async()` and the broker monitoring methods return `BrokerResult[T]` = `Result[T, BrokerOperationError]`. The outer `Err` is an infrastructure-level failure, distinct from the inner `TaskResult.err`.
+`app.get_result_async()` and broker methods return `BrokerResult[T]` = `Result[T, BrokerOperationError]`. The outer `Err` is an infrastructure-level failure, distinct from the inner `TaskResult.err`.
 
 | Code | Description | Retryable |
 | ---- | ----------- | --------- |
-| `INVALID_JSON_PAYLOAD` | Raw `result` column does not parse as JSON | No |
+| `SCHEMA_INIT_FAILED` | Schema initialization failed | Varies |
+| `ENQUEUE_FAILED` | Enqueue or schedule path failed | Yes when the underlying broker error is retryable |
+| `PAYLOAD_MISMATCH` | Retry payload SHA does not match the original enqueue payload | No |
+| `TASK_INFO_QUERY_FAILED` | Task-info or raw-result query failed | Varies |
+| `MONITORING_QUERY_FAILED` | Monitoring query failed | Varies |
+| `CLEANUP_FAILED` | Cleanup or retention operation failed | Varies |
+| `CLOSE_FAILED` | Broker close failed | Varies |
+| `LISTENER_START_FAILED` | LISTEN/NOTIFY listener failed to start | No |
+| `LISTENER_SUBSCRIBE_FAILED` | LISTEN/NOTIFY subscribe failed | No |
+| `NO_BROKER` | Operation needs a broker, but none is configured | No |
 | `NO_TYPE_AVAILABLE` | Typed decode at the `app` layer needs an `ok_type`, but `task_name` is not in the local task registry | No |
-| `BROKER_ERROR` | Database or broker failure during the query | Varies |
-| `ENQUEUE_FAILED` | Enqueue or schedule path failed (transient) | Yes |
-| `LISTENER_START_FAILED` / `LISTENER_SUBSCRIBE_FAILED` | LISTEN/NOTIFY plumbing failed | No |
+| `INVALID_JSON_PAYLOAD` | Stored result JSON is malformed, not a JSON object, has an invalid strict-serde envelope, or fails app-level typed slot decode | No |
 
 Failed-task results decode without an `ok_type`, so `BrokerErrorCode.NO_TYPE_AVAILABLE` only fires for the success path. Reading failed tasks across processes that don't import the user code still works.
 

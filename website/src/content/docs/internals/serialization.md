@@ -11,14 +11,15 @@ Strict-serde. The wire carries values plus one envelope marker. It does **not** 
 
 Two consequences:
 
-- Tasks must declare every parameter and return type. Banned types (`Any`, `object`, bare `dict`/`list`/`tuple`, `TypeVar`, bare `BaseModel`, `TypedDict`, `bytes`, `pathlib.PurePath`) are rejected at `@app.task` registration.
+- Tasks must declare every parameter and return type. Banned types (`Any`, `object`, bare `dict`/`list`/`tuple`, `TypeVar`, bare `BaseModel`, `TypedDict`, `bytes`, `set`/`frozenset`, `Callable`, and `pathlib.PurePath` subclasses) are rejected at `@app.task` registration.
 - `JsonValue` is the only untyped fence. Use it at task boundary positions or inside `BaseModel`/`@dataclass` fields when the payload is genuinely raw JSON.
 
 ## Codec Layout
 
 | Module | Purpose |
 |--------|---------|
-| `horsies.core.codec.json_value` | `JsonValue` PEP 695 alias; `dumps_json` / `loads_json`; `StrictJsonError` |
+| `horsies.core.codec.json_value` | `JsonValue` PEP 695 alias; `StrictJsonError`; strict JSON-native validators |
+| `horsies.core.codec.serde` | `dumps_json` / `loads_json` stringification helpers and library error-payload serialization |
 | `horsies.core.codec.signature_check` | `validate_task_signature` — rejects banned types at decorator time |
 | `horsies.core.codec.kwargs` | `encode_kwargs(task_fn, kwargs)` / `decode_kwargs(...)` for producer/consumer kwarg binding |
 | `horsies.core.codec.typed` | `encode_value` / `decode_value` / `encode_task_result` / `decode_task_result` / `decode_task_error` / `validate_task_result_envelope` |
@@ -64,7 +65,7 @@ The worker calls `encode_task_result(result, ok_type)` after the user function r
 
 1. Validates `result.ok` against `ok_type` via `TypeAdapter` (raises `ValidationError` / `PydanticSerializationError` on shape mismatch).
 2. Emits the envelope.
-3. Flattens any live `BaseException` carried on `TaskError.exception` into a `FlattenedException` (module, qualname, str, optional traceback string).
+3. Flattens any live `BaseException` carried on `TaskError.exception` into a `FlattenedException` (`type`, `module`, `message`, `repr`, `traceback`).
 
 Encode failures surface as `WORKER_SERIALIZATION_ERROR`.
 
@@ -91,9 +92,9 @@ Distinct decode-error surfaces:
 
 | Code | Source | When |
 |------|--------|------|
-| `BrokerErrorCode.INVALID_JSON_PAYLOAD` | broker raw fetch (`get_raw_result_record_async`) | the `result` column does not parse as JSON |
+| `BrokerErrorCode.INVALID_JSON_PAYLOAD` | broker/app result read | the stored result does not parse as JSON, is not a JSON object, has a malformed envelope, or fails typed slot decode through an app-level API |
 | `BrokerErrorCode.NO_TYPE_AVAILABLE` | `app.get_result_async` | `task_name` is not in the local task registry, so no `ok_type` available to decode the ok slot |
-| `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | typed decode (`decode_task_result`) | envelope shape invalid or `ok` does not match `ok_type` |
+| `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | handle / workflow / engine wrappers around typed decode | a wrapper catches a strict decode failure and folds it into a `TaskResult(err=...)` |
 | `ContractCode.NO_TYPE_AVAILABLE` | outputless workflow handle decode | per-node lookup failed inside `WorkflowHandle.get()` for a terminal task name not in the local registry |
 
 ## Type Surface at the Boundary
@@ -140,7 +141,7 @@ def validate_input(
 
 ## Pydantic Models in Workflows
 
-Models flowing through `args_from` ride through the same envelope. The downstream task declares `TaskResult[Model, TaskError]` (or `Model`) as the parameter type; the engine decodes the upstream envelope and binds the typed instance into the consumer's kwargs.
+Models flowing through `args_from` ride through the same envelope. The downstream task declares `TaskResult[Model, TaskError]` (or an `Optional` / `Union` containing it) as the parameter type; the engine decodes the upstream envelope and binds a typed `TaskResult` into the consumer's kwargs.
 
 ```python
 from datetime import datetime, timezone
@@ -193,14 +194,14 @@ node_process: TaskNode[str] = TaskNode(
 
 ## API Reference
 
-### `encode_task_result(result, ok_type) -> dict[str, JsonValue]`
+### `encode_task_result(result, ok_type) -> dict[str, Json]`
 
 Encode a `TaskResult[T, TaskError]` to the wire envelope.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `result` | `TaskResult[T, TaskError]` | Domain result returned by the task |
-| `ok_type` | `type` | Declared `T` from the task signature |
+| `ok_type` | `TypeAnnotation` | Declared `T` from the task signature |
 
 **Raises:** `pydantic.ValidationError` or `PydanticSerializationError` if `result.ok` does not match `ok_type`; `StrictJsonError` for non-JSON-serializable structures.
 
@@ -210,8 +211,8 @@ Decode a wire envelope into a typed `TaskResult`.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `envelope` | `dict[str, JsonValue]` | The `__h_task_result__` envelope |
-| `ok_type` | `type` | Declared `T` from the task signature (only used when the `ok` slot is populated) |
+| `envelope` | `dict[str, Json]` | The `__h_task_result__` envelope |
+| `ok_type` | `TypeAnnotation` | Declared `T` from the task signature (only used when the `ok` slot is populated) |
 
 ### `decode_task_error(err_slot) -> TaskError`
 
@@ -239,7 +240,7 @@ PEP 695 type alias. Re-exported as `horsies.JsonValue`.
 
 ### `StrictJsonError`
 
-Raised by `dumps_json` / `loads_json` for non-JSON-serializable structures or parse failures. Re-exported as `horsies.StrictJsonError`.
+Raised by strict codec primitives and the JSON parse-constant guard for strict JSON violations. `dumps_json` / `loads_json` return `SerdeResult` and wrap stringification or parse failures as `SerializationError`. Re-exported as `horsies.StrictJsonError`.
 
 ## Things to Avoid
 

@@ -13,7 +13,7 @@ This page lists every user-facing change against 0.1.1 and the mechanical fix fo
 
 ## Task Signatures
 
-### Positional task arguments are rejected at registration
+### Variadic and positional-only task parameters are rejected at registration
 
 `*args` (`VAR_POSITIONAL`), `**kwargs` (`VAR_KEYWORD`), and positional-only parameters (`def f(x, /):`) raise `SignatureValidationError` at `@app.task` time.
 
@@ -74,7 +74,7 @@ match my_task.send(a=5, b=3):
     ...
 ```
 
-The signatures themselves changed in the API reference: `.send(*args, **kwargs)` is now `.send(**kwargs)`; same for `.send_async` and `.schedule`.
+The user-facing contract is keyword-only. The wrapper may still accept `*args` at the Python signature level for compatibility and typing, but strict-serde rejects non-empty positional args before enqueue.
 
 ## Workflows
 
@@ -147,7 +147,7 @@ The return shape is now `BrokerResult[TaskResult[Any, TaskError]]` — the outer
 
 | Code | Enum | When |
 |------|------|------|
-| `INVALID_JSON_PAYLOAD` | `BrokerErrorCode` | Raw `result` column does not parse as JSON |
+| `INVALID_JSON_PAYLOAD` | `BrokerErrorCode` | Stored result JSON is malformed, not a JSON object, has an invalid strict-serde envelope, or fails app-level typed slot decode |
 | `NO_TYPE_AVAILABLE` | `BrokerErrorCode` | `app.get_result_async` ok-slot decode needs `ok_type` but `task_name` is not in the local registry |
 | `NO_TYPE_AVAILABLE` | `ContractCode` | Outputless workflow per-node decode failed for a terminal task name not registered locally |
 | `RESULT_DESERIALIZATION_ERROR` | `OperationalErrorCode` | Envelope shape invalid or `ok` slot does not match `ok_type` (existed pre-strict-serde; semantics narrowed) |
@@ -156,7 +156,7 @@ Failed-task results decode without an `ok_type`, so `BrokerErrorCode.NO_TYPE_AVA
 
 ### Removed error code
 
-`PYDANTIC_HYDRATION_ERROR` is retained as a legacy enum member on `ContractCode` but is no longer emitted by any production path. New code should not match on it. The strict-serde equivalents are `RETURN_TYPE_MISMATCH` (encode-side return type mismatch) and `RESULT_DESERIALIZATION_ERROR` (decode-side envelope/type failure).
+`PYDANTIC_HYDRATION_ERROR` is retained as a legacy enum member on `ContractCode` but is no longer emitted by any production path. New code should not match on it. The strict-serde equivalents are `RETURN_TYPE_MISMATCH` (encode-side return type mismatch), `RESULT_DESERIALIZATION_ERROR` (handle/workflow decode failure folded into `TaskResult.err`), and `BrokerErrorCode.INVALID_JSON_PAYLOAD` (app-level result read failure).
 
 ## Wire Envelope
 
@@ -174,7 +174,7 @@ See [Serialization](../internals/serialization) for the full envelope shape (inc
 
 ### Implications
 
-- **In-flight rows from a pre-strict-serde worker are not consumable by a 0.1.2 worker.** A 0.1.2 worker rejects rows carrying positional args with an explicit error. Drop or drain pre-strict-serde rows before upgrading.
+- **In-flight rows from a pre-strict-serde worker are not consumable by a 0.1.2 worker/result reader.** A 0.1.2 worker rejects rows carrying positional args, and strict result readers reject legacy result envelopes. Drop or drain pre-strict-serde rows before upgrading.
 - **The `__horsies_*` smuggle path is closed.** Any payload carrying reserved `__h_*` or `__builtin_task_code__` keys at user-controlled positions is rejected at decode time.
 
 ## TaskError
@@ -185,7 +185,7 @@ See [Serialization](../internals/serialization) for the full envelope shape (inc
 TaskError.exception: BaseException | FlattenedException | None
 ```
 
-In-process the value is a live `BaseException`. On the wire it flattens to a `FlattenedException` TypedDict (`module`, `qualname`, `str`, optional traceback). Code accessing `.exception` should switch on the concrete type rather than assuming `dict[str, Any]`.
+In-process the value is a live `BaseException`. On the wire it flattens to a `FlattenedException` TypedDict (`type`, `module`, `message`, `repr`, `traceback`). Code accessing `.exception` should switch on the concrete type rather than assuming `dict[str, Any]`.
 
 ### Reserved built-in codes are rejected as strings
 
@@ -227,7 +227,7 @@ broker = app.get_broker()
 
 ## Upgrade Checklist
 
-- [ ] Audit `@app.task` signatures: replace `Any` / `object` / bare containers / `bytes` / `TypeVar` with concrete types or `JsonValue`.
+- [ ] Audit `@app.task` signatures: replace `Any` / `object` / bare containers / `set` / `frozenset` / `Callable` / `bytes` / `TypeVar` / `TypedDict` / `pathlib.PurePath` with concrete types or `JsonValue`.
 - [ ] Search for positional `.send(` / `.send_async(` / `.schedule(` calls and rewrite as kwargs.
 - [ ] Search for `TaskNode(args=` / `TaskSchedule(args=` and migrate to `kwargs=`.
 - [ ] Replace `broker.get_result(...)` / `broker.get_result_async(...)` with `app.get_result(...)` / `app.get_result_async(...)`; update callers to unwrap the outer `BrokerResult`.
