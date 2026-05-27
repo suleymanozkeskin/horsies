@@ -43,7 +43,7 @@ schedule_config = ScheduleConfig(
             name='e2e_schedule_with_args',
             task_name='e2e_scheduled_with_args',
             pattern=IntervalSchedule(seconds=2),
-            args=(42,),
+            kwargs={'value': 42},
         ),
         TaskSchedule(
             name='e2e_schedule_catch_up',
@@ -68,6 +68,7 @@ config = AppConfig(
 app = Horsies(config)
 broker = PostgresBroker(config.broker)
 app._broker = broker
+broker.app = app
 
 # Import tasks to register them in current process
 from tests.e2e.tasks import scheduler as scheduler_tasks  # noqa: F401, E402

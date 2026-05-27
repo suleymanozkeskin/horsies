@@ -41,6 +41,7 @@ config = AppConfig(
 app = Horsies(config)
 broker = PostgresBroker(config.broker)
 app._broker = broker
+broker.app = app
 
 # Import tasks to register them in current process
 from tests.e2e.tasks import basic  # noqa: F401

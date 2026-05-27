@@ -17,7 +17,7 @@ Enqueue tasks with `.send()`, `.send_async()`, or `.schedule()`. All return a `T
 from horsies import Ok, Err
 from instance import my_task
 
-match my_task.send(arg1, arg2, key="value"):
+match my_task.send(name="alice", count=3):
     case Ok(handle):
         print(f"Task submitted: {handle.task_id}")
     case Err(send_err):
@@ -30,7 +30,7 @@ match my_task.send(arg1, arg2, key="value"):
 from horsies import Ok, Err
 
 async def my_endpoint():
-    match await my_task.send_async(arg1, arg2):
+    match await my_task.send_async(name="alice", count=3):
         case Ok(handle):
             return {"task_id": handle.task_id}
         case Err(send_err):
@@ -48,7 +48,7 @@ from horsies import Ok, Err
 
 deadline = datetime.now(timezone.utc) + timedelta(minutes=5)
 
-match my_task.with_options(good_until=deadline).send(arg1, arg2):
+match my_task.with_options(good_until=deadline).send(name="alice", count=3):
     case Ok(handle):
         print(f"Task submitted with 5-minute deadline: {handle.task_id}")
     case Err(err):
@@ -62,9 +62,9 @@ match my_task.with_options(good_until=deadline).send(arg1, arg2):
 ```python
 opts = my_task.with_options(good_until=deadline)
 
-opts.send(arg1, arg2)              # sync
-await opts.send_async(arg1, arg2)  # async
-opts.schedule(60, arg1, arg2)      # delayed
+opts.send(name="alice", count=3)              # sync
+await opts.send_async(name="alice", count=3)  # async
+opts.schedule(60, name="alice", count=3)      # delayed
 ```
 
 For workflow nodes, use `.node(good_until=...)` instead — see [Typed Node Builder](../concepts/workflows/typed-node-builder).
@@ -74,7 +74,7 @@ For workflow nodes, use `.node(good_until=...)` instead — see [Typed Node Buil
 ```python
 from horsies import Ok, Err
 
-match my_task.schedule(60, arg1, arg2):
+match my_task.schedule(60, name="alice", count=3):
     case Ok(handle):
         print(f"Scheduled: {handle.task_id}")
     case Err(err):
@@ -86,7 +86,7 @@ match my_task.schedule(60, arg1, arg2):
 ```python
 from horsies import Ok, Err
 
-match my_task.send(arg1, arg2):
+match my_task.send(name="alice", count=3):
     case Ok(handle):
         # Blocking wait
         result = handle.get()
@@ -105,12 +105,12 @@ match my_task.send(arg1, arg2):
 
 ```python
 # Send without waiting for result -- discard the TaskSendResult
-my_task.send(arg1, arg2)
+my_task.send(name="alice", count=3)
 ```
 
 ### Pass Complex Arguments
 
-Arguments must be JSON-serializable. Pydantic models and dataclass instances are supported directly and rehydrated on the worker side.
+Arguments must be keyword-only and JSON-serializable. Positional `.send(arg1, arg2)` is rejected with `Err(VALIDATION_FAILED)`. Pydantic models and dataclass instances are supported directly; the worker decodes them using the registered task's parameter type via `pydantic.TypeAdapter`.
 
 ```python
 from horsies import Ok, Err
@@ -130,13 +130,13 @@ match process_order.send(order=order):
         print(f"Send failed: {err.code}")
 ```
 
-Pydantic models and dataclasses must be defined in importable modules (not `__main__` and not inside functions).
+Pydantic models and dataclasses must be defined in importable modules (not `__main__` and not inside functions) so the worker can resolve the declared parameter type.
 
 ### Execute Directly (Skip Queue)
 
 ```python
-# Runs immediately in current process
-result = my_task("arg1", "arg2")
+# Runs immediately in current process (plain Python call; bypasses the queue)
+result = my_task(name="alice", count=3)
 ```
 
 Direct calls bypass the queue entirely. Library features do not apply:
@@ -155,11 +155,11 @@ Use only for **unit testing**. For production, always use `.send()` or `.send_as
 ```python
 # Wrong - returns Err(TaskSendError(SEND_SUPPRESSED)) during worker import
 # tasks.py
-result = my_task.send("test")  # Err(SEND_SUPPRESSED)
+result = my_task.send(name="test")  # Err(SEND_SUPPRESSED)
 
 # Correct - call from functions/endpoints
 def process():
-    match my_task.send("test"):
+    match my_task.send(name="test"):
         case Ok(handle):
             ...
         case Err(err):
@@ -183,7 +183,7 @@ When `.send()` fails with `ENQUEUE_FAILED` (a transient broker error), use the r
 ```python
 from horsies import Ok, Err
 
-match my_task.send(arg1, arg2):
+match my_task.send(name="alice", count=3):
     case Ok(handle):
         result = handle.get()
     case Err(err) if err.retryable:
@@ -211,33 +211,31 @@ config = AppConfig(
 
 ## API Reference
 
-### `.send(*args, **kwargs) -> TaskSendResult[TaskHandle[T]]`
+### `.send(**kwargs) -> TaskSendResult[TaskHandle[T]]`
 
-Enqueue task for immediate execution.
+Enqueue task for immediate execution. Keyword-only — positional arguments are rejected with `Err(VALIDATION_FAILED)`.
 
 | Parameter | Type | Description |
 | --------- | ---- | ----------- |
-| `*args` | task args | Positional arguments for the task |
-| `**kwargs` | task kwargs | Keyword arguments for the task |
+| `**kwargs` | task kwargs | Keyword arguments matching the task's signature |
 
 **Returns:** `TaskSendResult[TaskHandle[T]]` -- `Ok(TaskHandle)` on success, `Err(TaskSendError)` on failure.
 
-### `.send_async(*args, **kwargs) -> TaskSendResult[TaskHandle[T]]`
+### `.send_async(**kwargs) -> TaskSendResult[TaskHandle[T]]`
 
 Async variant of `.send()`. Use in async code (FastAPI, etc.).
-This does not execute the task locally; it only enqueues.
+This does not execute the task locally; it only enqueues. Keyword-only.
 
 **Returns:** `TaskSendResult[TaskHandle[T]]`
 
-### `.schedule(delay, *args, **kwargs) -> TaskSendResult[TaskHandle[T]]`
+### `.schedule(delay, **kwargs) -> TaskSendResult[TaskHandle[T]]`
 
-Enqueue task for delayed execution.
+Enqueue task for delayed execution. Task arguments are keyword-only.
 
 | Parameter | Type | Description |
 | --------- | ---- | ----------- |
 | `delay` | `int` | Seconds to wait before task becomes claimable |
-| `*args` | task args | Positional arguments for the task |
-| `**kwargs` | task kwargs | Keyword arguments for the task |
+| `**kwargs` | task kwargs | Keyword arguments matching the task's signature |
 
 **Returns:** `TaskSendResult[TaskHandle[T]]`
 

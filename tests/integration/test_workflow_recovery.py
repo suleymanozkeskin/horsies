@@ -11,7 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.codec.serde import loads_json, task_result_from_json
+from horsies.core.codec.serde import dumps_json, loads_json
+from horsies.core.codec.typed import decode_task_result, encode_task_result, encode_value
 from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode, RetrievalCode, OutcomeCode
 from horsies.core.models.workflow import (
     TaskNode,
@@ -25,6 +26,31 @@ from horsies.core.workflows.recovery import recover_stuck_workflows
 
 from .conftest import make_simple_task, make_failing_task, make_workflow_spec, start_ok
 from horsies.core.models.workflow import SuccessPolicy, SuccessCase
+
+
+def _strict_result_json(result: TaskResult[Any, TaskError]) -> str:
+    """Build the strict-serde wire envelope for ``horsies_workflow_tasks.result``.
+
+    Tests in this file seed terminal task rows directly (simulating crash /
+    recovery states); they must match what production writes so the engine's
+    strict envelope decode at ``on_workflow_task_complete`` / recovery
+    finalization accepts the payload. ``ok_type=Any`` is sufficient — these
+    tests substring-check the serialized output and don't pin the ok-payload
+    type-narrowing on read.
+    """
+    envelope = encode_task_result(result, Any)
+    serialized = dumps_json(envelope)
+    return serialized.unwrap()
+
+
+def _strict_error_json(error: TaskError) -> str:
+    """Build the bare TaskError JSON for the ``horsies_workflows.error`` column.
+
+    Production writes this column via
+    ``dumps_json(encode_value(err, TaskError))`` — bare TaskError dict, no
+    ``__h_task_result__`` envelope wrapper.
+    """
+    return dumps_json(encode_value(error, TaskError)).unwrap()
 
 
 def _workflow(
@@ -142,10 +168,13 @@ class TestWorkflowRecovery:
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
-                SET status = 'COMPLETED', result = '{"ok": 10}'
+                SET status = 'COMPLETED', result = :result
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
-            {'wf_id': handle.workflow_id},
+            {
+                'wf_id': handle.workflow_id,
+                'result': _strict_result_json(TaskResult(ok=10)),
+            },
         )
         # Workflow still RUNNING with no result
         await session.execute(
@@ -192,10 +221,15 @@ class TestWorkflowRecovery:
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
-                SET status = 'FAILED', result = '{"err": {"error_code": "TEST_ERROR", "message": "Test failure"}}'
+                SET status = 'FAILED', result = :result
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
-            {'wf_id': handle.workflow_id},
+            {
+                'wf_id': handle.workflow_id,
+                'result': _strict_result_json(
+                    TaskResult(err=TaskError(error_code='TEST_ERROR', message='Test failure')),
+                ),
+            },
         )
         # Workflow still RUNNING with no error
         await session.execute(
@@ -251,19 +285,29 @@ class TestWorkflowRecovery:
             text("""
                 UPDATE horsies_workflow_tasks
                 SET status = 'FAILED',
-                    result = '{"err": {"error_code": "FIRST_ERROR", "message": "First failure"}}'
+                    result = :result
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
-            {'wf_id': handle.workflow_id},
+            {
+                'wf_id': handle.workflow_id,
+                'result': _strict_result_json(
+                    TaskResult(err=TaskError(error_code='FIRST_ERROR', message='First failure')),
+                ),
+            },
         )
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
                 SET status = 'FAILED',
-                    result = '{"err": {"error_code": "SECOND_ERROR", "message": "Second failure"}}'
+                    result = :result
                 WHERE workflow_id = :wf_id AND task_index = 1
             """),
-            {'wf_id': handle.workflow_id},
+            {
+                'wf_id': handle.workflow_id,
+                'result': _strict_result_json(
+                    TaskResult(err=TaskError(error_code='SECOND_ERROR', message='Second failure')),
+                ),
+            },
         )
         await session.execute(
             text("""
@@ -273,7 +317,9 @@ class TestWorkflowRecovery:
             """),
             {
                 'wf_id': handle.workflow_id,
-                'error': '{"error_code": "SECOND_ERROR", "message": "Second failure"}',
+                'error': _strict_error_json(
+                    TaskError(error_code='SECOND_ERROR', message='Second failure'),
+                ),
             },
         )
         await session.commit()
@@ -422,10 +468,13 @@ class TestWorkflowRecovery:
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
-                SET status = 'COMPLETED', result = '{"ok": 10}'
+                SET status = 'COMPLETED', result = :result
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
-            {'wf_id': handle.workflow_id},
+            {
+                'wf_id': handle.workflow_id,
+                'result': _strict_result_json(TaskResult(ok=10)),
+            },
         )
         await session.execute(
             text("""
@@ -480,18 +529,26 @@ class TestWorkflowRecovery:
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
-                SET status = 'COMPLETED', result = '{"ok": 2}'
+                SET status = 'COMPLETED', result = :result
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
-            {'wf_id': handle.workflow_id},
+            {
+                'wf_id': handle.workflow_id,
+                'result': _strict_result_json(TaskResult(ok=2)),
+            },
         )
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
-                SET status = 'FAILED', result = '{"err": {"error_code": "TEST"}}'
+                SET status = 'FAILED', result = :result
                 WHERE workflow_id = :wf_id AND task_index = 1
             """),
-            {'wf_id': handle.workflow_id},
+            {
+                'wf_id': handle.workflow_id,
+                'result': _strict_result_json(
+                    TaskResult(err=TaskError(error_code='TEST', message='')),
+                ),
+            },
         )
         await session.execute(
             text("""
@@ -548,10 +605,20 @@ class TestWorkflowRecovery:
             text("""
                 UPDATE horsies_tasks
                 SET status = 'FAILED',
-                    result = '{"err": {"error_code": "WORKER_CRASHED", "message": "Worker died"}}'
+                    result = :result
                 WHERE id = :tid
             """),
-            {'tid': task_id},
+            {
+                'tid': task_id,
+                'result': _strict_result_json(
+                    TaskResult(
+                        err=TaskError(
+                            error_code=OperationalErrorCode.WORKER_CRASHED,
+                            message='Worker died',
+                        ),
+                    ),
+                ),
+            },
         )
 
         # Set workflow_tasks to RUNNING (simulating crash before on_workflow_task_complete)
@@ -620,10 +687,20 @@ class TestWorkflowRecovery:
             text("""
                 UPDATE horsies_tasks
                 SET status = 'FAILED',
-                    result = '{"err": {"error_code": "WORKER_CRASHED", "message": "Worker died"}}'
+                    result = :result
                 WHERE id = :tid
             """),
-            {'tid': task_id},
+            {
+                'tid': task_id,
+                'result': _strict_result_json(
+                    TaskResult(
+                        err=TaskError(
+                            error_code=OperationalErrorCode.WORKER_CRASHED,
+                            message='Worker died',
+                        ),
+                    ),
+                ),
+            },
         )
         await session.execute(
             text("""
@@ -691,10 +768,20 @@ class TestWorkflowRecovery:
             text("""
                 UPDATE horsies_tasks
                 SET status = 'FAILED',
-                    result = '{"err": {"error_code": "WORKER_CRASHED", "message": "Worker died"}}'
+                    result = :result
                 WHERE id = :tid
             """),
-            {'tid': task_id},
+            {
+                'tid': task_id,
+                'result': _strict_result_json(
+                    TaskResult(
+                        err=TaskError(
+                            error_code=OperationalErrorCode.WORKER_CRASHED,
+                            message='Worker died',
+                        ),
+                    ),
+                ),
+            },
         )
         await session.execute(
             text("""
@@ -776,7 +863,7 @@ class TestWorkflowRecovery:
         status, result_json = wt_result.fetchone()
         assert status == 'FAILED'
 
-        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
+        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
         assert task_result.is_err()
         assert task_result.err is not None
         assert task_result.err.error_code == OutcomeCode.TASK_CANCELLED
@@ -840,7 +927,7 @@ class TestWorkflowRecovery:
         status, result_json = wt_result.fetchone()
         assert status == 'FAILED'
 
-        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
+        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
         assert task_result.is_err()
         assert task_result.err is not None
         assert task_result.err.error_code == RetrievalCode.RESULT_NOT_AVAILABLE
@@ -868,10 +955,13 @@ class TestWorkflowRecovery:
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
-                SET status = 'COMPLETED', result = '{"ok": 2}'
+                SET status = 'COMPLETED', result = :result
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
-            {'wf_id': handle.workflow_id},
+            {
+                'wf_id': handle.workflow_id,
+                'result': _strict_result_json(TaskResult(ok=2)),
+            },
         )
         await session.commit()
 
@@ -915,10 +1005,15 @@ class TestWorkflowRecovery:
             text("""
                 UPDATE horsies_workflow_tasks
                 SET status = 'FAILED',
-                    result = '{"err": {"error_code": "TEST_FAIL", "message": "fail"}}'
+                    result = :result
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
-            {'wf_id': handle.workflow_id},
+            {
+                'wf_id': handle.workflow_id,
+                'result': _strict_result_json(
+                    TaskResult(err=TaskError(error_code='TEST_FAIL', message='fail')),
+                ),
+            },
         )
         await session.commit()
 
@@ -968,10 +1063,15 @@ class TestWorkflowRecovery:
             text("""
                 UPDATE horsies_workflow_tasks
                 SET status = 'FAILED',
-                    result = '{"err": {"error_code": "TEST_FAIL", "message": "fail"}}'
+                    result = :result
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
-            {'wf_id': handle.workflow_id},
+            {
+                'wf_id': handle.workflow_id,
+                'result': _strict_result_json(
+                    TaskResult(err=TaskError(error_code='TEST_FAIL', message='fail')),
+                ),
+            },
         )
         await session.commit()
 
@@ -1020,10 +1120,13 @@ class TestWorkflowRecovery:
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
-                SET status = 'COMPLETED', result = '{"ok": 2}'
+                SET status = 'COMPLETED', result = :result
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
-            {'wf_id': handle.workflow_id},
+            {
+                'wf_id': handle.workflow_id,
+                'result': _strict_result_json(TaskResult(ok=2)),
+            },
         )
         await session.execute(
             text("""
@@ -1076,10 +1179,13 @@ class TestWorkflowRecovery:
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
-                SET status = 'COMPLETED', result = '{"ok": 2}'
+                SET status = 'COMPLETED', result = :result
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
-            {'wf_id': handle.workflow_id},
+            {
+                'wf_id': handle.workflow_id,
+                'result': _strict_result_json(TaskResult(ok=2)),
+            },
         )
         await session.execute(
             text("""
@@ -1314,7 +1420,7 @@ class TestWorkflowRecovery:
         status, result_json = wt_result.fetchone()
         assert status == 'FAILED'
 
-        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
+        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
         assert task_result.is_err()
         assert task_result.err is not None
         assert task_result.err.error_code == OperationalErrorCode.WORKER_CRASHED
@@ -1349,19 +1455,27 @@ class TestWorkflowRecovery:
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
-                SET status = 'COMPLETED', result = '{"ok": 2}'
+                SET status = 'COMPLETED', result = :result
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
-            {'wf_id': handle.workflow_id},
+            {
+                'wf_id': handle.workflow_id,
+                'result': _strict_result_json(TaskResult(ok=2)),
+            },
         )
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
                 SET status = 'FAILED',
-                    result = '{"err": {"error_code": "TASK_FAIL", "message": "failed"}}'
+                    result = :result
                 WHERE workflow_id = :wf_id AND task_index = 1
             """),
-            {'wf_id': handle.workflow_id},
+            {
+                'wf_id': handle.workflow_id,
+                'result': _strict_result_json(
+                    TaskResult(err=TaskError(error_code='TASK_FAIL', message='failed')),
+                ),
+            },
         )
         await session.execute(
             text("""

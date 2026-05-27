@@ -13,7 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.codec.serde import dumps_json, loads_json, task_result_from_json
+from horsies.core.codec.serde import dumps_json, loads_json
+from horsies.core.codec.typed import decode_task_result
 from horsies.core.errors import WorkflowValidationError
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.workflow import (
@@ -58,24 +59,33 @@ def _workflow(
     )
 
 
-def _decode_task_result(value: Any) -> TaskResult[Any, TaskError] | None:
+def _decode_task_result(
+    value: Any,
+    ok_type: Any = Any,
+) -> TaskResult[Any, TaskError] | None:
+    """Decode a stored task-result JSON column into a TaskResult.
+
+    Strict-serde phase 7: replaces the legacy ``task_result_from_json``
+    helper. The wire is the ``__h_task_result__`` envelope; ``ok_type``
+    selects the typed decode path for the ok slot (defaults to ``Any``
+    when the test only inspects discriminator / error fields).
+    """
     if isinstance(value, str):
-        return task_result_from_json(loads_json(value).unwrap()).unwrap()
+        return decode_task_result(loads_json(value).unwrap(), ok_type)
     return None
 
 
-def _extract_taskresult_value(raw: Any, default: int = 0) -> int:
-    """Extract int value from a raw build_with param that may be a wrapped TaskResult."""
-    if isinstance(raw, dict):
-        raw_dict: dict[str, Any] = dict(raw)
-        if raw_dict.get('__horsies_taskresult__'):
-            data_str = raw_dict.get('data')
-            if isinstance(data_str, str):
-                tr = task_result_from_json(loads_json(data_str).unwrap()).unwrap()
-                return tr.unwrap() if tr.is_ok() else default
-    if isinstance(raw, int):
-        return raw
-    return default
+def _extract_taskresult_value(
+    value: TaskResult[int, TaskError],
+    default: int = 0,
+) -> int:
+    """Unwrap a TaskResult into the underlying int for build_with paths.
+
+    Strict-serde phase 7 (B3a): the engine passes the typed
+    ``TaskResult`` instance straight to ``build_with`` for args_from
+    kwargs. This helper just unwraps it.
+    """
+    return value.unwrap() if value.is_ok() else default
 
 
 # =============================================================================
@@ -111,16 +121,12 @@ class ParamChildWorkflow(WorkflowDefinition[int]):
     definition_key = 'tests.param_child.v1'
 
     @classmethod
-    def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-        params_map: dict[str, Any] = params
-        raw_value: Any = params_map.get('value', 0)
-        if isinstance(raw_value, dict):
-            raw_dict: dict[str, Any] = dict(raw_value)
-            if raw_dict.get('__horsies_taskresult__'):
-                data_str = raw_dict.get('data')
-                if isinstance(data_str, str):
-                    tr = task_result_from_json(loads_json(data_str).unwrap()).unwrap()
-                    raw_value = tr.unwrap() if tr.is_ok() else 0
+    def build_with(
+        cls,
+        app: Horsies,
+        value: TaskResult[int, TaskError],
+    ) -> Any:
+        raw_value = _extract_taskresult_value(value)
 
         @app.task(task_name='param_child_task')
         def child_task(value: int) -> TaskResult[int, TaskError]:
@@ -142,10 +148,14 @@ class MultiParamChildWorkflow(WorkflowDefinition[int]):
     definition_key = 'tests.multi_param_child.v1'
 
     @classmethod
-    def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-        params_map: dict[str, Any] = params
-        first_val = _extract_taskresult_value(params_map.get('first', 0))
-        second_val = _extract_taskresult_value(params_map.get('second', 0))
+    def build_with(
+        cls,
+        app: Horsies,
+        first: TaskResult[int, TaskError],
+        second: TaskResult[int, TaskError],
+    ) -> Any:
+        first_val = _extract_taskresult_value(first)
+        second_val = _extract_taskresult_value(second)
 
         @app.task(task_name='multi_param_child_task')
         def child_task(first: int, second: int) -> TaskResult[int, TaskError]:

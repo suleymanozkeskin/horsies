@@ -31,6 +31,7 @@ config = AppConfig(
 app = Horsies(config)
 broker = PostgresBroker(config.broker)
 app._broker = broker
+broker.app = app
 
 
 @app.task(task_name='e2e_retry_precedence_healthcheck')

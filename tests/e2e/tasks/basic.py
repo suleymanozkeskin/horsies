@@ -7,6 +7,7 @@ from typing import Any, cast
 
 from pydantic import BaseModel
 
+from horsies.core.codec.json_value import JsonValue
 from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode
 
 from tests.e2e.tasks.instance import app
@@ -29,7 +30,7 @@ def primitives_task(
     s: str,
     b: bool,
     n: None,
-) -> TaskResult[dict[str, Any], TaskError]:
+) -> TaskResult[dict[str, JsonValue], TaskError]:
     return TaskResult(ok={'i': i, 'f': f, 's': s, 'b': b, 'n': n})
 
 
@@ -38,7 +39,7 @@ def collections_task(
     lst: list[int],
     dct: dict[str, int],
     tpl: tuple[int, ...],
-) -> TaskResult[dict[str, Any], TaskError]:
+) -> TaskResult[dict[str, JsonValue], TaskError]:
     return TaskResult(ok={'lst': lst, 'dct': dct, 'tpl': list(tpl)})
 
 
@@ -130,13 +131,18 @@ def slow_task(duration_ms: int) -> TaskResult[str, TaskError]:
 
 
 @app.task(task_name='e2e_unserializable')
-def unserializable_result_task() -> TaskResult[Any, TaskError]:
-    """Task returning unserializable value for error handling tests."""
+def unserializable_result_task() -> TaskResult[int, TaskError]:
+    """Task that declares int return but actually returns a callable.
+
+    Exists to drive RETURN_TYPE_MISMATCH error-handling tests: the runtime
+    `ok_type_adapter.validate_python` rejects the callable against the
+    declared `int` slot, returning an Err.
+    """
 
     def identity(x: Any) -> Any:
         return x
 
-    return TaskResult(ok=identity)
+    return TaskResult(ok=identity)  # type: ignore[arg-type]
 
 
 @app.task(task_name='e2e_idempotent')

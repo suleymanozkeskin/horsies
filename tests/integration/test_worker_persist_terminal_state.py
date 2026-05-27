@@ -19,7 +19,11 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from horsies.core.app import Horsies
+from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.serde import dumps_json, serialize_error_payload
+from horsies.core.models.app import AppConfig
+from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
@@ -36,6 +40,39 @@ NOW = datetime.now(timezone.utc)
 # ---------------------------------------------------------------------------
 
 
+_TEST_APP: Horsies | None = None
+
+
+def _test_app() -> Horsies:
+    """Lazy-built Horsies app registering the task names this file inserts.
+
+    Production workers wire ``_app`` via ``_locate_app(cfg.app_locator)`` in
+    ``Worker._init_workers``; these unit-style integration tests bypass
+    preload and build a ``Worker`` directly, so we attach a minimal app
+    here. Strict-serde phase 6 worker finalize looks up ``task_ok_type``
+    via ``self._app.tasks[task_name]`` — registering each manually
+    inserted task name with a ``JsonValue``-typed return makes the
+    decode path uniform across the heterogeneous ok payloads these tests
+    seed (int, str, dict, None, etc.).
+    """
+    global _TEST_APP
+    if _TEST_APP is None:
+        cfg = AppConfig(broker=PostgresConfig(
+            database_url='postgresql+psycopg://u:p@localhost/db',
+        ))
+        _TEST_APP = Horsies(cfg)
+
+        @_TEST_APP.task(task_name='persist_terminal_test')
+        def _persist_terminal_test() -> TaskResult[JsonValue, TaskError]:
+            return TaskResult(ok=None)
+
+        @_TEST_APP.task(task_name='persist_retry_test')
+        def _persist_retry_test() -> TaskResult[JsonValue, TaskError]:
+            return TaskResult(ok=None)
+
+    return _TEST_APP
+
+
 def _make_worker(engine: AsyncEngine) -> Worker:
     """Construct a Worker wired to the test DB (no listener needed)."""
     sf = async_sessionmaker(engine, expire_on_commit=False)
@@ -44,7 +81,9 @@ def _make_worker(engine: AsyncEngine) -> Worker:
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
-    return Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
+    worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
+    worker._app = _test_app()
+    return worker
 
 
 async def _insert_running_task(session: AsyncSession) -> str:
@@ -157,17 +196,27 @@ async def _set_task_status(
 
 
 def _serialize_ok(value: object) -> str:
-    """Serialize a TaskResult(ok=value) to JSON string."""
-    r = dumps_json(TaskResult(ok=value))
+    """Build the strict ``__h_task_result__`` envelope for a seeded ok value.
+
+    Tests seed terminal task rows directly, so the JSON must match what
+    production writes. ``JsonValue`` is used as the ok-type because tests
+    here pass heterogeneous ok payloads (int, str, dict, None) under a
+    single registered task name; production tasks would carry their own
+    declared OkT.
+    """
+    envelope = encode_task_result(TaskResult(ok=value), JsonValue)
+    r = dumps_json(envelope)
     assert not is_err(r), f'Serialization failed: {r}'
     return r.ok_value
 
 
 def _serialize_err(error_code: str, message: str) -> str:
-    """Serialize a TaskResult(err=TaskError(...)) to JSON string."""
-    r = dumps_json(
+    """Build the strict ``__h_task_result__`` envelope for a seeded err."""
+    envelope = encode_task_result(
         TaskResult(err=TaskError(error_code=error_code, message=message)),
+        JsonValue,
     )
+    r = dumps_json(envelope)
     assert not is_err(r), f'Serialization failed: {r}'
     return r.ok_value
 

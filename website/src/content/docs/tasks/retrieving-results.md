@@ -17,7 +17,7 @@ Retrieve task outcomes through `TaskHandle.get()` / `get_async()`. For error han
 from horsies import RetrievalCode
 from instance import my_task
 
-send_result = my_task.send(10, 20)
+send_result = my_task.send(x=10, y=20)
 if send_result.is_err():
     raise RuntimeError(f"Send failed: {send_result.err_value.code}")
 handle = send_result.ok_value
@@ -39,7 +39,7 @@ else:
 ### Async Retrieval
 
 ```python
-send_result = await my_task.send_async(10, 20)
+send_result = await my_task.send_async(x=10, y=20)
 if send_result.is_err():
     raise RuntimeError(f"Send failed: {send_result.err_value.code}")
 handle = send_result.ok_value

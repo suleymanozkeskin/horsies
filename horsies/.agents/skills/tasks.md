@@ -131,8 +131,12 @@ Infra-level failures during task execution, brokering, or worker processing:
 Violations of the declared API contract between task author and library:
 
 - `RETURN_TYPE_MISMATCH` — returned value doesn't match declared type
-- `PYDANTIC_HYDRATION_ERROR` — return value could not be rehydrated to declared type
 - `WORKFLOW_CTX_MISSING_ID` — workflow context missing required ID
+
+(`PYDANTIC_HYDRATION_ERROR` is a legacy code retained in the enum but no
+longer reachable under strict-serde — stored payloads no longer carry
+the polymorphic ``__pydantic_model__`` shape that used to require
+runtime class import.)
 
 ### `RetrievalCode`
 
@@ -478,13 +482,28 @@ Serialization happens at `.send()` time, before enqueueing. Failure returns `Err
 - `dict` keys that collide after `str()` coercion
 - Non-finite floats (`nan`, `inf`)
 
-### Importability requirement
-
-Pydantic models and dataclasses must be importable from their `__module__` via `importlib.import_module`. Moving a model to a different file breaks rehydration of arguments serialized before the move → `PYDANTIC_HYDRATION_ERROR`.
-
 ### Return type serialization
 
-Worker serializes the return value after execution with the same codec. Non-serializable return → `WORKER_SERIALIZATION_ERROR`. Schema changes between serialization and retrieval → `PYDANTIC_HYDRATION_ERROR` (not a crash — `handle.get()` always returns `TaskResult`).
+Worker serializes the return value after execution with the strict-serde
+codec. Non-serializable return → `WORKER_SERIALIZATION_ERROR`.
+
+### Stored-result decode failure
+
+Decode failures surface differently depending on which retrieval API the
+caller uses:
+
+- `app.get_result(task_id, ...)` returns
+  `Err(BrokerOperationError(BrokerErrorCode.INVALID_JSON_PAYLOAD))` when
+  the stored envelope is malformed, missing the `__h_task_result__`
+  marker, or fails typed decode against the registered `task_ok_type`.
+  Cross-process monitoring and debugging callers see the infrastructure
+  failure as an outer `Err`, distinct from any domain `TaskError`.
+
+- `TaskHandle.get(...)` returns
+  `TaskResult(err=TaskError(error_code=RESULT_DESERIALIZATION_ERROR))`
+  when the stored payload cannot be decoded — `handle.get()` always
+  returns a `TaskResult`, so the decode failure is folded into the
+  domain error surface.
 
 ## Common Pitfalls
 

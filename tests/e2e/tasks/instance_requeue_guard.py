@@ -52,6 +52,7 @@ config = AppConfig(
 app = Horsies(config)
 broker = PostgresBroker(config.broker)
 app._broker = broker
+broker.app = app
 
 app.discover_tasks([
     'tests.e2e.tasks.basic',

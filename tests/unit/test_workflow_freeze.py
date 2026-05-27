@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from horsies.core.codec.json_value import JsonValue
 from horsies.core.errors import ErrorCode, WorkflowValidationError
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.task_send_types import TaskSendError, TaskSendResult
@@ -113,6 +114,24 @@ class MockFnWithCtx(TaskFunction[Any, Any]):
 fn_a = MockFn(task_name='task_a')
 fn_b = MockFn(task_name='task_b')
 fn_c = MockFnWithCtx(task_name='task_c')
+
+
+def _jsonvalue_payload_task(payload: JsonValue) -> TaskResult[None, TaskError]:
+    """Typed task target used by strict-snapshot regressions.
+
+    The annotated parameter routes through the JsonValue producer fence
+    inside ``_snapshot_kwargs_values`` so bad values (non-JSON natives,
+    non-finite floats, mapping-key collisions) surface as
+    ``WORKFLOW_KWARGS_NOT_SERIALIZABLE`` at workflow-spec construction.
+    """
+    _ = payload
+    return TaskResult(ok=None)
+
+
+def _typed_jsonvalue_fn(task_name: str) -> MockFn:
+    fn = MockFn(task_name=task_name)
+    fn._original_fn = _jsonvalue_payload_task  # type: ignore[attr-defined]
+    return fn
 
 
 @dataclass
@@ -423,19 +442,31 @@ class TestKwargsSnapshotAndFreeze:
         assert snap_payload.items == [1, 2, 3]
 
     def test_non_serializable_kwargs_value_fails_construction(self) -> None:
-        a = TaskNode(fn=fn_a, kwargs={'bad': object()})
+        """object() doesn't satisfy JsonValue — strict snapshot rejects it."""
+        a = TaskNode(
+            fn=_typed_jsonvalue_fn('wf_bad'),
+            kwargs={'payload': object()},
+        )
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='wf_bad', tasks=[a])
         assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
     def test_nan_kwargs_value_fails_construction(self) -> None:
-        a = TaskNode(fn=fn_a, kwargs={'bad_float': float('nan')})
+        """NaN is not RFC 8259; JsonValue's wire scan rejects it."""
+        a = TaskNode(
+            fn=_typed_jsonvalue_fn('wf_nan'),
+            kwargs={'payload': float('nan')},
+        )
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='wf_nan', tasks=[a])
         assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
     def test_colliding_mapping_keys_fail_construction(self) -> None:
-        a = TaskNode(fn=fn_a, kwargs={'bad_map': {1: 'a', '1': 'b'}})
+        """Non-string mapping keys violate the JsonValue dict[str, ...] shape."""
+        a = TaskNode(
+            fn=_typed_jsonvalue_fn('wf_key_collision'),
+            kwargs={'payload': {1: 'a', '1': 'b'}},
+        )
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='wf_key_collision', tasks=[a])
         assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE

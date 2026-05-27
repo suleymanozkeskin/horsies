@@ -167,7 +167,7 @@ GET_SUBWORKFLOW_SUMMARIES_SQL = text("""
 # -- SQL constants for on_workflow_task_complete --
 
 GET_WORKFLOW_TASK_BY_TASK_ID_SQL = text("""
-    SELECT workflow_id, task_index
+    SELECT workflow_id, task_index, task_name
     FROM horsies_workflow_tasks
     WHERE task_id = :tid
 """)
@@ -241,7 +241,7 @@ SET_READY_WORKFLOW_TASK_TERMINAL_SQL = text("""
 # -- SQL constants for get_dependency_results --
 
 GET_DEPENDENCY_RESULTS_SQL = text("""
-    SELECT task_index, status, result
+    SELECT task_index, task_name, status, result
     FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id
       AND task_index = ANY(:indices)
@@ -324,12 +324,12 @@ GET_TASK_STATUSES_SQL = text("""
 # -- SQL constants for get_workflow_failure_error --
 
 GET_FIRST_FAILED_TASK_RESULT_SQL = text("""
-    SELECT result FROM horsies_workflow_tasks
+    SELECT task_name, result FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id AND status = 'FAILED'
     ORDER BY task_index ASC LIMIT 1
 """)
 GET_FIRST_FAILED_REQUIRED_TASK_SQL = text("""
-    SELECT result FROM horsies_workflow_tasks
+    SELECT task_name, result FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id
       AND status = 'FAILED'
       AND task_index = ANY(:required)
@@ -341,11 +341,11 @@ GET_WORKFLOW_OUTPUT_INDEX_SQL = text(
     """SELECT output_task_index FROM horsies_workflows WHERE id = :wf_id"""
 )
 GET_OUTPUT_TASK_RESULT_SQL = text("""
-    SELECT result FROM horsies_workflow_tasks
+    SELECT task_name, result FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id AND task_index = :idx
 """)
 GET_TERMINAL_TASK_RESULTS_SQL = text("""
-    SELECT wt.node_id, wt.task_index, wt.result
+    SELECT wt.node_id, wt.task_index, wt.task_name, wt.result
     FROM horsies_workflow_tasks wt
     WHERE wt.workflow_id = :wf_id
       AND NOT EXISTS (

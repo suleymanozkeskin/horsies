@@ -26,10 +26,21 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from datetime import datetime, timezone
 from pydantic import TypeAdapter, ValidationError
+from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.kwargs import encode_kwargs
 from horsies.core.codec.serde import (
     serialize_task_options,
-    args_to_json,
-    kwargs_to_json,
+    dumps_json,
+)
+from horsies.core.codec.typed import (
+    TypeAnnotation,
+    decode_task_error,
+    decode_task_result,
+    validate_task_result_envelope,
+)
+from horsies.core.codec.signature_check import (
+    SignatureValidationError,
+    check_task_signature,
 )
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.utils.fingerprint import enqueue_fingerprint
@@ -61,6 +72,7 @@ from horsies.core.models.tasks import (
     OperationalErrorCode,
     ContractCode,
     RetrievalCode,
+    OutcomeCode,
 )
 from horsies.core.models.workflow import WorkflowContextMissingIdError
 from horsies.core.exception_mapper import (
@@ -176,11 +188,22 @@ class TaskHandle(Generic[T]):
     """
 
     def __init__(
-        self, task_id: str, app: Optional['Horsies'] = None, broker_mode: bool = False
+        self,
+        task_id: str,
+        app: Optional['Horsies'] = None,
+        broker_mode: bool = False,
+        ok_type: TypeAnnotation | None = None,
     ):
         self.task_id = task_id
         self._app = app
         self._broker_mode = broker_mode
+        # Strict-serde phase 6: declared OkT for typed decode. ``.send()``
+        # / ``.send_async()`` populate this from the wrapper's
+        # ``task_ok_type``. By-id reconstruction without an app or
+        # registered task leaves this ``None``; ``.get()`` then folds
+        # NO_TYPE_AVAILABLE into the err slot when an ok payload is
+        # present.
+        self.ok_type: TypeAnnotation | None = ok_type
         self._cached_result: Optional[TaskResult[T, TaskError]] = None
         self._result_fetched = False
 
@@ -203,6 +226,165 @@ class TaskHandle(Generic[T]):
         self._cached_result = error_result
         self._result_fetched = True
         return error_result
+
+    def _record_to_task_result(
+        self,
+        broker_result: Any,
+        timeout_ms: Optional[int],
+    ) -> TaskResult[T, TaskError]:
+        """Strict-serde phase 6: map a ``BrokerResult[RawResultRecord | None]``
+        to the typed ``TaskResult`` shape ``.get()`` returns.
+
+        Folds:
+        - ``Err(BrokerOperationError)`` → ``TaskResult(err=BROKER_ERROR)``
+          (or NO_TYPE_AVAILABLE / RESULT_DESERIALIZATION_ERROR for the
+          two strict-serde codes when surfaced by the broker layer).
+        - ``Ok(None)`` → ``TASK_NOT_FOUND``.
+        - ``Ok(record)`` with cancellation status → ``TASK_CANCELLED``.
+        - ``Ok(record)`` with non-terminal status (timeout fired) →
+          ``WAIT_TIMEOUT``.
+        - ``Ok(record)`` with raw_result populated → decode via
+          ``decode_task_result(record.raw_result, self.ok_type)``.
+          When ``ok_type is None`` and the err slot is populated, the
+          err is decoded directly (fast-path). When ``ok_type is None``
+          and the ok slot is populated, return ``NO_TYPE_AVAILABLE``.
+        """
+        from horsies.core.types.result import is_err as _is_err
+        from horsies.core.models.tasks import ContractCode
+
+        if _is_err(broker_result):
+            broker_err = broker_result.err_value
+            code = broker_err.code
+            if code == BrokerErrorCode.NO_TYPE_AVAILABLE:
+                err_code: BuiltInTaskCode = ContractCode.NO_TYPE_AVAILABLE
+            elif code == BrokerErrorCode.INVALID_JSON_PAYLOAD:
+                err_code = OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+            else:
+                err_code = OperationalErrorCode.BROKER_ERROR
+            return self._error_result(
+                error_code=err_code,
+                message=broker_err.message,
+                data={'task_id': self.task_id, 'broker_code': code.value},
+                exception=broker_err.exception,
+            )
+        record = broker_result.ok_value
+        if record is None:
+            return self._error_result(
+                error_code=RetrievalCode.TASK_NOT_FOUND,
+                message=f'Task {self.task_id} not found in database',
+                data={'task_id': self.task_id},
+            )
+        from horsies.core.types.status import TaskStatus as _TaskStatus
+
+        if record.status == _TaskStatus.CANCELLED:
+            return self._error_result(
+                error_code=OutcomeCode.TASK_CANCELLED,
+                message=f'Task {self.task_id} was cancelled before completion',
+                data={'task_id': self.task_id},
+            )
+        if record.raw_result is None:
+            # ``raw_result is None`` covers two distinct cases per the
+            # broker's ``get_raw_result_record`` contract:
+            #   1. Terminal status (COMPLETED / FAILED / EXPIRED) but
+            #      the result column is empty — engine never wrote a
+            #      payload, so map to RESULT_NOT_AVAILABLE (terminal,
+            #      cache the error).
+            #   2. Non-terminal status (PENDING / CLAIMED / RUNNING /
+            #      etc.) and the timeout fired before the row reached
+            #      a terminal state — map to WAIT_TIMEOUT (transient,
+            #      don't cache so a follow-up call can succeed).
+            terminal_statuses = (
+                _TaskStatus.COMPLETED,
+                _TaskStatus.FAILED,
+                _TaskStatus.EXPIRED,
+            )
+            if record.status in terminal_statuses:
+                return self._error_result(
+                    error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
+                    message=(
+                        f'Task {self.task_id} reached terminal status '
+                        f'{record.status.value} but stored no result '
+                        f'payload'
+                    ),
+                    data={
+                        'task_id': self.task_id,
+                        'status': record.status.value,
+                    },
+                )
+            tr_timeout: TaskResult[T, TaskError] = TaskResult(
+                err=TaskError(
+                    error_code=RetrievalCode.WAIT_TIMEOUT,
+                    message=(
+                        f'Timed out waiting for task {self.task_id} '
+                        f'after {timeout_ms}ms. Task may still be '
+                        f'running.'
+                    ),
+                    data={
+                        'task_id': self.task_id,
+                        'timeout_ms': timeout_ms,
+                        'status': record.status.value,
+                    },
+                ),
+            )
+            return tr_timeout
+
+        # Terminal record with payload. Validate the envelope shape
+        # before any per-slot decoding — both fast-path and full-decode
+        # routes share the same validator so a malformed envelope
+        # (missing marker, both slots populated, extras) fails closed
+        # before we touch the err slot.
+        raw = record.raw_result
+        try:
+            envelope = validate_task_result_envelope(raw)
+        except StrictJsonError as exc:
+            return self._error_result(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=f'TaskResult envelope invalid: {exc}',
+                data={'task_id': self.task_id},
+            )
+        err_slot = envelope.get('err')
+        # Err-fast-path: TaskError is fixed-schema; decodable without
+        # ok_type. ``validate_task_result_envelope`` already guarantees
+        # err and ok are not both populated.
+        if err_slot is not None:
+            try:
+                err_value = decode_task_error(err_slot)
+            except (StrictJsonError, ValidationError) as exc:
+                return self._error_result(
+                    error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                    message=f'Failed to decode TaskError: {exc}',
+                    data={'task_id': self.task_id},
+                )
+            decoded_err: TaskResult[T, TaskError] = TaskResult(
+                err=cast('TaskError', err_value),
+            )
+            self._cached_result = decoded_err
+            self._result_fetched = True
+            return decoded_err
+
+        # Ok slot path — needs ok_type.
+        if self.ok_type is None:
+            return self._error_result(
+                error_code=ContractCode.NO_TYPE_AVAILABLE,
+                message=(
+                    f'Task {self.task_id} ok-result decode requires '
+                    f'a declared OkT; the handle has none (task not '
+                    f'locally registered). Use raw_result() instead.'
+                ),
+                data={'task_id': self.task_id},
+            )
+        try:
+            decoded = decode_task_result(raw, self.ok_type)
+        except (StrictJsonError, ValidationError) as exc:
+            return self._error_result(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=f'decode_task_result failed: {exc}',
+                data={'task_id': self.task_id},
+            )
+        decoded_tr = cast('TaskResult[T, TaskError]', decoded)
+        self._cached_result = decoded_tr
+        self._result_fetched = True
+        return decoded_tr
 
     def get(
         self,
@@ -230,23 +412,11 @@ class TaskHandle(Generic[T]):
                     return result
 
         if self._broker_mode and self._app:
-            # Fetch from app's broker - broker now returns TaskResult for all cases
             broker = self._app.get_broker()
             try:
-                result = broker.get_result(self.task_id, timeout_ms)
-                # WAIT_TIMEOUT is transient ("not done yet"), not terminal.
-                # Caching it would prevent subsequent get() calls from ever
-                # seeing the real result once the task completes.
-                err_value = result.err
-                is_wait_timeout = (
-                    result.is_err()
-                    and err_value is not None
-                    and err_value.error_code == RetrievalCode.WAIT_TIMEOUT
+                broker_result = broker.get_raw_result_record(
+                    self.task_id, timeout_ms,
                 )
-                if not is_wait_timeout:
-                    self._cached_result = result
-                    self._result_fetched = True
-                return result
             except Exception as exc:
                 return self._error_result(
                     error_code=OperationalErrorCode.BROKER_ERROR,
@@ -254,6 +424,7 @@ class TaskHandle(Generic[T]):
                     data={'task_id': self.task_id},
                     exception=exc,
                 )
+            return self._record_to_task_result(broker_result, timeout_ms)
         else:
             # For synchronous/immediate execution, result should already be set
             match self._cached_result:
@@ -292,23 +463,11 @@ class TaskHandle(Generic[T]):
                     return result
 
         if self._broker_mode and self._app:
-            # Fetch from app's broker - broker now returns TaskResult for all cases
             broker = self._app.get_broker()
             try:
-                result = await broker.get_result_async(self.task_id, timeout_ms)
-                # WAIT_TIMEOUT is transient ("not done yet"), not terminal.
-                # Caching it would prevent subsequent get_async() calls from
-                # ever seeing the real result once the task completes.
-                err_value = result.err
-                is_wait_timeout = (
-                    result.is_err()
-                    and err_value is not None
-                    and err_value.error_code == RetrievalCode.WAIT_TIMEOUT
+                broker_result = await broker.get_raw_result_record_async(
+                    self.task_id, timeout_ms,
                 )
-                if not is_wait_timeout:
-                    self._cached_result = result
-                    self._result_fetched = True
-                return result
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -318,6 +477,7 @@ class TaskHandle(Generic[T]):
                     data={'task_id': self.task_id},
                     exception=exc,
                 )
+            return self._record_to_task_result(broker_result, timeout_ms)
         else:
             # For synchronous/immediate execution, result should already be set
             match self._cached_result:
@@ -352,8 +512,12 @@ class TaskHandle(Generic[T]):
                 retryable=False,
             ))
 
-        broker = self._app.get_broker()
-        return broker.get_task_info(
+        # Strict-serde phase 6: route through the app-level typed
+        # decode so ``include_result=True`` populates
+        # ``decoded_result`` / ``result_decoded`` whenever the task is
+        # locally registered. The broker-level ``get_task_info`` returns
+        # raw_result only.
+        return self._app.get_task_info(
             self.task_id,
             include_result=include_result,
             include_failed_reason=include_failed_reason,
@@ -382,8 +546,8 @@ class TaskHandle(Generic[T]):
                 retryable=False,
             ))
 
-        broker = self._app.get_broker()
-        return await broker.get_task_info_async(
+        # Strict-serde phase 6: same routing as the sync variant.
+        return await self._app.get_task_info_async(
             self.task_id,
             include_result=include_result,
             include_failed_reason=include_failed_reason,
@@ -702,6 +866,23 @@ def create_task_wrapper(
         )
 
     ok_type, err_type = type_args
+
+    # Strict signature validation per design-doc §2: every param / return
+    # annotation must use a type from the closed allow list. Runs AFTER the
+    # existing return-shape checks so HRS-100 / HRS-101 fire for missing /
+    # malformed return types; the strict validator catches banned content
+    # (Any, bare containers, set, bytes, Path, TypedDict, TypeVar, ...) and
+    # enforces ErrT is TaskError. Failure here is the documented breaking
+    # cut at app construction time.
+    try:
+        check_task_signature(fn, task_name=task_name)
+    except SignatureValidationError as exc:
+        raise TaskDefinitionError(
+            message=str(exc),
+            code=ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION,
+            location=fn_location,
+        ) from exc
+
     ok_type_adapter: TypeAdapter[Any] = TypeAdapter(ok_type)
     err_type_adapter: TypeAdapter[Any] = TypeAdapter(err_type)
 
@@ -932,7 +1113,7 @@ def create_task_wrapper(
                     continue
                 return mapped
 
-            return Ok(TaskHandle(result.ok_value, app, broker_mode=True))
+            return Ok(TaskHandle(result.ok_value, app, broker_mode=True, ok_type=ok_type))
 
         # Exhausted all attempts
         if last_err is not None:
@@ -1008,7 +1189,7 @@ def create_task_wrapper(
                     continue
                 return mapped
 
-            return Ok(TaskHandle(result.ok_value, app, broker_mode=True))
+            return Ok(TaskHandle(result.ok_value, app, broker_mode=True, ok_type=ok_type))
 
         # Exhausted all attempts
         if last_err is not None:
@@ -1084,7 +1265,7 @@ def create_task_wrapper(
                     continue
                 return mapped
 
-            return Ok(TaskHandle(result.ok_value, app, broker_mode=True))
+            return Ok(TaskHandle(result.ok_value, app, broker_mode=True, ok_type=ok_type))
 
         if last_err is not None:
             return Err(last_err)
@@ -1127,29 +1308,42 @@ def create_task_wrapper(
             return options_result
         good_until, task_options_json = options_result.ok_value
 
-        # Serialize args
-        args_json: str | None = None
+        # Strict-serde: positional args have no typed wire representation
+        # and are rejected at every producer entry point. The receiver
+        # always binds against the kwargs signature; positional values
+        # would defeat that binding.
         if args:
-            args_r = args_to_json(args)
-            if is_err(args_r):
-                return Err(TaskSendError(
-                    code=TaskSendErrorCode.VALIDATION_FAILED,
-                    message=f'Failed to serialize args for {task_name}: {args_r.err_value}',
-                    retryable=False,
-                    task_id=task_id,
-                    exception=args_r.err_value if isinstance(args_r.err_value, BaseException) else None,
-                ))
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.VALIDATION_FAILED,
+                message=(
+                    f"Task {task_name!r} received {len(args)} positional "
+                    f"arg(s); strict-serde rejects positional args. "
+                    f"Pass every argument by keyword."
+                ),
+                retryable=False,
+                task_id=task_id,
+            ))
+        args_json: str | None = None
 
-            args_json = args_r.ok_value
-
-        # Serialize kwargs
+        # Serialize kwargs — strict-serde phase 3 routes through encode_kwargs
+        # using the receiver's declared parameter types.
         kwargs_json: str | None = None
         if kwargs_dict:
-            kwargs_r = kwargs_to_json(kwargs_dict)
+            try:
+                encoded_kwargs = encode_kwargs(fn, kwargs_dict)
+            except (StrictJsonError, ValidationError) as exc:
+                return Err(TaskSendError(
+                    code=TaskSendErrorCode.VALIDATION_FAILED,
+                    message=f'Failed to encode kwargs for {task_name}: {exc}',
+                    retryable=False,
+                    task_id=task_id,
+                    exception=exc,
+                ))
+            kwargs_r = dumps_json(encoded_kwargs)
             if is_err(kwargs_r):
                 return Err(TaskSendError(
                     code=TaskSendErrorCode.VALIDATION_FAILED,
-                    message=f'Failed to serialize kwargs for {task_name}: {kwargs_r.err_value}',
+                    message=f'Failed to serialize encoded kwargs for {task_name}: {kwargs_r.err_value}',
                     retryable=False,
                     task_id=task_id,
                     exception=kwargs_r.err_value if isinstance(kwargs_r.err_value, BaseException) else None,

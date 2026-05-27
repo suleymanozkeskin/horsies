@@ -14,7 +14,8 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.workflow import TaskNode, WorkflowSpec
 from horsies.core.workflows.engine import on_workflow_task_complete
-from horsies.core.codec.serde import loads_json, task_result_from_json
+from horsies.core.codec.serde import loads_json
+from horsies.core.codec.typed import decode_task_result
 from horsies.core.worker.current import set_current_app
 from horsies.core.worker.worker import _run_task_entry, _initialize_worker_pool
 
@@ -70,6 +71,7 @@ class TestArgsFromInjection:
     async def _complete_task(
         self,
         session: AsyncSession,
+        broker: PostgresBroker,
         workflow_id: str,
         task_index: int,
         result: TaskResult[Any, TaskError],
@@ -84,7 +86,7 @@ class TestArgsFromInjection:
         )
         row = res.fetchone()
         if row and row[0]:
-            await on_workflow_task_complete(session, row[0], result)
+            await on_workflow_task_complete(session, row[0], result, broker)
             await session.commit()
 
     async def _get_task_kwargs(
@@ -140,16 +142,17 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A with result
-        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=42))
+        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=42))
 
         # Check wrapper: key present with TaskResult marker
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
         assert 'input_result' in kwargs
-        assert kwargs['input_result']['__horsies_taskresult__'] is True
+        assert kwargs['input_result']['__h_taskresult_envelope__'] is True
 
         # Check inner data: full TaskResult with ok value
-        injected = loads_json(kwargs['input_result']['data']).unwrap()
+        injected = kwargs['input_result']['inner']
         assert isinstance(injected, dict)
+        assert injected['__h_task_result__'] is True
         assert injected.get('ok') == 42
         assert 'err' not in injected or injected['err'] is None
 
@@ -178,15 +181,15 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete both roots
-        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=100))
-        await self._complete_task(session, handle.workflow_id, 1, TaskResult(ok=200))
+        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=100))
+        await self._complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=200))
 
         # Check C's kwargs
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 2)
         assert 'first' in kwargs
         assert 'second' in kwargs
-        assert kwargs['first']['__horsies_taskresult__'] is True
-        assert kwargs['second']['__horsies_taskresult__'] is True
+        assert kwargs['first']['__h_taskresult_envelope__'] is True
+        assert kwargs['second']['__h_taskresult_envelope__'] is True
 
     async def test_args_from_err_result(
         self,
@@ -214,6 +217,7 @@ class TestArgsFromInjection:
         # Complete A with failure
         await self._complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test failure')),
@@ -231,8 +235,9 @@ class TestArgsFromInjection:
 
         # Get B's kwargs - should contain failed TaskResult
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
-        injected = loads_json(kwargs['input_result']['data']).unwrap()
-        assert 'err' in injected
+        injected = kwargs['input_result']['inner']
+        assert injected['__h_task_result__'] is True
+        assert injected['err'] is not None
 
     async def test_args_from_with_static_kwargs(
         self,
@@ -267,7 +272,7 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A
-        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=50))
+        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=50))
 
         # Get B's kwargs - should have both static and injected
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
@@ -307,7 +312,7 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A
-        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=50))
+        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=50))
 
         # Get B's kwargs - should have both pointing to same result
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
@@ -315,8 +320,9 @@ class TestArgsFromInjection:
         assert 'second_copy' in kwargs
 
         # Both should have same data
-        first_data = loads_json(kwargs['first_copy']['data']).unwrap()
-        second_data = loads_json(kwargs['second_copy']['data']).unwrap()
+        first_data = kwargs['first_copy']['inner']
+        second_data = kwargs['second_copy']['inner']
+        assert first_data['__h_task_result__'] is True
         assert first_data == second_data
 
     async def test_skipped_dep_injects_upstream_skipped_sentinel(
@@ -350,6 +356,7 @@ class TestArgsFromInjection:
         # Complete A as FAILED
         await self._complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(err=TaskError(error_code='A_FAILED', message='A failed')),
@@ -361,11 +368,12 @@ class TestArgsFromInjection:
         # Check C's kwargs contain UPSTREAM_SKIPPED sentinel for B
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 2)
         assert 'input_result' in kwargs
-        assert kwargs['input_result']['__horsies_taskresult__'] is True
+        assert kwargs['input_result']['__h_taskresult_envelope__'] is True
 
         # Parse the injected TaskResult
-        injected_data = loads_json(kwargs['input_result']['data']).unwrap()
-        assert 'err' in injected_data
+        injected_data = kwargs['input_result']['inner']
+        assert injected_data['__h_task_result__'] is True
+        assert injected_data['err'] is not None
         assert injected_data['err']['error_code'] == {'__builtin_task_code__': 'UPSTREAM_SKIPPED'}
         assert injected_data['err']['data']['dependency_index'] == 1  # B's index
 
@@ -397,6 +405,7 @@ class TestArgsFromInjection:
         # Complete A as FAILED with specific error
         await self._complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(
@@ -407,11 +416,12 @@ class TestArgsFromInjection:
         # Check B's kwargs contain A's original error (not UPSTREAM_SKIPPED)
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
         assert 'input_result' in kwargs
-        assert kwargs['input_result']['__horsies_taskresult__'] is True
+        assert kwargs['input_result']['__h_taskresult_envelope__'] is True
 
         # Parse the injected TaskResult
-        injected_data = loads_json(kwargs['input_result']['data']).unwrap()
-        assert 'err' in injected_data
+        injected_data = kwargs['input_result']['inner']
+        assert injected_data['__h_task_result__'] is True
+        assert injected_data['err'] is not None
         assert (
             injected_data['err']['error_code'] == 'ORIGINAL_ERROR'
         )  # Original error preserved
@@ -444,7 +454,7 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A to enqueue B
-        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
+        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
 
         # Fetch task row for B
         task_row_result = await session.execute(
@@ -482,7 +492,7 @@ class TestArgsFromInjection:
         assert ok is True
         assert worker_failure is None
 
-        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
+        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
         assert task_result.is_ok()
         assert task_result.unwrap() == 15
 
@@ -512,6 +522,7 @@ class TestArgsFromInjection:
         # Complete A as FAILED
         await self._complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(err=TaskError(error_code='DEP_FAIL', message='Dep failed')),
@@ -561,7 +572,7 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A
-        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
+        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
 
         # B should be enqueued with only static kwargs
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
@@ -569,7 +580,7 @@ class TestArgsFromInjection:
         # No TaskResult markers injected
         for value in kwargs.values():
             if isinstance(value, dict):
-                assert '__horsies_taskresult__' not in value
+                assert '__h_taskresult_envelope__' not in value
 
     async def test_worker_deserializes_err_taskresult(
         self,
@@ -603,6 +614,7 @@ class TestArgsFromInjection:
         # Complete A as FAILED to enqueue B
         await self._complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(err=TaskError(error_code='WORKER_ERR', message='Worker err test')),
@@ -643,7 +655,7 @@ class TestArgsFromInjection:
         assert ok is True
         assert worker_failure is None
 
-        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
+        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
         assert task_result.is_ok()
         assert task_result.unwrap() == 999  # Recovery value
 
@@ -685,6 +697,7 @@ class TestArgsFromInjection:
         # Complete A as FAILED → B becomes SKIPPED → C enqueued
         await self._complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(err=TaskError(error_code='A_FAIL', message='A failed')),
@@ -725,7 +738,7 @@ class TestArgsFromInjection:
         assert ok is True
         assert worker_failure is None
 
-        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
+        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
         assert task_result.is_ok()
         assert task_result.unwrap() == 'UPSTREAM_SKIPPED'
 
@@ -759,17 +772,17 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete both roots
-        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=100))
-        await self._complete_task(session, handle.workflow_id, 1, TaskResult(ok=200))
+        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=100))
+        await self._complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=200))
 
         # Check C's kwargs: only 'from_a' injected, nothing from B
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 2)
         assert 'from_a' in kwargs
-        assert kwargs['from_a']['__horsies_taskresult__'] is True
+        assert kwargs['from_a']['__h_taskresult_envelope__'] is True
 
         # Exactly one TaskResult marker in kwargs — B's result not leaked
         taskresult_keys = [
             k for k, v in kwargs.items()
-            if isinstance(v, dict) and v.get('__horsies_taskresult__')
+            if isinstance(v, dict) and v.get('__h_taskresult_envelope__')
         ]
         assert taskresult_keys == ['from_a']

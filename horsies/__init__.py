@@ -89,6 +89,7 @@ from .core.brokers.result_types import (
     BrokerResult,
 )
 from .core.types.result import Result, Ok, Err, is_ok, is_err
+from .core.codec import JsonValue, StrictJsonError
 
 __all__ = [
     # Version
@@ -185,4 +186,7 @@ __all__ = [
     'Err',
     'is_ok',
     'is_err',
+    # Codec boundary types
+    'JsonValue',
+    'StrictJsonError',
 ]
