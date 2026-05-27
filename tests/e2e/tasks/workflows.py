@@ -7,10 +7,12 @@ for the worker process to resolve TaskNode.index correctly.
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Annotated, Any, Literal, TypeAlias
+
+from pydantic import BaseModel, Field
 
 from horsies.core.codec.json_value import JsonValue
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.tasks import SubWorkflowError, TaskResult, TaskError
 from horsies.core.models.workflow import TaskNode, SuccessPolicy, SuccessCase
 
 from tests.e2e.tasks.instance import app
@@ -970,4 +972,506 @@ spec_on_error_pause = _workflow(
     name='e2e_on_error_pause',
     tasks=[node_oep_a, node_oep_b, node_oep_c],
     on_error=OnError.PAUSE,
+)
+
+
+# =============================================================================
+# L7: SubWorkflowNode full lifecycle matrix
+# =============================================================================
+
+from horsies.core.models.workflow import SubWorkflowNode, WorkflowDefinition
+
+
+class E2ESubCat(BaseModel):
+    kind: Literal['cat'] = 'cat'
+    name: str
+
+
+class E2ESubDog(BaseModel):
+    kind: Literal['dog'] = 'dog'
+    name: str
+    bark_volume: int
+
+
+E2ESubPet: TypeAlias = Annotated[
+    E2ESubCat | E2ESubDog,
+    Field(discriminator='kind'),
+]
+
+
+@app.task(task_name='e2e_sub_int_ok')
+def e2e_sub_int_ok_task(value: int = 11) -> TaskResult[int, TaskError]:
+    time.sleep(0.05)
+    return TaskResult(ok=value)
+
+
+@app.task(task_name='e2e_sub_int_fail')
+def e2e_sub_int_fail_task(error_code: str) -> TaskResult[int, TaskError]:
+    time.sleep(0.05)
+    return TaskResult(
+        err=TaskError(error_code=error_code, message=f'Subworkflow failed: {error_code}'),
+    )
+
+
+@app.task(task_name='e2e_sub_report_input')
+def e2e_sub_report_input_task(
+    input_is_err: bool,
+    input_error_code: str | None,
+    input_value: int | None,
+) -> TaskResult[dict[str, JsonValue], TaskError]:
+    time.sleep(0.05)
+    return TaskResult(ok={
+        'input_is_err': input_is_err,
+        'input_error_code': input_error_code,
+        'input_value': input_value,
+    })
+
+
+@app.task(task_name='e2e_sub_probe_failed_child')
+def e2e_sub_probe_failed_child_task(
+    child_result: TaskResult[int, TaskError],
+    workflow_ctx: WorkflowContext | None = None,
+) -> TaskResult[dict[str, JsonValue], TaskError]:
+    time.sleep(0.05)
+
+    args_err = child_result.err if child_result.is_err() else None
+    ctx_err: TaskError | None = None
+    summary_status: str | None = None
+    summary_failed_tasks: int | None = None
+    summary_error_summary: str | None = None
+    ctx_lookup_ok = False
+    summary_lookup_ok = False
+
+    if workflow_ctx is not None:
+        try:
+            ctx_result = workflow_ctx.result_for(node_e2e_sub_failure_probe_child.key())
+            ctx_lookup_ok = True
+            ctx_err = ctx_result.err if ctx_result.is_err() else None
+        except Exception as exc:
+            ctx_err = TaskError(
+                error_code='CTX_LOOKUP_FAILED',
+                message=f'{type(exc).__name__}: {exc}',
+            )
+
+        try:
+            summary = workflow_ctx.summary_for(node_e2e_sub_failure_probe_child)
+            summary_lookup_ok = True
+            summary_status = summary.status.value
+            summary_failed_tasks = summary.failed_tasks
+            summary_error_summary = summary.error_summary
+        except Exception as exc:
+            summary_error_summary = f'{type(exc).__name__}: {exc}'
+
+    return TaskResult(ok={
+        'args_lookup_ok': True,
+        'args_is_subworkflow_error': isinstance(args_err, SubWorkflowError),
+        'args_sub_workflow_id': (
+            args_err.sub_workflow_id if isinstance(args_err, SubWorkflowError) else None
+        ),
+        'ctx_lookup_ok': ctx_lookup_ok,
+        'ctx_is_subworkflow_error': isinstance(ctx_err, SubWorkflowError),
+        'ctx_sub_workflow_id': (
+            ctx_err.sub_workflow_id if isinstance(ctx_err, SubWorkflowError) else None
+        ),
+        'ids_match': (
+            isinstance(args_err, SubWorkflowError)
+            and isinstance(ctx_err, SubWorkflowError)
+            and args_err.sub_workflow_id == ctx_err.sub_workflow_id
+        ),
+        'summary_lookup_ok': summary_lookup_ok,
+        'summary_status': summary_status,
+        'summary_failed_tasks': summary_failed_tasks,
+        'summary_error_summary': summary_error_summary,
+    })
+
+
+@app.task(task_name='e2e_sub_probe_success_ctx')
+def e2e_sub_probe_success_ctx_task(
+    workflow_ctx: WorkflowContext | None = None,
+) -> TaskResult[dict[str, JsonValue], TaskError]:
+    time.sleep(0.05)
+
+    result_ok = False
+    result_value: int | None = None
+    result_error_code: str | None = None
+    summary_status: str | None = None
+    summary_output: JsonValue = None
+    summary_completed_tasks: int | None = None
+    summary_lookup_ok = False
+
+    if workflow_ctx is None:
+        return TaskResult(
+            err=TaskError(error_code='NO_CTX', message='WorkflowContext not provided'),
+        )
+
+    try:
+        result = workflow_ctx.result_for(node_e2e_sub_success_ctx_child.key())
+        result_ok = result.is_ok()
+        if result.is_ok():
+            result_value = result.unwrap()
+        else:
+            err = result.err
+            result_error_code = str(err.error_code) if err is not None else None
+    except Exception as exc:
+        result_error_code = f'{type(exc).__name__}: {exc}'
+
+    try:
+        summary = workflow_ctx.summary_for(node_e2e_sub_success_ctx_child)
+        summary_lookup_ok = True
+        summary_status = summary.status.value
+        summary_output = summary.output
+        summary_completed_tasks = summary.completed_tasks
+    except Exception as exc:
+        summary_status = f'{type(exc).__name__}: {exc}'
+
+    return TaskResult(ok={
+        'result_ok': result_ok,
+        'result_value': result_value,
+        'result_error_code': result_error_code,
+        'summary_lookup_ok': summary_lookup_ok,
+        'summary_status': summary_status,
+        'summary_output': summary_output,
+        'summary_completed_tasks': summary_completed_tasks,
+    })
+
+
+@app.task(task_name='e2e_sub_pet_report')
+def e2e_sub_pet_report_task(
+    saw_dog_at_build: bool,
+    type_name_at_build: str,
+    kind_at_build: str | None,
+    bark_volume_at_build: int | None,
+) -> TaskResult[dict[str, JsonValue], TaskError]:
+    time.sleep(0.05)
+    return TaskResult(ok={
+        'saw_dog_at_build': saw_dog_at_build,
+        'type_name_at_build': type_name_at_build,
+        'kind_at_build': kind_at_build,
+        'bark_volume_at_build': bark_volume_at_build,
+    })
+
+
+class E2ESubOkWorkflow(WorkflowDefinition[int]):
+    name = 'e2e_sub_ok_workflow'
+    definition_key = 'tests.e2e.sub.ok.v1'
+
+    child = TaskNode(fn=e2e_sub_int_ok_task, kwargs={'value': 11})
+
+    class Meta:
+        output = None
+        on_error = OnError.FAIL
+
+
+E2ESubOkWorkflow.Meta.output = E2ESubOkWorkflow.child
+
+
+class E2ESubFailWorkflow(WorkflowDefinition[int]):
+    name = 'e2e_sub_fail_workflow'
+    definition_key = 'tests.e2e.sub.fail.v1'
+
+    child = TaskNode(
+        fn=e2e_sub_int_fail_task,
+        kwargs={'error_code': 'E2E_SUB_CHILD_FAIL'},
+    )
+
+    class Meta:
+        output = None
+        on_error = OnError.FAIL
+
+
+E2ESubFailWorkflow.Meta.output = E2ESubFailWorkflow.child
+
+
+class E2ESubNestedOkMiddleWorkflow(WorkflowDefinition[int]):
+    name = 'e2e_sub_nested_ok_middle_workflow'
+    definition_key = 'tests.e2e.sub.nested.ok.middle.v1'
+
+    child = SubWorkflowNode(workflow_def=E2ESubOkWorkflow)
+
+    class Meta:
+        output = None
+        on_error = OnError.FAIL
+
+
+E2ESubNestedOkMiddleWorkflow.Meta.output = E2ESubNestedOkMiddleWorkflow.child
+
+
+class E2ESubNestedFailMiddleWorkflow(WorkflowDefinition[int]):
+    name = 'e2e_sub_nested_fail_middle_workflow'
+    definition_key = 'tests.e2e.sub.nested.fail.middle.v1'
+
+    child = SubWorkflowNode(workflow_def=E2ESubFailWorkflow)
+
+    class Meta:
+        output = None
+        on_error = OnError.FAIL
+
+
+E2ESubNestedFailMiddleWorkflow.Meta.output = E2ESubNestedFailMiddleWorkflow.child
+
+
+class E2ESubParamWorkflow(WorkflowDefinition[int]):
+    name = 'e2e_sub_param_workflow'
+    definition_key = 'tests.e2e.sub.param.v1'
+
+    @classmethod
+    def build_with(
+        cls,
+        horsies_app: Any,
+        value: TaskResult[int, TaskError],
+    ) -> Any:
+        raw_value = value.unwrap() if value.is_ok() else -1
+        child = TaskNode(fn=e2e_sub_int_ok_task, kwargs={'value': raw_value})
+        return horsies_app.workflow(
+            name=cls.name,
+            tasks=[child],
+            output=child,
+            on_error=OnError.FAIL,
+            definition_key=cls.definition_key,
+            workflow_def_cls=cls,
+        )
+
+
+class E2ESubFailedInputWorkflow(WorkflowDefinition[dict[str, JsonValue]]):
+    name = 'e2e_sub_failed_input_workflow'
+    definition_key = 'tests.e2e.sub.failed.input.v1'
+
+    @classmethod
+    def build_with(
+        cls,
+        horsies_app: Any,
+        value: TaskResult[int, TaskError],
+    ) -> Any:
+        err = value.err if value.is_err() else None
+        child = TaskNode(
+            fn=e2e_sub_report_input_task,
+            kwargs={
+                'input_is_err': value.is_err(),
+                'input_error_code': str(err.error_code) if err is not None else None,
+                'input_value': value.unwrap() if value.is_ok() else None,
+            },
+        )
+        return horsies_app.workflow(
+            name=cls.name,
+            tasks=[child],
+            output=child,
+            on_error=OnError.FAIL,
+            definition_key=cls.definition_key,
+            workflow_def_cls=cls,
+        )
+
+
+class E2ESubTypedKwargWorkflow(WorkflowDefinition[dict[str, JsonValue]]):
+    name = 'e2e_sub_typed_kwarg_workflow'
+    definition_key = 'tests.e2e.sub.typed.kwarg.v1'
+
+    @classmethod
+    def build_with(
+        cls,
+        horsies_app: Any,
+        pet: E2ESubPet,
+    ) -> Any:
+        child = TaskNode(
+            fn=e2e_sub_pet_report_task,
+            kwargs={
+                'saw_dog_at_build': isinstance(pet, E2ESubDog),
+                'type_name_at_build': type(pet).__name__,
+                'kind_at_build': getattr(pet, 'kind', None),
+                'bark_volume_at_build': getattr(pet, 'bark_volume', None),
+            },
+        )
+        return horsies_app.workflow(
+            name=cls.name,
+            tasks=[child],
+            output=child,
+            on_error=OnError.FAIL,
+            definition_key=cls.definition_key,
+            workflow_def_cls=cls,
+        )
+
+
+node_e2e_sub_success_child = SubWorkflowNode(
+    workflow_def=E2ESubOkWorkflow,
+    node_id='e2e_sub_success_child',
+)
+spec_subworkflow_success_full_surface = _workflow(
+    name='e2e_subworkflow_success_full_surface',
+    tasks=[node_e2e_sub_success_child],
+    output=node_e2e_sub_success_child,
+)
+
+
+node_e2e_sub_failure_child = SubWorkflowNode(
+    workflow_def=E2ESubFailWorkflow,
+    node_id='e2e_sub_failure_child',
+)
+spec_subworkflow_failure_fail_policy = _workflow(
+    name='e2e_subworkflow_failure_fail_policy',
+    tasks=[node_e2e_sub_failure_child],
+    output=node_e2e_sub_failure_child,
+    on_error=OnError.FAIL,
+)
+
+
+node_e2e_sub_pause_child = SubWorkflowNode(
+    workflow_def=E2ESubFailWorkflow,
+    node_id='e2e_sub_pause_child',
+)
+spec_subworkflow_failure_pause_policy = _workflow(
+    name='e2e_subworkflow_failure_pause_policy',
+    tasks=[node_e2e_sub_pause_child],
+    output=node_e2e_sub_pause_child,
+    on_error=OnError.PAUSE,
+)
+
+
+node_e2e_sub_success_ctx_child = SubWorkflowNode(
+    workflow_def=E2ESubOkWorkflow,
+    node_id='e2e_sub_success_ctx_child',
+)
+node_e2e_sub_success_ctx_probe = TaskNode(
+    fn=e2e_sub_probe_success_ctx_task,
+    node_id='e2e_sub_success_ctx_probe',
+    waits_for=[node_e2e_sub_success_ctx_child],
+    workflow_ctx_from=[node_e2e_sub_success_ctx_child],
+)
+spec_subworkflow_success_ctx_probe = _workflow(
+    name='e2e_subworkflow_success_ctx_probe',
+    tasks=[node_e2e_sub_success_ctx_child, node_e2e_sub_success_ctx_probe],
+    output=node_e2e_sub_success_ctx_probe,
+)
+
+
+node_e2e_sub_failure_probe_child = SubWorkflowNode(
+    workflow_def=E2ESubFailWorkflow,
+    node_id='e2e_sub_failure_probe_child',
+)
+node_e2e_sub_failure_probe = TaskNode(
+    fn=e2e_sub_probe_failed_child_task,
+    node_id='e2e_sub_failure_probe',
+    waits_for=[node_e2e_sub_failure_probe_child],
+    args_from={'child_result': node_e2e_sub_failure_probe_child},
+    workflow_ctx_from=[node_e2e_sub_failure_probe_child],
+    allow_failed_deps=True,
+)
+spec_subworkflow_failure_args_ctx_probe = _workflow(
+    name='e2e_subworkflow_failure_args_ctx_probe',
+    tasks=[node_e2e_sub_failure_probe_child, node_e2e_sub_failure_probe],
+    output=node_e2e_sub_failure_probe,
+    success_policy=SuccessPolicy(
+        cases=[SuccessCase(required=[node_e2e_sub_failure_probe])],
+        optional=[node_e2e_sub_failure_probe_child],
+    ),
+)
+
+
+node_e2e_sub_outputless_ok = TaskNode(
+    fn=mark_task,
+    node_id='e2e_sub_outputless_ok',
+    kwargs={'value': 'required_ok'},
+)
+node_e2e_sub_outputless_fail_child = SubWorkflowNode(
+    workflow_def=E2ESubFailWorkflow,
+    node_id='e2e_sub_outputless_fail_child',
+)
+spec_subworkflow_outputless_success_policy = _workflow(
+    name='e2e_subworkflow_outputless_success_policy',
+    tasks=[node_e2e_sub_outputless_ok, node_e2e_sub_outputless_fail_child],
+    success_policy=SuccessPolicy(
+        cases=[SuccessCase(required=[node_e2e_sub_outputless_ok])],
+        optional=[node_e2e_sub_outputless_fail_child],
+    ),
+)
+
+
+node_e2e_sub_parallel_ok_child = SubWorkflowNode(
+    workflow_def=E2ESubOkWorkflow,
+    node_id='e2e_sub_parallel_ok_child',
+)
+node_e2e_sub_parallel_fail_child = SubWorkflowNode(
+    workflow_def=E2ESubFailWorkflow,
+    node_id='e2e_sub_parallel_fail_child',
+)
+spec_subworkflow_parallel_success_failure = _workflow(
+    name='e2e_subworkflow_parallel_success_failure',
+    tasks=[node_e2e_sub_parallel_ok_child, node_e2e_sub_parallel_fail_child],
+    success_policy=SuccessPolicy(
+        cases=[SuccessCase(required=[node_e2e_sub_parallel_ok_child])],
+        optional=[node_e2e_sub_parallel_fail_child],
+    ),
+)
+
+
+node_e2e_sub_nested_success_child = SubWorkflowNode(
+    workflow_def=E2ESubNestedOkMiddleWorkflow,
+    node_id='e2e_sub_nested_success_child',
+)
+spec_subworkflow_nested_success = _workflow(
+    name='e2e_subworkflow_nested_success',
+    tasks=[node_e2e_sub_nested_success_child],
+    output=node_e2e_sub_nested_success_child,
+)
+
+
+node_e2e_sub_nested_failure_child = SubWorkflowNode(
+    workflow_def=E2ESubNestedFailMiddleWorkflow,
+    node_id='e2e_sub_nested_failure_child',
+)
+spec_subworkflow_nested_failure = _workflow(
+    name='e2e_subworkflow_nested_failure',
+    tasks=[node_e2e_sub_nested_failure_child],
+    output=node_e2e_sub_nested_failure_child,
+)
+
+
+node_e2e_sub_param_source = TaskNode(
+    fn=produce_int_task,
+    node_id='e2e_sub_param_source',
+    kwargs={'value': 37},
+)
+node_e2e_sub_param_child = SubWorkflowNode(
+    workflow_def=E2ESubParamWorkflow,
+    node_id='e2e_sub_param_child',
+    waits_for=[node_e2e_sub_param_source],
+    args_from={'value': node_e2e_sub_param_source},
+)
+spec_subworkflow_build_with_args_from = _workflow(
+    name='e2e_subworkflow_build_with_args_from',
+    tasks=[node_e2e_sub_param_source, node_e2e_sub_param_child],
+    output=node_e2e_sub_param_child,
+)
+
+
+node_e2e_sub_failed_input_source = TaskNode(
+    fn=fail_task,
+    node_id='e2e_sub_failed_input_source',
+    kwargs={'error_code': 'E2E_UPSTREAM_FAIL'},
+)
+node_e2e_sub_failed_input_child = SubWorkflowNode(
+    workflow_def=E2ESubFailedInputWorkflow,
+    node_id='e2e_sub_failed_input_child',
+    waits_for=[node_e2e_sub_failed_input_source],
+    args_from={'value': node_e2e_sub_failed_input_source},
+    allow_failed_deps=True,
+)
+spec_subworkflow_allow_failed_deps_to_build_with = _workflow(
+    name='e2e_subworkflow_allow_failed_deps_to_build_with',
+    tasks=[node_e2e_sub_failed_input_source, node_e2e_sub_failed_input_child],
+    output=node_e2e_sub_failed_input_child,
+    success_policy=SuccessPolicy(
+        cases=[SuccessCase(required=[node_e2e_sub_failed_input_child])],
+        optional=[node_e2e_sub_failed_input_source],
+    ),
+)
+
+
+node_e2e_sub_typed_kwarg_child = SubWorkflowNode(
+    workflow_def=E2ESubTypedKwargWorkflow,
+    node_id='e2e_sub_typed_kwarg_child',
+    kwargs={'pet': E2ESubDog(name='Ada', bark_volume=7)},
+)
+spec_subworkflow_static_kwargs_preserve_types = _workflow(
+    name='e2e_subworkflow_static_kwargs_preserve_types',
+    tasks=[node_e2e_sub_typed_kwarg_child],
+    output=node_e2e_sub_typed_kwarg_child,
 )
