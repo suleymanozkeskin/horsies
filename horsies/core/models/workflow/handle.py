@@ -144,6 +144,26 @@ SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL = text("""
       AND t.status = 'CANCELLED'
 """)
 
+CASCADE_CANCEL_CHILD_WORKFLOWS_SQL = text("""
+    WITH RECURSIVE descendants AS (
+        SELECT id
+        FROM horsies_workflows
+        WHERE parent_workflow_id = :wf_id
+        UNION ALL
+        SELECT child.id
+        FROM horsies_workflows child
+        JOIN descendants parent ON child.parent_workflow_id = parent.id
+    )
+    UPDATE horsies_workflows w
+    SET status = 'CANCELLED', updated_at = NOW()
+    FROM descendants d
+    WHERE w.id = d.id
+      AND w.status IN ('PENDING', 'RUNNING', 'PAUSED')
+    RETURNING w.id
+""")
+
+NOTIFY_WORKFLOW_DONE_SQL = text("""SELECT pg_notify('workflow_done', :wf_id)""")
+
 
 # =============================================================================
 # WorkflowHandle
@@ -1087,6 +1107,37 @@ class WorkflowHandle(Generic[OutT]):
                     SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL,
                     {'wf_id': self.workflow_id},
                 )
+
+                # Cascade cancellation to currently active child workflows.
+                # The parent node may remain RUNNING until an already-started
+                # child task exits, but the workflow boundary is terminal and
+                # handle/status reads must reflect that immediately.
+                child_rows = await session.execute(
+                    CASCADE_CANCEL_CHILD_WORKFLOWS_SQL,
+                    {'wf_id': self.workflow_id},
+                )
+                child_workflow_ids = [row.id for row in child_rows.fetchall()]
+                for child_workflow_id in child_workflow_ids:
+                    await session.execute(
+                        SYNC_RUNNING_ENQUEUED_WORKFLOW_TASKS_ON_CANCEL_SQL,
+                        {'wf_id': child_workflow_id},
+                    )
+                    await session.execute(
+                        MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL,
+                        {'wf_id': child_workflow_id},
+                    )
+                    await session.execute(
+                        SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL,
+                        {'wf_id': child_workflow_id},
+                    )
+                    await session.execute(
+                        SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL,
+                        {'wf_id': child_workflow_id},
+                    )
+                    await session.execute(
+                        NOTIFY_WORKFLOW_DONE_SQL,
+                        {'wf_id': child_workflow_id},
+                    )
 
                 await session.commit()
             return Ok(None)

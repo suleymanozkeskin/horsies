@@ -7,6 +7,7 @@ for the worker process to resolve TaskNode.index correctly.
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import BaseModel, Field
@@ -1279,6 +1280,103 @@ class E2ESubTypedKwargWorkflow(WorkflowDefinition[dict[str, JsonValue]]):
                 'kind_at_build': getattr(pet, 'kind', None),
                 'bark_volume_at_build': getattr(pet, 'bark_volume', None),
             },
+        )
+        return horsies_app.workflow(
+            name=cls.name,
+            tasks=[child],
+            output=child,
+            on_error=OnError.FAIL,
+            definition_key=cls.definition_key,
+            workflow_def_cls=cls,
+        )
+
+
+class E2ESubSlowWorkflow(WorkflowDefinition[str]):
+    name = 'e2e_sub_slow_workflow'
+    definition_key = 'tests.e2e.sub.slow.v1'
+
+    @classmethod
+    def build_with(
+        cls,
+        horsies_app: Any,
+        value: str = 'slow_child',
+        delay_ms: int = 1_000,
+    ) -> Any:
+        child = TaskNode(
+            fn=slow_mark_task,
+            kwargs={'value': value, 'delay_ms': delay_ms},
+        )
+        return horsies_app.workflow(
+            name=cls.name,
+            tasks=[child],
+            output=child,
+            on_error=OnError.FAIL,
+            definition_key=cls.definition_key,
+            workflow_def_cls=cls,
+        )
+
+
+class E2ESubNestedSlowMiddleWorkflow(WorkflowDefinition[str]):
+    name = 'e2e_sub_nested_slow_middle_workflow'
+    definition_key = 'tests.e2e.sub.nested.slow.middle.v1'
+
+    child = SubWorkflowNode(
+        workflow_def=E2ESubSlowWorkflow,
+        kwargs={'value': 'nested_slow_leaf', 'delay_ms': 1_000},
+    )
+
+    class Meta:
+        output = None
+        on_error = OnError.FAIL
+
+
+E2ESubNestedSlowMiddleWorkflow.Meta.output = E2ESubNestedSlowMiddleWorkflow.child
+
+
+class E2ESubRetryWorkflow(WorkflowDefinition[str]):
+    name = 'e2e_sub_retry_workflow'
+    definition_key = 'tests.e2e.sub.retry.v1'
+
+    @classmethod
+    def build_with(
+        cls,
+        horsies_app: Any,
+        counter_file: str,
+        succeed_on_attempt: int,
+    ) -> Any:
+        child = TaskNode(
+            fn=retry_then_ok_task,
+            kwargs={
+                'counter_file': counter_file,
+                'succeed_on_attempt': succeed_on_attempt,
+            },
+        )
+        return horsies_app.workflow(
+            name=cls.name,
+            tasks=[child],
+            output=child,
+            on_error=OnError.FAIL,
+            definition_key=cls.definition_key,
+            workflow_def_cls=cls,
+        )
+
+
+class E2ESubExpiredWorkflow(WorkflowDefinition[str]):
+    name = 'e2e_sub_expired_workflow'
+    definition_key = 'tests.e2e.sub.expired.v1'
+
+    @classmethod
+    def build_with(
+        cls,
+        horsies_app: Any,
+        expires_in_ms: int = -100,
+    ) -> Any:
+        child = TaskNode(
+            fn=mark_task,
+            kwargs={'value': 'expired_child'},
+            good_until=(
+                datetime.now(timezone.utc) + timedelta(milliseconds=expires_in_ms)
+            ),
         )
         return horsies_app.workflow(
             name=cls.name,
