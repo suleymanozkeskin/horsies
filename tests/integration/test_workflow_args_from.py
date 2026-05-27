@@ -71,6 +71,7 @@ class TestArgsFromInjection:
     async def _complete_task(
         self,
         session: AsyncSession,
+        broker: PostgresBroker,
         workflow_id: str,
         task_index: int,
         result: TaskResult[Any, TaskError],
@@ -85,7 +86,7 @@ class TestArgsFromInjection:
         )
         row = res.fetchone()
         if row and row[0]:
-            await on_workflow_task_complete(session, row[0], result)
+            await on_workflow_task_complete(session, row[0], result, broker)
             await session.commit()
 
     async def _get_task_kwargs(
@@ -141,7 +142,7 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A with result
-        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=42))
+        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=42))
 
         # Check wrapper: key present with TaskResult marker
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
@@ -179,8 +180,8 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete both roots
-        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=100))
-        await self._complete_task(session, handle.workflow_id, 1, TaskResult(ok=200))
+        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=100))
+        await self._complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=200))
 
         # Check C's kwargs
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 2)
@@ -215,6 +216,7 @@ class TestArgsFromInjection:
         # Complete A with failure
         await self._complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test failure')),
@@ -268,7 +270,7 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A
-        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=50))
+        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=50))
 
         # Get B's kwargs - should have both static and injected
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
@@ -308,7 +310,7 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A
-        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=50))
+        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=50))
 
         # Get B's kwargs - should have both pointing to same result
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
@@ -351,6 +353,7 @@ class TestArgsFromInjection:
         # Complete A as FAILED
         await self._complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(err=TaskError(error_code='A_FAILED', message='A failed')),
@@ -398,6 +401,7 @@ class TestArgsFromInjection:
         # Complete A as FAILED with specific error
         await self._complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(
@@ -445,7 +449,7 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A to enqueue B
-        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
+        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
 
         # Fetch task row for B
         task_row_result = await session.execute(
@@ -513,6 +517,7 @@ class TestArgsFromInjection:
         # Complete A as FAILED
         await self._complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(err=TaskError(error_code='DEP_FAIL', message='Dep failed')),
@@ -562,7 +567,7 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A
-        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=10))
+        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
 
         # B should be enqueued with only static kwargs
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
@@ -604,6 +609,7 @@ class TestArgsFromInjection:
         # Complete A as FAILED to enqueue B
         await self._complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(err=TaskError(error_code='WORKER_ERR', message='Worker err test')),
@@ -686,6 +692,7 @@ class TestArgsFromInjection:
         # Complete A as FAILED → B becomes SKIPPED → C enqueued
         await self._complete_task(
             session,
+            broker,
             handle.workflow_id,
             0,
             TaskResult(err=TaskError(error_code='A_FAIL', message='A failed')),
@@ -760,8 +767,8 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete both roots
-        await self._complete_task(session, handle.workflow_id, 0, TaskResult(ok=100))
-        await self._complete_task(session, handle.workflow_id, 1, TaskResult(ok=200))
+        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=100))
+        await self._complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=200))
 
         # Check C's kwargs: only 'from_a' injected, nothing from B
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 2)

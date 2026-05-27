@@ -290,6 +290,7 @@ async def start_ok(
 
 async def complete_task(
     session: AsyncSession,
+    broker: PostgresBroker,
     workflow_id: str,
     task_index: int,
     result: TaskResult[Any, TaskError],
@@ -306,7 +307,7 @@ async def complete_task(
     )
     row = res.fetchone()
     if row and row[0]:
-        await on_workflow_task_complete(session, row[0], result)
+        await on_workflow_task_complete(session, row[0], result, broker)
         await session.commit()
 
 
