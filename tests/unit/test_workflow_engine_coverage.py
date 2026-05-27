@@ -18,6 +18,7 @@ from horsies.core.workflows import engine
 from horsies.core.workflows.engine import (
     DependencyResults,
     _build_workflow_context_data,
+    _decode_err_only,
     _deser_json,
     _handle_workflow_task_failure,
     _load_workflow_def_from_key,
@@ -1778,3 +1779,108 @@ class TestBuildWorkflowContextData:
                 session, 'wf-1', 0, 'my_task', [],
             )
         assert result['summaries_by_id'] == {}
+
+
+# ── 18. _decode_err_only ─────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestDecodeErrOnly:
+    """Envelope validation now routes through ``validate_task_result_envelope``.
+
+    Pre-fix the function only checked the ``__h_task_result__`` marker and
+    trusted everything else, so malformed envelopes (extras, both slots
+    populated, missing keys) silently produced a TaskResult. The strict
+    path now returns ``None`` for any envelope that doesn't satisfy the
+    full canonical shape — callers fall back to legacy handling.
+    """
+
+    def _make_err_envelope_json(self) -> str:
+        return (
+            '{"__h_task_result__": true, "ok": null, '
+            '"err": {"error_code": {"__builtin_task_code__": "TASK_EXCEPTION"}, '
+            '"message": "boom", "data": null, "exception": null}}'
+        )
+
+    def test_decodes_canonical_err_envelope(self) -> None:
+        result = _decode_err_only(self._make_err_envelope_json())
+        assert result is not None
+        assert result.err is not None
+        assert result.err.message == 'boom'
+
+    def test_returns_none_on_missing_marker(self) -> None:
+        raw = (
+            '{"ok": null, "err": {"error_code": '
+            '{"__builtin_task_code__": "TASK_EXCEPTION"}, '
+            '"message": "boom", "data": null, "exception": null}}'
+        )
+        assert _decode_err_only(raw) is None
+
+    def test_returns_none_on_marker_false(self) -> None:
+        raw = (
+            '{"__h_task_result__": false, "ok": null, '
+            '"err": {"error_code": {"__builtin_task_code__": "TASK_EXCEPTION"}, '
+            '"message": "boom", "data": null, "exception": null}}'
+        )
+        assert _decode_err_only(raw) is None
+
+    def test_returns_none_on_extras_in_envelope(self) -> None:
+        """Strict envelope rejects unknown top-level keys."""
+        raw = (
+            '{"__h_task_result__": true, "ok": null, '
+            '"err": {"error_code": {"__builtin_task_code__": "TASK_EXCEPTION"}, '
+            '"message": "boom", "data": null, "exception": null}, '
+            '"extra_key": "smuggled"}'
+        )
+        assert _decode_err_only(raw) is None
+
+    def test_returns_none_on_both_slots_populated(self) -> None:
+        """Envelope with both ok and err populated must be rejected."""
+        raw = (
+            '{"__h_task_result__": true, "ok": 42, '
+            '"err": {"error_code": {"__builtin_task_code__": "TASK_EXCEPTION"}, '
+            '"message": "boom", "data": null, "exception": null}}'
+        )
+        assert _decode_err_only(raw) is None
+
+    def test_returns_none_on_missing_err_key(self) -> None:
+        raw = '{"__h_task_result__": true, "ok": null}'
+        assert _decode_err_only(raw) is None
+
+    def test_returns_none_on_missing_ok_key(self) -> None:
+        raw = (
+            '{"__h_task_result__": true, '
+            '"err": {"error_code": {"__builtin_task_code__": "TASK_EXCEPTION"}, '
+            '"message": "boom", "data": null, "exception": null}}'
+        )
+        assert _decode_err_only(raw) is None
+
+    def test_returns_none_on_non_dict_payload(self) -> None:
+        assert _decode_err_only('null') is None
+        assert _decode_err_only('"a string"') is None
+        assert _decode_err_only('[]') is None
+
+    def test_returns_none_on_ok_only_envelope(self) -> None:
+        """Ok-only envelopes are not in this helper's jurisdiction."""
+        raw = '{"__h_task_result__": true, "ok": 42, "err": null}'
+        assert _decode_err_only(raw) is None
+
+    def test_preserves_sub_workflow_error_subclass_fields(self) -> None:
+        """Routes through ``decode_task_error`` (polymorphic)."""
+        raw = (
+            '{"__h_task_result__": true, "ok": null, '
+            '"err": {"error_code": {"__builtin_task_code__": "UNHANDLED_EXCEPTION"}, '
+            '"message": "child failed", "data": null, "exception": null, '
+            '"sub_workflow_id": "wf-child", '
+            '"sub_workflow_summary": {"status": "FAILED", "output": null, '
+            '"total_tasks": 1, "completed_tasks": 0, "failed_tasks": 1, '
+            '"skipped_tasks": 0, "error_summary": "downstream"}}}'
+        )
+        result = _decode_err_only(raw)
+        assert result is not None
+        assert result.err is not None
+        # Subclass-only fields must survive via polymorphic decode.
+        from horsies.core.models.tasks import SubWorkflowError
+
+        assert isinstance(result.err, SubWorkflowError)
+        assert result.err.sub_workflow_id == 'wf-child'

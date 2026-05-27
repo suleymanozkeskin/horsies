@@ -1163,7 +1163,11 @@ class Horsies:
             BrokerOperationError,
         )
         from horsies.core.codec.json_value import StrictJsonError
-        from horsies.core.codec.typed import decode_task_result
+        from horsies.core.codec.typed import (
+            decode_task_error,
+            decode_task_result,
+            validate_task_result_envelope,
+        )
         from horsies.core.types.result import Err, Ok, is_err
         from pydantic import ValidationError
 
@@ -1181,6 +1185,43 @@ class Horsies:
             return Ok(None)
         if not include_result or info.raw_result is None:
             return Ok(info)
+
+        # Validate envelope shape before either fast-path or full
+        # decode — mirrors ``get_result_async``. A malformed envelope
+        # (missing marker, both slots populated, extras) must fail
+        # closed rather than being silently returned undecoded.
+        try:
+            envelope = validate_task_result_envelope(info.raw_result)
+        except StrictJsonError as exc:
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                message=(
+                    f'TaskResult envelope invalid for {task_id}: {exc}'
+                ),
+                retryable=False,
+            ))
+        err_slot = envelope.get('err')
+        # Err-fast-path: TaskError is fixed-schema; decodable without
+        # ok_type, so unregistered tasks still surface their real err
+        # via ``decoded_result`` instead of being downgraded to
+        # ``decoded_result=None``.
+        if err_slot is not None:
+            try:
+                err_value = decode_task_error(err_slot)
+            except (StrictJsonError, ValidationError) as exc:
+                return Err(BrokerOperationError(
+                    code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                    message=(
+                        f'TaskError decode failed for {task_id}: {exc}'
+                    ),
+                    retryable=False,
+                ))
+            from horsies.core.models.tasks import TaskResult
+            info.decoded_result = TaskResult(err=err_value)
+            info.result_decoded = True
+            return Ok(info)
+
+        # Ok slot — needs ok_type from local registry.
         task = self.tasks.get(info.task_name)
         ok_type = getattr(task, 'task_ok_type', None) if task is not None else None
         if ok_type is None:
