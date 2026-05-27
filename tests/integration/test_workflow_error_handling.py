@@ -1325,7 +1325,7 @@ class TestEnqueuedFailureConversion:
             handle.workflow_id,
             1,
             {0: TaskResult(ok=1)},
-            broker,
+            broker=broker,
         )
         await session.commit()
 
@@ -1399,8 +1399,8 @@ class TestEnqueuedFailureConversion:
             handle.workflow_id,
             1,
             {0: TaskResult(ok=2)},
-            0,
-            handle.workflow_id,
+            parent_depth=0,
+            root_workflow_id=handle.workflow_id,
         )
         await session.commit()
 

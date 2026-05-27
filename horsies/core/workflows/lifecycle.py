@@ -450,11 +450,25 @@ async def start_workflow_async(
                         if isinstance(root_node, SubWorkflowNode):
                             # Start child workflow
                             await enqueue_subworkflow_task(
-                                session, broker, wf_id, root_node.index, {}, 0, wf_id
+                                session,
+                                broker,
+                                wf_id,
+                                root_node.index,
+                                all_dep_results={},
+                                all_dep_task_names={},
+                                parent_depth=0,
+                                root_workflow_id=wf_id,
                             )
                         else:
                             # Enqueue regular task
-                            await enqueue_workflow_task(session, wf_id, root_node.index, {}, broker)
+                            await enqueue_workflow_task(
+                                session,
+                                wf_id,
+                                root_node.index,
+                                all_dep_results={},
+                                all_dep_task_names={},
+                                broker=broker,
+                            )
 
                 await session.commit()
 
@@ -826,7 +840,7 @@ async def resume_workflow(
                 dep_indices: list[int] = (
                     cast(list[int], dependencies) if isinstance(dependencies, list) else []
                 )
-                dep_results = await get_dependency_results(
+                dep_results, dep_task_names = await get_dependency_results(
                     session, workflow_id, dep_indices,
                 )
 
@@ -836,13 +850,19 @@ async def resume_workflow(
                         broker,
                         workflow_id,
                         task_index,
-                        dep_results,
-                        depth,
-                        root_wf_id,
+                        all_dep_results=dep_results,
+                        all_dep_task_names=dep_task_names,
+                        parent_depth=depth,
+                        root_workflow_id=root_wf_id,
                     )
                 else:
                     await enqueue_workflow_task(
-                        session, workflow_id, task_index, dep_results, broker,
+                        session,
+                        workflow_id,
+                        task_index,
+                        all_dep_results=dep_results,
+                        all_dep_task_names=dep_task_names,
+                        broker=broker,
                     )
 
             # 4. Cascade resume to paused child workflows
@@ -937,7 +957,9 @@ async def cascade_resume_to_children(
                 dep_indices: list[int] = (
                     cast(list[int], deps) if isinstance(deps, list) else []
                 )
-                dep_res = await get_dependency_results(session, child_id, dep_indices)
+                dep_res, dep_names = await get_dependency_results(
+                    session, child_id, dep_indices,
+                )
 
                 if is_sub:
                     await enqueue_subworkflow_task(
@@ -945,12 +967,20 @@ async def cascade_resume_to_children(
                         broker,
                         child_id,
                         task_idx,
-                        dep_res,
-                        child_depth,
-                        child_root,
+                        all_dep_results=dep_res,
+                        all_dep_task_names=dep_names,
+                        parent_depth=child_depth,
+                        root_workflow_id=child_root,
                     )
                 else:
-                    await enqueue_workflow_task(session, child_id, task_idx, dep_res, broker)
+                    await enqueue_workflow_task(
+                        session,
+                        child_id,
+                        task_idx,
+                        all_dep_results=dep_res,
+                        all_dep_task_names=dep_names,
+                        broker=broker,
+                    )
 
             # Check completion: resume may transition all pending tasks to
             # SKIPPED/terminal without any subsequent callback to finalize.
