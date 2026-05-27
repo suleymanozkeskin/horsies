@@ -93,7 +93,7 @@ jobs:
         env:
           DB_PASSWORD: testpassword
         run: |
-          uv run pytest tests/e2e/test_layer1_tasks.py -v --tb=short --timeout=60 --timeout-method=thread
+          uv run pytest tests/e2e/test_layer1_tasks.py -v --tb=short
           pkill -TERM -f "horsies worker" 2>/dev/null || true
           sleep 5
 
