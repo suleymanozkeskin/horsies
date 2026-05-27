@@ -2759,6 +2759,198 @@ class TestWorkflowContextSummary:
         assert result.output == 42
         assert result.total_tasks == 3
 
+    def test_summary_for_decodes_pydantic_output(self) -> None:
+        """Strict-serde phase 6+: ``summary_for`` decodes the raw output
+        slot against the child workflow's declared ``OkT`` generic.
+
+        Pre-fix this used a bare ``cast`` — callers reading
+        ``summary.output`` on a Pydantic-typed child saw a raw dict and
+        had to manually re-validate. Now the dict is materialized via
+        the declared type.
+        """
+        from pydantic import BaseModel
+
+        class ChildOutput(BaseModel):
+            count: int
+            label: str
+
+        # Raw output as the engine would store it (JSON-decoded dict).
+        raw_output: dict[str, Any] = {'count': 3, 'label': 'done'}
+        summary = SubWorkflowSummary(
+            status=WorkflowStatus.COMPLETED,
+            output=raw_output,
+            total_tasks=1,
+            completed_tasks=1,
+            failed_tasks=0,
+            skipped_tasks=0,
+        )
+
+        ctx = WorkflowContext.from_serialized(
+            workflow_id='wf-decode-pydantic',
+            task_index=0,
+            task_name='consumer',
+            results_by_id={},
+            summaries_by_id={'sub-node': summary},
+        )
+
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        class ChildWorkflow(WorkflowDefinition[ChildOutput]):
+            name = 'child_pydantic_output'
+            definition_key = _definition_key('child_pydantic_output')
+            child = TaskNode(fn=fn_a)
+
+            class Meta:
+                output = None
+
+        ChildWorkflow.Meta.output = ChildWorkflow.child
+        node = SubWorkflowNode(
+            workflow_def=ChildWorkflow, node_id='sub-node',
+        )
+
+        result = ctx.summary_for(node)
+
+        # Decoded — caller sees the typed Pydantic instance.
+        assert isinstance(result.output, ChildOutput)
+        assert result.output.count == 3
+        assert result.output.label == 'done'
+
+    def test_summary_for_passes_through_when_ok_type_is_any(self) -> None:
+        """``WorkflowDefinition[Any]`` keeps the legacy raw passthrough."""
+        raw_output: dict[str, Any] = {'arbitrary': 'value'}
+        summary = SubWorkflowSummary(
+            status=WorkflowStatus.COMPLETED,
+            output=raw_output,
+            total_tasks=1,
+            completed_tasks=1,
+            failed_tasks=0,
+            skipped_tasks=0,
+        )
+
+        ctx = WorkflowContext.from_serialized(
+            workflow_id='wf-any-output',
+            task_index=0,
+            task_name='consumer',
+            results_by_id={},
+            summaries_by_id={'sub-node': summary},
+        )
+
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        class ChildWorkflow(WorkflowDefinition[Any]):
+            name = 'child_any_output'
+            definition_key = _definition_key('child_any_output')
+            child = TaskNode(fn=fn_a)
+
+            class Meta:
+                output = None
+
+        ChildWorkflow.Meta.output = ChildWorkflow.child
+        node = SubWorkflowNode(
+            workflow_def=ChildWorkflow, node_id='sub-node',
+        )
+
+        result = ctx.summary_for(node)
+        assert result.output == raw_output
+
+    def test_summary_for_returns_fresh_instance_no_mutation(self) -> None:
+        """``summary_for`` must not mutate the stored raw summary.
+
+        The decoded typed value lives on the returned instance only;
+        callers reading the underlying ``WorkflowContext._summaries_by_id``
+        afterward still see the raw payload.
+        """
+        from pydantic import BaseModel
+
+        class ChildOutput(BaseModel):
+            count: int
+
+        raw_output: dict[str, Any] = {'count': 7}
+        summary = SubWorkflowSummary(
+            status=WorkflowStatus.COMPLETED,
+            output=raw_output,
+            total_tasks=1,
+            completed_tasks=1,
+            failed_tasks=0,
+            skipped_tasks=0,
+        )
+
+        ctx = WorkflowContext.from_serialized(
+            workflow_id='wf-no-mutation',
+            task_index=0,
+            task_name='consumer',
+            results_by_id={},
+            summaries_by_id={'sub-node': summary},
+        )
+
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        class ChildWorkflow(WorkflowDefinition[ChildOutput]):
+            name = 'child_no_mutation'
+            definition_key = _definition_key('child_no_mutation')
+            child = TaskNode(fn=fn_a)
+
+            class Meta:
+                output = None
+
+        ChildWorkflow.Meta.output = ChildWorkflow.child
+        node = SubWorkflowNode(
+            workflow_def=ChildWorkflow, node_id='sub-node',
+        )
+
+        decoded = ctx.summary_for(node)
+        assert isinstance(decoded.output, ChildOutput)
+        # Stored raw summary is untouched.
+        assert summary.output == raw_output
+        assert summary.output is raw_output
+        # Fresh instance returned.
+        assert decoded is not summary
+
+    def test_summary_for_none_output_passes_through(self) -> None:
+        """``output=None`` (failed/no-output child) survives unchanged
+        even when a typed ``OkT`` is declared."""
+        from pydantic import BaseModel
+
+        class ChildOutput(BaseModel):
+            count: int
+
+        summary = SubWorkflowSummary(
+            status=WorkflowStatus.FAILED,
+            output=None,
+            total_tasks=1,
+            completed_tasks=0,
+            failed_tasks=1,
+            skipped_tasks=0,
+            error_summary='child failed',
+        )
+
+        ctx = WorkflowContext.from_serialized(
+            workflow_id='wf-none-output',
+            task_index=0,
+            task_name='consumer',
+            results_by_id={},
+            summaries_by_id={'sub-node': summary},
+        )
+
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        class ChildWorkflow(WorkflowDefinition[ChildOutput]):
+            name = 'child_none_output'
+            definition_key = _definition_key('child_none_output')
+            child = TaskNode(fn=fn_a)
+
+            class Meta:
+                output = None
+
+        ChildWorkflow.Meta.output = ChildWorkflow.child
+        node = SubWorkflowNode(
+            workflow_def=ChildWorkflow, node_id='sub-node',
+        )
+
+        result = ctx.summary_for(node)
+        assert result.output is None
+        assert result.status == WorkflowStatus.FAILED
+
     def test_model_dump_round_trips_summaries(self) -> None:
         """model_dump() preserves subworkflow summaries through model_validate()."""
         summary = SubWorkflowSummary(

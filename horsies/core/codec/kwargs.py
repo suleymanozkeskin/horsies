@@ -37,7 +37,9 @@ from horsies.core.models.tasks import TaskResult
 __all__ = [
     'KwargBinding',
     'decode_kwargs',
+    'decode_subworkflow_kwargs',
     'encode_kwargs',
+    'encode_subworkflow_kwargs',
     'resolve_hints_and_sig',
     'resolve_producer_kwarg_binding',
     'underlying_task_fn',
@@ -322,4 +324,152 @@ def decode_kwargs(
             decoded[key] = raw_value
             continue
         decoded[key] = decode_value(raw_value, annot)
+    return decoded
+
+
+def _resolve_build_with(workflow_def: Any) -> Callable[..., Any]:
+    """Return the unwrapped ``build_with`` for type introspection.
+
+    Workflow definitions are wrapped by ``WorkflowDefinitionMeta`` which
+    stores the original under ``_original_build_with``. Fall back to
+    ``build_with`` directly when the wrapper isn't present (test stubs).
+    """
+    original = getattr(workflow_def, '_original_build_with', None)
+    if callable(original):
+        return cast('Callable[..., Any]', original)
+    return cast('Callable[..., Any]', workflow_def.build_with)
+
+
+def _workflow_def_name(workflow_def: Any) -> str:
+    return getattr(workflow_def, 'name', None) or workflow_def.__name__
+
+
+def _signature_accepts_var_keyword(sig: inspect.Signature) -> bool:
+    """Return True iff the signature declares ``**kwargs``-style catch-all."""
+    return any(
+        param.kind == inspect.Parameter.VAR_KEYWORD
+        for param in sig.parameters.values()
+    )
+
+
+def encode_subworkflow_kwargs(
+    workflow_def: Any,
+    kwargs: Mapping[str, Any],
+) -> dict[str, Json]:
+    """Encode ``SubWorkflowNode.kwargs`` against the child ``build_with`` signature.
+
+    For each kwarg, the binding resolves against the child workflow's
+    unwrapped ``build_with`` callable:
+
+    - Annotated, non-``TaskResult`` parameter → ``encode_value(value, annotation)``.
+    - ``TaskResult[...]`` parameter → rejected. Those slots are
+      engine-populated via ``args_from`` and must not appear in static
+      ``SubWorkflowNode.kwargs``.
+    - Unknown key, no ``**kwargs`` catch-all → rejected.
+    - Annotated parameter with missing annotation → rejected.
+    - Unknown key with opaque ``**params: Any`` catch-all → strict
+      ``JsonValue`` fallback. Raw JSON-native values pass through;
+      Pydantic models / dataclasses / bytes raise, surfacing the missing
+      type declaration as an error instead of silently smuggling a
+      ``to_jsonable`` dump onto the wire.
+
+    Raises:
+        StrictJsonError: on unknown / TaskResult-typed / unannotated kwargs,
+            or non-JSON-native values supplied to an opaque ``**params``.
+        pydantic.ValidationError: when a typed value doesn't satisfy its
+            declared annotation.
+    """
+    from horsies.core.codec.json_value import JsonValue
+
+    build_with = _resolve_build_with(workflow_def)
+    resolved = resolve_hints_and_sig(build_with)
+    if resolved is None:
+        # ``inspect.signature`` failed — test scaffolding only; treat
+        # every value as ``JsonValue`` (strict).
+        return {k: encode_value(v, JsonValue) for k, v in kwargs.items()}
+    hints, sig = resolved
+    accepts_var_kw = _signature_accepts_var_keyword(sig)
+    encoded: dict[str, Json] = {}
+    for key, value in kwargs.items():
+        if key in sig.parameters:
+            annot = hints.get(key)
+            if annot is None:
+                raise StrictJsonError(
+                    f'kwarg {key!r} has no type annotation on build_with '
+                    f'for workflow {_workflow_def_name(workflow_def)!r}',
+                )
+            if get_origin(annot) is TaskResult:
+                raise StrictJsonError(
+                    f'kwarg {key!r} is TaskResult-typed; the workflow '
+                    f'engine populates it via args_from. SubWorkflowNode '
+                    f'must not supply a static value',
+                )
+            encoded[key] = encode_value(value, annot)
+            continue
+        if accepts_var_kw:
+            # Opaque ``**params: Any`` catch-all — JSON-native only.
+            encoded[key] = encode_value(value, JsonValue)
+            continue
+        raise StrictJsonError(
+            f'unknown kwarg {key!r} for build_with of '
+            f'{_workflow_def_name(workflow_def)!r}; declared params are '
+            f'{sorted(sig.parameters)}',
+        )
+    return encoded
+
+
+def decode_subworkflow_kwargs(
+    workflow_def: Any,
+    raw_kwargs: Mapping[str, Json],
+) -> dict[str, Any]:
+    """Decode raw wire kwargs against the child ``build_with`` signature.
+
+    Symmetric to ``encode_subworkflow_kwargs``. Annotated parameters get
+    typed decode; opaque ``**params: Any`` slots fall through ``JsonValue``
+    (raw JSON-native shapes pass through; non-native shapes never make
+    it past encode in the first place, so decode is closed by construction).
+
+    ``TaskResult``-typed parameters are merged in-process by the engine
+    after this function returns (the engine attaches live ``TaskResult``
+    instances at the call site); decode must not see them on the wire.
+
+    Raises:
+        StrictJsonError: on unknown / TaskResult-typed / unannotated
+            wire kwargs, or non-JSON-native values under opaque ``**params``.
+        pydantic.ValidationError: when a wire value doesn't satisfy its
+            declared annotation.
+    """
+    from horsies.core.codec.json_value import JsonValue
+
+    build_with = _resolve_build_with(workflow_def)
+    resolved = resolve_hints_and_sig(build_with)
+    if resolved is None:
+        return {k: decode_value(v, JsonValue) for k, v in raw_kwargs.items()}
+    hints, sig = resolved
+    accepts_var_kw = _signature_accepts_var_keyword(sig)
+    decoded: dict[str, Any] = {}
+    for key, raw_value in raw_kwargs.items():
+        if key in sig.parameters:
+            annot = hints.get(key)
+            if annot is None:
+                raise StrictJsonError(
+                    f'kwarg {key!r} has no type annotation on build_with '
+                    f'for workflow {_workflow_def_name(workflow_def)!r}',
+                )
+            if get_origin(annot) is TaskResult:
+                raise StrictJsonError(
+                    f'kwarg {key!r} is TaskResult-typed; static '
+                    f'SubWorkflowNode kwargs must not carry args_from '
+                    f'values',
+                )
+            decoded[key] = decode_value(raw_value, annot)
+            continue
+        if accepts_var_kw:
+            decoded[key] = decode_value(raw_value, JsonValue)
+            continue
+        raise StrictJsonError(
+            f'unknown kwarg {key!r} on the wire for build_with of '
+            f'{_workflow_def_name(workflow_def)!r}; declared params are '
+            f'{sorted(sig.parameters)}',
+        )
     return decoded
