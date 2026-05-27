@@ -162,21 +162,21 @@ class TestSerializeErrorPayloadFlattensException:
         # The pre-flattened dict round-trips unchanged.
         assert envelope['err']['exception'] == pre_flattened
 
-    def test_serialize_error_payload_strips_sub_workflow_error_subclass_fields(
+    def test_serialize_error_payload_preserves_sub_workflow_error_subclass_fields(
         self,
     ) -> None:
-        """``serialize_error_payload`` is statically typed at
-        ``TaskError`` and routes through ``encode_value(..., TaskError)``,
-        which drops subclass fields like ``sub_workflow_id``.
+        """``serialize_error_payload`` routes through ``encode_task_result``
+        which routes through ``encode_task_error``, so ``SubWorkflowError``
+        subclass fields (``sub_workflow_id`` / ``sub_workflow_summary``)
+        now survive the encode.
 
-        This is the *intentional* contract: every production caller of
-        ``serialize_error_payload`` constructs a plain ``TaskError``.
-        ``SubWorkflowError`` emission lives in
-        ``engine.on_subworkflow_complete``, which builds the envelope by
-        hand via ``error.model_dump(mode='json')`` so subclass fields
-        survive. This test documents the constraint so a future
-        refactor doesn't quietly start routing subworkflow err payloads
-        through this helper and lose the discriminator fields.
+        Pre-fix this helper called ``encode_value(_, TaskError)`` which
+        silently dropped subclass fields. Every production caller of
+        ``serialize_error_payload`` happened to construct only plain
+        ``TaskError`` instances, so the bug was latent — but the
+        invariant is now positive: any subclass of ``TaskError`` that
+        flows through this helper round-trips with its subclass fields
+        intact.
         """
         summary: SubWorkflowSummary[Any] = SubWorkflowSummary(
             status=WorkflowStatus.FAILED,
@@ -202,7 +202,8 @@ class TestSerializeErrorPayloadFlattensException:
         assert err['error_code'] == {
             '__builtin_task_code__': 'UNHANDLED_EXCEPTION',
         }
-        # Subclass fields are NOT present — engine emit path bypasses
-        # this helper specifically to preserve them.
-        assert 'sub_workflow_id' not in err
-        assert 'sub_workflow_summary' not in err
+        # Subclass fields are now preserved through the encode helper.
+        assert err['sub_workflow_id'] == 'wf-child'
+        assert isinstance(err['sub_workflow_summary'], dict)
+        assert err['sub_workflow_summary']['failed_tasks'] == 1
+        assert err['sub_workflow_summary']['error_summary'] == 'downstream'

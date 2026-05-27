@@ -662,14 +662,20 @@ class TestSubworkflowIntegration:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """When child fails and parent has on_error=PAUSE, parent workflow pauses."""
+        """When child fails and parent has on_error=PAUSE, parent workflow pauses.
+
+        Also verifies the workflow-level error column carries a
+        ``SubWorkflowError`` (not plain TaskError) — `on_error=PAUSE`
+        writes via `_handle_workflow_task_failure`'s `error_payload`
+        path (engine.py:2305), exercising `encode_task_error` directly.
+        """
         session, broker, app = setup
 
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=StartChildWorkflow,
         )
 
-        spec = _workflow(app, 
+        spec = _workflow(app,
             name='parent_workflow_pause_on_fail',
             tasks=[node_child],
             output=node_child,
@@ -678,7 +684,7 @@ class TestSubworkflowIntegration:
 
         handle = await start_ok(spec, broker)
 
-        await self._complete_child_workflow(
+        child_id = await self._complete_child_workflow(
             session, broker, handle.workflow_id, 0,
             TaskResult(err=TaskError(error_code='CHILD_FAILED', message='Test')),
         )
@@ -690,6 +696,27 @@ class TestSubworkflowIntegration:
         )
         wf_status = wf_row.scalar_one()
         assert wf_status == 'PAUSED'
+
+        # The workflow-level error column must preserve the
+        # SubWorkflowError subclass on write. Pre-fix
+        # `encode_value(err, TaskError)` at engine.py stripped
+        # `sub_workflow_id` / `sub_workflow_summary` before persisting;
+        # post-fix the encode routes through `encode_task_error`.
+        # Inspect the column directly (not via handle.get_async, which
+        # returns a synthetic `WORKFLOW_PAUSED` error for paused
+        # workflows without consulting the column).
+        err_row = await session.execute(
+            text('SELECT error FROM horsies_workflows WHERE id = :wf_id'),
+            {'wf_id': handle.workflow_id},
+        )
+        err_json = err_row.scalar_one()
+        assert err_json is not None
+        parsed = loads_json(err_json).unwrap() if isinstance(err_json, str) else err_json
+        assert isinstance(parsed, dict)
+        assert parsed.get('sub_workflow_id') == child_id
+        sub_summary = parsed.get('sub_workflow_summary')
+        assert isinstance(sub_summary, dict)
+        assert sub_summary.get('status') == WorkflowStatus.FAILED.value
 
     async def test_parent_pause_on_error_cascades_to_running_child(
         self,
