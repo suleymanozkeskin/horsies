@@ -1916,15 +1916,13 @@ class TestWorkflowContext:
         assert restored_result.is_ok()
         assert restored_result.unwrap() == 42
 
-    def test_model_dump_json_emits_payload_for_results(self) -> None:
-        """``model_dump(mode='json')`` emits a JSON-shaped TaskResult payload.
+    def test_model_dump_json_mode_raises_not_implemented(self) -> None:
+        """Strict-serde phase 7: model_dump(mode='json') is dropped.
 
-        Strict-serde phase 5/6: ``model_validate(dumped)`` no longer
-        round-trips. The validator rejects raw dicts in
-        ``results_by_id`` because typed decode requires knowing each
-        node's ``ok_type``, which only the engine/worker boundary has.
-        WorkflowContext must be reconstructed from pre-typed
-        ``TaskResult`` instances via ``from_serialized``.
+        WorkflowContext can't carry a wire form because per-result
+        ok_type lives at the engine/worker boundary, not on the model.
+        Reconstruction is via from_serialized with pre-typed TaskResult
+        instances.
         """
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
@@ -1933,20 +1931,11 @@ class TestWorkflowContext:
             results_by_id={'node-0': TaskResult(ok=42)},
         )
 
-        dumped = ctx.model_dump(mode='json')
-        # The dumped shape is JSONable (round-trippable through json.dumps),
-        # but is NOT the strict-serde wire envelope — that one
-        # (``__h_task_result__``) is produced by ``encode_task_result``
-        # at the codec layer.
-        node_payload = dumped['results_by_id']['node-0']
-        assert node_payload['ok'] == 42
-        assert node_payload['err'] is None
+        with pytest.raises(NotImplementedError, match='not supported under strict-serde'):
+            ctx.model_dump(mode='json')
 
-        # The new contract: model_validate must reject a raw-dict
-        # results_by_id payload. Decoding happens at the engine/worker
-        # boundary, not inside the model validator.
-        with pytest.raises(ValueError, match='must be a TaskResult instance'):
-            WorkflowContext.model_validate(dumped)
+        with pytest.raises(NotImplementedError, match='not supported under strict-serde'):
+            ctx.model_dump_json()
 
     def test_result_for_raises_on_missing_id(self) -> None:
         """result_for(node) raises RuntimeError if node has no node_id."""
@@ -2812,8 +2801,14 @@ class TestWorkflowContextSummary:
         assert restored_summary.output == 42
         assert restored_summary.total_tasks == 3
 
-    def test_model_dump_json_round_trips_summaries(self) -> None:
-        """model_dump(mode='json') preserves summaries in JSONable form."""
+    def test_model_dump_json_summaries_raises_not_implemented(self) -> None:
+        """Strict-serde phase 7: model_dump(mode='json') drops legacy
+        ``__dataclass__`` envelope emission for SubWorkflowSummary too.
+
+        The summary side previously round-tripped via SubWorkflowSummary.from_json
+        on a legacy ``__dataclass__`` envelope. Reconstruction now happens
+        via from_serialized with pre-typed SubWorkflowSummary instances.
+        """
         summary = SubWorkflowSummary(
             status=WorkflowStatus.COMPLETED,
             output=42,
@@ -2831,12 +2826,13 @@ class TestWorkflowContextSummary:
             summaries_by_id={'sub-node': summary},
         )
 
-        dumped = ctx.model_dump(mode='json')
-        assert dumped['summaries_by_id']['sub-node']['__dataclass__'] is True
-        assert (
-            dumped['summaries_by_id']['sub-node']['data']['status']
-            == WorkflowStatus.COMPLETED
-        )
+        with pytest.raises(NotImplementedError, match='not supported under strict-serde'):
+            ctx.model_dump(mode='json')
+
+        # ``model_dump()`` (python mode) preserves identity — the canonical
+        # way callers should access summaries in-process.
+        dumped = ctx.model_dump()
+        assert dumped['summaries_by_id']['sub-node'] is summary
 
         fn_a = MockTaskWrapper(task_name='task_a')
 

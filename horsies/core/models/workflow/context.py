@@ -196,26 +196,16 @@ class WorkflowContext(BaseModel):
     @staticmethod
     def _dump_payload_map(
         payload: dict[str, Any],
-        *,
-        mode: Literal['json', 'python'] | str,
     ) -> dict[str, Any]:
-        """Dump private context payloads in the same mode as model_dump()."""
-        if mode != 'json':
-            return dict(payload)
+        """Shallow-copy private context payloads for python-mode dump.
 
-        from horsies.core.codec.serde import to_jsonable
-        from horsies.core.types.result import is_err
-
-        serialized: dict[str, Any] = {}
-        for key, value in payload.items():
-            result = to_jsonable(value)
-            if is_err(result):
-                raise ValueError(
-                    f'Failed to serialize WorkflowContext payload {key!r}: '
-                    f'{result.err_value}'
-                )
-            serialized[key] = result.ok_value
-        return serialized
+        Strict-serde phase 7: JSON-mode dump is no longer supported on
+        ``WorkflowContext`` (see ``model_dump`` / ``model_dump_json``
+        overrides). The legacy ``to_jsonable`` branch is gone — the only
+        sanctioned reconstruction path is ``from_serialized`` with
+        pre-typed ``TaskResult`` instances.
+        """
+        return dict(payload)
 
     @staticmethod
     def _should_dump_payload_field(
@@ -322,6 +312,17 @@ class WorkflowContext(BaseModel):
         serialize_as_any: bool = False,
         polymorphic_serialization: bool | None = None,
     ) -> dict[str, Any]:
+        if mode == 'json':
+            raise NotImplementedError(
+                "WorkflowContext.model_dump(mode='json') is not supported "
+                "under strict-serde. WorkflowContext is not wire-encodable "
+                "because its per-result ok_type information lives at the "
+                "engine/worker boundary, not on the model. Use "
+                "WorkflowContext.from_serialized(...) with pre-typed "
+                "TaskResult instances for in-process reconstruction; "
+                "encode individual TaskResults via encode_task_result if "
+                "you need a wire form."
+            )
         data = super().model_dump(
             mode=mode,
             include=include,
@@ -344,15 +345,54 @@ class WorkflowContext(BaseModel):
             include=include,
             exclude=exclude,
         ):
-            data['results_by_id'] = self._dump_payload_map(self._results_by_id, mode=mode)
+            data['results_by_id'] = self._dump_payload_map(self._results_by_id)
         if self._should_dump_payload_field(
             'summaries_by_id',
             include=include,
             exclude=exclude,
         ):
-            data['summaries_by_id'] = self._dump_payload_map(self._summaries_by_id, mode=mode)
+            data['summaries_by_id'] = self._dump_payload_map(self._summaries_by_id)
 
         return data
+
+    def model_dump_json(
+        self,
+        *,
+        indent: int | None = None,
+        ensure_ascii: bool = False,
+        include: Any = None,
+        exclude: Any = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        exclude_unset: bool = False,
+        exclude_defaults: bool = False,
+        exclude_none: bool = False,
+        exclude_computed_fields: bool = False,
+        round_trip: bool = False,
+        warnings: bool | Literal['none', 'warn', 'error'] = True,
+        fallback: Callable[[Any], Any] | None = None,
+        serialize_as_any: bool = False,
+        polymorphic_serialization: bool | None = None,
+    ) -> str:
+        """Refuse wire serialization of WorkflowContext.
+
+        Strict-serde phase 7: WorkflowContext can only be reconstructed
+        via ``from_serialized`` with pre-typed ``TaskResult`` instances;
+        per-result ``ok_type`` information lives at the engine/worker
+        boundary, not on the model, so a JSON form has no sanctioned
+        decode path.
+        """
+        _ = (
+            indent, ensure_ascii, include, exclude, context, by_alias,
+            exclude_unset, exclude_defaults, exclude_none,
+            exclude_computed_fields, round_trip, warnings, fallback,
+            serialize_as_any, polymorphic_serialization,
+        )
+        raise NotImplementedError(
+            'WorkflowContext.model_dump_json() is not supported under '
+            'strict-serde. See model_dump(mode="json") for the rationale '
+            'and migration guidance.'
+        )
 
     @classmethod
     def model_validate(
