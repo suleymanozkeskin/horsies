@@ -34,7 +34,7 @@ Uses PostgreSQL `LISTEN/NOTIFY` with a 1-second polling fallback.
 | `task_id` | `str` | — | Task ID to retrieve result for |
 | `timeout_ms` | `int \| None` | `None` | Max wait time in milliseconds; `None` waits indefinitely |
 
-**Returns:** `BrokerResult[RawResultRecord | None]` — `Ok(None)` if the row exists but has no terminal payload yet; `Err(BrokerOperationError)` on infrastructure failure. The `RawResultRecord` carries `task_id`, `task_name`, `status`, and `raw_result` (the decoded JSON envelope, or `None`).
+**Returns:** `BrokerResult[RawResultRecord | None]` — `Ok(None)` if no task row exists for that ID; `Err(BrokerOperationError)` on infrastructure failure. The `RawResultRecord` carries `task_id`, `task_name`, `status`, and `raw_result` (the decoded JSON envelope, or `None` for cancelled tasks, non-terminal timeout snapshots, or terminal rows with no payload).
 
 Sync variant: `get_raw_result_record(task_id, timeout_ms)` (runs the async version in a background loop).
 
@@ -44,7 +44,9 @@ result = await broker.get_raw_result_record_async("task-uuid-here", timeout_ms=5
 if is_ok(result):
     record = result.ok_value
     if record is None:
-        print("Task still running or no payload")
+        print("Task does not exist")
+    elif record.raw_result is None:
+        print(f"status={record.status}, no result payload yet")
     else:
         print(f"status={record.status}, task_name={record.task_name}")
         print(f"raw envelope: {record.raw_result}")
@@ -118,10 +120,10 @@ Fetch metadata for a single task by ID. Returns `Ok(None)` if the task does not 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `task_id` | `str` | — | Task ID to query |
-| `include_result` | `bool` | `False` | Include `TaskResult` for terminal tasks |
+| `include_result` | `bool` | `False` | Include the raw stored result envelope for terminal tasks |
 | `include_failed_reason` | `bool` | `False` | Include worker-level `failed_reason` |
 
-**Returns:** `BrokerResult[TaskInfo | None]`
+**Returns:** `BrokerResult[TaskInfo | None]`. At the broker layer, `include_result=True` populates `TaskInfo.raw_result` only. Use `app.get_task_info_async(...)` when you want the local app to also populate `decoded_result` and `result_decoded`.
 Sync wrapper: `broker.get_task_info(...)`.
 
 ```python

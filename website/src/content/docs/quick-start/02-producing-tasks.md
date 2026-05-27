@@ -79,7 +79,7 @@ match await validate_order.send_async(order=order):
 ```python
 from horsies import Ok, Err
 
-match validate_order.schedule(5, order):
+match validate_order.schedule(5, order=order):
     case Ok(handle):
         print(f"Scheduled: {handle.task_id}")
     case Err(err):

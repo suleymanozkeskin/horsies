@@ -8,7 +8,7 @@ tags: [tasks, retry, backoff]
 ## Basic Usage
 
 ```python
-from horsies import RetryPolicy
+from horsies import RetryPolicy, TaskResult, TaskError, JsonValue
 
 @app.task(
     "flaky_task",

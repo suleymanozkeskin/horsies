@@ -487,7 +487,7 @@ def process_items(items: list[str]):
 Workflow tasks honor the same retry policies configured on the `@task` decorator. When a task with a `retry_policy` is used in a workflow, those settings (including `auto_retry_for`) are preserved and applied when the workflow engine enqueues the task.
 
 ```python
-from horsies import RetryPolicy
+from horsies import RetryPolicy, TaskResult, TaskError, JsonValue
 
 @app.task(
     retry_policy=RetryPolicy.exponential(

@@ -79,7 +79,7 @@ def might_crash() -> TaskResult[str, TaskError]:
 With explicit try/except:
 
 ```python
-from horsies import RetryPolicy
+from horsies import RetryPolicy, TaskResult, TaskError, JsonValue
 
 @app.task(
     "some_api_call",
