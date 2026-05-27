@@ -1493,8 +1493,18 @@ class TestWorkflowSpecValidation:
         # Should not raise
         WorkflowSpec(name='kwargs_task_ok', tasks=[node_a])
 
-    def test_subworkflow_kwargs_validation_skipped_for_kwargs_build_with(self) -> None:
-        """Subworkflow build_with(**kwargs) should skip key validation."""
+    def test_subworkflow_kwargs_rejected_for_untyped_build_with(self) -> None:
+        """Subworkflow build_with(**kwargs) rejects unknown kwargs at strict snapshot.
+
+        Strict-serde phase 7: ``_snapshot_kwargs_values`` binds
+        SubWorkflowNode kwargs against ``workflow_def._original_build_with``
+        (or ``build_with``) the same way it binds TaskNode kwargs against
+        ``node.fn``. A ``build_with(cls, app, **kwargs)`` has no declared
+        named parameters beyond ``app``/``cls`` (engine-supplied), so a
+        user-supplied kwarg like ``unknown=1`` fails strict binding —
+        the strict-serde contract is that every kwarg must hit a typed
+        named parameter on the subworkflow's entry.
+        """
         fn_a = MockTaskWrapper(task_name='task_a')
 
         class ChildWorkflow(WorkflowDefinition[int]):
@@ -1518,8 +1528,9 @@ class TestWorkflowSpecValidation:
             args_from={},
         )
 
-        # Should not raise
-        WorkflowSpec(name='subworkflow_kwargs_ok', tasks=[child_node])
+        with pytest.raises(WorkflowValidationError) as exc:
+            WorkflowSpec(name='subworkflow_kwargs_ok', tasks=[child_node])
+        assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
     def test_subworkflow_cycle_detection_allows_same_name_distinct_definitions(self) -> None:
         """Same workflow name in distinct definitions is not a cycle."""

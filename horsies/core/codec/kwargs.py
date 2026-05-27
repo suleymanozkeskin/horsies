@@ -26,14 +26,22 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Mapping
-from typing import Any, Callable, cast, get_origin, get_type_hints
+from dataclasses import dataclass
+from typing import Any, Callable, Literal, cast, get_origin, get_type_hints
 
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.typed import Json, decode_value, encode_value
 from horsies.core.models.tasks import TaskResult
 
 
-__all__ = ['decode_kwargs', 'encode_kwargs', 'underlying_task_fn']
+__all__ = [
+    'KwargBinding',
+    'decode_kwargs',
+    'encode_kwargs',
+    'resolve_hints_and_sig',
+    'resolve_producer_kwarg_binding',
+    'underlying_task_fn',
+]
 
 
 def underlying_task_fn(task: Any) -> Callable[..., Any]:
@@ -93,7 +101,7 @@ list.
 """
 
 
-def _resolve_hints_and_sig(
+def resolve_hints_and_sig(
     task_fn: Callable[..., Any],
 ) -> tuple[dict[str, Any], inspect.Signature] | None:
     """Resolve annotation hints and signature, or None if the callable
@@ -116,8 +124,93 @@ def _resolve_hints_and_sig(
     return hints, sig
 
 
+# Backwards-compatible alias for the previously private name. Kept until
+# the next sweep; new code should use ``resolve_hints_and_sig`` directly.
+_resolve_hints_and_sig = resolve_hints_and_sig
+
+
 def _fn_name(task_fn: Callable[..., Any]) -> str:
     return getattr(task_fn, '__name__', '<callable>')
+
+
+@dataclass(frozen=True)
+class KwargBinding:
+    """Result of resolving a single producer-side kwarg against a callable
+    signature.
+
+    Shared by ``encode_kwargs`` (raises ``StrictJsonError`` on
+    ``kind='error'``) and ``WorkflowSpec._snapshot_kwargs_values``
+    (collects errors per-key as workflow validation errors). Single
+    source of truth so the two paths cannot drift.
+
+    Producer-side semantics: engine-injected names
+    (``workflow_ctx`` / ``workflow_meta``) and TaskResult-typed kwargs
+    (engine populates via ``args_from``) are errors here. Decode-side
+    treats them differently and uses its own per-key logic.
+    """
+
+    kind: Literal['encode', 'error']
+    annotation: object | None = None
+    error_message: str | None = None
+
+
+def resolve_producer_kwarg_binding(
+    task_fn: Callable[..., Any],
+    key: str,
+    hints: Mapping[str, Any],
+    sig: inspect.Signature,
+) -> KwargBinding:
+    """Resolve how a producer-supplied kwarg key binds against `task_fn`.
+
+    Returns ``KwargBinding(kind='encode', annotation=annot)`` for valid
+    kwargs that need wire encoding. Returns ``KwargBinding(kind='error',
+    error_message=...)`` for invalid producer use:
+
+    - kwarg name shadows an engine-injected param
+      (``workflow_ctx`` / ``workflow_meta``).
+    - kwarg name not declared on the callable's signature.
+    - kwarg name declared but missing a type annotation.
+    - kwarg name annotated as ``TaskResult`` — engine populates via
+      ``args_from``, producer must not supply.
+
+    Caller decides whether ``kind='error'`` raises or accumulates.
+    """
+    if key in _INJECTED_PARAM_NAMES:
+        return KwargBinding(
+            kind='error',
+            error_message=(
+                f'kwarg {key!r} is engine-injected; producer code must '
+                f'not supply it (the engine populates {key!r} at worker '
+                f'time)'
+            ),
+        )
+    if key not in sig.parameters:
+        return KwargBinding(
+            kind='error',
+            error_message=(
+                f'unknown kwarg {key!r} for task {_fn_name(task_fn)!r}; '
+                f'declared params are {sorted(sig.parameters)}'
+            ),
+        )
+    annot = hints.get(key)
+    if annot is None:
+        return KwargBinding(
+            kind='error',
+            error_message=(
+                f'kwarg {key!r} has no type annotation on '
+                f'{_fn_name(task_fn)!r}'
+            ),
+        )
+    if get_origin(annot) is TaskResult:
+        return KwargBinding(
+            kind='error',
+            error_message=(
+                f'kwarg {key!r} is TaskResult-typed; the workflow engine '
+                f'populates it via args_from. Producer must not supply a '
+                f'value directly'
+            ),
+        )
+    return KwargBinding(kind='encode', annotation=annot)
 
 
 def encode_kwargs(
@@ -146,7 +239,7 @@ def encode_kwargs(
         pydantic.ValidationError: when a value doesn't satisfy its
             declared type.
     """
-    resolved = _resolve_hints_and_sig(task_fn)
+    resolved = resolve_hints_and_sig(task_fn)
     if resolved is None:
         # Mock / unresolvable forward refs — production tasks pass
         # `@app.task` strict-serde validation before reaching here, so
@@ -163,33 +256,12 @@ def encode_kwargs(
         return cast('dict[str, Json]', dict(kwargs))
     encoded: dict[str, Json] = {}
     for key, value in kwargs.items():
-        if key in _INJECTED_PARAM_NAMES:
-            raise StrictJsonError(
-                f"kwarg {key!r} is engine-injected; producer code must "
-                f"not supply it (the engine populates {key!r} at worker "
-                f"time)",
-            )
-        if key not in sig.parameters:
-            raise StrictJsonError(
-                f"unknown kwarg {key!r} for task {_fn_name(task_fn)!r}; "
-                f"declared params are {sorted(sig.parameters)}",
-            )
-        annot = hints.get(key)
-        if annot is None:
-            # Strict validator at registration rejects untyped params,
-            # so this is unreachable for real registered tasks. Fail
-            # closed here for defense in depth.
-            raise StrictJsonError(
-                f"kwarg {key!r} has no type annotation on "
-                f"{_fn_name(task_fn)!r}",
-            )
-        if get_origin(annot) is TaskResult:
-            raise StrictJsonError(
-                f"kwarg {key!r} is TaskResult-typed; the workflow engine "
-                f"populates it via args_from. Producer must not supply a "
-                f"value directly",
-            )
-        encoded[key] = encode_value(value, annot)
+        binding = resolve_producer_kwarg_binding(task_fn, key, hints, sig)
+        if binding.kind == 'error':
+            # Single source of truth via the shared resolver — keeps
+            # encode_kwargs and snapshot validation from drifting.
+            raise StrictJsonError(binding.error_message or '')
+        encoded[key] = encode_value(value, binding.annotation)
     return encoded
 
 
@@ -219,7 +291,7 @@ def decode_kwargs(
         pydantic.ValidationError: when a raw value doesn't satisfy its
             declared type.
     """
-    resolved = _resolve_hints_and_sig(task_fn)
+    resolved = resolve_hints_and_sig(task_fn)
     if resolved is None:
         return dict(raw_kwargs)
     hints, sig = resolved
