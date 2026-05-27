@@ -1094,11 +1094,11 @@ class TestWorkflowRecovery:
 
     # ── Case 1.5: READY SubWorkflowNodes not started ──
 
-    async def test_recover_subworkflow_ready_without_broker(
+    async def test_recover_subworkflow_ready_without_broker_leaves_ready(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """Case 1.5: READY subworkflow with no broker resets to PENDING."""
+        """Case 1.5: READY subworkflow without a broker stays ready for broker retry."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'recover_sub_nb_a')
 
@@ -1142,7 +1142,7 @@ class TestWorkflowRecovery:
         recovered = await recover_stuck_workflows(session, broker=None)
         await session.commit()
 
-        assert recovered == 1
+        assert recovered == 0
 
         result = await session.execute(
             text("""
@@ -1151,7 +1151,7 @@ class TestWorkflowRecovery:
             """),
             {'wf_id': handle.workflow_id},
         )
-        assert result.fetchone()[0] == 'PENDING'
+        assert result.fetchone()[0] == 'READY'
 
     async def test_recover_subworkflow_ready_with_broker(
         self,

@@ -133,12 +133,6 @@ GET_READY_SUBWORKFLOWS_NOT_STARTED_SQL = text("""
       AND w.status = 'RUNNING'
 """)
 
-RESET_SUBWORKFLOW_TO_PENDING_SQL = text("""
-    UPDATE horsies_workflow_tasks
-    SET status = 'PENDING'
-    WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'READY'
-""")
-
 GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL = text("""
     SELECT child.id, child.parent_workflow_id, child.parent_task_index, child.status
     FROM horsies_workflows child
@@ -276,42 +270,39 @@ async def recover_stuck_workflows(
         depth = row.depth or 0
         root_wf_id = row.root_workflow_id or workflow_id
 
-        if broker is not None:
-            from horsies.core.workflows.engine import (
-                enqueue_subworkflow_task,
-                get_dependency_results,
+        if broker is None:
+            logger.warning(
+                f'Recovery found stuck READY subworkflow but no broker was '
+                f'provided to start it: workflow={workflow_id}, '
+                f'task_index={task_index}'
             )
+            continue
 
-            dep_indices: list[int] = (
-                cast(list[int], dependencies) if isinstance(dependencies, list) else []
-            )
-            dep_results, dep_task_names = await get_dependency_results(
-                session, workflow_id, dep_indices, app=broker.app,
-            )
-            await enqueue_subworkflow_task(
-                session,
-                broker,
-                workflow_id,
-                task_index,
-                dep_results,
-                dep_task_names,
-                depth,
-                root_wf_id,
-            )
-            logger.info(
-                f'Recovered stuck READY subworkflow (started): '
-                f'workflow={workflow_id}, task_index={task_index}'
-            )
-        else:
-            # Reset to PENDING so a future evaluation can start it
-            await session.execute(
-                RESET_SUBWORKFLOW_TO_PENDING_SQL,
-                {'wf_id': workflow_id, 'idx': task_index},
-            )
-            logger.info(
-                f'Recovered stuck READY subworkflow (reset to PENDING): '
-                f'workflow={workflow_id}, task_index={task_index}'
-            )
+        from horsies.core.workflows.engine import (
+            enqueue_subworkflow_task,
+            get_dependency_results,
+        )
+
+        dep_indices: list[int] = (
+            cast(list[int], dependencies) if isinstance(dependencies, list) else []
+        )
+        dep_results, dep_task_names = await get_dependency_results(
+            session, workflow_id, dep_indices, app=broker.app,
+        )
+        await enqueue_subworkflow_task(
+            session,
+            broker,
+            workflow_id,
+            task_index,
+            dep_results,
+            dep_task_names,
+            depth,
+            root_wf_id,
+        )
+        logger.info(
+            f'Recovered stuck READY subworkflow (started): '
+            f'workflow={workflow_id}, task_index={task_index}'
+        )
         recovered += 1
 
     # Case 1.6: Child workflows completed but parent node not updated
