@@ -31,7 +31,8 @@ from horsies.core.workflows.engine import (
     enqueue_subworkflow_task,
 )
 from horsies.core.workflows.start_types import WorkflowStartErrorCode
-from horsies.core.codec.serde import loads_json, task_result_from_json
+from horsies.core.codec.serde import loads_json
+from horsies.core.codec.typed import decode_task_result
 
 from .conftest import (
     make_simple_task,
@@ -242,7 +243,7 @@ class TestOnErrorFail:
         assert row.status == initial_status
 
         if initial_status == 'COMPLETED':
-            loaded = task_result_from_json(loads_json(row.result).unwrap()).unwrap()
+            loaded = decode_task_result(loads_json(row.result).unwrap(), Any)
             assert loaded.is_ok()
             assert loaded.unwrap() == 42
         else:
@@ -340,7 +341,7 @@ class TestOnErrorFail:
         assert row.status == initial_status
 
         if initial_status == 'COMPLETED':
-            loaded = task_result_from_json(loads_json(row.result).unwrap()).unwrap()
+            loaded = decode_task_result(loads_json(row.result).unwrap(), Any)
             assert loaded.is_ok()
             assert loaded.unwrap() == 99
         else:

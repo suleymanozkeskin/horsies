@@ -11,7 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.codec.serde import loads_json, task_result_from_json
+from horsies.core.codec.serde import loads_json
+from horsies.core.codec.typed import decode_task_result
 from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode, RetrievalCode, OutcomeCode
 from horsies.core.models.workflow import (
     TaskNode,
@@ -776,7 +777,7 @@ class TestWorkflowRecovery:
         status, result_json = wt_result.fetchone()
         assert status == 'FAILED'
 
-        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
+        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
         assert task_result.is_err()
         assert task_result.err is not None
         assert task_result.err.error_code == OutcomeCode.TASK_CANCELLED
@@ -840,7 +841,7 @@ class TestWorkflowRecovery:
         status, result_json = wt_result.fetchone()
         assert status == 'FAILED'
 
-        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
+        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
         assert task_result.is_err()
         assert task_result.err is not None
         assert task_result.err.error_code == RetrievalCode.RESULT_NOT_AVAILABLE
@@ -1314,7 +1315,7 @@ class TestWorkflowRecovery:
         status, result_json = wt_result.fetchone()
         assert status == 'FAILED'
 
-        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
+        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
         assert task_result.is_err()
         assert task_result.err is not None
         assert task_result.err.error_code == OperationalErrorCode.WORKER_CRASHED

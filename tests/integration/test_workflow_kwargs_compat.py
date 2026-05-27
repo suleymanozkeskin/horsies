@@ -63,23 +63,18 @@ class KwargsChildWorkflow(WorkflowDefinition[int]):
     last_params: dict[str, Any] = {}
 
     @classmethod
-    def build_with(cls, app: Horsies, **params: Any) -> Any:
-        cls.last_params = dict(params)
+    def build_with(
+        cls,
+        app: Horsies,
+        value: TaskResult[int, TaskError],
+    ) -> Any:
+        cls.last_params = {'value': value}
 
         @app.task(task_name='kwargs_child_task')
         def child_task(value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
-        raw_value: Any = params.get('value', 0)
-        if isinstance(raw_value, dict):
-            raw_dict: dict[str, Any] = dict(raw_value)
-            if raw_dict.get('__horsies_taskresult__'):
-                data_str = raw_dict.get('data')
-                if isinstance(data_str, str):
-                    from horsies.core.codec.serde import task_result_from_json
-
-                    tr = task_result_from_json(loads_json(data_str).unwrap()).unwrap()
-                    raw_value = tr.unwrap() if tr.is_ok() else 0
+        raw_value = value.unwrap() if value.is_ok() else 0
 
         node = TaskNode(fn=child_task, kwargs={'value': raw_value})
         return app.workflow(

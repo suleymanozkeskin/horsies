@@ -14,7 +14,8 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.workflow import TaskNode, WorkflowSpec
 from horsies.core.workflows.engine import on_workflow_task_complete
-from horsies.core.codec.serde import loads_json, task_result_from_json
+from horsies.core.codec.serde import loads_json
+from horsies.core.codec.typed import decode_task_result
 from horsies.core.worker.current import set_current_app
 from horsies.core.worker.worker import _run_task_entry, _initialize_worker_pool
 
@@ -482,7 +483,7 @@ class TestArgsFromInjection:
         assert ok is True
         assert worker_failure is None
 
-        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
+        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
         assert task_result.is_ok()
         assert task_result.unwrap() == 15
 
@@ -643,7 +644,7 @@ class TestArgsFromInjection:
         assert ok is True
         assert worker_failure is None
 
-        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
+        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
         assert task_result.is_ok()
         assert task_result.unwrap() == 999  # Recovery value
 
@@ -725,7 +726,7 @@ class TestArgsFromInjection:
         assert ok is True
         assert worker_failure is None
 
-        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
+        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
         assert task_result.is_ok()
         assert task_result.unwrap() == 'UPSTREAM_SKIPPED'
 

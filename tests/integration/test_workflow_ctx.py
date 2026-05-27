@@ -11,7 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.codec.serde import dumps_json, loads_json, task_result_from_json
+from horsies.core.codec.serde import dumps_json, loads_json
+from horsies.core.codec.typed import decode_task_result
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.errors import ErrorCode
 from horsies.core.models.workflow import (
@@ -147,7 +148,7 @@ class TestWorkflowCtx:
         raw_results = typed_ctx_data.get('results_by_id')
         if _is_str_to_str_dict(raw_results):
             for node_id, result_json in raw_results.items():
-                results_by_id[node_id] = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
+                results_by_id[node_id] = decode_task_result(loads_json(result_json).unwrap(), Any)
 
         return WorkflowContext.from_serialized(
             workflow_id=typed_ctx_data.get('workflow_id', ''),
@@ -512,7 +513,7 @@ class TestWorkflowCtx:
         assert ok is True
         assert worker_failure is None
 
-        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
+        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
         assert task_result.is_ok()
         assert task_result.unwrap() == 10
 
@@ -581,7 +582,7 @@ class TestWorkflowCtx:
         assert ok is True
         assert worker_failure is None
 
-        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
+        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
         assert task_result.is_ok()
         assert task_result.unwrap() == f'{handle.workflow_id}:1:meta_worker_b'
 
@@ -653,7 +654,7 @@ class TestWorkflowCtx:
         assert ok is True
         assert worker_failure is None
 
-        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
+        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
         assert task_result.is_err()
         assert task_result.unwrap_err().error_code == 'WORKFLOW_CTX_MISSING_ID'
 
@@ -940,7 +941,7 @@ class TestWorkflowCtx:
         assert ok is True
         assert worker_failure is None
 
-        task_result = task_result_from_json(loads_json(result_json).unwrap()).unwrap()
+        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
         assert task_result.is_ok()
         # value=0 (default) + 100 = 100 — ctx was silently skipped
         assert task_result.unwrap() == 100
