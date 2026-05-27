@@ -74,7 +74,7 @@ def test_simple_task_lifecycle() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = unwrap_send(basic_tasks.simple_task.send(5))
+        handle = unwrap_send(basic_tasks.simple_task.send(x=5))
         result = handle.get(timeout_ms=5000)
         assert_ok(result, expected_value=10)
 
@@ -85,7 +85,7 @@ async def test_status_transitions(broker: PostgresBroker) -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = unwrap_send(basic_tasks.simple_task.send(5))
+        handle = unwrap_send(basic_tasks.simple_task.send(x=5))
         result = handle.get(timeout_ms=5000)
         assert_ok(result)
 
@@ -103,7 +103,7 @@ def test_primitive_args() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        result = unwrap_send(basic_tasks.primitives_task.send(42, 3.14, 'hello', True, None)).get(
+        result = unwrap_send(basic_tasks.primitives_task.send(i=42, f=3.14, s='hello', b=True, n=None)).get(
             timeout_ms=5000
         )
         assert_ok(result, {'i': 42, 'f': 3.14, 's': 'hello', 'b': True, 'n': None})
@@ -114,7 +114,7 @@ def test_collection_args() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        result = unwrap_send(basic_tasks.collections_task.send([1, 2, 3], {'a': 1}, (4, 5))).get(
+        result = unwrap_send(basic_tasks.collections_task.send(lst=[1, 2, 3], dct={'a': 1}, tpl=(4, 5))).get(
             timeout_ms=5000
         )
         assert_ok(result)
@@ -130,7 +130,7 @@ def test_pydantic_model_args() -> None:
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
         user = basic_tasks.UserInput(name='Alice', age=30)
-        result = unwrap_send(basic_tasks.pydantic_task.send(user)).get(timeout_ms=5000)
+        result = unwrap_send(basic_tasks.pydantic_task.send(user=user)).get(timeout_ms=5000)
         assert_ok(result, 'Alice is 30')
 
 
@@ -139,7 +139,7 @@ def test_dataclass_args() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        result = unwrap_send(basic_tasks.dataclass_task.send(basic_tasks.DataInput(x=10, y=20))).get(
+        result = unwrap_send(basic_tasks.dataclass_task.send(data=basic_tasks.DataInput(x=10, y=20))).get(
             timeout_ms=5000
         )
         assert_ok(result, 30)
@@ -150,13 +150,13 @@ def test_kwargs_with_defaults() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        r1 = unwrap_send(basic_tasks.kwargs_task.send(5)).get(timeout_ms=5000)
+        r1 = unwrap_send(basic_tasks.kwargs_task.send(required=5)).get(timeout_ms=5000)
         assert_ok(r1, '5_default')
 
-        r2 = unwrap_send(basic_tasks.kwargs_task.send(5, optional='custom')).get(timeout_ms=5000)
+        r2 = unwrap_send(basic_tasks.kwargs_task.send(required=5, optional='custom')).get(timeout_ms=5000)
         assert_ok(r2, '5_custom')
 
-        r3 = unwrap_send(basic_tasks.kwargs_task.send(5, optional='x', multiplier=10)).get(
+        r3 = unwrap_send(basic_tasks.kwargs_task.send(required=5, optional='x', multiplier=10)).get(
             timeout_ms=5000
         )
         assert_ok(r3, '50_x')
@@ -608,7 +608,7 @@ async def test_task_completes_before_expiry(
     expiry = datetime.now(timezone.utc) + timedelta(seconds=60)
     task_id = broker.enqueue(
         task_name='e2e_simple',
-        args_json='[5]',
+        kwargs_json='{"x": 5}',
         queue_name='default',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
@@ -940,7 +940,7 @@ async def test_multiple_tasks_concurrent(broker: PostgresBroker) -> None:
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handles = [
-            unwrap_send(basic_tasks.slow_task.send(task_duration_ms)) for _ in range(num_tasks)
+            unwrap_send(basic_tasks.slow_task.send(duration_ms=task_duration_ms)) for _ in range(num_tasks)
         ]
 
         # Observe runtime concurrency directly from DB instead of wall-clock timing.
@@ -981,7 +981,7 @@ def test_skip_locked_prevents_double_claim() -> None:
                     # Use unique tokens for each task
                     tokens = [f'task_{i}' for i in range(20)]
                     handles = [
-                        unwrap_send(basic_tasks.idempotent_task.send(token)) for token in tokens
+                        unwrap_send(basic_tasks.idempotent_task.send(token=token)) for token in tokens
                     ]
                     results = [h.get(timeout_ms=15000) for h in handles]
 
@@ -1013,7 +1013,7 @@ async def test_max_claim_batch(broker: PostgresBroker) -> None:
     ):
         # Submit slow tasks
         handles = [
-            unwrap_send(basic_tasks.slow_task.send(task_duration_ms)) for _ in range(num_tasks)
+            unwrap_send(basic_tasks.slow_task.send(duration_ms=task_duration_ms)) for _ in range(num_tasks)
         ]
 
         # Poll DB while tasks are running to check CLAIMED count
@@ -1062,7 +1062,7 @@ def test_task_handle_info() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = unwrap_send(basic_tasks.simple_task.send(5))
+        handle = unwrap_send(basic_tasks.simple_task.send(x=5))
         result = handle.get(timeout_ms=5000)
         assert_ok(result)
 
@@ -1085,7 +1085,7 @@ async def test_task_handle_info_async() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = unwrap_send(basic_tasks.simple_task.send(5))
+        handle = unwrap_send(basic_tasks.simple_task.send(x=5))
         result = handle.get(timeout_ms=5000)
         assert_ok(result)
 
@@ -1110,7 +1110,7 @@ def test_send_suppressed() -> None:
     """L1.10.1: Task send during suppression returns SEND_SUPPRESSED."""
     os.environ['TASKLIB_SUPPRESS_SENDS'] = '1'
     try:
-        send_result = basic_tasks.simple_task.send(5)
+        send_result = basic_tasks.simple_task.send(x=5)
         assert is_err(send_result)
         err = send_result.err_value
         assert err.code == TaskSendErrorCode.SEND_SUPPRESSED
