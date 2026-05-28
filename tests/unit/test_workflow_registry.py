@@ -11,7 +11,6 @@ from horsies.core.workflows.registry import (
     clear_workflow_definition_registry,
     clear_workflow_registry,
     get_workflow_definition,
-    get_workflow_definition_by_name,
     get_node,
     is_workflow_registered,
     register_workflow_definition,
@@ -107,70 +106,3 @@ class TestWorkflowRegistry:
         clear_workflow_registry()
 
         assert get_workflow_definition('tests.workflow_e.v1') is workflow_def
-
-    def test_get_workflow_definition_by_name(self) -> None:
-        """Secondary name index populated by `register_workflow_definition`.
-
-        Used by result-decode paths to resolve OkT for SubWorkflowNode
-        rows where the persisted ``task_name`` is the child workflow's
-        ``.name`` attribute, not a registered task name.
-        """
-        workflow_def = type(
-            'WorkflowByName',
-            (),
-            {
-                'definition_key': 'tests.workflow_by_name.v1',
-                'name': 'by_name_workflow',
-            },
-        )
-        register_workflow_definition(workflow_def)
-
-        assert get_workflow_definition_by_name('by_name_workflow') is workflow_def
-        assert get_workflow_definition_by_name('missing') is None
-
-    def test_unregister_clears_name_index(self) -> None:
-        """`unregister_workflow_definition` clears both indices."""
-        workflow_def = type(
-            'WorkflowUnregName',
-            (),
-            {
-                'definition_key': 'tests.workflow_unreg.v1',
-                'name': 'unreg_name_workflow',
-            },
-        )
-        register_workflow_definition(workflow_def)
-        assert get_workflow_definition_by_name('unreg_name_workflow') is workflow_def
-
-        unregister_workflow_definition('tests.workflow_unreg.v1')
-
-        assert get_workflow_definition('tests.workflow_unreg.v1') is None
-        assert get_workflow_definition_by_name('unreg_name_workflow') is None
-
-    def test_clear_workflow_definition_registry_clears_name_index(self) -> None:
-        workflow_def = type(
-            'WorkflowClearName',
-            (),
-            {
-                'definition_key': 'tests.workflow_clear.v1',
-                'name': 'clear_name_workflow',
-            },
-        )
-        register_workflow_definition(workflow_def)
-        assert get_workflow_definition_by_name('clear_name_workflow') is workflow_def
-
-        clear_workflow_definition_registry()
-
-        assert get_workflow_definition_by_name('clear_name_workflow') is None
-
-    def test_workflow_without_name_only_indexed_by_key(self) -> None:
-        """Workflows with no ``name`` attribute are only indexed by definition_key."""
-        workflow_def = type(
-            'WorkflowNoName',
-            (),
-            {'definition_key': 'tests.workflow_no_name.v1'},
-        )
-        register_workflow_definition(workflow_def)
-
-        assert get_workflow_definition('tests.workflow_no_name.v1') is workflow_def
-        # Name index does not contain this workflow.
-        assert get_workflow_definition_by_name('tests.workflow_no_name.v1') is None

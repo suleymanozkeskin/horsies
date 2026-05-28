@@ -963,15 +963,17 @@ class TestIsOkTypeCompatible:
 
 @pytest.mark.unit
 class TestResolveSourceOkType:
-    """Strict-serde phase 7+: resolve OkT for a persisted source name.
+    """Strict-serde phase 7+: resolve OkT for a persisted source — unambiguously.
 
-    The persisted ``horsies_workflow_tasks.task_name`` carries either a
-    task name (TaskNode source) or a workflow's ``.name`` attribute
-    (SubWorkflowNode source). ``resolve_source_ok_type`` must handle
-    both: task registry first, workflow definition registry as fallback.
+    The caller supplies the source kind:
+    - ``sub_definition_key`` given → SubWorkflowNode source, resolved via
+      the workflow's *unique* ``definition_key``.
+    - ``sub_definition_key`` is ``None`` → TaskNode source, resolved via
+      the task registry.
 
-    Pre-helper, decode paths only consulted ``app.tasks`` and silently
-    dropped SubWorkflowNode rows.
+    There is no by-name workflow fallback: ``.name`` is not unique and a
+    workflow name can collide with a task name, so name-keyed resolution
+    is never used.
     """
 
     def setup_method(self) -> None:
@@ -989,7 +991,7 @@ class TestResolveSourceOkType:
         clear_workflow_definition_registry()
 
     def test_resolves_via_task_registry(self) -> None:
-        """TaskNode source: name in ``app.tasks`` → ``task_ok_type``."""
+        """TaskNode source (no sub_definition_key): name in ``app.tasks``."""
         from unittest.mock import MagicMock
 
         fake_task = MagicMock()
@@ -1003,8 +1005,8 @@ class TestResolveSourceOkType:
 
         assert resolve_source_ok_type(fake_app, 'my_task') is int
 
-    def test_resolves_via_workflow_registry_fallback(self) -> None:
-        """SubWorkflowNode source: name in workflow def registry → OkT."""
+    def test_resolves_subworkflow_via_definition_key(self) -> None:
+        """SubWorkflowNode source: resolve by the unique definition_key."""
         from horsies.core.models.workflow.definition import WorkflowDefinition
         from horsies.core.workflows.registry import register_workflow_definition
 
@@ -1014,100 +1016,95 @@ class TestResolveSourceOkType:
 
         register_workflow_definition(MyChildWorkflow)
 
+        # No app needed; the definition_key is authoritative. task_name is
+        # ignored on the subworkflow path.
+        assert resolve_source_ok_type(
+            None, 'irrelevant',
+            sub_definition_key='tests.unit.typing_utils.my_child.v1',
+        ) is str
+
+    def test_definition_key_wins_over_colliding_task_name(self) -> None:
+        """The whole point: a task named the same as the workflow does NOT
+        hijack a SubWorkflowNode source's OkT resolution.
+
+        Pre-fix, the resolver tried the task registry by name first, so a
+        task sharing the workflow's name would supply the wrong OkT. With
+        ``sub_definition_key`` the subworkflow resolves by its unique key,
+        ignoring the colliding task entirely.
+        """
+        from unittest.mock import MagicMock
+
+        from horsies.core.models.workflow.definition import WorkflowDefinition
+        from horsies.core.workflows.registry import register_workflow_definition
+
+        class CollidingChildWorkflow(WorkflowDefinition[str]):
+            name = 'shared_name'
+            definition_key = 'tests.unit.typing_utils.collide_child.v1'
+
+        register_workflow_definition(CollidingChildWorkflow)
+
+        # A task registered under the SAME string as the workflow's name,
+        # with a DIFFERENT ok_type.
+        colliding_task = MagicMock()
+        colliding_task.task_ok_type = int
+        fake_app = MagicMock()
+        fake_app.tasks = MagicMock()
+        fake_app.tasks.get = lambda name: (  # type: ignore[assignment]
+            colliding_task if name == 'shared_name' else None
+        )
+
+        # SubWorkflowNode source: task_name is the workflow name, which
+        # collides with the task. Resolving by definition_key gives the
+        # workflow's str, NOT the colliding task's int.
+        assert resolve_source_ok_type(
+            fake_app, 'shared_name',
+            sub_definition_key='tests.unit.typing_utils.collide_child.v1',
+        ) is str
+
+        # And the TaskNode source path (no key) still resolves the task.
+        assert resolve_source_ok_type(fake_app, 'shared_name') is int
+
+    def test_returns_none_when_task_not_registered(self) -> None:
         from unittest.mock import MagicMock
 
         fake_app = MagicMock()
         fake_app.tasks = MagicMock()
         fake_app.tasks.get = lambda name: None  # type: ignore[assignment]
 
-        assert resolve_source_ok_type(fake_app, 'my_child_workflow') is str
+        assert resolve_source_ok_type(fake_app, 'unknown_task') is None
 
-    def test_task_registry_takes_precedence_when_both_match(self) -> None:
-        """Task registry hit wins over workflow registry hit on same name."""
+    def test_returns_none_when_definition_key_not_registered(self) -> None:
+        """An unknown definition_key resolves to None (no name fallback)."""
+        assert resolve_source_ok_type(
+            None, 'anything', sub_definition_key='tests.unit.not.registered.v1',
+        ) is None
+
+    def test_returns_none_when_app_none_and_task_source(self) -> None:
+        """TaskNode source needs app; without it, None."""
+        assert resolve_source_ok_type(None, 'some_task') is None
+
+    def test_workflow_name_not_used_as_fallback(self) -> None:
+        """A registered workflow is NOT found by its .name without the key.
+
+        Confirms the by-name fallback is gone: a SubWorkflowNode source
+        that somehow reaches the resolver without ``sub_definition_key``
+        (e.g. a TaskNode-shaped call) does not silently resolve via the
+        workflow's name.
+        """
         from horsies.core.models.workflow.definition import WorkflowDefinition
         from horsies.core.workflows.registry import register_workflow_definition
 
-        class CollidingWorkflow(WorkflowDefinition[str]):
-            name = 'colliding_name'
-            definition_key = 'tests.unit.typing_utils.colliding.v1'
+        class NameOnlyWorkflow(WorkflowDefinition[float]):
+            name = 'name_only_workflow'
+            definition_key = 'tests.unit.typing_utils.name_only.v1'
 
-        register_workflow_definition(CollidingWorkflow)
+        register_workflow_definition(NameOnlyWorkflow)
 
-        from unittest.mock import MagicMock
-
-        fake_task = MagicMock()
-        fake_task.task_ok_type = int
-
-        fake_app = MagicMock()
-        fake_app.tasks = MagicMock()
-        fake_app.tasks.get = lambda name: (  # type: ignore[assignment]
-            fake_task if name == 'colliding_name' else None
-        )
-
-        assert resolve_source_ok_type(fake_app, 'colliding_name') is int
-
-    def test_returns_none_when_neither_registry_matches(self) -> None:
         from unittest.mock import MagicMock
 
         fake_app = MagicMock()
         fake_app.tasks = MagicMock()
         fake_app.tasks.get = lambda name: None  # type: ignore[assignment]
 
-        assert resolve_source_ok_type(fake_app, 'unknown_source') is None
-
-    def test_returns_none_when_app_none_and_workflow_not_registered(self) -> None:
-        """No app context and no workflow registration → cannot resolve."""
-        assert resolve_source_ok_type(None, 'anything') is None
-
-    def test_resolves_workflow_when_app_is_none(self) -> None:
-        """A registered workflow resolves even without app context.
-
-        Cross-process recovery / out-of-process handle reads may not
-        have an app reference. The workflow registry is process-local
-        but doesn't require app.
-        """
-        from horsies.core.models.workflow.definition import WorkflowDefinition
-        from horsies.core.workflows.registry import register_workflow_definition
-
-        class AppLessWorkflow(WorkflowDefinition[dict[str, int]]):
-            name = 'app_less_workflow'
-            definition_key = 'tests.unit.typing_utils.app_less.v1'
-
-        register_workflow_definition(AppLessWorkflow)
-
-        result = resolve_source_ok_type(None, 'app_less_workflow')
-        # Generic alias compares by repr; check args/origin
-        from typing import get_args, get_origin
-
-        assert get_origin(result) is dict
-        assert get_args(result) == (str, int)
-
-    def test_task_without_task_ok_type_falls_through_to_workflow_registry(
-        self,
-    ) -> None:
-        """A task hit without ``task_ok_type`` falls through to the workflow
-        registry — handles the case where someone registered a task object
-        without ok_type metadata but the same name also matches a workflow.
-        """
-        from horsies.core.models.workflow.definition import WorkflowDefinition
-        from horsies.core.workflows.registry import register_workflow_definition
-
-        class FallthroughWorkflow(WorkflowDefinition[float]):
-            name = 'fallthrough_name'
-            definition_key = 'tests.unit.typing_utils.fallthrough.v1'
-
-        register_workflow_definition(FallthroughWorkflow)
-
-        from unittest.mock import MagicMock
-
-        # Task exists but has no task_ok_type.
-        fake_task = MagicMock()
-        fake_task.task_ok_type = None
-
-        fake_app = MagicMock()
-        fake_app.tasks = MagicMock()
-        fake_app.tasks.get = lambda name: (  # type: ignore[assignment]
-            fake_task if name == 'fallthrough_name' else None
-        )
-
-        assert resolve_source_ok_type(fake_app, 'fallthrough_name') is float
+        # No sub_definition_key → task path only → not a task → None.
+        assert resolve_source_ok_type(fake_app, 'name_only_workflow') is None

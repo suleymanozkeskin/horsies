@@ -1147,9 +1147,10 @@ class TestGetDependencyResults:
         ``(results_by_index, task_names_by_index)`` tuple.
         """
         session = AsyncMock()
-        results, names = await get_dependency_results(session, 'wf-1', [])
+        results, names, def_keys = await get_dependency_results(session, 'wf-1', [])
         assert results == {}
         assert names == {}
+        assert def_keys == {}
 
     @pytest.mark.asyncio
     async def test_corrupt_result_json_injects_deser_error(self) -> None:
@@ -1160,6 +1161,7 @@ class TestGetDependencyResults:
             task_name='task_a',
             status='COMPLETED',
             result='not{json',
+            sub_definition_key=None,
         )
 
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
@@ -1167,7 +1169,7 @@ class TestGetDependencyResults:
 
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
-        results, names = await get_dependency_results(session, 'wf-1', [0])
+        results, names, _def_keys = await get_dependency_results(session, 'wf-1', [0])
         assert 0 in results
         assert results[0].is_err()
         assert results[0].err.error_code == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
@@ -1195,6 +1197,7 @@ class TestGetDependencyResults:
             status='COMPLETED',
             # Valid JSON, but envelope marker is missing → decode rejects.
             result='{"unexpected": "shape"}',
+            sub_definition_key=None,
         )
 
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
@@ -1203,7 +1206,7 @@ class TestGetDependencyResults:
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
 
-        results, names = await get_dependency_results(
+        results, names, _def_keys = await get_dependency_results(
             session, 'wf-1', [0], app=app,
         )
         assert 0 in results
@@ -1229,6 +1232,7 @@ class TestGetDependencyResultsWithNames:
         row = SimpleNamespace(
             task_index=0, task_name='task_a', node_id='node-0',
             status='COMPLETED', result='not{json',
+            sub_definition_key=None,
         )
 
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
@@ -1259,6 +1263,7 @@ class TestGetDependencyResultsWithNames:
         row = SimpleNamespace(
             task_index=0, task_name='task_a', node_id='node-0',
             status='COMPLETED', result='{"valid": "json"}',
+            sub_definition_key=None,
         )
 
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
@@ -1282,6 +1287,7 @@ class TestGetDependencyResultsWithNames:
         row = SimpleNamespace(
             task_index=0, task_name='task_a', node_id='node-0',
             status='COMPLETED', result=None,
+            sub_definition_key=None,
         )
 
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
@@ -1460,6 +1466,7 @@ class TestGetWorkflowFinalResult:
                         node_id='node-0', task_index=0,
                         task_name='task_a',
                         result='{"valid": "but_not_taskresult"}',
+                        sub_definition_key=None,
                     ),
                 ])
             return _empty_result()

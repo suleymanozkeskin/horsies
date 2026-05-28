@@ -193,42 +193,46 @@ def _resolve_workflow_def_ok_type(
     return None
 
 
-def resolve_source_ok_type(app: Any | None, name: str) -> Any | None:
-    """Resolve the source OkT for a persisted node by name.
+def resolve_source_ok_type(
+    app: Any | None,
+    task_name: str,
+    *,
+    sub_definition_key: str | None = None,
+) -> Any | None:
+    """Resolve the source OkT for a persisted node — unambiguously.
 
-    The ``name`` is whatever was stored in ``horsies_workflow_tasks.task_name``:
+    The caller supplies the source kind, so resolution never guesses
+    across namespaces:
 
-    - For TaskNode rows: a registered task name (``app.tasks`` key).
-    - For SubWorkflowNode rows: the child workflow's ``.name`` attribute,
-      not a task name. The persisted name is the workflow's display
-      name (see ``lifecycle.py`` ``sub_wf_name`` field).
+    - ``sub_definition_key`` given → the source is a SubWorkflowNode;
+      resolve via the child workflow's *unique* ``definition_key``
+      (``get_workflow_definition``). ``definition_key`` is registry-
+      enforced unique, so it can never collide with a task name or
+      another workflow. ``task_name`` is ignored on this path.
+    - ``sub_definition_key`` is ``None`` → the source is a TaskNode;
+      resolve via the task registry (``app.tasks[task_name].task_ok_type``).
 
-    Tries the task registry first; falls back to the workflow definition
-    registry (``WorkflowDefinition[OkT]`` generic). Returns ``None`` if
-    the name isn't known in either, or when ``app`` is unavailable AND
-    the workflow definition isn't registered process-locally.
-
-    Strict-serde phase 7+: this is the single source of truth for
-    OkT lookup at all decode boundaries (handle, engine, child_runner).
-    Pre-helper callers used ``app.tasks.get(name).task_ok_type`` directly,
-    which silently dropped SubWorkflowNode rows because subworkflow names
-    don't appear in the task registry.
+    There is no by-name workflow fallback: every SubWorkflowNode source
+    (DB row and typed wire envelope) carries ``sub_definition_key``, so a
+    name-keyed lookup is never needed. Returns ``None`` when the source
+    isn't registered in the relevant registry.
     """
-    if app is not None:
-        source_task = app.tasks.get(name)
-        if source_task is not None:
-            task_ok_type = getattr(source_task, 'task_ok_type', None)
-            if task_ok_type is not None:
-                return _normalize_resolved_ok_type(task_ok_type)
+    from horsies.core.workflows.registry import get_workflow_definition
 
-    # SubWorkflowNode path: look up the workflow definition by its name
-    # in the workflow registry, then resolve OkT from its generic.
-    from horsies.core.workflows.registry import get_workflow_definition_by_name
+    # SubWorkflowNode source: the unique definition_key.
+    if sub_definition_key is not None:
+        workflow_def = get_workflow_definition(sub_definition_key)
+        if workflow_def is None:
+            return None
+        return _resolve_workflow_def_ok_type(workflow_def)
 
-    workflow_def = get_workflow_definition_by_name(name)
-    if workflow_def is None:
+    # TaskNode source: the task registry is authoritative.
+    if app is None:
         return None
-    return _resolve_workflow_def_ok_type(workflow_def)
+    source_task = app.tasks.get(task_name)
+    if source_task is None:
+        return None
+    return _normalize_resolved_ok_type(getattr(source_task, 'task_ok_type', None))
 
 
 def _resolve_source_node_ok_type(node: TaskNode[Any] | SubWorkflowNode[Any]) -> Any | None:
