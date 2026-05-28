@@ -1269,6 +1269,45 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
 
+    def test_workflow_ctx_summaries_by_id_bad_status(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        """summaries_by_id with valid JSON but unrecognized status → serde error.
+
+        Regression: a corrupt persisted status used to be silently coerced to
+        WorkflowStatus.FAILED and injected; it must now surface as a worker
+        serialization error instead.
+        """
+
+        def _task_with_ctx(workflow_ctx: Any = None) -> TaskResult[str, TaskError]:
+            return TaskResult(ok='done')
+
+        patches = _make_run_task_patches(task_fn=_task_with_ctx)
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_task = MagicMock()
+        mock_task.return_value = TaskResult(ok='done')
+        mock_task._original_fn = _task_with_ctx
+        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
+
+        _run_entry_defaults['kwargs_json'] = json.dumps({
+            '__h_workflow_ctx__': {
+                'workflow_id': 'wf-1',
+                'task_index': 0,
+                'task_name': 'my_task',
+                'results_by_id': {},
+                'summaries_by_id': {
+                    'sub_wf': json.dumps({'status': 'NOT_A_STATUS', 'total_tasks': 1}),
+                },
+            },
+        })
+
+        with _apply_patches(patches):
+            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+
+        assert ok is True
+        assert reason is not None and 'SerializationError' in reason
+
     def test_workflow_meta_injection(
         self,
         _run_entry_defaults: dict[str, Any],

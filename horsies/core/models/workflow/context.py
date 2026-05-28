@@ -69,12 +69,23 @@ class SubWorkflowSummary(Generic[OkT_co]):
     """Brief description of failure (if child failed)"""
 
     @classmethod
-    def from_json(cls, data: dict[str, Any]) -> SubWorkflowSummary[Any]:
-        """Build a SubWorkflowSummary from a JSON-like dict safely."""
+    def from_json(cls, data: object) -> SubWorkflowSummary[Any]:
+        """Build a SubWorkflowSummary from persisted JSON-like data.
+
+        Fails closed: raises ValueError when the payload is not a string-keyed
+        dict or the status is missing/unrecognized, so corrupt persisted data
+        is surfaced instead of being silently coerced into a FAILED summary.
+        """
         def _is_str_key_dict(value: object) -> TypeGuard[dict[str, Any]]:
             if not isinstance(value, dict):
                 return False
             return all(isinstance(k, str) for k in cast(dict[Any, Any], value))
+
+        if not _is_str_key_dict(data):
+            raise ValueError(
+                'SubWorkflowSummary payload must be a string-keyed dict, '
+                f'got {type(data).__name__}'
+            )
 
         # Normalize possible serde dataclass envelope:
         # {"__dataclass__": true, "module": ..., "qualname": ..., "data": {...}}
@@ -83,28 +94,51 @@ class SubWorkflowSummary(Generic[OkT_co]):
         if data.get('__dataclass__') and _is_str_key_dict(raw_inner):
             payload = raw_inner
 
-        def _as_int(value: Any, default: int = 0) -> int:
-            return int(value) if isinstance(value, (int, float)) else default
+        def _require_count(field_name: str, value: Any) -> int:
+            # Counts are always written by the engine; missing or non-int
+            # (incl. bool) or negative values mean corrupt persisted data.
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(
+                    f'SubWorkflowSummary {field_name} must be a non-negative '
+                    f'integer, got {value!r}'
+                )
+            return value
 
         status_val = payload.get('status')
         if isinstance(status_val, WorkflowStatus):
             status = status_val
-        else:
+        elif isinstance(status_val, str):
             try:
-                status = WorkflowStatus(str(status_val))
-            except Exception:
-                status = WorkflowStatus.FAILED
+                status = WorkflowStatus(status_val)
+            except ValueError:
+                raise ValueError(
+                    f'SubWorkflowSummary has unrecognized status {status_val!r}'
+                ) from None
+        else:
+            raise ValueError(
+                'SubWorkflowSummary status must be a status string, '
+                f'got {type(status_val).__name__}'
+            )
 
         error_val = payload.get('error_summary')
+        if error_val is None:
+            error_summary = None
+        elif isinstance(error_val, str):
+            error_summary = error_val
+        else:
+            raise ValueError(
+                'SubWorkflowSummary error_summary must be a string or null, '
+                f'got {type(error_val).__name__}'
+            )
 
         return cls(
             status=status,
             output=payload.get('output'),
-            total_tasks=_as_int(payload.get('total_tasks')),
-            completed_tasks=_as_int(payload.get('completed_tasks')),
-            failed_tasks=_as_int(payload.get('failed_tasks')),
-            skipped_tasks=_as_int(payload.get('skipped_tasks')),
-            error_summary=str(error_val) if error_val else None,
+            total_tasks=_require_count('total_tasks', payload.get('total_tasks')),
+            completed_tasks=_require_count('completed_tasks', payload.get('completed_tasks')),
+            failed_tasks=_require_count('failed_tasks', payload.get('failed_tasks')),
+            skipped_tasks=_require_count('skipped_tasks', payload.get('skipped_tasks')),
+            error_summary=error_summary,
         )
 
 
