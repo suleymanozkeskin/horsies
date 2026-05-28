@@ -1494,6 +1494,12 @@ class Horsies:
             ValueError: If any TaskNode.queue is not in app config
         """
         report = ValidationReport('workflow')
+        # WorkflowSpec shallow-copies each node, so the resolved queue/priority
+        # is captured from the original at copy time. We set it on the original
+        # here and restore it after construction (see the try/finally below) so
+        # app.workflow() never leaves a persistent side effect on the caller's
+        # TaskNode — reusing one node across configs must be order-independent.
+        saved_node_config: list[tuple[TaskNode[Any], str | None, int | None]] = []
         for node in tasks:
             # SubWorkflowNode doesn't have queue/priority - handled at execution time
             if isinstance(node, SubWorkflowNode):
@@ -1540,29 +1546,42 @@ class Horsies:
                 )
                 queue_valid = False
 
-            if queue_valid:
-                # Store resolved queue for later use
+            # Frozen nodes (reused from a prior spec) already carry resolved
+            # queue/priority and cannot be reassigned; skip mutation for them.
+            if queue_valid and not getattr(task, '_frozen', False):
+                # Stash the caller's values so we can restore them after the
+                # spec has copied the node.
+                saved_node_config.append((task, task.queue, task.priority))
                 task.queue = resolved_queue
 
                 # Resolve priority if not explicitly set
                 if task.priority is None:
                     task.priority = effective_priority(self, resolved_queue)
 
-        raise_collected(report)
+        try:
+            raise_collected(report)
 
-        # Create spec with validated tasks and broker
-        spec = WorkflowSpec(
-            name=name,
-            tasks=tasks,
-            on_error=on_error,
-            output=output,
-            success_policy=success_policy,
-            broker=self.get_broker(),
-            definition_key=definition_key,
-            workflow_def_cls=workflow_def_cls,
-            resend_on_transient_err=self.config.resend_on_transient_err,
-        )
-        spec._require_definition_key()
+            # Create spec with validated tasks and broker. The spec
+            # shallow-copies each node, capturing the resolved queue/priority
+            # set above.
+            spec = WorkflowSpec(
+                name=name,
+                tasks=tasks,
+                on_error=on_error,
+                output=output,
+                success_policy=success_policy,
+                broker=self.get_broker(),
+                definition_key=definition_key,
+                workflow_def_cls=workflow_def_cls,
+                resend_on_transient_err=self.config.resend_on_transient_err,
+            )
+            spec._require_definition_key()
+        finally:
+            # Restore the caller's nodes — the spec now owns independent copies.
+            for original, saved_queue, saved_priority in saved_node_config:
+                original.queue = saved_queue
+                original.priority = saved_priority
+
         if output is None:
             return cast('WorkflowSpec[WorkflowTerminalResults]', spec)
         return spec
