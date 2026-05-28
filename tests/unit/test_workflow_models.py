@@ -1898,6 +1898,38 @@ class TestWorkflowContext:
         assert result.is_ok()
         assert result.unwrap() == 7
 
+    def test_result_for_accepts_subworkflow_node(self) -> None:
+        """result_for(node) accepts a SubWorkflowNode and returns its terminal
+        TaskResult (the type signature must allow it — pyright previously
+        refused what the runtime accepts)."""
+        result_0: TaskResult[int, TaskError] = TaskResult(ok=99)
+        ctx = WorkflowContext.from_serialized(
+            workflow_id='wf-123',
+            task_index=1,
+            task_name='consumer',
+            results_by_id={'sub-node': result_0},
+        )
+
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        class ChildWorkflow(WorkflowDefinition[int]):
+            name = 'child_result_for'
+            definition_key = _definition_key('child_result_for')
+            child = TaskNode(fn=fn_a)
+
+            class Meta:
+                output = None
+
+        ChildWorkflow.Meta.output = ChildWorkflow.child
+
+        node: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=ChildWorkflow, node_id='sub-node',
+        )
+
+        result = ctx.result_for(node)
+        assert result.is_ok()
+        assert result.unwrap() == 99
+
     def test_model_dump_round_trips_results(self) -> None:
         """model_dump() preserves dependency results through model_validate()."""
         result_0: TaskResult[int, TaskError] = TaskResult(ok=42)
