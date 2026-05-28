@@ -3269,6 +3269,9 @@ class TestSubWorkflowSummaryFromJson:
         summary = SubWorkflowSummary.from_json({
             'status': WorkflowStatus.FAILED,
             'total_tasks': 1,
+            'completed_tasks': 0,
+            'failed_tasks': 1,
+            'skipped_tasks': 0,
         })
         assert summary.status == WorkflowStatus.FAILED
 
@@ -3278,10 +3281,72 @@ class TestSubWorkflowSummaryFromJson:
             '__dataclass__': True,
             'module': 'horsies.core.models.workflow.context',
             'qualname': 'SubWorkflowSummary',
-            'data': {'status': 'PAUSED', 'total_tasks': 2},
+            'data': {
+                'status': 'PAUSED',
+                'total_tasks': 2,
+                'completed_tasks': 1,
+                'failed_tasks': 0,
+                'skipped_tasks': 0,
+            },
         })
         assert summary.status == WorkflowStatus.PAUSED
         assert summary.total_tasks == 2
+
+    def test_error_summary_string_preserved(self) -> None:
+        """A string error_summary is preserved verbatim."""
+        summary = SubWorkflowSummary.from_json({
+            'status': 'FAILED', 'total_tasks': 1, 'completed_tasks': 0,
+            'failed_tasks': 1, 'skipped_tasks': 0, 'error_summary': 'boom',
+        })
+        assert summary.error_summary == 'boom'
+
+    def test_error_summary_null_is_none(self) -> None:
+        """A missing/null error_summary maps to None."""
+        summary = SubWorkflowSummary.from_json({
+            'status': 'COMPLETED', 'total_tasks': 1, 'completed_tasks': 1,
+            'failed_tasks': 0, 'skipped_tasks': 0,
+        })
+        assert summary.error_summary is None
+
+    def test_non_string_error_summary_raises(self) -> None:
+        """A non-string error_summary is surfaced, not coerced via str()."""
+        with pytest.raises(ValueError, match='error_summary must be a string or null'):
+            SubWorkflowSummary.from_json({
+                'status': 'FAILED', 'total_tasks': 1, 'completed_tasks': 0,
+                'failed_tasks': 1, 'skipped_tasks': 0, 'error_summary': {'code': 5},
+            })
+
+    def test_missing_count_raises(self) -> None:
+        """A missing count is surfaced, not defaulted to 0."""
+        with pytest.raises(ValueError, match='total_tasks must be a non-negative integer'):
+            SubWorkflowSummary.from_json({
+                'status': 'COMPLETED', 'completed_tasks': 0,
+                'failed_tasks': 0, 'skipped_tasks': 0,
+            })
+
+    def test_non_numeric_count_raises(self) -> None:
+        """A non-numeric count is surfaced, not silently coerced to 0."""
+        with pytest.raises(ValueError, match='completed_tasks must be a non-negative integer'):
+            SubWorkflowSummary.from_json({
+                'status': 'COMPLETED', 'total_tasks': 1, 'completed_tasks': 'two',
+                'failed_tasks': 0, 'skipped_tasks': 0,
+            })
+
+    def test_negative_count_raises(self) -> None:
+        """A negative count is rejected."""
+        with pytest.raises(ValueError, match='failed_tasks must be a non-negative integer'):
+            SubWorkflowSummary.from_json({
+                'status': 'COMPLETED', 'total_tasks': 1, 'completed_tasks': 1,
+                'failed_tasks': -1, 'skipped_tasks': 0,
+            })
+
+    def test_bool_count_raises(self) -> None:
+        """A bool count (int subclass) is rejected as not a real count."""
+        with pytest.raises(ValueError, match='skipped_tasks must be a non-negative integer'):
+            SubWorkflowSummary.from_json({
+                'status': 'COMPLETED', 'total_tasks': 1, 'completed_tasks': 1,
+                'failed_tasks': 0, 'skipped_tasks': True,
+            })
 
     def test_unrecognized_status_string_raises(self) -> None:
         """An invalid status string is surfaced, not coerced to FAILED."""

@@ -94,8 +94,15 @@ class SubWorkflowSummary(Generic[OkT_co]):
         if data.get('__dataclass__') and _is_str_key_dict(raw_inner):
             payload = raw_inner
 
-        def _as_int(value: Any, default: int = 0) -> int:
-            return int(value) if isinstance(value, (int, float)) else default
+        def _require_count(field_name: str, value: Any) -> int:
+            # Counts are always written by the engine; missing or non-int
+            # (incl. bool) or negative values mean corrupt persisted data.
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(
+                    f'SubWorkflowSummary {field_name} must be a non-negative '
+                    f'integer, got {value!r}'
+                )
+            return value
 
         status_val = payload.get('status')
         if isinstance(status_val, WorkflowStatus):
@@ -114,15 +121,24 @@ class SubWorkflowSummary(Generic[OkT_co]):
             )
 
         error_val = payload.get('error_summary')
+        if error_val is None:
+            error_summary = None
+        elif isinstance(error_val, str):
+            error_summary = error_val
+        else:
+            raise ValueError(
+                'SubWorkflowSummary error_summary must be a string or null, '
+                f'got {type(error_val).__name__}'
+            )
 
         return cls(
             status=status,
             output=payload.get('output'),
-            total_tasks=_as_int(payload.get('total_tasks')),
-            completed_tasks=_as_int(payload.get('completed_tasks')),
-            failed_tasks=_as_int(payload.get('failed_tasks')),
-            skipped_tasks=_as_int(payload.get('skipped_tasks')),
-            error_summary=str(error_val) if error_val else None,
+            total_tasks=_require_count('total_tasks', payload.get('total_tasks')),
+            completed_tasks=_require_count('completed_tasks', payload.get('completed_tasks')),
+            failed_tasks=_require_count('failed_tasks', payload.get('failed_tasks')),
+            skipped_tasks=_require_count('skipped_tasks', payload.get('skipped_tasks')),
+            error_summary=error_summary,
         )
 
 
