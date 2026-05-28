@@ -7,7 +7,6 @@ from typing import (
     Optional,
     Union,
     Mapping,
-    Sequence,
     TypeGuard,
     cast,
 )
@@ -213,28 +212,30 @@ def to_jsonable(value: Any) -> SerdeResult[Json]:
             'data': field_data,
         })
 
-    # Mapping (dict-like)
+    # Mapping (dict-like). JSON object keys must be strings — reject non-str
+    # keys rather than str()-coercing them, which is lossy on round-trip
+    # (e.g. {1: ...} would come back as {'1': ...}). Matches the strict-serde
+    # fence in `_validate_json_native`.
     if isinstance(value, Mapping):
         mapping = cast(Mapping[object, object], value)
         result_dict: Dict[str, Json] = {}
-        original_keys: Dict[str, object] = {}
         for key, item in mapping.items():
-            str_key = str(key)
-            if str_key in result_dict:
+            if not isinstance(key, str):
                 return Err(SerializationError(
-                    f"Mapping key collision: {key!r} and {original_keys[str_key]!r} "
-                    f"both resolve to '{str_key}' after stringification",
+                    f'Mapping key must be str, got {type(key).__name__}: {key!r}',
                 ))
             item_result = to_jsonable(item)
             if is_err(item_result):
                 return item_result
-            original_keys[str_key] = key
-            result_dict[str_key] = item_result.ok_value
+            result_dict[key] = item_result.ok_value
         return Ok(result_dict)
 
-    # Sequence (list-like, excluding str/bytes)
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        seq = cast(Sequence[object], value)
+    # List → JSON array. tuple/set/range and other sequences are NOT
+    # JSON-native; reject them (they fall through to the Err below) rather
+    # than silently coercing tuple -> list, which is lossy on round-trip.
+    # Matches the strict-serde fence in `_validate_json_native`.
+    if isinstance(value, list):
+        seq = cast(List[object], value)
         result_list: List[Json] = []
         for item in seq:
             item_result = to_jsonable(item)
