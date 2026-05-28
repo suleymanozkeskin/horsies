@@ -13,6 +13,9 @@ from dataclasses import dataclass
 
 import pytest
 
+from horsies.core.app import Horsies
+from horsies.core.models.app import AppConfig
+from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.task_send_types import TaskSendError, TaskSendResult
 from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, TaskSendOptions
@@ -504,3 +507,58 @@ class TestCopyOnBuild:
         # Neither is the class-level original
         assert spec_1.tasks[0] is not MyWorkflow.step
         assert spec_2.tasks[0] is not MyWorkflow.step
+
+
+_REAL_BROKER = PostgresConfig(
+    database_url='postgresql+psycopg://user:pass@localhost/db',
+)
+
+
+def _real_app() -> Horsies:
+    return Horsies(config=AppConfig(broker=_REAL_BROKER))
+
+
+@pytest.mark.unit
+class TestAppWorkflowDoesNotMutateCaller:
+    """app.workflow() must resolve queue/priority on its own copies, never on
+    the caller's TaskNode — reusing a node across workflows/configs has to be
+    order-independent."""
+
+    def test_caller_node_queue_priority_unchanged(self) -> None:
+        app = _real_app()
+        node = TaskNode(fn=fn_a)
+        assert node.queue is None
+        assert node.priority is None
+
+        spec = app.workflow('wf', [node], definition_key='tests.unit.no_mutation.v1')
+
+        # Caller's node is untouched...
+        assert node.queue is None
+        assert node.priority is None
+        # ...while the spec's own copy carries the resolved values.
+        assert spec.tasks[0] is not node
+        assert spec.tasks[0].queue == 'default'
+        assert spec.tasks[0].priority is not None
+
+    def test_node_id_still_back_propagates(self) -> None:
+        """The intended node_id/index back-propagation to the original is
+        preserved (task-body ctx.result_for(original_node) relies on it)."""
+        app = _real_app()
+        node = TaskNode(fn=fn_a)
+
+        app.workflow('wf', [node], definition_key='tests.unit.backprop.v1')
+
+        assert node.node_id is not None
+        assert node.index is not None
+
+    def test_reuse_across_workflows_is_order_independent(self) -> None:
+        app = _real_app()
+        node = TaskNode(fn=fn_a)
+
+        app.workflow('wf1', [node], definition_key='tests.unit.reuse1.v1')
+        # Second use must see the pristine node, not stale resolved state.
+        assert node.queue is None
+        assert node.priority is None
+        app.workflow('wf2', [node], definition_key='tests.unit.reuse2.v1')
+        assert node.queue is None
+        assert node.priority is None
