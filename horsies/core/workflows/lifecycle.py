@@ -875,7 +875,31 @@ async def resume_workflow(
             await check_workflow_completion(session, workflow_id, broker)
 
             await session.commit()
-            return Ok(True)
+
+        # A task can finish while this transaction has resumed a child workflow
+        # but before that status change is visible to the task-completion
+        # callback. The callback observes PAUSED and correctly avoids
+        # propagation; once resume commits, run the recovery completion pass to
+        # close that race through the same canonical engine paths. Scope it to
+        # the resumed workflow's tree (self + descendants) so resume does not
+        # trigger a full-DB recovery sweep over unrelated workflows.
+        async with broker.session_factory() as recovery_session:
+            from horsies.core.workflows.recovery import (
+                GET_WORKFLOW_TREE_IDS_SQL,
+                recover_stuck_workflows,
+            )
+
+            tree_result = await recovery_session.execute(
+                GET_WORKFLOW_TREE_IDS_SQL,
+                {'wf_id': workflow_id},
+            )
+            tree_ids = [r.id for r in tree_result.fetchall()]
+            await recover_stuck_workflows(
+                recovery_session, broker, scope_workflow_ids=tree_ids,
+            )
+            await recovery_session.commit()
+
+        return Ok(True)
     except SQLAlchemyError as exc:
         return Err(HandleOperationError(
             code=HandleErrorCode.DB_OPERATION_FAILED,
