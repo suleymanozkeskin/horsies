@@ -55,10 +55,14 @@ from horsies.core.errors import WorkflowValidationError
 
 __all__ = [
     # enums
+    'OkT',
+    'OkT_co',
+    'OutT',
     'WorkflowStatus',
     'WORKFLOW_TERMINAL_STATES',
     'WorkflowTaskStatus',
     'WORKFLOW_TASK_TERMINAL_STATES',
+    'WF_TASK_TERMINAL_VALUES',
     'OnError',
     # nodes
     'NodeKey',
@@ -69,6 +73,7 @@ __all__ = [
     'SuccessPolicy',
     'WorkflowTerminalResults',
     # typing utils
+    'NODE_ID_PATTERN',
     'slugify',
     'validate_workflow_generic_output_match',
     # context
@@ -87,6 +92,7 @@ __all__ = [
     'WorkflowSpec',
     # definition
     'WorkflowDefinition',
+    'WorkflowDefinitionMeta',
     # errors
     'WorkflowValidationError',
 ]
