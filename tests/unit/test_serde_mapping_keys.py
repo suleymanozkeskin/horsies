@@ -61,3 +61,37 @@ class TestMappingKeyCollision:
         result = to_jsonable({})
         assert not is_err(result)
         assert result.ok_value == {}
+
+
+@pytest.mark.unit
+class TestDumpsJsonSurrogate:
+    """dumps_json must fail closed on text that is not UTF-8 encodable.
+
+    ensure_ascii=False lets json.dumps emit lone UTF-16 surrogates verbatim;
+    those would otherwise pass as Ok and crash far downstream in the Postgres
+    TEXT insert.
+    """
+
+    def test_lone_surrogate_in_value_rejected(self) -> None:
+        """A lone surrogate inside a string value is rejected at encode time."""
+        result = dumps_json({'s': '\ud800test'})
+        assert is_err(result)
+        assert 'utf-8' in str(result.err_value).lower()
+
+    def test_lone_surrogate_in_key_rejected(self) -> None:
+        """A lone surrogate inside a mapping key is rejected."""
+        result = dumps_json({'\udfff': 'v'})
+        assert is_err(result)
+        assert 'utf-8' in str(result.err_value).lower()
+
+    def test_lone_surrogate_in_list_rejected(self) -> None:
+        """A lone surrogate inside a list element is rejected."""
+        result = dumps_json(['ok', '\ud83d'])  # lone half of a surrogate pair
+        assert is_err(result)
+        assert 'utf-8' in str(result.err_value).lower()
+
+    def test_valid_unicode_round_trips(self) -> None:
+        """Legitimate non-ASCII (accents, emoji, CJK) still serializes and is UTF-8 encodable."""
+        result = dumps_json({'s': 'héllo \U0001F600 日本語'})
+        assert not is_err(result)
+        assert result.ok_value.encode('utf-8')  # encodable, no raise
