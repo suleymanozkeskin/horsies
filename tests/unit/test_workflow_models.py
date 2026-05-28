@@ -2585,6 +2585,60 @@ class TestMultiErrorWorkflowCollection:
         with pytest.raises(WorkflowValidationError, match='not in waits_for'):
             WorkflowSpec(name='single_err', tasks=[node_a, node_b, node_c])
 
+    def test_kwargs_args_from_overlap_does_not_mask_type_errors(self) -> None:
+        """A kwargs/args_from overlap must not suppress type-checking of other keys.
+
+        Regression: a single overlapping key used to short-circuit the entire
+        node's args_from type validation, so users only saw the type error
+        after first removing the overlap (multi-round discovery).
+        """
+        producer = MockTaskWrapperInt(task_name='producer_int')
+        consumer = MockTaskWrapperWithParams(task_name='consumer')
+
+        node_a = TaskNode(fn=producer)
+        node_b = TaskNode(
+            fn=consumer,
+            waits_for=[node_a],
+            kwargs={'required': 42},  # overlaps with args_from key below
+            # 'required' overlaps; 'flag' is bool (not TaskResult) -> type mismatch
+            args_from={'required': node_a, 'flag': node_a},
+        )
+
+        with pytest.raises(MultipleValidationErrors) as exc_info:
+            WorkflowSpec(name='overlap_no_mask', tasks=[node_a, node_b])
+
+        codes = {e.code for e in exc_info.value.report.errors}
+        assert ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP in codes
+        assert ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH in codes
+
+    def test_non_dependency_args_from_source_does_not_mask_type_errors(self) -> None:
+        """A non-dependency args_from source must not suppress type-checking of other keys.
+
+        Regression: a single args_from key pointing outside waits_for used to
+        short-circuit the entire node's type validation, hiding type errors on
+        the node's dependency-sourced keys until the wiring was fixed.
+        """
+        dep = MockTaskWrapperInt(task_name='dep_int')
+        orphan = MockTaskWrapperInt(task_name='orphan_int')
+        consumer = MockTaskWrapperWithParams(task_name='consumer')
+
+        node_dep = TaskNode(fn=dep)
+        node_orphan = TaskNode(fn=orphan)  # in tasks, but not in consumer.waits_for
+        node_b = TaskNode(
+            fn=consumer,
+            waits_for=[node_dep],
+            # 'flag' source is a dependency but bool-typed -> type mismatch;
+            # 'required' source is the orphan -> WORKFLOW_INVALID_ARGS_FROM
+            args_from={'flag': node_dep, 'required': node_orphan},
+        )
+
+        with pytest.raises(MultipleValidationErrors) as exc_info:
+            WorkflowSpec(name='nondep_no_mask', tasks=[node_dep, node_orphan, node_b])
+
+        codes = {e.code for e in exc_info.value.report.errors}
+        assert ErrorCode.WORKFLOW_INVALID_ARGS_FROM in codes
+        assert ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH in codes
+
 
 # =============================================================================
 # TaskNode.key() and SubWorkflowNode.key() Tests
