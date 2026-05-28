@@ -1051,8 +1051,9 @@ class WorkflowSpec(Generic[OutT]):
         for node in self.tasks:
             if not node.args_from:
                 continue
-            if set(node.kwargs.keys()) & set(node.args_from.keys()):
-                continue  # Covered by WORKFLOW_KWARGS_ARGS_FROM_OVERLAP.
+            # Overlapping keys are skipped per-key below (not whole-node) so a
+            # single bad overlap does not mask type errors on the other keys.
+            overlap_keys = set(node.kwargs.keys()) & set(node.args_from.keys())
 
             deps_ids = {id(dep) for dep in node.waits_for}
             if any(id(source_node) not in deps_ids for source_node in node.args_from.values()):
@@ -1080,6 +1081,8 @@ class WorkflowSpec(Generic[OutT]):
             for kwarg_name, source_node in node.args_from.items():
                 if kwarg_name in exclude_names:
                     continue
+                if kwarg_name in overlap_keys:
+                    continue  # Covered by WORKFLOW_KWARGS_ARGS_FROM_OVERLAP.
 
                 param = sig.parameters.get(kwarg_name)
                 if param is None:
