@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from functools import wraps
 from datetime import datetime, timezone
@@ -1041,6 +1042,39 @@ class TestCreateTaskWrapperExecution:
         assert result.err is not None
         assert result.err.error_code == 'UNHANDLED_EXCEPTION'
         assert 'ValueError' in (result.err.message or '')
+
+
+# =============================================================================
+# create_task_wrapper — introspection (__wrapped__ / signature)
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestCreateTaskWrapperIntrospection:
+    """The wrapper must expose the original function's signature."""
+
+    def test_signature_reflects_original_function(self) -> None:
+        """inspect.signature resolves to the task's real params, not (*args, **kwargs)."""
+        def my_task(x: int, *, label: str = 'hi') -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        wrapper = create_task_wrapper(my_task, _make_app(), 'test.my_task')
+
+        sig = inspect.signature(wrapper)
+        assert list(sig.parameters) == ['x', 'label']
+        assert sig.parameters['x'].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        assert sig.parameters['label'].kind is inspect.Parameter.KEYWORD_ONLY
+        assert sig.parameters['label'].default == 'hi'
+
+    def test_wrapped_points_to_original_function(self) -> None:
+        """__wrapped__ is set so inspect.unwrap reaches the raw function."""
+        def my_task(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        wrapper = create_task_wrapper(my_task, _make_app(), 'test.my_task')
+
+        assert wrapper.__wrapped__ is my_task
+        assert inspect.unwrap(wrapper) is my_task
 
 
 # =============================================================================
