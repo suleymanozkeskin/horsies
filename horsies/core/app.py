@@ -118,8 +118,10 @@ class Horsies:
                 f'horsies subprocess initialized with {config.queue_mode.name} mode (pid={os.getpid()})'
             )
         else:
+            # Don't assert a role here — at init the process role is unknown
+            # (the CLI calls set_role() after discovery for workers/schedulers).
             self.logger.info(
-                f'horsies initialized as {self._role} with {config.queue_mode.name} mode'
+                f'horsies initialized with {config.queue_mode.name} mode'
             )
 
     def set_role(self, role: str) -> None:

@@ -3573,3 +3573,31 @@ class TestNodeIdPattern:
         for node_id in invalid_ids:
             match = NODE_ID_PATTERN.match(node_id)
             assert match is None, f'{node_id!r} should be invalid'
+
+
+@pytest.mark.unit
+class TestWorkflowPackageExports:
+    """The workflow package __all__ must stay in sync with its re-exports."""
+
+    def test_all_names_are_importable(self) -> None:
+        import horsies.core.models.workflow as wf
+
+        for name in wf.__all__:
+            assert hasattr(wf, name), f'{name!r} in __all__ but not importable'
+
+    def test_explicit_reexports_are_in_all(self) -> None:
+        """Names using the `X as X` explicit-re-export idiom must appear in
+        __all__ (regression for prior drift: OkT/OkT_co/OutT,
+        WF_TASK_TERMINAL_VALUES, NODE_ID_PATTERN, WorkflowDefinitionMeta)."""
+        import horsies.core.models.workflow as wf
+
+        for name in (
+            'OkT',
+            'OkT_co',
+            'OutT',
+            'WF_TASK_TERMINAL_VALUES',
+            'NODE_ID_PATTERN',
+            'WorkflowDefinitionMeta',
+        ):
+            assert name in wf.__all__, f'{name!r} re-exported but missing from __all__'
+            assert hasattr(wf, name)
