@@ -28,10 +28,8 @@ from datetime import datetime, timezone
 from pydantic import TypeAdapter, ValidationError
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import encode_kwargs
-from horsies.core.codec.serde import (
-    serialize_task_options,
-    dumps_json,
-)
+from horsies.core.codec.json_io import dumps_json
+from horsies.core.codec.task_options import serialize_task_options
 from horsies.core.codec.typed import (
     TypeAnnotation,
     decode_task_error,

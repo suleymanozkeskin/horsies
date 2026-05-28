@@ -1438,7 +1438,7 @@ class TestComputeConfigHashSerializationFailure:
         scheduler = Scheduler(app)
 
         with patch(
-            'horsies.core.codec.serde.dumps_json',
+            'horsies.core.codec.json_io.dumps_json',
             return_value=Err(ValueError('bad json')),
         ):
             with pytest.raises(RuntimeError, match='Failed to serialize config'):

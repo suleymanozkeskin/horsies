@@ -21,7 +21,7 @@ from pydantic import ValidationError as _PydanticValidationError
 
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import encode_kwargs, underlying_task_fn
-from horsies.core.codec.serde import dumps_json
+from horsies.core.codec.json_io import dumps_json
 from horsies.core.utils.fingerprint import enqueue_fingerprint, schedule_slot_task_id
 from horsies.core.types.result import Err, is_err
 from horsies.core.worker.worker import import_by_path
@@ -289,7 +289,7 @@ class Scheduler:
 
         Includes pattern and timezone to detect when schedule needs recalculation.
         """
-        from horsies.core.codec.serde import dumps_json
+        from horsies.core.codec.json_io import dumps_json
 
         ser_result = dumps_json(
             {

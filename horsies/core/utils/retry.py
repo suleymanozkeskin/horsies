@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from horsies.core.codec.serde import loads_json
+from horsies.core.codec.json_io import loads_json
 from horsies.core.types.result import is_err
 
 

@@ -24,7 +24,7 @@ from horsies.core.utils.loop_runner import get_shared_runner, LoopRunnerError
 from horsies.core.utils.db import is_retryable_connection_error
 from pydantic import ValidationError
 from horsies.core.codec.json_value import StrictJsonError
-from horsies.core.codec.serde import loads_json
+from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.typed import (
     Json,
     TypeAnnotation,

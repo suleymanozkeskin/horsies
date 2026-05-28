@@ -17,7 +17,8 @@ from horsies.core.codec.kwargs import (
     encode_kwargs,
     underlying_task_fn,
 )
-from horsies.core.codec.serde import dumps_json, loads_json, serialize_error_payload, SerdeResult
+from horsies.core.codec.json_io import dumps_json, loads_json, SerdeResult
+from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.typed import (
     Json,
     decode_task_error,
