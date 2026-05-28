@@ -1433,6 +1433,57 @@ class TestCreateTaskWrapperSchedule:
         assert is_err(result)
         assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
 
+    def test_schedule_negative_delay_rejected(self) -> None:
+        """A negative delay is rejected before reaching the broker."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        broker.enqueue.return_value = Ok('sched-1')
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.schedule(-5, x=1)
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        broker.enqueue.assert_not_called()
+
+    def test_schedule_zero_delay_rejected(self) -> None:
+        """A zero delay is rejected; send() is the path for immediate execution."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        broker.enqueue.return_value = Ok('sched-1')
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.schedule(0, x=1)
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        broker.enqueue.assert_not_called()
+
+    def test_with_options_schedule_negative_delay_rejected(self) -> None:
+        """The with_options(...).schedule() path validates the delay too."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        broker.enqueue.return_value = Ok('sched-1')
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.with_options().schedule(-1, x=1)
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        broker.enqueue.assert_not_called()
+
 
 # =============================================================================
 # create_task_wrapper — retry_send / retry_send_async / retry_schedule
