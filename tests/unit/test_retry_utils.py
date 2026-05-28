@@ -71,6 +71,17 @@ class TestCalculateRetryDelay:
         result = calculate_retry_delay(1, {})
         assert result >= 1.0
 
+    def test_jitter_above_floor_does_not_collapse_lower_half(self) -> None:
+        # Regression: jitter is applied upward from the 1.0 floor, not as a
+        # symmetric window that a trailing max(1.0, ...) clamps. base=1.0 used
+        # to push the [0.75, 1.0) half onto exactly 1.0, destroying spread.
+        policy = {'intervals': [1], 'backoff_strategy': 'fixed', 'jitter': True}
+        samples = [calculate_retry_delay(1, policy) for _ in range(200)]
+        assert all(d >= 1.0 for d in samples)
+        assert all(d <= 1.25 + 1e-9 for d in samples)
+        assert any(d > 1.0 for d in samples)
+        assert len({round(d, 4) for d in samples}) > 5
+
 
 @pytest.mark.unit
 class TestParseRetryPolicy:
