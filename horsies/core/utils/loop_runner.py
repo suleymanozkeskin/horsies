@@ -66,8 +66,11 @@ class LoopRunner:
                     self._thread.join(timeout=2)
                     if self._thread.is_alive():
                         self.logger.warning(
-                            'Loop runner thread did not stop within timeout; leaving loop open'
+                            'Loop runner thread did not stop within timeout; leaving '
+                            'loop open but marking runner stopped (not reusable)'
                         )
+                        self._started = False
+                        self._closed = True
                         return
                 self._loop.close()
                 self._loop = None

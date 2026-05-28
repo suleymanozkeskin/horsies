@@ -66,8 +66,10 @@ class TestLoopRunnerCall:
 class TestLoopRunnerStop:
     """Behavioral tests for LoopRunner.stop()."""
 
-    def test_stop_does_not_close_loop_when_thread_still_alive(self) -> None:
-        """If join(timeout) returns with alive thread, keep loop/thread state intact."""
+    def test_stop_marks_closed_when_thread_still_alive(self) -> None:
+        """If join(timeout) returns with an alive thread we cannot close the
+        still-running loop, but the runner must still be marked terminally
+        stopped (not reusable) — never left half-stopped with _closed=False."""
         runner = LoopRunner()
         runner._started = True
         runner._loop = MagicMock()
@@ -80,9 +82,12 @@ class TestLoopRunnerStop:
         runner._loop.call_soon_threadsafe.assert_called_once()
         runner._thread.join.assert_called_once_with(timeout=2)
         runner._loop.close.assert_not_called()
-        assert runner._started is True
+        # Loop/thread references kept (thread is still alive), but the runner
+        # is now closed and not started, so it rejects further use.
         assert runner._loop is not None
         assert runner._thread is not None
+        assert runner._started is False
+        assert runner._closed is True
         mock_warn.assert_called_once()
 
     def test_stop_closes_loop_when_thread_stops(self) -> None:
