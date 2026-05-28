@@ -952,10 +952,13 @@ def _run_task_entry(
                             return _serialization_error_response(
                                 task_name, sj.err_value
                             )
-                        parsed = sj.ok_value
-                        if isinstance(parsed, dict):
+                        try:
                             summaries_by_id[node_id] = SubWorkflowSummary.from_json(
-                                parsed,
+                                sj.ok_value,
+                            )
+                        except ValueError as summary_exc:
+                            return _serialization_error_response(
+                                task_name, SerializationError(str(summary_exc))
                             )
 
                 kwargs['workflow_ctx'] = WorkflowContext.from_serialized(

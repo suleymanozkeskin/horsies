@@ -69,12 +69,23 @@ class SubWorkflowSummary(Generic[OkT_co]):
     """Brief description of failure (if child failed)"""
 
     @classmethod
-    def from_json(cls, data: dict[str, Any]) -> SubWorkflowSummary[Any]:
-        """Build a SubWorkflowSummary from a JSON-like dict safely."""
+    def from_json(cls, data: object) -> SubWorkflowSummary[Any]:
+        """Build a SubWorkflowSummary from persisted JSON-like data.
+
+        Fails closed: raises ValueError when the payload is not a string-keyed
+        dict or the status is missing/unrecognized, so corrupt persisted data
+        is surfaced instead of being silently coerced into a FAILED summary.
+        """
         def _is_str_key_dict(value: object) -> TypeGuard[dict[str, Any]]:
             if not isinstance(value, dict):
                 return False
             return all(isinstance(k, str) for k in cast(dict[Any, Any], value))
+
+        if not _is_str_key_dict(data):
+            raise ValueError(
+                'SubWorkflowSummary payload must be a string-keyed dict, '
+                f'got {type(data).__name__}'
+            )
 
         # Normalize possible serde dataclass envelope:
         # {"__dataclass__": true, "module": ..., "qualname": ..., "data": {...}}
@@ -89,11 +100,18 @@ class SubWorkflowSummary(Generic[OkT_co]):
         status_val = payload.get('status')
         if isinstance(status_val, WorkflowStatus):
             status = status_val
-        else:
+        elif isinstance(status_val, str):
             try:
-                status = WorkflowStatus(str(status_val))
-            except Exception:
-                status = WorkflowStatus.FAILED
+                status = WorkflowStatus(status_val)
+            except ValueError:
+                raise ValueError(
+                    f'SubWorkflowSummary has unrecognized status {status_val!r}'
+                ) from None
+        else:
+            raise ValueError(
+                'SubWorkflowSummary status must be a status string, '
+                f'got {type(status_val).__name__}'
+            )
 
         error_val = payload.get('error_summary')
 

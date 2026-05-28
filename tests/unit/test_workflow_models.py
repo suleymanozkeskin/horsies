@@ -3242,6 +3242,69 @@ class TestWorkflowContextSummary:
 
 
 # =============================================================================
+# SubWorkflowSummary.from_json Tests
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestSubWorkflowSummaryFromJson:
+    """from_json must fail closed on corrupt persisted data, not coerce to FAILED."""
+
+    def test_valid_status_string_parsed(self) -> None:
+        """A recognized status string round-trips into the enum."""
+        summary = SubWorkflowSummary.from_json({
+            'status': 'COMPLETED',
+            'output': 42,
+            'total_tasks': 3,
+            'completed_tasks': 3,
+            'failed_tasks': 0,
+            'skipped_tasks': 0,
+        })
+        assert summary.status == WorkflowStatus.COMPLETED
+        assert summary.output == 42
+        assert summary.total_tasks == 3
+
+    def test_valid_status_enum_instance_parsed(self) -> None:
+        """An already-typed WorkflowStatus value is accepted as-is."""
+        summary = SubWorkflowSummary.from_json({
+            'status': WorkflowStatus.FAILED,
+            'total_tasks': 1,
+        })
+        assert summary.status == WorkflowStatus.FAILED
+
+    def test_dataclass_envelope_normalized(self) -> None:
+        """The legacy __dataclass__ envelope is unwrapped before parsing."""
+        summary = SubWorkflowSummary.from_json({
+            '__dataclass__': True,
+            'module': 'horsies.core.models.workflow.context',
+            'qualname': 'SubWorkflowSummary',
+            'data': {'status': 'PAUSED', 'total_tasks': 2},
+        })
+        assert summary.status == WorkflowStatus.PAUSED
+        assert summary.total_tasks == 2
+
+    def test_unrecognized_status_string_raises(self) -> None:
+        """An invalid status string is surfaced, not coerced to FAILED."""
+        with pytest.raises(ValueError, match='unrecognized status'):
+            SubWorkflowSummary.from_json({'status': 'NOT_A_STATUS', 'total_tasks': 1})
+
+    def test_non_string_status_raises(self) -> None:
+        """A non-string, non-enum status is surfaced, not coerced to FAILED."""
+        with pytest.raises(ValueError, match='status must be a status string'):
+            SubWorkflowSummary.from_json({'status': 123})
+
+    def test_missing_status_raises(self) -> None:
+        """A missing status is surfaced, not coerced to FAILED."""
+        with pytest.raises(ValueError, match='status must be a status string'):
+            SubWorkflowSummary.from_json({'total_tasks': 1})
+
+    def test_non_dict_payload_raises(self) -> None:
+        """A non-dict payload is rejected with a clear error (not AttributeError)."""
+        with pytest.raises(ValueError, match='must be a string-keyed dict'):
+            SubWorkflowSummary.from_json([1, 2, 3])
+
+
+# =============================================================================
 # Enum is_terminal Property Tests
 # =============================================================================
 
