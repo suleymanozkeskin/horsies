@@ -1005,7 +1005,7 @@ async def enqueue_subworkflow_task(
                     'idx': child_sub.index,
                     'node_id': child_sub.node_id,
                     'name': child_sub.name,
-                    'args': _ser(dumps_json(()), 'positional args', fallback='[]'),
+                    'args': _ser(dumps_json([]), 'positional args', fallback='[]'),
                     'kwargs': child_kwargs_json,
                     'queue': 'default',
                     'priority': 100,
@@ -1115,7 +1115,7 @@ async def enqueue_subworkflow_task(
                     'idx': child_task.index,
                     'node_id': child_task.node_id,
                     'name': child_task.name,
-                    'args': _ser(dumps_json(()), 'positional args', fallback='[]'),
+                    'args': _ser(dumps_json([]), 'positional args', fallback='[]'),
                     'kwargs': child_kwargs_json,
                     'queue': child_task.queue
                     or getattr(child_task.fn, 'task_queue_name', None)
