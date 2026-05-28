@@ -159,25 +159,19 @@ SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL = text("""
       AND t.status = 'CANCELLED'
 """)
 
-CASCADE_CANCEL_CHILD_WORKFLOWS_SQL = text("""
+SELECT_CANCELLABLE_DESCENDANT_WORKFLOWS_SQL = text("""
     WITH RECURSIVE descendants AS (
-        SELECT id
+        SELECT id, status
         FROM horsies_workflows
         WHERE parent_workflow_id = :wf_id
         UNION ALL
-        SELECT child.id
+        SELECT child.id, child.status
         FROM horsies_workflows child
         JOIN descendants parent ON child.parent_workflow_id = parent.id
     )
-    UPDATE horsies_workflows w
-    SET status = 'CANCELLED', updated_at = NOW()
-    FROM descendants d
-    WHERE w.id = d.id
-      AND w.status IN ('PENDING', 'RUNNING', 'PAUSED')
-    RETURNING w.id
+    SELECT id FROM descendants
+    WHERE status IN ('PENDING', 'RUNNING', 'PAUSED')
 """)
-
-NOTIFY_WORKFLOW_DONE_SQL = text("""SELECT pg_notify('workflow_done', :wf_id)""")
 
 
 # =============================================================================
@@ -1142,18 +1136,42 @@ class WorkflowHandle(Generic[OutT]):
                     {'wf_id': self.workflow_id},
                 )
 
-                # Cascade cancellation to currently active child workflows.
-                # The parent node may remain RUNNING until an already-started
-                # child task exits, but the workflow boundary is terminal and
-                # handle/status reads must reflect that immediately.
-                child_rows = await session.execute(
-                    CASCADE_CANCEL_CHILD_WORKFLOWS_SQL,
+                # Cascade cancellation to active child workflows. Each
+                # descendant gets the same lock-before-flip treatment as the
+                # parent above, so child cancellation is race-safe against a
+                # worker picking up a child backing task. The CANCELLED status
+                # flip fires ``horsies_workflow_notify_trigger`` per row, so no
+                # manual ``workflow_done`` notify is needed. The parent node may
+                # stay RUNNING until an already-started child task exits, but the
+                # child workflow boundary is terminal immediately.
+                descendant_rows = await session.execute(
+                    SELECT_CANCELLABLE_DESCENDANT_WORKFLOWS_SQL,
                     {'wf_id': self.workflow_id},
                 )
-                child_workflow_ids = [row.id for row in child_rows.fetchall()]
+                child_workflow_ids = [row.id for row in descendant_rows.fetchall()]
                 for child_workflow_id in child_workflow_ids:
+                    child_lock_params = {
+                        'wf_id': child_workflow_id,
+                        'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES,
+                        'task_terminal_states': _TASK_TERMINAL_VALUES,
+                    }
+                    # Lock backing tasks + workflow tasks before flipping status,
+                    # then re-lock backing tasks to catch a row an enqueue linked
+                    # while we waited for the workflow-task locks.
                     await session.execute(
-                        SYNC_RUNNING_ENQUEUED_WORKFLOW_TASKS_ON_CANCEL_SQL,
+                        LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL,
+                        child_lock_params,
+                    )
+                    await session.execute(
+                        LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL,
+                        child_lock_params,
+                    )
+                    await session.execute(
+                        LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL,
+                        child_lock_params,
+                    )
+                    await session.execute(
+                        CANCEL_WORKFLOW_SQL,
                         {'wf_id': child_workflow_id},
                     )
                     await session.execute(
@@ -1166,10 +1184,6 @@ class WorkflowHandle(Generic[OutT]):
                     )
                     await session.execute(
                         SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL,
-                        {'wf_id': child_workflow_id},
-                    )
-                    await session.execute(
-                        NOTIFY_WORKFLOW_DONE_SQL,
                         {'wf_id': child_workflow_id},
                     )
 

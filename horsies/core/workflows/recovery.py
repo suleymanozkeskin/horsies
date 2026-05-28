@@ -126,12 +126,21 @@ def _decode_recovered_task_result(
         return synthetic
 
 
+# Each candidate query carries a uniform scope filter:
+#   AND (CAST(:scope_ids AS varchar[]) IS NULL OR <wf_col> = ANY(CAST(:scope_ids AS varchar[])))
+# When ``:scope_ids`` is NULL (global reaper), the OR short-circuits and the
+# query behaves exactly as before. When a list of workflow ids is bound
+# (resume-time race closure), candidates are restricted to that tree. The
+# explicit ``::varchar[]`` cast avoids "could not determine data type" on the
+# NULL bind (workflow ids are VARCHAR(36) columns).
+
 GET_PENDING_WITH_TERMINAL_DEPS_SQL = text("""
     SELECT wt.workflow_id, wt.task_index, w.depth, w.root_workflow_id
     FROM horsies_workflow_tasks wt
     JOIN horsies_workflows w ON w.id = wt.workflow_id
     WHERE wt.status = 'PENDING'
       AND w.status = 'RUNNING'
+      AND (CAST(:scope_ids AS varchar[]) IS NULL OR wt.workflow_id = ANY(CAST(:scope_ids AS varchar[])))
       AND NOT EXISTS (
           SELECT 1 FROM horsies_workflow_tasks dep
           WHERE dep.workflow_id = wt.workflow_id
@@ -149,6 +158,7 @@ GET_READY_NOT_ENQUEUED_SQL = text("""
       AND wt.task_id IS NULL
       AND wt.is_subworkflow = FALSE
       AND w.status = 'RUNNING'
+      AND (CAST(:scope_ids AS varchar[]) IS NULL OR wt.workflow_id = ANY(CAST(:scope_ids AS varchar[])))
 """)
 
 GET_READY_SUBWORKFLOWS_NOT_STARTED_SQL = text("""
@@ -159,6 +169,7 @@ GET_READY_SUBWORKFLOWS_NOT_STARTED_SQL = text("""
       AND wt.is_subworkflow = TRUE
       AND wt.sub_workflow_id IS NULL
       AND w.status = 'RUNNING'
+      AND (CAST(:scope_ids AS varchar[]) IS NULL OR wt.workflow_id = ANY(CAST(:scope_ids AS varchar[])))
 """)
 
 GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL = text("""
@@ -169,6 +180,7 @@ GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL = text("""
     WHERE child.status IN ('COMPLETED', 'FAILED', 'CANCELLED')
       AND wt.status = 'RUNNING'
       AND parent.status = 'RUNNING'
+      AND (CAST(:scope_ids AS varchar[]) IS NULL OR child.id = ANY(CAST(:scope_ids AS varchar[])))
 """)
 
 GET_CRASHED_WORKER_TASKS_SQL = text("""
@@ -182,6 +194,7 @@ GET_CRASHED_WORKER_TASKS_SQL = text("""
       AND wt.is_subworkflow = FALSE
       AND w.status = 'RUNNING'
       AND UPPER(t.status) IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
+      AND (CAST(:scope_ids AS varchar[]) IS NULL OR wt.workflow_id = ANY(CAST(:scope_ids AS varchar[])))
 """)
 
 GET_TERMINAL_WORKFLOW_CANDIDATES_SQL = text("""
@@ -190,6 +203,7 @@ GET_TERMINAL_WORKFLOW_CANDIDATES_SQL = text("""
     FROM horsies_workflows w
     LEFT JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
     WHERE w.status = 'RUNNING'
+      AND (CAST(:scope_ids AS varchar[]) IS NULL OR w.id = ANY(CAST(:scope_ids AS varchar[])))
       AND NOT EXISTS (
           SELECT 1 FROM horsies_workflow_tasks wt2
           WHERE wt2.workflow_id = w.id
@@ -198,9 +212,23 @@ GET_TERMINAL_WORKFLOW_CANDIDATES_SQL = text("""
     GROUP BY w.id, w.error, w.success_policy
 """)
 
+# Resolve the descendant tree (self + all transitive children) for a resumed
+# workflow, so the resume-time recovery pass is scoped to that tree only.
+GET_WORKFLOW_TREE_IDS_SQL = text("""
+    WITH RECURSIVE tree AS (
+        SELECT id FROM horsies_workflows WHERE id = :wf_id
+        UNION ALL
+        SELECT child.id
+        FROM horsies_workflows child
+        JOIN tree parent ON child.parent_workflow_id = parent.id
+    )
+    SELECT id FROM tree
+""")
+
 async def recover_stuck_workflows(
     session: 'AsyncSession',
     broker: 'PostgresBroker | None' = None,
+    scope_workflow_ids: list[str] | None = None,
 ) -> int:
     """
     Find and recover workflows in inconsistent states.
@@ -213,11 +241,18 @@ async def recover_stuck_workflows(
 
     Args:
         session: Database session (caller manages commit)
+        broker: Optional broker for subworkflow/task re-enqueue.
+        scope_workflow_ids: When provided, restrict every candidate query
+            to these workflow ids. ``None`` (default, the periodic reaper)
+            scans all workflows globally. Resume passes the resumed
+            workflow's tree so the pause-resume race is closed without a
+            full-DB sweep.
 
     Returns:
         Count of recovered workflow tasks.
     """
     recovered = 0
+    scope_ids = scope_workflow_ids
 
     from horsies.core.workflows.engine import get_dependency_results, try_make_ready_and_enqueue
 
@@ -229,7 +264,7 @@ async def recover_stuck_workflows(
     # subworkflow routing, and dependent cascade.
     pending_ready = await session.execute(
         GET_PENDING_WITH_TERMINAL_DEPS_SQL,
-        {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES},
+        {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES, 'scope_ids': scope_ids},
     )
 
     for row in pending_ready.fetchall():
@@ -250,7 +285,10 @@ async def recover_stuck_workflows(
     # Case 1: READY tasks not enqueued (task_id is NULL but status is READY)
     # This happens if worker crashed after marking READY but before creating task
     # Excludes SubWorkflowNodes (handled separately)
-    ready_not_enqueued = await session.execute(GET_READY_NOT_ENQUEUED_SQL)
+    ready_not_enqueued = await session.execute(
+        GET_READY_NOT_ENQUEUED_SQL,
+        {'scope_ids': scope_ids},
+    )
 
     for row in ready_not_enqueued.fetchall():
         workflow_id = row.workflow_id
@@ -289,7 +327,10 @@ async def recover_stuck_workflows(
     # Case 1.5: READY SubWorkflowNodes not started (sub_workflow_id is NULL)
     # This happens if worker crashed after marking READY but before starting child workflow
     # NOTE: This requires broker to start the child workflow, so we just mark them for retry
-    ready_subworkflows = await session.execute(GET_READY_SUBWORKFLOWS_NOT_STARTED_SQL)
+    ready_subworkflows = await session.execute(
+        GET_READY_SUBWORKFLOWS_NOT_STARTED_SQL,
+        {'scope_ids': scope_ids},
+    )
 
     for row in ready_subworkflows.fetchall():
         workflow_id = row.workflow_id
@@ -335,7 +376,10 @@ async def recover_stuck_workflows(
 
     # Case 1.6: Child workflows completed but parent node not updated
     # This happens if the on_subworkflow_complete callback failed or was interrupted
-    completed_children = await session.execute(GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL)
+    completed_children = await session.execute(
+        GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL,
+        {'scope_ids': scope_ids},
+    )
 
     for row in completed_children.fetchall():
         child_id = row.id
@@ -360,7 +404,7 @@ async def recover_stuck_workflows(
     # - workflow_tasks row stays RUNNING/ENQUEUED indefinitely
     crashed_worker_tasks = await session.execute(
         GET_CRASHED_WORKER_TASKS_SQL,
-        {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES},
+        {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES, 'scope_ids': scope_ids},
     )
 
     for row in crashed_worker_tasks.fetchall():
@@ -431,7 +475,7 @@ async def recover_stuck_workflows(
     # This happens if worker crashed after completing last task but before updating workflow
     terminal_candidates = await session.execute(
         GET_TERMINAL_WORKFLOW_CANDIDATES_SQL,
-        {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES},
+        {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES, 'scope_ids': scope_ids},
     )
 
     for row in terminal_candidates.fetchall():

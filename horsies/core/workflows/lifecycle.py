@@ -880,11 +880,23 @@ async def resume_workflow(
         # but before that status change is visible to the task-completion
         # callback. The callback observes PAUSED and correctly avoids
         # propagation; once resume commits, run the recovery completion pass to
-        # close that race through the same canonical engine paths.
+        # close that race through the same canonical engine paths. Scope it to
+        # the resumed workflow's tree (self + descendants) so resume does not
+        # trigger a full-DB recovery sweep over unrelated workflows.
         async with broker.session_factory() as recovery_session:
-            from horsies.core.workflows.recovery import recover_stuck_workflows
+            from horsies.core.workflows.recovery import (
+                GET_WORKFLOW_TREE_IDS_SQL,
+                recover_stuck_workflows,
+            )
 
-            await recover_stuck_workflows(recovery_session, broker)
+            tree_result = await recovery_session.execute(
+                GET_WORKFLOW_TREE_IDS_SQL,
+                {'wf_id': workflow_id},
+            )
+            tree_ids = [r.id for r in tree_result.fetchall()]
+            await recover_stuck_workflows(
+                recovery_session, broker, scope_workflow_ids=tree_ids,
+            )
             await recovery_session.commit()
 
         return Ok(True)
