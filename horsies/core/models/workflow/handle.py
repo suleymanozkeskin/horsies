@@ -159,6 +159,20 @@ SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL = text("""
       AND t.status = 'CANCELLED'
 """)
 
+SELECT_CANCELLABLE_DESCENDANT_WORKFLOWS_SQL = text("""
+    WITH RECURSIVE descendants AS (
+        SELECT id, status
+        FROM horsies_workflows
+        WHERE parent_workflow_id = :wf_id
+        UNION ALL
+        SELECT child.id, child.status
+        FROM horsies_workflows child
+        JOIN descendants parent ON child.parent_workflow_id = parent.id
+    )
+    SELECT id FROM descendants
+    WHERE status IN ('PENDING', 'RUNNING', 'PAUSED')
+""")
+
 
 # =============================================================================
 # WorkflowHandle
@@ -230,21 +244,16 @@ def _decode_per_task_envelope(
                 data={'node_id': node_id},
             ),
         )
-    source_task = (
-        app.tasks.get(task_name) if app is not None else None
-    )
-    source_ok_type = (
-        getattr(source_task, 'task_ok_type', None)
-        if source_task is not None
-        else None
-    )
+    from .typing_utils import resolve_source_ok_type
+
+    source_ok_type = resolve_source_ok_type(app, task_name)
     if source_ok_type is None:
         return TaskResult(
             err=TaskError(
                 error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                 message=(
-                    f'Source task {task_name!r} not registered or '
-                    f'missing task_ok_type (node {node_id!r})'
+                    f'Source {task_name!r} not registered (no task or '
+                    f'workflow definition with this name) (node {node_id!r})'
                 ),
                 data={'node_id': node_id, 'task_name': task_name},
             ),
@@ -391,25 +400,18 @@ def _decode_workflow_envelope(
                     ),
                 )
                 continue
-            source_task = (
-                app.tasks.get(source_task_name)
-                if app is not None
-                else None
-            )
-            source_ok_type = (
-                getattr(source_task, 'task_ok_type', None)
-                if source_task is not None
-                else None
-            )
+            from .typing_utils import resolve_source_ok_type as _resolve_src_ok_type
+
+            source_ok_type = _resolve_src_ok_type(app, source_task_name)
             if source_ok_type is None:
                 decoded_results[node_id] = TaskResult(
                     err=TaskError(
                         error_code=ContractCode.NO_TYPE_AVAILABLE,
                         message=(
                             f'Outputless workflow {workflow_id} node '
-                            f'{node_id!r}: source task '
-                            f'{source_task_name!r} not registered or '
-                            f'missing task_ok_type'
+                            f'{node_id!r}: source '
+                            f'{source_task_name!r} is not a known task or '
+                            f'workflow definition'
                         ),
                         data={
                             'node_id': node_id,
@@ -1133,6 +1135,57 @@ class WorkflowHandle(Generic[OutT]):
                     SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL,
                     {'wf_id': self.workflow_id},
                 )
+
+                # Cascade cancellation to active child workflows. Each
+                # descendant gets the same lock-before-flip treatment as the
+                # parent above, so child cancellation is race-safe against a
+                # worker picking up a child backing task. The CANCELLED status
+                # flip fires ``horsies_workflow_notify_trigger`` per row, so no
+                # manual ``workflow_done`` notify is needed. The parent node may
+                # stay RUNNING until an already-started child task exits, but the
+                # child workflow boundary is terminal immediately.
+                descendant_rows = await session.execute(
+                    SELECT_CANCELLABLE_DESCENDANT_WORKFLOWS_SQL,
+                    {'wf_id': self.workflow_id},
+                )
+                child_workflow_ids = [row.id for row in descendant_rows.fetchall()]
+                for child_workflow_id in child_workflow_ids:
+                    child_lock_params = {
+                        'wf_id': child_workflow_id,
+                        'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES,
+                        'task_terminal_states': _TASK_TERMINAL_VALUES,
+                    }
+                    # Lock backing tasks + workflow tasks before flipping status,
+                    # then re-lock backing tasks to catch a row an enqueue linked
+                    # while we waited for the workflow-task locks.
+                    await session.execute(
+                        LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL,
+                        child_lock_params,
+                    )
+                    await session.execute(
+                        LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL,
+                        child_lock_params,
+                    )
+                    await session.execute(
+                        LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL,
+                        child_lock_params,
+                    )
+                    await session.execute(
+                        CANCEL_WORKFLOW_SQL,
+                        {'wf_id': child_workflow_id},
+                    )
+                    await session.execute(
+                        MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL,
+                        {'wf_id': child_workflow_id},
+                    )
+                    await session.execute(
+                        SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL,
+                        {'wf_id': child_workflow_id},
+                    )
+                    await session.execute(
+                        SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL,
+                        {'wf_id': child_workflow_id},
+                    )
 
                 await session.commit()
             return Ok(None)
