@@ -258,13 +258,13 @@ class TestFetchViaTarball:
     def test_extracts_from_synthetic_tarball(self, tmp_path: Path) -> None:
         tarball_data = _make_test_tarball()
 
-        def fake_urlretrieve(url: str, path: Path) -> None:
-            Path(path).write_bytes(tarball_data)
+        def fake_urlopen(url: str, timeout: float | None = None) -> io.BytesIO:
+            return io.BytesIO(tarball_data)
 
         output = tmp_path / 'output'
         with mock.patch(
-            'horsies.core.docs_fetcher.urllib.request.urlretrieve',
-            side_effect=fake_urlretrieve,
+            'horsies.core.docs_fetcher.urllib.request.urlopen',
+            side_effect=fake_urlopen,
         ):
             count = _fetch_via_tarball(output)
 
@@ -276,33 +276,52 @@ class TestFetchViaTarball:
     def test_detects_custom_prefix(self, tmp_path: Path) -> None:
         tarball_data = _make_test_tarball(prefix='horsies-v2.0')
 
-        def fake_urlretrieve(url: str, path: Path) -> None:
-            Path(path).write_bytes(tarball_data)
+        def fake_urlopen(url: str, timeout: float | None = None) -> io.BytesIO:
+            return io.BytesIO(tarball_data)
 
         output = tmp_path / 'output'
         with mock.patch(
-            'horsies.core.docs_fetcher.urllib.request.urlretrieve',
-            side_effect=fake_urlretrieve,
+            'horsies.core.docs_fetcher.urllib.request.urlopen',
+            side_effect=fake_urlopen,
         ):
             count = _fetch_via_tarball(output)
 
         assert count == 3
 
+    def test_download_uses_timeout(self, tmp_path: Path) -> None:
+        """urlopen must be called with a positive timeout so a stalled server
+        cannot hang the fetch forever."""
+        tarball_data = _make_test_tarball()
+        captured: dict[str, float | None] = {}
+
+        def fake_urlopen(url: str, timeout: float | None = None) -> io.BytesIO:
+            captured['timeout'] = timeout
+            return io.BytesIO(tarball_data)
+
+        with mock.patch(
+            'horsies.core.docs_fetcher.urllib.request.urlopen',
+            side_effect=fake_urlopen,
+        ):
+            _fetch_via_tarball(tmp_path / 'output')
+
+        assert isinstance(captured.get('timeout'), (int, float))
+        assert captured['timeout'] is not None and captured['timeout'] > 0
+
     def test_raises_on_download_failure(self, tmp_path: Path) -> None:
         with mock.patch(
-            'horsies.core.docs_fetcher.urllib.request.urlretrieve',
+            'horsies.core.docs_fetcher.urllib.request.urlopen',
             side_effect=Exception('connection refused'),
         ):
             with pytest.raises(DocsFetchError, match='failed to download tarball'):
                 _fetch_via_tarball(tmp_path / 'output')
 
     def test_raises_on_corrupt_tarball(self, tmp_path: Path) -> None:
-        def fake_urlretrieve(url: str, path: Path) -> None:
-            Path(path).write_bytes(b'not a tarball')
+        def fake_urlopen(url: str, timeout: float | None = None) -> io.BytesIO:
+            return io.BytesIO(b'not a tarball')
 
         with mock.patch(
-            'horsies.core.docs_fetcher.urllib.request.urlretrieve',
-            side_effect=fake_urlretrieve,
+            'horsies.core.docs_fetcher.urllib.request.urlopen',
+            side_effect=fake_urlopen,
         ):
             with pytest.raises(DocsFetchError, match='corrupt tarball'):
                 _fetch_via_tarball(tmp_path / 'output')
@@ -313,14 +332,35 @@ class TestFetchViaTarball:
             pass  # empty tarball
         empty_tarball = buf.getvalue()
 
-        def fake_urlretrieve(url: str, path: Path) -> None:
-            Path(path).write_bytes(empty_tarball)
+        def fake_urlopen(url: str, timeout: float | None = None) -> io.BytesIO:
+            return io.BytesIO(empty_tarball)
 
         with mock.patch(
-            'horsies.core.docs_fetcher.urllib.request.urlretrieve',
-            side_effect=fake_urlretrieve,
+            'horsies.core.docs_fetcher.urllib.request.urlopen',
+            side_effect=fake_urlopen,
         ):
             with pytest.raises(DocsFetchError, match='tarball is empty'):
+                _fetch_via_tarball(tmp_path / 'output')
+
+    def test_raises_on_inconsistent_prefix(self, tmp_path: Path) -> None:
+        """A tarball whose members don't share one top-level dir fails loudly."""
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w:gz') as tf:
+            for name in ('horsies-main/website/a.md', 'other-root/b.md'):
+                info = tarfile.TarInfo(name=name)
+                payload = b'x'
+                info.size = len(payload)
+                tf.addfile(info, io.BytesIO(payload))
+        bad_tarball = buf.getvalue()
+
+        def fake_urlopen(url: str, timeout: float | None = None) -> io.BytesIO:
+            return io.BytesIO(bad_tarball)
+
+        with mock.patch(
+            'horsies.core.docs_fetcher.urllib.request.urlopen',
+            side_effect=fake_urlopen,
+        ):
+            with pytest.raises(DocsFetchError, match='unexpected tarball layout'):
                 _fetch_via_tarball(tmp_path / 'output')
 
 

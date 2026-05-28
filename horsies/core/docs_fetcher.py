@@ -25,6 +25,7 @@ DEFAULT_BRANCH = 'main'
 TARBALL_URL = f'{REPO_URL}/archive/refs/heads/{DEFAULT_BRANCH}.tar.gz'
 
 _GIT_TIMEOUT_SECONDS = 60
+_TARBALL_TIMEOUT_SECONDS = 60
 
 
 class DocsFetchError(Exception):
@@ -127,11 +128,15 @@ def _fetch_via_tarball(output_dir: Path) -> int:
         tmp = Path(tmpdir)
         tarball_path = tmp / 'repo.tar.gz'
 
+        # urlopen with an explicit timeout: urlretrieve has no timeout param
+        # and falls back to the (usually None) global socket timeout, so a
+        # stalled server could hang the fetch forever.
         try:
-            urllib.request.urlretrieve(
+            with urllib.request.urlopen(
                 TARBALL_URL,
-                tarball_path,
-            )
+                timeout=_TARBALL_TIMEOUT_SECONDS,
+            ) as response, open(tarball_path, 'wb') as out:
+                shutil.copyfileobj(response, out)
         except Exception as exc:
             raise DocsFetchError(
                 f'failed to download tarball from {TARBALL_URL}: {exc}',
@@ -140,13 +145,23 @@ def _fetch_via_tarball(output_dir: Path) -> int:
         try:
             with tarfile.open(tarball_path, 'r:gz') as tf:
                 members = tf.getnames()
-                prefix = members[0].split('/')[0] if members else ''
+                if not members:
+                    raise DocsFetchError('tarball is empty')
+                # The archive's top-level directory (e.g. 'horsies-main/').
+                # Verify every member shares it instead of trusting members[0]
+                # blindly, so an unexpected layout fails loudly here rather
+                # than extracting to the wrong place.
+                prefix = members[0].split('/')[0]
+                if not all(
+                    m == prefix or m.startswith(f'{prefix}/') for m in members
+                ):
+                    raise DocsFetchError(
+                        'unexpected tarball layout: members do not share a '
+                        'single top-level directory',
+                    )
                 tf.extractall(path=tmp, filter='data')
         except tarfile.TarError as exc:
             raise DocsFetchError(f'corrupt tarball: {exc}') from exc
-
-        if not members:
-            raise DocsFetchError('tarball is empty')
 
         docs_src = tmp / prefix / DOCS_REPO_PATH
         llms_src = tmp / prefix / LLMS_REPO_PATH
