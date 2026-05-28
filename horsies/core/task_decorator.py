@@ -1435,12 +1435,12 @@ def create_task_wrapper(
                 retryable=False,
             ))
 
-        if delay <= 0:
+        if delay < 0:
             return Err(TaskSendError(
                 code=TaskSendErrorCode.VALIDATION_FAILED,
                 message=(
-                    f'schedule delay must be a positive number of seconds, '
-                    f'got {delay}; use {task_name}.send(...) for immediate execution'
+                    f'schedule delay must not be negative, got {delay}; '
+                    f'use delay=0 (or {task_name}.send(...)) for immediate execution'
                 ),
                 retryable=False,
             ))

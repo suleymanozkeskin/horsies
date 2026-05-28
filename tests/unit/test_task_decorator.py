@@ -1450,8 +1450,8 @@ class TestCreateTaskWrapperSchedule:
         assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
         broker.enqueue.assert_not_called()
 
-    def test_schedule_zero_delay_rejected(self) -> None:
-        """A zero delay is rejected; send() is the path for immediate execution."""
+    def test_schedule_zero_delay_allowed(self) -> None:
+        """delay=0 is valid (enqueue now) so dynamically computed delays need no branch."""
         def good_fn(x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
@@ -1463,9 +1463,8 @@ class TestCreateTaskWrapperSchedule:
 
         result = wrapper.schedule(0, x=1)
 
-        assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
-        broker.enqueue.assert_not_called()
+        assert is_ok(result)
+        assert broker.enqueue.call_args.kwargs.get('enqueue_delay_seconds') == 0
 
     def test_with_options_schedule_negative_delay_rejected(self) -> None:
         """The with_options(...).schedule() path validates the delay too."""
