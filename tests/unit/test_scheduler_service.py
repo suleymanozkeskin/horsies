@@ -155,7 +155,7 @@ class TestValidateScheduleSignature:
 
         exc = exc_info.value
         assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
-        assert 'args/kwargs do not match' in exc.message
+        assert 'kwargs do not match' in exc.message
 
     def test_unexpected_kwarg_raises_configuration_error(self) -> None:
         """Unexpected kwargs are rejected at scheduler startup."""
@@ -177,10 +177,12 @@ class TestValidateScheduleSignature:
 
         exc = exc_info.value
         assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
-        assert 'args/kwargs do not match' in exc.message
+        assert 'kwargs do not match' in exc.message
 
-    def test_satisfied_by_args(self) -> None:
-        """Required param satisfied by positional args passes."""
+    def test_positional_args_rejected(self) -> None:
+        """Schedules are kwargs-only; positional args are rejected at startup
+        (the enqueue path rejects them too, so they would otherwise fail every
+        tick)."""
         def needs_value(value: int) -> str:
             return str(value)
 
@@ -193,8 +195,10 @@ class TestValidateScheduleSignature:
             args=(42,),
         )
 
-        # Should not raise
-        scheduler._validate_schedule_signature(schedule)
+        with pytest.raises(ConfigurationError) as exc_info:
+            scheduler._validate_schedule_signature(schedule)
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert 'kwargs-only' in exc_info.value.message
 
     def test_satisfied_by_kwargs(self) -> None:
         """Required param satisfied by keyword args passes."""
@@ -213,8 +217,8 @@ class TestValidateScheduleSignature:
         # Should not raise
         scheduler._validate_schedule_signature(schedule)
 
-    def test_mixed_args_and_kwargs(self) -> None:
-        """Multiple required params satisfied by mix of args and kwargs."""
+    def test_positional_args_rejected_even_with_kwargs(self) -> None:
+        """Any positional args are rejected, even alongside valid kwargs."""
         def needs_both(a: int, b: str) -> str:
             return f'{a}{b}'
 
@@ -226,6 +230,25 @@ class TestValidateScheduleSignature:
             pattern=IntervalSchedule(seconds=5),
             args=(1,),
             kwargs={'b': 'hello'},
+        )
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            scheduler._validate_schedule_signature(schedule)
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert 'kwargs-only' in exc_info.value.message
+
+    def test_all_required_via_kwargs_ok(self) -> None:
+        """Multiple required params satisfied entirely by kwargs passes."""
+        def needs_both(a: int, b: str) -> str:
+            return f'{a}{b}'
+
+        task_mock = _make_task_mock(needs_both)
+        scheduler = self._make_scheduler({'task_a': task_mock})
+        schedule = TaskSchedule(
+            name='s',
+            task_name='task_a',
+            pattern=IntervalSchedule(seconds=5),
+            kwargs={'a': 1, 'b': 'hello'},
         )
 
         # Should not raise
@@ -2432,12 +2455,12 @@ class TestValidateSchedulesCallsSignatureValidation:
                     name='s',
                     task_name='my_task',
                     pattern=IntervalSchedule(seconds=5),
-                    args=(42,),
+                    kwargs={'x': 42},
                 ),
             ],
         )
         app = _make_app(schedule_config=config, tasks={'my_task': task_mock})
         scheduler = Scheduler(app)
 
-        # Should not raise — args match signature
+        # Should not raise — kwargs match signature
         scheduler._validate_schedules()

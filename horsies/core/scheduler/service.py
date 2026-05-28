@@ -583,7 +583,22 @@ class Scheduler:
             self._validate_schedule_serializable(sched)
 
     def _validate_schedule_signature(self, schedule: TaskSchedule) -> None:
-        """Ensure schedule args/kwargs bind cleanly to the task signature."""
+        """Ensure schedule kwargs bind cleanly to the task signature.
+
+        Schedules are kwargs-only — strict-serde has no typed wire
+        representation for positional args, so the enqueue path rejects any
+        (same contract as ``.send()`` and workflow nodes). Reject them here at
+        startup too, otherwise a schedule carrying positional args passes
+        validation and then fails ``ENQUEUE_FAILED`` on every tick.
+        """
+        if schedule.args:
+            raise ConfigurationError(
+                message=f"schedule '{schedule.name}' carries {len(schedule.args)} positional arg(s); schedules are kwargs-only",
+                code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                notes=['strict-serde rejects positional args (same contract as .send())'],
+                help_text='pass all task arguments as kwargs',
+            )
+
         task = self.app.tasks.get(schedule.task_name)
         original_fn = getattr(task, '_original_fn', None) if task else None
         if original_fn is None:
@@ -591,13 +606,13 @@ class Scheduler:
 
         sig = inspect.signature(original_fn)
         try:
-            sig.bind(*schedule.args, **schedule.kwargs)
+            sig.bind(**schedule.kwargs)
         except TypeError as e:
             raise ConfigurationError(
-                message=f"schedule '{schedule.name}' args/kwargs do not match task '{schedule.task_name}' signature",
+                message=f"schedule '{schedule.name}' kwargs do not match task '{schedule.task_name}' signature",
                 code=ErrorCode.CONFIG_INVALID_SCHEDULE,
                 notes=[f'signature bind error: {e}'],
-                help_text='update TaskSchedule args/kwargs to match task function parameters',
+                help_text='update TaskSchedule kwargs to match task function parameters',
             ) from e
 
     def _validate_schedule_serializable(self, schedule: TaskSchedule) -> None:
