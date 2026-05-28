@@ -24,7 +24,7 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from horsies.core.codec.serde import SerializationError
+from horsies.core.codec.json_io import SerializationError
 from horsies.core.models.tasks import (
     OperationalErrorCode,
     OutcomeCode,

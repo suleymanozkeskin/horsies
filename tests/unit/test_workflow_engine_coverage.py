@@ -1368,7 +1368,7 @@ class TestGetWorkflowFailureError:
         is the canonical emit helper for library-built TaskError
         payloads, so we seed the DB row with that.
         """
-        from horsies.core.codec.serde import serialize_error_payload
+        from horsies.core.codec.error_payload import serialize_error_payload
 
         error = TaskError(error_code='TEST_ERR', message='test failure')
         tr: TaskResult[Any, TaskError] = TaskResult(err=error)
@@ -1518,7 +1518,7 @@ class TestHandleWorkflowTaskFailure:
         ``serialize_error_payload`` so the engine's decode path can
         round-trip the inner error code.
         """
-        from horsies.core.codec.serde import serialize_error_payload
+        from horsies.core.codec.error_payload import serialize_error_payload
 
         set_error_params: dict[str, Any] = {}
         statements: list[Any] = []
