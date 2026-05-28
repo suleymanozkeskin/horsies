@@ -14,6 +14,8 @@ from horsies.core.models.schedule import (
     ScheduleConfig,
     TaskSchedule,
 )
+from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.workflow import WorkflowContext
 from horsies.core.scheduler.service import Scheduler
 from horsies.core.types.result import Err, Ok, is_err
 
@@ -228,6 +230,76 @@ class TestValidateScheduleSignature:
 
         # Should not raise
         scheduler._validate_schedule_signature(schedule)
+
+
+# =============================================================================
+# _validate_schedule_serializable
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestValidateScheduleSerializable:
+    """Schedules whose kwargs pass sig.bind but cannot be wire-encoded must be
+    rejected at startup, not fail ENQUEUE_FAILED on every tick."""
+
+    def _make_scheduler(self, tasks: dict[str, MagicMock]) -> Scheduler:
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(
+                    name='s',
+                    task_name='task_a',
+                    pattern=IntervalSchedule(seconds=5),
+                ),
+            ],
+        )
+        app = _make_app(schedule_config=config, tasks=tasks)
+        return Scheduler(app)
+
+    def _schedule(self, kwargs: dict[str, object]) -> TaskSchedule:
+        return TaskSchedule(
+            name='s',
+            task_name='task_a',
+            pattern=IntervalSchedule(seconds=5),
+            kwargs=kwargs,
+        )
+
+    def test_no_kwargs_ok(self) -> None:
+        def f() -> str:
+            return 'ok'
+
+        scheduler = self._make_scheduler({'task_a': _make_task_mock(f)})
+        scheduler._validate_schedule_serializable(self._schedule({}))
+
+    def test_plain_kwargs_ok(self) -> None:
+        def f(value: int) -> str:
+            return str(value)
+
+        scheduler = self._make_scheduler({'task_a': _make_task_mock(f)})
+        scheduler._validate_schedule_serializable(self._schedule({'value': 5}))
+
+    def test_engine_injected_kwarg_rejected(self) -> None:
+        def f(x: int, workflow_ctx: WorkflowContext | None = None) -> str:
+            return str(x)
+
+        scheduler = self._make_scheduler({'task_a': _make_task_mock(f)})
+        with pytest.raises(ConfigurationError) as exc_info:
+            scheduler._validate_schedule_serializable(
+                self._schedule({'x': 1, 'workflow_ctx': None})
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert 'not encodable' in exc_info.value.message
+
+    def test_taskresult_typed_kwarg_rejected(self) -> None:
+        def f(dep: TaskResult[int, TaskError]) -> str:
+            return 'ok'
+
+        scheduler = self._make_scheduler({'task_a': _make_task_mock(f)})
+        with pytest.raises(ConfigurationError) as exc_info:
+            scheduler._validate_schedule_serializable(
+                self._schedule({'dep': TaskResult(ok=1)})
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert 'not encodable' in exc_info.value.message
 
 
 # =============================================================================

@@ -580,6 +580,7 @@ class Scheduler:
                     help_text='check queue_name in schedule matches app.config queue settings',
                 ) from e
             self._validate_schedule_signature(sched)
+            self._validate_schedule_serializable(sched)
 
     def _validate_schedule_signature(self, schedule: TaskSchedule) -> None:
         """Ensure schedule args/kwargs bind cleanly to the task signature."""
@@ -598,6 +599,41 @@ class Scheduler:
                 notes=[f'signature bind error: {e}'],
                 help_text='update TaskSchedule args/kwargs to match task function parameters',
             ) from e
+
+    def _validate_schedule_serializable(self, schedule: TaskSchedule) -> None:
+        """Dry-run the kwargs wire encoding at startup.
+
+        ``sig.bind`` only checks parameter names/arity, not the strict-serde
+        wire contract. Without this, a schedule whose kwarg targets an
+        engine-injected parameter (``workflow_ctx``/``workflow_meta``), a
+        TaskResult-typed parameter, or a value that cannot be JSON-serialized
+        passes startup validation and then fails ``ENQUEUE_FAILED`` on every
+        tick. Mirror the enqueue-time encode/serialize so the bad schedule is
+        rejected once, at startup, instead of forever.
+        """
+        if not schedule.kwargs:
+            return
+        task = self.app.tasks.get(schedule.task_name)
+        if task is None:
+            return  # missing-task case already raised above
+        task_fn = underlying_task_fn(task)
+        try:
+            encoded = encode_kwargs(task_fn, schedule.kwargs)
+        except (StrictJsonError, _PydanticValidationError) as exc:
+            raise ConfigurationError(
+                message=f"schedule '{schedule.name}' kwargs are not encodable for task '{schedule.task_name}'",
+                code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                notes=[f'encode error: {exc}'],
+                help_text='schedules are kwargs-only and must satisfy the task\'s typed signature; do not supply engine-injected (workflow_ctx/workflow_meta) or TaskResult-typed kwargs',
+            ) from exc
+        ser = dumps_json(encoded)
+        if is_err(ser):
+            raise ConfigurationError(
+                message=f"schedule '{schedule.name}' kwargs are not JSON-serializable for task '{schedule.task_name}'",
+                code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                notes=[f'serialization error: {ser.err_value}'],
+                help_text='ensure all scheduled kwargs serialize to JSON',
+            )
 
     async def _enqueue_scheduled_task(
         self,
