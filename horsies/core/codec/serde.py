@@ -254,14 +254,24 @@ def dumps_json(value: Any) -> SerdeResult[str]:
     if is_err(jsonable_result):
         return jsonable_result
     try:
-        return Ok(json.dumps(
+        encoded = json.dumps(
             jsonable_result.ok_value,
             ensure_ascii=False,
             separators=(',', ':'),
             allow_nan=False,
-        ))
+        )
     except (ValueError, TypeError) as exc:
         return Err(SerializationError(f'json.dumps failed: {exc}'))
+    # ensure_ascii=False emits lone UTF-16 surrogates verbatim; they are not
+    # UTF-8 encodable and would otherwise fail far downstream in the Postgres
+    # TEXT insert. Fail closed here at the producer-side encode boundary.
+    try:
+        encoded.encode('utf-8')
+    except UnicodeEncodeError as exc:
+        return Err(SerializationError(
+            f'serialized value is not valid UTF-8 (lone surrogate?): {exc}'
+        ))
+    return Ok(encoded)
 
 
 def args_to_json(args: tuple[Any, ...]) -> SerdeResult[str]:
