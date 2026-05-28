@@ -15,6 +15,7 @@ from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
     decode_subworkflow_kwargs,
     encode_kwargs,
+    encode_subworkflow_kwargs,
     underlying_task_fn,
 )
 from horsies.core.codec.json_io import dumps_json, loads_json, SerdeResult
@@ -990,7 +991,24 @@ async def enqueue_subworkflow_task(
                     error_code=OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
                 )
                 return None
-            child_kwargs_json = _ser(dumps_json(child_sub.kwargs), 'child sub kwargs')
+            try:
+                encoded_child_sub_kwargs = encode_subworkflow_kwargs(
+                    child_sub.workflow_def, child_sub.kwargs,
+                )
+            except (StrictJsonError, _PydanticValidationError) as exc:
+                await _fail_enqueued_task(
+                    session, workflow_id, task_index,
+                    (
+                        f'Failed to encode kwargs for child sub '
+                        f'{child_sub.name}: {str(exc)[:200]}'
+                    ),
+                    broker,
+                    error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+                )
+                return None
+            child_kwargs_json = _ser(
+                dumps_json(encoded_child_sub_kwargs), 'child sub kwargs',
+            )
             if child_kwargs_json is None:
                 await _fail_enqueued_task(
                     session, workflow_id, task_index,

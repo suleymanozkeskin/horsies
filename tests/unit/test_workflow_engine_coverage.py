@@ -725,6 +725,9 @@ class TestEnqueueSubworkflowTask:
         mock_wf_def.build_with.return_value = mock_spec
         mock_wf_def.name = 'TestWF'
         mock_wf_def._original_build_with = mock_wf_def.build_with
+        # encode_subworkflow_kwargs (now run before dumps_json) resolves the
+        # child's build_with off workflow_def; spec-mock doesn't expose it.
+        child_sub_node.workflow_def = mock_wf_def
 
         # dumps_json returns Err for the child kwargs serialization
         original_dumps = engine.dumps_json
