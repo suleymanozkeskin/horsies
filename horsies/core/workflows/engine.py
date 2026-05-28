@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, TypeVar, cast
@@ -37,7 +36,6 @@ from horsies.core.models.workflow import (
     WorkflowStatus,
     WorkflowTaskStatus,
     WorkflowDefinition,
-    AnyNode,
     WF_TASK_TERMINAL_VALUES,
     validate_workflow_generic_output_match,
 )
@@ -369,7 +367,7 @@ async def _fail_enqueued_task(
         return
     if broker is not None:
         should_continue = await _handle_workflow_task_failure(
-            session, workflow_id, task_index, tr,
+            session, workflow_id, tr,
         )
         if should_continue:
             await _process_dependents(session, workflow_id, task_index, broker)
@@ -424,7 +422,7 @@ async def _fail_subworkflow_load(
 
     failure_result: TaskResult[Any, TaskError] = TaskResult(err=error)
     should_continue = await _handle_workflow_task_failure(
-        session, workflow_id, task_index, failure_result,
+        session, workflow_id, failure_result,
     )
     if should_continue:
         await _process_dependents(session, workflow_id, task_index, broker)
@@ -1362,7 +1360,7 @@ async def on_workflow_task_complete(
     # 3. Handle failure based on on_error policy
     if result.is_err():
         should_continue = await _handle_workflow_task_failure(
-            session, workflow_id, task_index, result
+            session, workflow_id, result
         )
         if not should_continue:
             # PAUSE mode - stop processing, don't propagate to dependents
@@ -2062,7 +2060,7 @@ async def on_subworkflow_complete(
             )
         )
         should_continue = await _handle_workflow_task_failure(
-            session, parent_wf_id, parent_task_idx, failure_result
+            session, parent_wf_id, failure_result
         )
         if not should_continue:
             # PAUSE mode - stop processing
@@ -2329,7 +2327,6 @@ async def get_workflow_final_result(
 async def _handle_workflow_task_failure(
     session: AsyncSession,
     workflow_id: str,
-    _task_index: int,  # Unused but kept for API consistency
     result: 'TaskResult[Any, TaskError]',
 ) -> bool:
     """
@@ -2417,39 +2414,6 @@ def _load_workflow_def_from_key(
 
     return get_workflow_definition(definition_key)
 
-
-def _resolve_workflow_def_nodes(
-    workflow_def: type[WorkflowDefinition[Any]],
-) -> dict[int, AnyNode]:
-    """Stamp all nodes from a WorkflowDefinition, return index->node mapping.
-
-    Creates shallow copies — never mutates class-level originals.
-    Remaps workflow_ctx_from on each copy to point at stamped copies.
-    """
-    nodes = workflow_def.get_workflow_nodes()
-    if not nodes:
-        return {}
-
-    old_to_copy: dict[int, AnyNode] = {}
-    by_index: dict[int, AnyNode] = {}
-    for idx, (attr_name, node) in enumerate(nodes):
-        node_copy = copy.copy(node)
-        # Ensure copy is mutable (source may be frozen from a prior spec).
-        object.__setattr__(node_copy, '_frozen', False)
-        if node_copy.index is None:
-            node_copy.index = idx
-        if node_copy.node_id is None:
-            node_copy.node_id = attr_name
-        old_to_copy[id(node)] = node_copy
-        by_index[idx] = node_copy
-
-    for node_copy in old_to_copy.values():
-        if node_copy.workflow_ctx_from is not None:
-            node_copy.workflow_ctx_from = [
-                old_to_copy.get(id(n), n) for n in node_copy.workflow_ctx_from
-            ]
-
-    return by_index
 
 # --- Backward-compat barrel re-exports from lifecycle.py ---
 from horsies.core.workflows import lifecycle as _lifecycle  # noqa: E402

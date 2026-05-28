@@ -22,7 +22,6 @@ from horsies.core.workflows.engine import (
     _deser_json,
     _handle_workflow_task_failure,
     _load_workflow_def_from_key,
-    _resolve_workflow_def_nodes,
     _ser,
     _validate_args_from_map,
     check_workflow_completion,
@@ -1493,7 +1492,7 @@ class TestHandleWorkflowTaskFailure:
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
         result_tr = TaskResult(err=TaskError(error_code='ERR', message='fail'))
-        result = await _handle_workflow_task_failure(session, 'wf-1', 0, result_tr)
+        result = await _handle_workflow_task_failure(session, 'wf-1', result_tr)
         assert result is True
 
     @pytest.mark.asyncio
@@ -1506,7 +1505,7 @@ class TestHandleWorkflowTaskFailure:
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
         result_tr = TaskResult(err=TaskError(error_code='ERR', message='fail'))
-        result = await _handle_workflow_task_failure(session, 'wf-1', 0, result_tr)
+        result = await _handle_workflow_task_failure(session, 'wf-1', result_tr)
         assert result is True
 
     @pytest.mark.asyncio
@@ -1549,7 +1548,7 @@ class TestHandleWorkflowTaskFailure:
         )
 
         result = await _handle_workflow_task_failure(
-            session, 'wf-1', 1, latest_result
+            session, 'wf-1', latest_result
         )
 
         assert result is True
@@ -1713,34 +1712,6 @@ class TestLoadWorkflowDefFromKey:
         ):
             result = _load_workflow_def_from_key('some.workflow.v1')
         assert result is workflow_def
-
-
-# ── 16. _resolve_workflow_def_nodes ──────────────────────────────────
-
-
-@pytest.mark.unit
-class TestResolveWorkflowDefNodes:
-    def test_assigns_node_id_from_attr_name(self) -> None:
-        """Node with node_id=None → assigned attr_name."""
-        mock_node = MagicMock()
-        mock_node.index = None
-        mock_node.node_id = None
-        mock_node.workflow_ctx_from = None
-        mock_node._frozen = False
-
-        mock_wf_def = MagicMock()
-        mock_wf_def.get_workflow_nodes.return_value = [('my_task', mock_node)]
-
-        result = _resolve_workflow_def_nodes(mock_wf_def)
-        assert 0 in result
-        assert result[0].node_id == 'my_task'
-        assert result[0].index == 0
-
-    def test_empty_nodes_returns_empty(self) -> None:
-        mock_wf_def = MagicMock()
-        mock_wf_def.get_workflow_nodes.return_value = []
-        result = _resolve_workflow_def_nodes(mock_wf_def)
-        assert result == {}
 
 
 # ── 17. _build_workflow_context_data ─────────────────────────────────
