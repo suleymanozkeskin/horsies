@@ -43,14 +43,18 @@ def calculate_retry_delay(
     else:
         base_delay = intervals[0] if intervals else 60
 
+    # Floor before jitter so 1.0 is the bottom of the spread, not a clamp
+    # that collapses the lower half of a symmetric window onto 1.0 (which
+    # destroys uniformity at small base delays). Jitter is applied upward.
+    base_delay = max(1.0, base_delay)
+
     if jitter:
-        jitter_range = base_delay * 0.25
-        base_delay += random.uniform(-jitter_range, jitter_range)
+        base_delay += random.uniform(0.0, base_delay * 0.25)
 
     if isinstance(max_delay_seconds, int) and max_delay_seconds > 0:
-        base_delay = min(base_delay, max_delay_seconds)
+        base_delay = min(base_delay, float(max_delay_seconds))
 
-    return float(max(1.0, base_delay))
+    return float(base_delay)
 
 
 def parse_retry_policy(
