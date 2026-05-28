@@ -808,11 +808,19 @@ def _run_task_entry(
                     ),
                 )
             inner = envelope.get('inner')
+            source_definition_key = envelope.get('source_definition_key')
             from horsies.core.models.workflow.typing_utils import (
                 resolve_source_ok_type,
             )
 
-            source_ok_type = resolve_source_ok_type(app, source_task_name)
+            source_ok_type = resolve_source_ok_type(
+                app, source_task_name,
+                sub_definition_key=(
+                    source_definition_key
+                    if isinstance(source_definition_key, str)
+                    else None
+                ),
+            )
             if source_ok_type is None:
                 return _serialization_error_response(
                     task_name,
@@ -849,6 +857,9 @@ def _run_task_entry(
 
                 results_by_id_raw = workflow_ctx_data.get('results_by_id', {})
                 task_name_by_id = workflow_ctx_data.get('task_name_by_id', {})
+                definition_key_by_id = workflow_ctx_data.get(
+                    'definition_key_by_id', {},
+                )
                 results_by_id: dict[str, TaskResult[Any, TaskError]] = {}
                 for node_id, envelope in results_by_id_raw.items():
                     if envelope is None:
@@ -886,7 +897,15 @@ def _run_task_entry(
                         resolve_source_ok_type as _resolve_src_ok,
                     )
 
-                    source_ok_type = _resolve_src_ok(app, source_task_name)
+                    _sub_def_key = definition_key_by_id.get(node_id)
+                    source_ok_type = _resolve_src_ok(
+                        app, source_task_name,
+                        sub_definition_key=(
+                            _sub_def_key
+                            if isinstance(_sub_def_key, str)
+                            else None
+                        ),
+                    )
                     if source_ok_type is None:
                         results_by_id[node_id] = TaskResult(
                             err=TaskError(

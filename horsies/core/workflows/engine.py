@@ -119,6 +119,7 @@ def _decode_stored_task_result(
     app: 'Horsies | None',
     task_name: str,
     context: dict[str, Any],
+    sub_definition_key: str | None = None,
 ) -> 'TaskResult[Any, TaskError]':
     """Decode a stored TaskResult JSON payload using the local task's OkT.
 
@@ -170,7 +171,9 @@ def _decode_stored_task_result(
         resolve_source_ok_type,
     )
 
-    ok_type = resolve_source_ok_type(app, task_name)
+    ok_type = resolve_source_ok_type(
+        app, task_name, sub_definition_key=sub_definition_key,
+    )
     if ok_type is None:
         return TaskResult(
             err=TaskError(
@@ -201,21 +204,24 @@ def _decode_stored_task_result(
 def _resolve_source_ok_type(
     app: 'Horsies | None',
     task_name: str,
+    sub_definition_key: str | None = None,
 ) -> Any | None:
     """Look up the source OkT for envelope encoding.
 
-    Resolves against both the task registry (``TaskNode`` source) and
-    the workflow definition registry (``SubWorkflowNode`` source — the
-    persisted ``task_name`` is the child workflow's ``.name`` for those
-    rows, not a registered task name).
+    Resolves a TaskNode source via the task registry and a SubWorkflowNode
+    source via its unique ``sub_definition_key`` (the child workflow's
+    ``definition_key``). The caller must pass ``sub_definition_key`` for
+    subworkflow sources so the lookup is unambiguous.
 
-    Returns ``None`` when the name isn't known in either registry; the
-    engine encode path then writes ``envelope=None`` for that entry,
-    which the decode side surfaces as a sentinel TaskError.
+    Returns ``None`` when the source isn't registered; the engine encode
+    path then writes ``envelope=None`` for that entry, which the decode
+    side surfaces as a sentinel TaskError.
     """
     from horsies.core.models.workflow.typing_utils import resolve_source_ok_type
 
-    return resolve_source_ok_type(app, task_name)
+    return resolve_source_ok_type(
+        app, task_name, sub_definition_key=sub_definition_key,
+    )
 
 
 def _decode_err_only(
@@ -434,6 +440,7 @@ async def enqueue_workflow_task(
     all_dep_results: dict[int, 'TaskResult[Any, TaskError]'],
     all_dep_task_names: dict[int, str] | None = None,
     broker: 'PostgresBroker | None' = None,
+    all_dep_definition_keys: dict[int, str | None] | None = None,
 ) -> str | None:
     """
     Enqueue a single workflow task.
@@ -575,15 +582,21 @@ async def enqueue_workflow_task(
                         )
                         return None
                     app = broker.app if broker is not None else None
+                    source_definition_key = (
+                        all_dep_definition_keys.get(dep_index)
+                        if all_dep_definition_keys is not None
+                        else None
+                    )
                     source_ok_type = _resolve_source_ok_type(
                         app, source_task_name,
+                        sub_definition_key=source_definition_key,
                     )
                     if source_ok_type is None:
                         await _fail_enqueued_task(
                             session, workflow_id, task_index,
                             (
-                                f'Source task {source_task_name!r} not '
-                                f'registered or missing task_ok_type; '
+                                f'Source {source_task_name!r} not '
+                                f'registered or missing OkT; '
                                 f'cannot encode args_from envelope for '
                                 f'kwarg {kwarg_name!r} (task '
                                 f'{task_index})'
@@ -611,6 +624,7 @@ async def enqueue_workflow_task(
                     kwargs[kwarg_name] = {
                         _ENGINE_KEY_TASKRESULT_ENVELOPE: True,
                         'source_task_name': source_task_name,
+                        'source_definition_key': source_definition_key,
                         'inner': inner,
                     }
 
@@ -1211,8 +1225,12 @@ async def _build_workflow_context_data(
     results_by_id: dict[str, dict[str, Json] | None] = {}
     for node_id, result in dep_results.by_id.items():
         source_task_name = dep_results.task_name_by_id.get(node_id)
+        source_definition_key = dep_results.definition_key_by_id.get(node_id)
         source_ok_type = (
-            _resolve_source_ok_type(app, source_task_name)
+            _resolve_source_ok_type(
+                app, source_task_name,
+                sub_definition_key=source_definition_key,
+            )
             if source_task_name is not None
             else None
         )
@@ -1254,6 +1272,10 @@ async def _build_workflow_context_data(
         # node_id to look up source `task_ok_type` for typed decode of
         # each envelope in `results_by_id`.
         'task_name_by_id': dict(dep_results.task_name_by_id),
+        # Per-node sub_definition_key (None for TaskNode sources) so the
+        # child runner resolves SubWorkflowNode OkT by the unique
+        # definition_key, not the ambiguous task_name.
+        'definition_key_by_id': dict(dep_results.definition_key_by_id),
         'summaries_by_id': summaries_by_id,
     }
 
@@ -1571,7 +1593,7 @@ async def try_make_ready_and_enqueue(
             return
 
     # 6. Fetch dependency results and enqueue
-    dep_results, dep_task_names = await get_dependency_results(
+    dep_results, dep_task_names, dep_definition_keys = await get_dependency_results(
         session,
         workflow_id,
         dependencies,
@@ -1589,6 +1611,7 @@ async def try_make_ready_and_enqueue(
         # Regular TaskNode: enqueue as task
         await enqueue_workflow_task(
             session, workflow_id, task_index, dep_results, dep_task_names, broker,
+            all_dep_definition_keys=dep_definition_keys,
         )
 
 
@@ -1606,6 +1629,12 @@ class DependencyResults:
         # ``task_ok_type`` for per-entry ``encode_task_result``
         # encoding when building the workflow_ctx_data envelope.
         self.task_name_by_id: dict[str, str] = {}
+        # node_id → sub_definition_key (None for TaskNode sources). For
+        # SubWorkflowNode sources this is the child workflow's unique
+        # definition_key, used to resolve OkT unambiguously when encoding
+        # the workflow_ctx envelope (task_name alone is ambiguous since a
+        # workflow .name can collide with a task name).
+        self.definition_key_by_id: dict[str, str | None] = {}
 
 
 
@@ -1616,7 +1645,11 @@ async def get_dependency_results(
     dependency_indices: list[int],
     *,
     app: 'Horsies | None' = None,
-) -> tuple[dict[int, 'TaskResult[Any, TaskError]'], dict[int, str]]:
+) -> tuple[
+    dict[int, 'TaskResult[Any, TaskError]'],
+    dict[int, str],
+    dict[int, str | None],
+]:
     """
     Fetch TaskResults for dependencies in terminal states.
 
@@ -1624,23 +1657,25 @@ async def get_dependency_results(
     - SKIPPED: returns sentinel TaskResult with UPSTREAM_SKIPPED error
 
     Strict-serde phase 6: decode each row's stored result via
-    ``decode_task_result(raw, ok_type)`` where ``ok_type`` comes from the
-    locally registered task identified by ``task_name``. ``app`` is
-    required for typed decode; when omitted (legacy callers), falls
-    back to a ``RESULT_DESERIALIZATION_ERROR`` sentinel so the caller
-    keeps explicit failure visibility instead of silently returning
-    wrongly-typed values.
+    ``decode_task_result(raw, ok_type)``. ``ok_type`` is resolved from
+    the source's ``sub_definition_key`` (SubWorkflowNode) or ``task_name``
+    (TaskNode). ``app`` is required for typed decode of task sources; when
+    omitted (legacy callers), falls back to a
+    ``RESULT_DESERIALIZATION_ERROR`` sentinel so the caller keeps explicit
+    failure visibility instead of silently returning wrongly-typed values.
 
     Returns:
         Tuple of:
           - dict mapping task_index → TaskResult
-          - dict mapping task_index → task_name (for envelope source
-            metadata during args_from emission)
+          - dict mapping task_index → task_name (envelope source metadata)
+          - dict mapping task_index → sub_definition_key | None (envelope
+            source metadata so args_from decode resolves SubWorkflowNode
+            OkT by the unique definition_key, not the ambiguous name)
     """
     from horsies.core.models.tasks import TaskError, TaskResult
 
     if not dependency_indices:
-        return ({}, {})
+        return ({}, {}, {})
 
     result = await session.execute(
         GET_DEPENDENCY_RESULTS_SQL,
@@ -1653,12 +1688,15 @@ async def get_dependency_results(
 
     results: dict[int, TaskResult[Any, TaskError]] = {}
     task_names_by_index: dict[int, str] = {}
+    definition_keys_by_index: dict[int, str | None] = {}
     for row in result.fetchall():
         task_index = row.task_index
         task_name = row.task_name
         status = row.status
         stored_result = row.result
+        sub_definition_key = row.sub_definition_key
         task_names_by_index[task_index] = task_name
+        definition_keys_by_index[task_index] = sub_definition_key
 
         if status == WorkflowTaskStatus.SKIPPED.value:
             # Inject sentinel TaskResult for SKIPPED dependencies
@@ -1679,10 +1717,11 @@ async def get_dependency_results(
                     'task_index': task_index,
                     'status': status,
                 },
+                sub_definition_key=sub_definition_key,
             )
             results[task_index] = decoded_tr
 
-    return (results, task_names_by_index)
+    return (results, task_names_by_index, definition_keys_by_index)
 
 
 
@@ -1729,6 +1768,7 @@ async def get_dependency_results_with_names(
         node_id = row.node_id
         status = row.status
         stored_result = row.result
+        sub_definition_key = row.sub_definition_key
 
         if status == WorkflowTaskStatus.SKIPPED.value:
             # Inject sentinel TaskResult for SKIPPED dependencies
@@ -1749,6 +1789,7 @@ async def get_dependency_results_with_names(
                     'task_index': task_index,
                     'status': status,
                 },
+                sub_definition_key=sub_definition_key,
             )
         else:
             continue  # No result to include
@@ -1757,6 +1798,7 @@ async def get_dependency_results_with_names(
         if node_id is not None:
             dep_results.by_id[node_id] = task_result
             dep_results.task_name_by_id[node_id] = task_name
+            dep_results.definition_key_by_id[node_id] = sub_definition_key
         # Use unique key to avoid collisions when same task appears multiple times
         unique_key = f'{task_name}#{task_index}'
         dep_results.by_name[unique_key] = task_result
@@ -2238,11 +2280,13 @@ async def get_workflow_final_result(
 
     results_dict: dict[str, Json] = {}
     task_name_by_id: dict[str, str] = {}
+    definition_key_by_id: dict[str, str | None] = {}
     for row in terminal_results.fetchall():
         node_id = row.node_id
         if not isinstance(node_id, str):
             continue
         task_name_by_id[node_id] = row.task_name
+        definition_key_by_id[node_id] = row.sub_definition_key
         if row.result:
             deser = _deser_json(row.result, 'terminal task result json')
             if isinstance(deser, dict) and deser.get('__h_task_result__') is True:
@@ -2262,14 +2306,16 @@ async def get_workflow_final_result(
     # ``__h_outputless_terminals__`` so the handle's decode path can
     # distinguish from a normal-output workflow. Each entry in
     # ``results_by_id`` is itself a ``__h_task_result__`` envelope;
-    # ``task_name_by_id`` lets the handle look up per-node ok_type for
-    # typed decode.
+    # ``definition_key_by_id`` lets the handle resolve per-node OkT for a
+    # SubWorkflowNode terminal by its unique definition_key (task_name is
+    # ambiguous). ``task_name_by_id`` resolves TaskNode terminals.
     outer_envelope: dict[str, Json] = {
         '__h_task_result__': True,
         '__h_outputless_terminals__': True,
         'ok': cast('Json', {
             'results_by_id': cast('Json', results_dict),
             'task_name_by_id': cast('Json', task_name_by_id),
+            'definition_key_by_id': cast('Json', definition_key_by_id),
         }),
         'err': None,
     }

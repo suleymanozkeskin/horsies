@@ -241,7 +241,7 @@ SET_READY_WORKFLOW_TASK_TERMINAL_SQL = text("""
 # -- SQL constants for get_dependency_results --
 
 GET_DEPENDENCY_RESULTS_SQL = text("""
-    SELECT task_index, task_name, status, result
+    SELECT task_index, task_name, status, result, sub_definition_key
     FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id
       AND task_index = ANY(:indices)
@@ -250,7 +250,7 @@ GET_DEPENDENCY_RESULTS_SQL = text("""
 # -- SQL constants for get_dependency_results_with_names --
 
 GET_DEPENDENCY_RESULTS_WITH_NAMES_SQL = text("""
-    SELECT task_index, task_name, node_id, status, result
+    SELECT task_index, task_name, node_id, status, result, sub_definition_key
     FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id
       AND node_id = ANY(:node_ids)
@@ -345,7 +345,8 @@ GET_OUTPUT_TASK_RESULT_SQL = text("""
     WHERE workflow_id = :wf_id AND task_index = :idx
 """)
 GET_TERMINAL_TASK_RESULTS_SQL = text("""
-    SELECT wt.node_id, wt.task_index, wt.task_name, wt.result
+    SELECT wt.node_id, wt.task_index, wt.task_name, wt.result,
+           wt.sub_definition_key
     FROM horsies_workflow_tasks wt
     WHERE wt.workflow_id = :wf_id
       AND NOT EXISTS (
