@@ -1615,6 +1615,11 @@ def create_task_wrapper(
             self.task_queue_name = task_options.queue_name if task_options else None
             # Keep a reference to the original function for introspection (signature checks).
             self._original_fn = fn
+            # Expose the original function as the wrapped target so
+            # inspect.signature(task_func) resolves to the real parameters
+            # instead of TaskFunctionImpl.__call__'s (*args, **kwargs). fn is
+            # guaranteed unwrapped (pre-decorated callables are rejected above).
+            self.__wrapped__ = fn
             # Expose declared TaskResult ok-type for workflow args_from type checks.
             self.task_ok_type = ok_type
             # Reuse the value already computed in the outer scope
