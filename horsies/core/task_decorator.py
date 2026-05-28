@@ -1435,6 +1435,29 @@ def create_task_wrapper(
                 retryable=False,
             ))
 
+        # bool is an int subclass; schedule(False, ...) silently meaning delay=0
+        # is a footgun, so reject it alongside other non-int types. This is a
+        # Result-returning API, so bad runtime inputs return Err, not raise.
+        if isinstance(delay, bool) or not isinstance(delay, int):
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.VALIDATION_FAILED,
+                message=(
+                    f'schedule delay must be an int number of seconds, '
+                    f'got {type(delay).__name__}'
+                ),
+                retryable=False,
+            ))
+
+        if delay < 0:
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.VALIDATION_FAILED,
+                message=(
+                    f'schedule delay must not be negative, got {delay}; '
+                    f'use delay=0 (or {task_name}.send(...)) for immediate execution'
+                ),
+                retryable=False,
+            ))
+
         prep = _prepare_send(
             args,
             kwargs_dict,
