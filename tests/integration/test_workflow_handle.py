@@ -814,6 +814,57 @@ class TestWorkflowHandleSubWorkflowFields:
         assert err.code == HandleErrorCode.DB_OPERATION_FAILED
         assert 'sub_workflow_summary JSON corrupt' in err.message
 
+    async def test_subworkflow_node_with_bad_status_summary_returns_err(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """Valid-JSON summary with an unrecognized status propagates as Err.
+
+        Regression: an invalid persisted status used to be silently coerced to
+        WorkflowStatus.FAILED, masquerading as a genuine child failure. It must
+        now surface as Err(HandleOperationError) instead.
+        """
+        task_a = make_simple_task(app, 'subwf_badstatus_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+
+        spec = make_workflow_spec(
+            broker=broker, name='subwf_badstatus', tasks=[node_a],
+        )
+        handle = await start_ok(spec, broker)
+
+        child_wf_id = str(uuid.uuid4())
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflows (id, name, status, on_error, depth, created_at, updated_at)
+                VALUES (:child_id, 'child_wf', 'COMPLETED', 'fail', 1, NOW(), NOW())
+            """),
+            {'child_id': child_wf_id},
+        )
+        await session.execute(
+            text("""
+                UPDATE horsies_workflow_tasks
+                SET is_subworkflow = TRUE,
+                    sub_workflow_id = :child_id,
+                    sub_workflow_summary = :summary
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {
+                'child_id': child_wf_id,
+                'summary': '{"status": "NOT_A_STATUS", "total_tasks": 1}',
+                'wf_id': handle.workflow_id,
+            },
+        )
+        await session.commit()
+
+        tasks_r = await handle.tasks_async()
+        assert is_err(tasks_r)
+        err = tasks_r.err_value
+        assert err.code == HandleErrorCode.DB_OPERATION_FAILED
+        assert 'sub_workflow_summary invalid for node' in err.message
+
 
 # =============================================================================
 # TestWorkflowHandleCancel

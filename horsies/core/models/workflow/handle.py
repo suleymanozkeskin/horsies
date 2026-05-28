@@ -1056,7 +1056,20 @@ class WorkflowHandle(Generic[OutT]):
                                 retryable=False,
                                 workflow_id=self.workflow_id,
                             ))
-                        summary = SubWorkflowSummary.from_json(summary_loads_r.ok_value)
+                        try:
+                            summary = SubWorkflowSummary.from_json(
+                                summary_loads_r.ok_value
+                            )
+                        except ValueError as summary_exc:
+                            return Err(HandleOperationError(
+                                code=HandleErrorCode.DB_OPERATION_FAILED,
+                                message=(
+                                    f'sub_workflow_summary invalid for node '
+                                    f'{row.node_id}: {summary_exc}'
+                                ),
+                                retryable=False,
+                                workflow_id=self.workflow_id,
+                            ))
 
                     out.append(WorkflowTaskInfo(
                         node_id=row.node_id,
