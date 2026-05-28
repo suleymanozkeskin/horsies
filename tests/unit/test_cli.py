@@ -113,9 +113,16 @@ class TestResolveModuleArgument:
     def test_positional_returned(self) -> None:
         assert _resolve_module_argument(self._make_ns(module_pos='app:inst')) == 'app:inst'
 
-    def test_module_flag_takes_precedence(self) -> None:
+    def test_conflicting_flag_and_positional_raises(self) -> None:
         ns = self._make_ns(module='flag_mod', module_pos='pos_mod')
-        assert _resolve_module_argument(ns) == 'flag_mod'
+        with pytest.raises(ConfigurationError) as exc_info:
+            _resolve_module_argument(ns)
+        assert exc_info.value.code == ErrorCode.CLI_INVALID_ARGS
+        assert 'conflict' in exc_info.value.message.lower()
+
+    def test_identical_flag_and_positional_accepted(self) -> None:
+        ns = self._make_ns(module='same:app', module_pos='same:app')
+        assert _resolve_module_argument(ns) == 'same:app'
 
     def test_both_missing_raises_configuration_error(self) -> None:
         with pytest.raises(ConfigurationError) as exc_info:

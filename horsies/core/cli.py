@@ -88,8 +88,24 @@ async def _close_broker(broker: Any, logger: logging.Logger) -> None:
 
 
 def _resolve_module_argument(args: argparse.Namespace) -> str:
-    """Return module path from --module or positional, error if missing."""
-    module_path = getattr(args, 'module', None) or getattr(args, 'module_pos', None)
+    """Return module path from --module or positional, error if missing or conflicting."""
+    module_flag = getattr(args, 'module', None)
+    module_pos = getattr(args, 'module_pos', None)
+    if module_flag and module_pos and module_flag != module_pos:
+        raise ConfigurationError(
+            message='conflicting module paths provided',
+            code=ErrorCode.CLI_INVALID_ARGS,
+            notes=[
+                f'--module={module_flag!r} conflicts with positional {module_pos!r}',
+                'pass the module path exactly once (either as -m/--module or positionally)',
+            ],
+            help_text=(
+                'provide the module path exactly once, e.g.:\n'
+                '  horsies worker app.configs.horsies:app  (positional, recommended)\n'
+                '  horsies worker -m app.configs.horsies:app  (flag)'
+            ),
+        )
+    module_path = module_flag or module_pos
     if not module_path:
         raise ConfigurationError(
             message='module path is required',
