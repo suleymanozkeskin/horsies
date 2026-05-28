@@ -41,15 +41,23 @@ from horsies.core.models.tasks import (
     OutcomeCode,
 )
 from horsies.core.types.result import Ok, Err, is_err
+from horsies.core.types.status import TASK_TERMINAL_STATES
 
 from .context import SubWorkflowSummary
-from .enums import OkT, OutT, WorkflowStatus, WorkflowTaskStatus
+from .enums import (
+    OkT,
+    OutT,
+    WF_TASK_TERMINAL_VALUES,
+    WorkflowStatus,
+    WorkflowTaskStatus,
+)
 from .handle_types import HandleErrorCode, HandleOperationError, HandleResult
 from .nodes import NodeKey
 
 logger = get_logger('workflow.handle')
 
 _T = TypeVar('_T')
+_TASK_TERMINAL_VALUES: list[str] = [status.value for status in TASK_TERMINAL_STATES]
 
 if TYPE_CHECKING:
     from horsies.core.brokers.postgres import PostgresBroker
@@ -101,15 +109,22 @@ CANCEL_WORKFLOW_SQL = text("""
     WHERE id = :wf_id AND status IN ('PENDING', 'RUNNING', 'PAUSED')
 """)
 
-SYNC_RUNNING_ENQUEUED_WORKFLOW_TASKS_ON_CANCEL_SQL = text("""
-    UPDATE horsies_workflow_tasks wt
-    SET status = 'RUNNING',
-        started_at = COALESCE(wt.started_at, NOW())
+LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL = text("""
+    SELECT t.id
     FROM horsies_tasks t
+    JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
     WHERE wt.workflow_id = :wf_id
-      AND wt.task_id = t.id
-      AND wt.status = 'ENQUEUED'
-      AND t.status = 'RUNNING'
+      AND NOT (wt.status = ANY(:wf_task_terminal_states))
+      AND NOT (t.status = ANY(:task_terminal_states))
+    FOR UPDATE OF t
+""")
+
+LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL = text("""
+    SELECT id
+    FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id
+      AND NOT (status = ANY(:wf_task_terminal_states))
+    FOR UPDATE
 """)
 
 MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL = text("""
@@ -124,7 +139,7 @@ MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL = text("""
     WHERE wt.workflow_id = :wf_id
       AND wt.task_id = t.id
       AND wt.status = 'ENQUEUED'
-      AND t.status IN ('PENDING', 'CLAIMED')
+      AND t.status IN ('PENDING', 'CLAIMED', 'RUNNING')
 """)
 
 SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL = text("""
@@ -1047,6 +1062,29 @@ class WorkflowHandle(Generic[OutT]):
         """Async version of cancel()."""
         try:
             async with self.broker.session_factory() as session:
+                lock_params = {
+                    'wf_id': self.workflow_id,
+                    'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES,
+                    'task_terminal_states': _TASK_TERMINAL_VALUES,
+                }
+                # Close the worker-pickup race before flipping workflow status:
+                # workers claim horsies_tasks rows with SKIP LOCKED, while
+                # enqueue/ready transitions mutate horsies_workflow_tasks rows.
+                await session.execute(
+                    LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL,
+                    lock_params,
+                )
+                await session.execute(
+                    LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL,
+                    lock_params,
+                )
+                # If an enqueue finished while we waited for workflow_task locks,
+                # catch the newly linked task row before the status update below.
+                await session.execute(
+                    LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL,
+                    lock_params,
+                )
+
                 # Cancel workflow (UPDATE is a no-op if not found or already terminal)
                 await session.execute(
                     CANCEL_WORKFLOW_SQL,
@@ -1074,15 +1112,11 @@ class WorkflowHandle(Generic[OutT]):
                     return Ok(None)
 
                 # CANCELLED (either by our UPDATE or already) → idempotent cleanup
-                # If a task has already started but workflow_task still says ENQUEUED,
-                # normalize it to RUNNING so cancellation doesn't leave stale ENQUEUED rows.
-                await session.execute(
-                    SYNC_RUNNING_ENQUEUED_WORKFLOW_TASKS_ON_CANCEL_SQL,
-                    {'wf_id': self.workflow_id},
-                )
-
                 # Cancel ENQUEUED tasks that have not started execution yet.
                 # This guarantees they are no longer claimable by workers.
+                # A backing task may briefly be RUNNING while workflow_task is
+                # still ENQUEUED; user code starts only after the workflow_task
+                # RUNNING handoff, so that state is still cancellable.
                 await session.execute(
                     MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL,
                     {'wf_id': self.workflow_id},
