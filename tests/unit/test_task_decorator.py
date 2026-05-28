@@ -1466,6 +1466,74 @@ class TestCreateTaskWrapperSchedule:
         assert is_ok(result)
         assert broker.enqueue.call_args.kwargs.get('enqueue_delay_seconds') == 0
 
+    def test_schedule_none_delay_rejected(self) -> None:
+        """A None delay returns Err(VALIDATION_FAILED), not a raw TypeError."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        broker.enqueue.return_value = Ok('sched-1')
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.schedule(None, x=1)  # type: ignore[arg-type]
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        broker.enqueue.assert_not_called()
+
+    def test_schedule_string_delay_rejected(self) -> None:
+        """A str delay returns Err(VALIDATION_FAILED), not a raw TypeError."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        broker.enqueue.return_value = Ok('sched-1')
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.schedule('5', x=1)  # type: ignore[arg-type]
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        broker.enqueue.assert_not_called()
+
+    def test_schedule_bool_delay_rejected(self) -> None:
+        """A bool delay is rejected: schedule(False) silently meaning 0 is a footgun."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        broker.enqueue.return_value = Ok('sched-1')
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        for bad in (True, False):
+            result = wrapper.schedule(bad, x=1)  # type: ignore[arg-type]
+            assert is_err(result), bad
+            assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        broker.enqueue.assert_not_called()
+
+    def test_schedule_float_delay_rejected(self) -> None:
+        """A float delay is rejected (signature is int)."""
+        def good_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        broker.enqueue.return_value = Ok('sched-1')
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.schedule(2.5, x=1)  # type: ignore[arg-type]
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        broker.enqueue.assert_not_called()
+
     def test_with_options_schedule_negative_delay_rejected(self) -> None:
         """The with_options(...).schedule() path validates the delay too."""
         def good_fn(x: int) -> TaskResult[int, TaskError]:
