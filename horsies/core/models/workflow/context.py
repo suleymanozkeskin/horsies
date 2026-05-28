@@ -482,16 +482,22 @@ class WorkflowContext(BaseModel):
 
     def result_for(
         self,
-        node: TaskNode[OkT] | NodeKey[OkT],
+        node: TaskNode[OkT] | SubWorkflowNode[OkT] | NodeKey[OkT],
     ) -> TaskResult[OkT, TaskError]:
         """
-        Get the result for a specific TaskNode.
+        Get the result for a specific node.
 
         Type-safe: returns TaskResult[T, TaskError] where T matches the node's type.
 
+        Accepts SubWorkflowNode as well as TaskNode: a SubWorkflowNode's
+        terminal TaskResult is stored alongside task results (see
+        ``has_result``, which also accepts both). Use ``summary_for`` when you
+        need the richer SubWorkflowSummary instead.
+
         Args:
-            node: The TaskNode or NodeKey whose result to retrieve. Must have been
-                  included in workflow_ctx_from and have a node_id assigned.
+            node: The TaskNode, SubWorkflowNode, or NodeKey whose result to
+                  retrieve. Must have been included in workflow_ctx_from and
+                  have a node_id assigned.
 
         Returns:
             The TaskResult from the completed task.
