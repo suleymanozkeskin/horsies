@@ -358,7 +358,7 @@ async def start_workflow_async(
                                 'idx': node.index,
                                 'node_id': node.node_id,
                                 'name': node.name,
-                                'args': _ser_or_raise(dumps_json(()), 'positional args'),  # kwargs-only: positional args not persisted
+                                'args': _ser_or_raise(dumps_json([]), 'positional args'),  # kwargs-only: positional args not persisted
                                 'kwargs': _ser_or_raise(
                                     dumps_json(
                                         encode_subworkflow_kwargs(
@@ -418,7 +418,7 @@ async def start_workflow_async(
                                 'idx': task.index,
                                 'node_id': task.node_id,
                                 'name': task.name,
-                                'args': _ser_or_raise(dumps_json(()), 'positional args'),  # kwargs-only: positional args not persisted
+                                'args': _ser_or_raise(dumps_json([]), 'positional args'),  # kwargs-only: positional args not persisted
                                 'kwargs': _ser_or_raise(
                                     dumps_json(
                                         _encode_node_kwargs_or_raise(task),
