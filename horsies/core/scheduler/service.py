@@ -293,12 +293,15 @@ class Scheduler:
 
         ser_result = dumps_json(
             {
-                'pattern': schedule.pattern.model_dump(),
+                # mode='json' is required: time-based patterns carry a
+                # datetime.time, which strict dumps_json rejects in python
+                # mode. mode='json' emits it as an isoformat string.
+                'pattern': schedule.pattern.model_dump(mode='json'),
                 'timezone': schedule.timezone,
             },
         )
         if is_err(ser_result):
-            # model_dump() output is always JSON-safe; failure here is a bug
+            # model_dump(mode='json') output is always JSON-safe; failure here is a bug
             raise RuntimeError(
                 f"Failed to serialize config for schedule '{schedule.name}': {ser_result.err_value}",
             )

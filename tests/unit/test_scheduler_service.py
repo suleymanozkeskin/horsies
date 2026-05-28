@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -10,9 +10,13 @@ import pytest
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
 from horsies.core.errors import ConfigurationError, ErrorCode, RegistryError
 from horsies.core.models.schedule import (
+    DailySchedule,
     IntervalSchedule,
+    MonthlySchedule,
     ScheduleConfig,
     TaskSchedule,
+    Weekday,
+    WeeklySchedule,
 )
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import WorkflowContext
@@ -377,6 +381,29 @@ class TestComputeConfigHash:
         hash_ny = scheduler._compute_config_hash(schedule_ny)
 
         assert hash_utc != hash_ny
+
+    def test_time_based_patterns_serialize(self) -> None:
+        """Regression: time-based patterns (Daily/Weekly/Monthly) carry a
+        datetime.time. _compute_config_hash must serialize them, not raise —
+        strict dumps_json rejects a live datetime.time, so model_dump(mode='json')
+        is required. Interval-only tests previously hid this."""
+        scheduler = self._make_scheduler()
+        patterns = [
+            DailySchedule(time=time(3, 0)),
+            WeeklySchedule(days=[Weekday.MONDAY, Weekday.FRIDAY], time=time(9, 0)),
+            MonthlySchedule(day=15, time=time(17, 30)),
+        ]
+        for pattern in patterns:
+            schedule = TaskSchedule(name='t', task_name='my_task', pattern=pattern)
+            digest = scheduler._compute_config_hash(schedule)
+            assert isinstance(digest, str) and len(digest) == 64  # sha256 hex
+
+    def test_time_based_pattern_hash_is_deterministic(self) -> None:
+        scheduler = self._make_scheduler()
+        schedule = TaskSchedule(
+            name='t', task_name='my_task', pattern=DailySchedule(time=time(3, 0)),
+        )
+        assert scheduler._compute_config_hash(schedule) == scheduler._compute_config_hash(schedule)
 
 
 # =============================================================================
