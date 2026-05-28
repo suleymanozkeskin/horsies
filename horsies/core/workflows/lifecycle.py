@@ -841,7 +841,7 @@ async def resume_workflow(
                 dep_indices: list[int] = (
                     cast(list[int], dependencies) if isinstance(dependencies, list) else []
                 )
-                dep_results, dep_task_names = await get_dependency_results(
+                dep_results, dep_task_names, dep_definition_keys = await get_dependency_results(
                     session, workflow_id, dep_indices,
                 )
 
@@ -864,6 +864,7 @@ async def resume_workflow(
                         all_dep_results=dep_results,
                         all_dep_task_names=dep_task_names,
                         broker=broker,
+                        all_dep_definition_keys=dep_definition_keys,
                     )
 
             # 4. Cascade resume to paused child workflows
@@ -982,7 +983,7 @@ async def cascade_resume_to_children(
                 dep_indices: list[int] = (
                     cast(list[int], deps) if isinstance(deps, list) else []
                 )
-                dep_res, dep_names = await get_dependency_results(
+                dep_res, dep_names, dep_def_keys = await get_dependency_results(
                     session, child_id, dep_indices,
                 )
 
@@ -1005,6 +1006,7 @@ async def cascade_resume_to_children(
                         all_dep_results=dep_res,
                         all_dep_task_names=dep_names,
                         broker=broker,
+                        all_dep_definition_keys=dep_def_keys,
                     )
 
             # Check completion: resume may transition all pending tasks to

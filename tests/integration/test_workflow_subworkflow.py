@@ -208,6 +208,32 @@ class SummaryChildWorkflow(WorkflowDefinition[int]):
         )
 
 
+class CollisionChildWorkflow(WorkflowDefinition[int]):
+    """Child workflow whose ``.name`` deliberately collides with a task name.
+
+    Used to prove that SubWorkflowNode OkT resolution goes through the
+    unique ``definition_key`` (→ ``int``), not the ambiguous ``task_name``
+    that also matches a registered task returning ``str``.
+    """
+
+    name = 'collision_shared_name'
+    definition_key = 'tests.collision_child.v1'
+
+    @classmethod
+    def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
+        @app.task(task_name='collision_child_inner_task')
+        def child_task() -> TaskResult[int, TaskError]:
+            return TaskResult(ok=42)
+
+        node = TaskNode(fn=child_task)
+        return app.workflow(
+            name=cls.name,
+            tasks=[node],
+            output=node,
+            on_error=OnError.FAIL,
+        )
+
+
 class MiddleWorkflow(WorkflowDefinition[int]):
     """Intermediate workflow containing a SubWorkflowNode for 3-level nesting."""
 
@@ -368,6 +394,66 @@ class TestSubworkflowIntegration:
         assert child_info[0] == handle.workflow_id
         assert child_info[1] == 1
         assert child_info[2] is not None
+
+    async def test_subworkflow_okt_resolves_by_definition_key_not_colliding_task_name(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """A task whose name collides with the child workflow's ``.name``
+        must NOT hijack the SubWorkflowNode's OkT resolution.
+
+        The persisted ``task_name`` for the subworkflow row equals the
+        workflow's ``.name`` (``collision_shared_name``). A task is also
+        registered under that exact name returning ``str``. Pre-fix,
+        ``result_for`` resolved OkT via the task registry first → wrong
+        ``str`` decode. With ``sub_definition_key`` routing, it resolves
+        via the unique ``definition_key`` → the workflow's ``int`` output.
+        """
+        session, broker, app = setup
+
+        # Register a task whose name collides with the child workflow's name.
+        @app.task(task_name='collision_shared_name')
+        def colliding_task() -> TaskResult[str, TaskError]:
+            return TaskResult(ok='i-am-a-string-task')
+
+        node_child: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=CollisionChildWorkflow,
+        )
+        spec = _workflow(
+            app,
+            name='parent_collision_workflow',
+            tasks=[node_child],
+            output=node_child,
+        )
+
+        handle = await start_ok(spec, broker)
+
+        # Sanity: the persisted subworkflow row's task_name collides with
+        # the registered task name, and sub_definition_key is the unique key.
+        row = await session.execute(
+            text(
+                'SELECT task_name, sub_definition_key, is_subworkflow '
+                'FROM horsies_workflow_tasks '
+                'WHERE workflow_id = :wf_id AND task_index = 0'
+            ),
+            {'wf_id': handle.workflow_id},
+        )
+        meta = row.fetchone()
+        assert meta is not None
+        assert meta[0] == 'collision_shared_name'  # collides with the task
+        assert meta[1] == 'tests.collision_child.v1'  # unique key
+        assert meta[2] is True
+
+        # Complete the child workflow's inner task (returns int 42).
+        await self._complete_child_workflow(
+            session, broker, handle.workflow_id, 0, TaskResult(ok=42),
+        )
+
+        # result_for must decode via the workflow's definition_key (int),
+        # not the colliding task's str type.
+        decoded = handle.result_for(node_child.key())
+        assert decoded.is_ok(), f'expected Ok(int), got {decoded}'
+        assert decoded.unwrap() == 42
 
     async def test_subworkflow_registry_fallback(
         self,

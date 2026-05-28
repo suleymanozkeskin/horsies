@@ -303,7 +303,7 @@ async def recover_stuck_workflows(
         # (results_by_index, task_names_by_index) so the engine can
         # encode args_from envelopes with source-task metadata.
         recovery_app = broker.app if broker is not None else None
-        dep_results, dep_task_names = await get_dependency_results(
+        dep_results, dep_task_names, dep_definition_keys = await get_dependency_results(
             session, workflow_id, dependencies, app=recovery_app,
         )
 
@@ -316,6 +316,7 @@ async def recover_stuck_workflows(
             dep_results,
             dep_task_names,
             broker,
+            all_dep_definition_keys=dep_definition_keys,
         )
         if task_id:
             logger.info(
@@ -355,7 +356,7 @@ async def recover_stuck_workflows(
         dep_indices: list[int] = (
             cast(list[int], dependencies) if isinstance(dependencies, list) else []
         )
-        dep_results, dep_task_names = await get_dependency_results(
+        dep_results, dep_task_names, _dep_definition_keys = await get_dependency_results(
             session, workflow_id, dep_indices, app=broker.app,
         )
         await enqueue_subworkflow_task(

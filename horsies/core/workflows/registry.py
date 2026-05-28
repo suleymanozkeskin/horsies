@@ -25,15 +25,6 @@ _nodes_by_spec: WeakValueDictionary[tuple[str, int], Any] = WeakValueDictionary(
 # Strong reference to keep specs alive during execution
 _active_specs: dict[str, 'WorkflowSpec[Any]'] = {}
 _workflow_defs_by_key: dict[str, 'type[WorkflowDefinition[Any]]'] = {}
-_workflow_defs_by_name: dict[str, 'type[WorkflowDefinition[Any]]'] = {}
-"""Secondary index keyed by ``WorkflowDefinition.name``.
-
-The persisted ``horsies_workflow_tasks.task_name`` column carries the
-child workflow's ``.name`` attribute for SubWorkflowNode rows (see
-``lifecycle.py``'s ``sub_wf_name`` field). Result-decode paths that
-resolve OkT from a name need to look here when the name is not in the
-task registry (i.e. the source is a SubWorkflowNode, not a TaskNode).
-"""
 
 
 def _remove_spec_nodes(name: str, spec: 'WorkflowSpec[Any]') -> None:
@@ -139,22 +130,11 @@ def register_workflow_definition(
             code=ErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY,
         )
     _workflow_defs_by_key[definition_key] = workflow_def
-    # Mirror under the workflow's ``.name`` so result-decode paths can
-    # resolve OkT for a SubWorkflowNode source row. ``.name`` is the
-    # value persisted to ``horsies_workflow_tasks.task_name`` for
-    # subworkflow nodes.
-    name = getattr(workflow_def, 'name', None)
-    if isinstance(name, str) and name.strip():
-        _workflow_defs_by_name[name] = workflow_def
 
 
 def unregister_workflow_definition(definition_key: str) -> None:
     """Remove a workflow definition from the definition_key registry."""
-    workflow_def = _workflow_defs_by_key.pop(definition_key, None)
-    if workflow_def is not None:
-        name = getattr(workflow_def, 'name', None)
-        if isinstance(name, str) and _workflow_defs_by_name.get(name) is workflow_def:
-            del _workflow_defs_by_name[name]
+    _workflow_defs_by_key.pop(definition_key, None)
 
 
 def get_workflow_definition(
@@ -164,20 +144,6 @@ def get_workflow_definition(
     return _workflow_defs_by_key.get(definition_key)
 
 
-def get_workflow_definition_by_name(
-    name: str,
-) -> 'type[WorkflowDefinition[Any]] | None':
-    """Look up a WorkflowDefinition by its ``.name`` attribute.
-
-    Used by result-decode paths that observe the persisted
-    ``horsies_workflow_tasks.task_name`` and must resolve OkT for a
-    SubWorkflowNode source (where the name is a workflow name, not a
-    registered task name).
-    """
-    return _workflow_defs_by_name.get(name)
-
-
 def clear_workflow_definition_registry() -> None:
     """Clear definition_key registrations."""
     _workflow_defs_by_key.clear()
-    _workflow_defs_by_name.clear()

@@ -81,14 +81,14 @@ GET_WORKFLOW_ERROR_SQL = text("""
 """)
 
 GET_WORKFLOW_TASK_RESULTS_SQL = text("""
-    SELECT node_id, task_name, result
+    SELECT node_id, task_name, result, is_subworkflow, sub_definition_key
     FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id
       AND result IS NOT NULL
 """)
 
 GET_WORKFLOW_TASK_RESULT_BY_NODE_SQL = text("""
-    SELECT task_name, result
+    SELECT task_name, result, is_subworkflow, sub_definition_key
     FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id
       AND node_id = :node_id
@@ -97,7 +97,8 @@ GET_WORKFLOW_TASK_RESULT_BY_NODE_SQL = text("""
 
 GET_WORKFLOW_TASKS_SQL = text("""
     SELECT node_id, task_index, task_name, status, result,
-           started_at, completed_at, sub_workflow_id, sub_workflow_summary
+           started_at, completed_at, sub_workflow_id, sub_workflow_summary,
+           is_subworkflow, sub_definition_key
     FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id
     ORDER BY task_index
@@ -225,14 +226,18 @@ def _decode_per_task_envelope(
     app: Any | None,
     task_name: str | None,
     node_id: str,
+    sub_definition_key: str | None = None,
 ) -> TaskResult[Any, TaskError]:
-    """Decode a single workflow_task row's envelope using the source
-    task's registered ``task_ok_type``.
+    """Decode a single workflow_task row's envelope using the source's OkT.
 
     Used by ``result_for``, ``results``, and ``tasks`` — each returns
     per-node ``TaskResult`` values. Failure folds into a
     ``RESULT_DESERIALIZATION_ERROR`` sentinel so the response stays
     typed.
+
+    ``sub_definition_key`` (from the row's ``sub_definition_key`` column)
+    is passed for SubWorkflowNode rows so OkT resolves via the unique
+    workflow ``definition_key`` rather than the ambiguous ``task_name``.
     """
     if not isinstance(task_name, str):
         return TaskResult(
@@ -246,7 +251,9 @@ def _decode_per_task_envelope(
         )
     from .typing_utils import resolve_source_ok_type
 
-    source_ok_type = resolve_source_ok_type(app, task_name)
+    source_ok_type = resolve_source_ok_type(
+        app, task_name, sub_definition_key=sub_definition_key,
+    )
     if source_ok_type is None:
         return TaskResult(
             err=TaskError(
@@ -373,13 +380,18 @@ def _decode_workflow_envelope(
             )
         results_raw = ok_slot.get('results_by_id', {})
         task_names = ok_slot.get('task_name_by_id', {})
-        if not isinstance(results_raw, dict) or not isinstance(task_names, dict):
+        definition_keys = ok_slot.get('definition_key_by_id', {})
+        if (
+            not isinstance(results_raw, dict)
+            or not isinstance(task_names, dict)
+            or not isinstance(definition_keys, dict)
+        ):
             return TaskResult(
                 err=TaskError(
                     error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                     message=(
                         'Outputless workflow envelope missing or malformed '
-                        'results_by_id / task_name_by_id'
+                        'results_by_id / task_name_by_id / definition_key_by_id'
                     ),
                 ),
             )
@@ -402,7 +414,10 @@ def _decode_workflow_envelope(
                 continue
             from .typing_utils import resolve_source_ok_type as _resolve_src_ok_type
 
-            source_ok_type = _resolve_src_ok_type(app, source_task_name)
+            sub_definition_key = definition_keys.get(node_id)
+            source_ok_type = _resolve_src_ok_type(
+                app, source_task_name, sub_definition_key=sub_definition_key,
+            )
             if source_ok_type is None:
                 decoded_results[node_id] = TaskResult(
                     err=TaskError(
@@ -920,6 +935,9 @@ class WorkflowHandle(Generic[OutT]):
                     app=self.broker.app,
                     task_name=row.task_name,
                     node_id=node_id,
+                    sub_definition_key=(
+                        row.sub_definition_key if row.is_subworkflow else None
+                    ),
                 )
                 return cast('TaskResult[OkT, TaskError]', decoded)
         except SQLAlchemyError as exc:
@@ -972,6 +990,9 @@ class WorkflowHandle(Generic[OutT]):
                         app=self.broker.app,
                         task_name=row.task_name,
                         node_id=row.node_id,
+                        sub_definition_key=(
+                            row.sub_definition_key if row.is_subworkflow else None
+                        ),
                     )
                 return Ok(out)
         except SQLAlchemyError as exc:
@@ -1016,6 +1037,10 @@ class WorkflowHandle(Generic[OutT]):
                                 app=self.broker.app,
                                 task_name=row.task_name,
                                 node_id=row.node_id,
+                                sub_definition_key=(
+                                    row.sub_definition_key
+                                    if row.is_subworkflow else None
+                                ),
                             )
 
                     summary: SubWorkflowSummary[Any] | None = None
