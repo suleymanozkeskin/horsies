@@ -2031,7 +2031,7 @@ async def on_subworkflow_complete(
         {
             'status': parent_node_status,
             'result': parent_node_result,
-            'summary': _ser(dumps_json(child_summary), 'child summary', fallback='null'),
+            'summary': _ser(dumps_json(child_summary.to_json()), 'child summary', fallback='null'),
             'wf_id': parent_wf_id,
             'idx': parent_task_idx,
             'terminal_states': WF_TASK_TERMINAL_VALUES,
