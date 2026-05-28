@@ -207,3 +207,57 @@ class TestSerializeErrorPayloadFlattensException:
         assert isinstance(err['sub_workflow_summary'], dict)
         assert err['sub_workflow_summary']['failed_tasks'] == 1
         assert err['sub_workflow_summary']['error_summary'] == 'downstream'
+
+
+@pytest.mark.unit
+class TestTaskErrorModelDumpException:
+    """Direct model_dump on a TaskError holding a live exception must not crash.
+
+    The codec path excludes the field; these cover any other caller doing a
+    plain model_dump(mode='json') / model_dump_json(), which used to raise
+    PydanticSerializationError on a live BaseException.
+    """
+
+    def test_model_dump_json_mode_flattens_live_exception(self) -> None:
+        try:
+            raise ValueError('boom')
+        except ValueError as caught:
+            te = TaskError(
+                error_code=OperationalErrorCode.TASK_EXCEPTION,
+                message='m',
+                exception=caught,
+            )
+
+        dumped = te.model_dump(mode='json')
+        flattened = dumped['exception']
+        assert isinstance(flattened, dict)
+        assert flattened['type'] == 'ValueError'
+        assert flattened['module'] == 'builtins'
+        assert flattened['message'] == 'boom'
+        assert flattened['repr'] == "ValueError('boom')"
+        assert 'ValueError: boom' in flattened['traceback']
+
+    def test_model_dump_json_string_does_not_raise(self) -> None:
+        te = TaskError(message='m', exception=ValueError('boom'))
+        wire = te.model_dump_json()
+        parsed: dict[str, Any] = json.loads(wire)
+        assert parsed['exception']['type'] == 'ValueError'
+
+    def test_python_mode_keeps_live_exception_object(self) -> None:
+        """when_used='json' must not touch python-mode dumps."""
+        original = ValueError('boom')
+        te = TaskError(message='m', exception=original)
+        dumped = te.model_dump()
+        assert dumped['exception'] is original
+
+    def test_none_exception_json_mode_is_none(self) -> None:
+        te = TaskError(message='m')
+        assert te.model_dump(mode='json')['exception'] is None
+
+    def test_already_flattened_dict_passes_through(self) -> None:
+        flat: FlattenedException = {
+            'type': 'ValueError', 'module': 'builtins', 'message': 'boom',
+            'repr': "ValueError('boom')", 'traceback': 'tb',
+        }
+        te = TaskError(message='m', exception=flat)
+        assert te.model_dump(mode='json')['exception'] == flat

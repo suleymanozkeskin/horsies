@@ -250,6 +250,27 @@ class TaskError(BaseModel):
             return {'__builtin_task_code__': value.value}
         return value
 
+    @field_serializer('exception', when_used='json')
+    @classmethod
+    def _serialize_exception(
+        cls,
+        value: BaseException | FlattenedException | None,
+        _info: Any,
+    ) -> FlattenedException | None:
+        """Serialize a live exception to its wire-safe FlattenedException form.
+
+        json.dumps cannot encode a BaseException, so without this any caller
+        doing model_dump(mode='json') / model_dump_json() crashes (the codec
+        already excludes the field). None and an already-flattened dict pass
+        through unchanged. Deferred import keeps traceback formatting in
+        codec/error_payload, not in models/. Only runs for JSON serialization
+        so python-mode model_dump still returns the live exception object.
+        """
+        if value is None or not isinstance(value, BaseException):
+            return value
+        from horsies.core.codec.error_payload import flatten_exception
+        return flatten_exception(value)
+
 
 class SubWorkflowError(TaskError):
     """
