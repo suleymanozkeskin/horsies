@@ -209,14 +209,23 @@ handle = WorkflowHandle(workflow_id="known-uuid", broker=app.get_broker())
 result = handle.get(timeout_ms=30_000)
 ```
 
-### Direct Broker Result Access
+### Direct Result Access by Task ID
 
-Fetch a task result by ID without a `TaskHandle` (e.g. in HTTP endpoints):
+Fetch a task result by ID without a `TaskHandle` (e.g. in HTTP endpoints). Use
+the app-level typed API — `broker.get_result(_async)` was removed in 0.1.2.
 
 ```python
-broker = app.get_broker()
-result = await broker.get_result_async("task-uuid", timeout_ms=5000)
-info = await broker.get_task_info_async("task-uuid", include_result=True)
+from horsies.core.types.result import is_err
+
+# Returns BrokerResult[TaskResult[Any, TaskError]] — unwrap the outer result.
+outer = await app.get_result_async("task-uuid", timeout_ms=5000)
+if is_err(outer):
+    ...  # infrastructure failure (INVALID_JSON_PAYLOAD / NO_TYPE_AVAILABLE)
+else:
+    task_result = outer.ok_value  # typed TaskResult[Any, TaskError]
+
+# Raw envelope (no typed decode): broker.get_raw_result_record_async("task-uuid")
+info = await app.get_broker().get_task_info_async("task-uuid", include_result=True)
 ```
 
 See `configs.md` for all broker methods. See website docs `monitoring/broker-methods` for full reference.

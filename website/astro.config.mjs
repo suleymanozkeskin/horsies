@@ -137,6 +137,12 @@ export default defineConfig({
 						{ label: 'Migrating to 0.1.2', slug: 'migrations/migration-to-0-1-2' },
 					],
 				},
+				{
+					label: 'Changelog',
+					items: [
+						{ label: 'Changelog', slug: 'changelog' },
+					],
+				},
 				],
 		}),
 	],
