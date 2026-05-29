@@ -828,6 +828,18 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_waits_for_edge_is_not_a_cycle() {
+        // Parity with horsies (Python) PR #22: a dependency declared twice is one
+        // DAG edge, not a cycle. Rust dedups by index at insertion time
+        // (waits_for / waits_for_all), so the spec builds cleanly.
+        let mut b = WorkflowSpecBuilder::new("wf");
+        let a = b.task(simple_node("a"));
+        let _bb = b.task(TaskNode::<()>::raw("b").waits_for(a).waits_for(a));
+        let spec = b.build().unwrap();
+        assert_eq!(spec.tasks[1].dependencies, vec![0]);
+    }
+
+    #[test]
     fn linear_chain_valid() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
