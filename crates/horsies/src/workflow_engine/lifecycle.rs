@@ -407,7 +407,13 @@ async fn resume_workflow_inner(
 ///
 /// Avoids deep recursion for deeply nested workflows. Mirrors Python's
 /// `_cascade_pause_to_children()`.
-async fn cascade_pause_to_children(pool: &PgPool, workflow_id: &str) -> Result<(), WorkflowError> {
+///
+/// Called by both the explicit pause path and the implicit on_error=pause
+/// failure path (`engine::handle_workflow_task_failure`).
+pub(crate) async fn cascade_pause_to_children(
+    pool: &PgPool,
+    workflow_id: &str,
+) -> Result<(), WorkflowError> {
     let mut queue: VecDeque<String> = VecDeque::new();
     queue.push_back(workflow_id.to_owned());
 

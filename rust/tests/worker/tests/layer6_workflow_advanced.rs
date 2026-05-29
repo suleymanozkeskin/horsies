@@ -816,6 +816,82 @@ async fn test_on_error_pause_resume_completes() {
 }
 
 // ---------------------------------------------------------------------------
+// T6.11c: on_error=PAUSE cascades the implicit pause to running child
+// workflows (parity with horsies PR #28). Driven via the DB + the completion
+// handler so no worker timing is involved: the manually-inserted RUNNING child
+// stands in for a running sub-workflow that must be paused alongside its parent.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial]
+async fn test_on_error_pause_cascades_to_running_child() {
+    let pool = pool().await;
+    db::clean_tables(&pool).await;
+    let reg = registry();
+
+    // Parent workflow with one root task and on_error=PAUSE. No worker: we drive
+    // the failure directly through on_workflow_task_complete.
+    let mut b = WorkflowSpecBuilder::new("e2e_pause_cascade_parent");
+    b.on_error(OnError::Pause);
+    b.task(
+        wf_step::node()
+            .unwrap()
+            .node_id("a")
+            .kwargs(r#"{"step":"A"}"#.to_owned()),
+    );
+    let spec = b.build().unwrap();
+
+    let wf_id = start_wf(&pool, &spec).await;
+
+    // Insert a RUNNING child workflow parented to the parent (mimics a running
+    // sub-workflow). Only id/name/status need explicit values; the rest default.
+    let child_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    sqlx::query(
+        "INSERT INTO horsies_workflows (id, name, status, parent_workflow_id, root_workflow_id) \
+         VALUES ($1, $2, 'RUNNING', $3, $3)",
+    )
+    .bind(child_id)
+    .bind("e2e_pause_cascade_child")
+    .bind(&wf_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Resolve the root task's horsies_tasks id, then fail it.
+    let task_id: String =
+        sqlx::query_scalar("SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0")
+            .bind(&wf_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    let failed_result = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(
+        TaskError::new("PARENT_FAIL", "parent failed"),
+    ))
+    .unwrap();
+
+    horsies::on_workflow_task_complete(&pool, &task_id, &failed_result, false, &reg)
+        .await
+        .unwrap();
+
+    // Parent paused on error, and the running child was paused by the cascade.
+    let parent_status: String =
+        sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+            .bind(&wf_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let child_status: String =
+        sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+            .bind(child_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(parent_status, "PAUSED");
+    assert_eq!(child_status, "PAUSED");
+}
+
+// ---------------------------------------------------------------------------
 // T6.9: Recovery preserves results (stuck RUNNING → re-finalized)
 // ---------------------------------------------------------------------------
 

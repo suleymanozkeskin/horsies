@@ -1164,13 +1164,23 @@ async fn handle_workflow_task_failure(
                 .fetch_optional(pool)
                 .await?;
 
-            if paused.is_some() {
-                tracing::info!(
-                    workflow_id,
-                    task_index,
-                    "on_error=pause, workflow paused with error stored",
-                );
+            if paused.is_none() {
+                // Another worker already paused/finalized this workflow; the
+                // RUNNING -> PAUSED transition was a no-op, so there is nothing
+                // to cascade. Stop processing dependents.
+                return Ok(false);
             }
+
+            tracing::info!(
+                workflow_id,
+                task_index,
+                "on_error=pause, workflow paused with error stored",
+            );
+
+            // Cascade the implicit pause to running child workflows, matching
+            // explicit pause behavior (mirrors Python PR #28).
+            crate::workflow_engine::lifecycle::cascade_pause_to_children(pool, workflow_id).await?;
+
             Ok(false)
         }
         _ => {
