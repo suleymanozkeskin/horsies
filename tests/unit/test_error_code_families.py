@@ -27,6 +27,7 @@ from horsies.core.models.tasks import (
     OutcomeCode,
     RetrievalCode,
     TaskError,
+    TaskResult,
 )
 
 
@@ -514,3 +515,55 @@ class TestCheckReservedCodeCollision:
             if e.code == ErrorCode.CHECK_RESERVED_CODE_COLLISION
         ]
         assert len(collision_errors) == 0
+
+    def test_per_task_exception_mapper_collision_detected(self) -> None:
+        # The task wrapper freezes exception_mapper as MappingProxyType, so the
+        # check must match Mapping, not dict, or this collision slips through.
+        from horsies.core.app import Horsies
+        from horsies.core.models.app import AppConfig
+        from horsies.core.models.broker import PostgresConfig
+        from horsies.core.errors import ErrorCode
+
+        app = Horsies(
+            config=AppConfig(
+                broker=PostgresConfig(database_url='postgresql+psycopg://x/y'),
+            ),
+        )
+
+        @app.task('boom', exception_mapper={ValueError: 'BROKER_ERROR'})
+        def boom() -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)
+
+        from types import MappingProxyType
+        assert isinstance(app.tasks['boom'].exception_mapper, MappingProxyType)
+
+        errors = app._check_runtime_policy_safety()
+        collision_errors = [
+            e for e in errors
+            if e.code == ErrorCode.CHECK_RESERVED_CODE_COLLISION
+        ]
+        assert len(collision_errors) == 1
+        assert 'BROKER_ERROR' in collision_errors[0].message
+        assert "task 'boom'" in collision_errors[0].notes
+
+    def test_frozen_global_mapper_collision_detected(self) -> None:
+        # A MappingProxyType global mapper must also be scanned (Mapping, not dict).
+        from types import MappingProxyType
+        from horsies.core.app import Horsies
+        from horsies.core.models.app import AppConfig
+        from horsies.core.models.broker import PostgresConfig
+        from horsies.core.errors import ErrorCode
+
+        app = Horsies(
+            config=AppConfig(
+                broker=PostgresConfig(database_url='postgresql+psycopg://x/y'),
+                exception_mapper=MappingProxyType({ValueError: 'BROKER_ERROR'}),
+            ),
+        )
+        errors = app._check_runtime_policy_safety()
+        collision_errors = [
+            e for e in errors
+            if e.code == ErrorCode.CHECK_RESERVED_CODE_COLLISION
+        ]
+        assert len(collision_errors) == 1
+        assert 'BROKER_ERROR' in collision_errors[0].message

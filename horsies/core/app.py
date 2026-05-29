@@ -50,6 +50,7 @@ import os
 import importlib
 import glob
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from horsies.core.utils.imports import import_by_path
@@ -499,7 +500,7 @@ class Horsies:
             )
 
         # Check exception_mapper values for reserved built-in code collisions.
-        if isinstance(self.config.exception_mapper, dict):
+        if isinstance(self.config.exception_mapper, Mapping):
             for exc_cls, code_str in self.config.exception_mapper.items():
                 if isinstance(code_str, str) and code_str in BUILTIN_CODE_REGISTRY:
                     builtin = BUILTIN_CODE_REGISTRY[code_str]
@@ -595,9 +596,10 @@ class Horsies:
                         )
                     )
 
-            # Check per-task exception_mapper for reserved collisions.
+            # Check per-task exception_mapper for reserved collisions. Stored as
+            # MappingProxyType on the task wrapper, so match Mapping, not dict.
             task_mapper = getattr(task, 'exception_mapper', None)
-            if isinstance(task_mapper, dict):
+            if isinstance(task_mapper, Mapping):
                 for exc_cls, code_str in task_mapper.items():
                     if isinstance(code_str, str) and code_str in BUILTIN_CODE_REGISTRY:
                         builtin = BUILTIN_CODE_REGISTRY[code_str]
