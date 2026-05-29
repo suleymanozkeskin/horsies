@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 from sqlalchemy import text
 
 from horsies.core.codec.json_value import StrictJsonError
-from horsies.core.codec.serde import loads_json
+from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.typed import (
     decode_task_error,
     decode_task_result,

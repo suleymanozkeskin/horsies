@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import text
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.codec.serde import dumps_json, loads_json
+from horsies.core.codec.json_io import dumps_json, loads_json
 from horsies.core.codec.typed import (
     decode_task_error,
     decode_task_result,

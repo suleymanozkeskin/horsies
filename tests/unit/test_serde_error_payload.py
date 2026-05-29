@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from horsies.core.codec.serde import serialize_error_payload
+from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.models.tasks import (
     FlattenedException,
     OperationalErrorCode,

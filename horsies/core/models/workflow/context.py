@@ -68,6 +68,23 @@ class SubWorkflowSummary(Generic[OkT_co]):
     error_summary: str | None = None
     """Brief description of failure (if child failed)"""
 
+    def to_json(self) -> dict[str, Any]:
+        """Serialize to a plain JSON-native dict (inverse of from_json).
+
+        Emits a bare, envelope-free dict — no serde class tags. ``output`` is
+        passed through as-is: at the engine emit site it is already a decoded
+        plain-JSON value. ``status`` is written as its string value.
+        """
+        return {
+            'status': self.status.value,
+            'output': self.output,
+            'total_tasks': self.total_tasks,
+            'completed_tasks': self.completed_tasks,
+            'failed_tasks': self.failed_tasks,
+            'skipped_tasks': self.skipped_tasks,
+            'error_summary': self.error_summary,
+        }
+
     @classmethod
     def from_json(cls, data: object) -> SubWorkflowSummary[Any]:
         """Build a SubWorkflowSummary from persisted JSON-like data.
@@ -87,12 +104,7 @@ class SubWorkflowSummary(Generic[OkT_co]):
                 f'got {type(data).__name__}'
             )
 
-        # Normalize possible serde dataclass envelope:
-        # {"__dataclass__": true, "module": ..., "qualname": ..., "data": {...}}
         payload: dict[str, Any] = data
-        raw_inner = data.get('data')
-        if data.get('__dataclass__') and _is_str_key_dict(raw_inner):
-            payload = raw_inner
 
         def _require_count(field_name: str, value: Any) -> int:
             # Counts are always written by the engine; missing or non-int

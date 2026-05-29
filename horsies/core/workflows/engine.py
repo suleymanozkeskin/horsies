@@ -15,9 +15,11 @@ from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
     decode_subworkflow_kwargs,
     encode_kwargs,
+    encode_subworkflow_kwargs,
     underlying_task_fn,
 )
-from horsies.core.codec.serde import dumps_json, loads_json, serialize_error_payload, SerdeResult
+from horsies.core.codec.json_io import dumps_json, loads_json, SerdeResult
+from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.typed import (
     Json,
     decode_task_error,
@@ -989,7 +991,24 @@ async def enqueue_subworkflow_task(
                     error_code=OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
                 )
                 return None
-            child_kwargs_json = _ser(dumps_json(child_sub.kwargs), 'child sub kwargs')
+            try:
+                encoded_child_sub_kwargs = encode_subworkflow_kwargs(
+                    child_sub.workflow_def, child_sub.kwargs,
+                )
+            except (StrictJsonError, _PydanticValidationError) as exc:
+                await _fail_enqueued_task(
+                    session, workflow_id, task_index,
+                    (
+                        f'Failed to encode kwargs for child sub '
+                        f'{child_sub.name}: {str(exc)[:200]}'
+                    ),
+                    broker,
+                    error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+                )
+                return None
+            child_kwargs_json = _ser(
+                dumps_json(encoded_child_sub_kwargs), 'child sub kwargs',
+            )
             if child_kwargs_json is None:
                 await _fail_enqueued_task(
                     session, workflow_id, task_index,
@@ -2031,7 +2050,7 @@ async def on_subworkflow_complete(
         {
             'status': parent_node_status,
             'result': parent_node_result,
-            'summary': _ser(dumps_json(child_summary), 'child summary', fallback='null'),
+            'summary': _ser(dumps_json(child_summary.to_json()), 'child summary', fallback='null'),
             'wf_id': parent_wf_id,
             'idx': parent_task_idx,
             'terminal_states': WF_TASK_TERMINAL_VALUES,
