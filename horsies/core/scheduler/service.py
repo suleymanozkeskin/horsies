@@ -21,7 +21,7 @@ from pydantic import ValidationError as _PydanticValidationError
 
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import encode_kwargs, underlying_task_fn
-from horsies.core.codec.serde import dumps_json
+from horsies.core.codec.json_io import dumps_json
 from horsies.core.utils.fingerprint import enqueue_fingerprint, schedule_slot_task_id
 from horsies.core.types.result import Err, is_err
 from horsies.core.worker.worker import import_by_path
@@ -289,16 +289,19 @@ class Scheduler:
 
         Includes pattern and timezone to detect when schedule needs recalculation.
         """
-        from horsies.core.codec.serde import dumps_json
+        from horsies.core.codec.json_io import dumps_json
 
         ser_result = dumps_json(
             {
-                'pattern': schedule.pattern.model_dump(),
+                # mode='json' is required: time-based patterns carry a
+                # datetime.time, which strict dumps_json rejects in python
+                # mode. mode='json' emits it as an isoformat string.
+                'pattern': schedule.pattern.model_dump(mode='json'),
                 'timezone': schedule.timezone,
             },
         )
         if is_err(ser_result):
-            # model_dump() output is always JSON-safe; failure here is a bug
+            # model_dump(mode='json') output is always JSON-safe; failure here is a bug
             raise RuntimeError(
                 f"Failed to serialize config for schedule '{schedule.name}': {ser_result.err_value}",
             )

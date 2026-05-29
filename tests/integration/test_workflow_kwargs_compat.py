@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.codec.serde import loads_json
+from horsies.core.codec.json_io import loads_json
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.workflow import (
     TaskNode,

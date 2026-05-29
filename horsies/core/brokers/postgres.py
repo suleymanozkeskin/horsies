@@ -22,7 +22,7 @@ from horsies.core.models.workflow_pg import (
 )
 from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.types.result import Err, Ok, is_err
-from horsies.core.codec.serde import loads_json
+from horsies.core.codec.json_io import loads_json
 from horsies.core.models.tasks import TaskInfo, TaskAttemptInfo
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.utils.loop_runner import LoopRunner
@@ -1195,7 +1195,7 @@ class PostgresBroker:
                 TaskError,
                 OperationalErrorCode,
             )
-            from horsies.core.codec.serde import dumps_json
+            from horsies.core.codec.json_io import dumps_json
             from horsies.core.codec.typed import encode_task_result
             from horsies.core.utils.retry import (
                 check_retry_eligibility,
@@ -1444,7 +1444,7 @@ class PostgresBroker:
         """
         try:
             from horsies.core.models.tasks import TaskResult, TaskError, OutcomeCode
-            from horsies.core.codec.serde import dumps_json
+            from horsies.core.codec.json_io import dumps_json
             from horsies.core.codec.typed import encode_task_result
 
             task_error = TaskError(

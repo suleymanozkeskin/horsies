@@ -178,7 +178,7 @@ class TestWireRoundTripNestedJsonValue:
     """
 
     def test_pydantic_field_with_nested_jsonvalue_round_trips(self) -> None:
-        from horsies.core.codec.serde import dumps_json, loads_json  # noqa: PLC0415
+        from horsies.core.codec.json_io import dumps_json, loads_json  # noqa: PLC0415
         from horsies.core.types.result import is_ok  # noqa: PLC0415
 
         payload = _RoundTripEnvelope(

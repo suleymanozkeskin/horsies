@@ -31,7 +31,7 @@ from horsies.core.workflows.engine import (
     enqueue_subworkflow_task,
 )
 from horsies.core.workflows.start_types import WorkflowStartErrorCode
-from horsies.core.codec.serde import loads_json
+from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.typed import decode_task_result
 
 from .conftest import (

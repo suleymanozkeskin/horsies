@@ -21,7 +21,7 @@ from horsies.core.codec.kwargs import (
     encode_subworkflow_kwargs,
     underlying_task_fn,
 )
-from horsies.core.codec.serde import dumps_json, loads_json, SerializationError, SerdeResult
+from horsies.core.codec.json_io import dumps_json, loads_json, SerializationError, SerdeResult
 from horsies.core.types.result import Ok, Err, is_err as _is_err
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (

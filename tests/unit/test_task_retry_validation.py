@@ -7,7 +7,7 @@ from functools import wraps
 import pytest
 
 from horsies.core.app import Horsies
-from horsies.core.codec.serde import serialize_task_options
+from horsies.core.codec.task_options import serialize_task_options
 from pydantic import ValidationError
 from horsies.core.errors import TaskDefinitionError, ErrorCode
 from horsies.core.models.app import AppConfig

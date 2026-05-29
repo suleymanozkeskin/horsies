@@ -22,7 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from horsies.core.app import Horsies
 from horsies.core.brokers.listener import PostgresListener
-from horsies.core.codec.serde import (
+from horsies.core.codec.json_io import (
     loads_json,
     SerializationError,
 )
@@ -50,7 +50,7 @@ from horsies.core.utils.url import to_psycopg_url
 # --- Imports from sibling modules (extracted for maintainability) ---
 from horsies.core.worker.config import WorkerConfig  # noqa: F401
 from horsies.core.worker.child_pool import _initialize_worker_pool  # noqa: F401
-from horsies.core.codec.serde import serialize_error_payload
+from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.worker.child_runner import (  # noqa: F401
     _locate_app,
     _child_initializer,

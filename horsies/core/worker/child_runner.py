@@ -23,12 +23,12 @@ from pydantic_core import PydanticSerializationError
 from horsies.core.app import Horsies
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import decode_kwargs, underlying_task_fn
-from horsies.core.codec.serde import (
+from horsies.core.codec.json_io import (
     loads_json,
     dumps_json,
-    serialize_error_payload,
     SerializationError,
 )
+from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.typed import (
     decode_task_result,
     encode_task_result,

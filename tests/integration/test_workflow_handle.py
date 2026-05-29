@@ -729,14 +729,13 @@ class TestWorkflowHandleSubWorkflowFields:
             """),
             {'child_id': child_wf_id},
         )
+        # Bare summary dict — the shape SubWorkflowSummary.to_json() now writes
+        # (the legacy __dataclass__ envelope was retired).
         summary_json = (
-            '{"__dataclass__": true,'
-            ' "module": "horsies.core.models.workflow.context",'
-            ' "qualname": "SubWorkflowSummary",'
-            ' "data": {"status": "COMPLETED", "output": null,'
+            '{"status": "COMPLETED", "output": null,'
             ' "total_tasks": 3, "completed_tasks": 3,'
             ' "failed_tasks": 0, "skipped_tasks": 0,'
-            ' "error_summary": null}}'
+            ' "error_summary": null}'
         )
         await session.execute(
             text("""

@@ -267,7 +267,7 @@ class TestLoadsJsonParseHardening:
     non-finite floats past the producer-side fence."""
 
     def test_nan_rejected(self) -> None:
-        from horsies.core.codec.serde import loads_json
+        from horsies.core.codec.json_io import loads_json
         from horsies.core.types.result import is_err
 
         result = loads_json('{"x": NaN}')
@@ -275,7 +275,7 @@ class TestLoadsJsonParseHardening:
         assert 'NaN' in str(result.err_value)
 
     def test_infinity_rejected(self) -> None:
-        from horsies.core.codec.serde import loads_json
+        from horsies.core.codec.json_io import loads_json
         from horsies.core.types.result import is_err
 
         result = loads_json('{"x": Infinity}')
@@ -283,7 +283,7 @@ class TestLoadsJsonParseHardening:
         assert 'Infinity' in str(result.err_value)
 
     def test_neg_infinity_rejected(self) -> None:
-        from horsies.core.codec.serde import loads_json
+        from horsies.core.codec.json_io import loads_json
         from horsies.core.types.result import is_err
 
         result = loads_json('{"x": -Infinity}')
@@ -291,7 +291,7 @@ class TestLoadsJsonParseHardening:
         assert '-Infinity' in str(result.err_value)
 
     def test_normal_payload_passes(self) -> None:
-        from horsies.core.codec.serde import loads_json
+        from horsies.core.codec.json_io import loads_json
         from horsies.core.types.result import is_err
 
         result = loads_json('{"x": 1.0, "y": [null, true, "s"]}')

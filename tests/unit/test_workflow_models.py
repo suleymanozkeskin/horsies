@@ -3307,22 +3307,39 @@ class TestSubWorkflowSummaryFromJson:
         })
         assert summary.status == WorkflowStatus.FAILED
 
-    def test_dataclass_envelope_normalized(self) -> None:
-        """The legacy __dataclass__ envelope is unwrapped before parsing."""
-        summary = SubWorkflowSummary.from_json({
-            '__dataclass__': True,
-            'module': 'horsies.core.models.workflow.context',
-            'qualname': 'SubWorkflowSummary',
-            'data': {
-                'status': 'PAUSED',
-                'total_tasks': 2,
-                'completed_tasks': 1,
-                'failed_tasks': 0,
-                'skipped_tasks': 0,
-            },
-        })
-        assert summary.status == WorkflowStatus.PAUSED
-        assert summary.total_tasks == 2
+    def test_to_json_from_json_round_trip(self) -> None:
+        """to_json emits a bare envelope-free dict that from_json reads back."""
+        original = SubWorkflowSummary(
+            status=WorkflowStatus.PAUSED,
+            output={'k': 'v'},
+            total_tasks=2,
+            completed_tasks=1,
+            failed_tasks=0,
+            skipped_tasks=0,
+            error_summary='partial',
+        )
+        payload = original.to_json()
+        # Bare dict — no legacy serde class tags.
+        assert '__dataclass__' not in payload
+        assert payload['status'] == 'PAUSED'
+
+        restored = SubWorkflowSummary.from_json(payload)
+        assert restored.status == WorkflowStatus.PAUSED
+        assert restored.output == {'k': 'v'}
+        assert restored.total_tasks == 2
+        assert restored.error_summary == 'partial'
+
+    def test_legacy_dataclass_envelope_no_longer_unwrapped(self) -> None:
+        """The legacy __dataclass__ envelope is retired — a wrapper dict now
+        fails closed (no top-level status) rather than being unwrapped."""
+        with pytest.raises(ValueError):
+            SubWorkflowSummary.from_json({
+                '__dataclass__': True,
+                'module': 'horsies.core.models.workflow.context',
+                'qualname': 'SubWorkflowSummary',
+                'data': {'status': 'PAUSED', 'total_tasks': 2,
+                         'completed_tasks': 1, 'failed_tasks': 0, 'skipped_tasks': 0},
+            })
 
     def test_error_summary_string_preserved(self) -> None:
         """A string error_summary is preserved verbatim."""
