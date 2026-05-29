@@ -840,6 +840,35 @@ mod tests {
     }
 
     #[test]
+    fn waits_for_all_dedups_preserving_first_seen_order() {
+        // Parity with horsies PR #30: mixed duplicates collapse to first-seen
+        // order. [a, b, a] -> dependencies [a, b].
+        let mut b = WorkflowSpecBuilder::new("wf");
+        let a = b.task(simple_node("a"));
+        let bb = b.task(simple_node("b"));
+        let c = b.task(TaskNode::<()>::raw("c").waits_for_all(&[a, bb, a]));
+        let spec = b.build().unwrap();
+        assert_eq!(spec.tasks[c.index].dependencies, vec![a.index, bb.index]);
+    }
+
+    #[test]
+    fn duplicate_dependencies_do_not_trigger_false_cycle() {
+        // Parity with horsies PR #30: cycle detection must be robust to duplicate
+        // dependency indices independent of waits_for's insertion-time dedup.
+        // Push duplicates directly to bypass the dedup and exercise the raw
+        // Kahn's algorithm. Rust's adjacency carries matching multiplicity, so
+        // increments and decrements stay balanced (no false cycle).
+        let mut b = WorkflowSpecBuilder::new("wf");
+        let a = b.task(simple_node("a"));
+        b.task(TaskNode::<()>::raw("b").waits_for(a));
+        b.tasks[1].dependencies.push(a.index);
+        b.tasks[1].dependencies.push(a.index);
+        assert_eq!(b.tasks[1].dependencies, vec![0, 0, 0]);
+        let spec = b.build().unwrap();
+        assert_eq!(spec.tasks.len(), 2);
+    }
+
+    #[test]
     fn linear_chain_valid() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
