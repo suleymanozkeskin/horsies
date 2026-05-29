@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from horsies.core.models.tasks import RetrievalCode, TaskResult
 from horsies.core.models.workflow.enums import WorkflowStatus
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.types.result import Ok
@@ -62,3 +63,34 @@ class TestWorkflowHandleAsyncCleanup:
 
         assert finished.is_set() is True
         handle.broker.listener.unsubscribe.assert_awaited_once_with('workflow_done', q)
+
+
+@pytest.mark.unit
+class TestWorkflowHandleZeroTimeout:
+    """timeout_ms=0 is a 0ms budget: return now (result if ready, else WAIT_TIMEOUT),
+    matching PostgresBroker.get_result_async. Only None disables the timeout."""
+
+    @pytest.mark.asyncio
+    async def test_zero_timeout_returns_wait_timeout_immediately(self) -> None:
+        handle = _make_handle()
+        handle.broker.listener.listen = AsyncMock(side_effect=RuntimeError())
+        handle.status_async = AsyncMock(return_value=Ok(WorkflowStatus.RUNNING))
+
+        result = await asyncio.wait_for(handle.get_async(timeout_ms=0), timeout=1.0)
+
+        assert result.is_err()
+        assert result.err_value.error_code == RetrievalCode.WAIT_TIMEOUT
+        # Polled status exactly once, then timed out without ever waiting.
+        assert handle.status_async.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_zero_timeout_returns_result_when_already_complete(self) -> None:
+        handle = _make_handle()
+        handle.broker.listener.listen = AsyncMock(side_effect=RuntimeError())
+        handle.status_async = AsyncMock(return_value=Ok(WorkflowStatus.COMPLETED))
+        expected: TaskResult[Any, Any] = TaskResult(ok=42)
+        handle._get_result = AsyncMock(return_value=expected)
+
+        result = await asyncio.wait_for(handle.get_async(timeout_ms=0), timeout=1.0)
+
+        assert result is expected
