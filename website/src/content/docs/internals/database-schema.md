@@ -174,12 +174,14 @@ The worker's reaper loop prunes old rows automatically every hour based on [Reco
 |-------|-------------|---------|-----------|
 | `horsies_heartbeats` | `heartbeat_retention_hours` | 24h | `sent_at` older than threshold |
 | `horsies_worker_states` | `worker_state_retention_hours` | 7 days | `snapshot_at` older than threshold |
-| `horsies_tasks` | `terminal_record_retention_hours` | 30 days | Terminal status + oldest timestamp older than threshold |
+| `horsies_tasks` | `terminal_record_retention_hours` | 30 days | Terminal status + oldest timestamp older than threshold, and not part of an active workflow |
 | `horsies_task_attempts` | — | — | Cascade-deleted when parent task row is deleted |
 | `horsies_workflows` | `terminal_record_retention_hours` | 30 days | Terminal status + oldest timestamp older than threshold |
 | `horsies_workflow_tasks` | `terminal_record_retention_hours` | 30 days | Parent workflow is terminal and older than threshold |
 
 Terminal statuses: COMPLETED, FAILED, CANCELLED, EXPIRED. Set any retention field to `None` to disable cleanup for that category. See [Recovery Config](../../configuration/recovery-config#retention-cleanup) for configuration details.
+
+A task's result is stored on its `horsies_tasks` row, so `terminal_record_retention_hours` is also the result-retention window: after a terminal task is pruned, its result is no longer retrievable. Raise the value or set it to `None` to keep results longer.
 
 ## File Location
 

@@ -131,9 +131,15 @@ The reaper loop automatically prunes old rows every hour. Three categories are c
 |----------|-------------|---------|-------------------|
 | Heartbeats | `heartbeat_retention_hours` | 24h | `horsies_heartbeats` rows older than threshold |
 | Worker states | `worker_state_retention_hours` | 7 days | `horsies_worker_states` snapshots older than threshold |
-| Terminal records | `terminal_record_retention_hours` | 30 days | `horsies_tasks`, `horsies_workflows`, and `horsies_workflow_tasks` rows in COMPLETED/FAILED/CANCELLED status older than threshold |
+| Terminal records | `terminal_record_retention_hours` | 30 days | `horsies_tasks`, `horsies_workflows`, and `horsies_workflow_tasks` rows in COMPLETED/FAILED/CANCELLED/EXPIRED status older than threshold |
 
 Set any field to `None` to disable pruning for that category.
+
+Notes on terminal-record pruning:
+
+- **Results live on the task row**, so `terminal_record_retention_hours` is also your result-retention window — once a terminal task is pruned, `app.get_result(...)` and `TaskHandle.info(...)` no longer find it. Raise the value (or set `None`) if you need long-lived results.
+- A terminal task is **not** pruned while it still belongs to an active (non-terminal) workflow, so in-flight work is never deleted out from under a running DAG.
+- `horsies_task_attempts` has no separate retention setting — its rows are `ON DELETE CASCADE` and are removed together with their parent task (likewise `workflow_tasks` with their workflow).
 
 ```python
 RecoveryConfig(

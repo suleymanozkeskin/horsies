@@ -198,6 +198,12 @@ Runs on `check_interval_ms` cadence:
 2. RUNNING tasks without heartbeat for `running_stale_threshold_ms` → marked FAILED (if enabled).
 3. Hourly retention pruning: deletes old heartbeat, worker_state, and terminal rows based on retention settings.
 
+**Retention pruning details:**
+- **Results are stored on the task row**, so `terminal_record_retention_hours` (default 30d) is also the result-retention window — after it, `get_result` / `TaskHandle.info` return nothing. Raise it or set `None` if you need long-lived results.
+- Terminal statuses pruned: COMPLETED, FAILED, CANCELLED, EXPIRED.
+- A terminal task is **not** pruned while it belongs to a still-active (non-terminal) workflow, so in-flight work is never deleted.
+- `horsies_task_attempts` has no own retention knob — its rows are `ON DELETE CASCADE` and are removed together with the parent task (same for `workflow_tasks` under a workflow).
+
 **CPU/GIL-heavy tasks:** Increase `running_stale_threshold_ms`. GIL-bound tasks may not send heartbeats at the configured interval. Rule of thumb: >= 3–5x worst-case heartbeat gap.
 
 ## WorkerResilienceConfig
