@@ -611,7 +611,10 @@ class WorkflowHandle(Generic[OutT]):
         """Async version of get()."""
 
         start = time.monotonic()
-        timeout_sec = timeout_ms / 1000 if timeout_ms else None
+        # timeout_ms=0 means "0ms budget": return the result if already
+        # available, else WAIT_TIMEOUT immediately. Only None disables the
+        # timeout. Matches PostgresBroker.get_result_async.
+        timeout_sec = timeout_ms / 1000 if timeout_ms is not None else None
 
         # Subscribe to workflow_done once before the loop.
         # Cross-loop RuntimeError (programming error) or infrastructure Err
@@ -678,7 +681,7 @@ class WorkflowHandle(Generic[OutT]):
 
                 # Check timeout
                 elapsed = time.monotonic() - start
-                if timeout_sec and elapsed >= timeout_sec:
+                if timeout_sec is not None and elapsed >= timeout_sec:
                     return cast(
                         'TaskResult[OutT, TaskError]',
                         TaskResult(
@@ -690,7 +693,7 @@ class WorkflowHandle(Generic[OutT]):
                     )
 
                 # Wait for notification or poll
-                remaining = (timeout_sec - elapsed) if timeout_sec else 5.0
+                remaining = (timeout_sec - elapsed) if timeout_sec is not None else 5.0
                 wait_time = min(remaining, 5.0)
 
                 if q is not None:
