@@ -206,6 +206,51 @@ mod tests {
     }
 
     #[test]
+    fn context_serde_round_trip_preserves_summaries() {
+        // Parity with horsies PR #31: subworkflow summaries must survive the
+        // serde round-trip into/out of the task-kwarg payload. In Rust both
+        // maps are #[serde(default)] struct fields, so this is native — no
+        // model_dump/model_validate override is needed (that was a Pydantic
+        // private-attribute quirk). This pins the summary round-trip, which the
+        // existing result round-trip test did not cover.
+        let mut summaries = HashMap::new();
+        summaries.insert(
+            "sub-node".to_owned(),
+            SubWorkflowSummary {
+                status: "COMPLETED".to_owned(),
+                is_success: true,
+                success_case: None,
+                output: Some(serde_json::json!(42)),
+                total_tasks: 3,
+                completed_tasks: 3,
+                failed_tasks: 0,
+                skipped_tasks: 0,
+                error_summary: None,
+                child_workflow_id: "child-wf-1".to_owned(),
+            },
+        );
+        let ctx = WorkflowContext::new(
+            "wf-123".to_owned(),
+            1,
+            "consumer".to_owned(),
+            HashMap::new(),
+            summaries,
+        );
+
+        let json = serde_json::to_string(&ctx).unwrap();
+        let back: WorkflowContext = serde_json::from_str(&json).unwrap();
+
+        assert!(back.has_summary("sub-node"));
+        let key: NodeKey<i32> = NodeKey::new("sub-node".to_owned());
+        let restored = back.summary_for(&key).unwrap();
+        assert_eq!(restored.status, "COMPLETED");
+        assert!(restored.is_success);
+        assert_eq!(restored.output, Some(serde_json::json!(42)));
+        assert_eq!(restored.total_tasks, 3);
+        assert_eq!(restored.child_workflow_id, "child-wf-1");
+    }
+
+    #[test]
     fn context_empty_results() {
         let ctx = WorkflowContext::new(
             "wf-1".to_owned(),
