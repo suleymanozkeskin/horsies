@@ -183,11 +183,13 @@ FROM horsies_workflow_tasks
 WHERE workflow_id = $1
 GROUP BY status";
 
-/// Store error on workflow row immediately (on_error=fail).
-/// Uses COALESCE to preserve any earlier error if already set.
-const STORE_WORKFLOW_ERROR_EARLY_SQL: &str = "\
+/// Store the recomputed failure error on a still-RUNNING workflow (on_error=fail).
+/// Unconditional SET: the caller passes the deterministic first-failed-task
+/// error (by index), which must replace any stale higher-index error. The final
+/// error is reselected at completion via `get_workflow_failure_error`.
+const SET_WORKFLOW_ERROR_SQL: &str = "\
 UPDATE horsies_workflows
-SET error = COALESCE(error, $2), updated_at = NOW()
+SET error = $2, updated_at = NOW()
 WHERE id = $1 AND status = 'RUNNING'";
 
 /// Pause workflow and store the triggering error (on_error=pause).
@@ -1139,20 +1141,39 @@ async fn handle_workflow_task_failure(
     on_error: &str,
     error_json: &str,
 ) -> Result<bool, WorkflowError> {
+    // Lock the workflow row for the duration of failure handling so concurrent
+    // failure handlers are serialized. This makes the stored running error the
+    // deterministic first-failed-task error (by index) rather than a race on
+    // whichever handler writes last. Mirrors Python PR #29.
+    let mut tx = pool.begin().await?;
+    let locked: Option<IdRow> = sqlx::query_as(LOCK_WORKFLOW_FOR_COMPLETION_SQL)
+        .bind(workflow_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if locked.is_none() {
+        // Workflow row is gone (e.g. cancelled/deleted). Nothing to handle;
+        // continue dependency propagation.
+        return Ok(true);
+    }
+
     match on_error {
         "fail" => {
-            // Store error on workflow row immediately, but keep RUNNING.
-            // Uses COALESCE to preserve the first error if multiple tasks fail.
-            sqlx::query(STORE_WORKFLOW_ERROR_EARLY_SQL)
+            // Store the first failed task's error (by index) for the still-RUNNING
+            // workflow, recomputed under the lock so a later lower-index failure
+            // replaces a higher-index one. The current task is already FAILED, so
+            // this always resolves to a real error.
+            let first_error = get_workflow_failure_error(&mut tx, workflow_id, &None).await?;
+            sqlx::query(SET_WORKFLOW_ERROR_SQL)
                 .bind(workflow_id)
-                .bind(error_json)
-                .execute(pool)
+                .bind(&first_error)
+                .execute(&mut *tx)
                 .await?;
+            tx.commit().await?;
 
             tracing::debug!(
                 workflow_id,
                 task_index,
-                "on_error=fail, stored error, continuing DAG resolution",
+                "on_error=fail, stored first failed error, continuing DAG resolution",
             );
             Ok(true)
         }
@@ -1161,8 +1182,10 @@ async fn handle_workflow_task_failure(
             let paused: Option<IdRow> = sqlx::query_as(PAUSE_WORKFLOW_WITH_ERROR_SQL)
                 .bind(workflow_id)
                 .bind(error_json)
-                .fetch_optional(pool)
+                .fetch_optional(&mut *tx)
                 .await?;
+
+            tx.commit().await?;
 
             if paused.is_none() {
                 // Another worker already paused/finalized this workflow; the
@@ -1178,7 +1201,8 @@ async fn handle_workflow_task_failure(
             );
 
             // Cascade the implicit pause to running child workflows, matching
-            // explicit pause behavior (mirrors Python PR #28).
+            // explicit pause behavior (mirrors Python PR #28). Only the handler
+            // that won the RUNNING -> PAUSED transition reaches this point.
             crate::workflow_engine::lifecycle::cascade_pause_to_children(pool, workflow_id).await?;
 
             Ok(false)
@@ -1190,11 +1214,13 @@ async fn handle_workflow_task_failure(
                 "unknown on_error policy, treating as fail",
             );
             // Store error even for unknown policy (same as fail).
-            sqlx::query(STORE_WORKFLOW_ERROR_EARLY_SQL)
+            let first_error = get_workflow_failure_error(&mut tx, workflow_id, &None).await?;
+            sqlx::query(SET_WORKFLOW_ERROR_SQL)
                 .bind(workflow_id)
-                .bind(error_json)
-                .execute(pool)
+                .bind(&first_error)
+                .execute(&mut *tx)
                 .await?;
+            tx.commit().await?;
             Ok(true)
         }
     }

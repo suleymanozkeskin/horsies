@@ -892,6 +892,108 @@ async fn test_on_error_pause_cascades_to_running_child() {
 }
 
 // ---------------------------------------------------------------------------
+// T6.11d: on_error=FAIL stores the first failed task's error by index, even
+// when a higher-index task fails first in time (parity with horsies PR #29).
+// Driven via the DB + completion handler; a never-completed blocker task keeps
+// the workflow RUNNING so the transient error is observable.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial]
+async fn test_on_error_fail_keeps_first_failed_error_by_index() {
+    let pool = pool().await;
+    db::clean_tables(&pool).await;
+    let reg = registry();
+
+    // Three root tasks under on_error=FAIL. We fail idx 1 first, then idx 0; a
+    // blocker (idx 2) is never completed so the workflow stays RUNNING.
+    let mut b = WorkflowSpecBuilder::new("e2e_fail_first_error_by_index");
+    b.on_error(OnError::Fail);
+    b.task(
+        wf_step::node()
+            .unwrap()
+            .node_id("a")
+            .kwargs(r#"{"step":"A"}"#.to_owned()),
+    );
+    b.task(
+        wf_step::node()
+            .unwrap()
+            .node_id("b")
+            .kwargs(r#"{"step":"B"}"#.to_owned()),
+    );
+    b.task(
+        wf_step::node()
+            .unwrap()
+            .node_id("blocker")
+            .kwargs(r#"{"step":"BLOCK"}"#.to_owned()),
+    );
+    let spec = b.build().unwrap();
+
+    let wf_id = start_wf(&pool, &spec).await;
+
+    let task_id_for = |idx: i32| {
+        let pool = pool.clone();
+        let wf_id = wf_id.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = $2",
+            )
+            .bind(&wf_id)
+            .bind(idx)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let task_id_0 = task_id_for(0).await;
+    let task_id_1 = task_id_for(1).await;
+
+    let err_result = |code: &str, msg: &str| {
+        serde_json::to_string(&TaskResult::<serde_json::Value>::Err(TaskError::new(code, msg)))
+            .unwrap()
+    };
+
+    // Fail the higher index (1) first in time...
+    horsies::on_workflow_task_complete(
+        &pool,
+        &task_id_1,
+        &err_result("SECOND_ERROR", "index 1 failed"),
+        false,
+        &reg,
+    )
+    .await
+    .unwrap();
+    // ...then the lower index (0).
+    horsies::on_workflow_task_complete(
+        &pool,
+        &task_id_0,
+        &err_result("FIRST_ERROR", "index 0 failed"),
+        false,
+        &reg,
+    )
+    .await
+    .unwrap();
+
+    // Workflow still RUNNING (blocker not terminal); stored error is index 0's.
+    let (status, error): (String, Option<String>) =
+        sqlx::query_as("SELECT status, error FROM horsies_workflows WHERE id = $1")
+            .bind(&wf_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "RUNNING");
+    let error = error.expect("workflow error should be set while RUNNING");
+    assert!(
+        error.contains("FIRST_ERROR"),
+        "expected first failed task error (by index), got: {error}",
+    );
+    assert!(
+        !error.contains("SECOND_ERROR"),
+        "higher-index error should not win, got: {error}",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // T6.9: Recovery preserves results (stuck RUNNING → re-finalized)
 // ---------------------------------------------------------------------------
 
