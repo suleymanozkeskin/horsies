@@ -640,7 +640,7 @@ async def do_async(
         do(Ok(1) for x in await foo())
     ```
 
-    Furthermore, neither mypy nor pyright can infer that the second case is
+    Furthermore, neither ty nor pyright can infer that the second case is
     actually an async generator, so we cannot annotate `do_async()`
     as accepting only an async generator. This is additional motivation
     to accept either.

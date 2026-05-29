@@ -7,7 +7,7 @@ tags: [concepts, workflows, types, api]
 
 # Typed Node Builder
 
-The `.node()` method on `TaskFunction` creates `TaskNode` instances with static type checking. Type checkers (pyright, mypy) validate argument names and types at development time.
+The `.node()` method on `TaskFunction` creates `TaskNode` instances with static type checking. Type checkers (pyright, ty) validate argument names and types at development time.
 
 ## How To
 
