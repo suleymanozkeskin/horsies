@@ -88,9 +88,14 @@ names = app.list_tasks()  # list[str]
 ```python
 broker = app.get_broker()
 
-# Wait for a task result by ID — returns TaskResult[Any, TaskError], never raises
-result = await broker.get_result_async("task-uuid", timeout_ms=5000)
-result = broker.get_result("task-uuid", timeout_ms=5000)  # sync
+# Typed result by ID — app-level API (broker.get_result(_async) was removed in 0.1.2).
+# Returns BrokerResult[TaskResult[Any, TaskError]]: outer surfaces infrastructure
+# failures (INVALID_JSON_PAYLOAD / NO_TYPE_AVAILABLE), inner is the typed result.
+outer = await app.get_result_async("task-uuid", timeout_ms=5000)
+outer = app.get_result("task-uuid", timeout_ms=5000)  # sync
+
+# Raw stored envelope, no typed decode — returns BrokerResult[RawResultRecord | None]
+raw = await broker.get_raw_result_record_async("task-uuid", timeout_ms=5000)
 
 # Fetch task metadata by ID — returns BrokerResult[TaskInfo | None]
 info = await broker.get_task_info_async("task-uuid", include_result=True)
