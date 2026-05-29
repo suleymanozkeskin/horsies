@@ -28,6 +28,7 @@ def flaky_task() -> TaskResult[str, TaskError]:
 | `intervals` | `list[int]` | [60, 300, 900] | Delay intervals in seconds |
 | `backoff_strategy` | `str` | "fixed" | "fixed" or "exponential" |
 | `jitter` | `bool` | `True` | Add random variation to delays |
+| `max_delay_seconds` | `int \| None` | `None` | Optional upper bound on the computed delay (positive int); `None` = uncapped |
 
 ## Backoff Strategies
 
@@ -67,14 +68,43 @@ RetryPolicy(
 
 ## Jitter
 
-When `jitter=True` (default), delays are randomized by +/-25%:
+When `jitter=True` (default), the computed delay is floored at 1 second and then
+randomized **upward** by 0–25%:
 
-- 60 second base -> 45-75 seconds actual
+- 60 second base -> 60-75 seconds actual
+- Applied after the floor, so 1.0s is the true bottom of the range (no lower-half
+  collapse at small base delays)
 - Prevents thundering herd when many tasks retry simultaneously
 
 ```python
 # Disable jitter for predictable delays
 RetryPolicy.fixed([60, 300, 900], auto_retry_for=["TRANSIENT_ERROR"], jitter=False)
+```
+
+## Maximum Delay Cap
+
+Exponential backoff is otherwise unbounded (`base * 2^(attempt-1)`), so a high
+`max_retries` can produce very large delays. Set `max_delay_seconds` to cap the
+final delay. The cap is opt-in (`None` = uncapped) and applied **last** — after
+backoff, the 1s floor, and jitter:
+
+```python
+# Exponential backoff, but never wait longer than 10 minutes between retries
+RetryPolicy.exponential(
+    base_seconds=30,
+    max_retries=10,
+    auto_retry_for=["TRANSIENT_ERROR"],
+    max_delay_seconds=600,
+)
+
+# Equivalent to:
+RetryPolicy(
+    max_retries=10,
+    intervals=[30],
+    backoff_strategy='exponential',
+    max_delay_seconds=600,
+    auto_retry_for=["TRANSIENT_ERROR"],
+)
 ```
 
 ## Auto-Retry Triggers
