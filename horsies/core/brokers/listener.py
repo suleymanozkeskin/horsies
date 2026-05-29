@@ -24,7 +24,7 @@ import asyncio
 import contextlib
 from collections import defaultdict
 from typing import Any, DefaultDict, Optional, Sequence, Set
-from asyncio import Task, Queue  # precise type for Pylance/mypy
+from asyncio import Task, Queue  # precise type for Pylance/pyright
 
 import psycopg
 from psycopg import AsyncConnection, InterfaceError, OperationalError, Notify
