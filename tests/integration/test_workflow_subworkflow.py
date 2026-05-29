@@ -14,7 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import dumps_json, loads_json
-from horsies.core.codec.typed import decode_task_result
+from horsies.core.codec.typed import (
+    decode_task_result,
+    encode_task_error,
+    encode_task_result,
+)
 from horsies.core.errors import WorkflowValidationError
 from horsies.core.models.tasks import SubWorkflowError, TaskResult, TaskError
 from horsies.core.models.workflow import (
@@ -73,6 +77,11 @@ def _decode_task_result(
     if isinstance(value, str):
         return decode_task_result(loads_json(value).unwrap(), ok_type)
     return None
+
+
+def _strict_result_json(result: TaskResult[Any, TaskError]) -> str:
+    """Build a strict-serde task-result envelope for direct DB fixtures."""
+    return dumps_json(encode_task_result(result, Any)).unwrap()
 
 
 def _extract_taskresult_value(
@@ -649,7 +658,7 @@ class TestSubworkflowIntegration:
         # The UPDATE_PARENT_NODE_RESULT_SQL would `SET completed_at = NOW()`, so
         # any tick of completed_at off this fixed past timestamp proves the CAS
         # guard failed.
-        preserved_result = dumps_json(TaskResult(ok=11)).unwrap()
+        preserved_result = _strict_result_json(TaskResult(ok=11))
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
@@ -671,15 +680,15 @@ class TestSubworkflowIntegration:
                 """),
                 {
                     'child_id': child_id,
-                    'result': dumps_json(TaskResult(ok=99)).unwrap(),
+                    'result': _strict_result_json(TaskResult(ok=99)),
                 },
             )
         else:
             child_error_payload = dumps_json(
-                TaskError(
+                encode_task_error(TaskError(
                     error_code='SUBWORKFLOW_REPLAY_PROBE',
                     message='child failed for replay-guard test',
-                ),
+                )),
             ).unwrap()
             await session.execute(
                 text("""
@@ -1984,10 +1993,10 @@ class TestSubworkflowRecovery:
             """),
             {
                 'child_id': child_id,
-                'result': dumps_json(TaskResult(err=TaskError(
+                'result': _strict_result_json(TaskResult(err=TaskError(
                     error_code='CHILD_CRASH',
                     message='child task crashed',
-                ))).unwrap(),
+                ))),
             },
         )
         await session.commit()
