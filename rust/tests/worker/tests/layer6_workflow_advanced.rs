@@ -16,8 +16,8 @@ use sqlx::PgPool;
 
 use horsies::{
     cancel_workflow, pause_workflow, resolve_node_task_options, resume_workflow, Horsies, OnError,
-    PostgresBroker, SubWorkflowNode, SuccessCase, SuccessPolicy, TaskResult, Worker, WorkerConfig,
-    WorkflowHandle, WorkflowSpecBuilder, WorkflowSpecRegistry,
+    PostgresBroker, SubWorkflowNode, SuccessCase, SuccessPolicy, TaskError, TaskResult, Worker,
+    WorkerConfig, WorkflowHandle, WorkflowSpecBuilder, WorkflowSpecRegistry,
 };
 use horsies_test_support::{
     db,
@@ -933,6 +933,106 @@ async fn test_recovery_preserves_failed_state() {
             .await
             .unwrap();
     assert_eq!(final_status, "FAILED");
+}
+
+// ---------------------------------------------------------------------------
+// T6.9d: Recovery recomputes the first failed task's error (parity with
+// horsies PR #27). Recovery must NOT preserve a stale later error — it
+// recomputes the failure error deterministically (first failed task by index),
+// the same selection as normal completion.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial]
+async fn test_recovery_recomputes_first_failed_error() {
+    let pool = pool().await;
+    db::clean_tables(&pool).await;
+    let reg = registry();
+
+    // Two independent root tasks (indices 0 and 1). No worker: we drive the DB
+    // state directly to simulate a workflow stuck mid-finalization that already
+    // has the *later* failure stored as its error.
+    let mut b = WorkflowSpecBuilder::new("e2e_recovery_first_error");
+    b.task(
+        wf_step::node()
+            .unwrap()
+            .node_id("a")
+            .kwargs(r#"{"step":"A"}"#.to_owned()),
+    );
+    b.task(
+        wf_step::node()
+            .unwrap()
+            .node_id("b")
+            .kwargs(r#"{"step":"B"}"#.to_owned()),
+    );
+    let spec = b.build().unwrap();
+
+    let wf_id = start_wf(&pool, &spec).await;
+
+    // Mark both tasks FAILED with distinct error codes.
+    let first_result = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(
+        TaskError::new("FIRST_ERROR", "first failure"),
+    ))
+    .unwrap();
+    let second_result = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(
+        TaskError::new("SECOND_ERROR", "second failure"),
+    ))
+    .unwrap();
+
+    sqlx::query(
+        "UPDATE horsies_workflow_tasks SET status = 'FAILED', result = $2, completed_at = NOW() \
+         WHERE workflow_id = $1 AND task_index = 0",
+    )
+    .bind(&wf_id)
+    .bind(&first_result)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE horsies_workflow_tasks SET status = 'FAILED', result = $2, completed_at = NOW() \
+         WHERE workflow_id = $1 AND task_index = 1",
+    )
+    .bind(&wf_id)
+    .bind(&second_result)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Workflow stuck RUNNING with the later failure already stored as error.
+    let stale_error =
+        serde_json::to_string(&TaskError::new("SECOND_ERROR", "second failure")).unwrap();
+    sqlx::query(
+        "UPDATE horsies_workflows \
+         SET status = 'RUNNING', completed_at = NULL, result = NULL, error = $2 \
+         WHERE id = $1",
+    )
+    .bind(&wf_id)
+    .bind(&stale_error)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Run recovery.
+    let _ = horsies::recover_stuck_workflows(&pool, &reg).await.unwrap();
+
+    // Workflow finalizes FAILED with the deterministic first failed task error,
+    // replacing the stale later error.
+    let (status, error): (String, Option<String>) =
+        sqlx::query_as("SELECT status, error FROM horsies_workflows WHERE id = $1")
+            .bind(&wf_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "FAILED");
+    let error = error.expect("workflow error should be set");
+    assert!(
+        error.contains("FIRST_ERROR"),
+        "expected first failed task error, got: {error}",
+    );
+    assert!(
+        !error.contains("SECOND_ERROR"),
+        "stale later error should have been replaced, got: {error}",
+    );
 }
 
 // ---------------------------------------------------------------------------

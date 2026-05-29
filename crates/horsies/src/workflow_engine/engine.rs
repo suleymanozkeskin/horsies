@@ -1202,20 +1202,7 @@ pub(crate) fn check_workflow_completion<'a>(
     workflow_id: &'a str,
     registry: &'a WorkflowSpecRegistry,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WorkflowError>> + Send + 'a>> {
-    check_workflow_completion_inner(pool, workflow_id, registry, false)
-}
-
-/// Same as [`check_workflow_completion`] but with `preserve_existing_error` flag.
-///
-/// When `preserve_existing_error` is `true` and the workflow already has an error
-/// set, the existing error is kept instead of being overwritten. Used by recovery
-/// (case 2+3) to match Python's `preserve_existing_error=True` behavior.
-pub(crate) fn check_workflow_completion_preserving<'a>(
-    pool: &'a PgPool,
-    workflow_id: &'a str,
-    registry: &'a WorkflowSpecRegistry,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WorkflowError>> + Send + 'a>> {
-    check_workflow_completion_inner(pool, workflow_id, registry, true)
+    check_workflow_completion_inner(pool, workflow_id, registry)
 }
 
 #[allow(clippy::explicit_auto_deref)]
@@ -1223,7 +1210,6 @@ fn check_workflow_completion_inner<'a>(
     pool: &'a PgPool,
     workflow_id: &'a str,
     registry: &'a WorkflowSpecRegistry,
-    preserve_existing_error: bool,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WorkflowError>> + Send + 'a>> {
     Box::pin(async move {
         // Run the entire completion check inside a transaction with FOR UPDATE
@@ -1294,27 +1280,12 @@ fn check_workflow_completion_inner<'a>(
             }
             row.is_some()
         } else {
-            // Compute error for the FAILED workflow.
-            // When preserve_existing_error is true (recovery), check if workflow
-            // already has an error set. If so, pass None so COALESCE(NULL, error)
-            // keeps the existing error. Matches Python's preserve_existing_error.
-            let error_json = if preserve_existing_error {
-                let existing: Option<String> =
-                    sqlx::query_scalar("SELECT error FROM horsies_workflows WHERE id = $1")
-                        .bind(workflow_id)
-                        .fetch_one(&mut *tx)
-                        .await?;
-                if existing.is_some() {
-                    None // Preserve existing error via COALESCE(NULL, error)
-                } else {
-                    Some(
-                        get_workflow_failure_error(&mut *tx, workflow_id, &meta.success_policy)
-                            .await?,
-                    )
-                }
-            } else {
-                Some(get_workflow_failure_error(&mut *tx, workflow_id, &meta.success_policy).await?)
-            };
+            // Compute error for the FAILED workflow deterministically from the
+            // terminal task results (first failed task by index). Recovery uses
+            // the same selection as normal completion — no stale error is
+            // preserved. Matches Python PR #27.
+            let error_json =
+                Some(get_workflow_failure_error(&mut *tx, workflow_id, &meta.success_policy).await?);
 
             let row: Option<IdRow> = sqlx::query_as(UPDATE_WORKFLOW_FAILED_SQL)
                 .bind(workflow_id)

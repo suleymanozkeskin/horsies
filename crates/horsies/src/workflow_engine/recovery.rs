@@ -611,7 +611,7 @@ async fn recover_case2_3(
     };
 
     for row in rows {
-        match engine::check_workflow_completion_preserving(pool, &row.workflow_id, registry).await {
+        match engine::check_workflow_completion(pool, &row.workflow_id, registry).await {
             Ok(()) => {
                 report.case2_3_workflow_completed += 1;
                 tracing::debug!(
