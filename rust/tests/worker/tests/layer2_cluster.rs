@@ -397,28 +397,70 @@ async fn test_retry_works_across_multiple_workers() {
         Duration::from_secs(10),
     );
 
-    // Enqueue with retry policy: 3 retries at 1s intervals for TRANSIENT.
-    let task_id = enqueue_with_retry(
-        &broker,
-        "e2e_retry_exhausted",
-        "{}",
-        3,
-        &[1, 1, 1],
-        &["TRANSIENT"],
+    // Enqueue several tasks with a retry policy (3 retries at 1s intervals for
+    // TRANSIENT). Multiple tasks across two workers make participation robust.
+    let mut task_ids = Vec::new();
+    for _ in 0..8 {
+        let id = enqueue_with_retry(
+            &broker,
+            "e2e_retry_exhausted",
+            "{}",
+            3,
+            &[1, 1, 1],
+            &["TRANSIENT"],
+        )
+        .await;
+        task_ids.push(id);
+    }
+
+    // Wait for all to reach terminal (each retries 3 times then fails).
+    wait_for_all_terminal(&pool, &task_ids, Duration::from_secs(40)).await;
+
+    // Each task: exactly 3 retries, and exactly 4 recorded attempts
+    // (initial attempt + 3 retries). Assert via the immutable
+    // horsies_task_attempts history rather than the mutable task-row owner
+    // (parity with horsies PR #38).
+    for task_id in &task_ids {
+        let retry_count: i32 =
+            sqlx::query_scalar("SELECT retry_count FROM horsies_tasks WHERE id = $1")
+                .bind(task_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            retry_count, 3,
+            "task {task_id}: expected 3 retries before final failure",
+        );
+
+        let attempt_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = $1")
+                .bind(task_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            attempt_count, 4,
+            "task {task_id}: expected 4 attempts (initial + 3 retries)",
+        );
+    }
+
+    // Prove multiple workers participated, using the attempt history's worker_id
+    // (the task row's claimed_by_worker_id is only the last owner).
+    let worker_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT worker_id FROM horsies_task_attempts \
+         WHERE task_id = ANY($1) AND worker_id IS NOT NULL",
     )
-    .await;
+    .bind(&task_ids)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
 
-    // Wait for terminal (will retry 3 times then fail).
-    wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(30)).await;
-
-    let retry_count: i32 =
-        sqlx::query_scalar("SELECT retry_count FROM horsies_tasks WHERE id = $1")
-            .bind(&task_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-
-    assert_eq!(retry_count, 3, "expected 3 retries before final failure");
+    assert!(
+        worker_ids.len() >= 2,
+        "expected at least 2 distinct workers across attempts, got {}: {:?}",
+        worker_ids.len(),
+        worker_ids,
+    );
 }
 
 // ---------------------------------------------------------------------------
