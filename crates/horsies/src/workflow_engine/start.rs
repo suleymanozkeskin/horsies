@@ -595,6 +595,25 @@ pub async fn start_child_workflow_in_tx(
     Ok(child_id)
 }
 
+/// Find the ancestor that the child workflow would close a cycle through, if any.
+///
+/// Identity is keyed by `definition_key` when both the child and ancestor have
+/// one: distinct keys are distinct workflows even if their `name`s collide
+/// (parity with horsies PR #33). Only when a key is absent do we fall back to
+/// `name` matching, for incomplete definitions.
+fn subworkflow_cycle_ancestor<'a>(
+    ancestors: &'a [AncestorWorkflowRow],
+    child_name: &str,
+    child_key: Option<&str>,
+) -> Option<&'a AncestorWorkflowRow> {
+    ancestors.iter().find(|ancestor| {
+        match (child_key, ancestor.definition_key.as_deref()) {
+            (Some(ck), Some(ak)) => ck == ak,
+            _ => ancestor.name == child_name,
+        }
+    })
+}
+
 async fn ensure_no_runtime_subworkflow_cycle(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     parent_workflow_id: &str,
@@ -606,13 +625,7 @@ async fn ensure_no_runtime_subworkflow_cycle(
         .await?;
 
     let child_key = child_spec.definition_key.as_deref();
-    if let Some(ancestor) = ancestors.iter().find(|ancestor| {
-        ancestor.name == child_spec.name
-            || match (child_key, ancestor.definition_key.as_deref()) {
-                (Some(child_key), Some(ancestor_key)) => child_key == ancestor_key,
-                _ => false,
-            }
-    }) {
+    if let Some(ancestor) = subworkflow_cycle_ancestor(&ancestors, &child_spec.name, child_key) {
         return Err(WorkflowError::Validation(format!(
             "starting child workflow '{}' would create a nested workflow cycle through ancestor '{}' ({})",
             child_spec.name, ancestor.name, ancestor.id,
@@ -727,6 +740,47 @@ mod tests {
             spec: builder.build().unwrap(),
             spec_builder: None,
         }
+    }
+
+    fn ancestor(name: &str, key: Option<&str>) -> AncestorWorkflowRow {
+        AncestorWorkflowRow {
+            id: format!("id-{name}-{}", key.unwrap_or("none")),
+            name: name.to_owned(),
+            definition_key: key.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn cycle_same_name_distinct_keys_is_not_a_cycle() {
+        // Parity with horsies PR #33: distinct definition_keys are distinct
+        // workflows even if their names collide.
+        let ancestors = vec![ancestor("shared", Some("key_parent"))];
+        assert!(
+            subworkflow_cycle_ancestor(&ancestors, "shared", Some("key_child")).is_none(),
+            "same name + distinct keys must not be flagged as a cycle",
+        );
+    }
+
+    #[test]
+    fn cycle_same_key_is_detected() {
+        let ancestors = vec![ancestor("any_name", Some("key_a"))];
+        let hit = subworkflow_cycle_ancestor(&ancestors, "other_name", Some("key_a"));
+        assert!(hit.is_some(), "matching definition_key must be a cycle");
+    }
+
+    #[test]
+    fn cycle_missing_keys_falls_back_to_name() {
+        // Incomplete definitions (no key) still detect a cycle by name.
+        let ancestors = vec![ancestor("recursive", None)];
+        assert!(subworkflow_cycle_ancestor(&ancestors, "recursive", None).is_some());
+        // A keyed child against an unkeyed same-name ancestor also falls back.
+        assert!(subworkflow_cycle_ancestor(&ancestors, "recursive", Some("key_c")).is_some());
+    }
+
+    #[test]
+    fn cycle_distinct_name_and_key_is_not_a_cycle() {
+        let ancestors = vec![ancestor("parent", Some("key_p"))];
+        assert!(subworkflow_cycle_ancestor(&ancestors, "child", Some("key_c")).is_none());
     }
 
     #[test]
