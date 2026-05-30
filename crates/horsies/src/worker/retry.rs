@@ -10,7 +10,8 @@ use rand::Rng;
 /// Reads the retry policy from the task_options JSON string.
 /// Falls back to sensible defaults if parsing fails.
 pub fn calculate_retry_delay(attempt: u32, task_options_json: Option<&str>) -> f64 {
-    let (intervals, backoff_strategy, jitter) = parse_retry_policy_fields(task_options_json);
+    let (intervals, backoff_strategy, jitter, max_delay_seconds) =
+        parse_retry_policy_fields(task_options_json);
 
     let base_delay: f64 = match backoff_strategy.as_str() {
         "exponential" => {
@@ -31,6 +32,12 @@ pub fn calculate_retry_delay(attempt: u32, task_options_json: Option<&str>) -> f
         base_delay + rng.gen_range(-jitter_range..=jitter_range)
     } else {
         base_delay
+    };
+
+    // Apply the opt-in max delay cap after backoff and jitter, before the floor.
+    let delay = match max_delay_seconds {
+        Some(cap) if cap > 0 => delay.min(cap as f64),
+        _ => delay,
     };
 
     delay.max(1.0)
@@ -119,9 +126,11 @@ fn extract_exception_type(exception: &serde_json::Value) -> Option<String> {
 
 /// Extract retry policy fields from task_options JSON.
 ///
-/// Returns `(intervals, backoff_strategy, jitter)`.
-fn parse_retry_policy_fields(task_options_json: Option<&str>) -> (Vec<u32>, String, bool) {
-    let defaults = (vec![60, 300, 900], "fixed".to_owned(), true);
+/// Returns `(intervals, backoff_strategy, jitter, max_delay_seconds)`.
+fn parse_retry_policy_fields(
+    task_options_json: Option<&str>,
+) -> (Vec<u32>, String, bool, Option<u32>) {
+    let defaults = (vec![60, 300, 900], "fixed".to_owned(), true, None);
 
     let Some(json_str) = task_options_json else {
         return defaults;
@@ -154,7 +163,12 @@ fn parse_retry_policy_fields(task_options_json: Option<&str>) -> (Vec<u32>, Stri
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
 
-    (intervals, backoff_strategy, jitter)
+    let max_delay_seconds = policy
+        .get("max_delay_seconds")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+
+    (intervals, backoff_strategy, jitter, max_delay_seconds)
 }
 
 /// Extract the `auto_retry_for` list from task_options JSON.
@@ -222,6 +236,29 @@ mod tests {
         assert_eq!(calculate_retry_delay(1, Some(opts)), 30.0); // 30 * 2^0
         assert_eq!(calculate_retry_delay(2, Some(opts)), 60.0); // 30 * 2^1
         assert_eq!(calculate_retry_delay(3, Some(opts)), 120.0); // 30 * 2^2
+    }
+
+    // Parity with horsies PR #44: opt-in max retry delay cap.
+
+    #[test]
+    fn exponential_without_max_delay_remains_uncapped() {
+        let opts = r#"{"retry_policy": {"intervals": [60], "backoff_strategy": "exponential", "jitter": false}}"#;
+        // 60 * 2^19 = 31_457_280
+        assert_eq!(calculate_retry_delay(20, Some(opts)), 31_457_280.0);
+    }
+
+    #[test]
+    fn exponential_max_delay_caps_large_attempts() {
+        let opts = r#"{"retry_policy": {"intervals": [60], "backoff_strategy": "exponential", "jitter": false, "max_delay_seconds": 600}}"#;
+        assert_eq!(calculate_retry_delay(20, Some(opts)), 600.0);
+    }
+
+    #[test]
+    fn max_delay_caps_after_jitter() {
+        let opts = r#"{"retry_policy": {"intervals": [60], "backoff_strategy": "exponential", "jitter": true, "max_delay_seconds": 600}}"#;
+        for _ in 0..50 {
+            assert!(calculate_retry_delay(5, Some(opts)) <= 600.0);
+        }
     }
 
     #[test]

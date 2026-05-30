@@ -27,6 +27,11 @@ pub struct RetryPolicy {
     pub backoff_strategy: BackoffStrategy,
     /// Whether to add +/-25% randomization to delays.
     pub jitter: bool,
+    /// Optional maximum retry delay in seconds, applied after backoff and
+    /// jitter. When unset, exponential backoff is unbounded. Omitted from
+    /// serialized task options when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_delay_seconds: Option<u32>,
 }
 
 /// Validation error for RetryPolicy construction.
@@ -51,6 +56,9 @@ pub enum RetryPolicyError {
 
     #[error("exponential backoff requires exactly one base interval, got {0}")]
     ExponentialMultipleIntervals(usize),
+
+    #[error("max_delay_seconds must be greater than 0 when set")]
+    NonPositiveMaxDelay,
 }
 
 impl RetryPolicy {
@@ -73,6 +81,7 @@ impl RetryPolicy {
             intervals,
             backoff_strategy: BackoffStrategy::Fixed,
             jitter,
+            max_delay_seconds: None,
         })
     }
 
@@ -95,7 +104,15 @@ impl RetryPolicy {
             intervals: vec![base_seconds],
             backoff_strategy: BackoffStrategy::Exponential,
             jitter,
+            max_delay_seconds: None,
         })
+    }
+
+    /// Set an opt-in maximum retry delay (seconds), applied after backoff and
+    /// jitter. Caps unbounded exponential growth.
+    pub fn with_max_delay_seconds(mut self, max_delay_seconds: u32) -> Self {
+        self.max_delay_seconds = Some(max_delay_seconds);
+        self
     }
 
     /// Validate internal consistency (used after deserialization).
@@ -127,6 +144,9 @@ impl RetryPolicy {
                     ));
                 }
             }
+        }
+        if let Some(0) = self.max_delay_seconds {
+            return Err(RetryPolicyError::NonPositiveMaxDelay);
         }
         Ok(())
     }
@@ -220,6 +240,7 @@ mod tests {
             intervals: vec![60, 300],
             backoff_strategy: BackoffStrategy::Fixed,
             jitter: true,
+            max_delay_seconds: None,
         };
         assert!(policy.validate().is_err());
     }
@@ -231,6 +252,7 @@ mod tests {
             intervals: vec![30, 60],
             backoff_strategy: BackoffStrategy::Exponential,
             jitter: true,
+            max_delay_seconds: None,
         };
         assert!(policy.validate().is_err());
     }
@@ -288,5 +310,56 @@ mod tests {
             retry_policy: None,
         };
         assert!(opts.serialize_retry_options().is_none());
+    }
+
+    // Parity with horsies PR #44: opt-in max retry delay cap.
+
+    #[test]
+    fn with_max_delay_seconds_sets_cap() {
+        let policy = RetryPolicy::exponential(60, 5, false)
+            .unwrap()
+            .with_max_delay_seconds(600);
+        assert_eq!(policy.max_delay_seconds, Some(600));
+        assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn zero_max_delay_seconds_rejected() {
+        let policy = RetryPolicy::exponential(60, 5, false)
+            .unwrap()
+            .with_max_delay_seconds(0);
+        assert!(matches!(
+            policy.validate(),
+            Err(RetryPolicyError::NonPositiveMaxDelay)
+        ));
+    }
+
+    #[test]
+    fn max_delay_seconds_omitted_when_unset() {
+        // An uncapped policy must not serialize the key (matches Python exclude_none).
+        let policy = RetryPolicy::exponential(60, 5, false).unwrap();
+        let value = serde_json::to_value(&policy).unwrap();
+        assert!(value.get("max_delay_seconds").is_none());
+    }
+
+    #[test]
+    fn max_delay_seconds_serialized_when_set() {
+        let policy = RetryPolicy::exponential(60, 5, false)
+            .unwrap()
+            .with_max_delay_seconds(600);
+        let value = serde_json::to_value(&policy).unwrap();
+        assert_eq!(value["max_delay_seconds"], 600);
+
+        // Round-trips through task_options JSON.
+        let opts = TaskOptions {
+            task_name: "capped".to_owned(),
+            queue_name: None,
+            good_until: None,
+            auto_retry_for: None,
+            retry_policy: Some(policy),
+        };
+        let json = opts.serialize_retry_options().expect("should produce JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["retry_policy"]["max_delay_seconds"], 600);
     }
 }
