@@ -88,7 +88,7 @@ pub use crate::worker::{
 };
 
 pub use crate::workflow_engine::bound_handle::WorkflowHandle;
-pub use crate::workflow_engine::engine::on_workflow_task_complete;
+pub use crate::workflow_engine::engine::{on_subworkflow_complete, on_workflow_task_complete};
 pub use crate::workflow_engine::error::WorkflowError;
 pub use crate::workflow_engine::info::WorkflowTaskInfo;
 pub use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow, resume_workflow};

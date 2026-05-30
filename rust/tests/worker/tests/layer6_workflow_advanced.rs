@@ -387,6 +387,96 @@ async fn test_unresolvable_subworkflow_marks_parent_failed() {
 }
 
 // ---------------------------------------------------------------------------
+// T6.2d: A replayed sub-workflow completion must not rewrite a parent node that
+// is already terminal (parity with horsies PR #26 / #42). The child_failed case
+// is load-bearing: the CAS-miss early return is what skips failure propagation,
+// so the parent workflow's error column must stay untouched.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial]
+async fn test_subworkflow_complete_does_not_rewrite_terminal_parent_node() {
+    let pool = pool().await;
+    db::clean_tables(&pool).await;
+    let reg = registry();
+
+    // Parent: A (root) -> B (index 1). Rewrite B into a sub-workflow node and pin
+    // it to a terminal COMPLETED state with a sentinel result + fixed completed_at.
+    let mut bld = WorkflowSpecBuilder::new("e2e_subworkflow_replay_guard");
+    bld.on_error(OnError::Fail);
+    let a = bld.task(
+        wf_step::node()
+            .unwrap()
+            .node_id("a")
+            .kwargs(r#"{"step":"A"}"#.to_owned()),
+    );
+    bld.task(
+        wf_step::node()
+            .unwrap()
+            .node_id("child")
+            .kwargs(r#"{"step":"B"}"#.to_owned())
+            .waits_for(a),
+    );
+    let spec = bld.build().unwrap();
+    let wf_id = start_wf(&pool, &spec).await;
+
+    let preserved_result =
+        serde_json::to_string(&TaskResult::<serde_json::Value>::Ok(serde_json::json!(11)))
+            .unwrap();
+    sqlx::query(
+        "UPDATE horsies_workflow_tasks \
+         SET is_subworkflow = TRUE, \
+             sub_workflow_name = 'e2e_replay_child', \
+             task_name = '__sub_workflow:e2e_replay_child', \
+             status = 'COMPLETED', \
+             result = $2, \
+             completed_at = TIMESTAMPTZ '2020-01-01 00:00:00+00' \
+         WHERE workflow_id = $1 AND task_index = 1",
+    )
+    .bind(&wf_id)
+    .bind(&preserved_result)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Replay a FAILED child completion against the already-terminal parent node.
+    horsies::on_subworkflow_complete(&pool, &wf_id, 1, "replay-child-id", "FAILED", None, &reg)
+        .await
+        .unwrap();
+
+    // Parent node B is unchanged on CAS-miss: status, result, and completed_at
+    // (which UPDATE_SUBWORKFLOW_FAILED_SQL would have set to NOW()) are preserved.
+    let (status, result, completed_at_preserved): (String, Option<String>, bool) =
+        sqlx::query_as(
+            "SELECT status, result, completed_at = TIMESTAMPTZ '2020-01-01 00:00:00+00' \
+             FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 1",
+        )
+        .bind(&wf_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "COMPLETED");
+    assert_eq!(result.as_deref(), Some(preserved_result.as_str()));
+    assert!(
+        completed_at_preserved,
+        "completed_at must not be rewritten to NOW() on CAS-miss",
+    );
+
+    // Load-bearing: the CAS-miss short-circuits before the FAILED branch's failure
+    // propagation, so the parent workflow's error column stays NULL.
+    let wf_error: Option<String> =
+        sqlx::query_scalar("SELECT error FROM horsies_workflows WHERE id = $1")
+            .bind(&wf_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        wf_error.is_none(),
+        "CAS-miss must skip failure propagation, leaving workflow.error NULL, got: {wf_error:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // T6.2c: Join=any, all deps fail → SKIPPED
 // ---------------------------------------------------------------------------
 
