@@ -291,6 +291,102 @@ async fn test_subworkflow_mixed_explicit_and_args_from() {
 }
 
 // ---------------------------------------------------------------------------
+// T6.2b: Unresolvable sub-workflow marks the parent FAILED + propagates
+// (parity with horsies PR #39 / _fail_subworkflow_load). A non-root
+// SubWorkflowNode whose child definition is not registered must mark its
+// parent workflow_task FAILED and let the workflow finalize, rather than
+// returning an error that leaves the parent stuck in READY forever.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial]
+async fn test_unresolvable_subworkflow_marks_parent_failed() {
+    let pool = pool().await;
+    db::clean_tables(&pool).await;
+    let reg = registry(); // empty: the child workflow is intentionally unregistered
+
+    // A (root) -> B (waits_for A). Both built as regular tasks so app.start's
+    // HRS-020 child-registration check passes; we then rewrite B's row into a
+    // sub-workflow node referencing an unregistered child. This faithfully
+    // exercises the runtime resolve-None path that occurs when a worker
+    // processing the sub-workflow enqueue lacks the child registration
+    // (heterogeneous multi-worker registries) — start-time validation cannot
+    // catch that case.
+    let mut b = WorkflowSpecBuilder::new("e2e_unresolvable_subworkflow");
+    b.on_error(OnError::Fail);
+    let a = b.task(
+        wf_step::node()
+            .unwrap()
+            .node_id("a")
+            .kwargs(r#"{"step":"A"}"#.to_owned()),
+    );
+    b.task(
+        wf_step::node()
+            .unwrap()
+            .node_id("child")
+            .kwargs(r#"{"step":"B"}"#.to_owned())
+            .waits_for(a),
+    );
+    let spec = b.build().unwrap();
+
+    let wf_id = start_wf(&pool, &spec).await;
+
+    // Rewrite task 1 into a sub-workflow node pointing at an unregistered child.
+    sqlx::query(
+        "UPDATE horsies_workflow_tasks \
+         SET is_subworkflow = TRUE, \
+             sub_workflow_name = 'e2e_unregistered_child', \
+             task_name = '__sub_workflow:e2e_unregistered_child' \
+         WHERE workflow_id = $1 AND task_index = 1",
+    )
+    .bind(&wf_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Complete A; this makes B READY and triggers enqueue_subworkflow_task, whose
+    // child resolution fails against the empty registry.
+    let task_id_a: String = sqlx::query_scalar(
+        "SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",
+    )
+    .bind(&wf_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let ok_result = serde_json::to_string(&TaskResult::<serde_json::Value>::Ok(
+        serde_json::json!("completed_A"),
+    ))
+    .unwrap();
+    horsies::on_workflow_task_complete(&pool, &task_id_a, &ok_result, true, &reg)
+        .await
+        .unwrap();
+
+    // Parent sub-workflow task (index 1) is FAILED with a load-failure error, and
+    // the workflow finalizes FAILED instead of hanging in RUNNING.
+    let (b_status, b_result): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, result FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 1",
+    )
+    .bind(&wf_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(b_status, "FAILED");
+    let b_result = b_result.expect("parent sub-workflow task should have a result");
+    assert!(
+        b_result.contains("SUBWORKFLOW_LOAD_FAILED"),
+        "expected SUBWORKFLOW_LOAD_FAILED error, got: {b_result}",
+    );
+
+    let wf_status: String =
+        sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+            .bind(&wf_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(wf_status, "FAILED");
+}
+
+// ---------------------------------------------------------------------------
 // T6.2c: Join=any, all deps fail → SKIPPED
 // ---------------------------------------------------------------------------
 

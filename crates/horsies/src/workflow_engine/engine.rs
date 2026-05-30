@@ -791,6 +791,87 @@ async fn enqueue_workflow_task(
 /// Launch a child workflow for a sub-workflow node.
 ///
 /// Looks up the child spec in the registry, builds it dynamically if a
+/// Mark a sub-workflow node FAILED when its child definition cannot be resolved.
+///
+/// Mirrors Python's `_fail_subworkflow_load`: writes FAILED via the terminal-state
+/// CAS guard (`UPDATE_WORKFLOW_TASK_FAILED_SQL`), then runs the failure-propagation
+/// chain (handle failure policy → process dependents → check completion). On a
+/// CAS-miss (row already terminal), skips propagation because whichever path set
+/// the terminal state has already propagated the appropriate outcome.
+async fn fail_subworkflow_load(
+    pool: &PgPool,
+    workflow_id: &str,
+    task_index: i32,
+    spec_name: &str,
+    sub_definition_key: Option<&str>,
+    registry: &WorkflowSpecRegistry,
+) -> Result<(), WorkflowError> {
+    let error = TaskError::builtin(
+        OperationalErrorCode::SubworkflowLoadFailed,
+        format!(
+            "failed to load sub-workflow definition (definition_key={:?}, name='{}')",
+            sub_definition_key, spec_name,
+        ),
+    );
+    let error_json = serde_json::to_string(&error)?;
+    let result_json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error))?;
+
+    // Mark the parent workflow_task FAILED via the terminal-state CAS guard.
+    let updated: Option<IdRow> = sqlx::query_as(UPDATE_WORKFLOW_TASK_FAILED_SQL)
+        .bind(&result_json)
+        .bind(&error_json)
+        .bind(workflow_id)
+        .bind(task_index)
+        .fetch_optional(pool)
+        .await?;
+
+    if updated.is_none() {
+        // Already terminal — whichever path set it has already propagated.
+        tracing::warn!(
+            workflow_id,
+            task_index,
+            "skipped sub-workflow load failure mark for terminal workflow task",
+        );
+        return Ok(());
+    }
+
+    tracing::error!(
+        workflow_id,
+        task_index,
+        spec_name,
+        "sub-workflow definition load failed, parent task marked FAILED",
+    );
+
+    // Run the failure-propagation chain (same shape as on_workflow_task_complete).
+    let on_error: String = sqlx::query_scalar("SELECT on_error FROM horsies_workflows WHERE id = $1")
+        .bind(workflow_id)
+        .fetch_one(pool)
+        .await?;
+
+    let should_continue =
+        handle_workflow_task_failure(pool, workflow_id, task_index, &on_error, &error_json).await?;
+    if !should_continue {
+        // on_error=pause — workflow paused, no further processing.
+        return Ok(());
+    }
+
+    // PAUSED guard before propagating to dependents.
+    let status_row: Option<WorkflowStatusRow> = sqlx::query_as(GET_WORKFLOW_STATUS_SQL)
+        .bind(workflow_id)
+        .fetch_optional(pool)
+        .await?;
+    if let Some(row) = &status_row {
+        if row.status == "PAUSED" {
+            return Ok(());
+        }
+    }
+
+    process_dependents(pool, workflow_id, task_index, registry).await?;
+    check_workflow_completion(pool, workflow_id, registry).await?;
+
+    Ok(())
+}
+
 /// `spec_builder` is registered (supporting runtime parameterization),
 /// starts the child workflow, and links the parent workflow_task to it.
 async fn enqueue_subworkflow_task(
@@ -807,14 +888,23 @@ async fn enqueue_subworkflow_task(
         .or(task.sub_workflow_name.as_deref())
         .unwrap_or(&task.task_name);
 
-    let registered = registry
-        .resolve_child_registration(spec_name, task.sub_definition_key.as_deref())
-        .ok_or_else(|| WorkflowError::WorkflowNotFound {
-            workflow_id: format!(
-                "sub-workflow spec not found (definition_key={:?}, name='{}')",
-                task.sub_definition_key, spec_name,
-            ),
-        })?;
+    let Some(registered) =
+        registry.resolve_child_registration(spec_name, task.sub_definition_key.as_deref())
+    else {
+        // Child definition is not registered on this worker. Mark the parent
+        // workflow_task FAILED and propagate, rather than returning an error
+        // that leaves the parent stuck in READY and the workflow RUNNING
+        // forever (parity with Python's _fail_subworkflow_load / PR #39).
+        return fail_subworkflow_load(
+            pool,
+            workflow_id,
+            task.task_index,
+            spec_name,
+            task.sub_definition_key.as_deref(),
+            registry,
+        )
+        .await;
+    };
 
     // Build child spec: use spec_builder if available for dynamic parameterization,
     // otherwise use the static registered spec.
