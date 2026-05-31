@@ -13,6 +13,9 @@ from horsies.core.models.schedule import (
     ScheduleConfig,
     TaskSchedule,
     IntervalSchedule,
+    CronSchedule,
+    CronEvery,
+    EveryDay,
 )
 
 DB_URL = os.environ.get(
@@ -50,6 +53,18 @@ schedule_config = ScheduleConfig(
             task_name='e2e_catch_up_task',
             pattern=IntervalSchedule(seconds=1),
             catch_up_missed=True,
+        ),
+        TaskSchedule(
+            name='e2e_schedule_cron_every_minute',
+            task_name='e2e_cron_task',
+            pattern=CronSchedule(
+                minute=[CronEvery()],
+                hour=[CronEvery()],
+                month=[CronEvery()],
+                day=EveryDay(),
+            ),
+            timezone='UTC',
+            catch_up_missed=False,
         ),
     ],
     check_interval_seconds=1,

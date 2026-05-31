@@ -383,3 +383,5 @@ class AppConfig(BaseModel):
                 return f"weekly on {days} at {pattern.time.strftime('%H:%M:%S')}"
             case 'monthly':
                 return f"monthly on day {pattern.day} at {pattern.time.strftime('%H:%M:%S')}"
+            case 'cron':
+                return pattern.summary()

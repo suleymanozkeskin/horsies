@@ -607,3 +607,91 @@ async def test_scheduler_restart_reuses_existing_state(
             f'config_hash should be unchanged after restart: '
             f'before={hash_before}, after={state_after.config_hash}'
         )
+
+
+# =============================================================================
+# T3.12 Cron Schedule Fires on Due Minute Slot
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_cron_schedule_fires_on_due_minute(
+    scheduler_broker: PostgresBroker,
+) -> None:
+    """T3.12: A CronSchedule initializes, fires when due, advances, and enqueues.
+
+    Smoke covers the cron-specific risk surface: scheduler initialization of a
+    cron pattern, config-hash/model-dump round-trip, due-state handling, and
+    enqueue. No worker is needed — the scheduler enqueues the task row itself.
+    """
+    cron_name = 'e2e_schedule_cron_every_minute'
+
+    # Phase 1: Start scheduler and wait for the cron state row to initialize.
+    with run_scheduler(SCHEDULER_INSTANCE, timeout=10.0):
+        deadline = time.time() + 5.0
+        state: ScheduleStateModel | None = None
+        while time.time() < deadline:
+            async with scheduler_broker.session_factory() as session:
+                state = await session.get(ScheduleStateModel, cron_name)
+            if state is not None:
+                break
+            await asyncio.sleep(0.1)
+
+        assert state is not None, 'Cron schedule state should be initialized'
+        assert state.run_count == 0, 'run_count should be 0 before firing'
+
+    # Phase 2: Backdate next_run_at to the current minute slot so it is due.
+    due_slot = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    async with scheduler_broker.session_factory() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE horsies_schedule_state
+                SET next_run_at = :slot
+                WHERE schedule_name = :name
+            """
+            ),
+            {'slot': due_slot, 'name': cron_name},
+        )
+        await session.commit()
+
+    # Phase 3: Restart scheduler; it should fire the due slot and advance.
+    with run_scheduler(SCHEDULER_INSTANCE, timeout=10.0):
+        deadline = time.time() + 10.0
+        fired = False
+        state = None
+        while time.time() < deadline:
+            async with scheduler_broker.session_factory() as session:
+                state = await session.get(ScheduleStateModel, cron_name)
+            if (
+                state is not None
+                and state.run_count >= 1
+                and state.next_run_at is not None
+                and state.next_run_at > due_slot
+            ):
+                fired = True
+                break
+            await asyncio.sleep(0.3)
+
+        assert fired, (
+            'Cron schedule should fire and advance next_run_at; '
+            f'run_count={state.run_count if state else None}, '
+            f'next_run_at={state.next_run_at if state else None}'
+        )
+
+        # The scheduler enqueued the cron task (observable without a worker).
+        async with scheduler_broker.session_factory() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT COUNT(*) FROM horsies_tasks
+                    WHERE task_name = 'e2e_cron_task'
+                """
+                )
+            )
+            cron_tasks = result.scalar() or 0
+
+        assert cron_tasks >= 1, (
+            'Scheduler should have enqueued at least one e2e_cron_task row'
+        )

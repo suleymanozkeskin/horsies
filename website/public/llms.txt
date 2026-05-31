@@ -410,8 +410,19 @@ making web request, local will cost you less tokens and greater knowledgebase at
 #### MonthlySchedule
 - MonthlySchedule(day=15, time=time(15, 0)) -> 15th at 15:00
 
+#### CronSchedule
+- Typed 5-field cron-style schedule (minute hour day-of-month month day-of-week); fires at second :00
+- Fields: minute=list[term] (0-59), hour=list[term] (0-23), month=list[enum_term] (Month), day=DaySelector
+- Numeric terms: CronEvery() | CronStep(step=n) (*/n anchored at domain start) | CronValues(values=[...]) | CronRange(start, end, step=1)
+- Enum terms (parameterized [Month]/[Weekday]): CronEvery() | CronEnumStep[T](step=n) | CronEnumValues[T](values=[...]) | CronEnumRange[T](start, end, step=1)
+- DaySelector: EveryDay() | ByMonthDay(day_of_month=[...]) | ByWeekday(day_of_week=[...]) | EitherDay(dom, dow) (OR) | BothDays(dom, dow) (AND)
+- Wall-clock aligned (unlike IntervalSchedule). CronStep(step=4) on hour -> 0,4,8,12,16,20
+- Example: CronSchedule(minute=[CronValues(values=[15])], hour=[CronStep(step=4)], month=[CronEvery()], day=EveryDay()) -> every 4h at :15
+- Validation (ConfigurationError at construction): per-field domain, range start<=end (no wrap), step <= field span, month/day-of-month satisfiability
+- Month enum: JANUARY..DECEMBER (str values "january".."december")
+
 #### SchedulePattern
-- Type union: IntervalSchedule | HourlySchedule | DailySchedule | WeeklySchedule | MonthlySchedule
+- Type union: IntervalSchedule | HourlySchedule | DailySchedule | WeeklySchedule | MonthlySchedule | CronSchedule
 
 #### TaskSchedule
 - name: str (unique schedule identifier)
