@@ -3,7 +3,7 @@ from __future__ import annotations
 import calendar
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from typing import Optional
+from typing import Callable, Optional
 from horsies.core.models.schedule import (
     SchedulePattern,
     IntervalSchedule,
@@ -11,18 +11,25 @@ from horsies.core.models.schedule import (
     DailySchedule,
     WeeklySchedule,
     MonthlySchedule,
-    Weekday,
+    CronSchedule,
+    DaySelector,
+    EveryDay,
+    ByMonthDay,
+    ByWeekday,
+    EitherDay,
+    BothDays,
+    WEEKDAY_ORDINAL,
+    expand_numeric_field,
+    expand_enum_field,
 )
 
-WEEKDAY_MAP = {
-    Weekday.MONDAY: 0,
-    Weekday.TUESDAY: 1,
-    Weekday.WEDNESDAY: 2,
-    Weekday.THURSDAY: 3,
-    Weekday.FRIDAY: 4,
-    Weekday.SATURDAY: 5,
-    Weekday.SUNDAY: 6,
-}
+# Canonical weekday ordering (Monday=0..Sunday=6) is imported from
+# models/schedule.py (WEEKDAY_ORDINAL) so there is a single source of truth.
+
+# One 400-year Gregorian cycle, as an exclusive day-offset bound. The calendar
+# repeats identically every 146097 days, so any satisfiable cron schedule
+# resolves within this many forward steps.
+MAX_CRON_SCAN_DAYS = 146097
 
 
 def calculate_next_run(
@@ -32,7 +39,7 @@ def calculate_next_run(
     Calculate the next run time for a schedule pattern.
 
     Args:
-        pattern: Schedule pattern (interval, hourly, daily, weekly, monthly)
+        pattern: Schedule pattern (interval, hourly, daily, weekly, monthly, cron)
         from_time: Calculate next run after this time (should be UTC-aware)
         tz_str: Timezone for schedule evaluation (e.g., "UTC", "America/New_York")
 
@@ -67,6 +74,8 @@ def calculate_next_run(
             next_run = _calculate_weekly(pattern, local_time, tz)
         case MonthlySchedule():
             next_run = _calculate_monthly(pattern, local_time, tz)
+        case CronSchedule():
+            next_run = _calculate_cron(pattern, local_time, tz)
 
     # Ensure result is UTC-aware
     if next_run.tzinfo is None:
@@ -126,7 +135,7 @@ def _calculate_weekly(
     pattern: WeeklySchedule, local_time: datetime, tz: ZoneInfo
 ) -> datetime:
     """Calculate next run for weekly schedule, skipping nonexistent local times."""
-    target_weekdays = {WEEKDAY_MAP[d] for d in pattern.days}
+    target_weekdays = {WEEKDAY_ORDINAL[d] for d in pattern.days}
     for day_offset in range(0, 15):
         candidate_date = (local_time + timedelta(days=day_offset)).date()
         if candidate_date.weekday() not in target_weekdays:
@@ -167,6 +176,76 @@ def _calculate_monthly(
         return candidate
 
     raise RuntimeError('Could not calculate next monthly run within 24 months')
+
+
+def _build_day_matcher(day: DaySelector) -> Callable[[date], bool]:
+    """Build a per-date predicate from a DaySelector.
+
+    Term sets are expanded once here (not per candidate day). Weekday ordinals
+    use Python's Monday=0..Sunday=6 convention via date.weekday(), matching
+    WEEKDAY_ORDINAL, and month-day uses date.day.
+    """
+    match day:
+        case EveryDay():
+            return lambda candidate: True
+        case ByMonthDay(day_of_month=dom_terms):
+            dom_set = expand_numeric_field(dom_terms, 1, 31)
+            return lambda candidate: candidate.day in dom_set
+        case ByWeekday(day_of_week=dow_terms):
+            dow_set = expand_enum_field(dow_terms, 0, 6)
+            return lambda candidate: candidate.weekday() in dow_set
+        case EitherDay(day_of_month=dom_terms, day_of_week=dow_terms):
+            dom_set = expand_numeric_field(dom_terms, 1, 31)
+            dow_set = expand_enum_field(dow_terms, 0, 6)
+            return (
+                lambda candidate: candidate.day in dom_set
+                or candidate.weekday() in dow_set
+            )
+        case BothDays(day_of_month=dom_terms, day_of_week=dow_terms):
+            dom_set = expand_numeric_field(dom_terms, 1, 31)
+            dow_set = expand_enum_field(dow_terms, 0, 6)
+            return (
+                lambda candidate: candidate.day in dom_set
+                and candidate.weekday() in dow_set
+            )
+
+
+def _calculate_cron(
+    pattern: CronSchedule, local_time: datetime, tz: ZoneInfo
+) -> datetime:
+    """Calculate next run for a cron-style schedule.
+
+    Scans forward day by day (bounded by one Gregorian cycle), reusing
+    _resolve_local_datetime for DST-correct wall-clock resolution. Fires at
+    second :00.
+    """
+    minute_set = sorted(expand_numeric_field(pattern.minute, 0, 59))
+    hour_set = sorted(expand_numeric_field(pattern.hour, 0, 23))
+    month_set = expand_enum_field(pattern.month, 1, 12)
+    day_matches = _build_day_matcher(pattern.day)
+
+    for day_offset in range(0, MAX_CRON_SCAN_DAYS):
+        candidate_date = (local_time + timedelta(days=day_offset)).date()
+        if candidate_date.month not in month_set:
+            continue
+        if not day_matches(candidate_date):
+            continue
+        for hour in hour_set:
+            for minute in minute_set:
+                candidate = _resolve_local_datetime(
+                    date_value=candidate_date,
+                    hour=hour,
+                    minute=minute,
+                    second=0,
+                    tz=tz,
+                )
+                if candidate is None or candidate <= local_time:
+                    continue
+                return candidate
+
+    raise RuntimeError(
+        'Could not calculate next cron run within the 400-year bound'
+    )
 
 
 def _add_months(year: int, month: int, month_offset: int) -> tuple[int, int]:

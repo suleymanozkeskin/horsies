@@ -6,7 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0: breaking changes may land in minor or patch releases,
 and there is no migration contract between pre-1.0 versions.
 
-## [0.1.2] - Unreleased
+## [0.1.3] - Unreleased
+
+0.1.3 adds `CronSchedule`, a typed 5-field cron-style schedule pattern. It brings
+wall-clock alignment and minute-offset load staggering that `IntervalSchedule`
+cannot express — without cron strings.
+
+### Added
+
+- `CronSchedule`: a typed 5-field cron-style schedule pattern (`minute`, `hour`,
+  `month` term lists plus a `DaySelector`). Provides wall-clock alignment and
+  minute-offset staggering that `IntervalSchedule` cannot express, with no cron
+  strings. The day-of-month vs day-of-week ambiguity is explicit through
+  `EitherDay` (OR) and `BothDays` (AND). New exports: `CronSchedule`, `Month`,
+  `CronEvery`, `CronStep`, `CronValues`, `CronRange`, `CronEnumValues`,
+  `CronEnumRange`, `CronEnumStep`, `DaySelector`, `EveryDay`, `ByMonthDay`,
+  `ByWeekday`, `EitherDay`, `BothDays`.
+
+## [0.1.2] - 2026-05-29
 
 0.1.2 is a **breaking** release headlined by the strict-serde redesign: the wire
 stops carrying class identity, and every task parameter and return type must

@@ -253,6 +253,11 @@ All `TaskSchedule.name` values must be unique (HRS-205).
 
 ### Schedule Patterns
 
+Use the smallest pattern that describes the schedule. `HourlySchedule`,
+`DailySchedule`, `WeeklySchedule`, and `MonthlySchedule` are simpler when they
+fit. Use `CronSchedule` for wall-clock aligned field combinations such as
+"every 4 hours at minute 15".
+
 **IntervalSchedule** — run every N time units:
 
 ```python
@@ -290,7 +295,90 @@ MonthlySchedule(day=15, time=time(15, 0))  # 15th at 15:00
 
 If `day` > days in month (e.g., day=31 in Feb), that month is skipped.
 
-### Weekday
+**CronSchedule** — typed cron-style schedule:
+
+```python
+from horsies import CronEvery, CronSchedule, CronStep, CronValues, EveryDay
+
+# Equivalent shape to "15 */4 * * *": 00:15, 04:15, 08:15, ...
+CronSchedule(
+    minute=[CronValues(values=[15])],
+    hour=[CronStep(step=4)],
+    month=[CronEvery()],
+    day=EveryDay(),
+)
+```
+
+`CronSchedule` fires at second `:00` and models the five cron fields as
+typed objects instead of accepting a cron expression string:
+
+| Field | Type | Domain |
+|---|---|---|
+| `minute` | `list[CronNumericTerm]` | 0-59 |
+| `hour` | `list[CronNumericTerm]` | 0-23 |
+| `month` | `list[CronMonthTerm]` | `Month` enum |
+| `day` | `DaySelector` | day-of-month / day-of-week choice |
+
+Numeric terms (`minute`, `hour`, day-of-month):
+
+| Term | Meaning |
+|---|---|
+| `CronEvery()` | every value in the field |
+| `CronStep(step=n)` | every nth value, anchored at the domain start |
+| `CronValues(values=[...])` | explicit integer values |
+| `CronRange(start=a, end=b, step=1)` | inclusive integer range |
+
+Enum terms (`month`, day-of-week):
+
+| Term | Meaning |
+|---|---|
+| `CronEvery()` | every enum value |
+| `CronEnumValues[Month \| Weekday](values=[...])` | explicit enum values |
+| `CronEnumRange[Month \| Weekday](start=..., end=..., step=1)` | inclusive enum range by canonical order |
+| `CronEnumStep[Month \| Weekday](step=n)` | every nth enum value, anchored at the domain start |
+
+`CronStep`/`CronEnumStep` are anchored at the field's first value. For example,
+`CronStep(step=4)` on `hour` means 0, 4, 8, 12, 16, 20. Steps larger than the
+field span are rejected as likely mistakes: minute 59, hour 23, day-of-month
+30, month 11, weekday 6. Use `CronValues`/`CronEnumValues` for a single value.
+
+`CronRange` and `CronEnumRange` do not wrap. `FRIDAY -> MONDAY` and
+`DECEMBER -> FEBRUARY` are invalid; split them into multiple terms.
+
+`day` is explicit so cron's ambiguous "day-of-month OR day-of-week" behavior
+cannot happen by accident:
+
+| Selector | Meaning |
+|---|---|
+| `EveryDay()` | no day restriction |
+| `ByMonthDay(day_of_month=[...])` | match day-of-month only |
+| `ByWeekday(day_of_week=[...])` | match weekday only |
+| `EitherDay(day_of_month=[...], day_of_week=[...])` | match either side (OR) |
+| `BothDays(day_of_month=[...], day_of_week=[...])` | match both sides (AND) |
+
+Example: the 13th or Friday vs Friday the 13th:
+
+```python
+from horsies import CronEnumValues, CronValues, EitherDay, BothDays, Weekday
+
+EitherDay(
+    day_of_month=[CronValues(values=[13])],
+    day_of_week=[CronEnumValues[Weekday](values=[Weekday.FRIDAY])],
+)
+
+BothDays(
+    day_of_month=[CronValues(values=[13])],
+    day_of_week=[CronEnumValues[Weekday](values=[Weekday.FRIDAY])],
+)
+```
+
+Construction-time validation rejects out-of-domain values, empty term lists,
+wrap-around ranges, invalid step spans, and unsatisfiable month/day combinations
+such as February 30. `EitherDay` can still contain an impossible
+day-of-month because the weekday side can satisfy the schedule; `BothDays`
+cannot.
+
+### Weekday and Month
 
 ```python
 class Weekday(str, Enum):
@@ -301,6 +389,20 @@ class Weekday(str, Enum):
     FRIDAY = 'friday'
     SATURDAY = 'saturday'
     SUNDAY = 'sunday'
+
+class Month(str, Enum):
+    JANUARY = 'january'
+    FEBRUARY = 'february'
+    MARCH = 'march'
+    APRIL = 'april'
+    MAY = 'may'
+    JUNE = 'june'
+    JULY = 'july'
+    AUGUST = 'august'
+    SEPTEMBER = 'september'
+    OCTOBER = 'october'
+    NOVEMBER = 'november'
+    DECEMBER = 'december'
 ```
 
 ## `resend_on_transient_err`
@@ -424,8 +526,12 @@ from horsies import (
     RecoveryConfig, WorkerResilienceConfig,
     # Scheduling
     ScheduleConfig, TaskSchedule,
-    Weekday, IntervalSchedule, HourlySchedule,
+    SchedulePattern,
+    Weekday, Month, IntervalSchedule, HourlySchedule,
     DailySchedule, WeeklySchedule, MonthlySchedule,
+    CronSchedule, CronEvery, CronStep, CronValues, CronRange,
+    CronEnumValues, CronEnumRange, CronEnumStep,
+    DaySelector, EveryDay, ByMonthDay, ByWeekday, EitherDay, BothDays,
     # Exception mapper
     ExceptionMapper,
     # Retry
