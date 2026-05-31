@@ -109,6 +109,46 @@ impl WorkflowContext {
         Ok(summary.clone())
     }
 
+    /// Retrieve the typed output of a completed sub-workflow node.
+    ///
+    /// Mirrors [`Self::result_for`]: uses `T` from the `NodeKey` to decode the
+    /// child workflow's stored `output` slot. Returns `Ok(None)` when the
+    /// summary has no output (no `output_index` was set on the child), a
+    /// `WorkflowCtxMissingId` error when the node_id is absent, or a
+    /// `ResultDeserializationError` when the stored output fails to decode
+    /// into `T`.
+    pub fn output_for<T: DeserializeOwned>(
+        &self,
+        key: &NodeKey<T>,
+    ) -> Result<Option<T>, TaskError> {
+        let summary = self.summaries_by_id.get(key.node_id()).ok_or_else(|| {
+            TaskError::builtin(
+                crate::core::task::error::ContractCode::WorkflowCtxMissingId,
+                format!(
+                    "no summary found for node_id '{}' in workflow context",
+                    key.node_id(),
+                ),
+            )
+        })?;
+
+        match &summary.output {
+            None => Ok(None),
+            Some(raw) => {
+                let parsed = serde_json::from_value(raw.clone()).map_err(|e| {
+                    TaskError::builtin(
+                        crate::core::task::error::OperationalErrorCode::ResultDeserializationError,
+                        format!(
+                            "failed to deserialize sub-workflow output for node_id '{}': {}",
+                            key.node_id(),
+                            e,
+                        ),
+                    )
+                })?;
+                Ok(Some(parsed))
+            }
+        }
+    }
+
     /// Check whether a summary exists for the given node_id.
     pub fn has_summary(&self, node_id: &str) -> bool {
         self.summaries_by_id.contains_key(node_id)
@@ -323,6 +363,68 @@ mod tests {
     fn has_summary_false_empty() {
         let ctx = make_ctx();
         assert!(!ctx.has_summary("anything"));
+    }
+
+    // -- output_for: typed sub-workflow output access (parity with horsies PR #63) --
+
+    #[test]
+    fn output_for_decodes_typed_output() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Report {
+            total: i32,
+            label: String,
+        }
+
+        let mut summaries = HashMap::new();
+        summaries.insert(
+            "sub_wf:0".to_owned(),
+            SubWorkflowSummary {
+                status: "COMPLETED".to_owned(),
+                is_success: true,
+                success_case: None,
+                output: Some(serde_json::json!({"total": 7, "label": "done"})),
+                total_tasks: 2,
+                completed_tasks: 2,
+                failed_tasks: 0,
+                skipped_tasks: 0,
+                error_summary: None,
+                child_workflow_id: "child-1".to_owned(),
+            },
+        );
+        let ctx = WorkflowContext::new(
+            "wf-parent".to_owned(),
+            1,
+            "aggregate".to_owned(),
+            HashMap::new(),
+            summaries,
+        );
+
+        let key: NodeKey<Report> = NodeKey::new("sub_wf:0".to_owned());
+        let output = ctx.output_for(&key).unwrap();
+        assert_eq!(
+            output,
+            Some(Report {
+                total: 7,
+                label: "done".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn output_for_returns_none_when_no_output() {
+        // make_ctx_with_summary stores a summary with `output: None`.
+        let ctx = make_ctx_with_summary();
+        let key: NodeKey<i32> = NodeKey::new("sub_wf:0".to_owned());
+        let output = ctx.output_for(&key).unwrap();
+        assert_eq!(output, None);
+    }
+
+    #[test]
+    fn output_for_missing_key_returns_error() {
+        let ctx = make_ctx_with_summary();
+        let key: NodeKey<i32> = NodeKey::new("nonexistent".to_owned());
+        let err = ctx.output_for(&key).unwrap_err();
+        assert!(err.message.as_ref().unwrap().contains("nonexistent"));
     }
 
     // -- Error result variant (ported from Python TestWorkflowContext) --
