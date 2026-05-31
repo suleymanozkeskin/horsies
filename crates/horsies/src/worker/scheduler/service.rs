@@ -343,7 +343,13 @@ async fn process_schedule(
         }
         // If nothing caught up, don't advance state — retry everything next tick.
     } else {
-        let task_id = enqueue_scheduled_task(broker, schedule, app_config, now).await?;
+        // Anchor to the logical due slot, not wall-clock `now`. A late tick must
+        // keep the enqueue slot and next-run aligned to the schedule (no drift)
+        // and the slot-based task_id idempotent. Falls back to `now` for the
+        // first run, where there is no prior slot (parity with horsies PR #46).
+        let slot_time = state_row.next_run_at.unwrap_or(now);
+
+        let task_id = enqueue_scheduled_task(broker, schedule, app_config, slot_time).await?;
         tracing::info!(
             schedule = %schedule.name,
             task_name = %schedule.task_name,
@@ -351,7 +357,7 @@ async fn process_schedule(
             "scheduled task enqueued",
         );
 
-        let next = next_run_at(&schedule.pattern, now, &schedule.timezone);
+        let next = next_run_at(&schedule.pattern, slot_time, &schedule.timezone);
         state::upsert_state(
             broker.pool(),
             &schedule.name,
@@ -721,5 +727,123 @@ mod tests {
         let missed = calculate_missed_runs(&schedule, first_due, now, 3);
 
         assert!(missed.is_empty());
+    }
+
+    // ---- DB-backed: slot-anchored advancement (parity with horsies PR #46) ----
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|p| p.join(".env").exists());
+        if let Some(root) = root {
+            if let Ok(contents) = std::fs::read_to_string(root.join(".env")) {
+                for line in contents.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    if let Some((key, value)) = line.split_once('=') {
+                        if key.trim() == "DB_PASSWORD" {
+                            return format!(
+                                "postgresql://postgres:{}@localhost:5432/horsies-rust-port",
+                                value.trim(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        panic!("database URL not found: set DATABASE_URL or add DB_PASSWORD to .env");
+    }
+
+    async fn test_pool() -> sqlx::PgPool {
+        let pool = sqlx::PgPool::connect(&test_db_url())
+            .await
+            .expect("failed to connect");
+        crate::broker::migrations::run_horsies_migrations(&pool)
+            .await
+            .expect("migrations failed");
+        pool
+    }
+
+    fn interval_schedule_secs(name: &str, seconds: u32) -> TaskSchedule {
+        TaskSchedule {
+            name: name.to_owned(),
+            task_name: "my_task".to_owned(),
+            pattern: SchedulePattern::Interval(IntervalSchedule {
+                seconds: Some(seconds),
+                minutes: None,
+                hours: None,
+                days: None,
+            }),
+            args: serde_json::Value::Null,
+            kwargs: serde_json::Value::Null,
+            queue_name: None,
+            enabled: true,
+            timezone: "UTC".to_owned(),
+            catch_up_missed: false,
+            max_catch_up_runs: 100,
+        }
+    }
+
+    #[tokio::test]
+    async fn process_schedule_advances_next_run_from_slot_not_now() {
+        let pool = test_pool().await;
+        let name = "pr46_slot_anchor";
+        sqlx::query("DELETE FROM horsies_schedule_state WHERE schedule_name = $1")
+            .bind(name)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'my_task'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let schedule = interval_schedule_secs(name, 5);
+        let app_config = default_app_config();
+
+        // Seed a due slot at 12:00:00; the tick arrives late at 12:00:17.
+        let due_slot = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
+        state::upsert_state(&pool, name, None, Some(due_slot), None, 0, None)
+            .await
+            .unwrap();
+
+        let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 17).unwrap();
+        process_schedule(&broker, &schedule, now, 1, &app_config)
+            .await
+            .unwrap();
+
+        // next_run advances from the slot (12:00:05), not the wall clock (12:00:22).
+        let state_row = state::get_state(&pool, name).await.unwrap().unwrap();
+        assert_eq!(
+            state_row.next_run_at,
+            Some(Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 5).unwrap()),
+            "next_run must anchor to the due slot, not wall-clock now",
+        );
+
+        // The enqueued task's sent_at is the logical slot, not wall-clock now.
+        let sent_at: chrono::DateTime<Utc> =
+            sqlx::query_scalar("SELECT sent_at FROM horsies_tasks WHERE task_name = 'my_task'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(sent_at, due_slot, "enqueue slot must be the due slot");
+
+        // Cleanup.
+        sqlx::query("DELETE FROM horsies_schedule_state WHERE schedule_name = $1")
+            .bind(name)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'my_task'")
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 }
