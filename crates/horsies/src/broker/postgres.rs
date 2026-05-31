@@ -689,28 +689,20 @@ impl PostgresBroker {
                 .await
                 .map_err(BrokerError::Database)?;
 
-        match stored_sha {
-            None => {
-                // Row was purged between INSERT conflict and SELECT — original send
-                // succeeded and task was already cleaned up.
-                tracing::warn!(
-                    task_id = %task_id,
-                    task_name,
-                    "enqueue conflict but row no longer exists — original send succeeded and task was purged",
-                );
-                Ok(task_id)
-            }
-            Some((existing_sha,)) if existing_sha == enqueue_sha => {
-                // Idempotent success — same payload already enqueued.
-                Ok(task_id)
-            }
-            Some(_) => {
-                // Different payload with same task_id — always a programming error.
-                Err(BrokerError::PayloadMismatch {
-                    task_id: task_id.clone(),
-                })
-            }
+        let outcome = classify_enqueue_conflict(
+            stored_sha.as_ref().map(|(s,)| s.as_str()),
+            enqueue_sha,
+            &task_id,
+            task_name,
+        );
+        if matches!(outcome, Err(BrokerError::EnqueueConflictUnverifiable { .. })) {
+            tracing::warn!(
+                task_id = %task_id,
+                task_name,
+                "enqueue conflict but row disappeared before verification — cannot verify payload identity",
+            );
         }
+        outcome
     }
 
     /// Send a task using pre-resolved enqueue parameters.
@@ -2591,12 +2583,71 @@ mod tests {
         assert_send::<Arc<PostgresBroker>>();
         assert_sync::<Arc<PostgresBroker>>();
     }
+
+    // Enqueue-conflict classification (parity with horsies PR #48).
+
+    #[test]
+    fn enqueue_conflict_matching_sha_is_idempotent_ok() {
+        let out = classify_enqueue_conflict(Some("sha-1"), "sha-1", "task-1", "my_task");
+        assert_eq!(out.unwrap(), "task-1");
+    }
+
+    #[test]
+    fn enqueue_conflict_differing_sha_is_payload_mismatch() {
+        let out = classify_enqueue_conflict(Some("other"), "sha-1", "task-1", "my_task");
+        assert!(matches!(
+            out,
+            Err(BrokerError::PayloadMismatch { task_id }) if task_id == "task-1"
+        ));
+    }
+
+    #[test]
+    fn enqueue_conflict_missing_row_is_non_retryable_unverifiable() {
+        // Row disappeared before verification: must NOT be treated as idempotent Ok.
+        let out = classify_enqueue_conflict(None, "sha-1", "task-1", "my_task");
+        match out {
+            Err(err @ BrokerError::EnqueueConflictUnverifiable { .. }) => {
+                assert!(!err.is_retryable(), "must be non-retryable");
+                assert!(
+                    err.to_string().contains("cannot verify payload identity"),
+                    "message should explain the unverifiable conflict, got: {err}",
+                );
+            }
+            other => panic!("expected EnqueueConflictUnverifiable, got: {other:?}"),
+        }
+    }
 }
 
 /// Canonical UTC datetime string for fingerprint hashing.
 /// Matches Python's `_canon_dt()`: always UTC, microsecond precision.
 fn canon_dt(dt: DateTime<Utc>) -> String {
     dt.format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string()
+}
+
+/// Classify the outcome of an `INSERT ... ON CONFLICT DO NOTHING` enqueue
+/// conflict by comparing the stored `enqueue_sha` against the expected one.
+///
+/// - `None` (row gone before verification): cannot prove payload identity, so
+///   fail non-retryably rather than assume the original send succeeded
+///   (parity with horsies PR #48).
+/// - matching sha: idempotent success.
+/// - differing sha: same task_id, different payload — a programming error.
+fn classify_enqueue_conflict(
+    stored_sha: Option<&str>,
+    enqueue_sha: &str,
+    task_id: &str,
+    task_name: &str,
+) -> Result<String, BrokerError> {
+    match stored_sha {
+        None => Err(BrokerError::EnqueueConflictUnverifiable {
+            task_id: task_id.to_owned(),
+            task_name: task_name.to_owned(),
+        }),
+        Some(existing) if existing == enqueue_sha => Ok(task_id.to_owned()),
+        Some(_) => Err(BrokerError::PayloadMismatch {
+            task_id: task_id.to_owned(),
+        }),
+    }
 }
 
 /// Compute a SHA-256 hex digest for idempotent enqueue verification.

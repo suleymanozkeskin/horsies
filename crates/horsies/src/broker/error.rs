@@ -28,6 +28,14 @@ pub enum BrokerError {
     #[error("payload mismatch for task_id {task_id}: existing row has different enqueue_sha")]
     PayloadMismatch { task_id: String },
 
+    /// Enqueue observed a conflict, but the conflicting row disappeared before
+    /// its `enqueue_sha` could be compared — payload identity cannot be proven.
+    #[error(
+        "task_id {task_id} conflict detected but row disappeared before verification \
+         for {task_name}; cannot verify payload identity"
+    )]
+    EnqueueConflictUnverifiable { task_id: String, task_name: String },
+
     /// The shared LISTEN/NOTIFY listener was closed or its background task stopped.
     #[error("shared listener closed")]
     ListenerClosed,
@@ -47,7 +55,8 @@ impl BrokerError {
             Self::Migration(_)
             | Self::Serialization(_)
             | Self::InvalidStatus(_)
-            | Self::PayloadMismatch { .. } => false,
+            | Self::PayloadMismatch { .. }
+            | Self::EnqueueConflictUnverifiable { .. } => false,
         }
     }
 }
