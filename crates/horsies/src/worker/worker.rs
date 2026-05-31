@@ -551,7 +551,7 @@ impl Worker {
             let all_ids: Vec<String> = claimed_rows.iter().map(|r| r.id.clone()).collect();
             let filtered_ids = self
                 .broker
-                .filter_non_runnable_workflow_tasks(&all_ids)
+                .filter_non_runnable_workflow_tasks(&all_ids, &self.worker_id)
                 .await?;
             if !filtered_ids.is_empty() {
                 let filtered_set: std::collections::HashSet<&str> =

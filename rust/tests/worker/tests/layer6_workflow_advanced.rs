@@ -2030,3 +2030,157 @@ async fn test_workflow_task_inherits_retry_from_registration() {
         final_count
     );
 }
+
+// ---------------------------------------------------------------------------
+// T6.13: Non-runnable workflow-task cleanup is scoped to worker ownership
+// (parity with horsies PR #51). A worker must not unclaim/cancel another
+// worker's claimed task when filtering PAUSED/CANCELLED workflow tasks.
+// ---------------------------------------------------------------------------
+
+/// Build + start a single-task workflow (no worker). Returns (wf_id, task_id).
+async fn setup_single_task_workflow(pool: &sqlx::PgPool) -> (String, String) {
+    let mut b = WorkflowSpecBuilder::new("e2e_nonrunnable_ownership");
+    b.task(
+        wf_step::node()
+            .unwrap()
+            .node_id("a")
+            .kwargs(r#"{"step":"A"}"#.to_owned()),
+    );
+    let spec = b.build().unwrap();
+    let wf_id = start_wf(pool, &spec).await;
+    let task_id: String = sqlx::query_scalar(
+        "SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",
+    )
+    .bind(&wf_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    (wf_id, task_id)
+}
+
+async fn claim_task_as(pool: &sqlx::PgPool, task_id: &str, worker_id: &str) {
+    sqlx::query(
+        "UPDATE horsies_tasks \
+         SET status = 'CLAIMED', claimed = TRUE, claimed_at = NOW(), claimed_by_worker_id = $2 \
+         WHERE id = $1",
+    )
+    .bind(task_id)
+    .bind(worker_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn set_workflow_status(pool: &sqlx::PgPool, wf_id: &str, status: &str) {
+    sqlx::query("UPDATE horsies_workflows SET status = $2 WHERE id = $1")
+        .bind(wf_id)
+        .bind(status)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn task_claim_row(pool: &sqlx::PgPool, task_id: &str) -> (String, bool, Option<String>) {
+    sqlx::query_as(
+        "SELECT status, claimed, claimed_by_worker_id FROM horsies_tasks WHERE id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+#[serial]
+async fn filter_nonrunnable_does_not_touch_other_workers_paused_task() {
+    let pool = pool().await;
+    db::clean_tables(&pool).await;
+    let broker = PostgresBroker::from_pool(pool.clone());
+
+    let (wf_id, task_id) = setup_single_task_workflow(&pool).await;
+    claim_task_as(&pool, &task_id, "worker-other").await;
+    set_workflow_status(&pool, &wf_id, "PAUSED").await;
+
+    let filtered = broker
+        .filter_non_runnable_workflow_tasks(&[task_id.clone()], "worker-this")
+        .await
+        .unwrap();
+
+    // Excluded from this worker's dispatch set, but the other worker's claim is intact.
+    assert!(filtered.contains(&task_id));
+    assert_eq!(
+        task_claim_row(&pool, &task_id).await,
+        ("CLAIMED".to_owned(), true, Some("worker-other".to_owned())),
+    );
+    let wt_status: String = sqlx::query_scalar(
+        "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",
+    )
+    .bind(&wf_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(wt_status, "ENQUEUED", "must not reset another worker's row");
+}
+
+#[tokio::test]
+#[serial]
+async fn filter_nonrunnable_does_not_touch_other_workers_cancelled_task() {
+    let pool = pool().await;
+    db::clean_tables(&pool).await;
+    let broker = PostgresBroker::from_pool(pool.clone());
+
+    let (wf_id, task_id) = setup_single_task_workflow(&pool).await;
+    claim_task_as(&pool, &task_id, "worker-other").await;
+    set_workflow_status(&pool, &wf_id, "CANCELLED").await;
+
+    let filtered = broker
+        .filter_non_runnable_workflow_tasks(&[task_id.clone()], "worker-this")
+        .await
+        .unwrap();
+
+    assert!(filtered.contains(&task_id));
+    assert_eq!(
+        task_claim_row(&pool, &task_id).await,
+        ("CLAIMED".to_owned(), true, Some("worker-other".to_owned())),
+    );
+    let wt_status: String = sqlx::query_scalar(
+        "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",
+    )
+    .bind(&wf_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(wt_status, "ENQUEUED", "must not cancel another worker's row");
+}
+
+#[tokio::test]
+#[serial]
+async fn filter_nonrunnable_unclaims_own_paused_task() {
+    let pool = pool().await;
+    db::clean_tables(&pool).await;
+    let broker = PostgresBroker::from_pool(pool.clone());
+
+    let (wf_id, task_id) = setup_single_task_workflow(&pool).await;
+    claim_task_as(&pool, &task_id, "worker-this").await;
+    set_workflow_status(&pool, &wf_id, "PAUSED").await;
+
+    let filtered = broker
+        .filter_non_runnable_workflow_tasks(&[task_id.clone()], "worker-this")
+        .await
+        .unwrap();
+
+    // This worker owns the claim: it is unclaimed and the workflow_task reset.
+    assert!(filtered.contains(&task_id));
+    assert_eq!(
+        task_claim_row(&pool, &task_id).await,
+        ("PENDING".to_owned(), false, None),
+    );
+    let wt_status: String = sqlx::query_scalar(
+        "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",
+    )
+    .bind(&wf_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(wt_status, "READY", "own paused task should reset to READY");
+}

@@ -266,6 +266,38 @@ SET status = 'SKIPPED', \
     completed_at = NOW() \
 WHERE task_id = ANY($1) AND status IN ('PENDING', 'READY', 'ENQUEUED')";
 
+/// Unclaim this worker's CLAIMED tasks in PAUSED workflows (post-claim batch
+/// filter). Ownership-scoped so a worker cannot reset another worker's claim;
+/// returns the affected ids so only those workflow_task rows are reset.
+const UNCLAIM_PAUSED_OWNED_TASKS_SQL: &str = "\
+UPDATE horsies_tasks \
+SET status = 'PENDING', \
+    claimed = FALSE, \
+    claimed_at = NULL, \
+    claimed_by_worker_id = NULL, \
+    claim_expires_at = NULL, \
+    updated_at = NOW() \
+WHERE id = ANY($1) \
+  AND status = 'CLAIMED' \
+  AND claimed_by_worker_id = $2 \
+RETURNING id";
+
+/// Cancel this worker's CLAIMED tasks in CANCELLED workflows (post-claim batch
+/// filter). Ownership-scoped; returns the affected ids so only those
+/// workflow_task rows are skipped.
+const CANCEL_CANCELLED_OWNED_TASKS_SQL: &str = "\
+UPDATE horsies_tasks \
+SET status = 'CANCELLED', \
+    claimed = FALSE, \
+    claimed_at = NULL, \
+    claimed_by_worker_id = NULL, \
+    claim_expires_at = NULL, \
+    updated_at = NOW() \
+WHERE id = ANY($1) \
+  AND status = 'CLAIMED' \
+  AND claimed_by_worker_id = $2 \
+RETURNING id";
+
 /// Unclaim tasks: reset from CLAIMED back to PENDING.
 const UNCLAIM_TASKS_SQL: &str = "\
 UPDATE horsies_tasks \
@@ -1660,12 +1692,16 @@ impl PostgresBroker {
     /// - PAUSED: unclaim task → PENDING, reset workflow_task → READY
     /// - CANCELLED: cancel task → CANCELLED, skip workflow_task → SKIPPED
     ///
-    /// Returns the IDs of all filtered tasks (both paused and cancelled).
-    ///
-    /// Mirrors Python's `_filter_non_runnable_workflow_tasks()`.
+    /// Returns the IDs of all filtered tasks (both paused and cancelled) so the
+    /// caller can exclude them from dispatch. The cleanup mutations (unclaim /
+    /// cancel + workflow_task reset / skip) are scoped to rows this worker
+    /// actually owns, so one worker cannot clear or cancel another worker's
+    /// claimed rows (mirrors Python's `_filter_non_runnable_workflow_tasks()` /
+    /// PR #51).
     pub async fn filter_non_runnable_workflow_tasks(
         &self,
         task_ids: &[String],
+        worker_id: &str,
     ) -> Result<Vec<String>, BrokerError> {
         if task_ids.is_empty() {
             return Ok(Vec::new());
@@ -1688,43 +1724,53 @@ impl PostgresBroker {
             }
         }
 
-        // PAUSED: unclaim back to PENDING so they can be picked up on resume.
+        // PAUSED: unclaim this worker's own claimed rows back to PENDING so they
+        // can be picked up on resume. Reset only the workflow_task rows we owned.
         if !paused_ids.is_empty() {
-            sqlx::query(UNCLAIM_TASKS_SQL)
+            let unclaimed: Vec<(String,)> = sqlx::query_as(UNCLAIM_PAUSED_OWNED_TASKS_SQL)
                 .bind(&paused_ids)
-                .execute(&self.pool)
+                .bind(worker_id)
+                .fetch_all(&self.pool)
                 .await
                 .map_err(BrokerError::Database)?;
+            let owned: Vec<String> = unclaimed.into_iter().map(|(id,)| id).collect();
 
-            sqlx::query(RESET_WORKFLOW_TASKS_SQL)
-                .bind(&paused_ids)
-                .execute(&self.pool)
-                .await
-                .map_err(BrokerError::Database)?;
+            if !owned.is_empty() {
+                sqlx::query(RESET_WORKFLOW_TASKS_SQL)
+                    .bind(&owned)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(BrokerError::Database)?;
+            }
 
             tracing::debug!(
-                count = paused_ids.len(),
-                "unclaimed tasks belonging to PAUSED workflows",
+                count = owned.len(),
+                "unclaimed own tasks belonging to PAUSED workflows",
             );
         }
 
-        // CANCELLED: hard-cancel tasks and skip workflow_tasks.
+        // CANCELLED: hard-cancel this worker's own claimed rows and skip only the
+        // workflow_task rows we owned.
         if !cancelled_ids.is_empty() {
-            sqlx::query(CANCEL_CANCELLED_WORKFLOW_HORSIES_TASKS_SQL)
+            let cancelled: Vec<(String,)> = sqlx::query_as(CANCEL_CANCELLED_OWNED_TASKS_SQL)
                 .bind(&cancelled_ids)
-                .execute(&self.pool)
+                .bind(worker_id)
+                .fetch_all(&self.pool)
                 .await
                 .map_err(BrokerError::Database)?;
+            let owned: Vec<String> = cancelled.into_iter().map(|(id,)| id).collect();
 
-            sqlx::query(SKIP_CANCELLED_WORKFLOW_TASKS_SQL)
-                .bind(&cancelled_ids)
-                .execute(&self.pool)
-                .await
-                .map_err(BrokerError::Database)?;
+            if !owned.is_empty() {
+                sqlx::query(SKIP_CANCELLED_WORKFLOW_TASKS_SQL)
+                    .bind(&owned)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(BrokerError::Database)?;
+            }
 
             tracing::debug!(
-                count = cancelled_ids.len(),
-                "cancelled tasks belonging to CANCELLED workflows",
+                count = owned.len(),
+                "cancelled own tasks belonging to CANCELLED workflows",
             );
         }
 
