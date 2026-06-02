@@ -361,6 +361,33 @@ impl TaskError {
             data: None,
         }
     }
+
+    /// Reconstruct a [`SubWorkflowError`] from a sub-workflow failure error.
+    ///
+    /// Sub-workflow failures are persisted as a `TaskError` with
+    /// `error_code == "SUBWORKFLOW_FAILED"` and the child workflow's
+    /// `sub_workflow_id` / `sub_workflow_summary` carried in `data`. This
+    /// recovers the typed details at any error surface (e.g.
+    /// `WorkflowHandle::get().err`), since `TaskResult<T>`'s err slot is the
+    /// concrete `TaskError` and cannot itself be a `SubWorkflowError`.
+    ///
+    /// Returns `None` for any error that is not a sub-workflow failure or whose
+    /// `data` does not carry the expected fields.
+    pub fn sub_workflow_details(&self) -> Option<SubWorkflowError> {
+        if self.error_code.as_ref().map(ToString::to_string).as_deref() != Some("SUBWORKFLOW_FAILED")
+        {
+            return None;
+        }
+        let data = self.data.as_ref()?;
+        let sub_workflow_id = data.get("sub_workflow_id")?.as_str()?.to_owned();
+        let sub_workflow_summary: SubWorkflowSummary =
+            serde_json::from_value(data.get("sub_workflow_summary")?.clone()).ok()?;
+        Some(SubWorkflowError {
+            task_error: self.clone(),
+            sub_workflow_id,
+            sub_workflow_summary,
+        })
+    }
 }
 
 impl std::fmt::Display for TaskError {
@@ -393,6 +420,7 @@ pub struct SubWorkflowError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::task::result::TaskResult;
 
     #[test]
     fn builtin_code_tagged_serde() {
@@ -588,5 +616,73 @@ mod tests {
             json_value.get("task_error").is_none(),
             "task_error should be flattened, not nested"
         );
+    }
+
+    fn failed_summary() -> SubWorkflowSummary {
+        SubWorkflowSummary {
+            status: "FAILED".to_owned(),
+            is_success: false,
+            success_case: None,
+            output: None,
+            total_tasks: 3,
+            completed_tasks: 1,
+            failed_tasks: 1,
+            skipped_tasks: 1,
+            error_summary: Some("child task 'b' failed".to_owned()),
+            child_workflow_id: "wf-child-42".to_owned(),
+        }
+    }
+
+    #[test]
+    fn sub_workflow_details_reconstructs_from_data() {
+        // Mirrors how the engine persists a sub-workflow failure: a TaskError
+        // with code SUBWORKFLOW_FAILED carrying the id/summary in `data`.
+        let summary = failed_summary();
+        let err = TaskError {
+            error_code: Some(TaskErrorCode::User("SUBWORKFLOW_FAILED".to_owned())),
+            message: Some("child task 'b' failed".to_owned()),
+            cause: None,
+            data: Some(serde_json::json!({
+                "sub_workflow_id": summary.child_workflow_id,
+                "sub_workflow_summary": summary,
+            })),
+        };
+
+        let details = err.sub_workflow_details().expect("should reconstruct");
+        assert_eq!(details.sub_workflow_id, "wf-child-42");
+        assert_eq!(details.sub_workflow_summary.status, "FAILED");
+        assert_eq!(details.sub_workflow_summary.failed_tasks, 1);
+        assert!(!details.sub_workflow_summary.is_success);
+    }
+
+    #[test]
+    fn sub_workflow_details_survives_json_round_trip() {
+        let summary = failed_summary();
+        let err = TaskError {
+            error_code: Some(TaskErrorCode::User("SUBWORKFLOW_FAILED".to_owned())),
+            message: Some("child failed".to_owned()),
+            cause: None,
+            data: Some(serde_json::json!({
+                "sub_workflow_id": summary.child_workflow_id,
+                "sub_workflow_summary": summary,
+            })),
+        };
+        // Decode through the err slot, as handle.get() does.
+        let json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(err)).unwrap();
+        let decoded: TaskResult<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        let recovered = decoded.unwrap_err().sub_workflow_details().unwrap();
+        assert_eq!(recovered.sub_workflow_id, "wf-child-42");
+        assert_eq!(recovered.sub_workflow_summary.completed_tasks, 1);
+    }
+
+    #[test]
+    fn sub_workflow_details_none_for_plain_error() {
+        // Wrong error code → not a sub-workflow failure.
+        let err = TaskError::new("SOME_OTHER_ERROR", "nope");
+        assert!(err.sub_workflow_details().is_none());
+
+        // Right code but no data payload.
+        let bare = TaskError::new("SUBWORKFLOW_FAILED", "missing data");
+        assert!(bare.sub_workflow_details().is_none());
     }
 }

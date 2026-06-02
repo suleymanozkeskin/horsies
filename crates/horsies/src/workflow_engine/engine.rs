@@ -980,6 +980,31 @@ async fn enqueue_subworkflow_task(
 
 /// Called when a child workflow reaches a terminal state.
 ///
+/// Build the `SUBWORKFLOW_FAILED` error for a failed child workflow.
+///
+/// Carries the child's `sub_workflow_id` and full `sub_workflow_summary` in
+/// `data` so [`TaskError::sub_workflow_details`] can reconstruct the typed
+/// `SubWorkflowError` at any error surface (including `WorkflowHandle::get`).
+/// `get_workflow_failure_error` re-serializes the whole error, so `data`
+/// propagates to the workflow-level error column intact.
+fn subworkflow_failed_error(summary: &SubWorkflowSummary) -> crate::core::TaskError {
+    crate::core::TaskError {
+        error_code: Some(crate::core::TaskErrorCode::User("SUBWORKFLOW_FAILED".to_owned())),
+        message: Some(
+            summary
+                .error_summary
+                .as_deref()
+                .unwrap_or("sub-workflow failed")
+                .to_owned(),
+        ),
+        cause: None,
+        data: Some(serde_json::json!({
+            "sub_workflow_id": summary.child_workflow_id,
+            "sub_workflow_summary": summary,
+        })),
+    }
+}
+
 /// Builds a SubWorkflowSummary, updates the parent workflow_task,
 /// and triggers dependent processing on the parent.
 pub async fn on_subworkflow_complete(
@@ -1082,13 +1107,7 @@ pub async fn on_subworkflow_complete(
             }
         }
     } else {
-        let err = TaskError::new(
-            "SUBWORKFLOW_FAILED",
-            summary
-                .error_summary
-                .as_deref()
-                .unwrap_or("sub-workflow failed"),
-        );
+        let err = subworkflow_failed_error(&summary);
         let wrapped = TaskResult::<serde_json::Value>::Err(err);
         serde_json::to_string(&wrapped)?
     };
@@ -1112,13 +1131,7 @@ pub async fn on_subworkflow_complete(
         }
         row.is_some()
     } else {
-        let error_json = serde_json::to_string(&TaskError::new(
-            "SUBWORKFLOW_FAILED",
-            summary
-                .error_summary
-                .as_deref()
-                .unwrap_or("sub-workflow failed"),
-        ))?;
+        let error_json = serde_json::to_string(&subworkflow_failed_error(&summary))?;
 
         let row: Option<IdRow> = sqlx::query_as(UPDATE_SUBWORKFLOW_FAILED_SQL)
             .bind(&result_json)
@@ -1159,13 +1172,7 @@ pub async fn on_subworkflow_complete(
                 .fetch_one(pool)
                 .await?;
 
-        let error_json = serde_json::to_string(&TaskError::new(
-            "SUBWORKFLOW_FAILED",
-            summary
-                .error_summary
-                .as_deref()
-                .unwrap_or("sub-workflow failed"),
-        ))?;
+        let error_json = serde_json::to_string(&subworkflow_failed_error(&summary))?;
 
         let should_continue = handle_workflow_task_failure(
             pool,
