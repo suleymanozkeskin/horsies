@@ -107,6 +107,7 @@ export default defineConfig({
 					label: 'Monitoring',
 					items: [
 						{ label: 'Syce Overview', slug: 'monitoring/syce-overview' },
+						{ label: 'Worker & Database Health', slug: 'monitoring/worker-health' },
 						{ label: 'Broker Methods', slug: 'monitoring/broker-methods' },
 					],
 				},

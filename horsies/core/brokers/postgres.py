@@ -1,6 +1,6 @@
 # app/core/brokers/postgres.py
 from __future__ import annotations
-import asyncio, hashlib, contextlib, random, threading
+import asyncio, hashlib, contextlib, random, threading, uuid
 from typing import Any, Optional, TYPE_CHECKING
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine, async_sessionmaker
@@ -22,8 +22,16 @@ from horsies.core.models.workflow_pg import (
 )
 from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.types.result import Err, Ok, is_err
-from horsies.core.codec.json_io import loads_json
+from horsies.core.codec.json_io import loads_json, dumps_json
 from horsies.core.models.tasks import TaskInfo, TaskAttemptInfo
+from horsies.core.models.health import (
+    WORKER_PING_CHANNEL,
+    DatabasePing,
+    WorkerPong,
+    WorkerPongPayload,
+    WorkerPingRequest,
+    WorkerStateSnapshot,
+)
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.utils.loop_runner import LoopRunner
 from horsies.core.utils.url import to_psycopg_url
@@ -170,26 +178,56 @@ GET_STALE_TASKS_SQL = text("""
     ORDER BY hb.last_heartbeat NULLS FIRST
 """)
 
-GET_WORKER_STATS_SQL = text("""
+# Latest snapshot per worker (includes idle workers). The retired
+# get_worker_stats only saw workers with RUNNING tasks; this reads the
+# worker-states timeseries instead. DISTINCT ON keeps the newest row per
+# worker_id.
+_WORKER_STATE_COLUMNS = """
+        worker_id,
+        snapshot_at,
+        hostname,
+        pid,
+        processes,
+        max_claim_batch,
+        max_claim_per_worker,
+        cluster_wide_cap,
+        queues,
+        queue_priorities,
+        queue_max_concurrency,
+        recovery_config,
+        tasks_running,
+        tasks_claimed,
+        memory_usage_mb,
+        memory_percent,
+        cpu_percent,
+        worker_started_at
+"""
+
+LIST_WORKER_STATES_SQL = text(f"""
+    SELECT DISTINCT ON (worker_id)
+{_WORKER_STATE_COLUMNS}
+    FROM horsies_worker_states
+    ORDER BY worker_id, snapshot_at DESC
+""")
+
+GET_WORKER_STATE_LATEST_SQL = text(f"""
     SELECT
-        t.worker_hostname,
-        t.worker_pid,
-        t.worker_process_name,
-        COUNT(*) AS active_tasks,
-        MIN(t.started_at) AS oldest_task_start,
-        MAX(hb.last_heartbeat) AS latest_heartbeat
-    FROM horsies_tasks t
-    LEFT JOIN LATERAL (
-        SELECT sent_at AS last_heartbeat
-        FROM horsies_heartbeats h
-        WHERE h.task_id = t.id AND h.role = 'runner'
-        ORDER BY sent_at DESC
-        LIMIT 1
-    ) hb ON TRUE
-    WHERE t.status = 'RUNNING'
-      AND t.worker_hostname IS NOT NULL
-    GROUP BY t.worker_hostname, t.worker_pid, t.worker_process_name
-    ORDER BY active_tasks DESC
+{_WORKER_STATE_COLUMNS}
+    FROM horsies_worker_states
+    WHERE worker_id = :worker_id
+    ORDER BY snapshot_at DESC
+    LIMIT 1
+""")
+
+# History for a single worker, newest first. ``:limit`` of NULL returns all
+# retained rows; callers pass an explicit cap to bound the fetch.
+GET_WORKER_STATE_HISTORY_SQL = text(f"""
+    SELECT
+{_WORKER_STATE_COLUMNS}
+    FROM horsies_worker_states
+    WHERE worker_id = :worker_id
+    ORDER BY snapshot_at DESC
+    LIMIT :limit
 """)
 
 GET_EXPIRED_TASKS_SQL = text("""
@@ -1147,17 +1185,284 @@ class PostgresBroker:
                 exc,
             )
 
-    async def get_worker_stats(self) -> BrokerResult[list[dict[str, Any]]]:
-        """Gather statistics about active worker processes."""
+    async def ping_database_async(self) -> BrokerResult[DatabasePing]:
+        """Probe Postgres reachability with ``SELECT 1`` through the live pool.
+
+        Goes through the broker's own pool (not an isolated engine), so a
+        success also confirms a connection could be checked out. Returns the
+        measured round-trip latency.
+        """
+        loop = asyncio.get_running_loop()
+        try:
+            start = loop.time()
+            async with self.session_factory() as session:
+                await session.execute(text('SELECT 1'))
+            latency_ms = (loop.time() - start) * 1000.0
+            return Ok(DatabasePing(latency_ms=latency_ms))
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.DB_PING_FAILED,
+                f'ping_database failed: {exc}',
+                exc,
+            )
+
+    async def ping_workers_async(
+        self,
+        *,
+        target_worker_id: str | None = None,
+        timeout_seconds: float = 2.0,
+    ) -> BrokerResult[list[WorkerPong]]:
+        """Active ping-pong: NOTIFY workers and collect replies within a window.
+
+        Subscribes to a unique reply channel, broadcasts a ping on
+        ``WORKER_PING_CHANNEL``, then collects pongs until ``timeout_seconds``
+        elapses (broadcast) or the targeted worker replies (single target).
+
+        A pong proves the replying worker's event loop is responsive *and*
+        that it can reach Postgres. Workers present in
+        ``list_worker_states_async`` but absent here are non-responsive.
+        """
+        if timeout_seconds <= 0:
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.WORKER_PING_FAILED,
+                    message=f'timeout_seconds must be positive, got {timeout_seconds}',
+                    retryable=False,
+                )
+            )
+
+        correlation_id = uuid.uuid4().hex
+        reply_channel = f'horsies_worker_pong_{correlation_id}'
+
+        # The `listener` property raises if the broker has no listener
+        # (assume_initialized), and listen() raises on cross-loop misuse.
+        # Convert both to an Err so the Result contract holds on every path.
+        try:
+            listen_r = await self.listener.listen(reply_channel)
+        except RuntimeError as exc:
+            return _broker_err(
+                BrokerErrorCode.WORKER_PING_FAILED,
+                f'ping_workers listener unavailable: {exc}',
+                exc,
+            )
+        if is_err(listen_r):
+            err = listen_r.err_value
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.WORKER_PING_FAILED,
+                    message=f'ping_workers reply subscribe failed: {err.message}',
+                    retryable=err.retryable,
+                    exception=err.exception,
+                )
+            )
+        queue = listen_r.ok_value
+
+        try:
+            request = WorkerPingRequest(
+                correlation_id=correlation_id,
+                reply_channel=reply_channel,
+                target_worker_id=target_worker_id,
+            )
+            payload_r = dumps_json(request.model_dump())
+            if is_err(payload_r):
+                return Err(
+                    BrokerOperationError(
+                        code=BrokerErrorCode.WORKER_PING_FAILED,
+                        message=f'ping_workers payload encode failed: {payload_r.err_value}',
+                        retryable=False,
+                    )
+                )
+            payload = payload_r.ok_value
+
+            loop = asyncio.get_running_loop()
+            async with self.session_factory() as session:
+                await session.execute(
+                    text('SELECT pg_notify(:ch, :p)'),
+                    {'ch': WORKER_PING_CHANNEL, 'p': payload},
+                )
+                await session.commit()
+            sent_at = loop.time()
+
+            pongs: list[WorkerPong] = []
+            deadline = sent_at + timeout_seconds
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                try:
+                    notify = await asyncio.wait_for(queue.get(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    break
+                pong = self._decode_pong(
+                    notify.payload, correlation_id, loop.time() - sent_at
+                )
+                if pong is None:
+                    continue
+                pongs.append(pong)
+                if target_worker_id is not None and pong.worker_id == target_worker_id:
+                    break
+            return Ok(pongs)
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.WORKER_PING_FAILED,
+                f'ping_workers failed: {exc}',
+                exc,
+            )
+        finally:
+            await self._unsubscribe_ping_safely(reply_channel, queue)
+
+    async def _unsubscribe_ping_safely(
+        self, channel: str, q: asyncio.Queue[Any]
+    ) -> None:
+        """Ensure reply-channel unsubscribe completes even under repeated cancellation.
+
+        Mirrors ``_unsubscribe_task_done_safely``: shields the unsubscribe so a
+        cancelled ``ping_workers_async`` does not leak the server-side LISTEN,
+        suppresses the cross-loop RuntimeError, and re-raises cancellation only
+        after cleanup finishes.
+        """
+        unsubscribe_task = asyncio.create_task(self.listener.unsubscribe(channel, q))
+        cancelled_during_cleanup = False
+        while not unsubscribe_task.done():
+            try:
+                await asyncio.shield(unsubscribe_task)
+            except asyncio.CancelledError:
+                cancelled_during_cleanup = True
+                continue
+        with contextlib.suppress(RuntimeError):
+            await unsubscribe_task
+        if cancelled_during_cleanup:
+            raise asyncio.CancelledError
+
+    def _decode_pong(
+        self,
+        raw_payload: str,
+        correlation_id: str,
+        elapsed_seconds: float,
+    ) -> WorkerPong | None:
+        """Decode a pong notification, discarding malformed or mismatched replies."""
+        parsed = loads_json(raw_payload)
+        if is_err(parsed):
+            self.logger.warning(
+                'Discarding unparseable pong payload: %s', parsed.err_value
+            )
+            return None
+        body = parsed.ok_value
+        if not isinstance(body, dict):
+            return None
+        try:
+            payload = WorkerPongPayload.model_validate(body)
+        except Exception as exc:
+            self.logger.warning('Discarding invalid pong payload: %s', exc)
+            return None
+        if payload.correlation_id != correlation_id:
+            return None
+        return WorkerPong(
+            worker_id=payload.worker_id,
+            hostname=payload.hostname,
+            pid=payload.pid,
+            round_trip_ms=elapsed_seconds * 1000.0,
+        )
+
+    @staticmethod
+    def _row_to_worker_snapshot(row: Any) -> WorkerStateSnapshot:
+        """Map a worker-states row to a typed snapshot."""
+        m = row._mapping
+        return WorkerStateSnapshot(
+            worker_id=m['worker_id'],
+            snapshot_at=m['snapshot_at'],
+            hostname=m['hostname'],
+            pid=m['pid'],
+            processes=m['processes'],
+            max_claim_batch=m['max_claim_batch'],
+            max_claim_per_worker=m['max_claim_per_worker'],
+            cluster_wide_cap=m['cluster_wide_cap'],
+            queues=list(m['queues']),
+            queue_priorities=m['queue_priorities'],
+            queue_max_concurrency=m['queue_max_concurrency'],
+            recovery_config=m['recovery_config'],
+            tasks_running=m['tasks_running'],
+            tasks_claimed=m['tasks_claimed'],
+            memory_usage_mb=m['memory_usage_mb'],
+            memory_percent=m['memory_percent'],
+            cpu_percent=m['cpu_percent'],
+            worker_started_at=m['worker_started_at'],
+        )
+
+    async def list_worker_states_async(self) -> BrokerResult[list[WorkerStateSnapshot]]:
+        """Latest state snapshot per worker, including idle workers.
+
+        Unlike the retired ``get_worker_stats`` (RUNNING tasks only), this
+        reads ``horsies_worker_states`` so every worker that has reported a
+        snapshot appears, regardless of current load.
+        """
         try:
             async with self.session_factory() as session:
-                result = await session.execute(GET_WORKER_STATS_SQL)
-                columns = result.keys()
-                return Ok([dict(zip(columns, row)) for row in result.fetchall()])
+                result = await session.execute(LIST_WORKER_STATES_SQL)
+                return Ok(
+                    [self._row_to_worker_snapshot(row) for row in result.fetchall()]
+                )
         except Exception as exc:
             return _broker_err(
                 BrokerErrorCode.MONITORING_QUERY_FAILED,
-                f'get_worker_stats failed: {exc}',
+                f'list_worker_states failed: {exc}',
+                exc,
+            )
+
+    async def get_worker_state_async(
+        self,
+        worker_id: str,
+    ) -> BrokerResult[WorkerStateSnapshot | None]:
+        """Latest state snapshot for one worker, or ``None`` if unknown."""
+        try:
+            async with self.session_factory() as session:
+                result = await session.execute(
+                    GET_WORKER_STATE_LATEST_SQL,
+                    {'worker_id': worker_id},
+                )
+                row = result.fetchone()
+                if row is None:
+                    return Ok(None)
+                return Ok(self._row_to_worker_snapshot(row))
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.MONITORING_QUERY_FAILED,
+                f'get_worker_state failed: {exc}',
+                exc,
+            )
+
+    async def get_worker_state_history_async(
+        self,
+        worker_id: str,
+        *,
+        limit: int | None = None,
+    ) -> BrokerResult[list[WorkerStateSnapshot]]:
+        """Timeseries snapshots for one worker, newest first.
+
+        ``limit`` of ``None`` returns all retained rows; pass an explicit cap
+        to bound the fetch (the table grows ~1 row per worker per interval).
+        """
+        if limit is not None and limit <= 0:
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.MONITORING_QUERY_FAILED,
+                    message=f'limit must be positive when set, got {limit}',
+                    retryable=False,
+                )
+            )
+        try:
+            async with self.session_factory() as session:
+                result = await session.execute(
+                    GET_WORKER_STATE_HISTORY_SQL,
+                    {'worker_id': worker_id, 'limit': limit},
+                )
+                return Ok(
+                    [self._row_to_worker_snapshot(row) for row in result.fetchall()]
+                )
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.MONITORING_QUERY_FAILED,
+                f'get_worker_state_history failed: {exc}',
                 exc,
             )
 

@@ -1,15 +1,46 @@
 ---
 title: Changelog
-summary: Notable changes per release. 0.1.3 adds CronSchedule; 0.1.2 is a breaking release headlined by the strict-serde redesign.
-related: [./migrations/migration-to-0-1-2, ./internals/serialization, ./scheduling/schedule-patterns]
-tags: [changelog, releases, breaking-changes, 0.1.3, 0.1.2]
+summary: Notable changes per release. 0.1.4 adds the worker & database health API; 0.1.3 adds CronSchedule; 0.1.2 is a breaking release headlined by the strict-serde redesign.
+related: [./monitoring/worker-health, ./migrations/migration-to-0-1-2, ./internals/serialization]
+tags: [changelog, releases, breaking-changes, 0.1.4, 0.1.3, 0.1.2]
 ---
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 horsies is pre-1.0: breaking changes may land in minor or patch releases, and
 there is no migration contract between pre-1.0 versions.
 
-## 0.1.3 — Unreleased
+## 0.1.4 — Unreleased
+
+0.1.4 adds a typed worker & database health API: active ping-pong liveness for
+workers, a database reachability probe, and typed reads over the worker-state
+timeseries (including idle workers). It retires the untyped `get_worker_stats`.
+
+### Added
+
+- Database reachability probe: `app.ping_database_async()` / `ping_database()`
+  run `SELECT 1` through the live broker pool and return
+  `BrokerResult[DatabasePing]` with measured round-trip latency. Callable from a
+  running event loop.
+- Active worker ping-pong: `app.ping_workers_async(target_worker_id=None,
+  timeout_seconds=2.0)` / `ping_workers()` broadcast a ping over LISTEN/NOTIFY
+  and collect `WorkerPong` replies within the window. A reply proves the
+  worker's event loop is responsive and that it can reach Postgres. Pass
+  `target_worker_id` to probe one worker.
+- Typed worker-state reads over the `horsies_worker_states` timeseries:
+  `app.list_worker_states_async()` (latest snapshot per worker, including idle
+  workers), `get_worker_state_async(worker_id)`, and
+  `get_worker_state_history_async(worker_id, limit=None)` returning
+  `WorkerStateSnapshot`. See [Worker & Database Health](/monitoring/worker-health/).
+- New exports: `DatabasePing`, `WorkerPong`, `WorkerStateSnapshot`.
+- New broker error codes: `DB_PING_FAILED`, `WORKER_PING_FAILED`.
+
+### Removed
+
+- `broker.get_worker_stats()` (untyped `list[dict]`, RUNNING-tasks only, missed
+  idle workers). Use `app.list_worker_states_async()` — typed and inclusive of
+  idle workers.
+
+## 0.1.3 — 2026-05-31
 
 0.1.3 adds `CronSchedule`, a typed 5-field cron-style schedule pattern. It brings
 wall-clock alignment and minute-offset load staggering that `IntervalSchedule`

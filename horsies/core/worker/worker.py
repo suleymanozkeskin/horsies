@@ -24,7 +24,13 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.codec.json_io import (
     loads_json,
+    dumps_json,
     SerializationError,
+)
+from horsies.core.models.health import (
+    WORKER_PING_CHANNEL,
+    WorkerPingRequest,
+    WorkerPongPayload,
 )
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.typed import (
@@ -208,6 +214,7 @@ class Worker:
         self._executor: Optional[ProcessPoolExecutor] = None
         self._executor_restart_lock = asyncio.Lock()
         self._stop = asyncio.Event()
+        self._ping_queue: asyncio.Queue[Any] | None = None
         self._service_tasks: set[asyncio.Task[Any]] = set()
         self._finalizer_tasks: set[asyncio.Task[Any]] = set()
         self._finalize_retry_attempts: dict[tuple[str, str], int] = {}
@@ -308,6 +315,16 @@ class Worker:
             return
 
     async def _cleanup_after_failed_start(self) -> None:
+        # Cancel any background loops spawned before the failure so a retry
+        # starts clean instead of leaking orphans and spawning duplicates.
+        # _stop is left unset: the resilience loop must be free to retry.
+        if self._service_tasks:
+            service_tasks = tuple(self._service_tasks)
+            for task in service_tasks:
+                task.cancel()
+            await asyncio.gather(*service_tasks, return_exceptions=True)
+            self._service_tasks.clear()
+
         try:
             await self.listener.close()
         except Exception as e:
@@ -411,6 +428,22 @@ class Worker:
             self._global = all_queues[-1]
             logger.info(f'Subscribed to queues: {self.cfg.queues} + global')
 
+            # Subscribe to the shared ping channel on a dedicated queue (kept
+            # separate from task-dispatch queues so pings are never drained by
+            # the claim loop). Done BEFORE spawning any background loop so a
+            # subscription failure cannot orphan already-running loops.
+            ping_listen_r = await self.listener.listen(WORKER_PING_CHANNEL)
+            if is_err(ping_listen_r):
+                err = ping_listen_r.err_value
+                logger.error(
+                    'Failed to subscribe to worker ping channel %r: %s',
+                    WORKER_PING_CHANNEL,
+                    err.message,
+                )
+                raise err.exception or RuntimeError(err.message)
+            self._ping_queue = ping_listen_r.ok_value
+            logger.info('Subscribed to worker ping channel')
+
             # Create the process pool only after listener startup/subscription succeeds.
             self._executor = self._create_executor()
 
@@ -425,6 +458,9 @@ class Worker:
                 name='worker-state-heartbeat',
             )
             logger.info('Worker state heartbeat loop started for monitoring')
+            # Serve liveness pings from a background loop.
+            self._spawn_background(self._ping_responder_loop(), name='ping-responder')
+            logger.info('Ping responder loop started for liveness probes')
             # Start reaper loop for automatic stale task handling
             if self.cfg.recovery_config:
                 self._spawn_background(self._reaper_loop(), name='reaper')
@@ -2164,6 +2200,63 @@ class Worker:
                 await asyncio.sleep(claimer_heartbeat_interval_ms / 1000.0)
         except asyncio.CancelledError:
             return
+
+    async def _ping_responder_loop(self) -> None:
+        """Serve liveness pings: reply on the request's reply channel.
+
+        A reply proves this worker's event loop is responsive and that it can
+        reach Postgres (the pong travels through ``self.sf()``).
+        """
+        if self._ping_queue is None:
+            return
+        try:
+            while not self._stop.is_set():
+                notify = await self._ping_queue.get()
+                try:
+                    await self._handle_ping(notify.payload)
+                except Exception as e:
+                    logger.error(f'Ping responder error: {e}')
+        except asyncio.CancelledError:
+            return
+
+    async def _handle_ping(self, raw_payload: str) -> None:
+        """Decode a ping and reply when broadcast or addressed to this worker."""
+        parsed = loads_json(raw_payload)
+        if is_err(parsed):
+            logger.warning('Discarding unparseable ping payload: %s', parsed.err_value)
+            return
+        body = parsed.ok_value
+        if not isinstance(body, dict):
+            return
+        try:
+            request = WorkerPingRequest.model_validate(body)
+        except ValidationError as e:
+            logger.warning('Discarding invalid ping payload: %s', e)
+            return
+
+        if (
+            request.target_worker_id is not None
+            and request.target_worker_id != self.worker_instance_id
+        ):
+            return  # Addressed to a different worker.
+
+        pong = WorkerPongPayload(
+            correlation_id=request.correlation_id,
+            worker_id=self.worker_instance_id,
+            hostname=socket.gethostname(),
+            pid=os.getpid(),
+        )
+        payload_r = dumps_json(pong.model_dump())
+        if is_err(payload_r):
+            logger.error('Failed to encode pong payload: %s', payload_r.err_value)
+            return
+
+        async with self.sf() as s:
+            await s.execute(
+                text('SELECT pg_notify(:ch, :p)'),
+                {'ch': request.reply_channel, 'p': payload_r.ok_value},
+            )
+            await s.commit()
 
     async def _update_worker_state(self) -> None:
         """Update worker state snapshot in database for monitoring."""

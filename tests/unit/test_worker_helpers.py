@@ -3424,3 +3424,118 @@ class TestClaimAndDispatchBranches:
         count = await worker._count_running_in_queue('some_queue')
 
         assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# Ping responder: _handle_ping
+# ---------------------------------------------------------------------------
+
+
+def _ping_session(worker: Worker) -> AsyncMock:
+    """Attach a mock session to the worker and return it for assertions."""
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.execute = AsyncMock()
+    session.commit = AsyncMock()
+    worker.sf = MagicMock(return_value=session)
+    return session
+
+
+def _encode_ping(
+    *,
+    reply_channel: str,
+    target_worker_id: str | None,
+    correlation_id: str = 'corr-1',
+) -> str:
+    from horsies.core.codec.json_io import dumps_json
+    from horsies.core.models.health import WorkerPingRequest
+
+    req = WorkerPingRequest(
+        correlation_id=correlation_id,
+        reply_channel=reply_channel,
+        target_worker_id=target_worker_id,
+    )
+    return dumps_json(req.model_dump()).ok_value
+
+
+@pytest.mark.unit
+class TestFailedStartCleanup:
+    """A failed start must not leak background loops into a retry."""
+
+    @pytest.mark.asyncio
+    async def test_cleanup_cancels_service_tasks(self) -> None:
+        """_cleanup_after_failed_start cancels spawned loops and clears the set."""
+        worker = _make_worker()
+        worker.listener.close = AsyncMock()
+
+        async def _never() -> None:
+            await asyncio.sleep(3600)
+
+        task = worker._spawn_background(_never(), name='dummy-loop')
+        assert worker._service_tasks  # spawned
+
+        await worker._cleanup_after_failed_start()
+
+        assert task.cancelled()
+        assert worker._service_tasks == set()
+        # _stop stays unset so the resilience loop is free to retry.
+        assert not worker._stop.is_set()
+
+
+@pytest.mark.unit
+class TestHandlePing:
+    """Worker replies on broadcast / matching target and stays silent otherwise."""
+
+    @pytest.mark.asyncio
+    async def test_broadcast_replies_with_pong(self) -> None:
+        from horsies.core.codec.json_io import loads_json
+        from horsies.core.models.health import WorkerPongPayload
+
+        worker = _make_worker()
+        session = _ping_session(worker)
+        payload = _encode_ping(reply_channel='reply-ch', target_worker_id=None)
+
+        await worker._handle_ping(payload)
+
+        session.execute.assert_awaited_once()
+        _, kwargs = session.execute.call_args
+        params = kwargs if kwargs else session.execute.call_args.args[1]
+        assert params['ch'] == 'reply-ch'
+        pong = WorkerPongPayload.model_validate(loads_json(params['p']).ok_value)
+        assert pong.correlation_id == 'corr-1'
+        assert pong.worker_id == worker.worker_instance_id
+
+    @pytest.mark.asyncio
+    async def test_matching_target_replies(self) -> None:
+        worker = _make_worker()
+        session = _ping_session(worker)
+        payload = _encode_ping(
+            reply_channel='reply-ch', target_worker_id=worker.worker_instance_id
+        )
+
+        await worker._handle_ping(payload)
+
+        session.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_other_target_stays_silent(self) -> None:
+        worker = _make_worker()
+        session = _ping_session(worker)
+        payload = _encode_ping(
+            reply_channel='reply-ch', target_worker_id='someone-else'
+        )
+
+        await worker._handle_ping(payload)
+
+        session.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_malformed_payload_is_dropped(self) -> None:
+        worker = _make_worker()
+        session = _ping_session(worker)
+
+        await worker._handle_ping('not json')
+        await worker._handle_ping('{"correlation_id": "c"}')  # missing reply_channel
+
+        session.execute.assert_not_awaited()

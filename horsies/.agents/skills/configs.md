@@ -102,7 +102,9 @@ info = await broker.get_task_info_async("task-uuid", include_result=True)
 info = broker.get_task_info("task-uuid", include_result=True)  # sync
 ```
 
-**Monitoring** (async only): `get_stale_tasks()`, `get_worker_stats()`, `get_expired_tasks()`, `mark_stale_tasks_as_failed()`, `requeue_stale_claimed()`. See website docs `monitoring/broker-methods` for full signatures.
+**Monitoring** (async only): `get_stale_tasks()`, `get_expired_tasks()`, `mark_stale_tasks_as_failed()`, `requeue_stale_claimed()`. See website docs `monitoring/broker-methods` for full signatures.
+
+**Health/liveness** (app, async + sync): `ping_database_async()` (DatabasePing latency), `ping_workers_async(target_worker_id=None, timeout_seconds=2.0)` (list[WorkerPong] — active ping-pong), `list_worker_states_async()` / `get_worker_state_async(worker_id)` / `get_worker_state_history_async(worker_id, limit=None)` (WorkerStateSnapshot, includes idle workers). Replaces the retired `get_worker_stats()`. See website docs `monitoring/worker-health`.
 
 ## PostgresConfig
 

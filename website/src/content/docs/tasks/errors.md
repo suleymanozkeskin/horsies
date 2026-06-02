@@ -93,7 +93,9 @@ Terminal outcome codes for tasks and workflows.
 | `ENQUEUE_FAILED` | Enqueue or schedule path failed | Yes when the underlying broker error is retryable |
 | `PAYLOAD_MISMATCH` | Retry payload SHA does not match the original enqueue payload | No |
 | `TASK_INFO_QUERY_FAILED` | Task-info or raw-result query failed | Varies |
-| `MONITORING_QUERY_FAILED` | Monitoring query failed | Varies |
+| `MONITORING_QUERY_FAILED` | Monitoring or worker-state query failed | Varies |
+| `DB_PING_FAILED` | `ping_database` reachability probe failed | Varies |
+| `WORKER_PING_FAILED` | `ping_workers` failed (listener unavailable, bad timeout) | No |
 | `CLEANUP_FAILED` | Cleanup or retention operation failed | Varies |
 | `CLOSE_FAILED` | Broker close failed | Varies |
 | `LISTENER_START_FAILED` | LISTEN/NOTIFY listener failed to start | No |
