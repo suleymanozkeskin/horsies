@@ -1044,7 +1044,7 @@ class TestGetRawResultRecordAsync:
 
 @pytest.mark.unit
 class TestMonitoringQueries:
-    """Tests for get_stale_tasks, get_worker_stats, get_expired_tasks."""
+    """Tests for get_stale_tasks, get_expired_tasks."""
 
     def _setup_session_with_rows(
         self,
@@ -1099,25 +1099,6 @@ class TestMonitoringQueries:
         assert result.ok_value == []
 
     @pytest.mark.asyncio
-    async def test_get_worker_stats_returns_list_of_dicts(self) -> None:
-        """get_worker_stats should return Ok(dicts) keyed by column names."""
-        broker = _make_broker()
-        columns = [
-            'worker_hostname',
-            'worker_pid',
-            'worker_process_name',
-            'active_tasks',
-        ]
-        rows = [('host-1', 1234, 'worker-0', 3)]
-        self._setup_session_with_rows(broker, columns, rows)
-
-        result = await broker.get_worker_stats()
-
-        assert is_ok(result)
-        assert len(result.ok_value) == 1
-        assert result.ok_value[0]['active_tasks'] == 3
-
-    @pytest.mark.asyncio
     async def test_get_expired_tasks_returns_list_of_dicts(self) -> None:
         """get_expired_tasks should return Ok(dicts) keyed by column names."""
         broker = _make_broker()
@@ -1139,6 +1120,224 @@ class TestMonitoringQueries:
         assert is_ok(result)
         assert len(result.ok_value) == 1
         assert result.ok_value[0]['task_name'] == 'slow_task'
+
+
+# ---------------------------------------------------------------------------
+# TestHealthApi
+# ---------------------------------------------------------------------------
+
+
+def _worker_state_row(**overrides: Any) -> Any:
+    """Build a fake worker-states row exposing ``_mapping`` like SQLAlchemy."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    mapping: dict[str, Any] = {
+        'worker_id': 'worker-1',
+        'snapshot_at': now,
+        'hostname': 'host-1',
+        'pid': 1234,
+        'processes': 4,
+        'max_claim_batch': 10,
+        'max_claim_per_worker': 4,
+        'cluster_wide_cap': None,
+        'queues': ['default'],
+        'queue_priorities': None,
+        'queue_max_concurrency': None,
+        'recovery_config': None,
+        'tasks_running': 2,
+        'tasks_claimed': 1,
+        'memory_usage_mb': 12.5,
+        'memory_percent': 0.5,
+        'cpu_percent': 3.0,
+        'worker_started_at': now,
+    }
+    mapping.update(overrides)
+    return SimpleNamespace(_mapping=mapping)
+
+
+def _setup_session_returning(
+    broker: Any,
+    *,
+    fetchall: list[Any] | None = None,
+    fetchone: Any = None,
+) -> AsyncMock:
+    """Configure broker.session_factory to return a result with given rows."""
+    mock_result = MagicMock()
+    mock_result.fetchall.return_value = fetchall if fetchall is not None else []
+    mock_result.fetchone.return_value = fetchone
+
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.execute = AsyncMock(return_value=mock_result)
+    session.commit = AsyncMock()
+    broker.session_factory = MagicMock(return_value=session)
+    return session
+
+
+@pytest.mark.unit
+class TestPingDatabase:
+    """ping_database_async: latency on success, typed error on failure."""
+
+    @pytest.mark.asyncio
+    async def test_returns_latency_on_success(self) -> None:
+        broker = _make_broker()
+        _setup_session_returning(broker)
+
+        result = await broker.ping_database_async()
+
+        assert is_ok(result)
+        assert result.ok_value.latency_ms >= 0.0
+
+    @pytest.mark.asyncio
+    async def test_returns_db_ping_failed_on_error(self) -> None:
+        broker = _make_broker()
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(side_effect=RuntimeError('connection refused'))
+        broker.session_factory = MagicMock(return_value=session)
+
+        result = await broker.ping_database_async()
+
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.DB_PING_FAILED
+
+
+@pytest.mark.unit
+class TestWorkerStateReads:
+    """list/get worker-state reads map rows to typed snapshots."""
+
+    @pytest.mark.asyncio
+    async def test_list_maps_rows_to_snapshots(self) -> None:
+        broker = _make_broker()
+        _setup_session_returning(
+            broker,
+            fetchall=[
+                _worker_state_row(worker_id='w1'),
+                _worker_state_row(worker_id='w2'),
+            ],
+        )
+
+        result = await broker.list_worker_states_async()
+
+        assert is_ok(result)
+        snaps = result.ok_value
+        assert [s.worker_id for s in snaps] == ['w1', 'w2']
+        assert snaps[0].tasks_running == 2
+        assert snaps[0].queues == ['default']
+
+    @pytest.mark.asyncio
+    async def test_get_returns_none_when_unknown(self) -> None:
+        broker = _make_broker()
+        _setup_session_returning(broker, fetchone=None)
+
+        result = await broker.get_worker_state_async('missing')
+
+        assert is_ok(result)
+        assert result.ok_value is None
+
+    @pytest.mark.asyncio
+    async def test_get_returns_snapshot(self) -> None:
+        broker = _make_broker()
+        _setup_session_returning(broker, fetchone=_worker_state_row(worker_id='w9'))
+
+        result = await broker.get_worker_state_async('w9')
+
+        assert is_ok(result)
+        assert result.ok_value is not None
+        assert result.ok_value.worker_id == 'w9'
+
+    @pytest.mark.asyncio
+    async def test_history_rejects_nonpositive_limit(self) -> None:
+        broker = _make_broker()
+
+        result = await broker.get_worker_state_history_async('w1', limit=0)
+
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.MONITORING_QUERY_FAILED
+        assert result.err_value.retryable is False
+
+    @pytest.mark.asyncio
+    async def test_history_returns_snapshots(self) -> None:
+        broker = _make_broker()
+        _setup_session_returning(
+            broker, fetchall=[_worker_state_row(), _worker_state_row()]
+        )
+
+        result = await broker.get_worker_state_history_async('worker-1', limit=10)
+
+        assert is_ok(result)
+        assert len(result.ok_value) == 2
+
+
+@pytest.mark.unit
+class TestPingWorkers:
+    """ping_workers_async validation and pong decoding."""
+
+    @pytest.mark.asyncio
+    async def test_rejects_nonpositive_timeout(self) -> None:
+        broker = _make_broker()
+
+        result = await broker.ping_workers_async(timeout_seconds=0)
+
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.WORKER_PING_FAILED
+
+    @pytest.mark.asyncio
+    async def test_disabled_listener_returns_err_not_raise(self) -> None:
+        """A broker with no listener must Err, not raise (Result contract)."""
+        from horsies.core.models.broker import PostgresConfig
+        from horsies.core.brokers.postgres import PostgresBroker
+
+        config = PostgresConfig(
+            database_url='postgresql+psycopg://u:p@localhost/db'
+        )
+        broker = PostgresBroker(config, assume_initialized=True)
+        assert broker._listener is None
+
+        result = await broker.ping_workers_async(timeout_seconds=1.0)
+
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.WORKER_PING_FAILED
+
+    def test_decode_pong_accepts_matching_correlation(self) -> None:
+        from horsies.core.codec.json_io import dumps_json
+        from horsies.core.models.health import WorkerPongPayload
+
+        broker = _make_broker()
+        payload = dumps_json(
+            WorkerPongPayload(
+                correlation_id='corr-1', worker_id='w1', hostname='h', pid=7
+            ).model_dump()
+        ).ok_value
+
+        pong = broker._decode_pong(payload, 'corr-1', 0.05)
+
+        assert pong is not None
+        assert pong.worker_id == 'w1'
+        assert pong.round_trip_ms == pytest.approx(50.0, abs=1.0)
+
+    def test_decode_pong_drops_mismatched_correlation(self) -> None:
+        from horsies.core.codec.json_io import dumps_json
+        from horsies.core.models.health import WorkerPongPayload
+
+        broker = _make_broker()
+        payload = dumps_json(
+            WorkerPongPayload(
+                correlation_id='other', worker_id='w1', hostname='h', pid=7
+            ).model_dump()
+        ).ok_value
+
+        assert broker._decode_pong(payload, 'corr-1', 0.05) is None
+
+    def test_decode_pong_drops_malformed_payload(self) -> None:
+        broker = _make_broker()
+        assert broker._decode_pong('not json', 'corr-1', 0.05) is None
+        assert (
+            broker._decode_pong('{"correlation_id": "corr-1"}', 'corr-1', 0.05) is None
+        )
 
 
 # ---------------------------------------------------------------------------

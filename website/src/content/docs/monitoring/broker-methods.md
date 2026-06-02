@@ -87,18 +87,9 @@ if is_ok(result):
         print(f"Task {task['id']} on {task['worker_hostname']} — last heartbeat: {task['last_heartbeat']}")
 ```
 
-### `get_worker_stats() -> BrokerResult[list[dict[str, Any]]]`
+### Worker health and load
 
-Group RUNNING tasks by worker to show load distribution and health.
-
-**Returns:** `Ok(list[dict])` with keys: `worker_hostname`, `worker_pid`, `worker_process_name`, `active_tasks`, `oldest_task_start`, `latest_heartbeat`.
-
-```python
-result = await broker.get_worker_stats()
-if is_ok(result):
-    for worker in result.ok_value:
-        print(f"{worker['worker_hostname']}:{worker['worker_pid']} — {worker['active_tasks']} active")
-```
+For per-worker load, configuration, and liveness, use the typed [Worker & Database Health](/monitoring/worker-health/) API (`app.list_worker_states_async`, `app.ping_workers_async`, `app.ping_database_async`). It reads the worker-state timeseries — so it includes idle workers — and returns typed `WorkerStateSnapshot` / `WorkerPong` models rather than raw dicts.
 
 ### `get_expired_tasks() -> BrokerResult[list[dict[str, Any]]]`
 

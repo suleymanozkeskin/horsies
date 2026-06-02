@@ -108,13 +108,20 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Err(BrokerOperationError): operation failed
 - Use is_ok(result) / is_err(result) type guards, then access ok_value/err_value
 - BrokerOperationError fields: code (BrokerErrorCode), message (str), retryable (bool), exception (BaseException | None)
-- BrokerErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, CLEANUP_FAILED, CLOSE_FAILED
+- BrokerErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, DB_PING_FAILED, WORKER_PING_FAILED, CLEANUP_FAILED, CLOSE_FAILED
 - retryable=True: transient (connection blip), retryable=False: permanent (schema drift, code bug)
 - Broker methods: enqueue_async -> BrokerResult[str], get_task_info_async -> BrokerResult[TaskInfo | None],
   ensure_schema_initialized -> BrokerResult[None], get_stale_tasks -> BrokerResult[list[dict]],
-  get_worker_stats -> BrokerResult[list[dict]], get_expired_tasks -> BrokerResult[list[dict]],
+  get_expired_tasks -> BrokerResult[list[dict]],
   mark_stale_tasks_as_failed -> BrokerResult[int], requeue_stale_claimed -> BrokerResult[int],
   close_async -> BrokerResult[None]
+- Health/liveness API (app-level, async + sync; broker exposes the async forms):
+  ping_database_async -> BrokerResult[DatabasePing] (SELECT 1 + latency via live pool),
+  ping_workers_async(target_worker_id=None, timeout_seconds=2.0) -> BrokerResult[list[WorkerPong]] (active LISTEN/NOTIFY ping-pong),
+  list_worker_states_async -> BrokerResult[list[WorkerStateSnapshot]] (latest per worker, includes idle workers),
+  get_worker_state_async(worker_id) -> BrokerResult[WorkerStateSnapshot | None],
+  get_worker_state_history_async(worker_id, limit=None) -> BrokerResult[list[WorkerStateSnapshot]]
+- get_worker_stats was removed in 0.1.4; use list_worker_states_async (typed, includes idle workers)
 - Note: get_result_async still returns TaskResult[T, TaskError] (task execution result, not broker infra)
 
 ### Result[T, E] (vendored Ok/Err type)
