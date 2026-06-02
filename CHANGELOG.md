@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0: breaking changes may land in minor or patch releases,
 and there is no migration contract between pre-1.0 versions.
 
+## [0.1.5] - Unreleased
+
+### Added
+
+- `ping_workers(min_responses=N)` / `ping_workers_async(min_responses=N)`:
+  return as soon as `N` distinct workers reply instead of waiting the full
+  `timeout_seconds`. `min_responses=1` is a fast fail-open liveness gate — a
+  healthy fleet answers in milliseconds; only a degraded fleet pays the
+  timeout. Removes the latency floor for high-frequency `/health` probes.
+  Pongs are de-duplicated by `worker_id`.
+
 ## [0.1.4] - Unreleased
 
 0.1.4 adds a typed worker & database health API: active ping-pong liveness for

@@ -1,13 +1,25 @@
 ---
 title: Changelog
-summary: Notable changes per release. 0.1.4 adds the worker & database health API; 0.1.3 adds CronSchedule; 0.1.2 is a breaking release headlined by the strict-serde redesign.
+summary: Notable changes per release. 0.1.5 adds ping_workers min_responses; 0.1.4 adds the worker & database health API; 0.1.3 adds CronSchedule; 0.1.2 is a breaking release headlined by the strict-serde redesign.
 related: [./monitoring/worker-health, ./migrations/migration-to-0-1-2, ./internals/serialization]
-tags: [changelog, releases, breaking-changes, 0.1.4, 0.1.3, 0.1.2]
+tags: [changelog, releases, breaking-changes, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
 ---
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 horsies is pre-1.0: breaking changes may land in minor or patch releases, and
 there is no migration contract between pre-1.0 versions.
+
+## 0.1.5 — Unreleased
+
+### Added
+
+- `ping_workers(min_responses=N)` / `ping_workers_async(min_responses=N)`:
+  return as soon as `N` distinct workers reply instead of waiting the full
+  `timeout_seconds`. `min_responses=1` is a fast fail-open liveness gate — a
+  healthy fleet answers in milliseconds; only a degraded fleet pays the
+  timeout. Removes the latency floor for high-frequency `/health` probes.
+  Pongs are de-duplicated by `worker_id`. See
+  [Worker & Database Health](/monitoring/worker-health/).
 
 ## 0.1.4 — Unreleased
 

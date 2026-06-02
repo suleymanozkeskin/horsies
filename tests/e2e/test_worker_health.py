@@ -70,6 +70,15 @@ async def test_ping_workers_reaches_real_worker(broker: PostgresBroker) -> None:
         assert pong.pid > 0
         assert pong.round_trip_ms >= 0.0
 
+        # Fast gate: min_responses=1 returns well before the timeout window.
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        gate = await broker.ping_workers_async(timeout_seconds=5.0, min_responses=1)
+        elapsed = loop.time() - start
+        assert is_ok(gate)
+        assert len(gate.ok_value) == 1
+        assert elapsed < 4.0, 'min_responses=1 should not wait the full window'
+
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
