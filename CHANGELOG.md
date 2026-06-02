@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0: breaking changes may land in minor or patch releases,
 and there is no migration contract between pre-1.0 versions.
 
-## [0.1.4] - Unreleased
+## [0.1.4] - 2026-06-02
 
 0.1.4 adds a typed worker & database health API: active ping-pong liveness for
 workers, a database reachability probe, and typed reads over the worker-state
