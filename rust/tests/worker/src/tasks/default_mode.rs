@@ -68,6 +68,10 @@ pub fn register(app: &mut Horsies) -> Result<(), Box<dyn std::error::Error>> {
         .register()?;
     register_child_label_workflow(app, &wf_child_label_task)?;
 
+    // Sub-workflow context reader + nested pipelines (layer-7 e2e matrix).
+    wf_subwf_ctx_reader::register(app)?;
+    register_nested_workflows(app)?;
+
     // Complex result + builtin error code.
     app.register_with_queue(
         "e2e_complex_result",

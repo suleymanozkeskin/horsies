@@ -5,8 +5,8 @@
 use serde::{Deserialize, Serialize};
 
 use horsies::{
-    task, Horsies, HorsiesError, TaskError, TaskFunction, TaskResult, WorkflowInput,
-    WorkflowSpec, WorkflowSpecBuilder,
+    task, Horsies, HorsiesError, NodeKey, SubWorkflowNode, TaskError, TaskFunction, TaskResult,
+    WorkflowInput, WorkflowSpec, WorkflowSpecBuilder,
 };
 
 // =============================================================================
@@ -759,6 +759,157 @@ pub(crate) fn register_child_label_workflow(
         "e2e_child_label_pipeline",
         "tests.e2e_child_label_pipeline.v1",
         move |params| build_child_label_workflow(&task, params),
+    )?;
+    Ok(())
+}
+
+// =============================================================================
+// Sub-workflow context reader (layer-7 e2e matrix)
+// =============================================================================
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SubwfCtxReaderInput {
+    #[serde(default)]
+    pub workflow_ctx: Option<horsies::WorkflowContext>,
+}
+
+/// Reads every sub-workflow read surface for the single upstream sub-workflow
+/// node injected into its context: `summary_for`, `output_for`, `result_for`.
+/// The reader declares `workflow_ctx_from = [child]`, so exactly one summary is
+/// present; it discovers that node_id from the context rather than hard-coding
+/// the `node_id:index` format.
+#[task("e2e_wf_subwf_ctx_reader", workflow_ctx)]
+pub async fn wf_subwf_ctx_reader(
+    input: SubwfCtxReaderInput,
+) -> Result<serde_json::Value, TaskError> {
+    let ctx = input
+        .workflow_ctx
+        .ok_or_else(|| TaskError::new("NO_CTX", "WorkflowContext not provided"))?;
+
+    let ctx_json = serde_json::to_value(&ctx).unwrap_or(serde_json::Value::Null);
+    let node_id = ctx_json
+        .get("summaries_by_id")
+        .and_then(|v| v.as_object())
+        .and_then(|m| m.keys().next().cloned())
+        .ok_or_else(|| TaskError::new("NO_SUMMARY", "no sub-workflow summary in context"))?;
+
+    let key: NodeKey<String> = NodeKey::new(node_id.clone());
+    let summary = ctx.summary_for(&key)?;
+    let output = ctx.output_for(&key)?;
+    let result = ctx.result_for(&key);
+    let result_is_ok = matches!(result, Ok(TaskResult::Ok(_)));
+
+    Ok(serde_json::json!({
+        "node_id": node_id,
+        "summary_status": summary.status,
+        "summary_failed_tasks": summary.failed_tasks,
+        "summary_completed_tasks": summary.completed_tasks,
+        "summary_is_success": summary.is_success,
+        "summary_child_workflow_id": summary.child_workflow_id,
+        "output": output,
+        "result_is_ok": result_is_ok,
+    }))
+}
+
+// =============================================================================
+// Nested sub-workflow pipelines (2-level nesting; layer-7 e2e matrix)
+// =============================================================================
+
+#[derive(Debug, Deserialize, Serialize, WorkflowInput, Clone)]
+pub struct NestedParentInput {
+    pub value: i64,
+    pub label: String,
+}
+
+/// Success path: `produce_int(value)` -> grandchild `e2e_child_label_pipeline`
+/// (label + produced int). Output is the grandchild's `"label=value"` string.
+/// Two sub-workflow levels below the top workflow.
+fn build_nested_parent_workflow(params: NestedParentInput) -> Result<WorkflowSpec, HorsiesError> {
+    let mut builder = WorkflowSpecBuilder::new("e2e_nested_parent_pipeline");
+    builder.definition_key("tests.e2e_nested_parent_pipeline.v1");
+    let produce = builder.task(
+        wf_produce_int::node()?
+            .node_id("n_produce")
+            .set_input(ProduceIntInput { value: params.value })?,
+    );
+    let grandchild = builder.sub_workflow(
+        SubWorkflowNode::<ChildLabelInput, String>::typed("e2e_child_label_pipeline")
+            .node_id("n_child")
+            .queue("default")
+            .set(ChildLabelInput::field_label(), params.label)?
+            .arg_from(ChildLabelInput::field_input_result(), produce),
+    );
+    builder.output(grandchild);
+    builder.build()
+}
+
+/// Failure path: `wf_fail_int` -> grandchild `e2e_child_label_pipeline`
+/// (allow_failed_deps), so the failed `TaskResult` flows into the grandchild,
+/// whose `wf_child_label` re-raises it. Failure surfaces at every level.
+fn build_nested_failing_workflow(params: NestedParentInput) -> Result<WorkflowSpec, HorsiesError> {
+    let mut builder = WorkflowSpecBuilder::new("e2e_nested_failing_pipeline");
+    builder.definition_key("tests.e2e_nested_failing_pipeline.v1");
+    let failing = builder.task(
+        wf_fail_int::node()?
+            .node_id("n_fail")
+            .set_input(FailInput {
+                error_code: "NESTED_INNER_FAIL".to_owned(),
+            })?,
+    );
+    let grandchild = builder.sub_workflow(
+        SubWorkflowNode::<ChildLabelInput, String>::typed("e2e_child_label_pipeline")
+            .node_id("n_child")
+            .queue("default")
+            .set(ChildLabelInput::field_label(), params.label)?
+            .arg_from(ChildLabelInput::field_input_result(), failing)
+            .allow_failed_deps(true),
+    );
+    builder.output(grandchild);
+    builder.build()
+}
+
+#[derive(Debug, Deserialize, Serialize, WorkflowInput, Clone)]
+pub struct FailingChildInput {
+    pub error_code: String,
+}
+
+/// A child workflow that always fails intrinsically (single `wf_fail` node), so
+/// a top-level sub-workflow node referencing it is the first/only failure —
+/// surfacing `SUBWORKFLOW_FAILED` at the parent rather than an upstream task's
+/// error.
+fn build_failing_child_workflow(
+    params: FailingChildInput,
+) -> Result<WorkflowSpec, HorsiesError> {
+    let mut builder = WorkflowSpecBuilder::new("e2e_child_failing_pipeline");
+    builder.definition_key("tests.e2e_child_failing_pipeline.v1");
+    let boom = builder.task(
+        wf_fail::node()?
+            .node_id("boom")
+            .set_input(FailInput {
+                error_code: params.error_code,
+            })?,
+    );
+    builder.output(boom);
+    builder.build()
+}
+
+pub(crate) fn register_nested_workflows(
+    app: &mut Horsies,
+) -> Result<(), Box<dyn std::error::Error>> {
+    app.register_parameterized_workflow::<FailingChildInput, serde_json::Value, _>(
+        "e2e_child_failing_pipeline",
+        "tests.e2e_child_failing_pipeline.v1",
+        build_failing_child_workflow,
+    )?;
+    app.register_parameterized_workflow::<NestedParentInput, String, _>(
+        "e2e_nested_parent_pipeline",
+        "tests.e2e_nested_parent_pipeline.v1",
+        build_nested_parent_workflow,
+    )?;
+    app.register_parameterized_workflow::<NestedParentInput, String, _>(
+        "e2e_nested_failing_pipeline",
+        "tests.e2e_nested_failing_pipeline.v1",
+        build_nested_failing_workflow,
     )?;
     Ok(())
 }
