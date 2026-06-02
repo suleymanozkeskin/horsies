@@ -21,7 +21,7 @@ there is no migration contract between pre-1.0 versions.
   Pongs are de-duplicated by `worker_id`. See
   [Worker & Database Health](/monitoring/worker-health/).
 
-## 0.1.4 — Unreleased
+## 0.1.4 — 2026-06-02
 
 0.1.4 adds a typed worker & database health API: active ping-pong liveness for
 workers, a database reachability probe, and typed reads over the worker-state
