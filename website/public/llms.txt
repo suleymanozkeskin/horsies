@@ -117,7 +117,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
   close_async -> BrokerResult[None]
 - Health/liveness API (app-level, async + sync; broker exposes the async forms):
   ping_database_async -> BrokerResult[DatabasePing] (SELECT 1 + latency via live pool),
-  ping_workers_async(target_worker_id=None, timeout_seconds=2.0) -> BrokerResult[list[WorkerPong]] (active LISTEN/NOTIFY ping-pong),
+  ping_workers_async(target_worker_id=None, timeout_seconds=2.0, min_responses=None) -> BrokerResult[list[WorkerPong]] (active LISTEN/NOTIFY ping-pong; min_responses=1 returns on first reply = fast liveness gate),
   list_worker_states_async -> BrokerResult[list[WorkerStateSnapshot]] (latest per worker, includes idle workers),
   get_worker_state_async(worker_id) -> BrokerResult[WorkerStateSnapshot | None],
   get_worker_state_history_async(worker_id, limit=None) -> BrokerResult[list[WorkerStateSnapshot]]

@@ -1211,12 +1211,19 @@ class PostgresBroker:
         *,
         target_worker_id: str | None = None,
         timeout_seconds: float = 2.0,
+        min_responses: int | None = None,
     ) -> BrokerResult[list[WorkerPong]]:
         """Active ping-pong: NOTIFY workers and collect replies within a window.
 
         Subscribes to a unique reply channel, broadcasts a ping on
-        ``WORKER_PING_CHANNEL``, then collects pongs until ``timeout_seconds``
-        elapses (broadcast) or the targeted worker replies (single target).
+        ``WORKER_PING_CHANNEL``, then collects pongs until a stop condition:
+
+        - ``target_worker_id`` set: returns as soon as that worker replies.
+        - ``min_responses`` set: returns as soon as that many distinct workers
+          reply (fast fail-open liveness, e.g. ``min_responses=1`` for a
+          ``/health`` gate — a healthy fleet answers in milliseconds; only a
+          degraded fleet pays the full ``timeout_seconds``).
+        - neither set: waits the full window and enumerates every responder.
 
         A pong proves the replying worker's event loop is responsive *and*
         that it can reach Postgres. Workers present in
@@ -1227,6 +1234,14 @@ class PostgresBroker:
                 BrokerOperationError(
                     code=BrokerErrorCode.WORKER_PING_FAILED,
                     message=f'timeout_seconds must be positive, got {timeout_seconds}',
+                    retryable=False,
+                )
+            )
+        if min_responses is not None and min_responses < 1:
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.WORKER_PING_FAILED,
+                    message=f'min_responses must be >= 1 when set, got {min_responses}',
                     retryable=False,
                 )
             )
@@ -1284,6 +1299,7 @@ class PostgresBroker:
             sent_at = loop.time()
 
             pongs: list[WorkerPong] = []
+            seen: set[str] = set()
             deadline = sent_at + timeout_seconds
             while True:
                 remaining = deadline - loop.time()
@@ -1296,10 +1312,13 @@ class PostgresBroker:
                 pong = self._decode_pong(
                     notify.payload, correlation_id, loop.time() - sent_at
                 )
-                if pong is None:
-                    continue
+                if pong is None or pong.worker_id in seen:
+                    continue  # malformed, mismatched, or duplicate worker
+                seen.add(pong.worker_id)
                 pongs.append(pong)
                 if target_worker_id is not None and pong.worker_id == target_worker_id:
+                    break
+                if min_responses is not None and len(pongs) >= min_responses:
                     break
             return Ok(pongs)
         except Exception as exc:

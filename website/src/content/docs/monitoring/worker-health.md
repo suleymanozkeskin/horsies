@@ -44,7 +44,7 @@ else:
 
 ## Which workers are alive?
 
-`ping_workers_async` broadcasts a ping and collects replies until the timeout. A reply proves the worker's event loop is responsive **and** that the worker can reach Postgres (the reply travels through the worker's own connection). Pass `target_worker_id` to probe one worker; it returns as soon as that worker replies.
+`ping_workers_async` broadcasts a ping and collects replies. A reply proves the worker's event loop is responsive **and** that the worker can reach Postgres (the reply travels through the worker's own connection). Pass `target_worker_id` to probe one worker; it returns as soon as that worker replies.
 
 ```python
 result = await app.ping_workers_async(timeout_seconds=2.0)
@@ -53,7 +53,17 @@ if is_ok(result):
         print(f"{pong.worker_id} on {pong.hostname}:{pong.pid} — {pong.round_trip_ms:.1f} ms")
 ```
 
-A broadcast collects for the full `timeout_seconds` (the count of live workers is not known in advance). A targeted ping returns early on the first matching reply.
+**Stop conditions:**
+
+- `min_responses=N` — return as soon as `N` distinct workers reply. Use `min_responses=1` for a fast fail-open liveness gate: a healthy fleet answers in milliseconds, and only a degraded fleet pays the full `timeout_seconds`. This removes the latency floor for a high-frequency `/health` probe.
+- `target_worker_id` — return on the first reply from that worker.
+- neither — wait the full `timeout_seconds` and enumerate every responder (the live count is not known in advance).
+
+```python
+# Fast liveness gate: returns on the first pong (~ms when healthy).
+result = await app.ping_workers_async(min_responses=1, timeout_seconds=2.0)
+healthy = is_ok(result) and len(result.ok_value) >= 1
+```
 
 ## What is each worker doing?
 
@@ -98,14 +108,15 @@ Each method has a sync variant with the same name minus the `_async` suffix (it 
 
 `SELECT 1` through the live pool. **Returns:** `Ok(DatabasePing)` with `latency_ms: float`; `Err` with code `DB_PING_FAILED` on failure.
 
-### `ping_workers_async(*, target_worker_id: str | None = None, timeout_seconds: float = 2.0) -> BrokerResult[list[WorkerPong]]`
+### `ping_workers_async(*, target_worker_id: str | None = None, timeout_seconds: float = 2.0, min_responses: int | None = None) -> BrokerResult[list[WorkerPong]]`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `target_worker_id` | `str \| None` | `None` | `None` broadcasts to all workers; a value probes one worker and returns on its reply |
 | `timeout_seconds` | `float` | `2.0` | Collection window; must be positive |
+| `min_responses` | `int \| None` | `None` | Return as soon as this many distinct workers reply. `None` waits the full window. Must be `>= 1` when set |
 
-**Returns:** `Ok(list[WorkerPong])` — one entry per responding worker, possibly empty. Each `WorkerPong` has `worker_id`, `hostname`, `pid`, `round_trip_ms`. `Err` with code `WORKER_PING_FAILED` on non-positive timeout or reply-channel failure.
+**Returns:** `Ok(list[WorkerPong])` — one entry per responding (distinct) worker, possibly empty. Each `WorkerPong` has `worker_id`, `hostname`, `pid`, `round_trip_ms`. `Err` with code `WORKER_PING_FAILED` on non-positive `timeout_seconds`, `min_responses < 1`, or reply-channel failure.
 
 ### `list_worker_states_async() -> BrokerResult[list[WorkerStateSnapshot]]`
 

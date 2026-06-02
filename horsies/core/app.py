@@ -1323,11 +1323,17 @@ class Horsies:
         *,
         target_worker_id: str | None = None,
         timeout_seconds: float = 2.0,
+        min_responses: int | None = None,
     ) -> 'BrokerResult[list[WorkerPong]]':
-        """Active ping-pong: collect live workers' replies within a window."""
+        """Active ping-pong: collect live workers' replies within a window.
+
+        Pass ``min_responses=1`` for a fast fail-open liveness gate — returns on
+        the first reply rather than waiting the full ``timeout_seconds``.
+        """
         return await self.get_broker().ping_workers_async(
             target_worker_id=target_worker_id,
             timeout_seconds=timeout_seconds,
+            min_responses=min_responses,
         )
 
     def ping_workers(
@@ -1335,6 +1341,7 @@ class Horsies:
         *,
         target_worker_id: str | None = None,
         timeout_seconds: float = 2.0,
+        min_responses: int | None = None,
     ) -> 'BrokerResult[list[WorkerPong]]':
         """Synchronous version of ``ping_workers_async``."""
         from horsies.core.brokers.result_types import BrokerErrorCode
@@ -1345,6 +1352,7 @@ class Horsies:
                 self.ping_workers_async,
                 target_worker_id=target_worker_id,
                 timeout_seconds=timeout_seconds,
+                min_responses=min_responses,
             )
         except Exception as exc:
             return self._sync_bridge_err(

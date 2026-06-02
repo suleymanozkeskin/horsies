@@ -1339,6 +1339,51 @@ class TestPingWorkers:
             broker._decode_pong('{"correlation_id": "corr-1"}', 'corr-1', 0.05) is None
         )
 
+    @pytest.mark.asyncio
+    async def test_rejects_nonpositive_min_responses(self) -> None:
+        broker = _make_broker()
+
+        result = await broker.ping_workers_async(min_responses=0)
+
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.WORKER_PING_FAILED
+
+    @pytest.mark.asyncio
+    async def test_min_responses_returns_early(self) -> None:
+        """With min_responses=1, return on the first pong, not at the deadline."""
+        import uuid as uuidlib
+        from unittest.mock import patch
+        from horsies.core.codec.json_io import dumps_json
+        from horsies.core.models.health import WorkerPongPayload
+
+        broker = _make_broker()
+        fixed = uuidlib.UUID(int=1)
+        corr = fixed.hex
+
+        reply_queue: asyncio.Queue[Any] = asyncio.Queue()
+        pong_json = dumps_json(
+            WorkerPongPayload(
+                correlation_id=corr, worker_id='w1', hostname='h', pid=5
+            ).model_dump()
+        ).ok_value
+        reply_queue.put_nowait(SimpleNamespace(payload=pong_json, channel='reply'))
+
+        broker.listener.listen = AsyncMock(return_value=Ok(reply_queue))
+        broker.listener.unsubscribe = AsyncMock()
+        _setup_session_returning(broker)  # NOTIFY send is a no-op
+
+        loop = asyncio.get_running_loop()
+        with patch('horsies.core.brokers.postgres.uuid.uuid4', return_value=fixed):
+            start = loop.time()
+            result = await broker.ping_workers_async(
+                timeout_seconds=5.0, min_responses=1
+            )
+            elapsed = loop.time() - start
+
+        assert is_ok(result)
+        assert [p.worker_id for p in result.ok_value] == ['w1']
+        assert elapsed < 2.0, 'should return on first pong, not wait the 5s window'
+
 
 # ---------------------------------------------------------------------------
 # TestMarkStaleTasksAsFailed
