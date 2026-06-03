@@ -38,11 +38,13 @@ SET status = 'CLAIMED',
     claimed = TRUE,
     claimed_at = now(),
     claimed_by_worker_id = :worker_id,
-    claim_expires_at = :claim_expires_at,
+    claim_expires_at = now() + :claim_lease_ms * INTERVAL '1 millisecond',
+    finalizing_at = NULL,
+    finalizing_by_worker_id = NULL,
     updated_at = now()
 FROM next
 WHERE t.id = next.id
-RETURNING t.id, t.task_name, t.args, t.kwargs;
+RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name, t.is_workflow_task;
 """)
 
 
@@ -117,11 +119,15 @@ GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL = text("""
 
 UNCLAIM_PAUSED_TASKS_SQL = text("""
     UPDATE horsies_tasks
-    SET status = 'PENDING',
+    SET status = 'CANCELLED',
         claimed = FALSE,
         claimed_at = NULL,
         claimed_by_worker_id = NULL,
         claim_expires_at = NULL,
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
+        error_code = 'TASK_CANCELLED',
+        failed_reason = 'Workflow paused before task start',
         updated_at = NOW()
     WHERE id = ANY(:ids)
       AND status = 'CLAIMED'
@@ -140,9 +146,11 @@ UNCLAIM_CLAIMED_TASK_SQL = text("""
         worker_pid = NULL,
         worker_hostname = NULL,
         worker_process_name = NULL,
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
         updated_at = NOW()
     WHERE id = :id
-      AND status IN ('CLAIMED', 'RUNNING')
+      AND status = 'CLAIMED'
       AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
 """)
 
@@ -150,6 +158,7 @@ RESET_PAUSED_WORKFLOW_TASKS_SQL = text("""
     UPDATE horsies_workflow_tasks
     SET status = 'READY', task_id = NULL, started_at = NULL
     WHERE task_id = ANY(:ids)
+      AND status IN ('ENQUEUED', 'RUNNING')
 """)
 
 CANCEL_CANCELLED_WORKFLOW_TASKS_SQL = text("""
@@ -159,6 +168,8 @@ CANCEL_CANCELLED_WORKFLOW_TASKS_SQL = text("""
         claimed_at = NULL,
         claimed_by_worker_id = NULL,
         claim_expires_at = NULL,
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
         updated_at = NOW()
     WHERE id = ANY(:ids)
       AND status = 'CLAIMED'
@@ -177,10 +188,13 @@ SKIP_CANCELLED_WORKFLOW_TASKS_SQL = text("""
 MARK_TASK_FAILED_WORKER_SQL = text("""
     UPDATE horsies_tasks
     SET status='FAILED',
-        failed_at = :now,
+        failed_at = NOW(),
         failed_reason = :reason,
-        error_code = NULL,
-        updated_at = :now
+        result = :result_json,
+        error_code = :error_code,
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
+        updated_at = NOW()
     WHERE id = :id
       AND status = 'RUNNING'
     RETURNING id
@@ -189,10 +203,12 @@ MARK_TASK_FAILED_WORKER_SQL = text("""
 MARK_TASK_FAILED_SQL = text("""
     UPDATE horsies_tasks
     SET status='FAILED',
-        failed_at = :now,
+        failed_at = NOW(),
         result = :result_json,
         error_code = :error_code,
-        updated_at = :now
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
+        updated_at = NOW()
     WHERE id = :id
       AND status = 'RUNNING'
     RETURNING id
@@ -201,10 +217,12 @@ MARK_TASK_FAILED_SQL = text("""
 MARK_TASK_COMPLETED_SQL = text("""
     UPDATE horsies_tasks
     SET status='COMPLETED',
-        completed_at = :now,
+        completed_at = NOW(),
         result = :result_json,
         error_code = NULL,
-        updated_at = :now
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
+        updated_at = NOW()
     WHERE id = :id
       AND status = 'RUNNING'
     RETURNING id
@@ -244,12 +262,34 @@ GET_TASK_RETRY_POSTCHECK_SQL = text("""
     WHERE id = :id
 """)
 
+SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL = text("""
+    SELECT id, status, retry_count, started_at, claimed_by_worker_id,
+           worker_hostname, worker_pid, worker_process_name,
+           queue_name, is_workflow_task, max_retries, task_options, good_until,
+           clock_timestamp() AS db_now
+    FROM horsies_tasks
+    WHERE id = :id
+      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
+      AND status IN ('CLAIMED', 'RUNNING')
+    FOR UPDATE
+""")
+
 SCHEDULE_TASK_RETRY_SQL = text("""
     UPDATE horsies_tasks
     SET status = 'PENDING',
         retry_count = :retry_count,
         next_retry_at = :next_retry_at,
         enqueued_at = :next_retry_at,
+        claimed = FALSE,
+        claimed_at = NULL,
+        claimed_by_worker_id = NULL,
+        claim_expires_at = NULL,
+        started_at = NULL,
+        worker_pid = NULL,
+        worker_hostname = NULL,
+        worker_process_name = NULL,
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
         error_code = NULL,
         updated_at = now()
     WHERE id = :id
@@ -268,11 +308,21 @@ SCHEDULE_STALE_TASK_RETRY_SQL = text("""
         claimed_at = NULL,
         claimed_by_worker_id = NULL,
         claim_expires_at = NULL,
+        started_at = NULL,
+        worker_pid = NULL,
+        worker_hostname = NULL,
+        worker_process_name = NULL,
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
         error_code = NULL,
         updated_at = now()
     WHERE t.id = :id
       AND t.status = 'RUNNING'
       AND t.started_at IS NOT NULL
+      AND (
+          t.finalizing_at IS NULL
+          OR t.finalizing_at < NOW() - CAST(:finalizing_stale_threshold || ' seconds' AS INTERVAL)
+      )
       AND COALESCE(
           (
               SELECT h.sent_at
@@ -300,7 +350,7 @@ INSERT_CLAIMER_HEARTBEAT_SQL = text("""
 
 RENEW_CLAIM_LEASE_SQL = text("""
     UPDATE horsies_tasks
-    SET claim_expires_at = :new_expires_at,
+    SET claim_expires_at = NOW() + :claim_lease_ms * INTERVAL '1 millisecond',
         updated_at = NOW()
     WHERE status = 'CLAIMED'
       AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
@@ -362,7 +412,8 @@ DELETE_EXPIRED_TASKS_SQL = text("""
 
 SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL = text("""
     SELECT task_name, retry_count, started_at, claimed_by_worker_id,
-           worker_hostname, worker_pid, worker_process_name
+           worker_hostname, worker_pid, worker_process_name,
+           queue_name, is_workflow_task, clock_timestamp() AS db_now
     FROM horsies_tasks
     WHERE id = :id AND status = 'RUNNING'
     FOR UPDATE

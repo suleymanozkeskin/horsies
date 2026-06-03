@@ -72,6 +72,7 @@ async def _link_task_to_workflow(
     task_id: str,
     *,
     wf_status: str = 'RUNNING',
+    wt_status: str = 'ENQUEUED',
 ) -> str:
     """Create workflow (with given status) + workflow_task rows.
 
@@ -100,9 +101,9 @@ async def _link_task_to_workflow(
             VALUES
                 (:id, :wf_id, 0, 'node_0', 'filter_test', '[]', '{}',
                  'default', 100, '{}', FALSE, 'all',
-                 FALSE, 'ENQUEUED', :task_id, NOW())
+                 FALSE, :wt_status, :task_id, NOW())
         """),
-        {'id': wt_id, 'wf_id': wf_id, 'task_id': task_id},
+        {'id': wt_id, 'wf_id': wf_id, 'task_id': task_id, 'wt_status': wt_status},
     )
     return wf_id
 
@@ -171,18 +172,18 @@ async def test_no_workflow_tasks_pass_through(
 
 
 # ---------------------------------------------------------------------------
-# I-7b: PAUSED workflow → task unclaimed, workflow_task reset
+# I-7b: PAUSED workflow → task cancelled, workflow_task reset
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_paused_workflow_unclaims_and_resets(
+async def test_paused_workflow_cancels_and_resets(
     engine: AsyncEngine,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """Task in a PAUSED workflow → excluded from return,
-    horsies_tasks → PENDING, horsies_workflow_tasks → READY with task_id=NULL."""
+    horsies_tasks → CANCELLED, horsies_workflow_tasks → READY with task_id=NULL."""
     worker = _make_worker(engine)
     tid = await _insert_claimed_task(
         session,
@@ -198,8 +199,8 @@ async def test_paused_workflow_unclaims_and_resets(
     # Excluded from return
     assert result == []
 
-    # horsies_tasks: unclaimed back to PENDING
-    assert await _get_task_status(session, tid) == 'PENDING'
+    # horsies_tasks: cancelled so claimed work does not leak back into the queue
+    assert await _get_task_status(session, tid) == 'CANCELLED'
 
     # horsies_workflow_tasks: reset to READY with task_id NULLed
     wt_row = (
@@ -219,6 +220,39 @@ async def test_paused_workflow_unclaims_and_resets(
     assert wt_row is not None
     assert wt_row[0] == 'READY'
     assert wt_row[1] is None  # task_id cleared
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_paused_retry_window_task_cancels_and_resets_running_node(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """A paused retry-window CLAIMED task resets even when workflow_task is RUNNING."""
+    worker = _make_worker(engine)
+    tid = await _insert_claimed_task(
+        session,
+        claimed_by_worker_id=worker.worker_instance_id,
+    )
+    await _link_task_to_workflow(session, tid, wf_status='PAUSED', wt_status='RUNNING')
+    await session.commit()
+
+    result = await worker._filter_nonrunnable_workflow_tasks(_make_rows(tid))
+
+    assert result == []
+    assert await _get_task_status(session, tid) == 'CANCELLED'
+    wt_row = (
+        await session.execute(
+            text("""
+                SELECT status, task_id
+                FROM horsies_workflow_tasks
+                WHERE node_id = 'node_0'
+            """),
+        )
+    ).fetchone()
+    assert wt_row is not None
+    assert wt_row[0] == 'READY'
+    assert wt_row[1] is None
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +339,7 @@ async def test_mixed_runnable_paused_cancelled(
 
     # Verify DB mutations on the blocked tasks
     assert await _get_task_status(session, tid_ok) == 'CLAIMED'
-    assert await _get_task_status(session, tid_paused) == 'PENDING'
+    assert await _get_task_status(session, tid_paused) == 'CANCELLED'
     assert await _get_task_status(session, tid_cancelled) == 'CANCELLED'
 
     # Cancelled workflow_task → SKIPPED

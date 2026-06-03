@@ -13,7 +13,7 @@ Horsies has two error systems: **runtime errors** returned in `TaskResult`, and 
 
 Runtime errors are returned via `TaskResult[T, TaskError]`. The `TaskError.error_code` field contains either a `BuiltInTaskCode` member or a user-defined string.
 
-When a task reaches a terminal `FAILED` state with a `TaskResult(err=TaskError(...))`, the `error_code` is persisted to `horsies_tasks.error_code` for queryability. This column is `NULL` for successful tasks, non-terminal tasks, and worker-level failures that never produced a `TaskResult`. Access it via `TaskInfo.error_code` from `handle.info()`.
+When a task reaches a terminal `FAILED` state with a `TaskResult(err=TaskError(...))`, the `error_code` is persisted to `horsies_tasks.error_code` for queryability. This column is `NULL` for successful and non-terminal tasks. Worker/process failures synthesize a `TaskResult(err=TaskError(...))` where possible, so `WORKER_CRASHED` and serialization failures are queryable. Access it via `TaskInfo.error_code` from `handle.info()`.
 
 Each execution attempt is also recorded in `horsies_task_attempts` with per-attempt `error_code`, `error_message`, and outcome. See [Retrieving Results](retrieving-results#task-metadata-and-attempt-history) for API usage.
 

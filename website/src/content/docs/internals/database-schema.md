@@ -22,13 +22,14 @@ Primary task storage table.
 These values correspond to `TaskStatus` in the API (see Task Lifecycle for terminal states).
 | `sent_at` | TIMESTAMP | Immutable call-site timestamp (when `.send()`/`.schedule()` was called) |
 | `enqueued_at` | TIMESTAMP | Mutable dispatch timestamp (when task becomes claimable; updated on retry) |
+| `is_workflow_task` | BOOLEAN | Whether the task row belongs to a workflow node; used to skip workflow-only checks on plain tasks |
 | `claimed_at` | TIMESTAMP | When worker claimed task |
 | `started_at` | TIMESTAMP | When execution started |
 | `completed_at` | TIMESTAMP | When task completed |
 | `failed_at` | TIMESTAMP | When task failed |
 | `result` | TEXT | JSON-serialized TaskResult |
 | `failed_reason` | TEXT | Human-readable failure message |
-| `error_code` | TEXT | Final `TaskError.error_code` for failed tasks (NULL for successful, non-terminal, or worker-level failures without a `TaskResult`) |
+| `error_code` | TEXT | Final `TaskError.error_code` for failed tasks (NULL for successful and non-terminal tasks) |
 | `claimed` | BOOLEAN | Claiming flag |
 | `claimed_by_worker_id` | VARCHAR(255) | Worker identifier |
 | `good_until` | TIMESTAMP | Task expiry deadline |
@@ -40,6 +41,8 @@ These values correspond to `TaskStatus` in the API (see Task Lifecycle for termi
 | `worker_hostname` | VARCHAR(255) | Executing machine |
 | `worker_process_name` | VARCHAR(255) | Process identifier |
 | `claim_expires_at` | TIMESTAMP | Claim lease expiry deadline |
+| `finalizing_at` | TIMESTAMPTZ | Child has finished user code and parent finalization is in progress |
+| `finalizing_by_worker_id` | TEXT | Worker responsible for parent finalization |
 | `enqueue_sha` | VARCHAR(64) | SHA-256 digest for idempotent retry |
 | `created_at` | TIMESTAMP | Row creation time |
 | `updated_at` | TIMESTAMP | Last update time |

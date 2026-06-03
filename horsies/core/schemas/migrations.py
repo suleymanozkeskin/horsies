@@ -7,7 +7,7 @@ from sqlalchemy import text
 
 # ---- Schema infrastructure ----
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
@@ -214,6 +214,26 @@ CREATE_TASK_ATTEMPTS_TABLE_SQL = text("""
 ADD_ERROR_CODE_COLUMN_SQL = text("""
     ALTER TABLE horsies_tasks
     ADD COLUMN IF NOT EXISTS error_code TEXT;
+""")
+
+ADD_TASK_IS_WORKFLOW_TASK_COLUMN_SQL = text("""
+    ALTER TABLE horsies_tasks
+    ADD COLUMN IF NOT EXISTS is_workflow_task BOOLEAN NOT NULL DEFAULT FALSE;
+""")
+
+BACKFILL_TASK_IS_WORKFLOW_TASK_SQL = text("""
+    UPDATE horsies_tasks t
+    SET is_workflow_task = TRUE
+    WHERE is_workflow_task = FALSE
+      AND EXISTS (
+          SELECT 1 FROM horsies_workflow_tasks wt WHERE wt.task_id = t.id
+      );
+""")
+
+ADD_TASK_FINALIZING_COLUMNS_SQL = text("""
+    ALTER TABLE horsies_tasks
+    ADD COLUMN IF NOT EXISTS finalizing_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS finalizing_by_worker_id TEXT;
 """)
 
 ADD_WORKFLOW_SENT_AT_COLUMN_SQL = text("""

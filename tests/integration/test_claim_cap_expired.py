@@ -329,8 +329,10 @@ class TestReclaimUnderCap:
             task_name: str,
             args_json: str | None,
             kwargs_json: str | None,
+            queue_name: str = 'default',
+            is_workflow_task: bool = True,
         ) -> None:
-            _ = (task_name, args_json, kwargs_json)
+            _ = (task_name, args_json, kwargs_json, queue_name, is_workflow_task)
             dispatched_ids.append(task_id)
 
         worker._dispatch_one = AsyncMock(side_effect=_fake_dispatch)  # type: ignore[method-assign]
@@ -388,7 +390,7 @@ class TestReclaimUnderCap:
                 'queue': 'default',
                 'lim': 1,
                 'worker_id': live_worker_id,
-                'claim_expires_at': datetime.now(timezone.utc) + timedelta(seconds=60),
+                'claim_lease_ms': 60_000,
             },
         )
         claimed_rows = claim_result.fetchall()

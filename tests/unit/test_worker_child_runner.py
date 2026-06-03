@@ -532,7 +532,7 @@ class TestHandleWorkflowStopBeforeStart:
         assert "SET status = 'SKIPPED'" in sql_blob
         assert "SET status = 'CANCELLED'" in sql_blob
 
-    def test_paused_requeues(self) -> None:
+    def test_paused_cancels_claimed_task_and_resets_node(self) -> None:
         cursor = _FakeCursor()
         conn = _FakeConn(cursor)
         result = _handle_workflow_stop_before_start(
@@ -541,8 +541,10 @@ class TestHandleWorkflowStopBeforeStart:
         assert result == (False, '', 'WORKFLOW_STOPPED')
         assert conn.commits == 1
         sql_blob = '\n'.join(q[0] for q in cursor.queries)
-        assert "SET status = 'PENDING'" in sql_blob
+        assert "SET status = 'CANCELLED'" in sql_blob
+        assert "error_code = 'TASK_CANCELLED'" in sql_blob
         assert "SET status = 'READY'" in sql_blob
+        assert "status IN ('ENQUEUED', 'RUNNING')" in sql_blob
 
     def test_unknown_status_returns_workflow_check_failed(self) -> None:
         cursor = _FakeCursor()
@@ -1567,35 +1569,35 @@ class TestOwnershipLostWorkflowBranch:
 
 @pytest.mark.unit
 class TestWorkflowTaskRunningSyncFailureAborts:
-    """Regression for #3: when _update_workflow_task_running_with_retry
-    returns False, _confirm_ownership_and_set_running must abort with
-    BROKER_ERROR instead of proceeding to user code."""
+    """Workflow RUNNING sync failures abort before user code starts."""
 
-    def test_running_sync_failure_returns_broker_error(self) -> None:
-        """Task aborted with BROKER_ERROR when workflow_task RUNNING update fails."""
+    def test_running_sync_failure_returns_preexec_abort(self) -> None:
+        """Task rolls back when workflow_task RUNNING update fails."""
         from horsies.core.worker.child_runner import (
             _confirm_ownership_and_set_running,
         )
 
-        # Ownership UPDATE succeeds (RETURNING id)
-        cursor = _FakeCursor(fetchone_return=_FakeRow(id='task-1'))
+        class _SequenceCursor(_FakeCursor):
+            def __init__(self) -> None:
+                super().__init__()
+                self._rows = [_FakeRow(id='task-1'), None]
+
+            def fetchone(self) -> Any:
+                return self._rows.pop(0)
+
+        cursor = _SequenceCursor()
         conn = _FakeConn(cursor)
         pool = _FakePool(conn)
 
         with patch(
             'horsies.core.worker.child_runner._get_worker_pool',
             return_value=pool,
-        ), patch(
-            'horsies.core.worker.child_runner._update_workflow_task_running_with_retry',
-            return_value=False,
         ):
             result = _confirm_ownership_and_set_running('task-1', 'worker-A')
 
-        assert result is not None
-        ok, payload, reason = result
-        assert ok is True  # True = task has a result payload to finalize
-        assert 'BROKER_ERROR' in payload
-        assert reason == 'Failed to update workflow task to RUNNING'
+        assert result == (False, '', 'WORKFLOW_CHECK_FAILED')
+        assert conn.commits == 0
+        assert conn.rollbacks == 1
 
     def test_running_sync_success_returns_none(self) -> None:
         """When workflow_task RUNNING update succeeds, returns None (proceed)."""
@@ -1610,13 +1612,12 @@ class TestWorkflowTaskRunningSyncFailureAborts:
         with patch(
             'horsies.core.worker.child_runner._get_worker_pool',
             return_value=pool,
-        ), patch(
-            'horsies.core.worker.child_runner._update_workflow_task_running_with_retry',
-            return_value=True,
         ):
             result = _confirm_ownership_and_set_running('task-1', 'worker-A')
 
         assert result is None  # None = proceed to user code
+        sql_blob = '\n'.join(q[0] for q in cursor.queries)
+        assert "status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')" in sql_blob
 
 
 # ===================================================================

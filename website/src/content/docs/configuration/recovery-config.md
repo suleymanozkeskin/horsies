@@ -27,6 +27,7 @@ config = AppConfig(
         claimed_stale_threshold_ms=120_000,
         auto_fail_stale_running=True,
         running_stale_threshold_ms=300_000,
+        finalizing_stale_threshold_ms=300_000,
     ),
 )
 ```
@@ -39,6 +40,7 @@ config = AppConfig(
 | `claimed_stale_threshold_ms` | `int` | 120,000 | Ms before CLAIMED task is stale |
 | `auto_fail_stale_running` | `bool` | `True` | Fail tasks stuck in RUNNING |
 | `running_stale_threshold_ms` | `int` | 300,000 | Ms before RUNNING task is stale |
+| `finalizing_stale_threshold_ms` | `int` | 300,000 | Ms a completed child may remain in finalization handoff before recovery |
 | `check_interval_ms` | `int` | 30,000 | How often to check for stale tasks |
 | `runner_heartbeat_interval_ms` | `int` | 30,000 | RUNNING task heartbeat frequency |
 | `claimer_heartbeat_interval_ms` | `int` | 30,000 | CLAIMED task heartbeat frequency |
@@ -66,6 +68,12 @@ When a **regular** task is RUNNING but the runner heartbeat stops:
 - If the task has a retry policy with `WORKER_CRASHED` in `auto_retry_for` and retries remaining: scheduled for retry (returns to PENDING with `next_retry_at`)
 - Otherwise: marked as FAILED with `WORKER_CRASHED` error
 
+`running_stale_threshold_ms` is based on missing runner heartbeats, not total
+task duration. Long tasks remain healthy as long as they continue heartbeating.
+After user code returns, the child marks the task as finalizing before the
+parent writes the terminal result. The reaper will not recover that task until
+`finalizing_stale_threshold_ms` has also elapsed.
+
 For **workflow** tasks, the recovery loop also detects when `workflow_tasks` is stuck non-terminal while the underlying task is already terminal, and triggers the normal completion path. See [Heartbeats & Recovery](../../workers/heartbeats-recovery) for details.
 
 ## Heartbeat System
@@ -84,6 +92,7 @@ The reaper (running in each worker) checks for missing heartbeats.
 | Threshold | Constraint |
 |-----------|------------|
 | Stale threshold | Must be >= 2x heartbeat interval |
+| Finalizing stale | Must be >= 2x runner heartbeat interval |
 | Claimed stale | 1 second to 1 hour |
 | Running stale | 1 second to 2 hours |
 | Check interval | 1 second to 10 minutes |

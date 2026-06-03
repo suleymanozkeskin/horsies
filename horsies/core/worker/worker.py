@@ -98,6 +98,7 @@ from horsies.core.worker.sql import (  # noqa: F401
     GET_TASK_RETRY_INFO_SQL,
     GET_TASK_RETRY_CONFIG_SQL,
     GET_TASK_RETRY_POSTCHECK_SQL,
+    SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
     SCHEDULE_TASK_RETRY_SQL,
     NOTIFY_DELAYED_SQL,
     INSERT_CLAIMER_HEARTBEAT_SQL,
@@ -697,10 +698,6 @@ class Worker:
         else:
             # Hard cap mode: limit to processes
             max_claimed = self.cfg.processes
-        claimed_count = await self._count_claimed_for_worker()
-        if claimed_count >= max_claimed:
-            return False
-
         # Cluster-wide, lock-guarded claim to avoid races. One short transaction.
         # CLAIM_SQL RETURNING provides dispatch payload directly (no separate load query).
         claimed_rows: list[dict[str, Any]] = []
@@ -726,16 +723,28 @@ class Worker:
             # Hard cap mode (prefetch_buffer=0): count RUNNING + CLAIMED for strict enforcement
             # Soft cap mode (prefetch_buffer>0): count only RUNNING, allow prefetch with lease
             hard_cap_mode = self.cfg.prefetch_buffer == 0
+            claimed_count = await self._count_claimed_for_worker(s)
+            if claimed_count >= max_claimed:
+                await s.commit()
+                return False
+            remaining_claim_allowance = max(0, int(max_claimed) - int(claimed_count))
 
             if hard_cap_mode:
                 # Hard cap: count both RUNNING and CLAIMED for this worker
-                local_in_flight = await self._count_in_flight_for_worker()
+                local_in_flight = await self._count_in_flight_for_worker(s)
                 max_local_capacity = self.cfg.processes
             else:
-                # Soft cap: count only RUNNING to allow prefetch beyond processes
-                local_in_flight = await self._count_only_running_for_worker()
+                # Soft cap: queue/global caps count only RUNNING, but local
+                # prefetch budget must include already CLAIMED rows so a worker
+                # cannot hoard beyond processes + prefetch_buffer.
+                local_in_flight = await self._count_only_running_for_worker(s)
                 max_local_capacity = self.cfg.processes + self.cfg.prefetch_buffer
-            local_available = max(0, int(max_local_capacity) - int(local_in_flight))
+            local_available = max(
+                0,
+                int(max_local_capacity)
+                - int(local_in_flight)
+                - (0 if hard_cap_mode else int(claimed_count)),
+            )
             budget_remaining = local_available
 
             global_remaining: Optional[int] = None
@@ -753,11 +762,9 @@ class Worker:
                 )
 
             # Total claim budget for this pass: local budget capped by global remaining (if any)
-            total_remaining = (
-                budget_remaining
-                if global_remaining is None
-                else min(budget_remaining, global_remaining)
-            )
+            total_remaining = min(budget_remaining, remaining_claim_allowance)
+            if global_remaining is not None:
+                total_remaining = min(total_remaining, global_remaining)
             if total_remaining <= 0:
                 # Nothing to claim globally or locally
                 await s.commit()
@@ -793,16 +800,17 @@ class Worker:
                     max_q = int(self.cfg.queue_max_concurrency.get(qname, 0))
                     q_remaining = max(0, max_q - in_flight_q)
 
-                # Determine how many we may claim from this queue
-                # Hierarchy: max_claim_batch (fairness) -> q_remaining (queue cap) -> total_remaining (worker budget)
+                # Determine how many we may claim from this queue.
+                # A positive max_claim_batch is an explicit fairness cap. The
+                # default 0 means fill the remaining worker/queue budget.
 
-                if self.cfg.queue_priorities:
+                if self.cfg.max_claim_batch > 0:
+                    per_queue_cap = self.cfg.max_claim_batch
+                elif self.cfg.queue_priorities:
                     # Strict priority mode: try to fill remaining budget from this queue
-                    # Ignore max_claim_batch (which forces round-robin fairness)
                     per_queue_cap = total_remaining
                 else:
-                    # Default mode: use max_claim_batch to ensure fairness across queues
-                    per_queue_cap = self.cfg.max_claim_batch
+                    per_queue_cap = total_remaining
 
                 if q_remaining is not None:
                     per_queue_cap = min(per_queue_cap, q_remaining)
@@ -830,6 +838,8 @@ class Worker:
                 row['task_name'],
                 row['args'],
                 row['kwargs'],
+                row.get('queue_name') or 'default',
+                bool(row.get('is_workflow_task', False)),
             )
         return len(claimed_rows) > 0
 
@@ -840,7 +850,7 @@ class Worker:
         Filter out tasks belonging to non-runnable workflows (PAUSED/CANCELLED).
 
         Post-claim guard:
-        - PAUSED workflow: unclaim task (back to PENDING), reset workflow_task to READY
+        - PAUSED workflow: cancel claimed task row, reset workflow_task to READY
         - CANCELLED workflow: hard-cancel task + mark workflow_task SKIPPED
 
         Returns the filtered list of rows that should be dispatched.
@@ -848,7 +858,13 @@ class Worker:
         if not rows:
             return rows
 
-        task_ids = [row['id'] for row in rows]
+        workflow_rows = [
+            row for row in rows if bool(row.get('is_workflow_task', True))
+        ]
+        if not workflow_rows:
+            return rows
+
+        task_ids = [row['id'] for row in workflow_rows]
         paused_task_ids: set[str] = set()
         cancelled_task_ids: set[str] = set()
 
@@ -914,18 +930,26 @@ class Worker:
 
     # Stale detection is handled via heartbeat policy for RUNNING tasks.
 
-    def _compute_claim_expires_at(self) -> datetime:
-        """Compute claim lease expiration. Always bounded (never None).
+    def _claim_lease_ms(self) -> int:
+        """Return the bounded claim lease duration in milliseconds.
 
         Uses explicit claim_lease_ms when configured (soft-cap or user override),
         otherwise falls back to DEFAULT_CLAIM_LEASE_MS for crash-recovery safety.
+        The database computes the actual expiry timestamp.
         """
-        lease_ms = (
+        return int(
             self.cfg.claim_lease_ms
             if self.cfg.claim_lease_ms is not None
             else DEFAULT_CLAIM_LEASE_MS
         )
-        return datetime.now(timezone.utc) + timedelta(milliseconds=lease_ms)
+
+    def _compute_claim_expires_at(self) -> datetime:
+        """Compatibility helper: local view of the configured claim lease.
+
+        SQL writes use DB time; this remains for diagnostics/tests that need to
+        inspect the effective lease duration without touching the database.
+        """
+        return datetime.now(timezone.utc) + timedelta(milliseconds=self._claim_lease_ms())
 
     async def _claim_batch_locked(
         self,
@@ -944,14 +968,22 @@ class Worker:
                 'queue': queue,
                 'lim': limit,
                 'worker_id': self.worker_instance_id,
+                'claim_lease_ms': self._claim_lease_ms(),
                 'claim_expires_at': self._compute_claim_expires_at(),
             },
         )
         cols = res.keys()
         return [dict(zip(cols, row)) for row in res.fetchall()]
 
-    async def _count_claimed_for_worker(self) -> int:
+    async def _count_claimed_for_worker(self, session: AsyncSession | None = None) -> int:
         """Count only CLAIMED tasks for this worker (not yet RUNNING)."""
+        if session is not None:
+            res = await session.execute(
+                COUNT_CLAIMED_FOR_WORKER_SQL,
+                {'wid': self.worker_instance_id},
+            )
+            row = res.fetchone()
+            return int(row.cnt) if row else 0
         async with self.sf() as s:
             res = await s.execute(
                 COUNT_CLAIMED_FOR_WORKER_SQL,
@@ -960,8 +992,17 @@ class Worker:
             row = res.fetchone()
             return int(row.cnt) if row else 0
 
-    async def _count_only_running_for_worker(self) -> int:
+    async def _count_only_running_for_worker(
+        self, session: AsyncSession | None = None
+    ) -> int:
         """Count only RUNNING tasks for this worker (excludes CLAIMED)."""
+        if session is not None:
+            res = await session.execute(
+                COUNT_RUNNING_FOR_WORKER_SQL,
+                {'wid': self.worker_instance_id},
+            )
+            row = res.fetchone()
+            return int(row.cnt) if row else 0
         async with self.sf() as s:
             res = await s.execute(
                 COUNT_RUNNING_FOR_WORKER_SQL,
@@ -970,8 +1011,17 @@ class Worker:
             row = res.fetchone()
             return int(row.cnt) if row else 0
 
-    async def _count_in_flight_for_worker(self) -> int:
+    async def _count_in_flight_for_worker(
+        self, session: AsyncSession | None = None
+    ) -> int:
         """Count RUNNING + CLAIMED tasks for this worker (hard cap mode)."""
+        if session is not None:
+            res = await session.execute(
+                COUNT_IN_FLIGHT_FOR_WORKER_SQL,
+                {'wid': self.worker_instance_id},
+            )
+            row = res.fetchone()
+            return int(row.cnt) if row else 0
         async with self.sf() as s:
             res = await s.execute(
                 COUNT_IN_FLIGHT_FOR_WORKER_SQL,
@@ -1030,7 +1080,7 @@ class Worker:
         exc: BaseException,
         failed_executor: Optional[ProcessPoolExecutor] = None,
     ) -> None:
-        outcome = await self._requeue_claimed_task(
+        outcome = await self._recover_worker_future_failure(
             task_id,
             f'Broken process pool: {exc}',
         )
@@ -1047,12 +1097,141 @@ class Worker:
             failed_executor=failed_executor,
         )
 
+    async def _recover_worker_future_failure(
+        self,
+        task_id: str,
+        reason: str,
+    ) -> _RequeueOutcome:
+        """Recover a task whose child future failed without a task result.
+
+        CLAIMED means user code never started and can be unclaimed. RUNNING
+        means user code may have executed, so recovery must respect retry policy.
+        """
+        try:
+            async with self.sf() as s:
+                ctx_result = await s.execute(
+                    SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
+                    {'id': task_id, 'wid': self.worker_instance_id},
+                )
+                ctx_row = ctx_result.fetchone()
+                if ctx_row is None:
+                    await s.rollback()
+                    return _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
+
+                status_value = (
+                    ctx_row.status.value
+                    if hasattr(ctx_row.status, 'value')
+                    else str(ctx_row.status)
+                )
+                if status_value == 'CLAIMED':
+                    res = await s.execute(
+                        UNCLAIM_CLAIMED_TASK_SQL,
+                        {'id': task_id, 'wid': self.worker_instance_id},
+                    )
+                    await s.commit()
+                    return (
+                        _RequeueOutcome.REQUEUED
+                        if (getattr(res, 'rowcount', 0) or 0) > 0
+                        else _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
+                    )
+
+                task_error = TaskError(
+                    error_code=OperationalErrorCode.WORKER_CRASHED,
+                    message=reason,
+                    data={
+                        'task_id': task_id,
+                        'worker_id': self.worker_instance_id,
+                    },
+                )
+                attempt_num = (ctx_row.retry_count or 0) + 1
+                db_now = ctx_row.db_now or datetime.now(timezone.utc)
+                attempt_started_at = ctx_row.started_at or db_now
+                attempt_worker = {
+                    'worker_id': ctx_row.claimed_by_worker_id,
+                    'worker_hostname': ctx_row.worker_hostname,
+                    'worker_pid': ctx_row.worker_pid,
+                    'worker_process_name': ctx_row.worker_process_name,
+                }
+
+                should_retry = await self._should_retry_task(task_id, task_error, s)
+                if should_retry:
+                    match await self._schedule_retry(task_id, s):
+                        case 'scheduled':
+                            await s.execute(
+                                UPSERT_TASK_ATTEMPT_SQL,
+                                {
+                                    'task_id': task_id,
+                                    'attempt': attempt_num,
+                                    'outcome': 'FAILED',
+                                    'will_retry': True,
+                                    'started_at': attempt_started_at,
+                                    'finished_at': db_now,
+                                    'error_code': OperationalErrorCode.WORKER_CRASHED.value,
+                                    'error_message': reason,
+                                    'failed_reason': reason,
+                                    **attempt_worker,
+                                },
+                            )
+                            await s.commit()
+                            return _RequeueOutcome.REQUEUED
+                        case 'expired' | 'reaper_reclaimed':
+                            pass
+
+                task_result: TaskResult[None, TaskError] = TaskResult(err=task_error)
+                result_json = serialize_error_payload(task_result)
+                await s.execute(
+                    UPSERT_TASK_ATTEMPT_SQL,
+                    {
+                        'task_id': task_id,
+                        'attempt': attempt_num,
+                        'outcome': 'FAILED',
+                        'will_retry': False,
+                        'started_at': attempt_started_at,
+                        'finished_at': db_now,
+                        'error_code': OperationalErrorCode.WORKER_CRASHED.value,
+                        'error_message': reason,
+                        'failed_reason': reason,
+                        **attempt_worker,
+                    },
+                )
+                mark_failed_res = await s.execute(
+                    MARK_TASK_FAILED_SQL,
+                    {
+                        'result_json': result_json,
+                        'id': task_id,
+                        'error_code': OperationalErrorCode.WORKER_CRASHED.value,
+                    },
+                )
+                if mark_failed_res.fetchone() is None:
+                    await s.rollback()
+                    return _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
+                await s.commit()
+                phase2_r = await self._finalize_workflow_phase(
+                    task_id,
+                    task_result,
+                    queue_name=ctx_row.queue_name or 'default',
+                    is_workflow_task=bool(ctx_row.is_workflow_task),
+                )
+                if is_err(phase2_r):
+                    await self._handle_finalize_error(phase2_r.err_value)
+                return _RequeueOutcome.REQUEUED
+        except Exception as exc:
+            logger.error(
+                'DB error while recovering future failure for task %s (%s): %s',
+                task_id,
+                reason,
+                exc,
+            )
+            return _RequeueOutcome.DB_ERROR
+
     async def _dispatch_one(
         self,
         task_id: str,
         task_name: str,
         args_json: Optional[str],
         kwargs_json: Optional[str],
+        queue_name: str = 'default',
+        is_workflow_task: bool = True,
     ) -> None:
         """Submit to process pool; attach completion handler."""
         if self._executor is None:
@@ -1095,12 +1274,13 @@ class Worker:
                 database_url,
                 self.worker_instance_id,
                 runner_heartbeat_interval_ms,
+                is_workflow_task,
             )
         except BrokenProcessPool as exc:
             await self._handle_broken_pool(task_id, exc, executor)
             return
         except Exception as exc:
-            outcome = await self._requeue_claimed_task(
+            outcome = await self._recover_worker_future_failure(
                 task_id,
                 f'Failed to dispatch task to executor: {exc}',
             )
@@ -1116,7 +1296,7 @@ class Worker:
 
         # When done, record the outcome
         self._spawn_background(
-            self._finalize_after(fut, task_id, executor),
+            self._finalize_after(fut, task_id, queue_name, is_workflow_task, executor),
             name=f'finalize-{task_id}',
             finalizer=True,
         )
@@ -1127,6 +1307,8 @@ class Worker:
         self,
         fut: 'asyncio.Future[tuple[bool, str, Optional[str]]]',
         task_id: str,
+        queue_name: str = 'default',
+        is_workflow_task: bool = True,
         executor: Optional[ProcessPoolExecutor] = None,
     ) -> Result[None, _FinalizeError]:
         try:
@@ -1145,7 +1327,7 @@ class Worker:
                 )
             )
         except Exception as exc:
-            requeue_outcome = await self._requeue_claimed_task(
+            requeue_outcome = await self._recover_worker_future_failure(
                 task_id, f'Worker future failed before result: {exc}'
             )
             return Err(
@@ -1171,15 +1353,26 @@ class Worker:
             failed_reason=failed_reason,
         )
         if is_err(phase1_r):
-            return phase1_r
+            return Err(
+                self._with_finalize_context(
+                    phase1_r.err_value,
+                    queue_name=queue_name,
+                    is_workflow_task=is_workflow_task,
+                )
+            )
         tr = phase1_r.ok_value
         if tr is None:
             self._clear_finalize_retry_attempts(task_id, _FINALIZE_STAGE_PHASE1)
             return Ok(None)
 
         # Phase 2: workflow progression + capacity wakeups in a separate transaction.
-        # If this fails, the terminal task result remains durable and workflow recovery can resume.
-        phase2_r = await self._finalize_workflow_phase(task_id, tr)
+        # Plain tasks only need capacity notifications.
+        phase2_r = await self._finalize_workflow_phase(
+            task_id,
+            tr,
+            queue_name=queue_name,
+            is_workflow_task=is_workflow_task,
+        )
         if is_err(phase2_r):
             return phase2_r
         self._clear_finalize_retry_attempts(task_id, _FINALIZE_STAGE_PHASE1)
@@ -1203,6 +1396,33 @@ class Worker:
             task_id=task_id,
             retryable=retryable,
             data=data,
+        )
+
+    def _with_finalize_context(
+        self,
+        err: _FinalizeError,
+        *,
+        queue_name: str,
+        is_workflow_task: bool,
+    ) -> _FinalizeError:
+        data = dict(err.data or {})
+        data.setdefault('queue_name', queue_name or 'default')
+        data.setdefault('is_workflow_task', is_workflow_task)
+        return _FinalizeError(
+            error_code=err.error_code,
+            message=err.message,
+            stage=err.stage,
+            task_id=err.task_id,
+            retryable=err.retryable,
+            data=data,
+        )
+
+    def _finalize_context_from_error(self, err: _FinalizeError) -> tuple[str, bool]:
+        data = err.data or {}
+        is_workflow_task_raw = data.get('is_workflow_task')
+        return (
+            str(data.get('queue_name') or 'default'),
+            is_workflow_task_raw if isinstance(is_workflow_task_raw, bool) else True,
         )
 
     def _clear_finalize_retry_attempts(self, task_id: str, stage: str) -> None:
@@ -1257,7 +1477,8 @@ class Worker:
                     return Ok(None)
 
                 attempt_num = (ctx_row.retry_count or 0) + 1
-                attempt_started_at = ctx_row.started_at or now
+                db_now = ctx_row.db_now or now
+                attempt_started_at = ctx_row.started_at or db_now
                 attempt_worker = {
                     'worker_id': ctx_row.claimed_by_worker_id,
                     'worker_hostname': ctx_row.worker_hostname,
@@ -1267,6 +1488,14 @@ class Worker:
 
                 if not ok:
                     # Worker-level failure (rare): write WORKER_FAILURE attempt, mark FAILED
+                    _err_tr: TaskResult[None, TaskError] = TaskResult(
+                        err=TaskError(
+                            error_code=OperationalErrorCode.BROKER_ERROR,
+                            message=failed_reason or 'Worker failure',
+                            data={'task_id': task_id},
+                        )
+                    )
+                    result_payload = serialize_error_payload(_err_tr)
                     await s.execute(
                         UPSERT_TASK_ATTEMPT_SQL,
                         {
@@ -1275,23 +1504,29 @@ class Worker:
                             'outcome': 'WORKER_FAILURE',
                             'will_retry': False,
                             'started_at': attempt_started_at,
-                            'finished_at': now,
-                            'error_code': None,
-                            'error_message': None,
+                            'finished_at': db_now,
+                            'error_code': OperationalErrorCode.BROKER_ERROR.value,
+                            'error_message': failed_reason or 'Worker failure',
                             'failed_reason': failed_reason or 'Worker failure',
                             **attempt_worker,
                         },
                     )
-                    await s.execute(
+                    fail_res = await s.execute(
                         MARK_TASK_FAILED_WORKER_SQL,
                         {
-                            'now': now,
                             'reason': failed_reason or 'Worker failure',
+                            'result_json': result_payload,
+                            'error_code': OperationalErrorCode.BROKER_ERROR.value,
                             'id': task_id,
                         },
                     )
+                    if fail_res.fetchone() is None:
+                        logger.warning(
+                            f'Task {task_id} worker-fail finalize aborted: status is no longer RUNNING'
+                        )
+                        return Ok(None)
                     await s.commit()
-                    return Ok(None)
+                    return Ok(_err_tr)
 
                 # --- ok=True: parse the TaskResult ---
                 _loads_r = loads_json(result_json_str)
@@ -1314,7 +1549,7 @@ class Worker:
                             'outcome': 'FAILED',
                             'will_retry': False,
                             'started_at': attempt_started_at,
-                            'finished_at': now,
+                            'finished_at': db_now,
                             'error_code': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
                             'error_message': f'Result JSON corrupt: {_loads_r.err_value}',
                             'failed_reason': None,
@@ -1324,14 +1559,13 @@ class Worker:
                     await s.execute(
                         MARK_TASK_FAILED_SQL,
                         {
-                            'now': now,
                             'result_json': serialize_error_payload(_err_tr),
                             'id': task_id,
                             'error_code': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
                         },
                     )
                     await s.commit()
-                    return Ok(None)
+                    return Ok(_err_tr)
 
                 # Strict-serde phase 6: decode the persisted envelope.
                 # Err-fast-path mirrors ``app.get_result_async``: validate
@@ -1399,7 +1633,7 @@ class Worker:
                             'outcome': 'FAILED',
                             'will_retry': False,
                             'started_at': attempt_started_at,
-                            'finished_at': now,
+                            'finished_at': db_now,
                             'error_code': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
                             'error_message': f'Result decode failed: {_decode_err}',
                             'failed_reason': None,
@@ -1409,14 +1643,13 @@ class Worker:
                     await s.execute(
                         MARK_TASK_FAILED_SQL,
                         {
-                            'now': now,
                             'result_json': serialize_error_payload(_err_tr),
                             'id': task_id,
                             'error_code': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
                         },
                     )
                     await s.commit()
-                    return Ok(None)
+                    return Ok(_err_tr)
 
                 # `tr` is set by either the err-fast-path or the ok-slot
                 # typed decode above; the _decode_err early-return covers
@@ -1450,7 +1683,7 @@ class Worker:
                                         'outcome': 'FAILED',
                                         'will_retry': True,
                                         'started_at': attempt_started_at,
-                                        'finished_at': now,
+                                        'finished_at': db_now,
                                         'error_code': error_code_str,
                                         'error_message': task_error.message
                                         if task_error
@@ -1484,7 +1717,7 @@ class Worker:
                             'outcome': 'FAILED',
                             'will_retry': False,
                             'started_at': attempt_started_at,
-                            'finished_at': now,
+                            'finished_at': db_now,
                             'error_code': error_code_str,
                             'error_message': task_error.message if task_error else None,
                             'failed_reason': None,
@@ -1494,7 +1727,6 @@ class Worker:
                     fail_res = await s.execute(
                         MARK_TASK_FAILED_SQL,
                         {
-                            'now': now,
                             'result_json': result_json_str,
                             'id': task_id,
                             'error_code': error_code_str,
@@ -1516,7 +1748,7 @@ class Worker:
                             'outcome': 'COMPLETED',
                             'will_retry': False,
                             'started_at': attempt_started_at,
-                            'finished_at': now,
+                            'finished_at': db_now,
                             'error_code': None,
                             'error_message': None,
                             'failed_reason': None,
@@ -1525,7 +1757,7 @@ class Worker:
                     )
                     comp_res = await s.execute(
                         MARK_TASK_COMPLETED_SQL,
-                        {'now': now, 'result_json': result_json_str, 'id': task_id},
+                        {'result_json': result_json_str, 'id': task_id},
                     )
                     if comp_res.fetchone() is None:
                         logger.warning(
@@ -1559,30 +1791,30 @@ class Worker:
         self,
         task_id: str,
         tr: 'TaskResult[Any, TaskError]',
+        *,
+        queue_name: str = 'default',
+        is_workflow_task: bool = True,
     ) -> Result[None, _FinalizeError]:
         """Phase 2 of finalization: workflow advancement and worker wake notifications."""
         try:
             async with self.sf() as s:
                 # Handle workflow task completion (if this task is part of a workflow)
-                await self._handle_workflow_task_if_needed(s, task_id, tr)
+                await self._handle_workflow_task_if_needed(
+                    s,
+                    task_id,
+                    tr,
+                    is_workflow_task=is_workflow_task,
+                )
 
                 # Proactively wake workers to re-check capacity/backlog.
                 try:
-                    # Notify workers globally and on the specific queue to wake claims
-                    # Fetch queue name for this task
-                    resq = await s.execute(
-                        GET_TASK_QUEUE_NAME_SQL,
-                        {'id': task_id},
-                    )
-                    rowq = resq.fetchone()
-                    qname = str(rowq[0]) if rowq and rowq[0] else 'default'
                     payload = f'capacity:{task_id}'
                     await s.execute(
                         NOTIFY_TASK_NEW_SQL, {'c1': 'task_new', 'p': payload}
                     )
                     await s.execute(
                         NOTIFY_TASK_QUEUE_SQL,
-                        {'c2': f'task_queue_{qname}', 'p': payload},
+                        {'c2': f'task_queue_{queue_name or "default"}', 'p': payload},
                     )
                 except Exception:
                     # Non-fatal if NOTIFY fails; workflow state is already persisted.
@@ -1602,6 +1834,8 @@ class Worker:
                     data={
                         'task_id': task_id,
                         'phase': 'finalize_phase_2',
+                        'queue_name': queue_name or 'default',
+                        'is_workflow_task': is_workflow_task,
                         'exception_type': type(exc).__name__,
                         'exception': str(exc)[:500],
                     },
@@ -1815,7 +2049,7 @@ class Worker:
         if self._stop.is_set():
             return
 
-        outcome = await self._requeue_claimed_task(
+        outcome = await self._recover_worker_future_failure(
             err.task_id,
             f'Retry after future-stage finalize error: {err.message}',
         )
@@ -1876,7 +2110,14 @@ class Worker:
             failed_reason=failed_reason,
         )
         if is_err(phase1_r):
-            await self._handle_finalize_error(phase1_r.err_value)
+            queue_name, is_workflow_task = self._finalize_context_from_error(err)
+            await self._handle_finalize_error(
+                self._with_finalize_context(
+                    phase1_r.err_value,
+                    queue_name=queue_name,
+                    is_workflow_task=is_workflow_task,
+                )
+            )
             return
 
         tr = phase1_r.ok_value
@@ -1884,7 +2125,13 @@ class Worker:
             self._clear_finalize_retry_attempts(err.task_id, _FINALIZE_STAGE_PHASE1)
             return
 
-        phase2_r = await self._finalize_workflow_phase(err.task_id, tr)
+        queue_name, is_workflow_task = self._finalize_context_from_error(err)
+        phase2_r = await self._finalize_workflow_phase(
+            err.task_id,
+            tr,
+            queue_name=queue_name,
+            is_workflow_task=is_workflow_task,
+        )
         if is_err(phase2_r):
             await self._handle_finalize_error(phase2_r.err_value)
             return
@@ -1903,7 +2150,13 @@ class Worker:
             await self._handle_finalize_error(load_r.err_value)
             return
 
-        phase2_r = await self._finalize_workflow_phase(err.task_id, load_r.ok_value)
+        queue_name, is_workflow_task = self._finalize_context_from_error(err)
+        phase2_r = await self._finalize_workflow_phase(
+            err.task_id,
+            load_r.ok_value,
+            queue_name=queue_name,
+            is_workflow_task=is_workflow_task,
+        )
         if is_err(phase2_r):
             await self._handle_finalize_error(phase2_r.err_value)
             return
@@ -1915,6 +2168,8 @@ class Worker:
         session: 'AsyncSession',
         task_id: str,
         result: 'TaskResult[Any, TaskError]',
+        *,
+        is_workflow_task: bool = True,
     ) -> None:
         """
         Check if task is part of a workflow and handle accordingly.
@@ -1923,6 +2178,9 @@ class Worker:
         It updates the workflow_task record and triggers dependency resolution.
         """
         from horsies.core.workflows.engine import on_workflow_task_complete
+
+        if not is_workflow_task:
+            return
 
         # Quick check: is this task linked to a workflow?
         check = await session.execute(
@@ -2189,7 +2447,7 @@ class Worker:
                             RENEW_CLAIM_LEASE_SQL,
                             {
                                 'wid': self.worker_instance_id,
-                                'new_expires_at': self._compute_claim_expires_at(),
+                                'claim_lease_ms': self._claim_lease_ms(),
                                 'max_claim_age_ms': self.cfg.max_claim_renew_age_ms,
                             },
                         )
@@ -2277,6 +2535,7 @@ class Worker:
                     'claimed_stale_threshold_ms': self.cfg.recovery_config.claimed_stale_threshold_ms,
                     'auto_fail_stale_running': self.cfg.recovery_config.auto_fail_stale_running,
                     'running_stale_threshold_ms': self.cfg.recovery_config.running_stale_threshold_ms,
+                    'finalizing_stale_threshold_ms': self.cfg.recovery_config.finalizing_stale_threshold_ms,
                     'check_interval_ms': self.cfg.recovery_config.check_interval_ms,
                     'runner_heartbeat_interval_ms': self.cfg.recovery_config.runner_heartbeat_interval_ms,
                     'claimer_heartbeat_interval_ms': self.cfg.recovery_config.claimer_heartbeat_interval_ms,
@@ -2445,6 +2704,9 @@ class Worker:
                     ):
                         match await temp_broker.mark_stale_tasks_as_failed(
                             stale_threshold_ms=recovery_cfg.running_stale_threshold_ms,
+                            finalizing_stale_threshold_ms=(
+                                recovery_cfg.finalizing_stale_threshold_ms
+                            ),
                         ):
                             case Ok(failed):
                                 mark_failed_permanent_failures = 0
@@ -2526,7 +2788,9 @@ class Worker:
                                             'retention_hours': recovery_cfg.heartbeat_retention_hours,
                                         },
                                     )
-                                    deleted_heartbeats = int(hb_result.rowcount or 0)
+                                    deleted_heartbeats = int(
+                                        getattr(hb_result, 'rowcount', 0) or 0
+                                    )
 
                                 if (
                                     recovery_cfg.worker_state_retention_hours
@@ -2538,7 +2802,9 @@ class Worker:
                                             'retention_hours': recovery_cfg.worker_state_retention_hours,
                                         },
                                     )
-                                    deleted_worker_states = int(ws_result.rowcount or 0)
+                                    deleted_worker_states = int(
+                                        getattr(ws_result, 'rowcount', 0) or 0
+                                    )
 
                                 if (
                                     recovery_cfg.terminal_record_retention_hours
@@ -2566,10 +2832,14 @@ class Worker:
                                         task_params,
                                     )
                                     deleted_workflow_tasks = int(
-                                        wt_result.rowcount or 0
+                                        getattr(wt_result, 'rowcount', 0) or 0
                                     )
-                                    deleted_workflows = int(wf_result.rowcount or 0)
-                                    deleted_tasks = int(task_result.rowcount or 0)
+                                    deleted_workflows = int(
+                                        getattr(wf_result, 'rowcount', 0) or 0
+                                    )
+                                    deleted_tasks = int(
+                                        getattr(task_result, 'rowcount', 0) or 0
+                                    )
 
                                 await s.commit()
 

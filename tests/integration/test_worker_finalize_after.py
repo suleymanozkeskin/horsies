@@ -259,12 +259,12 @@ async def test_phase1_skip_returns_ok_none(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_phase1_err_propagated(
+async def test_phase1_err_propagated_with_finalize_context(
     engine: AsyncEngine,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Phase-1 Err is propagated as-is; phase-2 never runs."""
+    """Phase-1 Err carries replay context; phase-2 never runs."""
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
     result_json = _serialize_ok('value')
@@ -283,7 +283,13 @@ async def test_phase1_err_propagated(
     result = await worker._finalize_after(fut, task_id)
 
     assert is_err(result)
-    assert result.err_value is expected_err
+    assert result.err_value.error_code == expected_err.error_code
+    assert result.err_value.stage == expected_err.stage
+    assert result.err_value.task_id == expected_err.task_id
+    assert result.err_value.data == {
+        'queue_name': 'default',
+        'is_workflow_task': True,
+    }
     worker._finalize_workflow_phase.assert_not_awaited()
 
 
@@ -348,12 +354,12 @@ async def test_broken_process_pool_returns_err(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_broken_process_pool_requeues_owned_running_task(
+async def test_broken_process_pool_marks_non_retryable_running_task_failed(
     engine: AsyncEngine,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """BrokenProcessPool requeues owned RUNNING tasks, not only CLAIMED tasks."""
+    """BrokenProcessPool treats owned RUNNING tasks as possible execution."""
     worker = _make_worker(engine)
     worker._restart_executor = AsyncMock()  # type: ignore[method-assign]
     task_id = await _insert_owned_running_task(session, worker.worker_instance_id)
@@ -364,7 +370,7 @@ async def test_broken_process_pool_requeues_owned_running_task(
         await session.execute(
             text("""
                 SELECT status, claimed, claimed_by_worker_id, started_at,
-                       worker_hostname, worker_pid, worker_process_name
+                       worker_hostname, worker_pid, worker_process_name, error_code
                 FROM horsies_tasks
                 WHERE id = :id
             """),
@@ -373,13 +379,14 @@ async def test_broken_process_pool_requeues_owned_running_task(
     ).fetchone()
 
     assert row is not None
-    assert row.status == 'PENDING'
+    assert row.status == 'FAILED'
     assert row.claimed is False
-    assert row.claimed_by_worker_id is None
-    assert row.started_at is None
-    assert row.worker_hostname is None
-    assert row.worker_pid is None
-    assert row.worker_process_name is None
+    assert row.claimed_by_worker_id == worker.worker_instance_id
+    assert row.started_at is not None
+    assert row.worker_hostname == 'stale-host'
+    assert row.worker_pid == 1234
+    assert row.worker_process_name == 'stale-process'
+    assert row.error_code == 'WORKER_CRASHED'
     worker._restart_executor.assert_awaited_once()
 
 
@@ -394,13 +401,12 @@ async def test_generic_future_exception_requeues_and_returns_err(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """RuntimeError from future → _requeue_claimed_task called, Err returned."""
+    """RuntimeError from future → crash recovery helper called, Err returned."""
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
     fut = _make_failed_future(RuntimeError('child process exploded'))
 
-    # Mock requeue to avoid needing CLAIMED state + worker_instance_id match
-    worker._requeue_claimed_task = AsyncMock(  # type: ignore[method-assign]
+    worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
         return_value=MagicMock(value='NOT_OWNER_OR_NOT_CLAIMED'),
     )
 
@@ -410,7 +416,7 @@ async def test_generic_future_exception_requeues_and_returns_err(
     err = result.err_value
     assert err.stage == _FINALIZE_STAGE_FUTURE
     assert 'child process exploded' in err.message
-    worker._requeue_claimed_task.assert_awaited_once()
+    worker._recover_worker_future_failure.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

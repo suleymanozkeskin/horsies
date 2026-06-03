@@ -6,7 +6,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0: breaking changes may land in minor or patch releases,
 and there is no migration contract between pre-1.0 versions.
 
-## [0.1.5] - Unreleased
+## [0.1.6] - Unreleased
+
+### Added
+
+- Schema v2 task lifecycle metadata: `is_workflow_task`, `finalizing_at`, and
+  `finalizing_by_worker_id`. Existing workflow-linked task rows are backfilled
+  once during migration; new direct task sends and workflow enqueues write the
+  flag explicitly.
+- `RecoveryConfig.finalizing_stale_threshold_ms` to protect the child-to-parent
+  finalization handoff without disabling stale child recovery.
+
+### Changed
+
+- Worker claim batching now defaults to filling available local/global capacity
+  (`max_claim_batch=0`), while a positive `max_claim_batch` remains an explicit
+  per-queue fairness cap.
+- Soft-prefetch local budgeting counts already-owned `CLAIMED` rows, preventing
+  a worker from hoarding beyond `processes + prefetch_buffer`.
+- Plain tasks skip workflow-specific child preflight/finalize checks using the
+  persisted `is_workflow_task` flag.
+
+### Fixed
+
+- `BrokenProcessPool` and child-future failures now distinguish `CLAIMED` work
+  from `RUNNING` work. `RUNNING` tasks respect `WORKER_CRASHED` retry policy or
+  persist a terminal `WORKER_CRASHED` result instead of being blindly requeued.
+- Finalization failure handling now preserves queue/workflow context across
+  retries, schedules phase-2 retries after terminal state is committed, and
+  returns synthetic `TaskResult` payloads for worker-failure/corrupt-result
+  terminal paths so workflow advancement and capacity notifications are not
+  skipped.
+- The reaper skips recent `finalizing_at` handoffs, recovers stale finalizing
+  rows after `finalizing_stale_threshold_ms`, and still recovers hung child
+  processes even when the parent worker coordinator is alive.
+- Workflow pause now cancels claimed-but-not-started internal task rows and
+  resets their workflow nodes to `READY`, including retry-window nodes already
+  marked `RUNNING`, so resume enqueues fresh task rows instead of leaving
+  orphan claims.
+
+## [0.1.5] - 2026-06-02
 
 ### Added
 

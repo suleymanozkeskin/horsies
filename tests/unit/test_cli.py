@@ -454,7 +454,7 @@ def _make_worker_namespace(
     module: str = 'my.mod:app',
     loglevel: str = 'INFO',
     processes: int = 1,
-    max_claim_batch: int = 2,
+    max_claim_batch: int = 0,
     max_claim_per_worker: int = 0,
 ) -> argparse.Namespace:
     """Build a valid argparse.Namespace for worker_command."""

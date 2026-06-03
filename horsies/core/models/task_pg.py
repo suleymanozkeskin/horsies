@@ -122,6 +122,15 @@ class TaskModel(Base):
     claim_expires_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
+    is_workflow_task: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=sa_false(), index=True,
+    )
+    finalizing_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    finalizing_by_worker_id: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
     good_until: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )

@@ -63,6 +63,34 @@ PAUSE_CHILD_WORKFLOW_SQL = text("""
     SET status = 'PAUSED', updated_at = NOW()
     WHERE id = :wf_id AND status = 'RUNNING'
 """)
+CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL = text("""
+    WITH cancelled AS (
+        UPDATE horsies_tasks t
+        SET status = 'CANCELLED',
+            claimed = FALSE,
+            claimed_at = NULL,
+            claimed_by_worker_id = NULL,
+            claim_expires_at = NULL,
+            finalizing_at = NULL,
+            finalizing_by_worker_id = NULL,
+            error_code = 'TASK_CANCELLED',
+            failed_reason = 'Workflow paused before task start',
+            updated_at = NOW()
+        FROM horsies_workflow_tasks wt
+        WHERE wt.task_id = t.id
+          AND wt.workflow_id = ANY(:workflow_ids)
+          AND wt.status IN ('ENQUEUED', 'RUNNING')
+          AND t.status = 'CLAIMED'
+        RETURNING t.id
+    )
+    UPDATE horsies_workflow_tasks wt
+    SET status = 'READY',
+        task_id = NULL,
+        started_at = NULL
+    WHERE wt.task_id IN (SELECT id FROM cancelled)
+      AND wt.status IN ('ENQUEUED', 'RUNNING')
+    RETURNING wt.workflow_id, wt.task_index
+""")
 # -- SQL constants for resume_workflow --
 
 RESUME_WORKFLOW_SQL = text("""
@@ -107,10 +135,10 @@ ENQUEUE_WORKFLOW_TASK_SQL = text("""
 INSERT_TASK_FOR_WORKFLOW_SQL = text("""
     INSERT INTO horsies_tasks (id, task_name, queue_name, priority, args, kwargs, status,
                        sent_at, enqueued_at, created_at, updated_at, claimed, retry_count, max_retries,
-                       task_options, good_until, enqueue_sha)
+                       task_options, good_until, enqueue_sha, is_workflow_task)
     VALUES (:id, :name, :queue, :priority, :args, :kwargs, 'PENDING',
             :sent_at, NOW(), NOW(), NOW(), FALSE, 0, :max_retries, :task_options, :good_until,
-            :enqueue_sha)
+            :enqueue_sha, TRUE)
 """)
 LINK_WORKFLOW_TASK_SQL = text("""
     UPDATE horsies_workflow_tasks SET task_id = :tid WHERE workflow_id = :wf_id AND task_index = :idx
