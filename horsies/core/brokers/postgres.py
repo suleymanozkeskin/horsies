@@ -113,6 +113,8 @@ from horsies.core.schemas.migrations import (
     ADD_ENQUEUE_SHA_COLUMN_SQL,
     ADD_ENQUEUED_AT_COLUMN_SQL,
     ADD_ERROR_CODE_COLUMN_SQL,
+    ADD_TASK_FINALIZING_COLUMNS_SQL,
+    ADD_TASK_IS_WORKFLOW_TASK_COLUMN_SQL,
     ADD_IS_SUBWORKFLOW_COLUMN_SQL,
     ADD_JOIN_TYPE_COLUMN_SQL,
     ADD_MIN_SUCCESS_COLUMN_SQL,
@@ -128,6 +130,7 @@ from horsies.core.schemas.migrations import (
     ADD_TASK_OPTIONS_COLUMN_SQL,
     ADD_WORKFLOW_SENT_AT_COLUMN_SQL,
     ADD_DEFINITION_KEY_COLUMN_SQL,
+    BACKFILL_TASK_IS_WORKFLOW_TASK_SQL,
     BACKFILL_ENQUEUE_SHA_SQL,
     BACKFILL_ENQUEUED_AT_SQL,
     BACKFILL_WORKFLOW_SENT_AT_SQL,
@@ -264,6 +267,10 @@ SELECT_STALE_RUNNING_TASKS_SQL = text("""
     ) hb ON TRUE
     WHERE t2.status = 'RUNNING'
       AND t2.started_at IS NOT NULL
+      AND (
+          t2.finalizing_at IS NULL
+          OR t2.finalizing_at < NOW() - CAST(:finalizing_stale_threshold || ' seconds' AS INTERVAL)
+      )
       AND COALESCE(hb.last_heartbeat, t2.started_at) < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL)
     FOR UPDATE OF t2 SKIP LOCKED
 """)
@@ -284,6 +291,10 @@ SELECT_STALE_TASK_FOR_UPDATE_SQL = text("""
     WHERE t.id = :id
       AND t.status = 'RUNNING'
       AND t.started_at IS NOT NULL
+      AND (
+          t.finalizing_at IS NULL
+          OR t.finalizing_at < NOW() - CAST(:finalizing_stale_threshold || ' seconds' AS INTERVAL)
+      )
       AND COALESCE(hb.last_heartbeat, t.started_at) < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL)
     FOR UPDATE OF t
 """)
@@ -295,10 +306,16 @@ MARK_STALE_TASK_FAILED_SQL = text("""
         failed_reason = :failed_reason,
         result = :result,
         error_code = :error_code,
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
         updated_at = NOW()
     WHERE t.id = :task_id
       AND t.status = 'RUNNING'
       AND t.started_at IS NOT NULL
+      AND (
+          t.finalizing_at IS NULL
+          OR t.finalizing_at < NOW() - CAST(:finalizing_stale_threshold || ' seconds' AS INTERVAL)
+      )
       AND COALESCE(
           (
               SELECT h.sent_at
@@ -341,6 +358,8 @@ REQUEUE_STALE_CLAIMED_SQL = text("""
         claimed_at = NULL,
         claimed_by_worker_id = NULL,
         claim_expires_at = NULL,
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
         updated_at = NOW()
     FROM (
         SELECT t2.id, hb.last_heartbeat, t2.claimed_at
@@ -636,6 +655,9 @@ class PostgresBroker:
 
             # Migration: add error_code column for task failure observability.
             await conn.execute(ADD_ERROR_CODE_COLUMN_SQL)
+            await conn.execute(ADD_TASK_IS_WORKFLOW_TASK_COLUMN_SQL)
+            await conn.execute(BACKFILL_TASK_IS_WORKFLOW_TASK_SQL)
+            await conn.execute(ADD_TASK_FINALIZING_COLUMNS_SQL)
             await conn.execute(CREATE_TASKS_ERROR_CODE_INDEX_SQL)
 
             # Migration: create horsies_task_attempts table and indexes.
@@ -784,6 +806,7 @@ class PostgresBroker:
                     max_retries=max_retries,
                     task_options=task_options,
                     enqueue_sha=enqueue_sha,
+                    is_workflow_task=False,
                     created_at=text('NOW()'),
                     updated_at=text('NOW()'),
                 )
@@ -1502,6 +1525,7 @@ class PostgresBroker:
     async def mark_stale_tasks_as_failed(
         self,
         stale_threshold_ms: int = 300_000,
+        finalizing_stale_threshold_ms: int = 300_000,
     ) -> BrokerResult[int]:
         """Clean up crashed worker tasks: retry if policy allows, otherwise mark FAILED.
 
@@ -1528,6 +1552,7 @@ class PostgresBroker:
             )
 
             stale_threshold_seconds = stale_threshold_ms / 1000.0
+            finalizing_stale_threshold_seconds = finalizing_stale_threshold_ms / 1000.0
 
             # Phase 1: lightweight scan to collect candidate task IDs.
             # FOR UPDATE SKIP LOCKED prevents picking up rows already being finalized,
@@ -1535,7 +1560,10 @@ class PostgresBroker:
             async with self.session_factory() as session:
                 stale_tasks_result = await session.execute(
                     SELECT_STALE_RUNNING_TASKS_SQL,
-                    {'stale_threshold': stale_threshold_seconds},
+                    {
+                        'stale_threshold': stale_threshold_seconds,
+                        'finalizing_stale_threshold': finalizing_stale_threshold_seconds,
+                    },
                 )
                 candidate_ids = [row.id for row in stale_tasks_result.fetchall()]
                 await session.rollback()
@@ -1557,6 +1585,7 @@ class PostgresBroker:
                             {
                                 'id': task_id,
                                 'stale_threshold': stale_threshold_seconds,
+                                'finalizing_stale_threshold': finalizing_stale_threshold_seconds,
                             },
                         )
                         ctx_row = ctx_result.fetchone()
@@ -1581,7 +1610,7 @@ class PostgresBroker:
                             f'for {stale_threshold_ms}ms = {stale_threshold_ms/1000:.1f}s)'
                         )
                         attempt_num = retry_count + 1
-                        now_utc = datetime.now(timezone.utc)
+                        now_utc = db_now
                         attempt_worker = {
                             'worker_id': worker_id,
                             'worker_hostname': worker_hostname,
@@ -1646,6 +1675,7 @@ class PostgresBroker:
                                     'retry_count': new_retry_count,
                                     'next_retry_at': next_retry_at,
                                     'stale_threshold': stale_threshold_seconds,
+                                    'finalizing_stale_threshold': finalizing_stale_threshold_seconds,
                                 },
                             )
                             if res.fetchone() is None:
@@ -1735,6 +1765,7 @@ class PostgresBroker:
                                     'result': result_json,
                                     'error_code': OperationalErrorCode.WORKER_CRASHED.value,
                                     'stale_threshold': stale_threshold_seconds,
+                                    'finalizing_stale_threshold': finalizing_stale_threshold_seconds,
                                 },
                             )
                             if mark_failed_res.fetchone() is None:

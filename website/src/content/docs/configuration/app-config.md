@@ -117,6 +117,7 @@ config = AppConfig(
         claimed_stale_threshold_ms=120_000,  # 2 minutes
         auto_fail_stale_running=True,
         running_stale_threshold_ms=300_000,  # 5 minutes
+        finalizing_stale_threshold_ms=300_000,  # 5 minutes
     ),
 )
 ```

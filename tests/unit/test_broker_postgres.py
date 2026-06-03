@@ -2476,6 +2476,9 @@ class TestSchemaVersionInitialization:
     @pytest.mark.asyncio
     async def test_slow_path_inserts_schema_version_after_migrations(self) -> None:
         from horsies.core.schemas.migrations import (
+            ADD_TASK_FINALIZING_COLUMNS_SQL,
+            ADD_TASK_IS_WORKFLOW_TASK_COLUMN_SQL,
+            BACKFILL_TASK_IS_WORKFLOW_TASK_SQL,
             CREATE_SCHEMA_VERSION_TABLE_SQL,
             INSERT_SCHEMA_VERSION_SQL,
             SCHEMA_ADVISORY_LOCK_SQL,
@@ -2512,9 +2515,27 @@ class TestSchemaVersionInitialization:
             for index, call in enumerate(calls)
             if call.args[0] is INSERT_SCHEMA_VERSION_SQL
         )
+        add_workflow_flag_index = next(
+            index
+            for index, call in enumerate(calls)
+            if call.args[0] is ADD_TASK_IS_WORKFLOW_TASK_COLUMN_SQL
+        )
+        backfill_workflow_flag_index = next(
+            index
+            for index, call in enumerate(calls)
+            if call.args[0] is BACKFILL_TASK_IS_WORKFLOW_TASK_SQL
+        )
+        add_finalizing_index = next(
+            index
+            for index, call in enumerate(calls)
+            if call.args[0] is ADD_TASK_FINALIZING_COLUMNS_SQL
+        )
 
         assert max(lock_indices) < create_version_index
         conn.run_sync.assert_awaited_once()
+        assert add_workflow_flag_index < backfill_workflow_flag_index
+        assert backfill_workflow_flag_index < add_finalizing_index
+        assert add_finalizing_index < insert_version_index
         assert insert_version_index > create_version_index
         assert calls[insert_version_index].args[1] == {'version': SCHEMA_VERSION}
 

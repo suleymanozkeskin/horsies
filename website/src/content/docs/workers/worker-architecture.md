@@ -144,7 +144,7 @@ From `WorkerConfig`:
 | `pgbouncer_transaction_mode` | Disables child-process prepared statements for PgBouncer transaction pooling |
 | `queues` | Queue names to process |
 | `processes` | Child process count |
-| `max_claim_batch` | Max claims per queue per pass |
+| `max_claim_batch` | Max claims per queue per pass; `0` means auto-fill available capacity |
 | `max_claim_per_worker` | Total claim limit |
 | `app_locator` | Path to app instance |
 | `imports` | Task module paths |
@@ -178,7 +178,7 @@ Workers recover from transient infrastructure failures without operator interven
 
 - **Database outages**: Worker retries on connection loss during startup, claiming, and result writes. No crash, no manual restart.
 - **Silent NOTIFY channels**: If the PostgreSQL NOTIFY mechanism stops delivering (broken listener connection, dropped trigger), the worker falls back to periodic polling so tasks are still picked up.
-- **Broken process pool**: If child processes crash, the process pool is recreated. Tasks still in CLAIMED status are requeued back to PENDING. Tasks already in RUNNING status are handled by the [recovery reaper](../heartbeats-recovery): if the task has a retry policy with `WORKER_CRASHED` in `auto_retry_for` and retries remaining, the task is scheduled for retry; otherwise it is marked FAILED.
+- **Broken process pool**: If child processes crash, the process pool is recreated. Tasks still in CLAIMED status are requeued back to PENDING. Tasks already in RUNNING status are recovered through the same retry policy used by the reaper: if `WORKER_CRASHED` is listed in `auto_retry_for` and retries remain, the task is scheduled for retry; otherwise it is marked FAILED with a `WORKER_CRASHED` result.
 
 ### Configuration
 

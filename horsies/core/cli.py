@@ -738,8 +738,8 @@ Examples:
         worker_parser.add_argument(
             '--max-claim-batch',
             type=int,
-            default=2,
-            help='Max tasks per queue per pass (default: 2)',
+            default=0,
+            help='Max tasks per queue per pass, 0=auto (default: 0)',
         )
         worker_parser.add_argument(
             '--max-claim-per-worker',

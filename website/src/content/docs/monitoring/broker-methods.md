@@ -132,13 +132,14 @@ elif result.ok_value is not None:
         print(f"Next retry at: {info.next_retry_at}")
 ```
 
-### `mark_stale_tasks_as_failed(stale_threshold_ms: int = 300_000) -> BrokerResult[int]`
+### `mark_stale_tasks_as_failed(stale_threshold_ms: int = 300_000, finalizing_stale_threshold_ms: int = 300_000) -> BrokerResult[int]`
 
 Handle RUNNING tasks with no heartbeat within the threshold. Tasks with a retry policy listing `WORKER_CRASHED` in `auto_retry_for` (and retries remaining) are scheduled for retry; all others are marked FAILED with `WORKER_CRASHED` error code.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `stale_threshold_ms` | `int` | `300_000` (5 min) | Milliseconds without heartbeat to consider crashed |
+| `finalizing_stale_threshold_ms` | `int` | `300_000` (5 min) | Milliseconds a completed child may remain finalizing before recovery |
 
 **Returns:** `Ok(int)` — number of tasks processed (retried or failed).
 

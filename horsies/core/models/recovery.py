@@ -25,6 +25,7 @@ class RecoveryConfig(BaseModel):
     - claimed_stale_threshold_ms: Milliseconds without heartbeat before CLAIMED task is stale
     - auto_fail_stale_running: If True, automatically mark stale RUNNING tasks as FAILED
     - running_stale_threshold_ms: Milliseconds without heartbeat before RUNNING task is stale
+    - finalizing_stale_threshold_ms: Milliseconds a task may remain finalizing before recovery
     - check_interval_ms: How often the reaper checks for stale tasks
     - runner_heartbeat_interval_ms: How often RUNNING tasks send heartbeats from inside the task process
     - claimer_heartbeat_interval_ms: How often CLAIMED tasks send heartbeats
@@ -49,6 +50,12 @@ class RecoveryConfig(BaseModel):
     running_stale_threshold_ms: Annotated[int, Field(ge=1_000, le=7_200_000)] = Field(
         default=300_000,  # 5 minutes
         description='Milliseconds without runner heartbeat before RUNNING task is considered stale (1s-2hr)',
+    )
+    finalizing_stale_threshold_ms: Annotated[
+        int, Field(ge=1_000, le=7_200_000),
+    ] = Field(
+        default=300_000,
+        description='Milliseconds a completed child may wait for parent finalization before recovery (1s-2hr)',
     )
 
     check_interval_ms: Annotated[int, Field(ge=1_000, le=600_000)] = Field(
@@ -115,6 +122,20 @@ class RecoveryConfig(BaseModel):
                         'threshold must be at least 2x heartbeat interval',
                     ],
                     help_text=f'set running_stale_threshold_ms >= {min_running}ms ({min_running/1000:.1f}s)',
+                )
+            )
+
+        if self.finalizing_stale_threshold_ms < min_running:
+            report.add(
+                ConfigurationError(
+                    message='finalizing_stale_threshold_ms too low',
+                    code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                    notes=[
+                        f'finalizing_stale_threshold_ms={self.finalizing_stale_threshold_ms}ms ({self.finalizing_stale_threshold_ms/1000:.1f}s)',
+                        f'runner_heartbeat_interval_ms={self.runner_heartbeat_interval_ms}ms ({self.runner_heartbeat_interval_ms/1000:.1f}s)',
+                        'threshold must be at least 2x runner heartbeat interval',
+                    ],
+                    help_text=f'set finalizing_stale_threshold_ms >= {min_running}ms ({min_running/1000:.1f}s)',
                 )
             )
 

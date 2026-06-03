@@ -336,7 +336,7 @@ async def test_worker_failure_marks_failed(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Generic worker failure → Ok(None), task becomes FAILED with reason."""
+    """Generic worker failure → error TaskResult, task becomes FAILED with reason."""
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
 
@@ -349,7 +349,8 @@ async def test_worker_failure_marks_failed(
     )
 
     assert is_ok(result)
-    assert result.ok_value is None
+    assert result.ok_value is not None
+    assert result.ok_value.is_err()
     status, _, failed_reason, _ = await _get_task_row(session, task_id)
     assert status == 'FAILED'
     assert failed_reason == 'Worker crash'
@@ -405,7 +406,8 @@ async def test_corrupt_json_marks_serialization_error(
     )
 
     assert is_ok(result)
-    assert result.ok_value is None
+    assert result.ok_value is not None
+    assert result.ok_value.is_err()
     status, result_json, _, _ = await _get_task_row(session, task_id)
     assert status == 'FAILED'
     assert result_json is not None
@@ -431,7 +433,8 @@ async def test_invalid_task_result_structure_marks_error(
     )
 
     assert is_ok(result)
-    assert result.ok_value is None
+    assert result.ok_value is not None
+    assert result.ok_value.is_err()
     status, result_json, _, _ = await _get_task_row(session, task_id)
     assert status == 'FAILED'
     assert result_json is not None

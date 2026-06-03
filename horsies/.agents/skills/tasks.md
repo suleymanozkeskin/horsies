@@ -309,7 +309,7 @@ error_code: str | None, error_message: str | None, failed_reason: str | None
 worker_id: str | None, worker_hostname: str | None, worker_pid: int | None, worker_process_name: str | None
 ```
 
-`TaskAttemptOutcome`: `COMPLETED` (success), `FAILED` (domain/library error with TaskResult), `WORKER_FAILURE` (worker crash without TaskResult).
+`TaskAttemptOutcome`: `COMPLETED` (success), `FAILED` (domain/library error or recoverable worker/process failure represented as a TaskResult), `WORKER_FAILURE` (legacy/rare worker failure path without a usable TaskResult).
 
 `TaskStatus`: `PENDING -> CLAIMED -> RUNNING -> COMPLETED | FAILED | CANCELLED | EXPIRED`. `is_terminal` is `True` for `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED`. `EXPIRED` means the task's `good_until` deadline passed before execution started (either PENDING or CLAIMED).
 

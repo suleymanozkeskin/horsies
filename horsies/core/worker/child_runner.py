@@ -353,15 +353,21 @@ def _handle_workflow_stop_before_start(
     )
     match workflow_status:
         case 'PAUSED':
-            # Pause is resumable: put task back to claimable state.
+            # Pause is resumable at the workflow node level. The already
+            # claimed task row is abandoned so resume can enqueue a fresh row
+            # without leaving an orphan claim that can run outside the workflow.
             cursor.execute(
                 """
                 UPDATE horsies_tasks
-                SET status = 'PENDING',
+                SET status = 'CANCELLED',
                     claimed = FALSE,
                     claimed_at = NULL,
                     claimed_by_worker_id = NULL,
                     claim_expires_at = NULL,
+                    finalizing_at = NULL,
+                    finalizing_by_worker_id = NULL,
+                    error_code = 'TASK_CANCELLED',
+                    failed_reason = 'Workflow paused before task start',
                     updated_at = NOW()
                 WHERE id = %s
                   AND status = 'CLAIMED'
@@ -375,7 +381,7 @@ def _handle_workflow_stop_before_start(
                     task_id = NULL,
                     started_at = NULL
                 WHERE task_id = %s
-                  AND status = 'ENQUEUED'
+                  AND status IN ('ENQUEUED', 'RUNNING')
                 """,
                 (task_id,),
             )
@@ -401,6 +407,8 @@ def _handle_workflow_stop_before_start(
                     claimed_at = NULL,
                     claimed_by_worker_id = NULL,
                     claim_expires_at = NULL,
+                    finalizing_at = NULL,
+                    finalizing_by_worker_id = NULL,
                     updated_at = NOW()
                 WHERE id = %s
                   AND status IN ('CLAIMED', 'PENDING')
@@ -467,6 +475,7 @@ def _update_workflow_task_running_with_retry(task_id: str) -> bool:
 def _preflight_workflow_check(
     task_id: str,
     worker_id: str,
+    is_workflow_task: bool = True,
 ) -> Optional[Tuple[bool, str, Optional[str]]]:
     try:
         pool = _get_worker_pool()
@@ -481,17 +490,19 @@ def _preflight_workflow_check(
             if expired_result is not None:
                 return expired_result
 
-            workflow_status = _get_workflow_status_for_task(cursor, task_id)
-            match workflow_status:
-                case 'PAUSED' | 'CANCELLED':
-                    return _handle_workflow_stop_before_start(
-                        cursor,
-                        conn,
-                        task_id,
-                        workflow_status,
-                    )
-                case _:
-                    return None
+            if is_workflow_task:
+                workflow_status = _get_workflow_status_for_task(cursor, task_id)
+                match workflow_status:
+                    case 'PAUSED' | 'CANCELLED':
+                        return _handle_workflow_stop_before_start(
+                            cursor,
+                            conn,
+                            task_id,
+                            workflow_status,
+                        )
+                    case _:
+                        return None
+            return None
     except Exception as e:
         logger.error(f'Failed to check workflow status for task {task_id}: {e}')
         return (False, '', 'WORKFLOW_CHECK_FAILED')
@@ -517,6 +528,8 @@ def _expire_claimed_task_before_start(
         SET status = 'EXPIRED',
             claimed = FALSE,
             claim_expires_at = NULL,
+            finalizing_at = NULL,
+            finalizing_by_worker_id = NULL,
             failed_at = NOW(),
             result = %s,
             error_code = %s,
@@ -547,12 +560,22 @@ def _expire_claimed_task_before_start(
 def _confirm_ownership_and_set_running(
     task_id: str,
     worker_id: str,
+    is_workflow_task: bool = True,
 ) -> Optional[Tuple[bool, str, Optional[str]]]:
     try:
         pool = _get_worker_pool()
         with pool.connection() as conn:
             cursor = conn.cursor(row_factory=namedtuple_row)
-            cursor.execute(
+            workflow_guard_sql = """
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM horsies_workflow_tasks wt
+                      JOIN horsies_workflows w ON w.id = wt.workflow_id
+                      WHERE wt.task_id = %s
+                        AND w.status IN ('PAUSED', 'CANCELLED')
+                  )
+            """
+            sql = (
                 """
                 UPDATE horsies_tasks
                 SET status = 'RUNNING',
@@ -568,23 +591,24 @@ def _confirm_ownership_and_set_running(
                   AND claimed_by_worker_id = %s
                   AND (claim_expires_at IS NULL OR claim_expires_at > now())
                   AND (good_until IS NULL OR good_until > now())
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM horsies_workflow_tasks wt
-                      JOIN horsies_workflows w ON w.id = wt.workflow_id
-                      WHERE wt.task_id = %s
-                        AND w.status IN ('PAUSED', 'CANCELLED')
-                  )
+                """
+                + (workflow_guard_sql if is_workflow_task else '')
+                + """
                 RETURNING id
-                """,
-                (
-                    os.getpid(),
-                    socket.gethostname(),
-                    f'worker-{os.getpid()}',
-                    task_id,
-                    worker_id,
-                    task_id,
-                ),
+                """
+            )
+            params = [
+                os.getpid(),
+                socket.gethostname(),
+                f'worker-{os.getpid()}',
+                task_id,
+                worker_id,
+            ]
+            if is_workflow_task:
+                params.append(task_id)
+            cursor.execute(
+                sql,
+                tuple(params),
             )
             updated_row = cursor.fetchone()
             if updated_row is None:
@@ -597,41 +621,45 @@ def _confirm_ownership_and_set_running(
                 if expired_result is not None:
                     return expired_result
 
-                workflow_status = _get_workflow_status_for_task(cursor, task_id)
-                match workflow_status:
-                    case 'PAUSED' | 'CANCELLED':
-                        return _handle_workflow_stop_before_start(
-                            cursor,
-                            conn,
-                            task_id,
-                            workflow_status,
-                        )
-                    case _:
-                        conn.rollback()
-                        logger.warning(
-                            f'Task {task_id} ownership lost - claim was reclaimed or status changed. '
-                            f'Aborting execution to prevent double-execution.'
-                        )
-                        return (False, '', 'CLAIM_LOST')
+                if is_workflow_task:
+                    workflow_status = _get_workflow_status_for_task(cursor, task_id)
+                    match workflow_status:
+                        case 'PAUSED' | 'CANCELLED':
+                            return _handle_workflow_stop_before_start(
+                                cursor,
+                                conn,
+                                task_id,
+                                workflow_status,
+                            )
+                        case _:
+                            pass
+                conn.rollback()
+                logger.warning(
+                    f'Task {task_id} ownership lost - claim was reclaimed or status changed. '
+                    f'Aborting execution to prevent double-execution.'
+                )
+                return (False, '', 'CLAIM_LOST')
+
+            if is_workflow_task:
+                cursor.execute(
+                    """
+                    UPDATE horsies_workflow_tasks
+                    SET status = 'RUNNING',
+                        started_at = NOW()
+                    WHERE task_id = %s
+                      AND status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
+                    RETURNING task_id
+                    """,
+                    (task_id,),
+                )
+                if cursor.fetchone() is None:
+                    conn.rollback()
+                    logger.error(
+                        f'Failed to update workflow_tasks to RUNNING for task {task_id}'
+                    )
+                    return (False, '', 'WORKFLOW_CHECK_FAILED')
 
             conn.commit()
-
-        if not _update_workflow_task_running_with_retry(task_id):
-            tr: TaskResult[Any, TaskError] = TaskResult(
-                err=TaskError(
-                    error_code=OperationalErrorCode.BROKER_ERROR,
-                    message=(
-                        'Failed to update workflow task to RUNNING before task execution; '
-                        'aborting before user code starts'
-                    ),
-                    data={'task_id': task_id},
-                )
-            )
-            return (
-                True,
-                serialize_error_payload(tr),
-                'Failed to update workflow task to RUNNING',
-            )
         return None
     except Exception as e:
         logger.error(f'Failed to transition task {task_id} to RUNNING: {e}')
@@ -661,6 +689,29 @@ def _start_heartbeat_thread(
     return heartbeat_thread
 
 
+def _mark_task_finalizing(task_id: str, worker_id: str) -> None:
+    """Mark a completed child result as waiting for parent finalization."""
+    try:
+        pool = _get_worker_pool()
+        with pool.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE horsies_tasks
+                SET finalizing_at = NOW(),
+                    finalizing_by_worker_id = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND status = 'RUNNING'
+                  AND claimed_by_worker_id = %s
+                """,
+                (worker_id, task_id, worker_id),
+            )
+            conn.commit()
+    except Exception as exc:
+        logger.warning('Failed to mark task %s finalizing: %s', task_id, exc)
+
+
 def _run_task_entry(
     task_name: str,
     args_json: Optional[str],
@@ -669,6 +720,7 @@ def _run_task_entry(
     database_url: str,
     master_worker_id: str,
     runner_heartbeat_interval_ms: int = 30_000,
+    is_workflow_task: bool = True,
 ) -> Tuple[bool, str, Optional[str]]:
     """
     Child-process entry.
@@ -686,13 +738,21 @@ def _run_task_entry(
 
     # Pre-execute guard: check if workflow is PAUSED or CANCELLED
     # If so, skip execution and mark task as SKIPPED
-    preflight_result = _preflight_workflow_check(task_id, master_worker_id)
+    preflight_result = _preflight_workflow_check(
+        task_id,
+        master_worker_id,
+        is_workflow_task,
+    )
     if preflight_result is not None:
         return preflight_result
 
     # Mark as RUNNING in DB at the actual start of execution (child process)
     # CRITICAL: Include ownership check to prevent double-execution when claim lease expires
-    ownership_result = _confirm_ownership_and_set_running(task_id, master_worker_id)
+    ownership_result = _confirm_ownership_and_set_running(
+        task_id,
+        master_worker_id,
+        is_workflow_task,
+    )
     if ownership_result is not None:
         return ownership_result
 
@@ -1071,6 +1131,10 @@ def _run_task_entry(
         return (True, serialize_error_payload(tr), None)
 
     finally:
+        # Mark finalizing before stopping heartbeat so the reaper does not
+        # mistake a completed child for a crashed child while the parent writes
+        # the durable terminal state.
+        _mark_task_finalizing(task_id, master_worker_id)
         # Always stop the heartbeat thread when task completes (success/failure/error)
         heartbeat_stop_event.set()
         logger.debug(f'Heartbeat stop signal sent for task {task_id}')

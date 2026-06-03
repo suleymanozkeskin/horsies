@@ -92,10 +92,13 @@ TASK_TERMINAL_STATES  # frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, Task
 - Task dispatched to worker's process pool
 - Child process sets `status=RUNNING`, `started_at=NOW()`
 - Heartbeat thread begins sending runner heartbeats
+- Non-workflow tasks skip workflow-status preflight work; workflow tasks update
+  the workflow task row in the same start transaction
 
 ### RUNNING → COMPLETED
 
 - Task returns `TaskResult(ok=value)`
+- Child marks the row with `finalizing_at` as it exits user code
 - Worker stores serialized result
 - Sets `completed_at=NOW()`
 
@@ -107,6 +110,8 @@ TASK_TERMINAL_STATES  # frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, Task
 - Task raises unhandled exception **or**
 - Worker process crashes (detected via missing heartbeats)
 - Sets `failed_at=NOW()`, stores error in `result`
+- Worker/process failures synthesize a `TaskResult(err=TaskError(...))` where
+  possible so downstream workflow completion and capacity notifications still run
 
 ### RUNNING → PENDING (retry)
 
@@ -158,6 +163,10 @@ Two types of heartbeats track task health:
 2. **Runner heartbeat**: Child process sends for RUNNING tasks
 
 Missing heartbeats trigger automatic recovery. See [Heartbeats & Recovery](../../workers/heartbeats-recovery).
+
+The runner stale threshold is heartbeat-based, not duration-based. A long task
+can run past `running_stale_threshold_ms` as long as its child process continues
+sending runner heartbeats.
 
 ## Task Expiry
 

@@ -179,6 +179,7 @@ Controls stale task detection, automatic recovery, and data retention.
 | `claimed_stale_threshold_ms` | `int` | `120_000` | 1s–1hr | Ms before CLAIMED task is stale |
 | `auto_fail_stale_running` | `bool` | `True` | — | Fail tasks stuck in RUNNING |
 | `running_stale_threshold_ms` | `int` | `300_000` | 1s–2hr | Ms before RUNNING task is stale |
+| `finalizing_stale_threshold_ms` | `int` | `300_000` | 1s–2hr | Ms a completed child may remain finalizing before recovery |
 | `check_interval_ms` | `int` | `30_000` | 1s–10min | Reaper poll cadence |
 | `runner_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | Heartbeat from running task process |
 | `claimer_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | Heartbeat for CLAIMED tasks |
@@ -189,6 +190,7 @@ Controls stale task detection, automatic recovery, and data retention.
 ### Constraints (HRS-204)
 
 - `running_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
+- `finalizing_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
 - `claimed_stale_threshold_ms >= claimer_heartbeat_interval_ms * 2`
 
 The 2x factor ensures a task can miss one full heartbeat cycle without being incorrectly marked stale.
@@ -197,10 +199,10 @@ The 2x factor ensures a task can miss one full heartbeat cycle without being inc
 
 Runs on `check_interval_ms` cadence:
 1. CLAIMED tasks without heartbeat for `claimed_stale_threshold_ms` → requeued to PENDING (if enabled).
-2. RUNNING tasks without heartbeat for `running_stale_threshold_ms` → marked FAILED (if enabled).
+2. RUNNING tasks without heartbeat for `running_stale_threshold_ms` → retry on `WORKER_CRASHED` policy or mark FAILED (if enabled). Recent `finalizing_at` and live parent worker state suppress this recovery.
 3. Hourly retention pruning: deletes old heartbeat, worker_state, and terminal rows based on retention settings.
 
-**CPU/GIL-heavy tasks:** Increase `running_stale_threshold_ms`. GIL-bound tasks may not send heartbeats at the configured interval. Rule of thumb: >= 3–5x worst-case heartbeat gap.
+**CPU/GIL-heavy tasks:** Increase `running_stale_threshold_ms`. GIL-bound tasks may not send heartbeats at the configured interval. Rule of thumb: >= 3–5x worst-case heartbeat gap. The stale threshold is based on missing runner heartbeats, not total task duration.
 
 ## WorkerResilienceConfig
 

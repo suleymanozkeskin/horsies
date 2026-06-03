@@ -140,7 +140,11 @@ async def test_non_workflow_task_notifies_and_returns_ok(
     worker = _make_worker(engine)
     tr = _make_ok_task_result()
 
-    result = await worker._finalize_workflow_phase(task_id, tr)
+    result = await worker._finalize_workflow_phase(
+        task_id,
+        tr,
+        queue_name='high-priority',
+    )
 
     assert is_ok(result)
     assert result.ok_value is None
@@ -237,7 +241,11 @@ async def test_notify_failure_swallowed(
 
     worker.sf = patched_sf  # type: ignore[assignment]
 
-    result = await worker._finalize_workflow_phase(task_id, tr)
+    result = await worker._finalize_workflow_phase(
+        task_id,
+        tr,
+        queue_name='high-priority',
+    )
 
     assert is_ok(result)
     assert result.ok_value is None
@@ -263,7 +271,11 @@ async def test_workflow_handler_exception_returns_err(
         side_effect=RuntimeError('workflow engine exploded'),
     )
 
-    result = await worker._finalize_workflow_phase(task_id, tr)
+    result = await worker._finalize_workflow_phase(
+        task_id,
+        tr,
+        queue_name='high-priority',
+    )
 
     assert is_err(result)
     err = result.err_value
@@ -321,7 +333,11 @@ async def test_queue_name_used_in_notify_channel(
 
     worker.sf = capturing_sf  # type: ignore[assignment]
 
-    result = await worker._finalize_workflow_phase(task_id, tr)
+    result = await worker._finalize_workflow_phase(
+        task_id,
+        tr,
+        queue_name='high-priority',
+    )
 
     assert is_ok(result)
     # Find the queue-specific NOTIFY

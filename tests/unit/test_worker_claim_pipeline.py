@@ -49,13 +49,16 @@ BROKER = PostgresConfig(
 
 @pytest.mark.unit
 class TestClaimSqlReturningPayload:
-    """CLAIM_SQL RETURNING clause includes id, task_name, args, kwargs."""
+    """CLAIM_SQL RETURNING clause includes dispatch and lifecycle metadata."""
 
     def test_returning_clause_has_dispatch_columns(self) -> None:
         """The compiled RETURNING clause must include all dispatch-needed columns."""
         sql_text = CLAIM_SQL.text
         normalised = ' '.join(sql_text.split())
-        assert 'RETURNING t.id, t.task_name, t.args, t.kwargs;' in normalised
+        assert (
+            'RETURNING t.id, t.task_name, t.args, t.kwargs, '
+            't.queue_name, t.is_workflow_task;'
+        ) in normalised
 
     def test_claim_sql_reclaims_expired_leases(self) -> None:
         """CLAIM_SQL WHERE includes reclaim branch for expired claim_expires_at."""
@@ -287,19 +290,20 @@ class TestOwnershipGateBehavioral:
         with patch(
             'horsies.core.worker.child_runner._get_worker_pool',
             return_value=pool,
-        ), patch(
-            'horsies.core.worker.child_runner._update_workflow_task_running_with_retry',
-        ) as mock_wf_update:
+        ):
             from horsies.core.worker.child_runner import (
                 _confirm_ownership_and_set_running,
             )
 
-            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                is_workflow_task=False,
+            )
 
         assert result is None, 'Ownership confirmed should return None'
         assert conn.commits == 1, 'Should commit on ownership confirmation'
         assert conn.rollbacks == 0, 'No rollback on success'
-        mock_wf_update.assert_called_once_with('task-1')
 
     def test_ownership_lost_returns_claim_lost_and_rollbacks(self) -> None:
         """When UPDATE RETURNING returns None and no workflow status, returns CLAIM_LOST."""
@@ -372,7 +376,8 @@ class TestLeaseRenewalSql:
 
         sql_text = RENEW_CLAIM_LEASE_SQL.text
         assert 'claim_expires_at' in sql_text
-        assert ':new_expires_at' in sql_text
+        assert ':claim_lease_ms' in sql_text
+        assert 'NOW() +' in sql_text
         assert "status = 'CLAIMED'" in sql_text
         assert 'claimed_by_worker_id' in sql_text
 
@@ -409,11 +414,13 @@ class TestUnclaimSqlClearsLeaseExpiry:
     stale lease timestamps from persisting on re-queued tasks.
     """
 
-    def test_unclaim_paused_tasks_clears_claim_expires_at(self) -> None:
-        """UNCLAIM_PAUSED_TASKS_SQL must SET claim_expires_at = NULL."""
+    def test_paused_task_cleanup_clears_claim_expires_at(self) -> None:
+        """Paused-task cleanup must SET claim_expires_at = NULL."""
         sql_text = UNCLAIM_PAUSED_TASKS_SQL.text
         normalised = ' '.join(sql_text.split())
         assert 'claim_expires_at = NULL' in normalised
+        assert "status = 'CANCELLED'" in normalised
+        assert "error_code = 'TASK_CANCELLED'" in normalised
 
     def test_unclaim_claimed_task_clears_claim_expires_at(self) -> None:
         """UNCLAIM_CLAIMED_TASK_SQL must SET claim_expires_at = NULL."""
@@ -421,15 +428,16 @@ class TestUnclaimSqlClearsLeaseExpiry:
         normalised = ' '.join(sql_text.split())
         assert 'claim_expires_at = NULL' in normalised
 
-    def test_unclaim_claimed_task_matches_owned_running_tasks(self) -> None:
-        """BrokenProcessPool requeue must match worker-owned RUNNING rows."""
+    def test_unclaim_claimed_task_matches_only_claimed_tasks(self) -> None:
+        """Pre-execution unclaim must not reset potentially executed RUNNING rows."""
         sql_text = UNCLAIM_CLAIMED_TASK_SQL.text
         normalised = ' '.join(sql_text.split())
-        assert "status IN ('CLAIMED', 'RUNNING')" in normalised
+        assert "status = 'CLAIMED'" in normalised
+        assert "status IN ('CLAIMED', 'RUNNING')" not in normalised
         assert 'claimed_by_worker_id = CAST(:wid AS VARCHAR)' in normalised
 
-    def test_unclaim_paused_tasks_matches_only_current_worker_claims(self) -> None:
-        """Paused workflow cleanup must only unclaim rows owned by this worker."""
+    def test_paused_task_cleanup_matches_only_current_worker_claims(self) -> None:
+        """Paused workflow cleanup must only cancel rows owned by this worker."""
         sql_text = UNCLAIM_PAUSED_TASKS_SQL.text
         normalised = ' '.join(sql_text.split())
         assert "status = 'CLAIMED'" in normalised

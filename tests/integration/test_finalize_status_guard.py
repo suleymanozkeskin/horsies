@@ -225,7 +225,12 @@ async def test_fail_worker_guard_blocks_when_not_running(
     now = datetime.now(timezone.utc)
     result = await session.execute(
         MARK_TASK_FAILED_WORKER_SQL,
-        {'now': now, 'reason': 'late worker failure', 'id': task_id},
+        {
+            'reason': 'late worker failure',
+            'result_json': '{"err": {"error_code": "BROKER_ERROR"}}',
+            'error_code': 'BROKER_ERROR',
+            'id': task_id,
+        },
     )
     returned_row = result.fetchone()
 

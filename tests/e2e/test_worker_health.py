@@ -15,6 +15,7 @@ import pytest
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.types.result import is_ok
+from horsies.core.types.status import TaskStatus
 
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
@@ -33,13 +34,18 @@ def _make_ready_check():
             if not is_ok(r):
                 return False
             handle = r.ok_value
-        return handle.get(timeout_ms=2000).is_ok()
+        info = handle.info()
+        return (
+            is_ok(info)
+            and info.ok_value is not None
+            and info.ok_value.status == TaskStatus.COMPLETED
+        )
 
     return _check
 
 
 @pytest.mark.e2e
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope='session')
 async def test_ping_database_real(broker: PostgresBroker) -> None:
     """ping_database_async succeeds against the real e2e database."""
     result = await broker.ping_database_async()
@@ -48,7 +54,7 @@ async def test_ping_database_real(broker: PostgresBroker) -> None:
 
 
 @pytest.mark.e2e
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope='session')
 async def test_ping_workers_reaches_real_worker(broker: PostgresBroker) -> None:
     """A live worker replies to a broadcast ping (real responder round-trip)."""
     ready = _make_ready_check()
@@ -81,7 +87,7 @@ async def test_ping_workers_reaches_real_worker(broker: PostgresBroker) -> None:
 
 
 @pytest.mark.e2e
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope='session')
 async def test_ping_and_worker_state_correlate(broker: PostgresBroker) -> None:
     """The responding worker also appears in list_worker_states (same worker_id)."""
     ready = _make_ready_check()

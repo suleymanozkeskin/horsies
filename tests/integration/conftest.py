@@ -104,7 +104,10 @@ def cleanup_worker_pool_at_teardown() -> Generator[None, None, None]:
 
 
 @pytest_asyncio.fixture
-async def clean_workflow_tables(session: AsyncSession) -> AsyncGenerator[None, None]:
+async def clean_workflow_tables(
+    session: AsyncSession,
+    broker: PostgresBroker,  # noqa: ARG001 - ensures schema migrations are applied
+) -> AsyncGenerator[None, None]:
     """Truncate workflow tables before each test."""
     await session.execute(text('TRUNCATE horsies_workflow_tasks, horsies_workflows, horsies_tasks CASCADE'))
     await session.commit()
