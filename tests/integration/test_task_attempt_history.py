@@ -405,7 +405,8 @@ async def test_worker_failure_writes_worker_failure_attempt(
     )
 
     assert is_ok(result)
-    assert result.ok_value is None
+    assert result.ok_value is not None
+    assert result.ok_value.is_err()
 
     attempts = await _get_attempts(session, task_id)
     assert len(attempts) == 1
@@ -414,14 +415,14 @@ async def test_worker_failure_writes_worker_failure_attempt(
     assert att['attempt'] == 1
     assert att['outcome'] == 'WORKER_FAILURE'
     assert att['will_retry'] is False
-    assert att['error_code'] is None
-    assert att['error_message'] is None
+    assert att['error_code'] == 'BROKER_ERROR'
+    assert att['error_message'] == 'Segfault in child'
     assert att['failed_reason'] == 'Segfault in child'
     assert att['worker_id'] == 'w-test-1'
 
-    # Task error_code stays NULL for worker-level failures
+    # Task carries the synthetic worker-failure error for workflow/capacity phase 2.
     task_ec = await _get_task_error_code(session, task_id)
-    assert task_ec is None
+    assert task_ec == 'BROKER_ERROR'
 
 
 # ---------------------------------------------------------------------------

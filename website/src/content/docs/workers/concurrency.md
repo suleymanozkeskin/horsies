@@ -8,7 +8,7 @@ tags: [workers, concurrency, claiming, limits]
 ## Operational Notes
 
 - **Priority ordering:** Within the same priority, FIFO ordering uses `enqueued_at`. When many tasks share the same timestamp, ordering can appear non-deterministic.
-- **Soft-cap bursts:** With `prefetch_buffer > 0`, the system counts only RUNNING tasks. Short-lived bursts above the nominal cap can occur during claim/dispatch.
+- **Soft-cap bursts:** With `prefetch_buffer > 0`, queue concurrency counts only RUNNING tasks, while each worker's local claim budget still counts its already-claimed rows. Short-lived bursts above a queue's nominal cap can occur during claim/dispatch.
 - **Claim leases:** In soft-cap mode, claims can expire and be reclaimed. Workers must verify ownership before running user code.
 
 ## Concurrency Levels
@@ -122,7 +122,7 @@ In production, task durations vary wildly. Without hard cap mode, a worker proce
 
 ### Soft Cap Mode (with Prefetch)
 
-When `prefetch_buffer > 0`, the system only counts **RUNNING** tasks, allowing workers to prefetch beyond their running capacity:
+When `prefetch_buffer > 0`, queue concurrency counts **RUNNING** tasks, allowing workers to prefetch beyond their running capacity. A worker's local budget still subtracts already-claimed rows so it cannot hold more than `processes + prefetch_buffer` in total:
 
 ```python
 config = AppConfig(
@@ -148,13 +148,17 @@ config = AppConfig(
 
 ### max_claim_batch
 
-Limits claims per queue per claiming pass:
+Limits claims per queue per claiming pass. The default is `0`, which means
+the worker claims up to the available local/global capacity for that queue.
+Set a positive value only when you want an explicit fairness cap per queue per
+pass.
 
 ```bash
-horsies worker myapp.instance:app --max-claim-batch=2
+horsies worker myapp.instance:app --max-claim-batch=4
 ```
 
-Prevents one worker from claiming all available tasks, ensuring fairness in multi-worker deployments.
+A positive cap prevents one worker from claiming all available tasks, ensuring
+fairness in multi-worker deployments at the cost of more claim passes.
 
 ### max_claim_per_worker
 
@@ -199,16 +203,18 @@ Key behaviors:
 During each claim pass:
 
 ```python
-# Hard cap mode (prefetch_buffer=0): count RUNNING + CLAIMED
-# Soft cap mode (prefetch_buffer>0): count only RUNNING
+# Hard cap mode (prefetch_buffer=0): local budget counts RUNNING + CLAIMED
+# Soft cap mode (prefetch_buffer>0): queue caps count RUNNING, but local
+# worker budget still subtracts already-claimed rows.
 hard_cap_mode = prefetch_buffer == 0
 
-# Local budget (process slots available)
 if hard_cap_mode:
     in_flight_locally = count_running_and_claimed_for_worker()
+    local_budget = processes - in_flight_locally
 else:
-    in_flight_locally = count_running_for_worker()
-local_budget = processes - in_flight_locally
+    running_locally = count_running_for_worker()
+    claimed_locally = count_claimed_for_worker()
+    local_budget = processes + prefetch_buffer - running_locally - claimed_locally
 
 # Global budget (if cluster_wide_cap set)
 if cluster_wide_cap:
@@ -227,7 +233,10 @@ for queue in queues:
         else:
             in_flight_in_queue = count_running_in_queue(queue)
         queue_budget = queue.max_concurrency - in_flight_in_queue
-        claim_count = min(budget, queue_budget, max_claim_batch)
+        if max_claim_batch > 0:
+            claim_count = min(budget, queue_budget, max_claim_batch)
+        else:
+            claim_count = min(budget, queue_budget)
 ```
 
 ## Advisory Locks
@@ -299,7 +308,7 @@ config = AppConfig(
 Worker logs concurrency config at startup:
 
 ```text
-Concurrency config: processes=4, cluster_wide_cap=20, max_claim_per_worker=4, max_claim_batch=2
+Concurrency config: processes=4, cluster_wide_cap=20, max_claim_per_worker=4, max_claim_batch=0
 ```
 
 ## Troubleshooting
@@ -314,7 +323,8 @@ Check:
 
 ### Uneven Distribution
 
-Increase `max_claim_batch` or run more workers.
+Use the default `max_claim_batch=0`, increase `max_claim_per_worker` when
+prefetching, or run more workers.
 
 ### Database Overload
 

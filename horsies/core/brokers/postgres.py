@@ -1,6 +1,6 @@
 # app/core/brokers/postgres.py
 from __future__ import annotations
-import asyncio, hashlib, contextlib, random, threading
+import asyncio, hashlib, contextlib, random, threading, uuid
 from typing import Any, Optional, TYPE_CHECKING
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine, async_sessionmaker
@@ -22,8 +22,16 @@ from horsies.core.models.workflow_pg import (
 )
 from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.types.result import Err, Ok, is_err
-from horsies.core.codec.json_io import loads_json
+from horsies.core.codec.json_io import loads_json, dumps_json
 from horsies.core.models.tasks import TaskInfo, TaskAttemptInfo
+from horsies.core.models.health import (
+    WORKER_PING_CHANNEL,
+    DatabasePing,
+    WorkerPong,
+    WorkerPongPayload,
+    WorkerPingRequest,
+    WorkerStateSnapshot,
+)
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.utils.loop_runner import LoopRunner
 from horsies.core.utils.url import to_psycopg_url
@@ -105,6 +113,8 @@ from horsies.core.schemas.migrations import (
     ADD_ENQUEUE_SHA_COLUMN_SQL,
     ADD_ENQUEUED_AT_COLUMN_SQL,
     ADD_ERROR_CODE_COLUMN_SQL,
+    ADD_TASK_FINALIZING_COLUMNS_SQL,
+    ADD_TASK_IS_WORKFLOW_TASK_COLUMN_SQL,
     ADD_IS_SUBWORKFLOW_COLUMN_SQL,
     ADD_JOIN_TYPE_COLUMN_SQL,
     ADD_MIN_SUCCESS_COLUMN_SQL,
@@ -120,6 +130,7 @@ from horsies.core.schemas.migrations import (
     ADD_TASK_OPTIONS_COLUMN_SQL,
     ADD_WORKFLOW_SENT_AT_COLUMN_SQL,
     ADD_DEFINITION_KEY_COLUMN_SQL,
+    BACKFILL_TASK_IS_WORKFLOW_TASK_SQL,
     BACKFILL_ENQUEUE_SHA_SQL,
     BACKFILL_ENQUEUED_AT_SQL,
     BACKFILL_WORKFLOW_SENT_AT_SQL,
@@ -170,26 +181,56 @@ GET_STALE_TASKS_SQL = text("""
     ORDER BY hb.last_heartbeat NULLS FIRST
 """)
 
-GET_WORKER_STATS_SQL = text("""
+# Latest snapshot per worker (includes idle workers). The retired
+# get_worker_stats only saw workers with RUNNING tasks; this reads the
+# worker-states timeseries instead. DISTINCT ON keeps the newest row per
+# worker_id.
+_WORKER_STATE_COLUMNS = """
+        worker_id,
+        snapshot_at,
+        hostname,
+        pid,
+        processes,
+        max_claim_batch,
+        max_claim_per_worker,
+        cluster_wide_cap,
+        queues,
+        queue_priorities,
+        queue_max_concurrency,
+        recovery_config,
+        tasks_running,
+        tasks_claimed,
+        memory_usage_mb,
+        memory_percent,
+        cpu_percent,
+        worker_started_at
+"""
+
+LIST_WORKER_STATES_SQL = text(f"""
+    SELECT DISTINCT ON (worker_id)
+{_WORKER_STATE_COLUMNS}
+    FROM horsies_worker_states
+    ORDER BY worker_id, snapshot_at DESC
+""")
+
+GET_WORKER_STATE_LATEST_SQL = text(f"""
     SELECT
-        t.worker_hostname,
-        t.worker_pid,
-        t.worker_process_name,
-        COUNT(*) AS active_tasks,
-        MIN(t.started_at) AS oldest_task_start,
-        MAX(hb.last_heartbeat) AS latest_heartbeat
-    FROM horsies_tasks t
-    LEFT JOIN LATERAL (
-        SELECT sent_at AS last_heartbeat
-        FROM horsies_heartbeats h
-        WHERE h.task_id = t.id AND h.role = 'runner'
-        ORDER BY sent_at DESC
-        LIMIT 1
-    ) hb ON TRUE
-    WHERE t.status = 'RUNNING'
-      AND t.worker_hostname IS NOT NULL
-    GROUP BY t.worker_hostname, t.worker_pid, t.worker_process_name
-    ORDER BY active_tasks DESC
+{_WORKER_STATE_COLUMNS}
+    FROM horsies_worker_states
+    WHERE worker_id = :worker_id
+    ORDER BY snapshot_at DESC
+    LIMIT 1
+""")
+
+# History for a single worker, newest first. ``:limit`` of NULL returns all
+# retained rows; callers pass an explicit cap to bound the fetch.
+GET_WORKER_STATE_HISTORY_SQL = text(f"""
+    SELECT
+{_WORKER_STATE_COLUMNS}
+    FROM horsies_worker_states
+    WHERE worker_id = :worker_id
+    ORDER BY snapshot_at DESC
+    LIMIT :limit
 """)
 
 GET_EXPIRED_TASKS_SQL = text("""
@@ -226,6 +267,10 @@ SELECT_STALE_RUNNING_TASKS_SQL = text("""
     ) hb ON TRUE
     WHERE t2.status = 'RUNNING'
       AND t2.started_at IS NOT NULL
+      AND (
+          t2.finalizing_at IS NULL
+          OR t2.finalizing_at < NOW() - CAST(:finalizing_stale_threshold || ' seconds' AS INTERVAL)
+      )
       AND COALESCE(hb.last_heartbeat, t2.started_at) < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL)
     FOR UPDATE OF t2 SKIP LOCKED
 """)
@@ -246,6 +291,10 @@ SELECT_STALE_TASK_FOR_UPDATE_SQL = text("""
     WHERE t.id = :id
       AND t.status = 'RUNNING'
       AND t.started_at IS NOT NULL
+      AND (
+          t.finalizing_at IS NULL
+          OR t.finalizing_at < NOW() - CAST(:finalizing_stale_threshold || ' seconds' AS INTERVAL)
+      )
       AND COALESCE(hb.last_heartbeat, t.started_at) < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL)
     FOR UPDATE OF t
 """)
@@ -257,10 +306,16 @@ MARK_STALE_TASK_FAILED_SQL = text("""
         failed_reason = :failed_reason,
         result = :result,
         error_code = :error_code,
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
         updated_at = NOW()
     WHERE t.id = :task_id
       AND t.status = 'RUNNING'
       AND t.started_at IS NOT NULL
+      AND (
+          t.finalizing_at IS NULL
+          OR t.finalizing_at < NOW() - CAST(:finalizing_stale_threshold || ' seconds' AS INTERVAL)
+      )
       AND COALESCE(
           (
               SELECT h.sent_at
@@ -303,6 +358,8 @@ REQUEUE_STALE_CLAIMED_SQL = text("""
         claimed_at = NULL,
         claimed_by_worker_id = NULL,
         claim_expires_at = NULL,
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
         updated_at = NOW()
     FROM (
         SELECT t2.id, hb.last_heartbeat, t2.claimed_at
@@ -363,14 +420,7 @@ class PostgresBroker:
         self.logger.info('PostgresBroker initialized')
 
     def _base_engine_config(self) -> dict[str, Any]:
-        return self.config.model_dump(
-            exclude={
-                'database_url',
-                'session_database_url',
-                'pgbouncer_transaction_mode',
-            },
-            exclude_none=True,
-        )
+        return self.config.sqlalchemy_engine_kwargs()
 
     def _runtime_engine_config(self) -> dict[str, Any]:
         engine_cfg = self._base_engine_config()
@@ -598,6 +648,9 @@ class PostgresBroker:
 
             # Migration: add error_code column for task failure observability.
             await conn.execute(ADD_ERROR_CODE_COLUMN_SQL)
+            await conn.execute(ADD_TASK_IS_WORKFLOW_TASK_COLUMN_SQL)
+            await conn.execute(BACKFILL_TASK_IS_WORKFLOW_TASK_SQL)
+            await conn.execute(ADD_TASK_FINALIZING_COLUMNS_SQL)
             await conn.execute(CREATE_TASKS_ERROR_CODE_INDEX_SQL)
 
             # Migration: create horsies_task_attempts table and indexes.
@@ -746,6 +799,7 @@ class PostgresBroker:
                     max_retries=max_retries,
                     task_options=task_options,
                     enqueue_sha=enqueue_sha,
+                    is_workflow_task=False,
                     created_at=text('NOW()'),
                     updated_at=text('NOW()'),
                 )
@@ -1147,17 +1201,303 @@ class PostgresBroker:
                 exc,
             )
 
-    async def get_worker_stats(self) -> BrokerResult[list[dict[str, Any]]]:
-        """Gather statistics about active worker processes."""
+    async def ping_database_async(self) -> BrokerResult[DatabasePing]:
+        """Probe Postgres reachability with ``SELECT 1`` through the live pool.
+
+        Goes through the broker's own pool (not an isolated engine), so a
+        success also confirms a connection could be checked out. Returns the
+        measured round-trip latency.
+        """
+        loop = asyncio.get_running_loop()
+        try:
+            start = loop.time()
+            async with self.session_factory() as session:
+                await session.execute(text('SELECT 1'))
+            latency_ms = (loop.time() - start) * 1000.0
+            return Ok(DatabasePing(latency_ms=latency_ms))
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.DB_PING_FAILED,
+                f'ping_database failed: {exc}',
+                exc,
+            )
+
+    async def ping_workers_async(
+        self,
+        *,
+        target_worker_id: str | None = None,
+        timeout_seconds: float = 2.0,
+        min_responses: int | None = None,
+    ) -> BrokerResult[list[WorkerPong]]:
+        """Active ping-pong: NOTIFY workers and collect replies within a window.
+
+        Subscribes to a unique reply channel, broadcasts a ping on
+        ``WORKER_PING_CHANNEL``, then collects pongs until a stop condition:
+
+        - ``target_worker_id`` set: returns as soon as that worker replies.
+        - ``min_responses`` set: returns as soon as that many distinct workers
+          reply (fast fail-open liveness, e.g. ``min_responses=1`` for a
+          ``/health`` gate — a healthy fleet answers in milliseconds; only a
+          degraded fleet pays the full ``timeout_seconds``).
+        - neither set: waits the full window and enumerates every responder.
+
+        A pong proves the replying worker's event loop is responsive *and*
+        that it can reach Postgres. Workers present in
+        ``list_worker_states_async`` but absent here are non-responsive.
+        """
+        if timeout_seconds <= 0:
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.WORKER_PING_FAILED,
+                    message=f'timeout_seconds must be positive, got {timeout_seconds}',
+                    retryable=False,
+                )
+            )
+        if min_responses is not None and min_responses < 1:
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.WORKER_PING_FAILED,
+                    message=f'min_responses must be >= 1 when set, got {min_responses}',
+                    retryable=False,
+                )
+            )
+
+        correlation_id = uuid.uuid4().hex
+        reply_channel = f'horsies_worker_pong_{correlation_id}'
+
+        # The `listener` property raises if the broker has no listener
+        # (assume_initialized), and listen() raises on cross-loop misuse.
+        # Convert both to an Err so the Result contract holds on every path.
+        try:
+            listen_r = await self.listener.listen(reply_channel)
+        except RuntimeError as exc:
+            return _broker_err(
+                BrokerErrorCode.WORKER_PING_FAILED,
+                f'ping_workers listener unavailable: {exc}',
+                exc,
+            )
+        if is_err(listen_r):
+            err = listen_r.err_value
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.WORKER_PING_FAILED,
+                    message=f'ping_workers reply subscribe failed: {err.message}',
+                    retryable=err.retryable,
+                    exception=err.exception,
+                )
+            )
+        queue = listen_r.ok_value
+
+        try:
+            request = WorkerPingRequest(
+                correlation_id=correlation_id,
+                reply_channel=reply_channel,
+                target_worker_id=target_worker_id,
+            )
+            payload_r = dumps_json(request.model_dump())
+            if is_err(payload_r):
+                return Err(
+                    BrokerOperationError(
+                        code=BrokerErrorCode.WORKER_PING_FAILED,
+                        message=f'ping_workers payload encode failed: {payload_r.err_value}',
+                        retryable=False,
+                    )
+                )
+            payload = payload_r.ok_value
+
+            loop = asyncio.get_running_loop()
+            async with self.session_factory() as session:
+                await session.execute(
+                    text('SELECT pg_notify(:ch, :p)'),
+                    {'ch': WORKER_PING_CHANNEL, 'p': payload},
+                )
+                await session.commit()
+            sent_at = loop.time()
+
+            pongs: list[WorkerPong] = []
+            seen: set[str] = set()
+            deadline = sent_at + timeout_seconds
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                try:
+                    notify = await asyncio.wait_for(queue.get(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    break
+                pong = self._decode_pong(
+                    notify.payload, correlation_id, loop.time() - sent_at
+                )
+                if pong is None or pong.worker_id in seen:
+                    continue  # malformed, mismatched, or duplicate worker
+                seen.add(pong.worker_id)
+                pongs.append(pong)
+                if target_worker_id is not None and pong.worker_id == target_worker_id:
+                    break
+                if min_responses is not None and len(pongs) >= min_responses:
+                    break
+            return Ok(pongs)
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.WORKER_PING_FAILED,
+                f'ping_workers failed: {exc}',
+                exc,
+            )
+        finally:
+            await self._unsubscribe_ping_safely(reply_channel, queue)
+
+    async def _unsubscribe_ping_safely(
+        self, channel: str, q: asyncio.Queue[Any]
+    ) -> None:
+        """Ensure reply-channel unsubscribe completes even under repeated cancellation.
+
+        Mirrors ``_unsubscribe_task_done_safely``: shields the unsubscribe so a
+        cancelled ``ping_workers_async`` does not leak the server-side LISTEN,
+        suppresses the cross-loop RuntimeError, and re-raises cancellation only
+        after cleanup finishes.
+        """
+        unsubscribe_task = asyncio.create_task(self.listener.unsubscribe(channel, q))
+        cancelled_during_cleanup = False
+        while not unsubscribe_task.done():
+            try:
+                await asyncio.shield(unsubscribe_task)
+            except asyncio.CancelledError:
+                cancelled_during_cleanup = True
+                continue
+        with contextlib.suppress(RuntimeError):
+            await unsubscribe_task
+        if cancelled_during_cleanup:
+            raise asyncio.CancelledError
+
+    def _decode_pong(
+        self,
+        raw_payload: str,
+        correlation_id: str,
+        elapsed_seconds: float,
+    ) -> WorkerPong | None:
+        """Decode a pong notification, discarding malformed or mismatched replies."""
+        parsed = loads_json(raw_payload)
+        if is_err(parsed):
+            self.logger.warning(
+                'Discarding unparseable pong payload: %s', parsed.err_value
+            )
+            return None
+        body = parsed.ok_value
+        if not isinstance(body, dict):
+            return None
+        try:
+            payload = WorkerPongPayload.model_validate(body)
+        except Exception as exc:
+            self.logger.warning('Discarding invalid pong payload: %s', exc)
+            return None
+        if payload.correlation_id != correlation_id:
+            return None
+        return WorkerPong(
+            worker_id=payload.worker_id,
+            hostname=payload.hostname,
+            pid=payload.pid,
+            round_trip_ms=elapsed_seconds * 1000.0,
+        )
+
+    @staticmethod
+    def _row_to_worker_snapshot(row: Any) -> WorkerStateSnapshot:
+        """Map a worker-states row to a typed snapshot."""
+        m = row._mapping
+        return WorkerStateSnapshot(
+            worker_id=m['worker_id'],
+            snapshot_at=m['snapshot_at'],
+            hostname=m['hostname'],
+            pid=m['pid'],
+            processes=m['processes'],
+            max_claim_batch=m['max_claim_batch'],
+            max_claim_per_worker=m['max_claim_per_worker'],
+            cluster_wide_cap=m['cluster_wide_cap'],
+            queues=list(m['queues']),
+            queue_priorities=m['queue_priorities'],
+            queue_max_concurrency=m['queue_max_concurrency'],
+            recovery_config=m['recovery_config'],
+            tasks_running=m['tasks_running'],
+            tasks_claimed=m['tasks_claimed'],
+            memory_usage_mb=m['memory_usage_mb'],
+            memory_percent=m['memory_percent'],
+            cpu_percent=m['cpu_percent'],
+            worker_started_at=m['worker_started_at'],
+        )
+
+    async def list_worker_states_async(self) -> BrokerResult[list[WorkerStateSnapshot]]:
+        """Latest state snapshot per worker, including idle workers.
+
+        Unlike the retired ``get_worker_stats`` (RUNNING tasks only), this
+        reads ``horsies_worker_states`` so every worker that has reported a
+        snapshot appears, regardless of current load.
+        """
         try:
             async with self.session_factory() as session:
-                result = await session.execute(GET_WORKER_STATS_SQL)
-                columns = result.keys()
-                return Ok([dict(zip(columns, row)) for row in result.fetchall()])
+                result = await session.execute(LIST_WORKER_STATES_SQL)
+                return Ok(
+                    [self._row_to_worker_snapshot(row) for row in result.fetchall()]
+                )
         except Exception as exc:
             return _broker_err(
                 BrokerErrorCode.MONITORING_QUERY_FAILED,
-                f'get_worker_stats failed: {exc}',
+                f'list_worker_states failed: {exc}',
+                exc,
+            )
+
+    async def get_worker_state_async(
+        self,
+        worker_id: str,
+    ) -> BrokerResult[WorkerStateSnapshot | None]:
+        """Latest state snapshot for one worker, or ``None`` if unknown."""
+        try:
+            async with self.session_factory() as session:
+                result = await session.execute(
+                    GET_WORKER_STATE_LATEST_SQL,
+                    {'worker_id': worker_id},
+                )
+                row = result.fetchone()
+                if row is None:
+                    return Ok(None)
+                return Ok(self._row_to_worker_snapshot(row))
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.MONITORING_QUERY_FAILED,
+                f'get_worker_state failed: {exc}',
+                exc,
+            )
+
+    async def get_worker_state_history_async(
+        self,
+        worker_id: str,
+        *,
+        limit: int | None = None,
+    ) -> BrokerResult[list[WorkerStateSnapshot]]:
+        """Timeseries snapshots for one worker, newest first.
+
+        ``limit`` of ``None`` returns all retained rows; pass an explicit cap
+        to bound the fetch (the table grows ~1 row per worker per interval).
+        """
+        if limit is not None and limit <= 0:
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.MONITORING_QUERY_FAILED,
+                    message=f'limit must be positive when set, got {limit}',
+                    retryable=False,
+                )
+            )
+        try:
+            async with self.session_factory() as session:
+                result = await session.execute(
+                    GET_WORKER_STATE_HISTORY_SQL,
+                    {'worker_id': worker_id, 'limit': limit},
+                )
+                return Ok(
+                    [self._row_to_worker_snapshot(row) for row in result.fetchall()]
+                )
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.MONITORING_QUERY_FAILED,
+                f'get_worker_state_history failed: {exc}',
                 exc,
             )
 
@@ -1178,6 +1518,7 @@ class PostgresBroker:
     async def mark_stale_tasks_as_failed(
         self,
         stale_threshold_ms: int = 300_000,
+        finalizing_stale_threshold_ms: int = 300_000,
     ) -> BrokerResult[int]:
         """Clean up crashed worker tasks: retry if policy allows, otherwise mark FAILED.
 
@@ -1204,6 +1545,7 @@ class PostgresBroker:
             )
 
             stale_threshold_seconds = stale_threshold_ms / 1000.0
+            finalizing_stale_threshold_seconds = finalizing_stale_threshold_ms / 1000.0
 
             # Phase 1: lightweight scan to collect candidate task IDs.
             # FOR UPDATE SKIP LOCKED prevents picking up rows already being finalized,
@@ -1211,7 +1553,10 @@ class PostgresBroker:
             async with self.session_factory() as session:
                 stale_tasks_result = await session.execute(
                     SELECT_STALE_RUNNING_TASKS_SQL,
-                    {'stale_threshold': stale_threshold_seconds},
+                    {
+                        'stale_threshold': stale_threshold_seconds,
+                        'finalizing_stale_threshold': finalizing_stale_threshold_seconds,
+                    },
                 )
                 candidate_ids = [row.id for row in stale_tasks_result.fetchall()]
                 await session.rollback()
@@ -1233,6 +1578,7 @@ class PostgresBroker:
                             {
                                 'id': task_id,
                                 'stale_threshold': stale_threshold_seconds,
+                                'finalizing_stale_threshold': finalizing_stale_threshold_seconds,
                             },
                         )
                         ctx_row = ctx_result.fetchone()
@@ -1257,7 +1603,7 @@ class PostgresBroker:
                             f'for {stale_threshold_ms}ms = {stale_threshold_ms/1000:.1f}s)'
                         )
                         attempt_num = retry_count + 1
-                        now_utc = datetime.now(timezone.utc)
+                        now_utc = db_now
                         attempt_worker = {
                             'worker_id': worker_id,
                             'worker_hostname': worker_hostname,
@@ -1322,6 +1668,7 @@ class PostgresBroker:
                                     'retry_count': new_retry_count,
                                     'next_retry_at': next_retry_at,
                                     'stale_threshold': stale_threshold_seconds,
+                                    'finalizing_stale_threshold': finalizing_stale_threshold_seconds,
                                 },
                             )
                             if res.fetchone() is None:
@@ -1411,6 +1758,7 @@ class PostgresBroker:
                                     'result': result_json,
                                     'error_code': OperationalErrorCode.WORKER_CRASHED.value,
                                     'stale_threshold': stale_threshold_seconds,
+                                    'finalizing_stale_threshold': finalizing_stale_threshold_seconds,
                                 },
                             )
                             if mark_failed_res.fetchone() is None:

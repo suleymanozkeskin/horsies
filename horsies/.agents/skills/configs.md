@@ -102,7 +102,9 @@ info = await broker.get_task_info_async("task-uuid", include_result=True)
 info = broker.get_task_info("task-uuid", include_result=True)  # sync
 ```
 
-**Monitoring** (async only): `get_stale_tasks()`, `get_worker_stats()`, `get_expired_tasks()`, `mark_stale_tasks_as_failed()`, `requeue_stale_claimed()`. See website docs `monitoring/broker-methods` for full signatures.
+**Monitoring** (async only): `get_stale_tasks()`, `get_expired_tasks()`, `mark_stale_tasks_as_failed()`, `requeue_stale_claimed()`. See website docs `monitoring/broker-methods` for full signatures.
+
+**Health/liveness** (app, async + sync): `ping_database_async()` (DatabasePing latency), `ping_workers_async(target_worker_id=None, timeout_seconds=2.0, min_responses=None)` (list[WorkerPong] — active ping-pong; min_responses=1 = fast liveness gate, returns on first reply), `list_worker_states_async()` / `get_worker_state_async(worker_id)` / `get_worker_state_history_async(worker_id, limit=None)` (WorkerStateSnapshot, includes idle workers). Replaces the retired `get_worker_stats()`. See website docs `monitoring/worker-health`.
 
 ## PostgresConfig
 
@@ -119,12 +121,34 @@ config = PostgresConfig(
 | `database_url` | `str` | required | Must start with `"postgresql+psycopg"` (HRS-203 otherwise) |
 | `pool_size` | `int` | `30` | Connection pool size |
 | `max_overflow` | `int` | `30` | Extra connections beyond pool_size |
+| `worker_pool_size` | `int | None` | `3` | Worker coordinator pool size; `None` inherits `pool_size` |
+| `worker_max_overflow` | `int | None` | `2` | Worker coordinator overflow; `None` inherits `max_overflow` |
+| `worker_child_pool_min_size` | `int` | `0` | Minimum connections kept by each child worker process |
+| `worker_child_pool_max_size` | `int` | `2` | Maximum connections allowed per child worker process |
 | `pool_timeout` | `int` | `30` | Seconds to wait for a connection |
 | `pool_recycle` | `int` | `1800` | Seconds before connections are recycled |
 | `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use |
 | `echo` | `bool` | `False` | Echo SQL (debug only) |
 
 Driver must be psycopg3 (async). `postgresql+psycopg2://` is rejected.
+
+Worker processes use a separate connection profile by default. The worker
+coordinator uses `worker_pool_size + worker_max_overflow`; each child process
+creates its own post-fork psycopg pool bounded by
+`worker_child_pool_min_size..worker_child_pool_max_size`. Direct Postgres
+budget for one worker is approximately:
+
+```text
+worker_pool_size + worker_max_overflow
+  + 2 listener/session connections
+  + processes * worker_child_pool_max_size
+  + task-code database connections
+```
+
+Child processes are warmed before the parent opens long-lived database sockets,
+but child DB connections are lazy by default (`worker_child_pool_min_size=0`).
+Replacement executors created after startup use a non-inheriting process start
+method so live parent database sockets are not forked into new children.
 
 ## QueueMode
 
@@ -177,6 +201,7 @@ Controls stale task detection, automatic recovery, and data retention.
 | `claimed_stale_threshold_ms` | `int` | `120_000` | 1s–1hr | Ms before CLAIMED task is stale |
 | `auto_fail_stale_running` | `bool` | `True` | — | Fail tasks stuck in RUNNING |
 | `running_stale_threshold_ms` | `int` | `300_000` | 1s–2hr | Ms before RUNNING task is stale |
+| `finalizing_stale_threshold_ms` | `int` | `300_000` | 1s–2hr | Ms a completed child may remain finalizing before recovery |
 | `check_interval_ms` | `int` | `30_000` | 1s–10min | Reaper poll cadence |
 | `runner_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | Heartbeat from running task process |
 | `claimer_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | Heartbeat for CLAIMED tasks |
@@ -187,6 +212,7 @@ Controls stale task detection, automatic recovery, and data retention.
 ### Constraints (HRS-204)
 
 - `running_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
+- `finalizing_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
 - `claimed_stale_threshold_ms >= claimer_heartbeat_interval_ms * 2`
 
 The 2x factor ensures a task can miss one full heartbeat cycle without being incorrectly marked stale.
@@ -195,10 +221,10 @@ The 2x factor ensures a task can miss one full heartbeat cycle without being inc
 
 Runs on `check_interval_ms` cadence:
 1. CLAIMED tasks without heartbeat for `claimed_stale_threshold_ms` → requeued to PENDING (if enabled).
-2. RUNNING tasks without heartbeat for `running_stale_threshold_ms` → marked FAILED (if enabled).
+2. RUNNING tasks without heartbeat for `running_stale_threshold_ms` → retry on `WORKER_CRASHED` policy or mark FAILED (if enabled). Recent `finalizing_at` and live parent worker state suppress this recovery.
 3. Hourly retention pruning: deletes old heartbeat, worker_state, and terminal rows based on retention settings.
 
-**CPU/GIL-heavy tasks:** Increase `running_stale_threshold_ms`. GIL-bound tasks may not send heartbeats at the configured interval. Rule of thumb: >= 3–5x worst-case heartbeat gap.
+**CPU/GIL-heavy tasks:** Increase `running_stale_threshold_ms`. GIL-bound tasks may not send heartbeats at the configured interval. Rule of thumb: >= 3–5x worst-case heartbeat gap. The stale threshold is based on missing runner heartbeats, not total task duration.
 
 ## WorkerResilienceConfig
 
@@ -253,6 +279,11 @@ All `TaskSchedule.name` values must be unique (HRS-205).
 
 ### Schedule Patterns
 
+Use the smallest pattern that describes the schedule. `HourlySchedule`,
+`DailySchedule`, `WeeklySchedule`, and `MonthlySchedule` are simpler when they
+fit. Use `CronSchedule` for wall-clock aligned field combinations such as
+"every 4 hours at minute 15".
+
 **IntervalSchedule** — run every N time units:
 
 ```python
@@ -290,7 +321,90 @@ MonthlySchedule(day=15, time=time(15, 0))  # 15th at 15:00
 
 If `day` > days in month (e.g., day=31 in Feb), that month is skipped.
 
-### Weekday
+**CronSchedule** — typed cron-style schedule:
+
+```python
+from horsies import CronEvery, CronSchedule, CronStep, CronValues, EveryDay
+
+# Equivalent shape to "15 */4 * * *": 00:15, 04:15, 08:15, ...
+CronSchedule(
+    minute=[CronValues(values=[15])],
+    hour=[CronStep(step=4)],
+    month=[CronEvery()],
+    day=EveryDay(),
+)
+```
+
+`CronSchedule` fires at second `:00` and models the five cron fields as
+typed objects instead of accepting a cron expression string:
+
+| Field | Type | Domain |
+|---|---|---|
+| `minute` | `list[CronNumericTerm]` | 0-59 |
+| `hour` | `list[CronNumericTerm]` | 0-23 |
+| `month` | `list[CronMonthTerm]` | `Month` enum |
+| `day` | `DaySelector` | day-of-month / day-of-week choice |
+
+Numeric terms (`minute`, `hour`, day-of-month):
+
+| Term | Meaning |
+|---|---|
+| `CronEvery()` | every value in the field |
+| `CronStep(step=n)` | every nth value, anchored at the domain start |
+| `CronValues(values=[...])` | explicit integer values |
+| `CronRange(start=a, end=b, step=1)` | inclusive integer range |
+
+Enum terms (`month`, day-of-week):
+
+| Term | Meaning |
+|---|---|
+| `CronEvery()` | every enum value |
+| `CronEnumValues[Month \| Weekday](values=[...])` | explicit enum values |
+| `CronEnumRange[Month \| Weekday](start=..., end=..., step=1)` | inclusive enum range by canonical order |
+| `CronEnumStep[Month \| Weekday](step=n)` | every nth enum value, anchored at the domain start |
+
+`CronStep`/`CronEnumStep` are anchored at the field's first value. For example,
+`CronStep(step=4)` on `hour` means 0, 4, 8, 12, 16, 20. Steps larger than the
+field span are rejected as likely mistakes: minute 59, hour 23, day-of-month
+30, month 11, weekday 6. Use `CronValues`/`CronEnumValues` for a single value.
+
+`CronRange` and `CronEnumRange` do not wrap. `FRIDAY -> MONDAY` and
+`DECEMBER -> FEBRUARY` are invalid; split them into multiple terms.
+
+`day` is explicit so cron's ambiguous "day-of-month OR day-of-week" behavior
+cannot happen by accident:
+
+| Selector | Meaning |
+|---|---|
+| `EveryDay()` | no day restriction |
+| `ByMonthDay(day_of_month=[...])` | match day-of-month only |
+| `ByWeekday(day_of_week=[...])` | match weekday only |
+| `EitherDay(day_of_month=[...], day_of_week=[...])` | match either side (OR) |
+| `BothDays(day_of_month=[...], day_of_week=[...])` | match both sides (AND) |
+
+Example: the 13th or Friday vs Friday the 13th:
+
+```python
+from horsies import CronEnumValues, CronValues, EitherDay, BothDays, Weekday
+
+EitherDay(
+    day_of_month=[CronValues(values=[13])],
+    day_of_week=[CronEnumValues[Weekday](values=[Weekday.FRIDAY])],
+)
+
+BothDays(
+    day_of_month=[CronValues(values=[13])],
+    day_of_week=[CronEnumValues[Weekday](values=[Weekday.FRIDAY])],
+)
+```
+
+Construction-time validation rejects out-of-domain values, empty term lists,
+wrap-around ranges, invalid step spans, and unsatisfiable month/day combinations
+such as February 30. `EitherDay` can still contain an impossible
+day-of-month because the weekday side can satisfy the schedule; `BothDays`
+cannot.
+
+### Weekday and Month
 
 ```python
 class Weekday(str, Enum):
@@ -301,6 +415,20 @@ class Weekday(str, Enum):
     FRIDAY = 'friday'
     SATURDAY = 'saturday'
     SUNDAY = 'sunday'
+
+class Month(str, Enum):
+    JANUARY = 'january'
+    FEBRUARY = 'february'
+    MARCH = 'march'
+    APRIL = 'april'
+    MAY = 'may'
+    JUNE = 'june'
+    JULY = 'july'
+    AUGUST = 'august'
+    SEPTEMBER = 'september'
+    OCTOBER = 'october'
+    NOVEMBER = 'november'
+    DECEMBER = 'december'
 ```
 
 ## `resend_on_transient_err`
@@ -424,8 +552,12 @@ from horsies import (
     RecoveryConfig, WorkerResilienceConfig,
     # Scheduling
     ScheduleConfig, TaskSchedule,
-    Weekday, IntervalSchedule, HourlySchedule,
+    SchedulePattern,
+    Weekday, Month, IntervalSchedule, HourlySchedule,
     DailySchedule, WeeklySchedule, MonthlySchedule,
+    CronSchedule, CronEvery, CronStep, CronValues, CronRange,
+    CronEnumValues, CronEnumRange, CronEnumStep,
+    DaySelector, EveryDay, ByMonthDay, ByWeekday, EitherDay, BothDays,
     # Exception mapper
     ExceptionMapper,
     # Retry

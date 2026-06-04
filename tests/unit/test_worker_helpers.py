@@ -441,10 +441,10 @@ class TestReaperHeartbeatRetention:
         created_brokers[0].close_async.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_reaper_reuses_app_broker_when_available(
+    async def test_reaper_reuses_worker_broker_when_available(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When app broker exists, reaper should reuse it and not construct/close temp broker."""
+        """When worker broker exists, reaper should reuse it and not construct/close temp broker."""
         worker = _make_worker()
         worker.cfg.recovery_config = RecoveryConfig(
             auto_requeue_stale_claimed=False,
@@ -468,16 +468,14 @@ class TestReaperHeartbeatRetention:
 
         session.execute = AsyncMock(side_effect=_execute)
 
-        app_broker = MagicMock()
-        app_broker.session_factory = MagicMock(return_value=session)
-        app_broker.close_async = AsyncMock(return_value=Ok(None))
-        app = MagicMock()
-        app.get_broker.return_value = app_broker
-        worker._app = app
+        worker_broker = MagicMock()
+        worker_broker.session_factory = MagicMock(return_value=session)
+        worker_broker.close_async = AsyncMock(return_value=Ok(None))
+        worker.broker = worker_broker
 
         class _UnexpectedBroker:
             def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-                raise AssertionError('Reaper should reuse app broker, not create temp broker')
+                raise AssertionError('Reaper should reuse worker broker, not create temp broker')
 
         recover_mock = AsyncMock(return_value=0)
         monkeypatch.setattr(
@@ -489,9 +487,8 @@ class TestReaperHeartbeatRetention:
 
         await worker._reaper_loop()
 
-        app.get_broker.assert_called_once()
         recover_mock.assert_awaited()
-        app_broker.close_async.assert_not_awaited()
+        worker_broker.close_async.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_reaper_prunes_worker_state_and_terminal_rows(
@@ -622,8 +619,8 @@ class TestClaimBatchLockedReturnsPayload:
         assert rows == []
 
     @pytest.mark.asyncio
-    async def test_claim_passes_claim_expires_at(self) -> None:
-        """claim_expires_at is always a datetime (never None)."""
+    async def test_claim_passes_claim_lease_ms(self) -> None:
+        """Claim passes a finite lease duration for DB-clock expiry."""
         worker = _make_worker(claim_lease_ms=None)
 
         fake_result = MagicMock()
@@ -637,7 +634,7 @@ class TestClaimBatchLockedReturnsPayload:
 
         call_args = session.execute.call_args
         params = call_args[0][1]
-        assert isinstance(params['claim_expires_at'], datetime)
+        assert params['claim_lease_ms'] == DEFAULT_CLAIM_LEASE_MS
 
 
 @pytest.mark.unit
@@ -672,14 +669,14 @@ class TestClaimerHeartbeatRenewsLease:
         assert INSERT_CLAIMER_HEARTBEAT_SQL in executed_stmts
         assert RENEW_CLAIM_LEASE_SQL in executed_stmts
 
-        # Verify renewal params contain a datetime (not None)
+        # Verify renewal params contain a finite lease duration.
         renewal_calls = [
             c for c in session.execute.call_args_list
             if c[0][0] is RENEW_CLAIM_LEASE_SQL
         ]
         assert len(renewal_calls) >= 1
         renewal_params = renewal_calls[0][0][1]
-        assert isinstance(renewal_params['new_expires_at'], datetime)
+        assert renewal_params['claim_lease_ms'] == DEFAULT_CLAIM_LEASE_MS
 
 
 # ---------------------------------------------------------------------------
@@ -782,9 +779,9 @@ class TestFinalizeAfterRequeueOutcome:
         """
         worker = _make_worker()
 
-        # Make requeue return REQUEUED
-        session = _make_session_mock(rowcount=1)
-        worker.sf = MagicMock(return_value=session)
+        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
+            return_value=_RequeueOutcome.REQUEUED,
+        )
 
         # Future that raises a retryable connection error
         fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
@@ -806,9 +803,9 @@ class TestFinalizeAfterRequeueOutcome:
         """
         worker = _make_worker()
 
-        # Make requeue return DB_ERROR
-        session = _make_session_mock(execute_side_effect=OperationalError('requeue failed'))
-        worker.sf = MagicMock(return_value=session)
+        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
+            return_value=_RequeueOutcome.DB_ERROR,
+        )
 
         fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
         fut.set_exception(OperationalError('original connection error'))
@@ -829,8 +826,9 @@ class TestFinalizeAfterRequeueOutcome:
         """
         worker = _make_worker()
 
-        session = _make_session_mock(rowcount=0)
-        worker.sf = MagicMock(return_value=session)
+        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
+            return_value=_RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED,
+        )
 
         fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
         fut.set_exception(OperationalError('transient'))
@@ -848,8 +846,9 @@ class TestFinalizeAfterRequeueOutcome:
         """Non-retryable future exception → retryable=False regardless of requeue outcome."""
         worker = _make_worker()
 
-        session = _make_session_mock(rowcount=0)
-        worker.sf = MagicMock(return_value=session)
+        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
+            return_value=_RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED,
+        )
 
         fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
         fut.set_exception(ValueError('bad data'))
@@ -879,8 +878,9 @@ class TestRequeueDbErrorContainment:
         """_handle_broken_pool logs CRITICAL on DB_ERROR and still restarts executor."""
         worker = _make_worker()
 
-        session = _make_session_mock(execute_side_effect=OperationalError('db down'))
-        worker.sf = MagicMock(return_value=session)
+        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
+            return_value=_RequeueOutcome.DB_ERROR,
+        )
         worker._restart_executor = AsyncMock()  # type: ignore[method-assign]
 
         _logger = logging.getLogger('horsies.worker')
@@ -908,8 +908,9 @@ class TestRequeueDbErrorContainment:
         # _restart_executor keeps executor as None (simulating restart failure)
         worker._restart_executor = AsyncMock()  # type: ignore[method-assign]
 
-        session = _make_session_mock(execute_side_effect=OperationalError('db down'))
-        worker.sf = MagicMock(return_value=session)
+        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
+            return_value=_RequeueOutcome.DB_ERROR,
+        )
 
         _logger = logging.getLogger('horsies.worker')
         _logger.propagate = True
@@ -941,8 +942,9 @@ class TestRequeueDbErrorContainment:
 
         loop.run_in_executor = _patched_run  # type: ignore[assignment]
 
-        session = _make_session_mock(execute_side_effect=OperationalError('db down'))
-        worker.sf = MagicMock(return_value=session)
+        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
+            return_value=_RequeueOutcome.DB_ERROR,
+        )
 
         _logger = logging.getLogger('horsies.worker')
         _logger.propagate = True
@@ -965,8 +967,9 @@ class TestRequeueDbErrorContainment:
         """No CRITICAL log when requeue succeeds in _handle_broken_pool."""
         worker = _make_worker()
 
-        session = _make_session_mock(rowcount=1)
-        worker.sf = MagicMock(return_value=session)
+        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
+            return_value=_RequeueOutcome.REQUEUED,
+        )
         worker._restart_executor = AsyncMock()  # type: ignore[method-assign]
 
         _logger = logging.getLogger('horsies.worker')
@@ -1423,18 +1426,18 @@ class TestRetryFinalizeFuture:
         worker = _make_worker()
         worker._stop.set()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
-        worker._requeue_claimed_task = AsyncMock()  # type: ignore[assignment]
+        worker._recover_worker_future_failure = AsyncMock()  # type: ignore[assignment]
 
         await worker._retry_finalize_future(self._make_err(), 1.0)
 
-        worker._requeue_claimed_task.assert_not_called()
+        worker._recover_worker_future_failure.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_requeue_success_clears_future_attempts(self) -> None:
         """Successful requeue clears future-stage retry attempts."""
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
-        worker._requeue_claimed_task = AsyncMock(  # type: ignore[assignment]
+        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[assignment]
             return_value=_RequeueOutcome.REQUEUED,
         )
         err = self._make_err()
@@ -1443,7 +1446,7 @@ class TestRetryFinalizeFuture:
 
         await worker._retry_finalize_future(err, 0.0)
 
-        worker._requeue_claimed_task.assert_awaited_once()
+        worker._recover_worker_future_failure.assert_awaited_once()
         assert key not in worker._finalize_retry_attempts
 
     @pytest.mark.asyncio
@@ -1451,7 +1454,7 @@ class TestRetryFinalizeFuture:
         """Repeated DB_ERROR requeue failures stay on the future-stage retry path."""
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
-        worker._requeue_claimed_task = AsyncMock(  # type: ignore[assignment]
+        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[assignment]
             return_value=_RequeueOutcome.DB_ERROR,
         )
         worker._handle_finalize_error = AsyncMock()  # type: ignore[assignment]
@@ -1472,7 +1475,7 @@ class TestRetryFinalizeFuture:
         """Ownership miss means this worker has no in-flight row to recover."""
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
-        worker._requeue_claimed_task = AsyncMock(  # type: ignore[assignment]
+        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[assignment]
             return_value=_RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED,
         )
         worker._handle_finalize_error = AsyncMock()  # type: ignore[assignment]
@@ -1596,10 +1599,50 @@ class TestRetryFinalizePhase1:
 
         worker._persist_task_terminal_state.assert_awaited_once()
         worker._finalize_workflow_phase.assert_awaited_once_with(
-            err.task_id, _SENTINEL_TASK_RESULT,
+            err.task_id,
+            _SENTINEL_TASK_RESULT,
+            queue_name='default',
+            is_workflow_task=True,
         )
         assert key_p1 not in worker._finalize_retry_attempts
         assert key_p2 not in worker._finalize_retry_attempts
+
+    @pytest.mark.asyncio
+    async def test_happy_path_preserves_finalize_context(self) -> None:
+        """Phase-1 replay forwards queue/workflow metadata to phase 2."""
+        worker = _make_worker()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        worker._persist_task_terminal_state = AsyncMock(  # type: ignore[assignment]
+            return_value=Ok(_SENTINEL_TASK_RESULT),
+        )
+        worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
+            return_value=Ok(None),
+        )
+        err = _FinalizeError(
+            error_code='TEST',
+            message='test',
+            stage=_FINALIZE_STAGE_PHASE1,
+            task_id='task-rf-context',
+            retryable=True,
+            data={
+                'outcome': {
+                    'ok': True,
+                    'result_json_str': '{"value": 1}',
+                    'failed_reason': None,
+                },
+                'queue_name': 'critical',
+                'is_workflow_task': False,
+            },
+        )
+
+        await worker._retry_finalize_phase1(err, 0.0)
+
+        worker._finalize_workflow_phase.assert_awaited_once_with(
+            err.task_id,
+            _SENTINEL_TASK_RESULT,
+            queue_name='critical',
+            is_workflow_task=False,
+        )
 
     # --- U-3e: _persist fails → delegates ---
 
@@ -1619,7 +1662,15 @@ class TestRetryFinalizePhase1:
 
         await worker._retry_finalize_phase1(err, 0.0)
 
-        worker._handle_finalize_error.assert_awaited_once_with(_SENTINEL_FINALIZE_ERR)
+        worker._handle_finalize_error.assert_awaited_once()
+        retry_err = worker._handle_finalize_error.await_args.args[0]
+        assert isinstance(retry_err, _FinalizeError)
+        assert retry_err.error_code == _SENTINEL_FINALIZE_ERR.error_code
+        assert retry_err.stage == _SENTINEL_FINALIZE_ERR.stage
+        assert retry_err.data == {
+            'queue_name': 'default',
+            'is_workflow_task': True,
+        }
 
     # --- U-3f: _persist Ok(None) → clears phase1 only ---
 
@@ -1750,9 +1801,41 @@ class TestRetryFinalizePhase2:
         await worker._retry_finalize_phase2(err, 0.0)
 
         worker._finalize_workflow_phase.assert_awaited_once_with(
-            err.task_id, _SENTINEL_TASK_RESULT,
+            err.task_id,
+            _SENTINEL_TASK_RESULT,
+            queue_name='default',
+            is_workflow_task=True,
         )
         assert key not in worker._finalize_retry_attempts
+
+    @pytest.mark.asyncio
+    async def test_happy_path_preserves_finalize_context(self) -> None:
+        """Phase-2 replay forwards queue/workflow metadata."""
+        worker = _make_worker()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
+            return_value=Ok(_SENTINEL_TASK_RESULT),
+        )
+        worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
+            return_value=Ok(None),
+        )
+        err = _FinalizeError(
+            error_code='TEST',
+            message='test',
+            stage=_FINALIZE_STAGE_PHASE2,
+            task_id='task-rf2-context',
+            retryable=True,
+            data={'queue_name': 'critical', 'is_workflow_task': False},
+        )
+
+        await worker._retry_finalize_phase2(err, 0.0)
+
+        worker._finalize_workflow_phase.assert_awaited_once_with(
+            err.task_id,
+            _SENTINEL_TASK_RESULT,
+            queue_name='critical',
+            is_workflow_task=False,
+        )
 
     # --- U-3k: _finalize_workflow fails → delegates ---
 
@@ -1860,10 +1943,34 @@ class TestRestartExecutor:
         worker._executor = None
         mock_executor = MagicMock()
         worker._create_executor = MagicMock(return_value=mock_executor)  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
 
         await worker._restart_executor('test reason')
 
-        worker._create_executor.assert_called_once()
+        worker._create_executor.assert_called_once_with(
+            avoid_parent_fd_inheritance=False
+        )
+        worker._warm_executor.assert_awaited_once()
+        assert worker._executor is mock_executor
+
+    @pytest.mark.asyncio
+    async def test_executor_none_uses_spawn_safe_context_after_parent_db_opens(
+        self,
+    ) -> None:
+        """Replacement executors avoid inheriting parent DB sockets after startup."""
+        worker = _make_worker()
+        worker._parent_db_sockets_open = True
+        worker._executor = None
+        mock_executor = MagicMock()
+        worker._create_executor = MagicMock(return_value=mock_executor)  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
+
+        await worker._restart_executor('test reason')
+
+        worker._create_executor.assert_called_once_with(
+            avoid_parent_fd_inheritance=True
+        )
+        worker._warm_executor.assert_awaited_once()
         assert worker._executor is mock_executor
 
     # --- U-4f ---
@@ -1876,10 +1983,15 @@ class TestRestartExecutor:
         new_executor = MagicMock()
         worker._executor = old_executor
         worker._create_executor = MagicMock(return_value=new_executor)  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
 
         await worker._restart_executor('broken pool')
 
         old_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+        worker._create_executor.assert_called_once_with(
+            avoid_parent_fd_inheritance=False
+        )
+        worker._warm_executor.assert_awaited_once()
         assert worker._executor is new_executor
 
     # --- U-4g ---
@@ -1893,6 +2005,7 @@ class TestRestartExecutor:
         new_executor = MagicMock()
         worker._executor = old_executor
         worker._create_executor = MagicMock(return_value=new_executor)  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
 
         await worker._restart_executor('broken pool')
 
@@ -1906,6 +2019,7 @@ class TestRestartExecutor:
         worker._executor = old_executor
         replacements = [MagicMock(name=f'executor-{idx}') for idx in range(12)]
         worker._create_executor = MagicMock(side_effect=replacements)  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
 
         await asyncio.gather(
             *(
@@ -1919,6 +2033,7 @@ class TestRestartExecutor:
 
         old_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
         worker._create_executor.assert_called_once()
+        worker._warm_executor.assert_awaited_once()
         assert worker._executor is replacements[0]
 
     @pytest.mark.asyncio
@@ -1932,12 +2047,14 @@ class TestRestartExecutor:
         worker._create_executor = MagicMock(  # type: ignore[assignment]
             side_effect=[first_replacement, second_replacement]
         )
+        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
 
         await worker._restart_executor('first broken pool', failed_executor=old_executor)
         await worker._restart_executor('late broken pool', failed_executor=old_executor)
 
         old_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
         worker._create_executor.assert_called_once()
+        worker._warm_executor.assert_awaited_once()
         assert worker._executor is first_replacement
 
 
@@ -2137,6 +2254,46 @@ class TestStartWithResilienceConfig:
         worker._handle_retryable_start_error.assert_not_called()
 
 
+@pytest.mark.unit
+class TestWorkerStartConnectionOrdering:
+    """Tests for fork-safe worker startup ordering."""
+
+    @pytest.mark.asyncio
+    async def test_warms_children_before_parent_listener_starts(self) -> None:
+        worker = _make_worker()
+        events: list[str] = []
+
+        worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
+        worker._create_executor = MagicMock(  # type: ignore[assignment]
+            side_effect=lambda **_kwargs: events.append('create-executor')
+            or MagicMock()
+        )
+
+        async def _warm() -> None:
+            events.append('warm-executor')
+
+        async def _listener_start():
+            events.append('listener-start')
+            return Ok(None)
+
+        worker._warm_executor = AsyncMock(side_effect=_warm)  # type: ignore[assignment]
+        worker.listener.start = AsyncMock(side_effect=_listener_start)
+        worker.listener.listen_many = AsyncMock(
+            return_value=Ok([asyncio.Queue(), asyncio.Queue()])
+        )
+        worker.listener.listen = AsyncMock(return_value=Ok(asyncio.Queue()))
+
+        def _close_spawned(coro, **kwargs):  # type: ignore[no-untyped-def]
+            coro.close()
+            return MagicMock()
+
+        worker._spawn_background = MagicMock(side_effect=_close_spawned)  # type: ignore[assignment]
+
+        await worker.start()
+
+        assert events == ['create-executor', 'warm-executor', 'listener-start']
+
+
 # ---------------------------------------------------------------------------
 # 17. Reaper loop — uncovered match arms
 # ---------------------------------------------------------------------------
@@ -2199,15 +2356,18 @@ def _make_reaper_worker(
         return result
 
     close_rv = broker_close_result if broker_close_result is not None else Ok(None)
+    created_brokers: list[Any] = []
 
     class _FakeBroker:
         def __init__(self, config: Any, **kwargs: Any) -> None:
+            created_brokers.append(self)
             self.config = config
             self.assume_initialized = kwargs.get('assume_initialized')
             self.session_factory = MagicMock(return_value=session)
             self.close_async = AsyncMock(return_value=close_rv)
             self.requeue_stale_claimed = _requeue_side_effect
             self.mark_stale_tasks_as_failed = _mark_failed_side_effect
+            self.expire_pending_tasks = AsyncMock(return_value=Ok(0))
             self.app: Any = None
 
     monkeypatch.setattr(
@@ -2218,6 +2378,7 @@ def _make_reaper_worker(
         AsyncMock(return_value=0),
     )
 
+    worker._test_created_brokers = created_brokers  # type: ignore[attr-defined]
     return worker
 
 
@@ -2387,33 +2548,28 @@ class TestReaperMatchArms:
         critical_records = [r for r in caplog.records if r.levelno == logging.CRITICAL]
         assert len(critical_records) >= 1
 
-    # --- U-6e: app broker get_broker raises → fallback to temp ---
+    # --- U-6e: no worker broker → fallback to temp ---
 
     @pytest.mark.asyncio
-    async def test_app_broker_error_falls_back_to_temp(
+    async def test_missing_worker_broker_falls_back_to_temp(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """When app.get_broker() raises, reaper falls back to temp broker."""
+        """When worker.broker is absent, reaper constructs a worker-sized temp broker."""
         worker = _make_reaper_worker(
             monkeypatch,
             auto_requeue=True,
             requeue_results=[Ok(0)],
         )
-        app = MagicMock()
-        app.get_broker.side_effect = RuntimeError('app broker broken')
-        worker._app = app
 
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
-                await worker._reaper_loop()
-        finally:
-            _logger.propagate = False
+        await worker._reaper_loop()
 
-        assert 'falling back' in caplog.text.lower()
+        assert worker.broker is None
+        created = worker._test_created_brokers  # type: ignore[attr-defined]
+        assert len(created) == 1
+        assert created[0].config.pool_size == worker.cfg.parent_pool_size
+        assert created[0].config.max_overflow == worker.cfg.parent_max_overflow
+        created[0].close_async.assert_awaited_once()
 
     # --- U-6f: loop-level exception → logged, continues ---
 
@@ -3153,7 +3309,7 @@ def _make_claim_worker(
     queue_priorities: dict[str, int] | None = None,
     queue_max_concurrency: dict[str, int] | None = None,
     cluster_wide_cap: int | None = None,
-    max_claim_batch: int = 2,
+    max_claim_batch: int = 0,
 ) -> Worker:
     """Build a Worker pre-configured for claim-and-dispatch testing."""
     cfg = WorkerConfig(
@@ -3212,6 +3368,31 @@ class TestClaimAndDispatchBranches:
         assert result is False
         worker._count_only_running_for_worker.assert_awaited_once()
         worker._count_in_flight_for_worker.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_softcap_budget_subtracts_existing_claimed_rows(self) -> None:
+        """Soft-cap auto-claim must not exceed processes + prefetch_buffer."""
+        worker = _make_claim_worker(
+            prefetch_buffer=16,
+            processes=8,
+            max_claim_batch=0,
+        )
+        worker._count_claimed_for_worker = AsyncMock(return_value=16)  # type: ignore[assignment]
+        worker._count_only_running_for_worker = AsyncMock(return_value=8)  # type: ignore[assignment]
+        worker._count_in_flight_for_worker = AsyncMock(return_value=24)  # type: ignore[assignment]
+        worker._claim_batch_locked = AsyncMock()  # type: ignore[assignment]
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(return_value=MagicMock())
+        session.commit = AsyncMock()
+        worker.sf = MagicMock(return_value=session)
+
+        result = await worker._claim_and_dispatch_all()
+
+        assert result is False
+        worker._claim_batch_locked.assert_not_awaited()
 
     # --- U-9b ---
 
@@ -3424,3 +3605,118 @@ class TestClaimAndDispatchBranches:
         count = await worker._count_running_in_queue('some_queue')
 
         assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# Ping responder: _handle_ping
+# ---------------------------------------------------------------------------
+
+
+def _ping_session(worker: Worker) -> AsyncMock:
+    """Attach a mock session to the worker and return it for assertions."""
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.execute = AsyncMock()
+    session.commit = AsyncMock()
+    worker.sf = MagicMock(return_value=session)
+    return session
+
+
+def _encode_ping(
+    *,
+    reply_channel: str,
+    target_worker_id: str | None,
+    correlation_id: str = 'corr-1',
+) -> str:
+    from horsies.core.codec.json_io import dumps_json
+    from horsies.core.models.health import WorkerPingRequest
+
+    req = WorkerPingRequest(
+        correlation_id=correlation_id,
+        reply_channel=reply_channel,
+        target_worker_id=target_worker_id,
+    )
+    return dumps_json(req.model_dump()).ok_value
+
+
+@pytest.mark.unit
+class TestFailedStartCleanup:
+    """A failed start must not leak background loops into a retry."""
+
+    @pytest.mark.asyncio
+    async def test_cleanup_cancels_service_tasks(self) -> None:
+        """_cleanup_after_failed_start cancels spawned loops and clears the set."""
+        worker = _make_worker()
+        worker.listener.close = AsyncMock()
+
+        async def _never() -> None:
+            await asyncio.sleep(3600)
+
+        task = worker._spawn_background(_never(), name='dummy-loop')
+        assert worker._service_tasks  # spawned
+
+        await worker._cleanup_after_failed_start()
+
+        assert task.cancelled()
+        assert worker._service_tasks == set()
+        # _stop stays unset so the resilience loop is free to retry.
+        assert not worker._stop.is_set()
+
+
+@pytest.mark.unit
+class TestHandlePing:
+    """Worker replies on broadcast / matching target and stays silent otherwise."""
+
+    @pytest.mark.asyncio
+    async def test_broadcast_replies_with_pong(self) -> None:
+        from horsies.core.codec.json_io import loads_json
+        from horsies.core.models.health import WorkerPongPayload
+
+        worker = _make_worker()
+        session = _ping_session(worker)
+        payload = _encode_ping(reply_channel='reply-ch', target_worker_id=None)
+
+        await worker._handle_ping(payload)
+
+        session.execute.assert_awaited_once()
+        _, kwargs = session.execute.call_args
+        params = kwargs if kwargs else session.execute.call_args.args[1]
+        assert params['ch'] == 'reply-ch'
+        pong = WorkerPongPayload.model_validate(loads_json(params['p']).ok_value)
+        assert pong.correlation_id == 'corr-1'
+        assert pong.worker_id == worker.worker_instance_id
+
+    @pytest.mark.asyncio
+    async def test_matching_target_replies(self) -> None:
+        worker = _make_worker()
+        session = _ping_session(worker)
+        payload = _encode_ping(
+            reply_channel='reply-ch', target_worker_id=worker.worker_instance_id
+        )
+
+        await worker._handle_ping(payload)
+
+        session.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_other_target_stays_silent(self) -> None:
+        worker = _make_worker()
+        session = _ping_session(worker)
+        payload = _encode_ping(
+            reply_channel='reply-ch', target_worker_id='someone-else'
+        )
+
+        await worker._handle_ping(payload)
+
+        session.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_malformed_payload_is_dropped(self) -> None:
+        worker = _make_worker()
+        session = _ping_session(worker)
+
+        await worker._handle_ping('not json')
+        await worker._handle_ping('{"correlation_id": "c"}')  # missing reply_channel
+
+        session.execute.assert_not_awaited()

@@ -27,7 +27,7 @@ horsies worker <module> [OPTIONS]
 | ------ | ------- | ----------- |
 | `--processes N` | 1 | Number of worker processes |
 | `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
-| `--max-claim-batch N` | 2 | Max claims per queue per pass |
+| `--max-claim-batch N` | 0 | Max claims per queue per pass (`0` auto-fills available capacity) |
 | `--max-claim-per-worker N` | 0 | Max total claimed tasks (0=auto) |
 
 **Examples:**
@@ -43,7 +43,7 @@ horsies worker myapp.instance:app --processes=8
 horsies worker myapp.instance:app --loglevel=DEBUG
 
 # Production settings
-horsies worker myapp.instance:app --processes=8 --max-claim-batch=4 --loglevel=WARNING
+horsies worker myapp.instance:app --processes=8 --loglevel=WARNING
 
 # Using file path (also supported)
 horsies worker app/configs/instance.py:app

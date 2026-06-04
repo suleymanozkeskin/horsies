@@ -13,7 +13,7 @@ Horsies has two error systems: **runtime errors** returned in `TaskResult`, and 
 
 Runtime errors are returned via `TaskResult[T, TaskError]`. The `TaskError.error_code` field contains either a `BuiltInTaskCode` member or a user-defined string.
 
-When a task reaches a terminal `FAILED` state with a `TaskResult(err=TaskError(...))`, the `error_code` is persisted to `horsies_tasks.error_code` for queryability. This column is `NULL` for successful tasks, non-terminal tasks, and worker-level failures that never produced a `TaskResult`. Access it via `TaskInfo.error_code` from `handle.info()`.
+When a task reaches a terminal `FAILED` state with a `TaskResult(err=TaskError(...))`, the `error_code` is persisted to `horsies_tasks.error_code` for queryability. This column is `NULL` for successful and non-terminal tasks. Worker/process failures synthesize a `TaskResult(err=TaskError(...))` where possible, so `WORKER_CRASHED` and serialization failures are queryable. Access it via `TaskInfo.error_code` from `handle.info()`.
 
 Each execution attempt is also recorded in `horsies_task_attempts` with per-attempt `error_code`, `error_message`, and outcome. See [Retrieving Results](retrieving-results#task-metadata-and-attempt-history) for API usage.
 
@@ -93,7 +93,9 @@ Terminal outcome codes for tasks and workflows.
 | `ENQUEUE_FAILED` | Enqueue or schedule path failed | Yes when the underlying broker error is retryable |
 | `PAYLOAD_MISMATCH` | Retry payload SHA does not match the original enqueue payload | No |
 | `TASK_INFO_QUERY_FAILED` | Task-info or raw-result query failed | Varies |
-| `MONITORING_QUERY_FAILED` | Monitoring query failed | Varies |
+| `MONITORING_QUERY_FAILED` | Monitoring or worker-state query failed | Varies |
+| `DB_PING_FAILED` | `ping_database` reachability probe failed | Varies |
+| `WORKER_PING_FAILED` | `ping_workers` failed (listener unavailable, bad timeout) | No |
 | `CLEANUP_FAILED` | Cleanup or retention operation failed | Varies |
 | `CLOSE_FAILED` | Broker close failed | Varies |
 | `LISTENER_START_FAILED` | LISTEN/NOTIFY listener failed to start | No |

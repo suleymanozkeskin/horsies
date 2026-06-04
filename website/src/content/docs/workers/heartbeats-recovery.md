@@ -61,6 +61,8 @@ for task in tasks.filter(status='CLAIMED'):
 
 for task in tasks.filter(status='RUNNING'):
     last_hb = get_latest_heartbeat(task, role='runner')
+    if task.finalizing_at is recent:
+        continue  # Child finished; parent may still be committing the result
     if now - last_hb > running_stale_threshold:
         fail(task)  # Not safe to requeue
 ```
@@ -83,6 +85,12 @@ When a RUNNING task has no recent runner heartbeat:
 - **Not safe to blindly requeue**: Code was executing, may have partial side effects
 - If the task has a retry policy with `WORKER_CRASHED` in `auto_retry_for` and retries remaining: scheduled for retry (returns to PENDING with `next_retry_at`)
 - Otherwise: marked as FAILED with `WORKER_CRASHED` error
+- Recent `finalizing_at` suppresses recovery so a completed child is not failed
+  while the parent is still writing terminal state
+
+`running_stale_threshold_ms` measures missing heartbeats, not task wall-clock
+duration. A task can run longer than the threshold if it continues sending
+runner heartbeats.
 
 ### Workflow Task Recovery
 
@@ -116,6 +124,7 @@ config = AppConfig(
         # Runner detection
         auto_fail_stale_running=True,
         running_stale_threshold_ms=300_000,     # 5 minutes
+        finalizing_stale_threshold_ms=300_000,  # 5 minutes
         runner_heartbeat_interval_ms=30_000,    # 30 seconds
 
         # Check frequency
@@ -135,6 +144,7 @@ Stale thresholds must be at least 2x the heartbeat interval:
 RecoveryConfig(
     runner_heartbeat_interval_ms=30_000,  # 30s
     running_stale_threshold_ms=60_000,    # 60s (2x)
+    finalizing_stale_threshold_ms=60_000, # 60s (2x)
 )
 
 # Invalid - will raise ValueError

@@ -144,7 +144,11 @@ From `WorkerConfig`:
 | `pgbouncer_transaction_mode` | Disables child-process prepared statements for PgBouncer transaction pooling |
 | `queues` | Queue names to process |
 | `processes` | Child process count |
-| `max_claim_batch` | Max claims per queue per pass |
+| `parent_pool_size` | Worker coordinator SQLAlchemy pool size |
+| `parent_max_overflow` | Worker coordinator overflow connections |
+| `child_pool_min_size` | Minimum per-child psycopg pool size |
+| `child_pool_max_size` | Maximum per-child psycopg pool size |
+| `max_claim_batch` | Max claims per queue per pass; `0` means auto-fill available capacity |
 | `max_claim_per_worker` | Total claim limit |
 | `app_locator` | Path to app instance |
 | `imports` | Task module paths |
@@ -153,6 +157,16 @@ Workers require PostgreSQL `LISTEN` for dispatch. When using transaction-pooled
 PgBouncer, configure `PostgresConfig.session_database_url` with a direct or
 session-capable URL. Workers fail startup instead of silently switching to
 poll-only dispatch if `LISTEN` is unavailable.
+
+Child database pools are initialized inside the child process, after the process
+pool starts. Psycopg connections are not process-safe and must not be opened in
+the parent and shared across forked children. Workers warm child processes
+before opening parent listener/coordinator sockets; child DB connections remain
+lazy by default when `worker_child_pool_min_size=0`.
+
+If a process pool must be replaced after startup, the worker uses a
+non-inheriting process start method for the replacement so live parent database
+sockets are not forked into new children.
 
 ## Graceful Shutdown
 
@@ -178,7 +192,7 @@ Workers recover from transient infrastructure failures without operator interven
 
 - **Database outages**: Worker retries on connection loss during startup, claiming, and result writes. No crash, no manual restart.
 - **Silent NOTIFY channels**: If the PostgreSQL NOTIFY mechanism stops delivering (broken listener connection, dropped trigger), the worker falls back to periodic polling so tasks are still picked up.
-- **Broken process pool**: If child processes crash, the process pool is recreated. Tasks still in CLAIMED status are requeued back to PENDING. Tasks already in RUNNING status are handled by the [recovery reaper](../heartbeats-recovery): if the task has a retry policy with `WORKER_CRASHED` in `auto_retry_for` and retries remaining, the task is scheduled for retry; otherwise it is marked FAILED.
+- **Broken process pool**: If child processes crash, the process pool is recreated. Tasks still in CLAIMED status are requeued back to PENDING. Tasks already in RUNNING status are recovered through the same retry policy used by the reaper: if `WORKER_CRASHED` is listed in `auto_retry_for` and retries remain, the task is scheduled for retry; otherwise it is marked FAILED with a `WORKER_CRASHED` result.
 
 ### Configuration
 

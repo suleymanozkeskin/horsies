@@ -94,6 +94,8 @@ if os.environ.get('INJECT_REQUEUE_DB_ERROR') == '1':
         task_name: str,
         args_json: Optional[str],
         kwargs_json: Optional[str],
+        queue_name: str = 'default',  # noqa: ARG001
+        is_workflow_task: bool = True,  # noqa: ARG001
     ) -> None:
         # Simulate: executor unavailable → requeue → DB_ERROR
         outcome = await self._requeue_claimed_task(task_id, 'INJECTED dispatch failure')

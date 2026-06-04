@@ -87,18 +87,9 @@ if is_ok(result):
         print(f"Task {task['id']} on {task['worker_hostname']} — last heartbeat: {task['last_heartbeat']}")
 ```
 
-### `get_worker_stats() -> BrokerResult[list[dict[str, Any]]]`
+### Worker health and load
 
-Group RUNNING tasks by worker to show load distribution and health.
-
-**Returns:** `Ok(list[dict])` with keys: `worker_hostname`, `worker_pid`, `worker_process_name`, `active_tasks`, `oldest_task_start`, `latest_heartbeat`.
-
-```python
-result = await broker.get_worker_stats()
-if is_ok(result):
-    for worker in result.ok_value:
-        print(f"{worker['worker_hostname']}:{worker['worker_pid']} — {worker['active_tasks']} active")
-```
+For per-worker load, configuration, and liveness, use the typed [Worker & Database Health](/monitoring/worker-health/) API (`app.list_worker_states_async`, `app.ping_workers_async`, `app.ping_database_async`). It reads the worker-state timeseries — so it includes idle workers — and returns typed `WorkerStateSnapshot` / `WorkerPong` models rather than raw dicts.
 
 ### `get_expired_tasks() -> BrokerResult[list[dict[str, Any]]]`
 
@@ -141,13 +132,14 @@ elif result.ok_value is not None:
         print(f"Next retry at: {info.next_retry_at}")
 ```
 
-### `mark_stale_tasks_as_failed(stale_threshold_ms: int = 300_000) -> BrokerResult[int]`
+### `mark_stale_tasks_as_failed(stale_threshold_ms: int = 300_000, finalizing_stale_threshold_ms: int = 300_000) -> BrokerResult[int]`
 
 Handle RUNNING tasks with no heartbeat within the threshold. Tasks with a retry policy listing `WORKER_CRASHED` in `auto_retry_for` (and retries remaining) are scheduled for retry; all others are marked FAILED with `WORKER_CRASHED` error code.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `stale_threshold_ms` | `int` | `300_000` (5 min) | Milliseconds without heartbeat to consider crashed |
+| `finalizing_stale_threshold_ms` | `int` | `300_000` (5 min) | Milliseconds a completed child may remain finalizing before recovery |
 
 **Returns:** `Ok(int)` — number of tasks processed (retried or failed).
 

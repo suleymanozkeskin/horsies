@@ -498,6 +498,37 @@ class TestLiveBrokerConnectivityCheck:
         mock_session.execute.assert_awaited_once()
         mock_engine.dispose.assert_awaited_once()
 
+    def test_live_check_does_not_pass_worker_pool_fields_to_engine(self) -> None:
+        """Worker-specific broker fields are not SQLAlchemy engine kwargs."""
+        app = _make_app()
+
+        mock_engine = mock.MagicMock()
+        mock_engine.dispose = mock.AsyncMock()
+        mock_session = mock.AsyncMock()
+        mock_session.__aenter__ = mock.AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = mock.AsyncMock(return_value=None)
+        mock_session.execute = mock.AsyncMock(return_value=None)
+        mock_session_factory = mock.MagicMock(return_value=mock_session)
+
+        with (
+            mock.patch(
+                'sqlalchemy.ext.asyncio.create_async_engine',
+                return_value=mock_engine,
+            ) as mock_create_engine,
+            mock.patch(
+                'sqlalchemy.ext.asyncio.async_sessionmaker',
+                return_value=mock_session_factory,
+            ),
+        ):
+            errors = app.check(live=True)
+
+        assert errors == []
+        engine_kwargs = mock_create_engine.call_args.kwargs
+        assert 'worker_pool_size' not in engine_kwargs
+        assert 'worker_max_overflow' not in engine_kwargs
+        assert 'worker_child_pool_min_size' not in engine_kwargs
+        assert 'worker_child_pool_max_size' not in engine_kwargs
+
     def test_live_check_reports_connectivity_error_without_touching_broker(self) -> None:
         """Connectivity failures map to BROKER_INVALID_URL and still dispose engine."""
         app = _make_app()

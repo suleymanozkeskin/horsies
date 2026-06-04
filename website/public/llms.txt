@@ -108,13 +108,20 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Err(BrokerOperationError): operation failed
 - Use is_ok(result) / is_err(result) type guards, then access ok_value/err_value
 - BrokerOperationError fields: code (BrokerErrorCode), message (str), retryable (bool), exception (BaseException | None)
-- BrokerErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, CLEANUP_FAILED, CLOSE_FAILED
+- BrokerErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, DB_PING_FAILED, WORKER_PING_FAILED, CLEANUP_FAILED, CLOSE_FAILED
 - retryable=True: transient (connection blip), retryable=False: permanent (schema drift, code bug)
 - Broker methods: enqueue_async -> BrokerResult[str], get_task_info_async -> BrokerResult[TaskInfo | None],
   ensure_schema_initialized -> BrokerResult[None], get_stale_tasks -> BrokerResult[list[dict]],
-  get_worker_stats -> BrokerResult[list[dict]], get_expired_tasks -> BrokerResult[list[dict]],
+  get_expired_tasks -> BrokerResult[list[dict]],
   mark_stale_tasks_as_failed -> BrokerResult[int], requeue_stale_claimed -> BrokerResult[int],
   close_async -> BrokerResult[None]
+- Health/liveness API (app-level, async + sync; broker exposes the async forms):
+  ping_database_async -> BrokerResult[DatabasePing] (SELECT 1 + latency via live pool),
+  ping_workers_async(target_worker_id=None, timeout_seconds=2.0, min_responses=None) -> BrokerResult[list[WorkerPong]] (active LISTEN/NOTIFY ping-pong; min_responses=1 returns on first reply = fast liveness gate),
+  list_worker_states_async -> BrokerResult[list[WorkerStateSnapshot]] (latest per worker, includes idle workers),
+  get_worker_state_async(worker_id) -> BrokerResult[WorkerStateSnapshot | None],
+  get_worker_state_history_async(worker_id, limit=None) -> BrokerResult[list[WorkerStateSnapshot]]
+- get_worker_stats was removed in 0.1.4; use list_worker_states_async (typed, includes idle workers)
 - Note: get_result_async still returns TaskResult[T, TaskError] (task execution result, not broker infra)
 
 ### Result[T, E] (vendored Ok/Err type)
@@ -410,8 +417,19 @@ making web request, local will cost you less tokens and greater knowledgebase at
 #### MonthlySchedule
 - MonthlySchedule(day=15, time=time(15, 0)) -> 15th at 15:00
 
+#### CronSchedule
+- Typed 5-field cron-style schedule (minute hour day-of-month month day-of-week); fires at second :00
+- Fields: minute=list[term] (0-59), hour=list[term] (0-23), month=list[enum_term] (Month), day=DaySelector
+- Numeric terms: CronEvery() | CronStep(step=n) (*/n anchored at domain start) | CronValues(values=[...]) | CronRange(start, end, step=1)
+- Enum terms (parameterized [Month]/[Weekday]): CronEvery() | CronEnumStep[T](step=n) | CronEnumValues[T](values=[...]) | CronEnumRange[T](start, end, step=1)
+- DaySelector: EveryDay() | ByMonthDay(day_of_month=[...]) | ByWeekday(day_of_week=[...]) | EitherDay(dom, dow) (OR) | BothDays(dom, dow) (AND)
+- Wall-clock aligned (unlike IntervalSchedule). CronStep(step=4) on hour -> 0,4,8,12,16,20
+- Example: CronSchedule(minute=[CronValues(values=[15])], hour=[CronStep(step=4)], month=[CronEvery()], day=EveryDay()) -> every 4h at :15
+- Validation (ConfigurationError at construction): per-field domain, range start<=end (no wrap), step <= field span, month/day-of-month satisfiability
+- Month enum: JANUARY..DECEMBER (str values "january".."december")
+
 #### SchedulePattern
-- Type union: IntervalSchedule | HourlySchedule | DailySchedule | WeeklySchedule | MonthlySchedule
+- Type union: IntervalSchedule | HourlySchedule | DailySchedule | WeeklySchedule | MonthlySchedule | CronSchedule
 
 #### TaskSchedule
 - name: str (unique schedule identifier)

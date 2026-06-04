@@ -60,7 +60,12 @@ from horsies.core.types.result import is_err
 if TYPE_CHECKING:
     from horsies.core.task_decorator import TaskFunction
     from horsies.core.models.tasks import TaskInfo, TaskResult, TaskError
-    from horsies.core.brokers.result_types import BrokerResult
+    from horsies.core.brokers.result_types import BrokerResult, BrokerErrorCode
+    from horsies.core.models.health import (
+        DatabasePing,
+        WorkerPong,
+        WorkerStateSnapshot,
+    )
 
 P = ParamSpec('P')
 T = TypeVar('T')
@@ -792,14 +797,7 @@ class Horsies:
 
         errors: list[HorsiesError] = []
         try:
-            base_engine_cfg = self.config.broker.model_dump(
-                exclude={
-                    'database_url',
-                    'session_database_url',
-                    'pgbouncer_transaction_mode',
-                },
-                exclude_none=True,
-            )
+            base_engine_cfg = self.config.broker.sqlalchemy_engine_kwargs()
 
             async def _test_connection(
                 database_url: str,
@@ -917,7 +915,12 @@ class Horsies:
         """Get the configured PostgreSQL broker for this app"""
         try:
             if self._broker is None:
-                self._broker = PostgresBroker(self.config.broker)
+                broker_config = (
+                    self.config.broker.worker_runtime_config()
+                    if self._role == 'worker'
+                    else self.config.broker
+                )
+                self._broker = PostgresBroker(broker_config)
                 self._broker.app = self  # Store app reference for subworkflow support
             return self._broker
         except HorsiesError:
@@ -1277,6 +1280,152 @@ class Horsies:
                 retryable=False,
                 exception=exc,
             ))
+
+    # ------------- Health / liveness API -------------
+
+    def _sync_bridge_err(
+        self,
+        code: 'BrokerErrorCode',
+        label: str,
+        exc: Exception,
+    ) -> 'BrokerResult[Any]':
+        """Wrap a sync-bridge failure as an Err (shared by health sync facades)."""
+        from horsies.core.brokers.result_types import BrokerOperationError
+        from horsies.core.types.result import Err
+
+        return Err(BrokerOperationError(
+            code=code,
+            message=f'Sync bridge failed for {label}: {exc}',
+            retryable=False,
+            exception=exc,
+        ))
+
+    async def ping_database_async(self) -> 'BrokerResult[DatabasePing]':
+        """Probe Postgres reachability + latency through the live pool."""
+        return await self.get_broker().ping_database_async()
+
+    def ping_database(self) -> 'BrokerResult[DatabasePing]':
+        """Synchronous version of ``ping_database_async``."""
+        from horsies.core.brokers.result_types import BrokerErrorCode
+
+        broker = self.get_broker()
+        try:
+            return broker._loop_runner.call(self.ping_database_async)
+        except Exception as exc:
+            return self._sync_bridge_err(
+                BrokerErrorCode.DB_PING_FAILED, 'ping_database', exc
+            )
+
+    async def ping_workers_async(
+        self,
+        *,
+        target_worker_id: str | None = None,
+        timeout_seconds: float = 2.0,
+        min_responses: int | None = None,
+    ) -> 'BrokerResult[list[WorkerPong]]':
+        """Active ping-pong: collect live workers' replies within a window.
+
+        Pass ``min_responses=1`` for a fast fail-open liveness gate — returns on
+        the first reply rather than waiting the full ``timeout_seconds``.
+        """
+        return await self.get_broker().ping_workers_async(
+            target_worker_id=target_worker_id,
+            timeout_seconds=timeout_seconds,
+            min_responses=min_responses,
+        )
+
+    def ping_workers(
+        self,
+        *,
+        target_worker_id: str | None = None,
+        timeout_seconds: float = 2.0,
+        min_responses: int | None = None,
+    ) -> 'BrokerResult[list[WorkerPong]]':
+        """Synchronous version of ``ping_workers_async``."""
+        from horsies.core.brokers.result_types import BrokerErrorCode
+
+        broker = self.get_broker()
+        try:
+            return broker._loop_runner.call(
+                self.ping_workers_async,
+                target_worker_id=target_worker_id,
+                timeout_seconds=timeout_seconds,
+                min_responses=min_responses,
+            )
+        except Exception as exc:
+            return self._sync_bridge_err(
+                BrokerErrorCode.WORKER_PING_FAILED, 'ping_workers', exc
+            )
+
+    async def list_worker_states_async(
+        self,
+    ) -> 'BrokerResult[list[WorkerStateSnapshot]]':
+        """Latest state snapshot per worker (including idle workers)."""
+        return await self.get_broker().list_worker_states_async()
+
+    def list_worker_states(self) -> 'BrokerResult[list[WorkerStateSnapshot]]':
+        """Synchronous version of ``list_worker_states_async``."""
+        from horsies.core.brokers.result_types import BrokerErrorCode
+
+        broker = self.get_broker()
+        try:
+            return broker._loop_runner.call(self.list_worker_states_async)
+        except Exception as exc:
+            return self._sync_bridge_err(
+                BrokerErrorCode.MONITORING_QUERY_FAILED, 'list_worker_states', exc
+            )
+
+    async def get_worker_state_async(
+        self,
+        worker_id: str,
+    ) -> 'BrokerResult[WorkerStateSnapshot | None]':
+        """Latest state snapshot for one worker, or ``None`` if unknown."""
+        return await self.get_broker().get_worker_state_async(worker_id)
+
+    def get_worker_state(
+        self,
+        worker_id: str,
+    ) -> 'BrokerResult[WorkerStateSnapshot | None]':
+        """Synchronous version of ``get_worker_state_async``."""
+        from horsies.core.brokers.result_types import BrokerErrorCode
+
+        broker = self.get_broker()
+        try:
+            return broker._loop_runner.call(self.get_worker_state_async, worker_id)
+        except Exception as exc:
+            return self._sync_bridge_err(
+                BrokerErrorCode.MONITORING_QUERY_FAILED, 'get_worker_state', exc
+            )
+
+    async def get_worker_state_history_async(
+        self,
+        worker_id: str,
+        *,
+        limit: int | None = None,
+    ) -> 'BrokerResult[list[WorkerStateSnapshot]]':
+        """Timeseries snapshots for one worker, newest first."""
+        return await self.get_broker().get_worker_state_history_async(
+            worker_id, limit=limit
+        )
+
+    def get_worker_state_history(
+        self,
+        worker_id: str,
+        *,
+        limit: int | None = None,
+    ) -> 'BrokerResult[list[WorkerStateSnapshot]]':
+        """Synchronous version of ``get_worker_state_history_async``."""
+        from horsies.core.brokers.result_types import BrokerErrorCode
+
+        broker = self.get_broker()
+        try:
+            return broker._loop_runner.call(
+                self.get_worker_state_history_async, worker_id, limit=limit
+            )
+        except Exception as exc:
+            return self._sync_bridge_err(
+                BrokerErrorCode.MONITORING_QUERY_FAILED, 'get_worker_state_history', exc
+            )
 
     def discover_tasks(
         self,

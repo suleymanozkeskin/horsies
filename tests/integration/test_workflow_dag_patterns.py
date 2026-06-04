@@ -245,7 +245,7 @@ class TestDAGPatterns:
                 'queue': 'default',
                 'lim': 1,
                 'worker_id': 'test-worker',
-                'claim_expires_at': None,
+                'claim_lease_ms': 60_000,
             },
         )
         claimed_row = claim_result.fetchone()

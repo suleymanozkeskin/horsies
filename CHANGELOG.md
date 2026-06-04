@@ -6,7 +6,115 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0: breaking changes may land in minor or patch releases,
 and there is no migration contract between pre-1.0 versions.
 
-## [0.1.2] - Unreleased
+## [0.1.6] - 2026-06-04
+
+### Added
+
+- Schema v2 task lifecycle metadata: `is_workflow_task`, `finalizing_at`, and
+  `finalizing_by_worker_id`. Existing workflow-linked task rows are backfilled
+  once during migration; new direct task sends and workflow enqueues write the
+  flag explicitly.
+- `RecoveryConfig.finalizing_stale_threshold_ms` to protect the child-to-parent
+  finalization handoff without disabling stale child recovery.
+- Worker-specific broker pool settings:
+  `worker_pool_size`, `worker_max_overflow`,
+  `worker_child_pool_min_size`, and `worker_child_pool_max_size`.
+
+### Changed
+
+- Worker claim batching now defaults to filling available local/global capacity
+  (`max_claim_batch=0`), while a positive `max_claim_batch` remains an explicit
+  per-queue fairness cap.
+- Soft-prefetch local budgeting counts already-owned `CLAIMED` rows, preventing
+  a worker from hoarding beyond `processes + prefetch_buffer`.
+- Plain tasks skip workflow-specific child preflight/finalize checks using the
+  persisted `is_workflow_task` flag.
+- Worker processes now use a smaller coordinator pool by default (`3 + 2`
+  overflow) while producer/web broker defaults remain unchanged (`30 + 30`).
+- Child worker psycopg pools now default to `min_size=0`, `max_size=2` instead
+  of `1..5`, and are configurable from `PostgresConfig`.
+- Worker child processes are warmed before the parent opens long-lived database
+  sockets, and replacement executors use a non-inheriting start method after
+  startup, avoiding fork inheritance of psycopg connections.
+
+### Fixed
+
+- `BrokenProcessPool` and child-future failures now distinguish `CLAIMED` work
+  from `RUNNING` work. `RUNNING` tasks respect `WORKER_CRASHED` retry policy or
+  persist a terminal `WORKER_CRASHED` result instead of being blindly requeued.
+- Finalization failure handling now preserves queue/workflow context across
+  retries, schedules phase-2 retries after terminal state is committed, and
+  returns synthetic `TaskResult` payloads for worker-failure/corrupt-result
+  terminal paths so workflow advancement and capacity notifications are not
+  skipped.
+- The reaper skips recent `finalizing_at` handoffs, recovers stale finalizing
+  rows after `finalizing_stale_threshold_ms`, and still recovers hung child
+  processes even when the parent worker coordinator is alive.
+- Workflow pause now cancels claimed-but-not-started internal task rows and
+  resets their workflow nodes to `READY`, including retry-window nodes already
+  marked `RUNNING`, so resume enqueues fresh task rows instead of leaving
+  orphan claims.
+
+## [0.1.5] - 2026-06-02
+
+### Added
+
+- `ping_workers(min_responses=N)` / `ping_workers_async(min_responses=N)`:
+  return as soon as `N` distinct workers reply instead of waiting the full
+  `timeout_seconds`. `min_responses=1` is a fast fail-open liveness gate — a
+  healthy fleet answers in milliseconds; only a degraded fleet pays the
+  timeout. Removes the latency floor for high-frequency `/health` probes.
+  Pongs are de-duplicated by `worker_id`.
+
+## [0.1.4] - 2026-06-02
+
+0.1.4 adds a typed worker & database health API: active ping-pong liveness for
+workers, a database reachability probe, and typed reads over the worker-state
+timeseries (including idle workers). It retires the untyped `get_worker_stats`.
+
+### Added
+
+- Database reachability probe: `app.ping_database_async()` / `ping_database()`
+  run `SELECT 1` through the live broker pool and return
+  `BrokerResult[DatabasePing]` with measured round-trip latency. Callable from a
+  running event loop.
+- Active worker ping-pong: `app.ping_workers_async(target_worker_id=None,
+  timeout_seconds=2.0)` / `ping_workers()` broadcast a ping over LISTEN/NOTIFY
+  and collect `WorkerPong` replies within the window. A reply proves the
+  worker's event loop is responsive and that it can reach Postgres. Pass
+  `target_worker_id` to probe one worker.
+- Typed worker-state reads over the `horsies_worker_states` timeseries:
+  `app.list_worker_states_async()` (latest snapshot per worker, including idle
+  workers), `get_worker_state_async(worker_id)`, and
+  `get_worker_state_history_async(worker_id, limit=None)` returning
+  `WorkerStateSnapshot`.
+- New exports: `DatabasePing`, `WorkerPong`, `WorkerStateSnapshot`.
+- New broker error codes: `DB_PING_FAILED`, `WORKER_PING_FAILED`.
+
+### Removed
+
+- `broker.get_worker_stats()` (untyped `list[dict]`, RUNNING-tasks only, missed
+  idle workers). Use `app.list_worker_states_async()` — typed and inclusive of
+  idle workers.
+
+## [0.1.3] - 2026-05-31
+
+0.1.3 adds `CronSchedule`, a typed 5-field cron-style schedule pattern. It brings
+wall-clock alignment and minute-offset load staggering that `IntervalSchedule`
+cannot express — without cron strings.
+
+### Added
+
+- `CronSchedule`: a typed 5-field cron-style schedule pattern (`minute`, `hour`,
+  `month` term lists plus a `DaySelector`). Provides wall-clock alignment and
+  minute-offset staggering that `IntervalSchedule` cannot express, with no cron
+  strings. The day-of-month vs day-of-week ambiguity is explicit through
+  `EitherDay` (OR) and `BothDays` (AND). New exports: `CronSchedule`, `Month`,
+  `CronEvery`, `CronStep`, `CronValues`, `CronRange`, `CronEnumValues`,
+  `CronEnumRange`, `CronEnumStep`, `DaySelector`, `EveryDay`, `ByMonthDay`,
+  `ByWeekday`, `EitherDay`, `BothDays`.
+
+## [0.1.2] - 2026-05-29
 
 0.1.2 is a **breaking** release headlined by the strict-serde redesign: the wire
 stops carrying class identity, and every task parameter and return type must

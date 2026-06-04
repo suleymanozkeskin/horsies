@@ -23,3 +23,9 @@ def scheduled_with_args_task(value: int) -> TaskResult[int, TaskError]:
 def catch_up_task() -> TaskResult[str, TaskError]:
     """Task used to verify catch-up missed runs logic."""
     return TaskResult(ok='catch_up_executed')
+
+
+@app.task(task_name='e2e_cron_task')
+def cron_task() -> TaskResult[str, TaskError]:
+    """Task used to verify CronSchedule enqueue/firing."""
+    return TaskResult(ok='cron_executed')

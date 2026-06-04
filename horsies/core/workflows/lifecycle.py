@@ -53,6 +53,7 @@ from horsies.core.workflows.sql import (
     NOTIFY_WORKFLOW_DONE_SQL,
     GET_RUNNING_CHILD_WORKFLOWS_SQL,
     PAUSE_CHILD_WORKFLOW_SQL,
+    CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL,
     RESUME_WORKFLOW_SQL,
     GET_PENDING_WORKFLOW_TASKS_SQL,
     GET_READY_WORKFLOW_TASKS_SQL,
@@ -644,7 +645,18 @@ async def pause_workflow(
                 return Ok(False)
 
             # Cascade pause to running child workflows (iterative BFS)
-            await cascade_pause_to_children(session, workflow_id)
+            paused_workflow_ids = [workflow_id]
+            paused_workflow_ids.extend(
+                await cascade_pause_to_children(session, workflow_id)
+            )
+
+            # Claimed-but-not-started task rows cannot safely remain claimable
+            # after their workflow_task is reset to READY for resume. Cancel the
+            # abandoned internal task rows and let resume enqueue fresh rows.
+            await session.execute(
+                CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL,
+                {'workflow_ids': paused_workflow_ids},
+            )
 
             # Notify clients of pause (so get() returns immediately with WORKFLOW_PAUSED)
             await session.execute(
@@ -678,12 +690,13 @@ async def pause_workflow(
 async def cascade_pause_to_children(
     session: AsyncSession,
     workflow_id: str,
-) -> None:
+) -> list[str]:
     """
     Iteratively pause all running child workflows using BFS.
     Avoids deep recursion for deeply nested workflows.
     """
     queue: deque[str] = deque([workflow_id])
+    paused_child_ids: list[str] = []
 
     while queue:
         current_id = queue.popleft()
@@ -696,6 +709,7 @@ async def cascade_pause_to_children(
 
         for child_row in children.fetchall():
             child_id = child_row.id
+            paused_child_ids.append(child_id)
 
             # Pause child
             await session.execute(
@@ -711,6 +725,8 @@ async def cascade_pause_to_children(
 
             # Add to queue to pause its children
             queue.append(child_id)
+
+    return paused_child_ids
 
 
 def pause_workflow_sync(

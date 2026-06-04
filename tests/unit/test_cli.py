@@ -31,6 +31,8 @@ from horsies.core.errors import (
     HorsiesError,
     WorkflowValidationError,
 )
+from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.types.result import Err, Ok
 
@@ -454,7 +456,7 @@ def _make_worker_namespace(
     module: str = 'my.mod:app',
     loglevel: str = 'INFO',
     processes: int = 1,
-    max_claim_batch: int = 2,
+    max_claim_batch: int = 0,
     max_claim_per_worker: int = 0,
 ) -> argparse.Namespace:
     """Build a valid argparse.Namespace for worker_command."""
@@ -517,6 +519,9 @@ def _make_mock_app() -> MagicMock:
     resilience = WorkerResilienceConfig()
 
     app.config = MagicMock()
+    app.config.broker = PostgresConfig(
+        database_url='postgresql+psycopg://user:pass@localhost/db',
+    )
     app.config.queue_mode = queue_mode
     app.config.custom_queues = None
     app.config.schedule = schedule_config
@@ -525,7 +530,7 @@ def _make_mock_app() -> MagicMock:
     app.config.prefetch_buffer = 2
     app.config.claim_lease_ms = 30000
     app.config.max_claim_renew_age_ms = 120000
-    app.config.recovery = None
+    app.config.recovery = RecoveryConfig()
     return app
 
 
@@ -776,16 +781,18 @@ class TestWorkerCommand:
             worker_command(args)
         assert exc_info.value.code == 1
 
+    @patch('horsies.core.cli.PostgresBroker', autospec=True)
     @patch('horsies.core.cli.setup_logging', autospec=True)
     @patch('horsies.core.cli.discover_app', autospec=True)
     def test_broker_horsies_error_exits_1(
         self,
         mock_discover: MagicMock,
         _mock_logging: MagicMock,
+        mock_broker_cls: MagicMock,
     ) -> None:
         # Arrange
         app = _make_mock_app()
-        app.get_broker.side_effect = HorsiesError(message='broker config error')
+        mock_broker_cls.side_effect = HorsiesError(message='broker config error')
         mock_discover.return_value = (app, 'app', 'my.mod', None)
         args = _make_worker_namespace()
 
@@ -794,16 +801,18 @@ class TestWorkerCommand:
             worker_command(args)
         assert exc_info.value.code == 1
 
+    @patch('horsies.core.cli.PostgresBroker', autospec=True)
     @patch('horsies.core.cli.setup_logging', autospec=True)
     @patch('horsies.core.cli.discover_app', autospec=True)
     def test_broker_generic_exception_exits_1(
         self,
         mock_discover: MagicMock,
         _mock_logging: MagicMock,
+        mock_broker_cls: MagicMock,
     ) -> None:
         # Arrange
         app = _make_mock_app()
-        app.get_broker.side_effect = RuntimeError('connection failed')
+        mock_broker_cls.side_effect = RuntimeError('connection failed')
         mock_discover.return_value = (app, 'app', 'my.mod', None)
         args = _make_worker_namespace()
 
@@ -827,6 +836,7 @@ class TestWorkerCommand:
     ) -> None:
         # Arrange
         app = _make_mock_app()
+        schema_broker = _make_mock_broker()
         broker = _make_mock_broker()
         app.get_broker.return_value = broker
         mock_discover.return_value = (app, 'app', 'my.mod', '/project')
@@ -1617,8 +1627,8 @@ class TestRunWorkerCoroutine:
         """Capture the coroutine passed to asyncio.run and execute it."""
         # Arrange
         app = _make_mock_app()
+        schema_broker = _make_mock_broker()
         broker = _make_mock_broker()
-        app.get_broker.return_value = broker
         mock_discover.return_value = (app, 'app', 'my.mod', '/project')
         args = _make_worker_namespace()
 
@@ -1634,16 +1644,30 @@ class TestRunWorkerCoroutine:
             captured_coro.append(coro)
             raise KeyboardInterrupt  # Break out of worker_command
 
-        with patch('horsies.core.cli.asyncio.run', side_effect=capture_run):
+        with (
+            patch(
+                'horsies.core.cli.PostgresBroker',
+                autospec=True,
+                side_effect=[schema_broker, broker],
+            ),
+            patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
+        ):
             worker_command(args)
 
-        # Act — now run the captured coroutine
-        assert len(captured_coro) == 1
-        await captured_coro[0]
+            # Act — now run the captured coroutine
+            assert len(captured_coro) == 1
+            await captured_coro[0]
 
         # Assert
-        broker.ensure_schema_initialized.assert_awaited_once()
+        schema_broker.ensure_schema_initialized.assert_awaited_once()
+        schema_broker.close_async.assert_awaited_once()
         mock_worker_cls.assert_called_once()
+        worker_cfg = mock_worker_cls.call_args.args[2]
+        assert worker_cfg.parent_pool_size == 3
+        assert worker_cfg.parent_max_overflow == 2
+        assert worker_cfg.child_pool_min_size == 0
+        assert worker_cfg.child_pool_max_size == 2
+        assert mock_worker_cls.call_args.kwargs == {'broker': broker}
         mock_worker.run_forever.assert_awaited_once()
         broker.close_async.assert_awaited_once()
 
@@ -1664,8 +1688,8 @@ class TestRunWorkerCoroutine:
     ) -> None:
         """SIGTERM/SIGINT handlers are active while schema init can block."""
         app = _make_mock_app()
+        schema_broker = _make_mock_broker()
         broker = _make_mock_broker()
-        app.get_broker.return_value = broker
         mock_discover.return_value = (app, 'app', 'my.mod', '/project')
         args = _make_worker_namespace()
 
@@ -1677,7 +1701,7 @@ class TestRunWorkerCoroutine:
             assert handled == [signal.SIGTERM, signal.SIGINT]
             return Ok(None)
 
-        broker.ensure_schema_initialized = AsyncMock(side_effect=ensure_schema)
+        schema_broker.ensure_schema_initialized = AsyncMock(side_effect=ensure_schema)
         mock_worker = MagicMock()
         mock_worker.run_forever = AsyncMock()
         mock_worker_cls.return_value = mock_worker
@@ -1688,10 +1712,17 @@ class TestRunWorkerCoroutine:
             captured_coro.append(coro)
             raise KeyboardInterrupt
 
-        with patch('horsies.core.cli.asyncio.run', side_effect=capture_run):
+        with (
+            patch(
+                'horsies.core.cli.PostgresBroker',
+                autospec=True,
+                side_effect=[schema_broker, broker],
+            ),
+            patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
+        ):
             worker_command(args)
 
-        await captured_coro[0]
+            await captured_coro[0]
 
     @patch('horsies.core.cli.Worker', autospec=True)
     @patch('horsies.core.cli.print_banner', autospec=True)
@@ -1709,10 +1740,9 @@ class TestRunWorkerCoroutine:
         """Schema init failure inside run_worker raises out."""
         # Arrange
         app = _make_mock_app()
-        broker = _make_mock_broker()
+        schema_broker = _make_mock_broker()
         err_obj = _make_schema_err(retryable=False, message='fatal')
-        broker.ensure_schema_initialized = AsyncMock(return_value=Err(err_obj))
-        app.get_broker.return_value = broker
+        schema_broker.ensure_schema_initialized = AsyncMock(return_value=Err(err_obj))
         mock_discover.return_value = (app, 'app', 'my.mod', '/project')
         args = _make_worker_namespace()
 
@@ -1722,13 +1752,20 @@ class TestRunWorkerCoroutine:
             captured_coro.append(coro)
             raise KeyboardInterrupt
 
-        with patch('horsies.core.cli.asyncio.run', side_effect=capture_run):
+        with (
+            patch(
+                'horsies.core.cli.PostgresBroker',
+                autospec=True,
+                side_effect=[schema_broker],
+            ),
+            patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
+        ):
             worker_command(args)
 
-        # Act / Assert — coroutine should raise RuntimeError
-        with pytest.raises(RuntimeError, match='fatal'):
-            await captured_coro[0]
-        broker.close_async.assert_awaited_once()
+            # Act / Assert — coroutine should raise RuntimeError
+            with pytest.raises(RuntimeError, match='fatal'):
+                await captured_coro[0]
+        schema_broker.close_async.assert_awaited_once()
 
     @patch('horsies.core.cli.Worker', autospec=True)
     @patch('horsies.core.cli.print_banner', autospec=True)
@@ -1745,8 +1782,8 @@ class TestRunWorkerCoroutine:
     ) -> None:
         """Broker is closed if Worker construction fails after schema init."""
         app = _make_mock_app()
+        schema_broker = _make_mock_broker()
         broker = _make_mock_broker()
-        app.get_broker.return_value = broker
         mock_discover.return_value = (app, 'app', 'my.mod', '/project')
         mock_worker_cls.side_effect = RuntimeError('worker init failed')
         args = _make_worker_namespace()
@@ -1757,11 +1794,19 @@ class TestRunWorkerCoroutine:
             captured_coro.append(coro)
             raise KeyboardInterrupt
 
-        with patch('horsies.core.cli.asyncio.run', side_effect=capture_run):
+        with (
+            patch(
+                'horsies.core.cli.PostgresBroker',
+                autospec=True,
+                side_effect=[schema_broker, broker],
+            ),
+            patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
+        ):
             worker_command(args)
 
-        with pytest.raises(RuntimeError, match='worker init failed'):
-            await captured_coro[0]
+            with pytest.raises(RuntimeError, match='worker init failed'):
+                await captured_coro[0]
+        schema_broker.close_async.assert_awaited_once()
         broker.close_async.assert_awaited_once()
 
     @patch('horsies.core.cli.Worker', autospec=True)
@@ -1780,10 +1825,10 @@ class TestRunWorkerCoroutine:
         """Broker close returning Err is handled gracefully (logged, no crash)."""
         # Arrange
         app = _make_mock_app()
+        schema_broker = _make_mock_broker()
         broker = _make_mock_broker()
         close_err = _make_schema_err(retryable=False, message='close failed')
         broker.close_async = AsyncMock(return_value=Err(close_err))
-        app.get_broker.return_value = broker
         mock_discover.return_value = (app, 'app', 'my.mod', '/project')
         args = _make_worker_namespace()
 
@@ -1797,12 +1842,20 @@ class TestRunWorkerCoroutine:
             captured_coro.append(coro)
             raise KeyboardInterrupt
 
-        with patch('horsies.core.cli.asyncio.run', side_effect=capture_run):
+        with (
+            patch(
+                'horsies.core.cli.PostgresBroker',
+                autospec=True,
+                side_effect=[schema_broker, broker],
+            ),
+            patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
+        ):
             worker_command(args)
 
-        # Act — should complete without error despite close failure
-        await captured_coro[0]
+            # Act — should complete without error despite close failure
+            await captured_coro[0]
 
+        schema_broker.close_async.assert_awaited_once()
         broker.close_async.assert_awaited_once()
 
 

@@ -135,6 +135,8 @@ MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL = text("""
         claimed_at = NULL,
         claimed_by_worker_id = NULL,
         claim_expires_at = NULL,
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
         updated_at = NOW()
     FROM horsies_workflow_tasks wt
     WHERE wt.workflow_id = :wf_id
