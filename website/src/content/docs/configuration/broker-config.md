@@ -24,6 +24,10 @@ broker = PostgresConfig(
 | `pgbouncer_transaction_mode` | `bool` | `False` | Disable prepared statements for transaction-pooled PgBouncer |
 | `pool_size` | `int` | 30 | Connection pool size |
 | `max_overflow` | `int` | 30 | Additional connections beyond pool_size |
+| `worker_pool_size` | `int \| None` | 3 | Worker coordinator pool size; `None` inherits `pool_size` |
+| `worker_max_overflow` | `int \| None` | 2 | Worker coordinator overflow; `None` inherits `max_overflow` |
+| `worker_child_pool_min_size` | `int` | 0 | Minimum connections kept by each child worker process |
+| `worker_child_pool_max_size` | `int` | 2 | Maximum connections allowed per child worker process |
 | `pool_timeout` | `int` | 30 | Seconds to wait for connection |
 | `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use |
 | `echo` | `bool` | `False` | Echo SQL statements to logs |
@@ -117,13 +121,38 @@ The broker uses SQLAlchemy's async connection pool:
 
 ### Sizing Guidelines
 
+`pool_size` and `max_overflow` size the general broker used by producers,
+web processes, schedulers, and app-level APIs. Workers use the smaller
+`worker_pool_size` and `worker_max_overflow` profile by default so an idle or
+moderately loaded worker does not reserve a web-sized pool.
+
 | Deployment | pool_size | max_overflow |
 |------------|-----------|--------------|
 | Development | 2-5 | 5 |
 | Small production | 5-10 | 10-20 |
 | High traffic | 10-20 | 20-40 |
 
-Consider: `pool_size + max_overflow` should not exceed PostgreSQL's `max_connections` (divided by number of worker processes).
+For direct PostgreSQL connections, budget a worker roughly as:
+
+```
+worker_pool_size + worker_max_overflow
+  + 2 session/LISTEN connections
+  + processes * worker_child_pool_max_size
+  + task-code database connections
+```
+
+With the defaults and `--processes=8`, the framework ceiling is about
+`3 + 2 + 2 + 8 * 2 = 23` direct connections, before application task code.
+Idle child processes keep no database connection by default because
+`worker_child_pool_min_size=0`; connections are opened lazily when task
+lifecycle work starts. Set `worker_child_pool_max_size=1` only after testing heartbeat and task
+lifecycle latency for your workload; `2` leaves one connection for task
+lifecycle work and one for heartbeat overlap.
+
+When using PgBouncer transaction pooling, those client-side pool slots are
+multiplexed onto fewer server backends. Connections are still not safe to share
+between OS processes; Horsies creates child pools after worker processes start
+and uses a non-inheriting start method for replacement executors after startup.
 
 ## Multiple Components
 

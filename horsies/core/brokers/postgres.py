@@ -420,14 +420,7 @@ class PostgresBroker:
         self.logger.info('PostgresBroker initialized')
 
     def _base_engine_config(self) -> dict[str, Any]:
-        return self.config.model_dump(
-            exclude={
-                'database_url',
-                'session_database_url',
-                'pgbouncer_transaction_mode',
-            },
-            exclude_none=True,
-        )
+        return self.config.sqlalchemy_engine_kwargs()
 
     def _runtime_engine_config(self) -> dict[str, Any]:
         engine_cfg = self._base_engine_config()

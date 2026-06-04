@@ -36,6 +36,8 @@ def _initialize_worker_pool(
     database_url: str,
     *,
     pgbouncer_transaction_mode: bool = False,
+    min_size: int = 0,
+    max_size: int = 2,
 ) -> None:
     """
     Initialize the per-process connection pool.
@@ -46,11 +48,17 @@ def _initialize_worker_pool(
     global _worker_pool
     if _worker_pool is not None:
         return  # Already initialized
+    if min_size < 0:
+        raise ValueError('min_size must be >= 0')
+    if max_size < 1:
+        raise ValueError('max_size must be >= 1')
+    if min_size > max_size:
+        raise ValueError('min_size must be <= max_size')
     if pgbouncer_transaction_mode:
         _worker_pool = ConnectionPool(
             database_url,
-            min_size=1,
-            max_size=5,
+            min_size=min_size,
+            max_size=max_size,
             max_lifetime=300.0,
             check=ConnectionPool.check_connection,
             open=True,
@@ -59,8 +67,8 @@ def _initialize_worker_pool(
     else:
         _worker_pool = ConnectionPool(
             database_url,
-            min_size=1,
-            max_size=5,
+            min_size=min_size,
+            max_size=max_size,
             max_lifetime=300.0,
             check=ConnectionPool.check_connection,
             open=True,

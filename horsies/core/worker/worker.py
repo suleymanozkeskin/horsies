@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 import os
+import multiprocessing
 import random
 import socket
 import time
@@ -14,7 +15,7 @@ from enum import Enum
 from datetime import datetime, timezone, timedelta
 from importlib import import_module
 from collections.abc import Coroutine
-from typing import Any, Optional, Literal
+from typing import Any, Optional, Literal, TYPE_CHECKING
 import hashlib
 import sys
 from psycopg.types.json import Jsonb
@@ -52,6 +53,9 @@ from horsies.core.types.result import Ok, Err, Result, is_err
 from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.utils.url import to_psycopg_url
+
+if TYPE_CHECKING:
+    from horsies.core.brokers.postgres import PostgresBroker
 
 # --- Imports from sibling modules (extracted for maintainability) ---
 from horsies.core.worker.config import WorkerConfig  # noqa: F401
@@ -188,6 +192,13 @@ def _collect_psutil_metrics() -> tuple[float, float, float]:
     )
 
 
+def _warm_child_process(delay_seconds: float = 0.1) -> int:
+    """No-op child task used to force process startup before parent DB sockets open."""
+    if delay_seconds > 0:
+        time.sleep(delay_seconds)
+    return os.getpid()
+
+
 class Worker:
     """
     Async master that:
@@ -202,10 +213,12 @@ class Worker:
         session_factory: async_sessionmaker[AsyncSession],
         listener: PostgresListener,
         cfg: WorkerConfig,
+        broker: PostgresBroker | None = None,
     ):
         self.sf = session_factory
         self.listener = listener
         self.cfg = cfg
+        self.broker = broker
         self.worker_instance_id = str(uuid.uuid4())
         self._started_at = datetime.now(timezone.utc)
         self._app: Horsies | None = None
@@ -214,6 +227,7 @@ class Worker:
         # any import/validation errors surface in the main process at startup.
         self._executor: Optional[ProcessPoolExecutor] = None
         self._executor_restart_lock = asyncio.Lock()
+        self._parent_db_sockets_open = False
         self._stop = asyncio.Event()
         self._ping_queue: asyncio.Queue[Any] | None = None
         self._service_tasks: set[asyncio.Task[Any]] = set()
@@ -255,8 +269,15 @@ class Worker:
         task.add_done_callback(_on_done)
         return task
 
-    def _create_executor(self) -> ProcessPoolExecutor:
+    def _create_executor(
+        self,
+        *,
+        avoid_parent_fd_inheritance: bool = False,
+    ) -> ProcessPoolExecutor:
         child_database_url = to_psycopg_url(self.cfg.dsn)
+        kwargs: dict[str, Any] = {}
+        if avoid_parent_fd_inheritance:
+            kwargs['mp_context'] = multiprocessing.get_context('spawn')
         return ProcessPoolExecutor(
             max_workers=self.cfg.processes,
             initializer=_child_initializer,
@@ -267,8 +288,60 @@ class Worker:
                 self.cfg.loglevel,
                 child_database_url,
                 self.cfg.pgbouncer_transaction_mode,
+                self.cfg.child_pool_min_size,
+                self.cfg.child_pool_max_size,
             ),
+            **kwargs,
         )
+
+    async def _warm_executor(self) -> None:
+        """Start child processes while the parent has not opened listener sockets."""
+        if self._executor is None:
+            return
+        loop = asyncio.get_running_loop()
+        pids: set[int] = set()
+        for _ in range(3):
+            futures = [
+                loop.run_in_executor(self._executor, _warm_child_process)
+                for _ in range(self.cfg.processes)
+            ]
+            pids.update(await asyncio.gather(*futures))
+            if len(pids) >= self.cfg.processes:
+                break
+        if len(pids) < self.cfg.processes:
+            raise RuntimeError(
+                'worker child warmup started '
+                f'{len(pids)}/{self.cfg.processes} process(es)'
+            )
+        logger.info(
+            'Worker child processes ready: %s/%s',
+            len(pids),
+            self.cfg.processes,
+        )
+
+    async def _create_warmed_executor(
+        self,
+        *,
+        avoid_parent_fd_inheritance: bool = False,
+    ) -> None:
+        executor = self._create_executor(
+            avoid_parent_fd_inheritance=avoid_parent_fd_inheritance,
+        )
+        self._executor = executor
+        try:
+            await self._warm_executor()
+        except Exception:
+            self._executor = None
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(
+                    None, lambda: executor.shutdown(wait=True, cancel_futures=True)
+                )
+            except Exception as shutdown_exc:
+                logger.error(
+                    f'Error shutting down failed executor warmup: {shutdown_exc}'
+                )
+            raise
 
     async def _restart_executor(
         self,
@@ -286,7 +359,9 @@ class Worker:
                 )
                 return
             if self._executor is None:
-                self._executor = self._create_executor()
+                await self._create_warmed_executor(
+                    avoid_parent_fd_inheritance=self._parent_db_sockets_open,
+                )
                 logger.warning(f'Executor created after restart request: {reason}')
                 return
 
@@ -300,7 +375,9 @@ class Worker:
                 )
             except Exception as e:
                 logger.error(f'Error shutting down broken executor: {e}')
-            self._executor = self._create_executor()
+            await self._create_warmed_executor(
+                avoid_parent_fd_inheritance=self._parent_db_sockets_open,
+            )
 
     def _make_retry_backoff(self) -> _RetryBackoff:
         return _RetryBackoff(
@@ -328,6 +405,7 @@ class Worker:
 
         try:
             await self.listener.close()
+            self._parent_db_sockets_open = False
         except Exception as e:
             logger.error(f'Error closing listener after failed start: {e}')
 
@@ -384,6 +462,11 @@ class Worker:
         self._preload_modules_main()
 
         try:
+            # Fork and initialize children before the parent opens
+            # listener/coordinator DB sockets. Psycopg connections are not
+            # process-safe and must not be inherited by child processes.
+            await self._create_warmed_executor()
+
             start_r = await self.listener.start()
             if is_err(start_r):
                 err = start_r.err_value
@@ -394,6 +477,7 @@ class Worker:
                     err.message,
                 )
                 raise err.exception or RuntimeError(err.message)
+            self._parent_db_sockets_open = True
             # Surface concurrency configuration clearly for operators
             max_claimed_effective = (
                 self.cfg.max_claim_per_worker
@@ -444,9 +528,6 @@ class Worker:
                 raise err.exception or RuntimeError(err.message)
             self._ping_queue = ping_listen_r.ok_value
             logger.info('Subscribed to worker ping channel')
-
-            # Create the process pool only after listener startup/subscription succeeds.
-            self._executor = self._create_executor()
 
             # Start claimer heartbeat loop (CLAIMED coverage)
             self._spawn_background(
@@ -510,6 +591,7 @@ class Worker:
         # Close the Postgres listener early to avoid UNLISTEN races on dispatcher connection
         try:
             await self.listener.close()
+            self._parent_db_sockets_open = False
             logger.info('Postgres listener closed')
         except Exception as e:
             logger.error(f'Error closing Postgres listener: {e}')
@@ -555,6 +637,7 @@ class Worker:
 
             # Load app object (variable or factory)
             app = _locate_app(self.cfg.app_locator)
+            app.set_role('worker')
             # Optionally set as current for consistency in main process
             set_current_app(app)
             self._app = app
@@ -2191,9 +2274,8 @@ class Worker:
         if check.fetchone() is None:
             return  # Not a workflow task
 
-        broker = self._app.get_broker() if self._app is not None else None
         # Handle workflow task completion
-        await on_workflow_task_complete(session, task_id, result, broker)
+        await on_workflow_task_complete(session, task_id, result, self.broker)
 
     async def _should_retry_task(
         self,
@@ -2630,16 +2712,9 @@ class Worker:
         )
 
         try:
-            # Prefer the app-owned broker to avoid creating redundant engines/listeners.
-            if self._app is not None:
-                try:
-                    temp_broker = self._app.get_broker()
-                except Exception as app_broker_err:
-                    logger.warning(
-                        'Reaper could not reuse app broker; falling back to temporary broker: %s',
-                        app_broker_err,
-                    )
-                    temp_broker = None
+            # Prefer the worker-owned broker to avoid creating redundant
+            # engines/listeners or falling back to producer-sized pool defaults.
+            temp_broker = self.broker
 
             if temp_broker is None:
                 from horsies.core.brokers.postgres import PostgresBroker
@@ -2649,6 +2724,8 @@ class Worker:
                     database_url=self.cfg.dsn,
                     session_database_url=self.cfg.session_dsn or None,
                     pgbouncer_transaction_mode=self.cfg.pgbouncer_transaction_mode,
+                    pool_size=self.cfg.parent_pool_size,
+                    max_overflow=self.cfg.parent_max_overflow,
                 )
                 temp_broker = PostgresBroker(
                     temp_broker_config,

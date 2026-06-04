@@ -16,6 +16,9 @@ and there is no migration contract between pre-1.0 versions.
   flag explicitly.
 - `RecoveryConfig.finalizing_stale_threshold_ms` to protect the child-to-parent
   finalization handoff without disabling stale child recovery.
+- Worker-specific broker pool settings:
+  `worker_pool_size`, `worker_max_overflow`,
+  `worker_child_pool_min_size`, and `worker_child_pool_max_size`.
 
 ### Changed
 
@@ -26,6 +29,13 @@ and there is no migration contract between pre-1.0 versions.
   a worker from hoarding beyond `processes + prefetch_buffer`.
 - Plain tasks skip workflow-specific child preflight/finalize checks using the
   persisted `is_workflow_task` flag.
+- Worker processes now use a smaller coordinator pool by default (`3 + 2`
+  overflow) while producer/web broker defaults remain unchanged (`30 + 30`).
+- Child worker psycopg pools now default to `min_size=0`, `max_size=2` instead
+  of `1..5`, and are configurable from `PostgresConfig`.
+- Worker child processes are warmed before the parent opens long-lived database
+  sockets, and replacement executors use a non-inheriting start method after
+  startup, avoiding fork inheritance of psycopg connections.
 
 ### Fixed
 

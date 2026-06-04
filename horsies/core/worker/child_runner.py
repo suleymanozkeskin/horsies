@@ -171,6 +171,27 @@ def _locate_app(app_locator: str) -> Horsies:
     return obj
 
 
+def _discard_inherited_broker(app: Horsies) -> None:
+    """Drop any broker object inherited from a forked parent process."""
+    broker = getattr(app, '_broker', None)
+    if broker is None:
+        return
+    async_engine = getattr(broker, 'async_engine', None)
+    sync_engine = getattr(async_engine, 'sync_engine', None)
+    dispose = getattr(sync_engine, 'dispose', None)
+    if callable(dispose):
+        try:
+            dispose(close=False)
+        except TypeError:
+            dispose()
+        except Exception as exc:
+            logger.warning('Failed to discard inherited broker pool in child: %s', exc)
+    try:
+        setattr(app, '_broker', None)
+    except Exception as exc:
+        logger.warning('Failed to reset inherited broker in child: %s', exc)
+
+
 def _child_initializer(
     app_locator: str,
     imports: Sequence[str],
@@ -178,6 +199,8 @@ def _child_initializer(
     loglevel: int,
     database_url: str,
     pgbouncer_transaction_mode: bool = False,
+    child_pool_min_size: int = 0,
+    child_pool_max_size: int = 2,
 ) -> None:
     # Ignore SIGINT in child processes - let the parent handle shutdown gracefully
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -204,6 +227,8 @@ def _child_initializer(
             sys.path.insert(0, root)
 
     app = _locate_app(app_locator)  # uses import_by_path -> loads as 'instance'
+    _discard_inherited_broker(app)
+    app.set_role('worker')
     set_current_app(app)
 
     # Suppress accidental sends while importing modules for discovery
@@ -232,6 +257,8 @@ def _child_initializer(
     _initialize_worker_pool(
         database_url,
         pgbouncer_transaction_mode=pgbouncer_transaction_mode,
+        min_size=child_pool_min_size,
+        max_size=child_pool_max_size,
     )
     logger.debug(f'[child {os.getpid()}] Connection pool initialized')
 

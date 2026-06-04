@@ -251,7 +251,84 @@ class TestChildInitializer:
         mock_init_pool.assert_called_once_with(
             'postgresql://localhost/test',
             pgbouncer_transaction_mode=False,
+            min_size=0,
+            max_size=2,
         )
+
+    @patch('horsies.core.worker.child_runner._initialize_worker_pool')
+    @patch('horsies.core.worker.child_runner.set_current_app')
+    @patch('horsies.core.worker.child_runner._locate_app')
+    @patch('horsies.core.worker.child_runner.import_by_path')
+    @patch('horsies.core.worker.child_runner.signal.signal')
+    @patch('horsies.core.logging.configure_logging')
+    def test_child_pool_bounds_are_forwarded(
+        self,
+        mock_set_level: MagicMock,
+        mock_signal: MagicMock,
+        mock_import_path: MagicMock,
+        mock_locate_app: MagicMock,
+        mock_set_current: MagicMock,
+        mock_init_pool: MagicMock,
+    ) -> None:
+        from horsies.core.worker.child_runner import _child_initializer
+
+        mocks = self._make_patches(app_tasks={'add': True})
+        mock_locate_app.return_value = mocks['app']
+
+        _child_initializer(
+            app_locator='mymod:app',
+            imports=[],
+            sys_path_roots=[],
+            loglevel=20,
+            database_url='postgresql://localhost/test',
+            pgbouncer_transaction_mode=True,
+            child_pool_min_size=0,
+            child_pool_max_size=1,
+        )
+
+        mock_init_pool.assert_called_once_with(
+            'postgresql://localhost/test',
+            pgbouncer_transaction_mode=True,
+            min_size=0,
+            max_size=1,
+        )
+
+    @patch('horsies.core.worker.child_runner._initialize_worker_pool')
+    @patch('horsies.core.worker.child_runner.set_current_app')
+    @patch('horsies.core.worker.child_runner._locate_app')
+    @patch('horsies.core.worker.child_runner.import_by_path')
+    @patch('horsies.core.worker.child_runner.signal.signal')
+    @patch('horsies.core.logging.configure_logging')
+    def test_child_initializer_discards_inherited_broker(
+        self,
+        mock_set_level: MagicMock,
+        mock_signal: MagicMock,
+        mock_import_path: MagicMock,
+        mock_locate_app: MagicMock,
+        mock_set_current: MagicMock,
+        mock_init_pool: MagicMock,
+    ) -> None:
+        from horsies.core.worker.child_runner import _child_initializer
+
+        mocks = self._make_patches(app_tasks={'add': True})
+        inherited_broker = MagicMock()
+        inherited_broker.async_engine.sync_engine.dispose = MagicMock()
+        mocks['app']._broker = inherited_broker
+        mock_locate_app.return_value = mocks['app']
+
+        _child_initializer(
+            app_locator='mymod:app',
+            imports=[],
+            sys_path_roots=[],
+            loglevel=20,
+            database_url='postgresql://localhost/test',
+        )
+
+        inherited_broker.async_engine.sync_engine.dispose.assert_called_once_with(
+            close=False
+        )
+        assert mocks['app']._broker is None
+        mocks['app'].set_role.assert_called_once_with('worker')
 
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')

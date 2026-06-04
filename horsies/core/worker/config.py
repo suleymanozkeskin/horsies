@@ -29,6 +29,10 @@ class WorkerConfig:
     session_dsn: str = ''  # SQLAlchemy async URL for session features
     pgbouncer_transaction_mode: bool = False
     processes: int = os.cpu_count() or 2
+    parent_pool_size: int = 3
+    parent_max_overflow: int = 2
+    child_pool_min_size: int = 0
+    child_pool_max_size: int = 2
     # Claiming knobs
     # max_claim_batch: Optional top-level fairness limiter per queue per pass.
     # 0 = auto-fill available local/global capacity. Positive values explicitly cap claims.

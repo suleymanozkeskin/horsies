@@ -20,6 +20,7 @@ from typing import Any
 
 from horsies.core.app import Horsies
 from horsies.core.banner import print_banner
+from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
@@ -362,15 +363,18 @@ def worker_command(args: argparse.Namespace) -> None:
         print(report.format_rust_style(), file=sys.stderr)
         sys.exit(1)
 
-    # Get broker config from app
+    # Build the worker broker config directly from the app config. Avoid
+    # app.get_broker() here: user apps may also use a larger producer/web broker
+    # pool, and any broker opened before child forking must not be inherited by
+    # child workers.
     try:
-        broker = app.get_broker()
-        postgres_config = broker.config
+        postgres_config = app.config.broker
+        worker_postgres_config = postgres_config.worker_runtime_config()
     except HorsiesError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
     except Exception as e:
-        logger.error(f'Failed to get broker config: {e}')
+        logger.error(f'Failed to initialize worker broker config: {e}')
         sys.exit(1)
 
     # Get queues from app config
@@ -420,6 +424,10 @@ def worker_command(args: argparse.Namespace) -> None:
         session_dsn=postgres_config.effective_session_database_url,
         psycopg_dsn=to_psycopg_url(postgres_config.effective_session_database_url),
         pgbouncer_transaction_mode=postgres_config.pgbouncer_transaction_mode,
+        parent_pool_size=worker_postgres_config.pool_size,
+        parent_max_overflow=worker_postgres_config.max_overflow,
+        child_pool_min_size=postgres_config.worker_child_pool_min_size,
+        child_pool_max_size=postgres_config.worker_child_pool_max_size,
         queues=queues,
         processes=processes,
         app_locator=app_locator,
@@ -465,11 +473,14 @@ def worker_command(args: argparse.Namespace) -> None:
                 except NotImplementedError:
                     pass
 
+            broker: PostgresBroker | None = None
             try:
+                schema_broker = PostgresBroker(worker_postgres_config)
+                schema_broker.app = app
                 try:
                     logger.info('Ensuring Postgres schema and triggers are initialized...')
                     await _ensure_schema_with_retry(
-                        broker,
+                        schema_broker,
                         app.config.resilience,
                         logger,
                     )
@@ -479,11 +490,21 @@ def worker_command(args: argparse.Namespace) -> None:
                 except Exception as e:
                     logger.error(f'Failed to initialize database schema: {e}')
                     raise
+                finally:
+                    await _close_broker(schema_broker, logger)
 
-                worker = Worker(broker.session_factory, broker.listener, worker_config)
+                broker = PostgresBroker(worker_postgres_config)
+                broker.app = app
+                worker = Worker(
+                    broker.session_factory,
+                    broker.listener,
+                    worker_config,
+                    broker=broker,
+                )
                 await worker.run_forever()
             finally:
-                await _close_broker(broker, logger)
+                if broker is not None:
+                    await _close_broker(broker, logger)
 
         try:
             asyncio.run(run_worker())
