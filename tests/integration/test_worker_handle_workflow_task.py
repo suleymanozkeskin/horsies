@@ -128,7 +128,7 @@ async def test_non_workflow_task_returns_without_delegation(
 
 
 # ---------------------------------------------------------------------------
-# I-4b: Task in workflow, app present → delegates with broker
+# I-4b: Task in workflow, worker broker present → delegates with broker
 # ---------------------------------------------------------------------------
 
 
@@ -138,17 +138,14 @@ async def test_workflow_task_delegates_with_broker(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Task linked to a workflow + _app is set →
-    on_workflow_task_complete called with broker from get_broker()."""
+    """Task linked to a workflow delegates with the worker-owned broker."""
     task_id = await _insert_task(session)
     await _link_task_to_workflow(session, task_id)
     worker = _make_worker(engine)
     result = _make_ok_result()
 
     mock_broker = MagicMock()
-    mock_app = MagicMock()
-    mock_app.get_broker.return_value = mock_broker
-    worker._app = mock_app
+    worker.broker = mock_broker
 
     with patch(
         'horsies.core.workflows.engine.on_workflow_task_complete',
@@ -157,7 +154,6 @@ async def test_workflow_task_delegates_with_broker(
         await worker._handle_workflow_task_if_needed(session, task_id, result)
 
     mock_complete.assert_awaited_once_with(session, task_id, result, mock_broker)
-    mock_app.get_broker.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

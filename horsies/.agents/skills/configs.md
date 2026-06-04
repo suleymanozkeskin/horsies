@@ -121,12 +121,34 @@ config = PostgresConfig(
 | `database_url` | `str` | required | Must start with `"postgresql+psycopg"` (HRS-203 otherwise) |
 | `pool_size` | `int` | `30` | Connection pool size |
 | `max_overflow` | `int` | `30` | Extra connections beyond pool_size |
+| `worker_pool_size` | `int | None` | `3` | Worker coordinator pool size; `None` inherits `pool_size` |
+| `worker_max_overflow` | `int | None` | `2` | Worker coordinator overflow; `None` inherits `max_overflow` |
+| `worker_child_pool_min_size` | `int` | `0` | Minimum connections kept by each child worker process |
+| `worker_child_pool_max_size` | `int` | `2` | Maximum connections allowed per child worker process |
 | `pool_timeout` | `int` | `30` | Seconds to wait for a connection |
 | `pool_recycle` | `int` | `1800` | Seconds before connections are recycled |
 | `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use |
 | `echo` | `bool` | `False` | Echo SQL (debug only) |
 
 Driver must be psycopg3 (async). `postgresql+psycopg2://` is rejected.
+
+Worker processes use a separate connection profile by default. The worker
+coordinator uses `worker_pool_size + worker_max_overflow`; each child process
+creates its own post-fork psycopg pool bounded by
+`worker_child_pool_min_size..worker_child_pool_max_size`. Direct Postgres
+budget for one worker is approximately:
+
+```text
+worker_pool_size + worker_max_overflow
+  + 2 listener/session connections
+  + processes * worker_child_pool_max_size
+  + task-code database connections
+```
+
+Child processes are warmed before the parent opens long-lived database sockets,
+but child DB connections are lazy by default (`worker_child_pool_min_size=0`).
+Replacement executors created after startup use a non-inheriting process start
+method so live parent database sockets are not forked into new children.
 
 ## QueueMode
 

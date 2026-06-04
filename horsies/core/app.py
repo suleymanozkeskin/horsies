@@ -797,14 +797,7 @@ class Horsies:
 
         errors: list[HorsiesError] = []
         try:
-            base_engine_cfg = self.config.broker.model_dump(
-                exclude={
-                    'database_url',
-                    'session_database_url',
-                    'pgbouncer_transaction_mode',
-                },
-                exclude_none=True,
-            )
+            base_engine_cfg = self.config.broker.sqlalchemy_engine_kwargs()
 
             async def _test_connection(
                 database_url: str,
@@ -922,7 +915,12 @@ class Horsies:
         """Get the configured PostgreSQL broker for this app"""
         try:
             if self._broker is None:
-                self._broker = PostgresBroker(self.config.broker)
+                broker_config = (
+                    self.config.broker.worker_runtime_config()
+                    if self._role == 'worker'
+                    else self.config.broker
+                )
+                self._broker = PostgresBroker(broker_config)
                 self._broker.app = self  # Store app reference for subworkflow support
             return self._broker
         except HorsiesError:

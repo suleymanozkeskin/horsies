@@ -48,6 +48,82 @@ SHORT_HB_RECOVERY = RecoveryConfig(claimer_heartbeat_interval_ms=1_000)
 class TestPostgresConfigPgBouncer:
     """Tests for split PostgreSQL URL configuration."""
 
+    def test_worker_pool_defaults_are_smaller_than_producer_pool(self) -> None:
+        config = PostgresConfig(
+            database_url='postgresql+psycopg://user:pass@localhost/db',
+        )
+
+        assert config.pool_size == 30
+        assert config.max_overflow == 30
+        assert config.worker_pool_size == 3
+        assert config.worker_max_overflow == 2
+        assert config.worker_child_pool_min_size == 0
+        assert config.worker_child_pool_max_size == 2
+
+        worker_config = config.worker_runtime_config()
+
+        assert worker_config.pool_size == 3
+        assert worker_config.max_overflow == 2
+        assert worker_config.database_url == config.database_url
+
+    def test_worker_pool_can_inherit_producer_pool(self) -> None:
+        config = PostgresConfig(
+            database_url='postgresql+psycopg://user:pass@localhost/db',
+            pool_size=11,
+            max_overflow=7,
+            worker_pool_size=None,
+            worker_max_overflow=None,
+        )
+
+        worker_config = config.worker_runtime_config()
+
+        assert worker_config.pool_size == 11
+        assert worker_config.max_overflow == 7
+
+    def test_sqlalchemy_engine_kwargs_excludes_worker_only_fields(self) -> None:
+        config = PostgresConfig(
+            database_url='postgresql+psycopg://user:pass@localhost/db',
+        )
+
+        kwargs = config.sqlalchemy_engine_kwargs()
+
+        assert 'worker_pool_size' not in kwargs
+        assert 'worker_max_overflow' not in kwargs
+        assert 'worker_child_pool_min_size' not in kwargs
+        assert 'worker_child_pool_max_size' not in kwargs
+
+    @pytest.mark.parametrize(
+        ('field', 'value'),
+        [
+            ('worker_pool_size', 0),
+            ('worker_max_overflow', -1),
+            ('worker_child_pool_min_size', -1),
+            ('worker_child_pool_max_size', 0),
+        ],
+    )
+    def test_worker_pool_rejects_invalid_bounds(
+        self,
+        field: str,
+        value: int,
+    ) -> None:
+        with pytest.raises(ConfigurationError) as exc_info:
+            PostgresConfig(
+                database_url='postgresql+psycopg://user:pass@localhost/db',
+                **{field: value},
+            )
+
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+
+    def test_worker_child_pool_min_must_not_exceed_max(self) -> None:
+        with pytest.raises(ConfigurationError) as exc_info:
+            PostgresConfig(
+                database_url='postgresql+psycopg://user:pass@localhost/db',
+                worker_child_pool_min_size=3,
+                worker_child_pool_max_size=2,
+            )
+
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+
     def test_effective_session_database_url_defaults_to_database_url(self) -> None:
         config = PostgresConfig(
             database_url='postgresql+psycopg://user:pass@localhost/db',
@@ -925,6 +1001,27 @@ class TestFormatSchedulePattern:
 @pytest.mark.unit
 class TestGetBrokerErrorHandling:
     """Regression tests for Horsies.get_broker() error wrapping (HRS-211)."""
+
+    def test_worker_role_get_broker_uses_worker_pool_profile(self) -> None:
+        """Worker app brokers should not use producer-sized pool defaults."""
+        from horsies import Horsies
+
+        config = PostgresConfig(
+            database_url='postgresql+psycopg://user:pass@localhost/db',
+            pool_size=30,
+            max_overflow=30,
+            worker_pool_size=3,
+            worker_max_overflow=2,
+        )
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=config))
+        app.set_role('worker')
+
+        with patch('horsies.core.app.PostgresBroker') as mock_broker_cls:
+            app.get_broker()
+
+        broker_config = mock_broker_cls.call_args.args[0]
+        assert broker_config.pool_size == 3
+        assert broker_config.max_overflow == 2
 
     def test_non_horsies_error_wrapped_as_broker_init_failed(self) -> None:
         """Non-HorsiesError exceptions are wrapped with BROKER_INIT_FAILED."""

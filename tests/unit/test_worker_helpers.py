@@ -441,10 +441,10 @@ class TestReaperHeartbeatRetention:
         created_brokers[0].close_async.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_reaper_reuses_app_broker_when_available(
+    async def test_reaper_reuses_worker_broker_when_available(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When app broker exists, reaper should reuse it and not construct/close temp broker."""
+        """When worker broker exists, reaper should reuse it and not construct/close temp broker."""
         worker = _make_worker()
         worker.cfg.recovery_config = RecoveryConfig(
             auto_requeue_stale_claimed=False,
@@ -468,16 +468,14 @@ class TestReaperHeartbeatRetention:
 
         session.execute = AsyncMock(side_effect=_execute)
 
-        app_broker = MagicMock()
-        app_broker.session_factory = MagicMock(return_value=session)
-        app_broker.close_async = AsyncMock(return_value=Ok(None))
-        app = MagicMock()
-        app.get_broker.return_value = app_broker
-        worker._app = app
+        worker_broker = MagicMock()
+        worker_broker.session_factory = MagicMock(return_value=session)
+        worker_broker.close_async = AsyncMock(return_value=Ok(None))
+        worker.broker = worker_broker
 
         class _UnexpectedBroker:
             def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-                raise AssertionError('Reaper should reuse app broker, not create temp broker')
+                raise AssertionError('Reaper should reuse worker broker, not create temp broker')
 
         recover_mock = AsyncMock(return_value=0)
         monkeypatch.setattr(
@@ -489,9 +487,8 @@ class TestReaperHeartbeatRetention:
 
         await worker._reaper_loop()
 
-        app.get_broker.assert_called_once()
         recover_mock.assert_awaited()
-        app_broker.close_async.assert_not_awaited()
+        worker_broker.close_async.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_reaper_prunes_worker_state_and_terminal_rows(
@@ -1946,10 +1943,34 @@ class TestRestartExecutor:
         worker._executor = None
         mock_executor = MagicMock()
         worker._create_executor = MagicMock(return_value=mock_executor)  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
 
         await worker._restart_executor('test reason')
 
-        worker._create_executor.assert_called_once()
+        worker._create_executor.assert_called_once_with(
+            avoid_parent_fd_inheritance=False
+        )
+        worker._warm_executor.assert_awaited_once()
+        assert worker._executor is mock_executor
+
+    @pytest.mark.asyncio
+    async def test_executor_none_uses_spawn_safe_context_after_parent_db_opens(
+        self,
+    ) -> None:
+        """Replacement executors avoid inheriting parent DB sockets after startup."""
+        worker = _make_worker()
+        worker._parent_db_sockets_open = True
+        worker._executor = None
+        mock_executor = MagicMock()
+        worker._create_executor = MagicMock(return_value=mock_executor)  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
+
+        await worker._restart_executor('test reason')
+
+        worker._create_executor.assert_called_once_with(
+            avoid_parent_fd_inheritance=True
+        )
+        worker._warm_executor.assert_awaited_once()
         assert worker._executor is mock_executor
 
     # --- U-4f ---
@@ -1962,10 +1983,15 @@ class TestRestartExecutor:
         new_executor = MagicMock()
         worker._executor = old_executor
         worker._create_executor = MagicMock(return_value=new_executor)  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
 
         await worker._restart_executor('broken pool')
 
         old_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+        worker._create_executor.assert_called_once_with(
+            avoid_parent_fd_inheritance=False
+        )
+        worker._warm_executor.assert_awaited_once()
         assert worker._executor is new_executor
 
     # --- U-4g ---
@@ -1979,6 +2005,7 @@ class TestRestartExecutor:
         new_executor = MagicMock()
         worker._executor = old_executor
         worker._create_executor = MagicMock(return_value=new_executor)  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
 
         await worker._restart_executor('broken pool')
 
@@ -1992,6 +2019,7 @@ class TestRestartExecutor:
         worker._executor = old_executor
         replacements = [MagicMock(name=f'executor-{idx}') for idx in range(12)]
         worker._create_executor = MagicMock(side_effect=replacements)  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
 
         await asyncio.gather(
             *(
@@ -2005,6 +2033,7 @@ class TestRestartExecutor:
 
         old_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
         worker._create_executor.assert_called_once()
+        worker._warm_executor.assert_awaited_once()
         assert worker._executor is replacements[0]
 
     @pytest.mark.asyncio
@@ -2018,12 +2047,14 @@ class TestRestartExecutor:
         worker._create_executor = MagicMock(  # type: ignore[assignment]
             side_effect=[first_replacement, second_replacement]
         )
+        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
 
         await worker._restart_executor('first broken pool', failed_executor=old_executor)
         await worker._restart_executor('late broken pool', failed_executor=old_executor)
 
         old_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
         worker._create_executor.assert_called_once()
+        worker._warm_executor.assert_awaited_once()
         assert worker._executor is first_replacement
 
 
@@ -2223,6 +2254,46 @@ class TestStartWithResilienceConfig:
         worker._handle_retryable_start_error.assert_not_called()
 
 
+@pytest.mark.unit
+class TestWorkerStartConnectionOrdering:
+    """Tests for fork-safe worker startup ordering."""
+
+    @pytest.mark.asyncio
+    async def test_warms_children_before_parent_listener_starts(self) -> None:
+        worker = _make_worker()
+        events: list[str] = []
+
+        worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
+        worker._create_executor = MagicMock(  # type: ignore[assignment]
+            side_effect=lambda **_kwargs: events.append('create-executor')
+            or MagicMock()
+        )
+
+        async def _warm() -> None:
+            events.append('warm-executor')
+
+        async def _listener_start():
+            events.append('listener-start')
+            return Ok(None)
+
+        worker._warm_executor = AsyncMock(side_effect=_warm)  # type: ignore[assignment]
+        worker.listener.start = AsyncMock(side_effect=_listener_start)
+        worker.listener.listen_many = AsyncMock(
+            return_value=Ok([asyncio.Queue(), asyncio.Queue()])
+        )
+        worker.listener.listen = AsyncMock(return_value=Ok(asyncio.Queue()))
+
+        def _close_spawned(coro, **kwargs):  # type: ignore[no-untyped-def]
+            coro.close()
+            return MagicMock()
+
+        worker._spawn_background = MagicMock(side_effect=_close_spawned)  # type: ignore[assignment]
+
+        await worker.start()
+
+        assert events == ['create-executor', 'warm-executor', 'listener-start']
+
+
 # ---------------------------------------------------------------------------
 # 17. Reaper loop — uncovered match arms
 # ---------------------------------------------------------------------------
@@ -2285,15 +2356,18 @@ def _make_reaper_worker(
         return result
 
     close_rv = broker_close_result if broker_close_result is not None else Ok(None)
+    created_brokers: list[Any] = []
 
     class _FakeBroker:
         def __init__(self, config: Any, **kwargs: Any) -> None:
+            created_brokers.append(self)
             self.config = config
             self.assume_initialized = kwargs.get('assume_initialized')
             self.session_factory = MagicMock(return_value=session)
             self.close_async = AsyncMock(return_value=close_rv)
             self.requeue_stale_claimed = _requeue_side_effect
             self.mark_stale_tasks_as_failed = _mark_failed_side_effect
+            self.expire_pending_tasks = AsyncMock(return_value=Ok(0))
             self.app: Any = None
 
     monkeypatch.setattr(
@@ -2304,6 +2378,7 @@ def _make_reaper_worker(
         AsyncMock(return_value=0),
     )
 
+    worker._test_created_brokers = created_brokers  # type: ignore[attr-defined]
     return worker
 
 
@@ -2473,33 +2548,28 @@ class TestReaperMatchArms:
         critical_records = [r for r in caplog.records if r.levelno == logging.CRITICAL]
         assert len(critical_records) >= 1
 
-    # --- U-6e: app broker get_broker raises → fallback to temp ---
+    # --- U-6e: no worker broker → fallback to temp ---
 
     @pytest.mark.asyncio
-    async def test_app_broker_error_falls_back_to_temp(
+    async def test_missing_worker_broker_falls_back_to_temp(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """When app.get_broker() raises, reaper falls back to temp broker."""
+        """When worker.broker is absent, reaper constructs a worker-sized temp broker."""
         worker = _make_reaper_worker(
             monkeypatch,
             auto_requeue=True,
             requeue_results=[Ok(0)],
         )
-        app = MagicMock()
-        app.get_broker.side_effect = RuntimeError('app broker broken')
-        worker._app = app
 
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
-                await worker._reaper_loop()
-        finally:
-            _logger.propagate = False
+        await worker._reaper_loop()
 
-        assert 'falling back' in caplog.text.lower()
+        assert worker.broker is None
+        created = worker._test_created_brokers  # type: ignore[attr-defined]
+        assert len(created) == 1
+        assert created[0].config.pool_size == worker.cfg.parent_pool_size
+        assert created[0].config.max_overflow == worker.cfg.parent_max_overflow
+        created[0].close_async.assert_awaited_once()
 
     # --- U-6f: loop-level exception → logged, continues ---
 
