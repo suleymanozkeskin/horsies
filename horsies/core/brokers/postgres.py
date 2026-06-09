@@ -1758,17 +1758,19 @@ class PostgresBroker:
 
                             # Best-effort: notify workers so they wake at next_retry_at
                             # rather than waiting for the next poll cycle.
+                            # Reuses the already-open session post-commit — a
+                            # second pool checkout per retried task is real
+                            # churn during mass crash recovery.
                             queue_name = ctx_row.queue_name or 'default'
                             try:
-                                async with self.session_factory() as notify_session:
-                                    await notify_session.execute(
-                                        text('SELECT pg_notify(:ch, :p)'),
-                                        {
-                                            'ch': f'task_queue_{queue_name}',
-                                            'p': f'retry:{task_id}',
-                                        },
-                                    )
-                                    await notify_session.commit()
+                                await session.execute(
+                                    text('SELECT pg_notify(:ch, :p)'),
+                                    {
+                                        'ch': f'task_queue_{queue_name}',
+                                        'p': f'retry:{task_id}',
+                                    },
+                                )
+                                await session.commit()
                             except Exception:
                                 pass  # Non-fatal; polling will pick it up
                         else:

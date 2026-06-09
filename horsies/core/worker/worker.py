@@ -2687,10 +2687,6 @@ class Worker:
                 _collect_psutil_metrics,
             )
 
-            # Get current task counts
-            running = await self._count_only_running_for_worker()
-            claimed = await self._count_claimed_for_worker()
-
             # Serialize recovery config
             recovery_dict = None
             if self.cfg.recovery_config:
@@ -2708,7 +2704,11 @@ class Worker:
                     'terminal_record_retention_hours': self.cfg.recovery_config.terminal_record_retention_hours,
                 }
 
+            # One session for the counts and the snapshot INSERT — three
+            # pool checkouts per snapshot per worker is needless churn.
             async with self.sf() as s:
+                running = await self._count_only_running_for_worker(s)
+                claimed = await self._count_claimed_for_worker(s)
                 await s.execute(
                     INSERT_WORKER_STATE_SQL,
                     {
