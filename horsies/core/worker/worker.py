@@ -97,7 +97,6 @@ from horsies.core.worker.sql import (  # noqa: F401
     MARK_TASK_COMPLETED_SQL,
     SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
     UPSERT_TASK_ATTEMPT_SQL,
-    NOTIFY_TASK_NEW_SQL,
     NOTIFY_TASK_QUEUE_SQL,
     CHECK_WORKFLOW_TASK_EXISTS_SQL,
     GET_TASK_RETRY_INFO_SQL,
@@ -513,8 +512,12 @@ class Worker:
                 self.cfg.max_claim_batch,
             )
 
-            # Subscribe to each queue channel (and a global) in one batch.
-            all_channels = [f'task_queue_{q}' for q in self.cfg.queues] + ['task_new']
+            # Subscribe to each queue channel in one batch. The global
+            # task_new channel is deliberately NOT subscribed: queue channels
+            # cover every insert this worker can act on, while task_new would
+            # wake every worker for every insert cluster-wide — including
+            # queues it cannot claim from (thundering herd).
+            all_channels = [f'task_queue_{q}' for q in self.cfg.queues]
             listen_r = await self.listener.listen_many(all_channels)
             if is_err(listen_r):
                 err = listen_r.err_value
@@ -525,10 +528,8 @@ class Worker:
                     err.message,
                 )
                 raise err.exception or RuntimeError(err.message)
-            all_queues = listen_r.ok_value
-            self._queues = all_queues[:-1]
-            self._global = all_queues[-1]
-            logger.info(f'Subscribed to queues: {self.cfg.queues} + global')
+            self._queues = listen_r.ok_value
+            logger.info(f'Subscribed to queues: {self.cfg.queues}')
 
             # Subscribe to the shared ping channel on a dedicated queue (kept
             # separate from task-dispatch queues so pings are never drained by
@@ -738,7 +739,7 @@ class Worker:
         import contextlib
 
         queue_tasks = [
-            asyncio.create_task(q.get()) for q in (self._queues + [self._global])
+            asyncio.create_task(q.get()) for q in self._queues
         ]
         # Add only the stop event as an additional wait condition (no periodic polling)
         stop_task = asyncio.create_task(self._stop.wait())
@@ -778,7 +779,7 @@ class Worker:
 
         # drain a burst
         drained = 0
-        for q in self._queues + [self._global]:
+        for q in self._queues:
             while drained < self.cfg.coalesce_notifies and not q.empty():
                 try:
                     q.get_nowait()
@@ -1968,12 +1969,10 @@ class Worker:
                     is_workflow_task=is_workflow_task,
                 )
 
-                # Proactively wake workers to re-check capacity/backlog.
+                # Proactively wake workers of this queue to re-check
+                # capacity/backlog (workers no longer listen on task_new).
                 try:
                     payload = f'capacity:{task_id}'
-                    await s.execute(
-                        NOTIFY_TASK_NEW_SQL, {'c1': 'task_new', 'p': payload}
-                    )
                     await s.execute(
                         NOTIFY_TASK_QUEUE_SQL,
                         {'c2': f'task_queue_{queue_name or "default"}', 'p': payload},

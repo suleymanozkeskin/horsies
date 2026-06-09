@@ -261,10 +261,6 @@ MARK_TASK_COMPLETED_SQL = text("""
     RETURNING id
 """)
 
-NOTIFY_TASK_NEW_SQL = text("""
-    SELECT pg_notify(:c1, :p)
-""")
-
 NOTIFY_TASK_QUEUE_SQL = text("""
     SELECT pg_notify(:c2, :p)
 """)

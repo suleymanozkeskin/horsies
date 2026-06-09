@@ -3306,7 +3306,6 @@ class TestWaitForAnyNotify:
         # Set up queue/global attributes as start() would
         q1: asyncio.Queue[object] = asyncio.Queue()
         worker._queues = [q1]
-        worker._global = asyncio.Queue()
         worker._stop.set()
 
         # Should return immediately without hanging
@@ -3320,7 +3319,6 @@ class TestWaitForAnyNotify:
         worker = _make_worker()
         q1: asyncio.Queue[object] = asyncio.Queue()
         worker._queues = [q1]
-        worker._global = asyncio.Queue()
 
         # Very short timeout → nothing will resolve
         await worker._wait_for_any_notify(poll_interval_ms=1)
@@ -3339,7 +3337,6 @@ class TestWaitForAnyNotify:
             q1.put_nowait(f'notify-{i}')
 
         worker._queues = [q1]
-        worker._global = asyncio.Queue()
 
         await worker._wait_for_any_notify(poll_interval_ms=5_000)
 

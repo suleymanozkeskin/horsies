@@ -7,13 +7,14 @@ Architecture:
 
 Flow:
   1. Task submission: INSERT into tasks table -> PostgreSQL trigger -> NOTIFY task_new/task_queue_*
-  2. Worker notification: Workers listen to task_new + queue-specific channels
+  2. Worker notification: Workers listen to queue-specific channels
   3. Task processing: Worker picks up task, processes it, updates status
   4. Completion notification: UPDATE tasks status -> PostgreSQL trigger -> NOTIFY task_done
   5. Result retrieval: Clients listen to task_done channel, filter by task_id
 
 Key channels:
-  - task_new: Global notification for any new task (workers)
+  - task_new: Global notification for any new task (external observers;
+    workers listen to queue channels only to avoid a thundering herd)
   - task_queue_*: Queue-specific notifications (workers)
   - task_done: Task completion notifications (result waiters)
 """
