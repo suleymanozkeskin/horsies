@@ -858,7 +858,7 @@ async def resume_workflow(
                     cast(list[int], dependencies) if isinstance(dependencies, list) else []
                 )
                 dep_results, dep_task_names, dep_definition_keys = await get_dependency_results(
-                    session, workflow_id, dep_indices,
+                    session, workflow_id, dep_indices, app=broker.app,
                 )
 
                 if is_subworkflow:
@@ -1000,7 +1000,7 @@ async def cascade_resume_to_children(
                     cast(list[int], deps) if isinstance(deps, list) else []
                 )
                 dep_res, dep_names, dep_def_keys = await get_dependency_results(
-                    session, child_id, dep_indices,
+                    session, child_id, dep_indices, app=broker.app,
                 )
 
                 if is_sub:
