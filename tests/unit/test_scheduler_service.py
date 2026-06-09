@@ -1957,8 +1957,14 @@ class TestCheckScheduleAdditionalPaths:
         assert update_kwargs['next_run_at'] > now
         session.commit.assert_awaited_once()
 
-    async def test_normal_run_permanent_failure_rollback(self) -> None:
-        """Normal run: non-retryable Err → error logged, rollback."""
+    async def test_normal_run_permanent_failure_skips_slot(self) -> None:
+        """Non-retryable Err advances past the doomed slot (no wedge).
+
+        Spec change (0.1.7): a permanent enqueue error (e.g.
+        PAYLOAD_MISMATCH after a deploy changed kwargs) used to roll back
+        without advancing next_run_at, so the same slot was retried every
+        tick forever.
+        """
         schedule = TaskSchedule(
             name='s',
             task_name='my_task',
@@ -1978,6 +1984,7 @@ class TestCheckScheduleAdditionalPaths:
         state_manager = MagicMock()
         state_manager.get_state = AsyncMock(return_value=state)
         state_manager.update_after_run = AsyncMock()
+        state_manager.update_next_run = AsyncMock()
         scheduler.state_manager = state_manager
 
         scheduler._enqueue_scheduled_task = AsyncMock(  # type: ignore[method-assign]
@@ -1996,7 +2003,101 @@ class TestCheckScheduleAdditionalPaths:
             await scheduler._check_schedule(schedule, now)
 
         state_manager.update_after_run.assert_not_awaited()
+        update_kwargs = state_manager.update_next_run.await_args.kwargs
+        assert update_kwargs['next_run_at'] == _utc(2025, 6, 1, 12, 0, 10)
+        session.commit.assert_awaited_once()
+
+    async def test_normal_run_transient_failure_rollback(self) -> None:
+        """Retryable Err → rollback, slot retried next tick."""
+        schedule = TaskSchedule(
+            name='s',
+            task_name='my_task',
+            pattern=IntervalSchedule(seconds=5),
+            catch_up_missed=False,
+        )
+        config = ScheduleConfig(schedules=[schedule])
+        app = _make_app(schedule_config=config)
+        scheduler = Scheduler(app)
+
+        session, broker = _make_session_and_broker()
+        scheduler.broker = broker
+
+        state = MagicMock()
+        state.next_run_at = _utc(2025, 6, 1, 12, 0, 0)
+
+        state_manager = MagicMock()
+        state_manager.get_state = AsyncMock(return_value=state)
+        state_manager.update_after_run = AsyncMock()
+        state_manager.update_next_run = AsyncMock()
+        scheduler.state_manager = state_manager
+
+        scheduler._enqueue_scheduled_task = AsyncMock(  # type: ignore[method-assign]
+            return_value=Err(BrokerOperationError(
+                code=BrokerErrorCode.ENQUEUE_FAILED,
+                message='transient failure',
+                retryable=True,
+            )),
+        )
+
+        now = _utc(2025, 6, 1, 12, 0, 5)
+        with patch(
+            'horsies.core.scheduler.service.should_run_now',
+            return_value=True,
+        ):
+            await scheduler._check_schedule(schedule, now)
+
+        state_manager.update_after_run.assert_not_awaited()
+        state_manager.update_next_run.assert_not_awaited()
         session.rollback.assert_awaited_once()
+
+    async def test_catch_up_permanent_failure_skips_doomed_slot(self) -> None:
+        """Catch-up: a permanently failing slot is consumed, not retried."""
+        schedule = TaskSchedule(
+            name='s',
+            task_name='my_task',
+            pattern=IntervalSchedule(seconds=5),
+            catch_up_missed=True,
+        )
+        config = ScheduleConfig(schedules=[schedule])
+        app = _make_app(schedule_config=config)
+        scheduler = Scheduler(app)
+
+        session, broker = _make_session_and_broker()
+        scheduler.broker = broker
+
+        state = MagicMock()
+        state.next_run_at = _utc(2025, 6, 1, 12, 0, 0)
+
+        state_manager = MagicMock()
+        state_manager.get_state = AsyncMock(return_value=state)
+        state_manager.update_after_run = AsyncMock()
+        state_manager.update_next_run = AsyncMock()
+        scheduler.state_manager = state_manager
+
+        # First slot enqueues, second fails permanently, third never tried.
+        scheduler._enqueue_scheduled_task = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                Ok('task-0'),
+                Err(BrokerOperationError(
+                    code=BrokerErrorCode.PAYLOAD_MISMATCH,
+                    message='sha mismatch',
+                    retryable=False,
+                )),
+            ],
+        )
+
+        now = _utc(2025, 6, 1, 12, 0, 12)  # due slots: 0, 5, 10
+        with patch(
+            'horsies.core.scheduler.service.should_run_now',
+            return_value=True,
+        ):
+            await scheduler._check_schedule(schedule, now)
+
+        # Progress recorded past the doomed slot (12:00:05) → next 12:00:10.
+        update_kwargs = state_manager.update_after_run.await_args.kwargs
+        assert update_kwargs['task_id'] == 'task-0'
+        assert update_kwargs['next_run_at'] == _utc(2025, 6, 1, 12, 0, 10)
+        session.commit.assert_awaited_once()
 
     async def test_unexpected_exception_rollback(self) -> None:
         """Unexpected exception during enqueue → error logged, rollback."""

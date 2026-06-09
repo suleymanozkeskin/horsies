@@ -383,15 +383,27 @@ class Scheduler:
 
                     last_task_id = ''
                     caught_up: list[datetime] = []
+                    permanent_skip_slot: datetime | None = None
                     for due_time in due_runs:
                         result = await self._enqueue_scheduled_task(schedule, slot_time=due_time)
                         if is_err(result):
                             err = result.err_value
-                            level = 'transient' if err.retryable else 'permanent'
-                            logger.error(
-                                f"Schedule '{schedule.name}' catch-up failed at run "
-                                f'{len(caught_up) + 1}/{len(due_runs)} ({level}): {err.message}',
-                            )
+                            if err.retryable:
+                                logger.error(
+                                    f"Schedule '{schedule.name}' catch-up failed at run "
+                                    f'{len(caught_up) + 1}/{len(due_runs)} (transient), '
+                                    f'will retry next tick: {err.message}',
+                                )
+                            else:
+                                # A permanent error for this slot can never
+                                # succeed on retry; mark the slot consumed so
+                                # the schedule does not wedge on it forever.
+                                permanent_skip_slot = due_time
+                                logger.error(
+                                    f"Schedule '{schedule.name}' catch-up failed at run "
+                                    f'{len(caught_up) + 1}/{len(due_runs)} (permanent), '
+                                    f'skipping slot {due_time}: {err.message}',
+                                )
                             break
                         last_task_id = result.ok_value
                         caught_up.append(due_time)
@@ -400,20 +412,31 @@ class Scheduler:
                             f'for scheduled run at {due_time}',
                         )
 
-                    if caught_up:
-                        # Save progress for runs that succeeded — prevents
-                        # double-enqueue on the next tick.
-                        last_slot = caught_up[-1]
+                    progress_slot = permanent_skip_slot or (
+                        caught_up[-1] if caught_up else None
+                    )
+                    if progress_slot is not None:
+                        # Save progress for enqueued runs (and a permanently
+                        # failed slot, which is treated as consumed) —
+                        # prevents double-enqueue and permanent-error wedges
+                        # on the next tick.
                         next_run = calculate_next_run(
-                            schedule.pattern, last_slot, schedule.timezone,
+                            schedule.pattern, progress_slot, schedule.timezone,
                         )
-                        await self.state_manager.update_after_run(
-                            schedule_name=schedule.name,
-                            task_id=last_task_id,
-                            executed_at=check_time,
-                            next_run_at=next_run,
-                            session=session,
-                        )
+                        if caught_up:
+                            await self.state_manager.update_after_run(
+                                schedule_name=schedule.name,
+                                task_id=last_task_id,
+                                executed_at=check_time,
+                                next_run_at=next_run,
+                                session=session,
+                            )
+                        else:
+                            await self.state_manager.update_next_run(
+                                schedule_name=schedule.name,
+                                next_run_at=next_run,
+                                session=session,
+                            )
                         await session.commit()
                         if len(caught_up) < len(due_runs):
                             logger.warning(
@@ -421,7 +444,8 @@ class Scheduler:
                                 f'{len(caught_up)}/{len(due_runs)} runs enqueued',
                             )
                     else:
-                        # All failed — don't advance state, will retry next tick
+                        # All failed transiently — don't advance state, will
+                        # retry next tick
                         await session.rollback()
 
                 else:
@@ -464,12 +488,22 @@ class Scheduler:
                                 f"Schedule '{schedule.name}' enqueue failed (transient), "
                                 f'will retry next tick: {err.message}',
                             )
-                        else:
-                            logger.error(
-                                f"Schedule '{schedule.name}' enqueue failed (permanent): "
-                                f'{err.message}',
-                            )
-                        await session.rollback()
+                            await session.rollback()
+                            return
+                        # A permanent error (e.g. PAYLOAD_MISMATCH after a
+                        # deploy changed the schedule's kwargs) can never
+                        # succeed on retry: advance past the doomed slot so
+                        # the schedule does not retry it every tick forever.
+                        logger.error(
+                            f"Schedule '{schedule.name}' enqueue failed (permanent), "
+                            f'skipping slot {slot_time}: {err.message}',
+                        )
+                        await self.state_manager.update_next_run(
+                            schedule_name=schedule.name,
+                            next_run_at=next_run,
+                            session=session,
+                        )
+                        await session.commit()
                         return
 
                     task_id = result.ok_value
