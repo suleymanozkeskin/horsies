@@ -566,36 +566,19 @@ class Worker:
             await asyncio.gather(*service_tasks, return_exceptions=True)
             self._service_tasks.clear()
 
-        # Finalizers persist task outcomes and should be drained gracefully.
-        if self._finalizer_tasks:
+        if force and self._finalizer_tasks:
             finalizer_tasks = tuple(self._finalizer_tasks)
-            if force:
-                for task in finalizer_tasks:
-                    task.cancel()
-                await asyncio.gather(*finalizer_tasks, return_exceptions=True)
-            else:
-                done, pending = await asyncio.wait(
-                    finalizer_tasks, timeout=max(0.0, finalizer_timeout_s)
-                )
-                if pending:
-                    logger.warning(
-                        'Worker stop timed out with %s finalize task(s) still running; cancelling pending finalizers',
-                        len(pending),
-                    )
-                    for task in pending:
-                        task.cancel()
-                    await asyncio.gather(*pending, return_exceptions=True)
-                if done:
-                    await asyncio.gather(*done, return_exceptions=True)
+            for task in finalizer_tasks:
+                task.cancel()
+            await asyncio.gather(*finalizer_tasks, return_exceptions=True)
             self._finalizer_tasks.clear()
-        # Close the Postgres listener early to avoid UNLISTEN races on dispatcher connection
-        try:
-            await self.listener.close()
-            self._parent_db_sockets_open = False
-            logger.info('Postgres listener closed')
-        except Exception as e:
-            logger.error(f'Error closing Postgres listener: {e}')
-        # Shutdown executor
+
+        # Shutdown the executor BEFORE draining finalizers: finalizers block
+        # on child futures, and the executor wait is what bounds child
+        # completion. Draining first burned the timeout on still-running
+        # children, then the executor wait completed the work anyway and the
+        # cancelled finalizers discarded its results (row left RUNNING until
+        # a reaper recorded the finished task as WORKER_CRASHED).
         if self._executor:
             # Offload blocking shutdown to a thread to avoid freezing the event loop
             loop = asyncio.get_running_loop()
@@ -608,6 +591,35 @@ class Worker:
             except Exception as e:
                 logger.error(f'Error shutting down executor: {e}')
             logger.info('Worker executor shutdown')
+
+        # Finalizers persist task outcomes; with all child futures resolved
+        # they only have DB writes left, so the drain timeout bounds DB work
+        # rather than task runtime.
+        if self._finalizer_tasks:
+            finalizer_tasks = tuple(self._finalizer_tasks)
+            done, pending = await asyncio.wait(
+                finalizer_tasks, timeout=max(0.0, finalizer_timeout_s)
+            )
+            if pending:
+                logger.warning(
+                    'Worker stop timed out with %s finalize task(s) still running; cancelling pending finalizers',
+                    len(pending),
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+            if done:
+                await asyncio.gather(*done, return_exceptions=True)
+            self._finalizer_tasks.clear()
+
+        # Close the Postgres listener after finalizers so completion NOTIFYs
+        # and result waits drain through normally.
+        try:
+            await self.listener.close()
+            self._parent_db_sockets_open = False
+            logger.info('Postgres listener closed')
+        except Exception as e:
+            logger.error(f'Error closing Postgres listener: {e}')
         # Release per-process registries on shutdown.
         try:
             from horsies.core.workflows.registry import clear_workflow_registry
