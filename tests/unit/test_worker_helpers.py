@@ -228,7 +228,12 @@ class TestBuildSysPathRoots:
 
 @pytest.mark.unit
 class TestAdvisoryKeyGlobal:
-    """Tests for Worker._advisory_key_global: deterministic 64-bit hash."""
+    """Tests for Worker._advisory_key_global: fixed 64-bit key per database.
+
+    Advisory locks are database-scoped, so the key must NOT depend on the
+    DSN: workers reaching the same database through different DSN spellings
+    (host vs IP, PgBouncer vs direct) must serialize on the same key.
+    """
 
     def test_returns_int(self) -> None:
         w = _make_worker()
@@ -238,15 +243,15 @@ class TestAdvisoryKeyGlobal:
         w = _make_worker()
         assert w._advisory_key_global() == w._advisory_key_global()
 
-    def test_different_dsns_produce_different_keys(self) -> None:
-        w1 = _make_worker(psycopg_dsn="postgresql://a@host/db1")
-        w2 = _make_worker(psycopg_dsn="postgresql://b@host/db2")
-        assert w1._advisory_key_global() != w2._advisory_key_global()
+    def test_different_dsn_spellings_share_one_key(self) -> None:
+        w1 = _make_worker(psycopg_dsn="postgresql://a@db.internal/db1")
+        w2 = _make_worker(psycopg_dsn="postgresql://a@10.0.0.5/db1")
+        assert w1._advisory_key_global() == w2._advisory_key_global()
 
-    def test_falls_back_to_dsn_when_psycopg_dsn_empty(self) -> None:
-        w = _make_worker(psycopg_dsn="", dsn="postgresql+psycopg://u:p@h/mydb")
-        result = w._advisory_key_global()
-        assert isinstance(result, int)
+    def test_key_is_dsn_independent(self) -> None:
+        w1 = _make_worker(psycopg_dsn="", dsn="postgresql+psycopg://u:p@h/mydb")
+        w2 = _make_worker(psycopg_dsn="postgresql://other@elsewhere/db")
+        assert w1._advisory_key_global() == w2._advisory_key_global()
 
 
 # ---------------------------------------------------------------------------

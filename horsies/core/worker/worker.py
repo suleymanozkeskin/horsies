@@ -1004,11 +1004,15 @@ class Worker:
         return [row for row in rows if row['id'] not in blocked_task_ids]
 
     def _advisory_key_global(self) -> int:
-        """Compute a stable 64-bit advisory lock key for this cluster."""
-        basis = (self.cfg.psycopg_dsn or self.cfg.dsn or 'horsies').encode(
-            'utf-8', errors='ignore'
-        )
-        h = hashlib.sha256(b'horsies-global:' + basis).digest()
+        """Compute a stable 64-bit advisory lock key for claim serialization.
+
+        PostgreSQL advisory locks are scoped to the current database, so a
+        fixed key serializes all Horsies claim passes per database. A
+        DSN-derived key (pre-0.1.7) silently split the lock when workers
+        reached the same database through different DSN spellings (host vs
+        IP, PgBouncer vs direct), letting cap accounting race.
+        """
+        h = hashlib.sha256(b'horsies:claim:v1').digest()
         return int.from_bytes(h[:8], byteorder='big', signed=True)
 
     # Stale detection is handled via heartbeat policy for RUNNING tasks.
