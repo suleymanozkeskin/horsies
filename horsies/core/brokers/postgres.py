@@ -342,17 +342,32 @@ MARK_STALE_TASK_FAILED_SQL = text("""
     RETURNING t.id
 """)
 
+# Batched: a mass expiry as one statement is a single long transaction whose
+# commit flushes two NOTIFYs per row at once, overflowing listener queues.
+# SKIP LOCKED steps around rows a concurrent claim pass holds; the claim
+# itself re-checks good_until, so the race resolves consistently either way.
 EXPIRE_PENDING_TASKS_SQL = text("""
-    UPDATE horsies_tasks
+    UPDATE horsies_tasks t
     SET status = 'EXPIRED',
         failed_at = NOW(),
         result = :result,
         error_code = :error_code,
         updated_at = NOW()
-    WHERE status = 'PENDING'
-      AND good_until IS NOT NULL
-      AND good_until <= NOW()
+    FROM (
+        SELECT id FROM horsies_tasks
+        WHERE status = 'PENDING'
+          AND good_until IS NOT NULL
+          AND good_until <= NOW()
+        ORDER BY good_until ASC
+        LIMIT :batch_size
+        FOR UPDATE SKIP LOCKED
+    ) s
+    WHERE t.id = s.id
 """)
+
+_EXPIRE_BATCH_SIZE = 500
+# Backstop against an unbounded pass; the remainder expires next interval.
+_EXPIRE_MAX_BATCHES_PER_PASS = 200
 
 SELECT_TASK_ATTEMPTS_BY_TASK_ID_SQL = text("""
     SELECT task_id, attempt, outcome, will_retry,
@@ -1870,16 +1885,28 @@ class PostgresBroker:
                 )
             result_json = ser_r.ok_value
 
-            async with self.session_factory() as session:
-                res = await session.execute(
-                    EXPIRE_PENDING_TASKS_SQL,
-                    {
-                        'result': result_json,
-                        'error_code': OutcomeCode.TASK_EXPIRED.value,
-                    },
-                )
-                await session.commit()
-                return Ok(getattr(res, 'rowcount', 0) or 0)
+            total_expired = 0
+            for _ in range(_EXPIRE_MAX_BATCHES_PER_PASS):
+                async with self.session_factory() as session:
+                    res = await session.execute(
+                        EXPIRE_PENDING_TASKS_SQL,
+                        {
+                            'result': result_json,
+                            'error_code': OutcomeCode.TASK_EXPIRED.value,
+                            'batch_size': _EXPIRE_BATCH_SIZE,
+                        },
+                    )
+                    await session.commit()
+                batch_expired = int(getattr(res, 'rowcount', 0) or 0)
+                total_expired += batch_expired
+                if batch_expired < _EXPIRE_BATCH_SIZE:
+                    return Ok(total_expired)
+            self.logger.warning(
+                'expire_pending_tasks reached the per-pass batch cap after '
+                'expiring %s task(s); the remainder expires next interval',
+                total_expired,
+            )
+            return Ok(total_expired)
         except Exception as exc:
             return _broker_err(
                 BrokerErrorCode.CLEANUP_FAILED,
