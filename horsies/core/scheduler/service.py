@@ -688,6 +688,17 @@ class Scheduler:
                     notes=[f'underlying error: {e}'],
                     help_text='check queue_name in schedule matches app.config queue settings',
                 ) from e
+            if sched.args:
+                # Enqueue rejects positional args unconditionally
+                # (strict-serde has no typed wire representation for them);
+                # without this check the schedule passes startup and then
+                # fails permanently on every tick.
+                raise ConfigurationError(
+                    message=f"schedule '{sched.name}' carries positional args; schedules are kwargs-only",
+                    code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                    notes=[f'{len(sched.args)} positional arg(s) found'],
+                    help_text='move positional args to kwargs to satisfy the strict-serde wire contract',
+                )
             self._validate_schedule_signature(sched)
             self._validate_schedule_serializable(sched)
 

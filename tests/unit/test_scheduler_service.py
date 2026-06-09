@@ -755,6 +755,41 @@ class TestValidateSchedules:
         # Should not raise even though task doesn't exist
         scheduler._validate_schedules()
 
+    def test_positional_args_raise_configuration_error(self) -> None:
+        """Schedules carrying positional args fail at startup, not per tick.
+
+        Enqueue rejects args unconditionally (strict-serde, kwargs-only);
+        startup validation must mirror that instead of letting the schedule
+        boot cleanly and then fail permanently on every tick.
+        """
+        def one_param(value: int) -> str:
+            return str(value)
+
+        task_mock = _make_task_mock(one_param)
+
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(
+                    name='s',
+                    task_name='my_task',
+                    pattern=IntervalSchedule(seconds=5),
+                    args=(1,),
+                ),
+            ],
+        )
+        app = _make_app(
+            schedule_config=config,
+            tasks={'my_task': task_mock},
+        )
+        scheduler = Scheduler(app)
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            scheduler._validate_schedules()
+
+        exc = exc_info.value
+        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert 'kwargs-only' in exc.message
+
     def test_invalid_queue_raises_configuration_error(self) -> None:
         """Invalid queue configuration raises ConfigurationError HRS-205."""
         def no_params() -> str:
@@ -2725,7 +2760,7 @@ class TestValidateSchedulesCallsSignatureValidation:
     """Cover L588: _validate_schedules calls _validate_schedule_signature."""
 
     def test_valid_task_and_queue_calls_signature_validation(self) -> None:
-        """A valid schedule reaches signature validation."""
+        """A valid (kwargs-only) schedule reaches signature validation."""
         def my_fn(x: int) -> str:
             return str(x)
 
@@ -2737,12 +2772,12 @@ class TestValidateSchedulesCallsSignatureValidation:
                     name='s',
                     task_name='my_task',
                     pattern=IntervalSchedule(seconds=5),
-                    args=(42,),
+                    kwargs={'x': 42},
                 ),
             ],
         )
         app = _make_app(schedule_config=config, tasks={'my_task': task_mock})
         scheduler = Scheduler(app)
 
-        # Should not raise — args match signature
+        # Should not raise — kwargs match signature
         scheduler._validate_schedules()
