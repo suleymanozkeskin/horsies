@@ -12,8 +12,11 @@ from sqlalchemy import text
 #     idx_horsies_worker_states_worker_snapshot).
 # v4: widen horsies_heartbeats.id / horsies_worker_states.id to BIGINT
 #     (int4 sequences exhaust within months at heartbeat insert rates).
+# v5: drop write-amplifying single-column indexes on horsies_tasks whose
+#     queries are served by the v3 partial composites (or that no query
+#     uses); replace full good_until index with a partial one.
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
@@ -252,6 +255,29 @@ WIDEN_HEARTBEATS_ID_TO_BIGINT_SQL = text("""
 WIDEN_WORKER_STATES_ID_TO_BIGINT_SQL = text("""
     ALTER TABLE horsies_worker_states
     ALTER COLUMN id TYPE BIGINT;
+""")
+
+# Migration (v5): every horsies_tasks lifecycle UPDATE touches an indexed
+# column, making updates non-HOT — each one writes new entries into ALL
+# indexes. Indexes that serve no query (or whose queries are covered by the
+# v3 partial composites) are pure churn on the hottest table.
+DROP_REDUNDANT_TASK_INDEXES_SQL = text("""
+    DROP INDEX IF EXISTS ix_horsies_tasks_claimed;
+    DROP INDEX IF EXISTS ix_horsies_tasks_claim_expires_at;
+    DROP INDEX IF EXISTS ix_horsies_tasks_is_workflow_task;
+    DROP INDEX IF EXISTS ix_horsies_tasks_finalizing_at;
+    DROP INDEX IF EXISTS ix_horsies_tasks_good_until;
+    DROP INDEX IF EXISTS ix_horsies_tasks_next_retry_at;
+    DROP INDEX IF EXISTS ix_horsies_worker_states_worker_id;
+""")
+
+# good_until is immutable per row and mostly NULL; the expiry scans
+# (status='PENDING' AND good_until <= NOW() ORDER BY good_until) only ever
+# touch rows where it is set.
+CREATE_TASKS_GOOD_UNTIL_PARTIAL_INDEX_SQL = text("""
+    CREATE INDEX IF NOT EXISTS idx_horsies_tasks_good_until_set
+    ON horsies_tasks (good_until)
+    WHERE good_until IS NOT NULL;
 """)
 
 ADD_WORKFLOW_SENT_AT_COLUMN_SQL = text("""

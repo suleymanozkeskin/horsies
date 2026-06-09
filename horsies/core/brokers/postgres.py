@@ -151,6 +151,8 @@ from horsies.core.schemas.migrations import (
     SET_ENQUEUE_SHA_NOT_NULL_SQL,
     SET_ENQUEUED_AT_DEFAULT_SQL,
     SET_ENQUEUED_AT_NOT_NULL_SQL,
+    CREATE_TASKS_GOOD_UNTIL_PARTIAL_INDEX_SQL,
+    DROP_REDUNDANT_TASK_INDEXES_SQL,
     SET_TASK_COLUMN_DEFAULTS_SQL,
     SET_WORKFLOW_SENT_AT_DEFAULT_SQL,
     SET_WORKFLOW_SENT_AT_NOT_NULL_SQL,
@@ -668,6 +670,11 @@ class PostgresBroker:
             # Migration (v4): widen timeseries PKs to BIGINT.
             await conn.execute(WIDEN_HEARTBEATS_ID_TO_BIGINT_SQL)
             await conn.execute(WIDEN_WORKER_STATES_ID_TO_BIGINT_SQL)
+
+            # Migration (v5): drop write-amplifying single-column indexes;
+            # partial replacement for good_until.
+            await conn.execute(DROP_REDUNDANT_TASK_INDEXES_SQL)
+            await conn.execute(CREATE_TASKS_GOOD_UNTIL_PARTIAL_INDEX_SQL)
 
             # Migration: create horsies_task_attempts table and indexes.
             await conn.execute(CREATE_TASK_ATTEMPTS_TABLE_SQL)
