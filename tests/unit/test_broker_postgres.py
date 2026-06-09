@@ -993,7 +993,7 @@ class TestGetRawResultRecordAsync:
         """
         broker = _make_broker()
         q: asyncio.Queue[Any] = asyncio.Queue()
-        broker.listener.listen = AsyncMock(return_value=Ok(q))
+        broker.listener.listen_payload = AsyncMock(return_value=Ok(q))
 
         session = _make_result_session(
             _make_task_row(status=TaskStatus.RUNNING),
@@ -1004,12 +1004,16 @@ class TestGetRawResultRecordAsync:
         release = asyncio.Event()
         finished = asyncio.Event()
 
-        async def _unsubscribe(_channel: str, _queue: object) -> None:
+        async def _unsubscribe(
+            _channel: str, _payload: str, _queue: object,
+        ) -> None:
             started.set()
             await release.wait()
             finished.set()
 
-        broker.listener.unsubscribe = AsyncMock(side_effect=_unsubscribe)
+        broker.listener.unsubscribe_payload = AsyncMock(
+            side_effect=_unsubscribe,
+        )
 
         task = asyncio.create_task(
             broker.get_raw_result_record_async(
@@ -1018,7 +1022,7 @@ class TestGetRawResultRecordAsync:
         )
 
         for _ in range(50):
-            if broker.listener.listen.await_count > 0:
+            if broker.listener.listen_payload.await_count > 0:
                 break
             await asyncio.sleep(0)
 
@@ -1034,7 +1038,9 @@ class TestGetRawResultRecordAsync:
             await task
 
         assert finished.is_set() is True
-        broker.listener.unsubscribe.assert_awaited_once_with('task_done', q)
+        broker.listener.unsubscribe_payload.assert_awaited_once_with(
+            'task_done', 'task-123', q,
+        )
 
 
 # ---------------------------------------------------------------------------

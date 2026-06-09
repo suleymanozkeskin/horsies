@@ -1086,7 +1086,9 @@ class PostgresBroker:
             # Listen + poll loop.
             q: asyncio.Queue[Any] | None = None
             try:
-                listen_r = await self.listener.listen('task_done')
+                listen_r = await self.listener.listen_payload(
+                    'task_done', task_id,
+                )
             except RuntimeError as e:
                 self.logger.debug(
                     'LISTEN unavailable; falling back to polling for '
@@ -1164,7 +1166,7 @@ class PostgresBroker:
                             )
             finally:
                 if q is not None:
-                    await self._unsubscribe_task_done_safely(q)
+                    await self._unsubscribe_task_done_safely(task_id, q)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1199,10 +1201,12 @@ class PostgresBroker:
                 exc,
             )
 
-    async def _unsubscribe_task_done_safely(self, q: asyncio.Queue[Any]) -> None:
+    async def _unsubscribe_task_done_safely(
+        self, task_id: str, q: asyncio.Queue[Any],
+    ) -> None:
         """Ensure task_done unsubscribe completes even under repeated cancellation."""
         unsubscribe_task = asyncio.create_task(
-            self.listener.unsubscribe('task_done', q)
+            self.listener.unsubscribe_payload('task_done', task_id, q)
         )
         cancelled_during_cleanup = False
         while not unsubscribe_task.done():
