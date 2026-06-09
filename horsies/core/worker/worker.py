@@ -1282,6 +1282,7 @@ class Worker:
                     {
                         'result_json': result_json,
                         'id': task_id,
+                        'wid': self.worker_instance_id,
                         'error_code': OperationalErrorCode.WORKER_CRASHED.value,
                     },
                 )
@@ -1549,13 +1550,15 @@ class Worker:
                 # Lock the RUNNING row and extract context for attempt history
                 ctx_result = await s.execute(
                     SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
-                    {'id': task_id},
+                    {'id': task_id, 'wid': self.worker_instance_id},
                 )
                 ctx_row = ctx_result.fetchone()
                 if ctx_row is None:
                     logger.warning(
                         f'Task {task_id} finalize aborted: status is no longer RUNNING '
-                        f'(reaper likely reclaimed). Skipping to prevent double-execution.'
+                        f'or task is no longer owned by this worker (reaper reclaim '
+                        f'or re-claim by another worker). Skipping to prevent '
+                        f'clobbering the current attempt.'
                     )
                     return Ok(None)
 
@@ -1601,6 +1604,7 @@ class Worker:
                             'result_json': result_payload,
                             'error_code': OperationalErrorCode.BROKER_ERROR.value,
                             'id': task_id,
+                            'wid': self.worker_instance_id,
                         },
                     )
                     if fail_res.fetchone() is None:
@@ -1644,6 +1648,7 @@ class Worker:
                         {
                             'result_json': serialize_error_payload(_err_tr),
                             'id': task_id,
+                            'wid': self.worker_instance_id,
                             'error_code': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
                         },
                     )
@@ -1728,6 +1733,7 @@ class Worker:
                         {
                             'result_json': serialize_error_payload(_err_tr),
                             'id': task_id,
+                            'wid': self.worker_instance_id,
                             'error_code': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
                         },
                     )
@@ -1812,13 +1818,15 @@ class Worker:
                         {
                             'result_json': result_json_str,
                             'id': task_id,
+                            'wid': self.worker_instance_id,
                             'error_code': error_code_str,
                         },
                     )
                     if fail_res.fetchone() is None:
                         logger.warning(
-                            f'Task {task_id} finalize-fail aborted: status is no longer RUNNING '
-                            f'(reaper likely reclaimed). Skipping to prevent double-execution.'
+                            f'Task {task_id} finalize-fail aborted: status/ownership '
+                            f'changed (reaper reclaim or re-claim by another worker). '
+                            f'Skipping to prevent clobbering the current attempt.'
                         )
                         return Ok(None)
                 else:
@@ -1840,12 +1848,17 @@ class Worker:
                     )
                     comp_res = await s.execute(
                         MARK_TASK_COMPLETED_SQL,
-                        {'result_json': result_json_str, 'id': task_id},
+                        {
+                            'result_json': result_json_str,
+                            'id': task_id,
+                            'wid': self.worker_instance_id,
+                        },
                     )
                     if comp_res.fetchone() is None:
                         logger.warning(
-                            f'Task {task_id} finalize-complete aborted: status is no longer RUNNING '
-                            f'(reaper likely reclaimed). Skipping to prevent double-execution.'
+                            f'Task {task_id} finalize-complete aborted: status/ownership '
+                            f'changed (reaper reclaim or re-claim by another worker). '
+                            f'Skipping to prevent clobbering the current attempt.'
                         )
                         return Ok(None)
 
@@ -2403,10 +2416,15 @@ class Worker:
                 )
                 return 'expired'
 
-        # Update task for retry — guarded by AND status = 'RUNNING'
+        # Update task for retry — guarded by status = 'RUNNING' + ownership
         res = await session.execute(
             SCHEDULE_TASK_RETRY_SQL,
-            {'id': task_id, 'retry_count': retry_count, 'next_retry_at': next_retry_at},
+            {
+                'id': task_id,
+                'wid': self.worker_instance_id,
+                'retry_count': retry_count,
+                'next_retry_at': next_retry_at,
+            },
         )
         if res.fetchone() is None:
             # Distinguish expiry guard rejections from true reaper reclaim races.
@@ -2438,8 +2456,9 @@ class Worker:
                             )
                             return 'expired'
             logger.warning(
-                f'Task {task_id} retry aborted: status is no longer RUNNING '
-                f'(reaper likely reclaimed). Skipping to prevent double-execution.'
+                f'Task {task_id} retry aborted: status/ownership changed '
+                f'(reaper reclaim or re-claim by another worker). '
+                f'Skipping to prevent double-execution.'
             )
             return 'reaper_reclaimed'
 

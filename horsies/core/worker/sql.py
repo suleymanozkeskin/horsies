@@ -197,6 +197,7 @@ MARK_TASK_FAILED_WORKER_SQL = text("""
         updated_at = NOW()
     WHERE id = :id
       AND status = 'RUNNING'
+      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
     RETURNING id
 """)
 
@@ -211,6 +212,7 @@ MARK_TASK_FAILED_SQL = text("""
         updated_at = NOW()
     WHERE id = :id
       AND status = 'RUNNING'
+      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
     RETURNING id
 """)
 
@@ -225,6 +227,7 @@ MARK_TASK_COMPLETED_SQL = text("""
         updated_at = NOW()
     WHERE id = :id
       AND status = 'RUNNING'
+      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
     RETURNING id
 """)
 
@@ -294,6 +297,7 @@ SCHEDULE_TASK_RETRY_SQL = text("""
         updated_at = now()
     WHERE id = :id
       AND status = 'RUNNING'
+      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
       AND (good_until IS NULL OR :next_retry_at < good_until)
     RETURNING id
 """)
@@ -415,7 +419,9 @@ SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL = text("""
            worker_hostname, worker_pid, worker_process_name,
            queue_name, is_workflow_task, clock_timestamp() AS db_now
     FROM horsies_tasks
-    WHERE id = :id AND status = 'RUNNING'
+    WHERE id = :id
+      AND status = 'RUNNING'
+      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
     FOR UPDATE
 """)
 

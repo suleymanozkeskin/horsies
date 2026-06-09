@@ -30,6 +30,11 @@ pytestmark = [pytest.mark.integration]
 # ---------------------------------------------------------------------------
 
 
+# Owner id shared by the insert helper and the worker under test so the
+# retry-path ownership guard matches.
+TEST_WORKER_ID = 'w-retry-test'
+
+
 def _make_worker(engine: AsyncEngine) -> Worker:
     """Construct a Worker wired to the test DB."""
     sf = async_sessionmaker(engine, expire_on_commit=False)
@@ -38,7 +43,9 @@ def _make_worker(engine: AsyncEngine) -> Worker:
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
-    return Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
+    worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
+    worker.worker_instance_id = TEST_WORKER_ID
+    return worker
 
 
 async def _insert_task(
@@ -62,11 +69,11 @@ async def _insert_task(
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs, status, sent_at,
                  created_at, updated_at, claimed, retry_count, max_retries, started_at,
-                 good_until, task_options, enqueue_sha)
+                 good_until, task_options, enqueue_sha, claimed_by_worker_id)
             VALUES
                 (:id, 'retry_test', 'default', 100, '[]', '{}', :status, :sent_at,
                  NOW(), NOW(), FALSE, :retry_count, :max_retries, NOW(),
-                 :good_until, :task_options, :enqueue_sha)
+                 :good_until, :task_options, :enqueue_sha, :claimed_by_worker_id)
         """),
         {
             'id': task_id,
@@ -77,6 +84,7 @@ async def _insert_task(
             'max_retries': max_retries,
             'good_until': good_until,
             'task_options': task_options,
+            'claimed_by_worker_id': TEST_WORKER_ID,
         },
     )
     await session.commit()
