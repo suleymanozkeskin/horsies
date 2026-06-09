@@ -478,6 +478,12 @@ When a task becomes SKIPPED, all dependents are SKIPPED too (unless `allow_faile
 
 `join="quorum"` requires `min_success >= 1` and `<= len(waits_for)`.
 
+With `join='any'`/`'quorum'`, an `args_from` source may not be terminal
+when the node fires — its kwarg is then **not injected**. Each such
+parameter must declare a default (e.g.
+`TaskResult[T, TaskError] | None = None`); spec validation rejects
+no-default targets (`WORKFLOW_INVALID_JOIN`).
+
 ### `args_from` — data flow
 
 - Maps kwarg names to upstream nodes.

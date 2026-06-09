@@ -1348,6 +1348,56 @@ class WorkflowSpec(Generic[OutT]):
                             code=ErrorCode.WORKFLOW_INVALID_JOIN,
                         )
                     )
+
+            # args_from with a non-'all' join: a source dep may not be
+            # terminal when the node becomes ready, in which case its kwarg
+            # is simply not injected. That partial-injection pattern is
+            # supported only when the target parameter declares a default;
+            # otherwise the task crashes with a TypeError depending on
+            # completion order.
+            if task.join in ('any', 'quorum') and task.args_from:
+                errors.extend(self._collect_args_from_default_errors(task))
+        return errors
+
+    def _collect_args_from_default_errors(
+        self,
+        task: 'TaskNode[Any] | SubWorkflowNode[Any]',
+    ) -> list[WorkflowValidationError]:
+        """Require defaults on args_from targets of non-'all' join nodes."""
+        errors: list[WorkflowValidationError] = []
+        if isinstance(task, TaskNode):
+            fn = task.fn
+        else:
+            fn = getattr(
+                task.workflow_def,
+                '_original_build_with',
+                task.workflow_def.build_with,
+            )
+        sig = _get_signature(fn)
+        if sig is None:
+            return errors
+
+        for kwarg_name in task.args_from:
+            param = sig.parameters.get(kwarg_name)
+            if param is None:
+                continue  # Covered by the args_from reference validators.
+            if param.default is inspect.Parameter.empty:
+                errors.append(
+                    WorkflowValidationError(
+                        f"Task '{task.name}' has join='{task.join}' and "
+                        f"args_from['{kwarg_name}'], but parameter "
+                        f"'{kwarg_name}' has no default. With "
+                        f"join='{task.join}' the source may not be terminal "
+                        f'when the node becomes ready, so the kwarg may not '
+                        f'be injected.',
+                        code=ErrorCode.WORKFLOW_INVALID_JOIN,
+                        help_text=(
+                            f"give '{kwarg_name}' a default (e.g. "
+                            f"TaskResult[..., TaskError] | None = None) or "
+                            f"use join='all'"
+                        ),
+                    )
+                )
         return errors
 
     def _collect_subworkflow_cycle_errors(self) -> list[WorkflowValidationError]:
