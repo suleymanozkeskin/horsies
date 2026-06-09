@@ -10,8 +10,10 @@ from sqlalchemy import text
 # v3: claim-path indexes (idx_horsies_tasks_claim_pending,
 #     idx_horsies_tasks_claim_expired, idx_horsies_tasks_worker_status,
 #     idx_horsies_worker_states_worker_snapshot).
+# v4: widen horsies_heartbeats.id / horsies_worker_states.id to BIGINT
+#     (int4 sequences exhaust within months at heartbeat insert rates).
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
@@ -238,6 +240,18 @@ ADD_TASK_FINALIZING_COLUMNS_SQL = text("""
     ALTER TABLE horsies_tasks
     ADD COLUMN IF NOT EXISTS finalizing_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS finalizing_by_worker_id TEXT;
+""")
+
+# Migration (v4): widen timeseries PKs to BIGINT. Both tables are
+# retention-bounded (hourly/periodic cleanup), so the type rewrite is cheap.
+WIDEN_HEARTBEATS_ID_TO_BIGINT_SQL = text("""
+    ALTER TABLE horsies_heartbeats
+    ALTER COLUMN id TYPE BIGINT;
+""")
+
+WIDEN_WORKER_STATES_ID_TO_BIGINT_SQL = text("""
+    ALTER TABLE horsies_worker_states
+    ALTER COLUMN id TYPE BIGINT;
 """)
 
 ADD_WORKFLOW_SENT_AT_COLUMN_SQL = text("""

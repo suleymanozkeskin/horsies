@@ -229,7 +229,7 @@ class TaskHeartbeatModel(Base):
         ),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     task_id: Mapped[str] = mapped_column(String(36), nullable=False)
     sender_id: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -252,7 +252,7 @@ class WorkerStateModel(Base):
     __tablename__ = 'horsies_worker_states'
 
     # Timeseries primary key
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     worker_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     snapshot_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
