@@ -78,6 +78,12 @@ CLAIM_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
 """)
 
+# Non-blocking gate for the reaper: every worker runs a reaper loop, but
+# only one needs to execute the cluster-wide scans per interval.
+REAPER_GATE_TRY_LOCK_SQL = text("""
+    SELECT pg_try_advisory_xact_lock(CAST(:key AS BIGINT))
+""")
+
 # Effective in-flight counts: expired CLAIMED tasks are excluded because they
 # are reclaimable and must not consume cap budget.  The predicate for an
 # "active" claim is: claim_expires_at IS NULL OR claim_expires_at > now().

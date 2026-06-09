@@ -56,6 +56,7 @@ from horsies.core.utils.url import to_psycopg_url
 
 if TYPE_CHECKING:
     from horsies.core.brokers.postgres import PostgresBroker
+    from horsies.core.models.recovery import RecoveryConfig
 
 # --- Imports from sibling modules (extracted for maintainability) ---
 from horsies.core.worker.config import WorkerConfig  # noqa: F401
@@ -77,6 +78,7 @@ from horsies.core.worker.child_runner import (  # noqa: F401
 from horsies.core.worker.sql import (  # noqa: F401
     CLAIM_SQL,
     CLAIM_ADVISORY_LOCK_SQL,
+    REAPER_GATE_TRY_LOCK_SQL,
     COUNT_GLOBAL_IN_FLIGHT_SQL,
     COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
     COUNT_QUEUE_IN_FLIGHT_SOFT_SQL,
@@ -176,6 +178,22 @@ class _RequeueOutcome(str, Enum):
     REQUEUED = 'REQUEUED'
     NOT_OWNER_OR_NOT_CLAIMED = 'NOT_OWNER_OR_NOT_CLAIMED'
     DB_ERROR = 'DB_ERROR'
+
+
+# After this many consecutive permanent failures, a reaper operation is
+# disabled for the process lifetime to avoid spamming logs every interval.
+_REAPER_MAX_PERMANENT_FAILURES = 3
+
+
+@dataclass
+class _ReaperPassState:
+    """Per-process reaper failure counters and retention schedule."""
+
+    requeue_permanent_failures: int = 0
+    requeue_disabled: bool = False
+    mark_failed_permanent_failures: int = 0
+    mark_failed_disabled: bool = False
+    next_retention_cleanup_at: float = 0.0
 
 
 def _collect_psutil_metrics() -> tuple[float, float, float]:
@@ -1046,6 +1064,11 @@ class Worker:
         IP, PgBouncer vs direct), letting cap accounting race.
         """
         h = hashlib.sha256(b'horsies:claim:v1').digest()
+        return int.from_bytes(h[:8], byteorder='big', signed=True)
+
+    def _advisory_key_reaper(self) -> int:
+        """Fixed 64-bit key gating reaper passes (one reaper per interval)."""
+        h = hashlib.sha256(b'horsies:reaper:v1').digest()
         return int.from_bytes(h[:8], byteorder='big', signed=True)
 
     # Stale detection is handled via heartbeat policy for RUNNING tasks.
@@ -2734,6 +2757,220 @@ class Worker:
         except asyncio.CancelledError:
             return
 
+    async def _run_reaper_pass(
+        self,
+        temp_broker: 'PostgresBroker',
+        recovery_cfg: 'RecoveryConfig',
+        state: _ReaperPassState,
+    ) -> None:
+        """One reaper pass: stale-task recovery, pending expiry, workflow
+        recovery, retention cleanup. Runs under the cluster-wide reaper
+        gate (one executing worker per interval)."""
+        # Auto-requeue stale CLAIMED tasks
+        if recovery_cfg.auto_requeue_stale_claimed and not state.requeue_disabled:
+            match await temp_broker.requeue_stale_claimed(
+                stale_threshold_ms=recovery_cfg.claimed_stale_threshold_ms,
+            ):
+                case Ok(requeued):
+                    state.requeue_permanent_failures = 0
+                    if requeued > 0:
+                        logger.info(
+                            f'Reaper requeued {requeued} stale CLAIMED task(s)',
+                        )
+                case Err(err) if err.retryable:
+                    state.requeue_permanent_failures = 0
+                    logger.warning(
+                        f'Reaper requeue_stale_claimed transient failure '
+                        f'(will retry next cycle): {err.message}',
+                    )
+                case Err(err):
+                    state.requeue_permanent_failures += 1
+                    if (
+                        state.requeue_permanent_failures
+                        >= _REAPER_MAX_PERMANENT_FAILURES
+                    ):
+                        state.requeue_disabled = True
+                        logger.critical(
+                            f'Reaper requeue_stale_claimed disabled after '
+                            f'{state.requeue_permanent_failures} consecutive permanent '
+                            f'failures. Last error: {err.message}. '
+                            f'Requires deploy or manual intervention.',
+                        )
+                    else:
+                        logger.error(
+                            f'Reaper requeue_stale_claimed permanent failure '
+                            f'({state.requeue_permanent_failures}/{_REAPER_MAX_PERMANENT_FAILURES} '
+                            f'before disable): {err.message}',
+                        )
+
+        # Auto-fail stale RUNNING tasks
+        if (
+            recovery_cfg.auto_fail_stale_running
+            and not state.mark_failed_disabled
+        ):
+            match await temp_broker.mark_stale_tasks_as_failed(
+                stale_threshold_ms=recovery_cfg.running_stale_threshold_ms,
+                finalizing_stale_threshold_ms=(
+                    recovery_cfg.finalizing_stale_threshold_ms
+                ),
+            ):
+                case Ok(failed):
+                    state.mark_failed_permanent_failures = 0
+                    if failed > 0:
+                        logger.warning(
+                            f'Reaper marked {failed} stale RUNNING task(s) as FAILED',
+                        )
+                case Err(err) if err.retryable:
+                    state.mark_failed_permanent_failures = 0
+                    logger.warning(
+                        f'Reaper mark_stale_tasks_as_failed transient failure '
+                        f'(will retry next cycle): {err.message}',
+                    )
+                case Err(err):
+                    state.mark_failed_permanent_failures += 1
+                    if (
+                        state.mark_failed_permanent_failures
+                        >= _REAPER_MAX_PERMANENT_FAILURES
+                    ):
+                        state.mark_failed_disabled = True
+                        logger.critical(
+                            f'Reaper mark_stale_tasks_as_failed disabled after '
+                            f'{state.mark_failed_permanent_failures} consecutive permanent '
+                            f'failures. Last error: {err.message}. '
+                            f'Requires deploy or manual intervention.',
+                        )
+                    else:
+                        logger.error(
+                            f'Reaper mark_stale_tasks_as_failed permanent failure '
+                            f'({state.mark_failed_permanent_failures}/{_REAPER_MAX_PERMANENT_FAILURES} '
+                            f'before disable): {err.message}',
+                        )
+
+        # Expire PENDING tasks past good_until deadline
+        try:
+            match await temp_broker.expire_pending_tasks():
+                case Ok(expired):
+                    if expired > 0:
+                        logger.info(
+                            f'Reaper expired {expired} PENDING task(s) past good_until',
+                        )
+                case Err(err):
+                    logger.warning(
+                        f'Reaper expire_pending_tasks failed: {err.message}',
+                    )
+        except Exception as expire_err:
+            logger.error(f'Reaper expire_pending_tasks error: {expire_err}')
+
+        # Recover stuck workflows
+        try:
+            from horsies.core.workflows.recovery import (
+                recover_stuck_workflows,
+            )
+
+            async with temp_broker.session_factory() as s:
+                recovered = await recover_stuck_workflows(s, temp_broker)
+                if recovered > 0:
+                    logger.info(
+                        f'Reaper recovered {recovered} stuck workflow task(s)'
+                    )
+                await s.commit()
+        except Exception as wf_err:
+            logger.error(f'Workflow recovery error: {wf_err}')
+
+        now_monotonic = time.monotonic()
+        if now_monotonic >= state.next_retention_cleanup_at:
+            try:
+                deleted_heartbeats = 0
+                deleted_worker_states = 0
+                deleted_workflow_tasks = 0
+                deleted_workflows = 0
+                deleted_tasks = 0
+
+                async with temp_broker.session_factory() as s:
+                    if recovery_cfg.heartbeat_retention_hours is not None:
+                        hb_result = await s.execute(
+                            DELETE_EXPIRED_HEARTBEATS_SQL,
+                            {
+                                'retention_hours': recovery_cfg.heartbeat_retention_hours,
+                            },
+                        )
+                        deleted_heartbeats = int(
+                            getattr(hb_result, 'rowcount', 0) or 0
+                        )
+
+                    if (
+                        recovery_cfg.worker_state_retention_hours
+                        is not None
+                    ):
+                        ws_result = await s.execute(
+                            DELETE_EXPIRED_WORKER_STATES_SQL,
+                            {
+                                'retention_hours': recovery_cfg.worker_state_retention_hours,
+                            },
+                        )
+                        deleted_worker_states = int(
+                            getattr(ws_result, 'rowcount', 0) or 0
+                        )
+
+                    if (
+                        recovery_cfg.terminal_record_retention_hours
+                        is not None
+                    ):
+                        wf_params = {
+                            'retention_hours': recovery_cfg.terminal_record_retention_hours,
+                            'wf_terminal_states': WORKFLOW_TERMINAL_VALUES,
+                        }
+                        task_params = {
+                            'retention_hours': recovery_cfg.terminal_record_retention_hours,
+                            'wf_terminal_states': WORKFLOW_TERMINAL_VALUES,
+                            'task_terminal_states': TASK_TERMINAL_VALUES,
+                        }
+                        wt_result = await s.execute(
+                            DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
+                            wf_params,
+                        )
+                        wf_result = await s.execute(
+                            DELETE_EXPIRED_WORKFLOWS_SQL,
+                            wf_params,
+                        )
+                        task_result = await s.execute(
+                            DELETE_EXPIRED_TASKS_SQL,
+                            task_params,
+                        )
+                        deleted_workflow_tasks = int(
+                            getattr(wt_result, 'rowcount', 0) or 0
+                        )
+                        deleted_workflows = int(
+                            getattr(wf_result, 'rowcount', 0) or 0
+                        )
+                        deleted_tasks = int(
+                            getattr(task_result, 'rowcount', 0) or 0
+                        )
+
+                    await s.commit()
+
+                if (
+                    deleted_heartbeats > 0
+                    or deleted_worker_states > 0
+                    or deleted_workflow_tasks > 0
+                    or deleted_workflows > 0
+                    or deleted_tasks > 0
+                ):
+                    logger.info(
+                        'Reaper retention cleanup: heartbeats=%s worker_states=%s workflow_tasks=%s workflows=%s tasks=%s',
+                        deleted_heartbeats,
+                        deleted_worker_states,
+                        deleted_workflow_tasks,
+                        deleted_workflows,
+                        deleted_tasks,
+                    )
+            except Exception as cleanup_err:
+                logger.error(f'Retention cleanup error: {cleanup_err}')
+            finally:
+                state.next_retention_cleanup_at = (
+                    now_monotonic + _RETENTION_CLEANUP_INTERVAL_S
+                )
+
     async def _reaper_loop(self) -> None:
         """Automatic stale task handling loop.
 
@@ -2754,15 +2991,9 @@ class Worker:
         check_interval_ms = recovery_cfg.check_interval_ms
         temp_broker = None
         owns_temp_broker = False
-        next_retention_cleanup_at = time.monotonic()
-
-        # Per-operation consecutive permanent failure counters.
-        # Transient failures and successes reset the counter.
-        _REAPER_MAX_PERMANENT_FAILURES = 3
-        requeue_permanent_failures = 0
-        requeue_disabled = False
-        mark_failed_permanent_failures = 0
-        mark_failed_disabled = False
+        state = _ReaperPassState(
+            next_retention_cleanup_at=time.monotonic(),
+        )
 
         logger.info(
             f'Reaper configuration: auto_requeue_claimed={recovery_cfg.auto_requeue_stale_claimed}, '
@@ -2796,211 +3027,25 @@ class Worker:
 
             while not self._stop.is_set():
                 try:
-                    # Auto-requeue stale CLAIMED tasks
-                    if recovery_cfg.auto_requeue_stale_claimed and not requeue_disabled:
-                        match await temp_broker.requeue_stale_claimed(
-                            stale_threshold_ms=recovery_cfg.claimed_stale_threshold_ms,
-                        ):
-                            case Ok(requeued):
-                                requeue_permanent_failures = 0
-                                if requeued > 0:
-                                    logger.info(
-                                        f'Reaper requeued {requeued} stale CLAIMED task(s)',
-                                    )
-                            case Err(err) if err.retryable:
-                                requeue_permanent_failures = 0
-                                logger.warning(
-                                    f'Reaper requeue_stale_claimed transient failure '
-                                    f'(will retry next cycle): {err.message}',
-                                )
-                            case Err(err):
-                                requeue_permanent_failures += 1
-                                if (
-                                    requeue_permanent_failures
-                                    >= _REAPER_MAX_PERMANENT_FAILURES
-                                ):
-                                    requeue_disabled = True
-                                    logger.critical(
-                                        f'Reaper requeue_stale_claimed disabled after '
-                                        f'{requeue_permanent_failures} consecutive permanent '
-                                        f'failures. Last error: {err.message}. '
-                                        f'Requires deploy or manual intervention.',
-                                    )
-                                else:
-                                    logger.error(
-                                        f'Reaper requeue_stale_claimed permanent failure '
-                                        f'({requeue_permanent_failures}/{_REAPER_MAX_PERMANENT_FAILURES} '
-                                        f'before disable): {err.message}',
-                                    )
-
-                    # Auto-fail stale RUNNING tasks
-                    if (
-                        recovery_cfg.auto_fail_stale_running
-                        and not mark_failed_disabled
-                    ):
-                        match await temp_broker.mark_stale_tasks_as_failed(
-                            stale_threshold_ms=recovery_cfg.running_stale_threshold_ms,
-                            finalizing_stale_threshold_ms=(
-                                recovery_cfg.finalizing_stale_threshold_ms
-                            ),
-                        ):
-                            case Ok(failed):
-                                mark_failed_permanent_failures = 0
-                                if failed > 0:
-                                    logger.warning(
-                                        f'Reaper marked {failed} stale RUNNING task(s) as FAILED',
-                                    )
-                            case Err(err) if err.retryable:
-                                mark_failed_permanent_failures = 0
-                                logger.warning(
-                                    f'Reaper mark_stale_tasks_as_failed transient failure '
-                                    f'(will retry next cycle): {err.message}',
-                                )
-                            case Err(err):
-                                mark_failed_permanent_failures += 1
-                                if (
-                                    mark_failed_permanent_failures
-                                    >= _REAPER_MAX_PERMANENT_FAILURES
-                                ):
-                                    mark_failed_disabled = True
-                                    logger.critical(
-                                        f'Reaper mark_stale_tasks_as_failed disabled after '
-                                        f'{mark_failed_permanent_failures} consecutive permanent '
-                                        f'failures. Last error: {err.message}. '
-                                        f'Requires deploy or manual intervention.',
-                                    )
-                                else:
-                                    logger.error(
-                                        f'Reaper mark_stale_tasks_as_failed permanent failure '
-                                        f'({mark_failed_permanent_failures}/{_REAPER_MAX_PERMANENT_FAILURES} '
-                                        f'before disable): {err.message}',
-                                    )
-
-                    # Expire PENDING tasks past good_until deadline
-                    try:
-                        match await temp_broker.expire_pending_tasks():
-                            case Ok(expired):
-                                if expired > 0:
-                                    logger.info(
-                                        f'Reaper expired {expired} PENDING task(s) past good_until',
-                                    )
-                            case Err(err):
-                                logger.warning(
-                                    f'Reaper expire_pending_tasks failed: {err.message}',
-                                )
-                    except Exception as expire_err:
-                        logger.error(f'Reaper expire_pending_tasks error: {expire_err}')
-
-                    # Recover stuck workflows
-                    try:
-                        from horsies.core.workflows.recovery import (
-                            recover_stuck_workflows,
+                    # Gate: every worker runs this loop, but one executing
+                    # reaper per interval is enough — SKIP LOCKED makes
+                    # concurrent passes safe, just redundant. The try-lock
+                    # is held by the gate session for the duration of the
+                    # pass and releases automatically (xact scope) if the
+                    # holder dies mid-pass.
+                    async with self.sf() as gate_session:
+                        gate_result = await gate_session.execute(
+                            REAPER_GATE_TRY_LOCK_SQL,
+                            {'key': self._advisory_key_reaper()},
                         )
-
-                        async with temp_broker.session_factory() as s:
-                            recovered = await recover_stuck_workflows(s, temp_broker)
-                            if recovered > 0:
-                                logger.info(
-                                    f'Reaper recovered {recovered} stuck workflow task(s)'
-                                )
-                            await s.commit()
-                    except Exception as wf_err:
-                        logger.error(f'Workflow recovery error: {wf_err}')
-
-                    now_monotonic = time.monotonic()
-                    if now_monotonic >= next_retention_cleanup_at:
-                        try:
-                            deleted_heartbeats = 0
-                            deleted_worker_states = 0
-                            deleted_workflow_tasks = 0
-                            deleted_workflows = 0
-                            deleted_tasks = 0
-
-                            async with temp_broker.session_factory() as s:
-                                if recovery_cfg.heartbeat_retention_hours is not None:
-                                    hb_result = await s.execute(
-                                        DELETE_EXPIRED_HEARTBEATS_SQL,
-                                        {
-                                            'retention_hours': recovery_cfg.heartbeat_retention_hours,
-                                        },
-                                    )
-                                    deleted_heartbeats = int(
-                                        getattr(hb_result, 'rowcount', 0) or 0
-                                    )
-
-                                if (
-                                    recovery_cfg.worker_state_retention_hours
-                                    is not None
-                                ):
-                                    ws_result = await s.execute(
-                                        DELETE_EXPIRED_WORKER_STATES_SQL,
-                                        {
-                                            'retention_hours': recovery_cfg.worker_state_retention_hours,
-                                        },
-                                    )
-                                    deleted_worker_states = int(
-                                        getattr(ws_result, 'rowcount', 0) or 0
-                                    )
-
-                                if (
-                                    recovery_cfg.terminal_record_retention_hours
-                                    is not None
-                                ):
-                                    wf_params = {
-                                        'retention_hours': recovery_cfg.terminal_record_retention_hours,
-                                        'wf_terminal_states': WORKFLOW_TERMINAL_VALUES,
-                                    }
-                                    task_params = {
-                                        'retention_hours': recovery_cfg.terminal_record_retention_hours,
-                                        'wf_terminal_states': WORKFLOW_TERMINAL_VALUES,
-                                        'task_terminal_states': TASK_TERMINAL_VALUES,
-                                    }
-                                    wt_result = await s.execute(
-                                        DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
-                                        wf_params,
-                                    )
-                                    wf_result = await s.execute(
-                                        DELETE_EXPIRED_WORKFLOWS_SQL,
-                                        wf_params,
-                                    )
-                                    task_result = await s.execute(
-                                        DELETE_EXPIRED_TASKS_SQL,
-                                        task_params,
-                                    )
-                                    deleted_workflow_tasks = int(
-                                        getattr(wt_result, 'rowcount', 0) or 0
-                                    )
-                                    deleted_workflows = int(
-                                        getattr(wf_result, 'rowcount', 0) or 0
-                                    )
-                                    deleted_tasks = int(
-                                        getattr(task_result, 'rowcount', 0) or 0
-                                    )
-
-                                await s.commit()
-
-                            if (
-                                deleted_heartbeats > 0
-                                or deleted_worker_states > 0
-                                or deleted_workflow_tasks > 0
-                                or deleted_workflows > 0
-                                or deleted_tasks > 0
-                            ):
-                                logger.info(
-                                    'Reaper retention cleanup: heartbeats=%s worker_states=%s workflow_tasks=%s workflows=%s tasks=%s',
-                                    deleted_heartbeats,
-                                    deleted_worker_states,
-                                    deleted_workflow_tasks,
-                                    deleted_workflows,
-                                    deleted_tasks,
-                                )
-                        except Exception as cleanup_err:
-                            logger.error(f'Retention cleanup error: {cleanup_err}')
-                        finally:
-                            next_retention_cleanup_at = (
-                                now_monotonic + _RETENTION_CLEANUP_INTERVAL_S
+                        if bool(gate_result.scalar()):
+                            await self._run_reaper_pass(
+                                temp_broker, recovery_cfg, state,
                             )
-
+                        else:
+                            logger.debug(
+                                'Reaper pass skipped: another worker holds the gate',
+                            )
                 except Exception as e:
                     logger.error(f'Reaper loop error: {e}')
 
