@@ -49,6 +49,10 @@ def _test_app() -> Horsies:
 
 pytestmark = [pytest.mark.integration]
 
+# Owner id shared by the insert helper and the worker under test so the
+# finalize-path ownership guard matches.
+TEST_WORKER_ID = 'w-two-phase-test'
+
 
 async def _insert_running_task(session: AsyncSession) -> str:
     """Insert a minimal horsies_tasks row in RUNNING state and return its id."""
@@ -59,13 +63,18 @@ async def _insert_running_task(session: AsyncSession) -> str:
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha)
+                 max_retries, started_at, enqueue_sha, claimed_by_worker_id)
             VALUES
                 (:id, 'two_phase_finalize_test', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 3, NOW(), :enqueue_sha)
+                 3, NOW(), :enqueue_sha, :claimed_by_worker_id)
         """),
-        {'id': task_id, 'sent_at': sent_at, 'enqueue_sha': sha},
+        {
+            'id': task_id,
+            'sent_at': sent_at,
+            'enqueue_sha': sha,
+            'claimed_by_worker_id': TEST_WORKER_ID,
+        },
     )
     await session.commit()
     return task_id
@@ -88,6 +97,7 @@ async def test_finalize_phase2_failure_keeps_terminal_task_result_durable(
     sf = async_sessionmaker(engine, expire_on_commit=False)
     worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
     worker._app = _test_app()
+    worker.worker_instance_id = TEST_WORKER_ID
 
     # Simulate workflow advancement failure after phase-1 task status persistence.
     worker._handle_workflow_task_if_needed = AsyncMock(
