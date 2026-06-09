@@ -360,11 +360,10 @@ class TestScheduleRetryExpiry:
         worker = MagicMock(spec=Worker)
         worker.worker_instance_id = 'w-unit-test'
         worker._calculate_retry_delay.return_value = 60.0
-        worker._get_task_queue_name = AsyncMock(return_value="default")
         worker._spawn_background = MagicMock()
         worker._schedule_delayed_notification = MagicMock(return_value=AsyncMock())
 
-        outcome = await Worker._schedule_retry(worker, "task-1", session)
+        outcome = await Worker._schedule_retry(worker, "task-1", session, queue_name="default")
 
         assert outcome == 'expired'
         assert session.execute.await_count == 1
@@ -386,11 +385,10 @@ class TestScheduleRetryExpiry:
         worker = MagicMock(spec=Worker)
         worker.worker_instance_id = 'w-unit-test'
         worker._calculate_retry_delay.return_value = 5.0
-        worker._get_task_queue_name = AsyncMock(return_value="default")
         worker._spawn_background = MagicMock()
         worker._schedule_delayed_notification = MagicMock(return_value=AsyncMock())
 
-        outcome = await Worker._schedule_retry(worker, "task-1", session)
+        outcome = await Worker._schedule_retry(worker, "task-1", session, queue_name="default")
 
         assert outcome == 'scheduled'
         assert session.execute.await_count == 2
@@ -412,11 +410,10 @@ class TestScheduleRetryExpiry:
         worker = MagicMock(spec=Worker)
         worker.worker_instance_id = 'w-unit-test'
         worker._calculate_retry_delay.return_value = 5.0
-        worker._get_task_queue_name = AsyncMock(return_value="default")
         worker._spawn_background = MagicMock()
         worker._schedule_delayed_notification = MagicMock(return_value=AsyncMock())
 
-        outcome = await Worker._schedule_retry(worker, "task-1", session)
+        outcome = await Worker._schedule_retry(worker, "task-1", session, queue_name="default")
 
         assert outcome == 'scheduled'
         assert session.execute.await_count == 2
@@ -442,11 +439,10 @@ class TestScheduleRetryExpiry:
         worker = MagicMock(spec=Worker)
         worker.worker_instance_id = 'w-unit-test'
         worker._calculate_retry_delay.return_value = 5.0
-        worker._get_task_queue_name = AsyncMock(return_value="default")
         worker._spawn_background = MagicMock()
         worker._schedule_delayed_notification = MagicMock(return_value=AsyncMock())
 
-        outcome = await Worker._schedule_retry(worker, "task-1", session)
+        outcome = await Worker._schedule_retry(worker, "task-1", session, queue_name="default")
 
         assert outcome == 'reaper_reclaimed'
         assert session.execute.await_count == 3
@@ -474,11 +470,10 @@ class TestScheduleRetryExpiry:
         worker = MagicMock(spec=Worker)
         worker.worker_instance_id = 'w-unit-test'
         worker._calculate_retry_delay.return_value = 5.0
-        worker._get_task_queue_name = AsyncMock(return_value="default")
         worker._spawn_background = MagicMock()
         worker._schedule_delayed_notification = MagicMock(return_value=AsyncMock())
 
-        outcome = await Worker._schedule_retry(worker, "task-1", session)
+        outcome = await Worker._schedule_retry(worker, "task-1", session, queue_name="default")
 
         assert outcome == 'expired'
         assert session.execute.await_count == 3

@@ -95,7 +95,6 @@ from horsies.core.worker.sql import (  # noqa: F401
     MARK_TASK_COMPLETED_SQL,
     SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
     UPSERT_TASK_ATTEMPT_SQL,
-    GET_TASK_QUEUE_NAME_SQL,
     NOTIFY_TASK_NEW_SQL,
     NOTIFY_TASK_QUEUE_SQL,
     CHECK_WORKFLOW_TASK_EXISTS_SQL,
@@ -1276,7 +1275,10 @@ class Worker:
 
                 should_retry = await self._should_retry_task(task_id, task_error, s)
                 if should_retry:
-                    match await self._schedule_retry(task_id, s):
+                    retry_outcome = await self._schedule_retry(
+                        task_id, s, queue_name=ctx_row.queue_name or 'default',
+                    )
+                    match retry_outcome:
                         case 'scheduled':
                             await s.execute(
                                 UPSERT_TASK_ATTEMPT_SQL,
@@ -1799,7 +1801,10 @@ class Worker:
 
                     should_retry = await self._should_retry_task(task_id, task_error, s)
                     if should_retry:
-                        match await self._schedule_retry(task_id, s):
+                        retry_outcome = await self._schedule_retry(
+                            task_id, s, queue_name=ctx_row.queue_name or 'default',
+                        )
+                        match retry_outcome:
                             case 'scheduled':
                                 # Retry scheduled: write FAILED attempt with will_retry=True
                                 await s.execute(
@@ -2396,9 +2401,17 @@ class Worker:
         return False
 
     async def _schedule_retry(
-        self, task_id: str, session: AsyncSession
+        self,
+        task_id: str,
+        session: AsyncSession,
+        queue_name: str,
     ) -> Literal['scheduled', 'reaper_reclaimed', 'expired']:
         """Schedule a task for retry by updating its status and next retry time.
+
+        ``queue_name`` comes from the caller's already-locked task row; the
+        delayed wake-up notification targets that queue. Fetching it here
+        would require a second pooled session while the caller holds one plus
+        a row lock — a pool-starvation deadlock under mass failure.
 
         Returns:
         - 'scheduled' when retry was persisted
@@ -2501,7 +2514,6 @@ class Worker:
             return 'reaper_reclaimed'
 
         # Schedule a delayed notification using asyncio for the task's actual queue
-        queue_name = await self._get_task_queue_name(task_id)
         self._spawn_background(
             self._schedule_delayed_notification(
                 delay_seconds,
@@ -2546,16 +2558,6 @@ class Worker:
             logger.debug(f'Delayed notification cancelled for: {payload}')
         except Exception as e:
             logger.error(f'Error sending delayed notification for {payload}: {e}')
-
-    async def _get_task_queue_name(self, task_id: str) -> str:
-        """Fetch the queue_name for a given task id."""
-        async with self.sf() as session:
-            res = await session.execute(
-                GET_TASK_QUEUE_NAME_SQL,
-                {'id': task_id},
-            )
-            row = res.fetchone()
-            return str(row.queue_name) if row and row.queue_name else 'default'
 
     async def _claimer_heartbeat_loop(self) -> None:
         """Emit claimer heartbeats for tasks we've claimed but not yet started."""

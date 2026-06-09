@@ -296,7 +296,9 @@ async def test_schedule_retry_no_row_returns_reaper_reclaimed(
     worker = _make_worker(engine)
 
     async with worker.sf() as s:
-        result = await worker._schedule_retry(str(uuid.uuid4()), s)
+        result = await worker._schedule_retry(
+                str(uuid.uuid4()), s, queue_name='default',
+            )
 
     assert result == 'reaper_reclaimed'
 
@@ -320,7 +322,7 @@ async def test_schedule_retry_null_task_options_uses_defaults(
     worker._schedule_delayed_notification = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
 
     async with worker.sf() as s:
-        result = await worker._schedule_retry(task_id, s)
+        result = await worker._schedule_retry(task_id, s, queue_name='default')
         await s.commit()
 
     assert result == 'scheduled'
@@ -351,7 +353,7 @@ async def test_schedule_retry_happy_path_scheduled(
     worker._schedule_delayed_notification = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
 
     async with worker.sf() as s:
-        result = await worker._schedule_retry(task_id, s)
+        result = await worker._schedule_retry(task_id, s, queue_name='default')
         await s.commit()
 
     assert result == 'scheduled'
@@ -385,7 +387,7 @@ async def test_schedule_retry_good_until_exceeded_returns_expired(
     worker = _make_worker(engine)
 
     async with worker.sf() as s:
-        result = await worker._schedule_retry(task_id, s)
+        result = await worker._schedule_retry(task_id, s, queue_name='default')
 
     assert result == 'expired'
 
@@ -412,7 +414,7 @@ async def test_schedule_retry_reaper_reclaimed(
     worker = _make_worker(engine)
 
     async with worker.sf() as s:
-        result = await worker._schedule_retry(task_id, s)
+        result = await worker._schedule_retry(task_id, s, queue_name='default')
 
     assert result == 'reaper_reclaimed'
 
@@ -468,7 +470,7 @@ async def test_schedule_retry_sql_guard_expiry_postcheck_returns_expired(
     async with worker.sf() as real_session:
         wrapped = _InterceptSession(real_session, task_id, past_good_until)
         result = await worker._schedule_retry(
-            task_id, wrapped,  # type: ignore[arg-type]
+            task_id, wrapped, queue_name='default',  # type: ignore[arg-type]
         )
 
     assert result == 'expired'

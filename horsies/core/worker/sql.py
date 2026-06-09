@@ -255,10 +255,6 @@ MARK_TASK_COMPLETED_SQL = text("""
     RETURNING id
 """)
 
-GET_TASK_QUEUE_NAME_SQL = text("""
-    SELECT queue_name FROM horsies_tasks WHERE id = :id
-""")
-
 NOTIFY_TASK_NEW_SQL = text("""
     SELECT pg_notify(:c1, :p)
 """)
