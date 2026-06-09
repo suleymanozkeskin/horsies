@@ -1,9 +1,14 @@
 # app/core/brokers/postgres.py
 from __future__ import annotations
 import asyncio, hashlib, contextlib, random, threading, uuid
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING, cast
 from datetime import datetime, timedelta, timezone
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine, async_sessionmaker
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    create_async_engine,
+    async_sessionmaker,
+)
 from sqlalchemy import text, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError
@@ -358,6 +363,16 @@ SELECT_TASK_ATTEMPTS_BY_TASK_ID_SQL = text("""
     WHERE task_id = :task_id
     ORDER BY attempt DESC
 """)
+
+# Slim status probe for result-wait polling: the full row drags the
+# (potentially TOASTed) args/kwargs/result payload columns along on every
+# poll iteration; status+name is all the loop needs until terminal.
+GET_TASK_STATUS_NAME_SQL = text("""
+    SELECT status, task_name FROM horsies_tasks WHERE id = :id
+""")
+
+# Sentinel returned by _probe_result_row while the row is non-terminal.
+_STILL_WAITING = object()
 
 REQUEUE_STALE_CLAIMED_SQL = text("""
     UPDATE horsies_tasks AS t
@@ -966,6 +981,49 @@ class PostgresBroker:
             raw_result=raw_value,
         ))
 
+    async def _probe_result_row(
+        self,
+        session: AsyncSession,
+        task_id: str,
+        *,
+        non_terminal_snapshot: bool = False,
+    ) -> 'BrokerResult[RawResultRecord | None] | object':
+        """Slim status probe for the result-wait loop.
+
+        Polls status+name only; the full row (with potentially TOASTed
+        payload columns) is fetched once, when a terminal status is
+        observed.
+
+        Returns the loop's final ``BrokerResult`` when the wait is over,
+        or the ``_STILL_WAITING`` sentinel to keep polling. With
+        ``non_terminal_snapshot=True`` (timeout path) a non-terminal row is
+        returned as a payload-less record instead of the sentinel.
+        """
+        probe = await session.execute(
+            GET_TASK_STATUS_NAME_SQL, {'id': task_id},
+        )
+        probe_row = probe.fetchone()
+        if probe_row is None:
+            return Ok(None)
+        status = TaskStatus(str(probe_row.status))
+        if status in (
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.EXPIRED,
+        ):
+            row = await session.get(TaskModel, task_id)
+            if row is None:
+                return Ok(None)
+            return self._build_raw_result_record(row, task_id)
+        if status == TaskStatus.CANCELLED or non_terminal_snapshot:
+            return Ok(RawResultRecord(
+                task_id=task_id,
+                task_name=str(probe_row.task_name),
+                status=status,
+                raw_result=None,
+            ))
+        return _STILL_WAITING
+
     async def get_raw_result_record_async(
         self,
         task_id: str,
@@ -1004,22 +1062,11 @@ class PostgresBroker:
 
             # Quick path: row may already be terminal.
             async with self.session_factory() as session:
-                row = await session.get(TaskModel, task_id)
-                if row is None:
-                    return Ok(None)
-                if row.status in (
-                    TaskStatus.COMPLETED,
-                    TaskStatus.FAILED,
-                    TaskStatus.EXPIRED,
-                ):
-                    return self._build_raw_result_record(row, task_id)
-                if row.status == TaskStatus.CANCELLED:
-                    return Ok(RawResultRecord(
-                        task_id=task_id,
-                        task_name=row.task_name,
-                        status=row.status,
-                        raw_result=None,
-                    ))
+                outcome = await self._probe_result_row(session, task_id)
+                if outcome is not _STILL_WAITING:
+                    return cast(
+                        'BrokerResult[RawResultRecord | None]', outcome,
+                    )
 
             # Listen + poll loop.
             q: asyncio.Queue[Any] | None = None
@@ -1058,23 +1105,15 @@ class PostgresBroker:
                             # to terminal between checks; one more read
                             # to capture the latest snapshot.
                             async with self.session_factory() as session:
-                                row = await session.get(TaskModel, task_id)
-                                if row is None:
-                                    return Ok(None)
-                                if row.status in (
-                                    TaskStatus.COMPLETED,
-                                    TaskStatus.FAILED,
-                                    TaskStatus.EXPIRED,
-                                ):
-                                    return self._build_raw_result_record(
-                                        row, task_id,
-                                    )
-                                return Ok(RawResultRecord(
-                                    task_id=task_id,
-                                    task_name=row.task_name,
-                                    status=row.status,
-                                    raw_result=None,
-                                ))
+                                outcome = await self._probe_result_row(
+                                    session,
+                                    task_id,
+                                    non_terminal_snapshot=True,
+                                )
+                                return cast(
+                                    'BrokerResult[RawResultRecord | None]',
+                                    outcome,
+                                )
 
                     wait_time = (
                         min(poll_interval, remaining_timeout)
@@ -1100,22 +1139,14 @@ class PostgresBroker:
                         await asyncio.sleep(wait_time)
 
                     async with self.session_factory() as session:
-                        row = await session.get(TaskModel, task_id)
-                        if row is None:
-                            return Ok(None)
-                        if row.status in (
-                            TaskStatus.COMPLETED,
-                            TaskStatus.FAILED,
-                            TaskStatus.EXPIRED,
-                        ):
-                            return self._build_raw_result_record(row, task_id)
-                        if row.status == TaskStatus.CANCELLED:
-                            return Ok(RawResultRecord(
-                                task_id=task_id,
-                                task_name=row.task_name,
-                                status=row.status,
-                                raw_result=None,
-                            ))
+                        outcome = await self._probe_result_row(
+                            session, task_id,
+                        )
+                        if outcome is not _STILL_WAITING:
+                            return cast(
+                                'BrokerResult[RawResultRecord | None]',
+                                outcome,
+                            )
             finally:
                 if q is not None:
                     await self._unsubscribe_task_done_safely(q)
