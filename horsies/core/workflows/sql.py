@@ -311,14 +311,14 @@ GET_WORKFLOW_COMPLETION_STATUS_SQL = text("""
 MARK_WORKFLOW_COMPLETED_SQL = text("""
     UPDATE horsies_workflows
     SET status = 'COMPLETED', result = :result, completed_at = NOW(), updated_at = NOW()
-    WHERE id = :wf_id AND completed_at IS NULL
+    WHERE id = :wf_id AND status = 'RUNNING' AND completed_at IS NULL
 """)
 MARK_WORKFLOW_FAILED_SQL = text("""
     UPDATE horsies_workflows
     SET status = 'FAILED', result = :result,
         error = COALESCE(:error, error),
         completed_at = NOW(), updated_at = NOW()
-    WHERE id = :wf_id AND completed_at IS NULL
+    WHERE id = :wf_id AND status = 'RUNNING' AND completed_at IS NULL
 """)
 GET_PARENT_WORKFLOW_INFO_SQL = text("""
     SELECT parent_workflow_id, parent_task_index

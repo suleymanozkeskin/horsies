@@ -1877,8 +1877,11 @@ async def check_workflow_completion(
     completed = row.completed or 0
     total = row.total or 0
 
-    # Don't process if workflow is PAUSED (waiting for manual intervention)
-    if current_status == 'PAUSED':
+    # Only a RUNNING workflow may be finalized. PAUSED waits for manual
+    # intervention; CANCELLED/COMPLETED/FAILED are final — a late task
+    # completion must not resurrect them (CANCELLED has completed_at NULL,
+    # so the already_completed check below does not cover it).
+    if current_status != 'RUNNING':
         return
 
     if incomplete > 0:

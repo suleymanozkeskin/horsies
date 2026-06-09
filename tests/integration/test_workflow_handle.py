@@ -961,6 +961,78 @@ class TestWorkflowHandleCancel:
         assert is_ok(status_r)
         assert status_r.ok_value == WorkflowStatus.COMPLETED
 
+    async def test_cancel_then_late_completion_stays_cancelled(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """A task left RUNNING through cancel must not resurrect the workflow.
+
+        cancel() deliberately lets RUNNING tasks finish. When such a task
+        later completes, check_workflow_completion must leave the workflow
+        CANCELLED instead of flipping it to COMPLETED/FAILED.
+        """
+        task_a = make_simple_task(app, 'cancel_late_complete_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker, name='cancel_late_complete', tasks=[node_a],
+        )
+
+        handle = await start_ok(spec, broker)
+
+        # Simulate a worker mid-execution: backing task + node are RUNNING,
+        # so cancel leaves them alone (only queueable states are swept).
+        await session.execute(
+            text("""
+                UPDATE horsies_tasks
+                SET status = 'RUNNING', started_at = NOW(), updated_at = NOW()
+                WHERE id = (
+                    SELECT task_id FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf_id AND task_index = 0
+                )
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        await session.execute(
+            text("""
+                UPDATE horsies_workflow_tasks
+                SET status = 'RUNNING', started_at = NOW()
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        await session.commit()
+
+        cancel_r = await handle.cancel_async()
+        assert is_ok(cancel_r)
+
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.CANCELLED
+
+        # The still-running task finishes after the cancel.
+        await _complete_task(
+            session, broker, handle.workflow_id, 0, TaskResult(ok=10),
+        )
+
+        row = (
+            await session.execute(
+                text("""
+                    SELECT status, completed_at, result
+                    FROM horsies_workflows WHERE id = :wf_id
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+        ).fetchone()
+        assert row is not None
+        assert row[0] == 'CANCELLED', (
+            f'Late completion must not resurrect a cancelled workflow, got {row[0]}'
+        )
+        assert row[1] is None, 'completed_at must stay NULL for CANCELLED'
+        assert row[2] is None, 'workflow result must not be written after cancel'
+
     async def test_cancel_leaves_no_pending_ready_enqueued_workflow_tasks(
         self,
         clean_workflow_tables: None,
