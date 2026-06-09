@@ -212,7 +212,15 @@ class TaskHandle(Generic[T]):
         message: str,
         data: dict[str, Any],
         exception: BaseException | None = None,
+        cache: bool = True,
     ) -> TaskResult[T, TaskError]:
+        """Build an err TaskResult, caching it when the error is final.
+
+        ``cache=False`` is for transient retrieval errors (broker outage,
+        not-found racing the enqueue): caching them would poison the handle
+        — every later ``get()`` would replay the error after the condition
+        cleared. Mirrors the WAIT_TIMEOUT path, which never caches.
+        """
         error_result: TaskResult[T, TaskError] = TaskResult(
             err=TaskError(
                 error_code=error_code,
@@ -221,8 +229,9 @@ class TaskHandle(Generic[T]):
                 exception=exception,
             )
         )
-        self._cached_result = error_result
-        self._result_fetched = True
+        if cache:
+            self._cached_result = error_result
+            self._result_fetched = True
         return error_result
 
     def _record_to_task_result(
@@ -264,6 +273,9 @@ class TaskHandle(Generic[T]):
                 message=broker_err.message,
                 data={'task_id': self.task_id, 'broker_code': code.value},
                 exception=broker_err.exception,
+                # A generic broker error is transient; the strict-serde
+                # codes are properties of the stored payload / handle.
+                cache=err_code is not OperationalErrorCode.BROKER_ERROR,
             )
         record = broker_result.ok_value
         if record is None:
@@ -271,6 +283,9 @@ class TaskHandle(Generic[T]):
                 error_code=RetrievalCode.TASK_NOT_FOUND,
                 message=f'Task {self.task_id} not found in database',
                 data={'task_id': self.task_id},
+                # Possibly a handle reconstructed by id racing the enqueue
+                # commit; a later get() may find the row.
+                cache=False,
             )
         from horsies.core.types.status import TaskStatus as _TaskStatus
 
@@ -421,6 +436,7 @@ class TaskHandle(Generic[T]):
                     message='Broker error while retrieving task result',
                     data={'task_id': self.task_id},
                     exception=exc,
+                    cache=False,
                 )
             return self._record_to_task_result(broker_result, timeout_ms)
         else:
@@ -474,6 +490,7 @@ class TaskHandle(Generic[T]):
                     message='Broker error while retrieving task result',
                     data={'task_id': self.task_id},
                     exception=exc,
+                    cache=False,
                 )
             return self._record_to_task_result(broker_result, timeout_ms)
         else:
