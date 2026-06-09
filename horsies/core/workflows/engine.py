@@ -2047,7 +2047,25 @@ async def on_subworkflow_complete(
             fallback='null',
         )
 
-    # 4. Update parent node
+    # 4. Serialize parent-side promotion with other completions of the same
+    # parent: on_workflow_task_complete takes this lock for exactly that
+    # reason, and the failure/completion paths below (steps 5 and 8) acquire
+    # it anyway, in the same child→parent order. Without it, two sibling
+    # child workflows finishing concurrently can each observe the other's
+    # node as non-terminal and leave a fan-in dependent PENDING until the
+    # next reaper sweep.
+    parent_lock = await session.execute(
+        LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
+        {'wf_id': parent_wf_id},
+    )
+    if parent_lock.fetchone() is None:
+        logger.error(
+            f'Parent workflow {parent_wf_id} not found for child '
+            f'{child_workflow_id}; skipping subworkflow progression'
+        )
+        return
+
+    # 5. Update parent node
     update_result = await session.execute(
         UPDATE_PARENT_NODE_RESULT_SQL,
         {
@@ -2070,7 +2088,7 @@ async def on_subworkflow_complete(
         )
         return
 
-    # 5. Handle failure (same as task failure)
+    # 6. Handle failure (same as task failure)
     if parent_node_status == 'FAILED':
         # Create a TaskResult for the failure handler
         failure_result: TaskResult[Any, TaskError] = TaskResult(
@@ -2088,7 +2106,7 @@ async def on_subworkflow_complete(
             # PAUSE mode - stop processing
             return
 
-    # 6. Check if parent workflow is PAUSED
+    # 7. Check if parent workflow is PAUSED
     parent_status_check = await session.execute(
         GET_WORKFLOW_STATUS_SQL,
         {'wf_id': parent_wf_id},
@@ -2097,10 +2115,10 @@ async def on_subworkflow_complete(
     if parent_status_row and parent_status_row.status == 'PAUSED':
         return  # Don't propagate - parent is paused
 
-    # 7. Process parent dependents
+    # 8. Process parent dependents
     await _process_dependents(session, parent_wf_id, parent_task_idx, broker)
 
-    # 8. Check parent completion
+    # 9. Check parent completion
     await check_workflow_completion(session, parent_wf_id, broker)
 
 
