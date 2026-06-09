@@ -177,6 +177,59 @@ class TestImportFilePath:
         finally:
             sys.path[:] = original_path
 
+    def test_failed_exec_leaves_no_module_registered(self, tmp_path: Path) -> None:
+        """A failed import must not leave a half-executed module importable.
+
+        Registration happens before exec (circular-import semantics); on
+        exec failure the entries must be rolled back — otherwise the next
+        import_file_path silently returns the broken module as success.
+        """
+        bad = tmp_path / 'broken_mod.py'
+        bad.write_text('BEFORE = 1\nraise RuntimeError("boom at import")')
+        synthetic = _compute_synthetic_module_name(str(bad.resolve()))
+
+        with pytest.raises(RuntimeError, match='boom at import'):
+            import_file_path(str(bad))
+
+        assert synthetic not in sys.modules
+        assert 'broken_mod' not in sys.modules
+
+        # A later import must re-execute (and fail again), not return the
+        # half-executed module.
+        with pytest.raises(RuntimeError, match='boom at import'):
+            import_file_path(str(bad))
+
+    def test_failed_exec_recovers_after_fix(self, tmp_path: Path) -> None:
+        """After the file is fixed, the import succeeds (no stale cache)."""
+        flaky = tmp_path / 'flaky_mod.py'
+        flaky.write_text('raise RuntimeError("transient import error")')
+
+        with pytest.raises(RuntimeError, match='transient import error'):
+            import_file_path(str(flaky))
+
+        flaky.write_text('VALUE = 3')
+        mod = import_file_path(str(flaky))
+        assert mod.VALUE == 3
+
+    def test_basename_alias_does_not_shadow_other_modules(self, tmp_path: Path) -> None:
+        """The basename alias must not hijack an importable module name.
+
+        A task file named like a stdlib module (here: wave.py) must not
+        become sys.modules['wave'] when 'wave' resolves elsewhere.
+        """
+        sys.modules.pop('wave', None)
+        shadow = tmp_path / 'wave.py'
+        shadow.write_text('VALUE = 99')
+
+        mod = import_file_path(str(shadow), add_parent_to_path=False)
+        assert mod.VALUE == 99
+
+        import wave as stdlib_wave
+
+        assert not hasattr(stdlib_wave, 'VALUE'), (
+            'import_file_path must not register a stdlib-shadowing alias'
+        )
+
     def test_unload_file_path_removes_registered_module_keys(self, tmp_path: Path) -> None:
         """unload_file_path should remove synthetic and basename aliases."""
         mod_file = tmp_path / 'to_unload.py'
