@@ -160,22 +160,28 @@ class Scheduler:
         now = datetime.now(timezone.utc)
         configured_names = {schedule.name for schedule in self.schedule_config.schedules}
 
-        # Remove stale DB state entries for schedules that no longer exist in config.
+        # State rows not in this scheduler's config are left untouched:
+        # deleting them breaks rolling deploys (the still-running old-config
+        # scheduler loses its rows and silently stops firing) and shared-DB
+        # topologies (one app's scheduler wiping another app's schedules).
+        # Orphan rows are inert — get_due_states filters to configured
+        # names — so we only surface them for operators.
         try:
             existing_states = await self.state_manager.get_all_states()
-            removed = [
+            orphaned = [
                 state.schedule_name
                 for state in existing_states
                 if state.schedule_name not in configured_names
             ]
-            for name in removed:
-                await self.state_manager.delete_state(name)
-            if removed:
-                logger.info(
-                    f'Pruned {len(removed)} stale schedule_state row(s): {removed}'
+            if orphaned:
+                logger.warning(
+                    f'{len(orphaned)} schedule_state row(s) not in this '
+                    f"scheduler's config (other scheduler, or removed "
+                    f'schedules): {orphaned}. Rows are kept; delete '
+                    f'manually if the schedules are gone for good.'
                 )
         except Exception as e:
-            logger.warning(f'Failed to prune stale schedule state rows: {e}')
+            logger.warning(f'Failed to inspect schedule state rows: {e}')
 
         failed_schedules: list[str] = []
         for schedule in self.schedule_config.schedules:

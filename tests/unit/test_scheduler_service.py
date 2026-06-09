@@ -803,7 +803,14 @@ class TestInitializeSchedules:
     """Tests for Scheduler._initialize_schedules."""
 
     @pytest.mark.asyncio
-    async def test_prunes_removed_schedule_state_rows(self) -> None:
+    async def test_foreign_schedule_state_rows_are_kept(self) -> None:
+        """Startup must not delete state rows outside this config.
+
+        Spec change (0.1.7): auto-pruning broke rolling deploys (the
+        old-config scheduler lost its rows and silently stopped firing)
+        and shared-database topologies. Orphan rows are kept and only
+        logged.
+        """
         config = ScheduleConfig(
             schedules=[
                 TaskSchedule(
@@ -816,13 +823,15 @@ class TestInitializeSchedules:
         app = _make_app(schedule_config=config)
         scheduler = Scheduler(app)
 
-        stale_state = MagicMock()
-        stale_state.schedule_name = 'removed'
+        foreign_state = MagicMock()
+        foreign_state.schedule_name = 'other_schedulers_row'
         kept_state = MagicMock()
         kept_state.schedule_name = 'kept'
 
         state_manager = MagicMock()
-        state_manager.get_all_states = AsyncMock(return_value=[stale_state, kept_state])
+        state_manager.get_all_states = AsyncMock(
+            return_value=[foreign_state, kept_state],
+        )
         state_manager.delete_state = AsyncMock(return_value=True)
         state_manager.get_state = AsyncMock(return_value=None)
         state_manager.initialize_state = AsyncMock()
@@ -832,7 +841,7 @@ class TestInitializeSchedules:
         await scheduler._initialize_schedules()
 
         state_manager.get_all_states.assert_awaited_once()
-        state_manager.delete_state.assert_awaited_once_with('removed')
+        state_manager.delete_state.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_one_bad_schedule_does_not_block_others(self) -> None:
