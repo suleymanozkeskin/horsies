@@ -15,8 +15,10 @@ from sqlalchemy import text
 # v5: drop write-amplifying single-column indexes on horsies_tasks whose
 #     queries are served by the v3 partial composites (or that no query
 #     uses); replace full good_until index with a partial one.
+# v6: split notify triggers into INSERT/UPDATE pairs with WHEN clauses so
+#     non-status updates (lease renewals etc.) never invoke plpgsql.
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
