@@ -59,6 +59,9 @@ def _make_worker(
     psycopg_dsn: str = "postgresql://u:p@localhost/db",
     queues: list[str] | None = None,
     claim_lease_ms: int | None = None,
+    cluster_wide_cap: int | None = None,
+    queue_priorities: dict[str, int] | None = None,
+    queue_max_concurrency: dict[str, int] | None = None,
 ) -> Worker:
     """Build a Worker with MagicMock session_factory and listener."""
     cfg = WorkerConfig(
@@ -66,6 +69,9 @@ def _make_worker(
         psycopg_dsn=psycopg_dsn,
         queues=queues or ["default"],
         claim_lease_ms=claim_lease_ms,
+        cluster_wide_cap=cluster_wide_cap,
+        queue_priorities=queue_priorities or {},
+        queue_max_concurrency=queue_max_concurrency or {},
     )
     return Worker(
         session_factory=MagicMock(),
@@ -252,6 +258,47 @@ class TestAdvisoryKeyGlobal:
         w1 = _make_worker(psycopg_dsn="", dsn="postgresql+psycopg://u:p@h/mydb")
         w2 = _make_worker(psycopg_dsn="postgresql://other@elsewhere/db")
         assert w1._advisory_key_global() == w2._advisory_key_global()
+
+
+# ---------------------------------------------------------------------------
+# 5b. Worker._claim_pass_needs_serialization
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestClaimPassNeedsSerialization:
+    """The claim advisory lock is taken only when cap accounting needs it."""
+
+    def test_no_caps_skips_lock(self) -> None:
+        w = _make_worker()
+        assert w._claim_pass_needs_serialization() is False
+
+    def test_cluster_wide_cap_requires_lock(self) -> None:
+        w = _make_worker(cluster_wide_cap=10)
+        assert w._claim_pass_needs_serialization() is True
+
+    def test_active_queue_cap_requires_lock(self) -> None:
+        w = _make_worker(
+            queues=["q1"],
+            queue_priorities={"q1": 1},
+            queue_max_concurrency={"q1": 5},
+        )
+        assert w._claim_pass_needs_serialization() is True
+
+    def test_priorities_without_concurrency_caps_skip_lock(self) -> None:
+        w = _make_worker(
+            queues=["q1"],
+            queue_priorities={"q1": 1},
+        )
+        assert w._claim_pass_needs_serialization() is False
+
+    def test_cap_on_foreign_queue_skips_lock(self) -> None:
+        w = _make_worker(
+            queues=["q1"],
+            queue_priorities={"q1": 1},
+            queue_max_concurrency={"other_queue": 5},
+        )
+        assert w._claim_pass_needs_serialization() is False
 
 
 # ---------------------------------------------------------------------------

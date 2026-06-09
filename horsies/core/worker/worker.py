@@ -794,13 +794,17 @@ class Worker:
         else:
             ordered_queues = list(self.cfg.queues)
 
-        # Open one transaction, take a global advisory xact lock
+        # Open one transaction; serialize claim passes only when a
+        # multi-worker read-then-act invariant exists (cluster/queue caps).
+        # Without caps, CLAIM_SQL's FOR UPDATE SKIP LOCKED already makes
+        # concurrent claiming safe, and the lock would only cap cluster
+        # claim throughput at 1/claim-pass-latency.
         async with self.sf() as s:
-            # Take a cluster-wide transaction-scoped advisory lock to serialize claiming
-            await s.execute(
-                CLAIM_ADVISORY_LOCK_SQL,
-                {'key': self._advisory_key_global()},
-            )
+            if self._claim_pass_needs_serialization():
+                await s.execute(
+                    CLAIM_ADVISORY_LOCK_SQL,
+                    {'key': self._advisory_key_global()},
+                )
 
             # Compute local budget and optional global remaining
             # Hard cap mode (prefetch_buffer=0): count RUNNING + CLAIMED for strict enforcement
@@ -1002,6 +1006,24 @@ class Worker:
 
         blocked_task_ids = paused_task_ids | cancelled_task_ids
         return [row for row in rows if row['id'] not in blocked_task_ids]
+
+    def _claim_pass_needs_serialization(self) -> bool:
+        """Whether the claim pass must hold the cluster advisory lock.
+
+        Serialization is required only for read-then-act cap accounting:
+        a cluster_wide_cap, or an active per-queue max_concurrency (CUSTOM
+        mode with a configured queue this worker claims from). Workers in a
+        capped cluster must share the same cap config — a mixed fleet
+        already breaks cap semantics regardless of locking.
+        """
+        if self.cfg.cluster_wide_cap is not None:
+            return True
+        if not self.cfg.queue_priorities:
+            return False
+        return any(
+            queue_name in self.cfg.queue_max_concurrency
+            for queue_name in self.cfg.queues
+        )
 
     def _advisory_key_global(self) -> int:
         """Compute a stable 64-bit advisory lock key for claim serialization.
