@@ -6,8 +6,12 @@ from sqlalchemy import text
 
 
 # ---- Schema infrastructure ----
+#
+# v3: claim-path indexes (idx_horsies_tasks_claim_pending,
+#     idx_horsies_tasks_claim_expired, idx_horsies_tasks_worker_status,
+#     idx_horsies_worker_states_worker_snapshot).
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))

@@ -103,7 +103,11 @@ from horsies.core.schemas.indexes import (
     CREATE_HEARTBEATS_TASK_ROLE_SENT_INDEX_SQL,
     CREATE_TASK_ATTEMPTS_ERROR_CODE_INDEX_SQL,
     CREATE_TASK_ATTEMPTS_FINISHED_AT_INDEX_SQL,
+    CREATE_TASKS_CLAIM_EXPIRED_INDEX_SQL,
+    CREATE_TASKS_CLAIM_PENDING_INDEX_SQL,
     CREATE_TASKS_ERROR_CODE_INDEX_SQL,
+    CREATE_TASKS_WORKER_STATUS_INDEX_SQL,
+    CREATE_WORKER_STATES_WORKER_SNAPSHOT_INDEX_SQL,
     CREATE_WORKFLOW_TASKS_DEPS_INDEX_SQL,
 )
 from horsies.core.schemas.migrations import (
@@ -652,6 +656,12 @@ class PostgresBroker:
             await conn.execute(BACKFILL_TASK_IS_WORKFLOW_TASK_SQL)
             await conn.execute(ADD_TASK_FINALIZING_COLUMNS_SQL)
             await conn.execute(CREATE_TASKS_ERROR_CODE_INDEX_SQL)
+
+            # Migration (v3): claim-path indexes.
+            await conn.execute(CREATE_TASKS_CLAIM_PENDING_INDEX_SQL)
+            await conn.execute(CREATE_TASKS_CLAIM_EXPIRED_INDEX_SQL)
+            await conn.execute(CREATE_TASKS_WORKER_STATUS_INDEX_SQL)
+            await conn.execute(CREATE_WORKER_STATES_WORKER_SNAPSHOT_INDEX_SQL)
 
             # Migration: create horsies_task_attempts table and indexes.
             await conn.execute(CREATE_TASK_ATTEMPTS_TABLE_SQL)
