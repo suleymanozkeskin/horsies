@@ -419,11 +419,37 @@ class Scheduler:
                         await session.rollback()
 
                 else:
-                    # Normal execution: single run
-                    # slot_time = state.next_run_at for deterministic task_id.
-                    # Fallback to check_time only if next_run_at is somehow None
-                    # (should not happen since should_run_now already checked it).
-                    slot_time = state.next_run_at if state.next_run_at is not None else check_time
+                    # Normal execution (catch_up_missed=False): fire only the
+                    # latest due slot. Older missed slots (scheduler downtime)
+                    # are dropped, and the schedule resumes strictly in the
+                    # future. slot_time stays slot-aligned for deterministic
+                    # task_id. Fallback to check_time only if next_run_at is
+                    # somehow None (should not happen since should_run_now
+                    # already checked it).
+                    first_due = (
+                        state.next_run_at if state.next_run_at is not None else check_time
+                    )
+                    slot_time, next_run, skipped = self._advance_to_latest_due_slot(
+                        schedule, first_due, check_time,
+                    )
+                    if skipped:
+                        logger.warning(
+                            f"Schedule '{schedule.name}' missed {skipped} run(s); "
+                            f'skipping to latest due slot {slot_time} '
+                            f'(catch_up_missed=False)',
+                        )
+                    if next_run <= check_time:
+                        # Scan cap reached on a very deep backlog: persist
+                        # progress without firing a stale slot; the next tick
+                        # continues advancing from here.
+                        await self.state_manager.update_next_run(
+                            schedule_name=schedule.name,
+                            next_run_at=next_run,
+                            session=session,
+                        )
+                        await session.commit()
+                        return
+
                     result = await self._enqueue_scheduled_task(schedule, slot_time=slot_time)
                     if is_err(result):
                         err = result.err_value
@@ -446,9 +472,8 @@ class Scheduler:
                         f"for task '{schedule.task_name}'",
                     )
 
-                    next_run = calculate_next_run(
-                        schedule.pattern, slot_time, schedule.timezone,
-                    )
+                    # next_run (strictly future) was computed alongside the
+                    # latest due slot above.
                     await self.state_manager.update_after_run(
                         schedule_name=schedule.name,
                         task_id=task_id,
@@ -465,6 +490,47 @@ class Scheduler:
                 await session.rollback()
 
         # Advisory lock automatically released at transaction end
+
+    # Bound the per-tick slot scan so a pathological backlog (tiny period,
+    # very long downtime) cannot stall a tick; progress is persisted and the
+    # next tick continues from where this one stopped.
+    _MAX_SKIP_SCAN_PER_TICK = 100_000
+
+    def _advance_to_latest_due_slot(
+        self,
+        schedule: TaskSchedule,
+        first_due: datetime,
+        check_time: datetime,
+    ) -> tuple[datetime, datetime, int]:
+        """Advance through due slots to the latest one (catch_up_missed=False).
+
+        Args:
+            schedule: TaskSchedule configuration
+            first_due: First due scheduled run (<= check_time)
+            check_time: Current time
+
+        Returns:
+            (latest_due_slot, next_run_after_slot, skipped_count).
+            next_run_after_slot may still be <= check_time when the scan cap
+            was reached; callers must not fire a slot in that case.
+        """
+        slot = first_due
+        skipped = 0
+        next_run = calculate_next_run(schedule.pattern, slot, schedule.timezone)
+        while next_run <= check_time and skipped < self._MAX_SKIP_SCAN_PER_TICK:
+            if next_run <= slot:
+                logger.error(
+                    "Non-monotonic next_run calculated for schedule '%s': "
+                    'current=%s next=%s',
+                    schedule.name,
+                    slot,
+                    next_run,
+                )
+                break
+            slot = next_run
+            skipped += 1
+            next_run = calculate_next_run(schedule.pattern, slot, schedule.timezone)
+        return slot, next_run, skipped
 
     def _calculate_missed_runs(
         self,

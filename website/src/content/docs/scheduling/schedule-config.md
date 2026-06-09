@@ -61,7 +61,7 @@ TaskSchedule(
 | `queue_name` | `str` | `None` | Queue override (CUSTOM mode) |
 | `enabled` | `bool` | `True` | Enable/disable this schedule |
 | `timezone` | `str` | `"UTC"` | Timezone for schedule evaluation |
-| `catch_up_missed` | `bool` | `False` | Execute missed runs on restart |
+| `catch_up_missed` | `bool` | `False` | `True`: replay missed runs on restart. `False`: drop missed runs, fire only the most recent due slot |
 | `max_catch_up_runs` | `int` | `100` | Maximum runs to enqueue per scheduler tick when `catch_up_missed=True` (range: 1–10000) |
 
 ### Name
@@ -158,7 +158,8 @@ TaskSchedule(
 )
 ```
 
-If scheduler was down 3 hours, 3 tasks are enqueued on restart.
+If scheduler was down 3 hours, 3 tasks are enqueued on restart (bounded by
+`max_catch_up_runs`).
 
 Use for:
 
@@ -169,6 +170,11 @@ Avoid for:
 
 - Notifications (users don't want 24 emails at once)
 - Status updates (only latest matters)
+
+When `catch_up_missed=False` (default), missed runs are dropped: after
+downtime the scheduler fires at most one run — the most recent due slot —
+logs a warning with the number of skipped slots, and resumes at the next
+future slot.
 
 ## Disabling Schedules
 

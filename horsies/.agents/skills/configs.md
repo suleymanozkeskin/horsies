@@ -274,7 +274,7 @@ All `TaskSchedule.name` values must be unique (HRS-205).
 | `queue_name` | `str \| None` | `None` | Target queue |
 | `enabled` | `bool` | `True` | Per-schedule on/off |
 | `timezone` | `str` | `"UTC"` | IANA timezone |
-| `catch_up_missed` | `bool` | `False` | Execute missed runs on restart |
+| `catch_up_missed` | `bool` | `False` | `True`: replay missed runs on restart. `False`: drop missed runs, fire only the most recent due slot |
 | `max_catch_up_runs` | `int` | `100` | 1–10000; max runs per tick during catch-up |
 
 ### Schedule Patterns
