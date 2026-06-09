@@ -77,6 +77,17 @@ class _Status(enum.IntEnum):
     INACTIVE = 0
 
 
+class _TupleValued(enum.Enum):
+    A = (1, 2)
+
+
+class _MixedScalarValued(enum.Enum):
+    NAME = 'name'
+    COUNT = 3
+    RATIO = 1.5
+    NOTHING = None
+
+
 class _Cat(BaseModel):
     kind: Literal['cat'] = 'cat'
     name: str
@@ -154,6 +165,23 @@ class TestAllowedScalars:
 
     def test_intenum_param(self) -> None:
         def f(x: _Status) -> TaskResult[int, TaskError]: ...
+        _check(f)
+
+    def test_enum_with_non_scalar_value_rejected(self) -> None:
+        """Enum member values must round-trip by value.
+
+        A tuple value encodes to a list (mode='json' coercion) and then
+        fails enum-by-value decode on the consumer — the validator must
+        reject it at registration instead.
+        """
+        def f(x: _TupleValued) -> TaskResult[int, TaskError]: ...
+        with pytest.raises(
+            SignatureValidationError, match='JSON-native scalars'
+        ):
+            _check(f)
+
+    def test_enum_with_mixed_scalar_values_allowed(self) -> None:
+        def f(x: _MixedScalarValued) -> TaskResult[int, TaskError]: ...
         _check(f)
 
 

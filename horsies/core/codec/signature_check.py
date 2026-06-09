@@ -314,6 +314,24 @@ def _classify(
             return
 
         if issubclass(annot_cls, enum.Enum):
+            # Member values must be JSON-native scalars: anything else
+            # encodes through mode='json' coercion (tuple → list, ...) and
+            # then fails enum-by-value decode on the consumer — exactly the
+            # deferred runtime failure this validator exists to prevent.
+            for member in annot_cls:
+                value = member.value
+                if value is not None and not isinstance(value, (str, int, float)):
+                    raise _RejectedError(_Rejection(
+                        banned=(
+                            f'Enum {annot_cls.__name__} '
+                            f'(member {member.name!r} has value {value!r})'
+                        ),
+                        reason=(
+                            'enum member values must be JSON-native scalars '
+                            '(str/int/float/bool/None) to round-trip by value'
+                        ),
+                        fix='use str or int member values',
+                    ))
             return
 
         if is_typeddict(annot_cls):
