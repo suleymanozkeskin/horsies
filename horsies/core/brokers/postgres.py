@@ -370,7 +370,11 @@ REQUEUE_STALE_CLAIMED_SQL = text("""
         finalizing_by_worker_id = NULL,
         updated_at = NOW()
     FROM (
-        SELECT t2.id, hb.last_heartbeat, t2.claimed_at
+        -- Staleness predicate sits inside the locking subquery so only
+        -- genuinely stale rows are row-locked; locking every CLAIMED row
+        -- stalled concurrent lease renewals and made the claim path skip
+        -- reclaimable rows for the duration of this scan.
+        SELECT t2.id
         FROM horsies_tasks t2
         LEFT JOIN LATERAL (
             SELECT sent_at AS last_heartbeat
@@ -380,13 +384,13 @@ REQUEUE_STALE_CLAIMED_SQL = text("""
             LIMIT 1
         ) hb ON TRUE
         WHERE t2.status = 'CLAIMED'
+          AND (
+            (hb.last_heartbeat IS NULL AND t2.claimed_at IS NOT NULL AND t2.claimed_at < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL))
+            OR (hb.last_heartbeat IS NOT NULL AND hb.last_heartbeat < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL))
+          )
         FOR UPDATE OF t2 SKIP LOCKED
     ) s
     WHERE t.id = s.id
-      AND (
-        (s.last_heartbeat IS NULL AND s.claimed_at IS NOT NULL AND s.claimed_at < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL))
-        OR (s.last_heartbeat IS NOT NULL AND s.last_heartbeat < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL))
-      )
 """)
 
 
