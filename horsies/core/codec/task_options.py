@@ -23,5 +23,6 @@ def serialize_task_options(task_options: TaskOptions) -> SerdeResult[str]:
             'good_until': task_options.good_until.isoformat()
             if task_options.good_until
             else None,
+            'timeout_ms': task_options.timeout_ms,
         },
     )

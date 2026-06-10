@@ -190,6 +190,7 @@ class Horsies:
         retry_policy: Optional['RetryPolicy'] = None,
         exception_mapper: Optional['ExceptionMapper'] = None,
         default_unhandled_error_code: Optional[str] = None,
+        timeout_ms: Optional[int] = None,
     ) -> Callable[
         [Callable[P, 'TaskResult[T, TaskError]']],
         'TaskFunction[P, T]',
