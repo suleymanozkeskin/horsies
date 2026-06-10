@@ -1112,8 +1112,9 @@ class Worker:
                 'queue': queue,
                 'lim': limit,
                 'worker_id': self.worker_instance_id,
+                # Lease expiry is computed server-side (now() + lease);
+                # no local-clock timestamp is passed.
                 'claim_lease_ms': self._claim_lease_ms(),
-                'claim_expires_at': self._compute_claim_expires_at(),
             },
         )
         cols = res.keys()
@@ -1483,8 +1484,11 @@ class Worker:
                     task_id=task_id,
                     stage=_FINALIZE_STAGE_FUTURE,
                     message=f'Worker future failed before result: {exc}',
-                    retryable=is_retryable_connection_error(exc)
-                    and requeue_outcome is _RequeueOutcome.DB_ERROR,
+                    # Retryability is keyed on the recovery DB failure, not
+                    # the child-future exception: a non-connection future
+                    # error whose requeue hit a transient DB blip must still
+                    # retry the recovery instead of waiting on the reaper.
+                    retryable=requeue_outcome is _RequeueOutcome.DB_ERROR,
                     data={
                         'exception_type': type(exc).__name__,
                         'requeue_outcome': requeue_outcome.value,
@@ -2391,7 +2395,14 @@ class Worker:
             if not isinstance(retry_policy_raw, dict):
                 return False
             auto_retry_for = retry_policy_raw.get('auto_retry_for')
-        except Exception:
+        except Exception as exc:
+            # Corrupt task_options must not silently disable retries.
+            logger.error(
+                'Task %s retry decision failed parsing task_options; '
+                'treating as non-retryable: %s',
+                task_id,
+                exc,
+            )
             return False
 
         if not isinstance(auto_retry_for, list) or not auto_retry_for:
@@ -2465,7 +2476,13 @@ class Worker:
                     retry_policy_data = task_options_data.get('retry_policy', {})
                     if not isinstance(retry_policy_data, dict):
                         retry_policy_data = {}
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                'Task %s retry policy unparseable; falling back to default '
+                'intervals: %s',
+                task_id,
+                exc,
+            )
             retry_policy_data = {}
 
         # Calculate retry delay

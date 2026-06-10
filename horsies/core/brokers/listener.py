@@ -434,8 +434,14 @@ class PostgresListener:
             except asyncio.CancelledError:
                 # Graceful shutdown: stop dispatching and exit the task.
                 raise
-            except Exception:
-                # Unexpected issue: brief pause to avoid a hot loop, then try again.
+            except Exception as exc:
+                # Unexpected issue: brief pause to avoid a hot loop, then try
+                # again. Logged — a persistent non-OperationalError failure
+                # would otherwise be an invisible busy-reconnect loop.
+                logger.error(
+                    'Listener dispatcher failed unexpectedly; reconnecting: %s',
+                    exc,
+                )
                 await self._close_connections()
                 await asyncio.sleep(0.5)
                 continue
