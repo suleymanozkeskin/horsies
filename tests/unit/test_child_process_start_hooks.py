@@ -173,6 +173,42 @@ class TestRunChildStartHooks:
 
         assert exit_codes == [CHILD_HOOK_FAILURE_EXIT_CODE]
 
+    def test_mid_run_hook_failure_stops_worker_instead_of_restart_looping(
+        self,
+    ) -> None:
+        """ChildHookFailedError from a warmed-executor rebuild sets the stop flag.
+
+        Pins the mid-run off-ramp: the boot path is covered e2e, but a hook
+        that fails only on a respawn reaches _restart_executor, which must
+        stop the worker rather than retry a failure that re-runs in every
+        replacement child.
+        """
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        from horsies.core.worker.config import WorkerConfig
+        from horsies.core.worker.worker import ChildHookFailedError, Worker
+
+        cfg = WorkerConfig(
+            dsn='postgresql+psycopg://u:p@localhost/db',
+            psycopg_dsn='postgresql://u:p@localhost/db',
+            queues=['default'],
+        )
+        worker = Worker(
+            session_factory=MagicMock(), listener=MagicMock(), cfg=cfg,
+        )
+        worker._create_warmed_executor = AsyncMock(  # type: ignore[method-assign]
+            side_effect=ChildHookFailedError('hook failed in replacement child'),
+        )
+
+        async def _run() -> None:
+            await worker._restart_executor('broken pool during test')
+
+        asyncio.run(_run())
+
+        assert worker._stop.is_set()
+        worker._create_warmed_executor.assert_awaited_once()
+
     def test_fast_hook_does_not_trip_watchdog(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
