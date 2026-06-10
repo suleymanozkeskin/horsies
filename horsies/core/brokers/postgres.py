@@ -445,7 +445,9 @@ class PostgresBroker:
         self._app: Horsies | None = None  # Set by Horsies.get_broker()
 
         engine_cfg = self._runtime_engine_config()
-        self.async_engine = create_async_engine(self.config.database_url, **engine_cfg)
+        self.async_engine = create_async_engine(
+            self.config.database_url.get_secret_value(), **engine_cfg,
+        )
         self.session_factory = async_sessionmaker(
             self.async_engine, expire_on_commit=False
         )
@@ -511,11 +513,13 @@ class PostgresBroker:
         return int.from_bytes(h[:8], byteorder='big', signed=True)
 
     def _legacy_schema_advisory_key(self) -> int:
-        return self._legacy_schema_advisory_key_for_url(self.config.database_url)
+        return self._legacy_schema_advisory_key_for_url(
+            self.config.database_url.get_secret_value()
+        )
 
     def _legacy_schema_advisory_keys(self) -> tuple[int, ...]:
         urls = {
-            self.config.database_url,
+            self.config.database_url.get_secret_value(),
             self.config.effective_session_database_url,
         }
         return tuple(
@@ -597,7 +601,7 @@ class PostgresBroker:
 
     async def _run_with_schema_engine(self, fn: Any) -> None:
         schema_url = self.config.effective_session_database_url
-        if schema_url == self.config.database_url:
+        if schema_url == self.config.database_url.get_secret_value():
             await fn(self.async_engine)
             return
 

@@ -420,7 +420,7 @@ def worker_command(args: argparse.Namespace) -> None:
         app_locator = f'{module_name}:{var_name}'
 
     worker_config = WorkerConfig(
-        dsn=postgres_config.database_url,
+        dsn=postgres_config.database_url.get_secret_value(),
         session_dsn=postgres_config.effective_session_database_url,
         psycopg_dsn=to_psycopg_url(postgres_config.effective_session_database_url),
         pgbouncer_transaction_mode=postgres_config.pgbouncer_transaction_mode,

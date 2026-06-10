@@ -883,11 +883,13 @@ class Horsies:
 
             async def _test_all_connections() -> None:
                 await _test_connection(
-                    self.config.broker.database_url,
+                    self.config.broker.database_url.get_secret_value(),
                     connect_args=self.config.broker.pooled_connect_args,
                 )
                 if self.config.broker.session_database_url is not None:
-                    await _test_connection(self.config.broker.session_database_url)
+                    await _test_connection(
+                        self.config.broker.session_database_url.get_secret_value()
+                    )
                 if self.config.broker.pgbouncer_transaction_mode:
                     await _run_listener_probe()
 

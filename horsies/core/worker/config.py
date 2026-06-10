@@ -68,3 +68,26 @@ class WorkerConfig:
     max_claim_renew_age_ms: int = MAX_CLAIM_RENEW_AGE_MS
     # Log level for worker processes (default: INFO)
     loglevel: int = 20  # logging.INFO
+
+    def __repr__(self) -> str:
+        """Mask credential-bearing DSNs; the dataclass auto-repr put all
+        three in cleartext, one logger.debug('%s', cfg) away from a leak."""
+        from horsies.core.utils.url import mask_database_url
+
+        masked = {
+            'dsn': mask_database_url(self.dsn),
+            'psycopg_dsn': mask_database_url(self.psycopg_dsn),
+            'session_dsn': (
+                mask_database_url(self.session_dsn) if self.session_dsn else ''
+            ),
+        }
+        public_fields = {
+            'queues': self.queues,
+            'processes': self.processes,
+            'parent_pool_size': self.parent_pool_size,
+            'parent_max_overflow': self.parent_max_overflow,
+            'prefetch_buffer': self.prefetch_buffer,
+            'cluster_wide_cap': self.cluster_wide_cap,
+        }
+        parts = [f'{k}={v!r}' for k, v in {**masked, **public_fields}.items()]
+        return f'WorkerConfig({", ".join(parts)})'

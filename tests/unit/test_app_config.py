@@ -131,7 +131,11 @@ class TestPostgresConfigPgBouncer:
             database_url='postgresql+psycopg://user:pass@localhost/db',
         )
 
-        assert config.effective_session_database_url == config.database_url
+        # database_url is SecretStr (0.1.7); the effective property unwraps.
+        assert (
+            config.effective_session_database_url
+            == config.database_url.get_secret_value()
+        )
 
     def test_split_database_urls_are_valid(self) -> None:
         config = PostgresConfig(
@@ -144,6 +148,43 @@ class TestPostgresConfigPgBouncer:
             'postgresql+psycopg://user:pass@direct:5432/db'
         )
         assert config.pooled_connect_args == {'prepare_threshold': None}
+
+    def test_database_urls_never_leak_via_repr_or_dump(self) -> None:
+        """Credential-bearing URLs are SecretStr: repr/str/model_dump mask.
+
+        Regression for the defense-in-depth gap where any adopter logging
+        the config object (or a debugger/error tracker capturing locals)
+        got the cleartext password.
+        """
+        password = 'sup3r-secret-pw'
+        config = PostgresConfig(
+            database_url=f'postgresql+psycopg://user:{password}@pooler/db',
+            session_database_url=(
+                f'postgresql+psycopg://user:{password}@direct/db'
+            ),
+        )
+
+        assert password not in repr(config)
+        assert password not in str(config)
+        assert password not in str(config.model_dump())
+        # The unwrap path still yields the real URL for engine construction.
+        assert password in config.database_url.get_secret_value()
+        assert password in config.effective_session_database_url
+
+    def test_worker_config_repr_masks_dsns(self) -> None:
+        """WorkerConfig auto-repr carried all three DSNs in cleartext."""
+        from horsies.core.worker.config import WorkerConfig
+
+        password = 'sup3r-secret-pw'
+        cfg = WorkerConfig(
+            dsn=f'postgresql+psycopg://user:{password}@host/db',
+            psycopg_dsn=f'postgresql://user:{password}@host/db',
+            session_dsn=f'postgresql+psycopg://user:{password}@direct/db',
+            queues=['default'],
+        )
+
+        assert password not in repr(cfg)
+        assert 'default' in repr(cfg)
 
     def test_pgbouncer_mode_requires_session_database_url(self) -> None:
         with pytest.raises(ConfigurationError, match='session_database_url required'):

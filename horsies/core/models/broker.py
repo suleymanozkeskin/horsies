@@ -1,6 +1,6 @@
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from horsies.core.errors import ConfigurationError, ErrorCode
 
 
@@ -15,8 +15,10 @@ class PostgresConfig(BaseModel):
         'worker_child_pool_max_size',
     }
 
-    database_url: str = Field(..., description='The URL of the PostgreSQL database')
-    session_database_url: str | None = Field(
+    # SecretStr: repr()/model_dump() of the config must never expose
+    # credentials; internal consumers unwrap via get_secret_value().
+    database_url: SecretStr = Field(..., description='The URL of the PostgreSQL database')
+    session_database_url: SecretStr | None = Field(
         default=None,
         description='Direct/session-capable PostgreSQL URL for LISTEN/NOTIFY and schema DDL',
     )
@@ -63,13 +65,14 @@ class PostgresConfig(BaseModel):
     echo: bool = Field(default=False, description='Whether to echo the SQL statements')
 
     @field_validator('database_url')
-    def validate_database_url(cls, v: str) -> str:
-        if not v.startswith('postgresql+psycopg://'):
+    def validate_database_url(cls, v: SecretStr) -> SecretStr:
+        raw = v.get_secret_value()
+        if not raw.startswith('postgresql+psycopg://'):
             raise ConfigurationError(
                 message='invalid database URL scheme',
                 code=ErrorCode.BROKER_INVALID_URL,
                 notes=[
-                    f"got: {v.split('://')[0] if '://' in v else v[:20]}://...",
+                    f"got: {raw.split('://')[0] if '://' in raw else raw[:20]}://...",
                     'horsies only supports psycopg3 (async PostgreSQL driver)',
                 ],
                 help_text="use 'postgresql+psycopg://user:pass@host/db'",
@@ -77,15 +80,16 @@ class PostgresConfig(BaseModel):
         return v
 
     @field_validator('session_database_url')
-    def validate_session_database_url(cls, v: str | None) -> str | None:
+    def validate_session_database_url(cls, v: SecretStr | None) -> SecretStr | None:
         if v is None:
             return v
-        if not v.startswith('postgresql+psycopg://'):
+        raw = v.get_secret_value()
+        if not raw.startswith('postgresql+psycopg://'):
             raise ConfigurationError(
                 message='invalid session database URL scheme',
                 code=ErrorCode.BROKER_INVALID_URL,
                 notes=[
-                    f"got: {v.split('://')[0] if '://' in v else v[:20]}://...",
+                    f"got: {raw.split('://')[0] if '://' in raw else raw[:20]}://...",
                     'session_database_url must use the psycopg3 PostgreSQL driver',
                 ],
                 help_text="use 'postgresql+psycopg://user:pass@host/db'",
@@ -145,7 +149,8 @@ class PostgresConfig(BaseModel):
 
     @property
     def effective_session_database_url(self) -> str:
-        return self.session_database_url or self.database_url
+        url = self.session_database_url or self.database_url
+        return url.get_secret_value()
 
     @property
     def pooled_connect_args(self) -> dict[str, object]:
