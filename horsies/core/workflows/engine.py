@@ -374,6 +374,16 @@ async def _fail_enqueued_task(
         if should_continue:
             await _process_dependents(session, workflow_id, task_index, broker)
             await check_workflow_completion(session, workflow_id, broker)
+    else:
+        # Loud, not silent: the node is FAILED but on_error handling,
+        # dependent cascade, and the completion check did not run. The
+        # workflow stalls until the next reaper pass with a broker.
+        logger.warning(
+            'Marked workflow task %s:%s FAILED without a broker; failure '
+            'propagation deferred to the next recovery pass',
+            workflow_id,
+            task_index,
+        )
 
 
 async def _fail_subworkflow_load(
@@ -494,14 +504,42 @@ async def enqueue_workflow_task(
             return None
         retry_policy = options_data.get('retry_policy')
         if isinstance(retry_policy, dict):
-            max_retries = retry_policy.get('max_retries', 3)
+            # Default 3 mirrors RetryPolicy.max_retries; a non-int value
+            # (corrupt row) would otherwise surface as an INSERT error and
+            # loop the finalize retries.
+            max_retries_raw = retry_policy.get('max_retries', 3)
+            if isinstance(max_retries_raw, bool) or not isinstance(
+                max_retries_raw, int
+            ):
+                await _fail_enqueued_task(
+                    session,
+                    workflow_id,
+                    task_index,
+                    (
+                        f'Invalid max_retries in retry_policy for task '
+                        f'{task_index}: {max_retries_raw!r}'
+                    ),
+                    broker,
+                    error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+                )
+                return None
+            max_retries = max_retries_raw
         good_until_raw = options_data.get('good_until')
         if good_until_raw is not None:
             good_until_str = str(good_until_raw)
             try:
                 good_until_dt = datetime.fromisoformat(good_until_str)
-            except (ValueError, TypeError):
-                pass  # SHA will use None; good_until_str still passed to DB
+            except (ValueError, TypeError) as exc:
+                # SHA will use None; good_until_str is still passed to the
+                # DB column. Loud — fingerprint and stored deadline diverge.
+                logger.warning(
+                    'Unparseable good_until for workflow=%s task_index=%s '
+                    '(%r): %s',
+                    workflow_id,
+                    task_index,
+                    good_until_raw,
+                    exc,
+                )
 
     # Start with static kwargs — corrupt kwargs is fatal for this task
     raw_kwargs = _deser_json(row.task_kwargs, 'workflow task kwargs')
@@ -1354,12 +1392,38 @@ async def on_workflow_task_complete(
         resolved = _resolve_source_ok_type(broker.app, task_name)
         if resolved is not None:
             ok_type_for_encode = resolved
+    try:
+        encoded_result = encode_task_result(result, ok_type_for_encode)
+    except Exception as exc:
+        # A deterministic encode failure would otherwise loop the worker's
+        # phase-2 finalize retries forever (this is the only completion-path
+        # encode that was unwrapped). Degrade to a FAILED node carrying a
+        # serialization error; the err-only envelope encode below is
+        # fixed-schema and total.
+        from horsies.core.models.tasks import TaskError, TaskResult
+
+        logger.error(
+            'Failed to encode completion result for workflow=%s '
+            'task_index=%s: %s; storing a serialization-error envelope',
+            workflow_id,
+            task_index,
+            exc,
+        )
+        result = TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+                message=f'Failed to encode completion result: {exc}',
+                data={'workflow_id': workflow_id, 'task_index': task_index},
+            ),
+        )
+        new_status = 'FAILED'
+        encoded_result = encode_task_result(result, type(None))
     update_result = await session.execute(
         UPDATE_WORKFLOW_TASK_RESULT_SQL,
         {
             'status': new_status,
             'result': _ser(
-                dumps_json(encode_task_result(result, ok_type_for_encode)),
+                dumps_json(encoded_result),
                 'task completion result',
                 fallback='null',
             ),
