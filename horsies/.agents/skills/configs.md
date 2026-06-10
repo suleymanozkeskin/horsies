@@ -119,8 +119,8 @@ config = PostgresConfig(
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `database_url` | `str` | required | Must start with `"postgresql+psycopg"` (HRS-203 otherwise) |
-| `pool_size` | `int` | `30` | Connection pool size |
-| `max_overflow` | `int` | `30` | Extra connections beyond pool_size |
+| `pool_size` | `int` | `5` | Connection pool size (raise for high-throughput producers) |
+| `max_overflow` | `int` | `10` | Extra connections beyond pool_size |
 | `worker_pool_size` | `int | None` | `3` | Worker coordinator pool size; `None` inherits `pool_size` |
 | `worker_max_overflow` | `int | None` | `2` | Worker coordinator overflow; `None` inherits `max_overflow` |
 | `worker_child_pool_min_size` | `int` | `0` | Minimum connections kept by each child worker process |
@@ -269,12 +269,12 @@ All `TaskSchedule.name` values must be unique (HRS-205).
 | `name` | `str` | required | Unique schedule identifier |
 | `task_name` | `str` | required | Must match a registered task |
 | `pattern` | `SchedulePattern` | required | When to run |
-| `args` | `tuple` | `()` | Positional args to task |
+| `args` | `tuple` | `()` | Must stay empty — schedules are kwargs-only (rejected at scheduler startup) |
 | `kwargs` | `dict` | `{}` | Keyword args to task |
 | `queue_name` | `str \| None` | `None` | Target queue |
 | `enabled` | `bool` | `True` | Per-schedule on/off |
 | `timezone` | `str` | `"UTC"` | IANA timezone |
-| `catch_up_missed` | `bool` | `False` | Execute missed runs on restart |
+| `catch_up_missed` | `bool` | `False` | `True`: replay missed runs on restart. `False`: drop missed runs, fire only the most recent due slot |
 | `max_catch_up_runs` | `int` | `100` | 1–10000; max runs per tick during catch-up |
 
 ### Schedule Patterns

@@ -146,9 +146,13 @@ TaskSchedule(
 )
 ```
 
-If the scheduler was down for 3 hours, it will enqueue 3 tasks on restart.
+If the scheduler was down for 3 hours, it will enqueue 3 tasks on restart
+(bounded by `max_catch_up_runs`).
 
-When `catch_up_missed=False` (default), only the next scheduled run is executed.
+When `catch_up_missed=False` (default), missed runs are dropped: after
+downtime the scheduler fires at most one run — the most recent due slot —
+logs how many older slots were skipped, and resumes at the next future
+slot. Slot alignment is preserved, so task ids stay deterministic.
 
 ## Timezone Support
 

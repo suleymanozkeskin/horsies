@@ -67,6 +67,31 @@ def _make_broker(database_url: str = 'postgresql+psycopg://u:p@localhost/db') ->
     return broker
 
 
+def _make_result_session(row: Any) -> AsyncMock:
+    """Mock session for get_raw_result_record_async.
+
+    The broker polls a slim status/name SELECT first and only fetches the
+    full TaskModel row (session.get) once a terminal status is observed.
+    """
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    if row is None:
+        probe_row = None
+    else:
+        probe_row = MagicMock()
+        status = row.status
+        probe_row.status = (
+            status.value if isinstance(status, TaskStatus) else status
+        )
+        probe_row.task_name = row.task_name
+    probe_result = MagicMock()
+    probe_result.fetchone = MagicMock(return_value=probe_row)
+    session.execute = AsyncMock(return_value=probe_result)
+    session.get = AsyncMock(return_value=row)
+    return session
+
+
 def _make_task_row(**overrides: Any) -> MagicMock:
     """Build a mock TaskModel row with sensible defaults."""
     defaults = {
@@ -824,10 +849,7 @@ class TestGetRawResultRecordAsync:
     async def test_missing_row_returns_ok_none(self) -> None:
         """Row absent → Ok(None); no INVALID_JSON_PAYLOAD."""
         broker = _make_broker()
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.get = AsyncMock(return_value=None)
+        session = _make_result_session(None)
         broker.session_factory = MagicMock(return_value=session)
 
         result = await broker.get_raw_result_record_async('missing-id')
@@ -841,15 +863,11 @@ class TestGetRawResultRecordAsync:
         from horsies.core.brokers.result_types import RawResultRecord
 
         broker = _make_broker()
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-
         row = _make_task_row(
             status=TaskStatus.COMPLETED,
             result='{"__h_task_result__":true,"ok":42,"err":null}',
         )
-        session.get = AsyncMock(return_value=row)
+        session = _make_result_session(row)
         broker.session_factory = MagicMock(return_value=session)
 
         result = await broker.get_raw_result_record_async('task-123')
@@ -872,12 +890,8 @@ class TestGetRawResultRecordAsync:
         from horsies.core.brokers.result_types import RawResultRecord
 
         broker = _make_broker()
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-
         row = _make_task_row(status=TaskStatus.CANCELLED, result=None)
-        session.get = AsyncMock(return_value=row)
+        session = _make_result_session(row)
         broker.session_factory = MagicMock(return_value=session)
 
         result = await broker.get_raw_result_record_async('task-123')
@@ -902,11 +916,8 @@ class TestGetRawResultRecordAsync:
         broker.listener.listen = AsyncMock(
             side_effect=RuntimeError('listener down; force polling'),
         )
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
         running_row = _make_task_row(status=TaskStatus.RUNNING, result=None)
-        session.get = AsyncMock(return_value=running_row)
+        session = _make_result_session(running_row)
         broker.session_factory = MagicMock(return_value=session)
 
         with patch(
@@ -926,14 +937,11 @@ class TestGetRawResultRecordAsync:
     async def test_malformed_json_returns_invalid_json_payload(self) -> None:
         """Result column with malformed JSON → Err(INVALID_JSON_PAYLOAD)."""
         broker = _make_broker()
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
         row = _make_task_row(
             status=TaskStatus.COMPLETED,
             result='{not valid json',
         )
-        session.get = AsyncMock(return_value=row)
+        session = _make_result_session(row)
         broker.session_factory = MagicMock(return_value=session)
 
         result = await broker.get_raw_result_record_async('task-123')
@@ -953,11 +961,8 @@ class TestGetRawResultRecordAsync:
         parse failure.
         """
         broker = _make_broker()
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
         row = _make_task_row(status=TaskStatus.COMPLETED, result='42')
-        session.get = AsyncMock(return_value=row)
+        session = _make_result_session(row)
         broker.session_factory = MagicMock(return_value=session)
 
         result = await broker.get_raw_result_record_async('task-123')
@@ -971,10 +976,8 @@ class TestGetRawResultRecordAsync:
     async def test_cancelled_error_propagates(self) -> None:
         """``asyncio.CancelledError`` must re-raise; no broker-error wrap."""
         broker = _make_broker()
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.get = AsyncMock(side_effect=asyncio.CancelledError)
+        session = _make_result_session(None)
+        session.execute = AsyncMock(side_effect=asyncio.CancelledError)
         broker.session_factory = MagicMock(return_value=session)
 
         with pytest.raises(asyncio.CancelledError):
@@ -990,13 +993,10 @@ class TestGetRawResultRecordAsync:
         """
         broker = _make_broker()
         q: asyncio.Queue[Any] = asyncio.Queue()
-        broker.listener.listen = AsyncMock(return_value=Ok(q))
+        broker.listener.listen_payload = AsyncMock(return_value=Ok(q))
 
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.get = AsyncMock(
-            return_value=_make_task_row(status=TaskStatus.RUNNING),
+        session = _make_result_session(
+            _make_task_row(status=TaskStatus.RUNNING),
         )
         broker.session_factory = MagicMock(return_value=session)
 
@@ -1004,12 +1004,16 @@ class TestGetRawResultRecordAsync:
         release = asyncio.Event()
         finished = asyncio.Event()
 
-        async def _unsubscribe(_channel: str, _queue: object) -> None:
+        async def _unsubscribe(
+            _channel: str, _payload: str, _queue: object,
+        ) -> None:
             started.set()
             await release.wait()
             finished.set()
 
-        broker.listener.unsubscribe = AsyncMock(side_effect=_unsubscribe)
+        broker.listener.unsubscribe_payload = AsyncMock(
+            side_effect=_unsubscribe,
+        )
 
         task = asyncio.create_task(
             broker.get_raw_result_record_async(
@@ -1018,7 +1022,7 @@ class TestGetRawResultRecordAsync:
         )
 
         for _ in range(50):
-            if broker.listener.listen.await_count > 0:
+            if broker.listener.listen_payload.await_count > 0:
                 break
             await asyncio.sleep(0)
 
@@ -1034,7 +1038,9 @@ class TestGetRawResultRecordAsync:
             await task
 
         assert finished.is_set() is True
-        broker.listener.unsubscribe.assert_awaited_once_with('task_done', q)
+        broker.listener.unsubscribe_payload.assert_awaited_once_with(
+            'task_done', 'task-123', q,
+        )
 
 
 # ---------------------------------------------------------------------------

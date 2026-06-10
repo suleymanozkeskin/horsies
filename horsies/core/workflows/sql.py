@@ -214,7 +214,7 @@ GET_WORKFLOW_STATUS_SQL = text(
 GET_DEPENDENT_TASKS_SQL = text("""
     SELECT task_index FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id
-      AND :completed_idx = ANY(dependencies)
+      AND dependencies @> ARRAY[CAST(:completed_idx AS INTEGER)]
       AND status = 'PENDING'
 """)
 GET_WORKFLOW_DEPTH_SQL = text(
@@ -311,14 +311,14 @@ GET_WORKFLOW_COMPLETION_STATUS_SQL = text("""
 MARK_WORKFLOW_COMPLETED_SQL = text("""
     UPDATE horsies_workflows
     SET status = 'COMPLETED', result = :result, completed_at = NOW(), updated_at = NOW()
-    WHERE id = :wf_id AND completed_at IS NULL
+    WHERE id = :wf_id AND status = 'RUNNING' AND completed_at IS NULL
 """)
 MARK_WORKFLOW_FAILED_SQL = text("""
     UPDATE horsies_workflows
     SET status = 'FAILED', result = :result,
         error = COALESCE(:error, error),
         completed_at = NOW(), updated_at = NOW()
-    WHERE id = :wf_id AND completed_at IS NULL
+    WHERE id = :wf_id AND status = 'RUNNING' AND completed_at IS NULL
 """)
 GET_PARENT_WORKFLOW_INFO_SQL = text("""
     SELECT parent_workflow_id, parent_task_index
@@ -380,7 +380,7 @@ GET_TERMINAL_TASK_RESULTS_SQL = text("""
       AND NOT EXISTS (
           SELECT 1 FROM horsies_workflow_tasks other
           WHERE other.workflow_id = wt.workflow_id
-            AND wt.task_index = ANY(other.dependencies)
+            AND other.dependencies @> ARRAY[wt.task_index]
       )
 """)
 # -- SQL constants for _handle_workflow_task_failure --

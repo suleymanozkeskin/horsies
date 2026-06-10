@@ -138,6 +138,26 @@ def _parse_locator(locator: str) -> tuple[str, str | None]:
     return (locator, None)
 
 
+def _positive_int(value: str) -> int:
+    """argparse type: integer >= 1.
+
+    ProcessPoolExecutor raises a raw ValueError on max_workers=0; reject
+    at the CLI boundary with a usage error instead.
+    """
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(f'must be >= 1, got {parsed}')
+    return parsed
+
+
+def _non_negative_int(value: str) -> int:
+    """argparse type: integer >= 0 (0 means auto)."""
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f'must be >= 0, got {parsed}')
+    return parsed
+
+
 def _is_file_path(path: str) -> bool:
     """Check if path looks like a file path (vs dotted module path)."""
     return path.endswith('.py') or os.path.sep in path or '/' in path
@@ -420,7 +440,7 @@ def worker_command(args: argparse.Namespace) -> None:
         app_locator = f'{module_name}:{var_name}'
 
     worker_config = WorkerConfig(
-        dsn=postgres_config.database_url,
+        dsn=postgres_config.database_url.get_secret_value(),
         session_dsn=postgres_config.effective_session_database_url,
         psycopg_dsn=to_psycopg_url(postgres_config.effective_session_database_url),
         pgbouncer_transaction_mode=postgres_config.pgbouncer_transaction_mode,
@@ -752,19 +772,19 @@ Examples:
         )
         worker_parser.add_argument(
             '--processes',
-            type=int,
+            type=_positive_int,
             default=1,
             help='Number of worker processes (default: 1)',
         )
         worker_parser.add_argument(
             '--max-claim-batch',
-            type=int,
+            type=_non_negative_int,
             default=0,
             help='Max tasks per queue per pass, 0=auto (default: 0)',
         )
         worker_parser.add_argument(
             '--max-claim-per-worker',
-            type=int,
+            type=_non_negative_int,
             default=0,
             help='Max claimed tasks per worker, 0=auto (default: 0)',
         )

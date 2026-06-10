@@ -6,8 +6,23 @@ from sqlalchemy import text
 
 
 # ---- Schema infrastructure ----
+#
+# v3: claim-path indexes (idx_horsies_tasks_claim_pending,
+#     idx_horsies_tasks_claim_expired, idx_horsies_tasks_worker_status,
+#     idx_horsies_worker_states_worker_snapshot).
+# v4: widen horsies_heartbeats.id / horsies_worker_states.id to BIGINT
+#     (int4 sequences exhaust within months at heartbeat insert rates).
+# v5: drop write-amplifying single-column indexes on horsies_tasks whose
+#     queries are served by the v3 partial composites (or that no query
+#     uses); replace full good_until index with a partial one.
+# v6: split notify triggers into INSERT/UPDATE pairs with WHEN clauses so
+#     non-status updates (lease renewals etc.) never invoke plpgsql.
+# v7: ordered partial index for the expired claim arm
+#     (idx_horsies_tasks_claim_expired_ordered) — the v3 expiry-filter
+#     index cannot serve the arm's ORDER BY, so deep expired backlogs
+#     paid a full sort under SKIP LOCKED.
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 7
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
@@ -234,6 +249,41 @@ ADD_TASK_FINALIZING_COLUMNS_SQL = text("""
     ALTER TABLE horsies_tasks
     ADD COLUMN IF NOT EXISTS finalizing_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS finalizing_by_worker_id TEXT;
+""")
+
+# Migration (v4): widen timeseries PKs to BIGINT. Both tables are
+# retention-bounded (hourly/periodic cleanup), so the type rewrite is cheap.
+WIDEN_HEARTBEATS_ID_TO_BIGINT_SQL = text("""
+    ALTER TABLE horsies_heartbeats
+    ALTER COLUMN id TYPE BIGINT;
+""")
+
+WIDEN_WORKER_STATES_ID_TO_BIGINT_SQL = text("""
+    ALTER TABLE horsies_worker_states
+    ALTER COLUMN id TYPE BIGINT;
+""")
+
+# Migration (v5): every horsies_tasks lifecycle UPDATE touches an indexed
+# column, making updates non-HOT — each one writes new entries into ALL
+# indexes. Indexes that serve no query (or whose queries are covered by the
+# v3 partial composites) are pure churn on the hottest table.
+DROP_REDUNDANT_TASK_INDEXES_SQL = text("""
+    DROP INDEX IF EXISTS ix_horsies_tasks_claimed;
+    DROP INDEX IF EXISTS ix_horsies_tasks_claim_expires_at;
+    DROP INDEX IF EXISTS ix_horsies_tasks_is_workflow_task;
+    DROP INDEX IF EXISTS ix_horsies_tasks_finalizing_at;
+    DROP INDEX IF EXISTS ix_horsies_tasks_good_until;
+    DROP INDEX IF EXISTS ix_horsies_tasks_next_retry_at;
+    DROP INDEX IF EXISTS ix_horsies_worker_states_worker_id;
+""")
+
+# good_until is immutable per row and mostly NULL; the expiry scans
+# (status='PENDING' AND good_until <= NOW() ORDER BY good_until) only ever
+# touch rows where it is set.
+CREATE_TASKS_GOOD_UNTIL_PARTIAL_INDEX_SQL = text("""
+    CREATE INDEX IF NOT EXISTS idx_horsies_tasks_good_until_set
+    ON horsies_tasks (good_until)
+    WHERE good_until IS NOT NULL;
 """)
 
 ADD_WORKFLOW_SENT_AT_COLUMN_SQL = text("""

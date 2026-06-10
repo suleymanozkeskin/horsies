@@ -178,6 +178,11 @@ class TaskError(BaseModel):
 
     exception: BaseException | FlattenedException | None = None
     error_code: Optional[Union[BuiltInTaskCode, str]] = None
+    # Boundary note: values must be JSON-native (str/int/float/bool/
+    # None/list/dict). This internal field bypasses the strict JsonValue
+    # fence, so non-native values are silently coerced by pydantic's
+    # mode='json' dump on the wire (tuple/set → list, Decimal → str) and
+    # do not round-trip type-faithfully.
     data: Optional[Any] = None
     message: Optional[str] = None
 

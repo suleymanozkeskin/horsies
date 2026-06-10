@@ -16,6 +16,7 @@ import datetime
 import decimal
 import enum
 import inspect
+import math
 import pathlib
 import types
 import uuid
@@ -314,6 +315,33 @@ def _classify(
             return
 
         if issubclass(annot_cls, enum.Enum):
+            # Member values must be JSON-native scalars: anything else
+            # encodes through mode='json' coercion (tuple → list, ...) and
+            # then fails enum-by-value decode on the consumer — exactly the
+            # deferred runtime failure this validator exists to prevent.
+            for member in annot_cls:
+                value = member.value
+                # bool is an int subclass and is fine; non-finite floats are
+                # not JSON-native (the codec encodes them to None, so decode
+                # can never reconstruct the member by value).
+                is_json_native_scalar = isinstance(
+                    value, (str, int, float)
+                ) and not (
+                    isinstance(value, float) and not math.isfinite(value)
+                )
+                if value is not None and not is_json_native_scalar:
+                    raise _RejectedError(_Rejection(
+                        banned=(
+                            f'Enum {annot_cls.__name__} '
+                            f'(member {member.name!r} has value {value!r})'
+                        ),
+                        reason=(
+                            'enum member values must be JSON-native scalars '
+                            '(str/int/finite float/bool/None) to round-trip '
+                            'by value'
+                        ),
+                        fix='use str or int member values',
+                    ))
             return
 
         if is_typeddict(annot_cls):

@@ -112,28 +112,28 @@ class TaskModel(Base):
 
     # Task claiming and lifecycle
     claimed: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default=sa_false(), index=True,
-    )
+        Boolean, default=False, server_default=sa_false(),
+    )  # informational; never a query predicate (no index)
     claimed_by_worker_id: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True
     )
     # Claim lease expiry: prefetched claims expire after this time and can be reclaimed.
     # NULL means no expiry (task is within running capacity, not prefetched).
     claim_expires_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True, index=True
-    )
+        DateTime(timezone=True), nullable=True
+    )  # served by idx_horsies_tasks_claim_expired (partial, schema v3)
     is_workflow_task: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default=sa_false(), index=True,
-    )
+        Boolean, nullable=False, default=False, server_default=sa_false(),
+    )  # near-zero selectivity; no query needs an index on it
     finalizing_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True, index=True
-    )
+        DateTime(timezone=True), nullable=True
+    )  # only OR-combined behind status filters; index never selective
     finalizing_by_worker_id: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True
     )
     good_until: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True, index=True
-    )
+        DateTime(timezone=True), nullable=True
+    )  # served by idx_horsies_tasks_good_until_set (partial, schema v5)
 
     # Retry configuration and tracking
     retry_count: Mapped[int] = mapped_column(
@@ -143,8 +143,8 @@ class TaskModel(Base):
         Integer, default=0, server_default=text('0'), nullable=False,
     )
     next_retry_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True, index=True
-    )
+        DateTime(timezone=True), nullable=True
+    )  # filter inside claim index scans only; standalone index unused
     task_options: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Idempotent enqueue verification
@@ -229,7 +229,7 @@ class TaskHeartbeatModel(Base):
         ),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     task_id: Mapped[str] = mapped_column(String(36), nullable=False)
     sender_id: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -252,8 +252,10 @@ class WorkerStateModel(Base):
     __tablename__ = 'horsies_worker_states'
 
     # Timeseries primary key
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    worker_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    worker_id: Mapped[str] = mapped_column(
+        String(255), nullable=False,
+    )  # served by idx_horsies_worker_states_worker_snapshot (schema v3)
     snapshot_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

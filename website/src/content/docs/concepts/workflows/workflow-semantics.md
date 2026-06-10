@@ -385,6 +385,27 @@ TaskResult(err=TaskError(
 
 This applies to both `args_from` kwargs and `workflow_ctx_from` context data.
 
+### args_from with join='any' / 'quorum'
+
+With a non-`all` join, the node becomes ready while some dependencies may
+still be running. An `args_from` kwarg whose source is not yet terminal is
+simply **not injected** — the task receives only the kwargs of terminal
+sources. The target parameter must therefore declare a default:
+
+```python
+@app.task("partial_consumer")
+def partial_consumer(
+    b_result: TaskResult[int, TaskError] | None = None,
+    c_result: TaskResult[int, TaskError] | None = None,
+) -> TaskResult[str, TaskError]:
+    ...
+```
+
+Spec validation rejects (`WORKFLOW_INVALID_JOIN`) any `join='any'` /
+`'quorum'` node whose `args_from` targets a parameter without a default —
+without one, the task would crash with a `TypeError` depending on
+completion order.
+
 ## DAG Examples
 
 ### Linear Chain

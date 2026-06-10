@@ -374,6 +374,16 @@ async def _fail_enqueued_task(
         if should_continue:
             await _process_dependents(session, workflow_id, task_index, broker)
             await check_workflow_completion(session, workflow_id, broker)
+    else:
+        # Loud, not silent: the node is FAILED but on_error handling,
+        # dependent cascade, and the completion check did not run. The
+        # workflow stalls until the next reaper pass with a broker.
+        logger.warning(
+            'Marked workflow task %s:%s FAILED without a broker; failure '
+            'propagation deferred to the next recovery pass',
+            workflow_id,
+            task_index,
+        )
 
 
 async def _fail_subworkflow_load(
@@ -494,14 +504,42 @@ async def enqueue_workflow_task(
             return None
         retry_policy = options_data.get('retry_policy')
         if isinstance(retry_policy, dict):
-            max_retries = retry_policy.get('max_retries', 3)
+            # Default 3 mirrors RetryPolicy.max_retries; a non-int value
+            # (corrupt row) would otherwise surface as an INSERT error and
+            # loop the finalize retries.
+            max_retries_raw = retry_policy.get('max_retries', 3)
+            if isinstance(max_retries_raw, bool) or not isinstance(
+                max_retries_raw, int
+            ):
+                await _fail_enqueued_task(
+                    session,
+                    workflow_id,
+                    task_index,
+                    (
+                        f'Invalid max_retries in retry_policy for task '
+                        f'{task_index}: {max_retries_raw!r}'
+                    ),
+                    broker,
+                    error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+                )
+                return None
+            max_retries = max_retries_raw
         good_until_raw = options_data.get('good_until')
         if good_until_raw is not None:
             good_until_str = str(good_until_raw)
             try:
                 good_until_dt = datetime.fromisoformat(good_until_str)
-            except (ValueError, TypeError):
-                pass  # SHA will use None; good_until_str still passed to DB
+            except (ValueError, TypeError) as exc:
+                # SHA will use None; good_until_str is still passed to the
+                # DB column. Loud — fingerprint and stored deadline diverge.
+                logger.warning(
+                    'Unparseable good_until for workflow=%s task_index=%s '
+                    '(%r): %s',
+                    workflow_id,
+                    task_index,
+                    good_until_raw,
+                    exc,
+                )
 
     # Start with static kwargs — corrupt kwargs is fatal for this task
     raw_kwargs = _deser_json(row.task_kwargs, 'workflow task kwargs')
@@ -1354,12 +1392,38 @@ async def on_workflow_task_complete(
         resolved = _resolve_source_ok_type(broker.app, task_name)
         if resolved is not None:
             ok_type_for_encode = resolved
+    try:
+        encoded_result = encode_task_result(result, ok_type_for_encode)
+    except Exception as exc:
+        # A deterministic encode failure would otherwise loop the worker's
+        # phase-2 finalize retries forever (this is the only completion-path
+        # encode that was unwrapped). Degrade to a FAILED node carrying a
+        # serialization error; the err-only envelope encode below is
+        # fixed-schema and total.
+        from horsies.core.models.tasks import TaskError, TaskResult
+
+        logger.error(
+            'Failed to encode completion result for workflow=%s '
+            'task_index=%s: %s; storing a serialization-error envelope',
+            workflow_id,
+            task_index,
+            exc,
+        )
+        result = TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+                message=f'Failed to encode completion result: {exc}',
+                data={'workflow_id': workflow_id, 'task_index': task_index},
+            ),
+        )
+        new_status = 'FAILED'
+        encoded_result = encode_task_result(result, type(None))
     update_result = await session.execute(
         UPDATE_WORKFLOW_TASK_RESULT_SQL,
         {
             'status': new_status,
             'result': _ser(
-                dumps_json(encode_task_result(result, ok_type_for_encode)),
+                dumps_json(encoded_result),
                 'task completion result',
                 fallback='null',
             ),
@@ -1877,8 +1941,11 @@ async def check_workflow_completion(
     completed = row.completed or 0
     total = row.total or 0
 
-    # Don't process if workflow is PAUSED (waiting for manual intervention)
-    if current_status == 'PAUSED':
+    # Only a RUNNING workflow may be finalized. PAUSED waits for manual
+    # intervention; CANCELLED/COMPLETED/FAILED are final — a late task
+    # completion must not resurrect them (CANCELLED has completed_at NULL,
+    # so the already_completed check below does not cover it).
+    if current_status != 'RUNNING':
         return
 
     if incomplete > 0:
@@ -2044,7 +2111,25 @@ async def on_subworkflow_complete(
             fallback='null',
         )
 
-    # 4. Update parent node
+    # 4. Serialize parent-side promotion with other completions of the same
+    # parent: on_workflow_task_complete takes this lock for exactly that
+    # reason, and the failure/completion paths below (steps 5 and 8) acquire
+    # it anyway, in the same child→parent order. Without it, two sibling
+    # child workflows finishing concurrently can each observe the other's
+    # node as non-terminal and leave a fan-in dependent PENDING until the
+    # next reaper sweep.
+    parent_lock = await session.execute(
+        LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
+        {'wf_id': parent_wf_id},
+    )
+    if parent_lock.fetchone() is None:
+        logger.error(
+            f'Parent workflow {parent_wf_id} not found for child '
+            f'{child_workflow_id}; skipping subworkflow progression'
+        )
+        return
+
+    # 5. Update parent node
     update_result = await session.execute(
         UPDATE_PARENT_NODE_RESULT_SQL,
         {
@@ -2067,7 +2152,7 @@ async def on_subworkflow_complete(
         )
         return
 
-    # 5. Handle failure (same as task failure)
+    # 6. Handle failure (same as task failure)
     if parent_node_status == 'FAILED':
         # Create a TaskResult for the failure handler
         failure_result: TaskResult[Any, TaskError] = TaskResult(
@@ -2085,7 +2170,7 @@ async def on_subworkflow_complete(
             # PAUSE mode - stop processing
             return
 
-    # 6. Check if parent workflow is PAUSED
+    # 7. Check if parent workflow is PAUSED
     parent_status_check = await session.execute(
         GET_WORKFLOW_STATUS_SQL,
         {'wf_id': parent_wf_id},
@@ -2094,10 +2179,10 @@ async def on_subworkflow_complete(
     if parent_status_row and parent_status_row.status == 'PAUSED':
         return  # Don't propagate - parent is paused
 
-    # 7. Process parent dependents
+    # 8. Process parent dependents
     await _process_dependents(session, parent_wf_id, parent_task_idx, broker)
 
-    # 8. Check parent completion
+    # 9. Check parent completion
     await check_workflow_completion(session, parent_wf_id, broker)
 
 

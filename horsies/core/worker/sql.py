@@ -14,23 +14,47 @@ TASK_TERMINAL_VALUES: list[str] = [s.value for s in TASK_TERMINAL_STATES]
 # ---------- Claim SQL (priority + enqueued_at) ----------
 # All claimed tasks receive a bounded lease via claim_expires_at.
 # Expired leases are reclaimable by any worker (crash recovery + soft-cap prefetch).
+#
+# The two eligibility arms (fresh PENDING, expired CLAIMED lease) are scanned
+# separately so each walks its partial index in ORDER BY order and stops at
+# :lim — a single OR'd scan forces a sort of the whole eligible backlog.
+# Merging the per-arm top-:lim and re-limiting selects exactly the same rows
+# as the single ordered scan; the only difference is that up to :lim
+# additional candidate rows from the losing arm stay row-locked until the
+# (short) claim transaction commits.
 
 CLAIM_SQL = text("""
-WITH next AS (
-  SELECT id
+WITH pending AS (
+  SELECT id, priority, enqueued_at
   FROM horsies_tasks
   WHERE queue_name = :queue
-    AND (
-      -- Fresh pending tasks
-      status = 'PENDING'
-      -- OR expired claims (lease expired, reclaimable by any worker)
-      OR (status = 'CLAIMED' AND claim_expires_at IS NOT NULL AND claim_expires_at < now())
-    )
+    AND status = 'PENDING'
     AND enqueued_at <= now()
     AND (next_retry_at IS NULL OR next_retry_at <= now())
     AND (good_until IS NULL OR good_until > now())
   ORDER BY priority ASC, enqueued_at ASC, id ASC
   FOR UPDATE SKIP LOCKED
+  LIMIT :lim
+),
+expired AS (
+  SELECT id, priority, enqueued_at
+  FROM horsies_tasks
+  WHERE queue_name = :queue
+    AND status = 'CLAIMED' AND claim_expires_at IS NOT NULL AND claim_expires_at < now()
+    AND enqueued_at <= now()
+    AND (next_retry_at IS NULL OR next_retry_at <= now())
+    AND (good_until IS NULL OR good_until > now())
+  ORDER BY priority ASC, enqueued_at ASC, id ASC
+  FOR UPDATE SKIP LOCKED
+  LIMIT :lim
+),
+next AS (
+  SELECT id FROM (
+    SELECT * FROM pending
+    UNION ALL
+    SELECT * FROM expired
+  ) candidates
+  ORDER BY priority ASC, enqueued_at ASC, id ASC
   LIMIT :lim
 )
 UPDATE horsies_tasks t
@@ -52,6 +76,12 @@ RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name, t.is_workflow_task;
 
 CLAIM_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
+""")
+
+# Non-blocking gate for the reaper: every worker runs a reaper loop, but
+# only one needs to execute the cluster-wide scans per interval.
+REAPER_GATE_TRY_LOCK_SQL = text("""
+    SELECT pg_try_advisory_xact_lock(CAST(:key AS BIGINT))
 """)
 
 # Effective in-flight counts: expired CLAIMED tasks are excluded because they
@@ -197,6 +227,7 @@ MARK_TASK_FAILED_WORKER_SQL = text("""
         updated_at = NOW()
     WHERE id = :id
       AND status = 'RUNNING'
+      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
     RETURNING id
 """)
 
@@ -211,6 +242,7 @@ MARK_TASK_FAILED_SQL = text("""
         updated_at = NOW()
     WHERE id = :id
       AND status = 'RUNNING'
+      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
     RETURNING id
 """)
 
@@ -225,15 +257,8 @@ MARK_TASK_COMPLETED_SQL = text("""
         updated_at = NOW()
     WHERE id = :id
       AND status = 'RUNNING'
+      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
     RETURNING id
-""")
-
-GET_TASK_QUEUE_NAME_SQL = text("""
-    SELECT queue_name FROM horsies_tasks WHERE id = :id
-""")
-
-NOTIFY_TASK_NEW_SQL = text("""
-    SELECT pg_notify(:c1, :p)
 """)
 
 NOTIFY_TASK_QUEUE_SQL = text("""
@@ -294,6 +319,7 @@ SCHEDULE_TASK_RETRY_SQL = text("""
         updated_at = now()
     WHERE id = :id
       AND status = 'RUNNING'
+      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
       AND (good_until IS NULL OR :next_retry_at < good_until)
     RETURNING id
 """)
@@ -415,7 +441,9 @@ SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL = text("""
            worker_hostname, worker_pid, worker_process_name,
            queue_name, is_workflow_task, clock_timestamp() AS db_now
     FROM horsies_tasks
-    WHERE id = :id AND status = 'RUNNING'
+    WHERE id = :id
+      AND status = 'RUNNING'
+      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
     FOR UPDATE
 """)
 

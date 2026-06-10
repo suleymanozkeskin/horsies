@@ -979,6 +979,25 @@ class TestCreateTaskWrapperExecution:
         assert result.err is not None
         assert result.err.error_code == ContractCode.RETURN_TYPE_MISMATCH
 
+    def test_coercible_ok_value_returns_coerced(self) -> None:
+        """A lax-coercible ok value is returned coerced, matching the wire.
+
+        Ok('5') for a declared int passes lax validation as 5; the
+        in-process caller must observe the same 5 a wire consumer decodes,
+        not the original '5'.
+        """
+        def coercible_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok='5')  # type: ignore[arg-type]
+
+        app = _make_app()
+        wrapper = create_task_wrapper(coercible_fn, app, 'test.coercible')
+
+        result = wrapper(1)
+
+        assert result.is_ok()
+        assert result.ok == 5
+        assert isinstance(result.ok, int)
+
     def test_keyboard_interrupt_propagates(self) -> None:
         """KeyboardInterrupt re-raises for graceful worker shutdown."""
         def interrupting_fn(x: int) -> TaskResult[int, TaskError]:

@@ -280,7 +280,7 @@ class AppConfig(BaseModel):
             lines.append(f'  claim_lease_ms: {self.claim_lease_ms}ms')
 
         # Broker config with masked password
-        masked_url = mask_database_url(self.broker.database_url)
+        masked_url = mask_database_url(self.broker.database_url.get_secret_value())
         lines.append(f'  broker:')
         lines.append(f'    database_url: {masked_url}')
         if (

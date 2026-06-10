@@ -103,6 +103,9 @@ def _make_worker(engine: AsyncEngine) -> Worker:
     )
     worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
     worker._app = _test_app()
+    # Pin the instance id to the owner id used by the insert helpers so the
+    # finalize-path ownership guard matches.
+    worker.worker_instance_id = 'w-test-1'
     return worker
 
 

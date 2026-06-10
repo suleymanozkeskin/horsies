@@ -75,6 +75,11 @@ def _test_app() -> Horsies:
     return _TEST_APP
 
 
+# Owner id shared by the insert helper and the worker under test so the
+# finalize-path ownership guard matches.
+TEST_WORKER_ID = 'w-finalize-test'
+
+
 def _make_worker(engine: AsyncEngine) -> Worker:
     """Construct a Worker wired to the test DB."""
     sf = async_sessionmaker(engine, expire_on_commit=False)
@@ -85,6 +90,7 @@ def _make_worker(engine: AsyncEngine) -> Worker:
     )
     worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
     worker._app = _test_app()
+    worker.worker_instance_id = TEST_WORKER_ID
     return worker
 
 
@@ -97,13 +103,18 @@ async def _insert_running_task(session: AsyncSession) -> str:
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha)
+                 max_retries, started_at, enqueue_sha, claimed_by_worker_id)
             VALUES
                 (:id, 'finalize_after_test', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, NOW(), :enqueue_sha)
+                 0, NOW(), :enqueue_sha, :claimed_by_worker_id)
         """),
-        {'id': task_id, 'sent_at': sent_at, 'enqueue_sha': sha},
+        {
+            'id': task_id,
+            'sent_at': sent_at,
+            'enqueue_sha': sha,
+            'claimed_by_worker_id': TEST_WORKER_ID,
+        },
     )
     await session.commit()
     return task_id

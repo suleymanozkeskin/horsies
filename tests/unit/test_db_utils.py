@@ -95,3 +95,16 @@ class TestIsRetryableConnectionError:
 
     def test_empty_message_psycopg_operational_error(self) -> None:
         assert is_retryable_connection_error(OperationalError('')) is True
+
+    def test_deadlock_detected_is_retryable(self) -> None:
+        """Postgres 40P01 must stay retryable.
+
+        Cancel cascades lock parent-then-child while completion bubbling
+        locks child-then-parent; the resulting deadlock aborts one
+        transaction and the retry paths re-drive it. DeadlockDetected
+        subclasses psycopg OperationalError, so this holds today — this
+        test pins it against classifier or driver-mapping changes.
+        """
+        from psycopg.errors import DeadlockDetected
+
+        assert is_retryable_connection_error(DeadlockDetected('boom')) is True

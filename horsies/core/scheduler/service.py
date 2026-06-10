@@ -160,22 +160,28 @@ class Scheduler:
         now = datetime.now(timezone.utc)
         configured_names = {schedule.name for schedule in self.schedule_config.schedules}
 
-        # Remove stale DB state entries for schedules that no longer exist in config.
+        # State rows not in this scheduler's config are left untouched:
+        # deleting them breaks rolling deploys (the still-running old-config
+        # scheduler loses its rows and silently stops firing) and shared-DB
+        # topologies (one app's scheduler wiping another app's schedules).
+        # Orphan rows are inert — get_due_states filters to configured
+        # names — so we only surface them for operators.
         try:
             existing_states = await self.state_manager.get_all_states()
-            removed = [
+            orphaned = [
                 state.schedule_name
                 for state in existing_states
                 if state.schedule_name not in configured_names
             ]
-            for name in removed:
-                await self.state_manager.delete_state(name)
-            if removed:
-                logger.info(
-                    f'Pruned {len(removed)} stale schedule_state row(s): {removed}'
+            if orphaned:
+                logger.warning(
+                    f'{len(orphaned)} schedule_state row(s) not in this '
+                    f"scheduler's config (other scheduler, or removed "
+                    f'schedules): {orphaned}. Rows are kept; delete '
+                    f'manually if the schedules are gone for good.'
                 )
         except Exception as e:
-            logger.warning(f'Failed to prune stale schedule state rows: {e}')
+            logger.warning(f'Failed to inspect schedule state rows: {e}')
 
         failed_schedules: list[str] = []
         for schedule in self.schedule_config.schedules:
@@ -377,15 +383,27 @@ class Scheduler:
 
                     last_task_id = ''
                     caught_up: list[datetime] = []
+                    permanent_skip_slot: datetime | None = None
                     for due_time in due_runs:
                         result = await self._enqueue_scheduled_task(schedule, slot_time=due_time)
                         if is_err(result):
                             err = result.err_value
-                            level = 'transient' if err.retryable else 'permanent'
-                            logger.error(
-                                f"Schedule '{schedule.name}' catch-up failed at run "
-                                f'{len(caught_up) + 1}/{len(due_runs)} ({level}): {err.message}',
-                            )
+                            if err.retryable:
+                                logger.error(
+                                    f"Schedule '{schedule.name}' catch-up failed at run "
+                                    f'{len(caught_up) + 1}/{len(due_runs)} (transient), '
+                                    f'will retry next tick: {err.message}',
+                                )
+                            else:
+                                # A permanent error for this slot can never
+                                # succeed on retry; mark the slot consumed so
+                                # the schedule does not wedge on it forever.
+                                permanent_skip_slot = due_time
+                                logger.error(
+                                    f"Schedule '{schedule.name}' catch-up failed at run "
+                                    f'{len(caught_up) + 1}/{len(due_runs)} (permanent), '
+                                    f'skipping slot {due_time}: {err.message}',
+                                )
                             break
                         last_task_id = result.ok_value
                         caught_up.append(due_time)
@@ -394,20 +412,31 @@ class Scheduler:
                             f'for scheduled run at {due_time}',
                         )
 
-                    if caught_up:
-                        # Save progress for runs that succeeded — prevents
-                        # double-enqueue on the next tick.
-                        last_slot = caught_up[-1]
+                    progress_slot = permanent_skip_slot or (
+                        caught_up[-1] if caught_up else None
+                    )
+                    if progress_slot is not None:
+                        # Save progress for enqueued runs (and a permanently
+                        # failed slot, which is treated as consumed) —
+                        # prevents double-enqueue and permanent-error wedges
+                        # on the next tick.
                         next_run = calculate_next_run(
-                            schedule.pattern, last_slot, schedule.timezone,
+                            schedule.pattern, progress_slot, schedule.timezone,
                         )
-                        await self.state_manager.update_after_run(
-                            schedule_name=schedule.name,
-                            task_id=last_task_id,
-                            executed_at=check_time,
-                            next_run_at=next_run,
-                            session=session,
-                        )
+                        if caught_up:
+                            await self.state_manager.update_after_run(
+                                schedule_name=schedule.name,
+                                task_id=last_task_id,
+                                executed_at=check_time,
+                                next_run_at=next_run,
+                                session=session,
+                            )
+                        else:
+                            await self.state_manager.update_next_run(
+                                schedule_name=schedule.name,
+                                next_run_at=next_run,
+                                session=session,
+                            )
                         await session.commit()
                         if len(caught_up) < len(due_runs):
                             logger.warning(
@@ -415,15 +444,42 @@ class Scheduler:
                                 f'{len(caught_up)}/{len(due_runs)} runs enqueued',
                             )
                     else:
-                        # All failed — don't advance state, will retry next tick
+                        # All failed transiently — don't advance state, will
+                        # retry next tick
                         await session.rollback()
 
                 else:
-                    # Normal execution: single run
-                    # slot_time = state.next_run_at for deterministic task_id.
-                    # Fallback to check_time only if next_run_at is somehow None
-                    # (should not happen since should_run_now already checked it).
-                    slot_time = state.next_run_at if state.next_run_at is not None else check_time
+                    # Normal execution (catch_up_missed=False): fire only the
+                    # latest due slot. Older missed slots (scheduler downtime)
+                    # are dropped, and the schedule resumes strictly in the
+                    # future. slot_time stays slot-aligned for deterministic
+                    # task_id. Fallback to check_time only if next_run_at is
+                    # somehow None (should not happen since should_run_now
+                    # already checked it).
+                    first_due = (
+                        state.next_run_at if state.next_run_at is not None else check_time
+                    )
+                    slot_time, next_run, skipped = self._advance_to_latest_due_slot(
+                        schedule, first_due, check_time,
+                    )
+                    if skipped:
+                        logger.warning(
+                            f"Schedule '{schedule.name}' missed {skipped} run(s); "
+                            f'skipping to latest due slot {slot_time} '
+                            f'(catch_up_missed=False)',
+                        )
+                    if next_run <= check_time:
+                        # Scan cap reached on a very deep backlog: persist
+                        # progress without firing a stale slot; the next tick
+                        # continues advancing from here.
+                        await self.state_manager.update_next_run(
+                            schedule_name=schedule.name,
+                            next_run_at=next_run,
+                            session=session,
+                        )
+                        await session.commit()
+                        return
+
                     result = await self._enqueue_scheduled_task(schedule, slot_time=slot_time)
                     if is_err(result):
                         err = result.err_value
@@ -432,12 +488,22 @@ class Scheduler:
                                 f"Schedule '{schedule.name}' enqueue failed (transient), "
                                 f'will retry next tick: {err.message}',
                             )
-                        else:
-                            logger.error(
-                                f"Schedule '{schedule.name}' enqueue failed (permanent): "
-                                f'{err.message}',
-                            )
-                        await session.rollback()
+                            await session.rollback()
+                            return
+                        # A permanent error (e.g. PAYLOAD_MISMATCH after a
+                        # deploy changed the schedule's kwargs) can never
+                        # succeed on retry: advance past the doomed slot so
+                        # the schedule does not retry it every tick forever.
+                        logger.error(
+                            f"Schedule '{schedule.name}' enqueue failed (permanent), "
+                            f'skipping slot {slot_time}: {err.message}',
+                        )
+                        await self.state_manager.update_next_run(
+                            schedule_name=schedule.name,
+                            next_run_at=next_run,
+                            session=session,
+                        )
+                        await session.commit()
                         return
 
                     task_id = result.ok_value
@@ -446,9 +512,8 @@ class Scheduler:
                         f"for task '{schedule.task_name}'",
                     )
 
-                    next_run = calculate_next_run(
-                        schedule.pattern, slot_time, schedule.timezone,
-                    )
+                    # next_run (strictly future) was computed alongside the
+                    # latest due slot above.
                     await self.state_manager.update_after_run(
                         schedule_name=schedule.name,
                         task_id=task_id,
@@ -465,6 +530,47 @@ class Scheduler:
                 await session.rollback()
 
         # Advisory lock automatically released at transaction end
+
+    # Bound the per-tick slot scan so a pathological backlog (tiny period,
+    # very long downtime) cannot stall a tick; progress is persisted and the
+    # next tick continues from where this one stopped.
+    _MAX_SKIP_SCAN_PER_TICK = 100_000
+
+    def _advance_to_latest_due_slot(
+        self,
+        schedule: TaskSchedule,
+        first_due: datetime,
+        check_time: datetime,
+    ) -> tuple[datetime, datetime, int]:
+        """Advance through due slots to the latest one (catch_up_missed=False).
+
+        Args:
+            schedule: TaskSchedule configuration
+            first_due: First due scheduled run (<= check_time)
+            check_time: Current time
+
+        Returns:
+            (latest_due_slot, next_run_after_slot, skipped_count).
+            next_run_after_slot may still be <= check_time when the scan cap
+            was reached; callers must not fire a slot in that case.
+        """
+        slot = first_due
+        skipped = 0
+        next_run = calculate_next_run(schedule.pattern, slot, schedule.timezone)
+        while next_run <= check_time and skipped < self._MAX_SKIP_SCAN_PER_TICK:
+            if next_run <= slot:
+                logger.error(
+                    "Non-monotonic next_run calculated for schedule '%s': "
+                    'current=%s next=%s',
+                    schedule.name,
+                    slot,
+                    next_run,
+                )
+                break
+            slot = next_run
+            skipped += 1
+            next_run = calculate_next_run(schedule.pattern, slot, schedule.timezone)
+        return slot, next_run, skipped
 
     def _calculate_missed_runs(
         self,
@@ -522,6 +628,9 @@ class Scheduler:
             )
             return
 
+        # Save/restore rather than force-False: a caller that already
+        # suppressed sends (e.g. app.check()) must keep its setting.
+        prev_suppress = self.app._suppress_sends
         self.app.suppress_sends(True)
         try:
             for module in modules:
@@ -540,7 +649,7 @@ class Scheduler:
                     except Exception as e:
                         logger.warning(f"Failed to import task module '{module}': {e}")
         finally:
-            self.app.suppress_sends(False)
+            self.app.suppress_sends(prev_suppress)
 
     def _resolve_schedule_queue(self, schedule: TaskSchedule) -> str:
         """
@@ -582,6 +691,17 @@ class Scheduler:
                     notes=[f'underlying error: {e}'],
                     help_text='check queue_name in schedule matches app.config queue settings',
                 ) from e
+            if sched.args:
+                # Enqueue rejects positional args unconditionally
+                # (strict-serde has no typed wire representation for them);
+                # without this check the schedule passes startup and then
+                # fails permanently on every tick.
+                raise ConfigurationError(
+                    message=f"schedule '{sched.name}' carries positional args; schedules are kwargs-only",
+                    code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                    notes=[f'{len(sched.args)} positional arg(s) found'],
+                    help_text='move positional args to kwargs to satisfy the strict-serde wire contract',
+                )
             self._validate_schedule_signature(sched)
             self._validate_schedule_serializable(sched)
 

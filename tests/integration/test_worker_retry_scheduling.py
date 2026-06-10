@@ -30,6 +30,11 @@ pytestmark = [pytest.mark.integration]
 # ---------------------------------------------------------------------------
 
 
+# Owner id shared by the insert helper and the worker under test so the
+# retry-path ownership guard matches.
+TEST_WORKER_ID = 'w-retry-test'
+
+
 def _make_worker(engine: AsyncEngine) -> Worker:
     """Construct a Worker wired to the test DB."""
     sf = async_sessionmaker(engine, expire_on_commit=False)
@@ -38,7 +43,9 @@ def _make_worker(engine: AsyncEngine) -> Worker:
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
-    return Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
+    worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
+    worker.worker_instance_id = TEST_WORKER_ID
+    return worker
 
 
 async def _insert_task(
@@ -62,11 +69,11 @@ async def _insert_task(
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs, status, sent_at,
                  created_at, updated_at, claimed, retry_count, max_retries, started_at,
-                 good_until, task_options, enqueue_sha)
+                 good_until, task_options, enqueue_sha, claimed_by_worker_id)
             VALUES
                 (:id, 'retry_test', 'default', 100, '[]', '{}', :status, :sent_at,
                  NOW(), NOW(), FALSE, :retry_count, :max_retries, NOW(),
-                 :good_until, :task_options, :enqueue_sha)
+                 :good_until, :task_options, :enqueue_sha, :claimed_by_worker_id)
         """),
         {
             'id': task_id,
@@ -77,6 +84,7 @@ async def _insert_task(
             'max_retries': max_retries,
             'good_until': good_until,
             'task_options': task_options,
+            'claimed_by_worker_id': TEST_WORKER_ID,
         },
     )
     await session.commit()
@@ -288,7 +296,9 @@ async def test_schedule_retry_no_row_returns_reaper_reclaimed(
     worker = _make_worker(engine)
 
     async with worker.sf() as s:
-        result = await worker._schedule_retry(str(uuid.uuid4()), s)
+        result = await worker._schedule_retry(
+                str(uuid.uuid4()), s, queue_name='default',
+            )
 
     assert result == 'reaper_reclaimed'
 
@@ -312,7 +322,7 @@ async def test_schedule_retry_null_task_options_uses_defaults(
     worker._schedule_delayed_notification = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
 
     async with worker.sf() as s:
-        result = await worker._schedule_retry(task_id, s)
+        result = await worker._schedule_retry(task_id, s, queue_name='default')
         await s.commit()
 
     assert result == 'scheduled'
@@ -343,7 +353,7 @@ async def test_schedule_retry_happy_path_scheduled(
     worker._schedule_delayed_notification = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
 
     async with worker.sf() as s:
-        result = await worker._schedule_retry(task_id, s)
+        result = await worker._schedule_retry(task_id, s, queue_name='default')
         await s.commit()
 
     assert result == 'scheduled'
@@ -377,7 +387,7 @@ async def test_schedule_retry_good_until_exceeded_returns_expired(
     worker = _make_worker(engine)
 
     async with worker.sf() as s:
-        result = await worker._schedule_retry(task_id, s)
+        result = await worker._schedule_retry(task_id, s, queue_name='default')
 
     assert result == 'expired'
 
@@ -404,7 +414,7 @@ async def test_schedule_retry_reaper_reclaimed(
     worker = _make_worker(engine)
 
     async with worker.sf() as s:
-        result = await worker._schedule_retry(task_id, s)
+        result = await worker._schedule_retry(task_id, s, queue_name='default')
 
     assert result == 'reaper_reclaimed'
 
@@ -460,7 +470,7 @@ async def test_schedule_retry_sql_guard_expiry_postcheck_returns_expired(
     async with worker.sf() as real_session:
         wrapped = _InterceptSession(real_session, task_id, past_good_until)
         result = await worker._schedule_retry(
-            task_id, wrapped,  # type: ignore[arg-type]
+            task_id, wrapped, queue_name='default',  # type: ignore[arg-type]
         )
 
     assert result == 'expired'

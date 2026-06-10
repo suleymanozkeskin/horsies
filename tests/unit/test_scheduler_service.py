@@ -548,6 +548,166 @@ class TestCalculateMissedRuns:
 
 
 # =============================================================================
+# _advance_to_latest_due_slot (catch_up_missed=False skip semantics)
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestAdvanceToLatestDueSlot:
+    """Tests for Scheduler._advance_to_latest_due_slot."""
+
+    def _make_scheduler(self) -> Scheduler:
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(
+                    name='s',
+                    task_name='my_task',
+                    pattern=IntervalSchedule(seconds=5),
+                ),
+            ],
+        )
+        app = _make_app(schedule_config=config)
+        return Scheduler(app)
+
+    def test_single_due_slot_is_not_skipped(self) -> None:
+        """Normal operation: slot due by under one period fires unchanged."""
+        scheduler = self._make_scheduler()
+        schedule = TaskSchedule(
+            name='s',
+            task_name='my_task',
+            pattern=IntervalSchedule(seconds=5),
+        )
+        first_due = _utc(2025, 6, 1, 12, 0, 0)
+        now = _utc(2025, 6, 1, 12, 0, 1)
+
+        slot, next_run, skipped = scheduler._advance_to_latest_due_slot(
+            schedule, first_due, now,
+        )
+
+        assert slot == first_due
+        assert skipped == 0
+        assert next_run == _utc(2025, 6, 1, 12, 0, 5)
+        assert next_run > now
+
+    def test_backlog_skips_to_latest_due_slot(self) -> None:
+        """Downtime backlog: only the latest due slot remains."""
+        scheduler = self._make_scheduler()
+        schedule = TaskSchedule(
+            name='s',
+            task_name='my_task',
+            pattern=IntervalSchedule(seconds=5),
+        )
+        first_due = _utc(2025, 6, 1, 12, 0, 0)
+        now = _utc(2025, 6, 1, 12, 0, 52)  # slots 0..50 due (11 slots)
+
+        slot, next_run, skipped = scheduler._advance_to_latest_due_slot(
+            schedule, first_due, now,
+        )
+
+        assert slot == _utc(2025, 6, 1, 12, 0, 50)
+        assert skipped == 10
+        assert next_run == _utc(2025, 6, 1, 12, 0, 55)
+        assert next_run > now
+
+    def test_scan_cap_returns_partial_progress(self) -> None:
+        """Deep backlog beyond the cap returns a still-due next_run."""
+        scheduler = self._make_scheduler()
+        schedule = TaskSchedule(
+            name='s',
+            task_name='my_task',
+            pattern=IntervalSchedule(seconds=1),
+        )
+        first_due = _utc(2025, 6, 1, 12, 0, 0)
+        now = _utc(2025, 6, 1, 12, 0, 30)
+
+        with patch.object(Scheduler, '_MAX_SKIP_SCAN_PER_TICK', 3):
+            slot, next_run, skipped = scheduler._advance_to_latest_due_slot(
+                schedule, first_due, now,
+            )
+
+        assert skipped == 3
+        assert slot == _utc(2025, 6, 1, 12, 0, 3)
+        assert next_run == _utc(2025, 6, 1, 12, 0, 4)
+        assert next_run <= now, 'cap path must signal an unconverged backlog'
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestCheckScheduleSkipsMissedRuns:
+    """catch_up_missed=False fires at most one run after downtime."""
+
+    def _make_harness(
+        self,
+        *,
+        pattern: IntervalSchedule,
+        next_run_at: datetime,
+    ) -> tuple[Scheduler, TaskSchedule, AsyncMock, MagicMock]:
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(name='s', task_name='my_task', pattern=pattern),
+            ],
+        )
+        app = _make_app(schedule_config=config)
+        scheduler = Scheduler(app)
+
+        session = AsyncMock()
+        broker = MagicMock()
+        broker.session_factory.return_value.__aenter__ = AsyncMock(
+            return_value=session,
+        )
+        broker.session_factory.return_value.__aexit__ = AsyncMock(
+            return_value=False,
+        )
+        scheduler.broker = broker
+
+        state = MagicMock()
+        state.next_run_at = next_run_at
+        state_manager = MagicMock()
+        state_manager.get_state = AsyncMock(return_value=state)
+        state_manager.update_after_run = AsyncMock()
+        state_manager.update_next_run = AsyncMock()
+        scheduler.state_manager = state_manager
+
+        enqueue_mock = AsyncMock(return_value=Ok('task-1'))
+        scheduler._enqueue_scheduled_task = enqueue_mock  # type: ignore[method-assign]
+        return scheduler, config.schedules[0], enqueue_mock, state_manager
+
+    async def test_downtime_backlog_fires_latest_slot_once(self) -> None:
+        """10h-stale hourly-equivalent state enqueues exactly one run."""
+        scheduler, schedule, enqueue_mock, state_manager = self._make_harness(
+            pattern=IntervalSchedule(seconds=5),
+            next_run_at=_utc(2025, 6, 1, 12, 0, 0),
+        )
+        now = _utc(2025, 6, 1, 12, 0, 52)
+
+        await scheduler._check_schedule(schedule, now)
+
+        enqueue_mock.assert_awaited_once()
+        assert enqueue_mock.await_args.kwargs['slot_time'] == _utc(
+            2025, 6, 1, 12, 0, 50,
+        )
+        update_kwargs = state_manager.update_after_run.await_args.kwargs
+        assert update_kwargs['next_run_at'] == _utc(2025, 6, 1, 12, 0, 55)
+        assert update_kwargs['next_run_at'] > now
+
+    async def test_deep_backlog_persists_progress_without_firing(self) -> None:
+        """Scan-cap path advances state without enqueuing a stale slot."""
+        scheduler, schedule, enqueue_mock, state_manager = self._make_harness(
+            pattern=IntervalSchedule(seconds=1),
+            next_run_at=_utc(2025, 6, 1, 12, 0, 0),
+        )
+        now = _utc(2025, 6, 1, 12, 0, 30)
+
+        with patch.object(Scheduler, '_MAX_SKIP_SCAN_PER_TICK', 3):
+            await scheduler._check_schedule(schedule, now)
+
+        enqueue_mock.assert_not_awaited()
+        state_manager.update_after_run.assert_not_awaited()
+        update_kwargs = state_manager.update_next_run.await_args.kwargs
+        assert update_kwargs['next_run_at'] == _utc(2025, 6, 1, 12, 0, 4)
+
+
+# =============================================================================
 # _validate_schedules
 # =============================================================================
 
@@ -594,6 +754,41 @@ class TestValidateSchedules:
 
         # Should not raise even though task doesn't exist
         scheduler._validate_schedules()
+
+    def test_positional_args_raise_configuration_error(self) -> None:
+        """Schedules carrying positional args fail at startup, not per tick.
+
+        Enqueue rejects args unconditionally (strict-serde, kwargs-only);
+        startup validation must mirror that instead of letting the schedule
+        boot cleanly and then fail permanently on every tick.
+        """
+        def one_param(value: int) -> str:
+            return str(value)
+
+        task_mock = _make_task_mock(one_param)
+
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(
+                    name='s',
+                    task_name='my_task',
+                    pattern=IntervalSchedule(seconds=5),
+                    args=(1,),
+                ),
+            ],
+        )
+        app = _make_app(
+            schedule_config=config,
+            tasks={'my_task': task_mock},
+        )
+        scheduler = Scheduler(app)
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            scheduler._validate_schedules()
+
+        exc = exc_info.value
+        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert 'kwargs-only' in exc.message
 
     def test_invalid_queue_raises_configuration_error(self) -> None:
         """Invalid queue configuration raises ConfigurationError HRS-205."""
@@ -643,7 +838,14 @@ class TestInitializeSchedules:
     """Tests for Scheduler._initialize_schedules."""
 
     @pytest.mark.asyncio
-    async def test_prunes_removed_schedule_state_rows(self) -> None:
+    async def test_foreign_schedule_state_rows_are_kept(self) -> None:
+        """Startup must not delete state rows outside this config.
+
+        Spec change (0.1.7): auto-pruning broke rolling deploys (the
+        old-config scheduler lost its rows and silently stopped firing)
+        and shared-database topologies. Orphan rows are kept and only
+        logged.
+        """
         config = ScheduleConfig(
             schedules=[
                 TaskSchedule(
@@ -656,13 +858,15 @@ class TestInitializeSchedules:
         app = _make_app(schedule_config=config)
         scheduler = Scheduler(app)
 
-        stale_state = MagicMock()
-        stale_state.schedule_name = 'removed'
+        foreign_state = MagicMock()
+        foreign_state.schedule_name = 'other_schedulers_row'
         kept_state = MagicMock()
         kept_state.schedule_name = 'kept'
 
         state_manager = MagicMock()
-        state_manager.get_all_states = AsyncMock(return_value=[stale_state, kept_state])
+        state_manager.get_all_states = AsyncMock(
+            return_value=[foreign_state, kept_state],
+        )
         state_manager.delete_state = AsyncMock(return_value=True)
         state_manager.get_state = AsyncMock(return_value=None)
         state_manager.initialize_state = AsyncMock()
@@ -672,7 +876,7 @@ class TestInitializeSchedules:
         await scheduler._initialize_schedules()
 
         state_manager.get_all_states.assert_awaited_once()
-        state_manager.delete_state.assert_awaited_once_with('removed')
+        state_manager.delete_state.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_one_bad_schedule_does_not_block_others(self) -> None:
@@ -1736,7 +1940,12 @@ class TestCheckScheduleAdditionalPaths:
         session.rollback.assert_awaited_once()
 
     async def test_normal_run_advances_next_run_from_slot_time(self) -> None:
-        """A late interval tick should not shift the schedule anchor forward."""
+        """A late tick fires the latest due slot, keeping slot alignment.
+
+        catch_up_missed=False (spec change, 0.1.7): older missed slots are
+        dropped instead of replayed one per tick; the fired slot and the new
+        next_run_at stay aligned to the original anchor.
+        """
         schedule = TaskSchedule(
             name='s',
             task_name='my_task',
@@ -1774,14 +1983,23 @@ class TestCheckScheduleAdditionalPaths:
         ):
             await scheduler._check_schedule(schedule, now)
 
-        assert slot_times == [due_slot]
+        # Slots 12:00:00..12:00:15 were due; only the latest fires, and the
+        # anchor is preserved (12:00:15 is still a multiple of the period).
+        assert slot_times == [_utc(2025, 6, 1, 12, 0, 15)]
         state_manager.update_after_run.assert_awaited_once()
         update_kwargs = state_manager.update_after_run.await_args.kwargs
-        assert update_kwargs['next_run_at'] == _utc(2025, 6, 1, 12, 0, 5)
+        assert update_kwargs['next_run_at'] == _utc(2025, 6, 1, 12, 0, 20)
+        assert update_kwargs['next_run_at'] > now
         session.commit.assert_awaited_once()
 
-    async def test_normal_run_permanent_failure_rollback(self) -> None:
-        """Normal run: non-retryable Err → error logged, rollback."""
+    async def test_normal_run_permanent_failure_skips_slot(self) -> None:
+        """Non-retryable Err advances past the doomed slot (no wedge).
+
+        Spec change (0.1.7): a permanent enqueue error (e.g.
+        PAYLOAD_MISMATCH after a deploy changed kwargs) used to roll back
+        without advancing next_run_at, so the same slot was retried every
+        tick forever.
+        """
         schedule = TaskSchedule(
             name='s',
             task_name='my_task',
@@ -1801,6 +2019,7 @@ class TestCheckScheduleAdditionalPaths:
         state_manager = MagicMock()
         state_manager.get_state = AsyncMock(return_value=state)
         state_manager.update_after_run = AsyncMock()
+        state_manager.update_next_run = AsyncMock()
         scheduler.state_manager = state_manager
 
         scheduler._enqueue_scheduled_task = AsyncMock(  # type: ignore[method-assign]
@@ -1819,7 +2038,101 @@ class TestCheckScheduleAdditionalPaths:
             await scheduler._check_schedule(schedule, now)
 
         state_manager.update_after_run.assert_not_awaited()
+        update_kwargs = state_manager.update_next_run.await_args.kwargs
+        assert update_kwargs['next_run_at'] == _utc(2025, 6, 1, 12, 0, 10)
+        session.commit.assert_awaited_once()
+
+    async def test_normal_run_transient_failure_rollback(self) -> None:
+        """Retryable Err → rollback, slot retried next tick."""
+        schedule = TaskSchedule(
+            name='s',
+            task_name='my_task',
+            pattern=IntervalSchedule(seconds=5),
+            catch_up_missed=False,
+        )
+        config = ScheduleConfig(schedules=[schedule])
+        app = _make_app(schedule_config=config)
+        scheduler = Scheduler(app)
+
+        session, broker = _make_session_and_broker()
+        scheduler.broker = broker
+
+        state = MagicMock()
+        state.next_run_at = _utc(2025, 6, 1, 12, 0, 0)
+
+        state_manager = MagicMock()
+        state_manager.get_state = AsyncMock(return_value=state)
+        state_manager.update_after_run = AsyncMock()
+        state_manager.update_next_run = AsyncMock()
+        scheduler.state_manager = state_manager
+
+        scheduler._enqueue_scheduled_task = AsyncMock(  # type: ignore[method-assign]
+            return_value=Err(BrokerOperationError(
+                code=BrokerErrorCode.ENQUEUE_FAILED,
+                message='transient failure',
+                retryable=True,
+            )),
+        )
+
+        now = _utc(2025, 6, 1, 12, 0, 5)
+        with patch(
+            'horsies.core.scheduler.service.should_run_now',
+            return_value=True,
+        ):
+            await scheduler._check_schedule(schedule, now)
+
+        state_manager.update_after_run.assert_not_awaited()
+        state_manager.update_next_run.assert_not_awaited()
         session.rollback.assert_awaited_once()
+
+    async def test_catch_up_permanent_failure_skips_doomed_slot(self) -> None:
+        """Catch-up: a permanently failing slot is consumed, not retried."""
+        schedule = TaskSchedule(
+            name='s',
+            task_name='my_task',
+            pattern=IntervalSchedule(seconds=5),
+            catch_up_missed=True,
+        )
+        config = ScheduleConfig(schedules=[schedule])
+        app = _make_app(schedule_config=config)
+        scheduler = Scheduler(app)
+
+        session, broker = _make_session_and_broker()
+        scheduler.broker = broker
+
+        state = MagicMock()
+        state.next_run_at = _utc(2025, 6, 1, 12, 0, 0)
+
+        state_manager = MagicMock()
+        state_manager.get_state = AsyncMock(return_value=state)
+        state_manager.update_after_run = AsyncMock()
+        state_manager.update_next_run = AsyncMock()
+        scheduler.state_manager = state_manager
+
+        # First slot enqueues, second fails permanently, third never tried.
+        scheduler._enqueue_scheduled_task = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                Ok('task-0'),
+                Err(BrokerOperationError(
+                    code=BrokerErrorCode.PAYLOAD_MISMATCH,
+                    message='sha mismatch',
+                    retryable=False,
+                )),
+            ],
+        )
+
+        now = _utc(2025, 6, 1, 12, 0, 12)  # due slots: 0, 5, 10
+        with patch(
+            'horsies.core.scheduler.service.should_run_now',
+            return_value=True,
+        ):
+            await scheduler._check_schedule(schedule, now)
+
+        # Progress recorded past the doomed slot (12:00:05) → next 12:00:10.
+        update_kwargs = state_manager.update_after_run.await_args.kwargs
+        assert update_kwargs['task_id'] == 'task-0'
+        assert update_kwargs['next_run_at'] == _utc(2025, 6, 1, 12, 0, 10)
+        session.commit.assert_awaited_once()
 
     async def test_unexpected_exception_rollback(self) -> None:
         """Unexpected exception during enqueue → error logged, rollback."""
@@ -2362,6 +2675,9 @@ class TestPreloadTaskModulesAdditionalPaths:
         scheduler.app.suppress_sends = MagicMock(
             side_effect=_suppress_side_effect,
         )
+        # The finally-restore passes the saved prior flag (spec change,
+        # 0.1.7); pin it to False so the failing restore path is exercised.
+        scheduler.app._suppress_sends = False
 
         with pytest.raises(AttributeError, match='no suppress_sends'):
             with patch(
@@ -2447,7 +2763,7 @@ class TestValidateSchedulesCallsSignatureValidation:
     """Cover L588: _validate_schedules calls _validate_schedule_signature."""
 
     def test_valid_task_and_queue_calls_signature_validation(self) -> None:
-        """A valid schedule reaches signature validation."""
+        """A valid (kwargs-only) schedule reaches signature validation."""
         def my_fn(x: int) -> str:
             return str(x)
 
@@ -2459,12 +2775,12 @@ class TestValidateSchedulesCallsSignatureValidation:
                     name='s',
                     task_name='my_task',
                     pattern=IntervalSchedule(seconds=5),
-                    args=(42,),
+                    kwargs={'x': 42},
                 ),
             ],
         )
         app = _make_app(schedule_config=config, tasks={'my_task': task_mock})
         scheduler = Scheduler(app)
 
-        # Should not raise — args match signature
+        # Should not raise — kwargs match signature
         scheduler._validate_schedules()

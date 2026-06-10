@@ -1,9 +1,14 @@
 # app/core/brokers/postgres.py
 from __future__ import annotations
 import asyncio, hashlib, contextlib, random, threading, uuid
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING, cast
 from datetime import datetime, timedelta, timezone
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine, async_sessionmaker
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    create_async_engine,
+    async_sessionmaker,
+)
 from sqlalchemy import text, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError
@@ -103,7 +108,12 @@ from horsies.core.schemas.indexes import (
     CREATE_HEARTBEATS_TASK_ROLE_SENT_INDEX_SQL,
     CREATE_TASK_ATTEMPTS_ERROR_CODE_INDEX_SQL,
     CREATE_TASK_ATTEMPTS_FINISHED_AT_INDEX_SQL,
+    CREATE_TASKS_CLAIM_EXPIRED_INDEX_SQL,
+    CREATE_TASKS_CLAIM_PENDING_INDEX_SQL,
+    CREATE_TASKS_CLAIM_EXPIRED_ORDERED_INDEX_SQL,
     CREATE_TASKS_ERROR_CODE_INDEX_SQL,
+    CREATE_TASKS_WORKER_STATUS_INDEX_SQL,
+    CREATE_WORKER_STATES_WORKER_SNAPSHOT_INDEX_SQL,
     CREATE_WORKFLOW_TASKS_DEPS_INDEX_SQL,
 )
 from horsies.core.schemas.migrations import (
@@ -147,9 +157,13 @@ from horsies.core.schemas.migrations import (
     SET_ENQUEUE_SHA_NOT_NULL_SQL,
     SET_ENQUEUED_AT_DEFAULT_SQL,
     SET_ENQUEUED_AT_NOT_NULL_SQL,
+    CREATE_TASKS_GOOD_UNTIL_PARTIAL_INDEX_SQL,
+    DROP_REDUNDANT_TASK_INDEXES_SQL,
     SET_TASK_COLUMN_DEFAULTS_SQL,
     SET_WORKFLOW_SENT_AT_DEFAULT_SQL,
     SET_WORKFLOW_SENT_AT_NOT_NULL_SQL,
+    WIDEN_HEARTBEATS_ID_TO_BIGINT_SQL,
+    WIDEN_WORKER_STATES_ID_TO_BIGINT_SQL,
 )
 
 _SCHEMA_INIT_MAX_ATTEMPTS = 5
@@ -329,17 +343,32 @@ MARK_STALE_TASK_FAILED_SQL = text("""
     RETURNING t.id
 """)
 
+# Batched: a mass expiry as one statement is a single long transaction whose
+# commit flushes two NOTIFYs per row at once, overflowing listener queues.
+# SKIP LOCKED steps around rows a concurrent claim pass holds; the claim
+# itself re-checks good_until, so the race resolves consistently either way.
 EXPIRE_PENDING_TASKS_SQL = text("""
-    UPDATE horsies_tasks
+    UPDATE horsies_tasks t
     SET status = 'EXPIRED',
         failed_at = NOW(),
         result = :result,
         error_code = :error_code,
         updated_at = NOW()
-    WHERE status = 'PENDING'
-      AND good_until IS NOT NULL
-      AND good_until <= NOW()
+    FROM (
+        SELECT id FROM horsies_tasks
+        WHERE status = 'PENDING'
+          AND good_until IS NOT NULL
+          AND good_until <= NOW()
+        ORDER BY good_until ASC
+        LIMIT :batch_size
+        FOR UPDATE SKIP LOCKED
+    ) s
+    WHERE t.id = s.id
 """)
+
+_EXPIRE_BATCH_SIZE = 500
+# Backstop against an unbounded pass; the remainder expires next interval.
+_EXPIRE_MAX_BATCHES_PER_PASS = 200
 
 SELECT_TASK_ATTEMPTS_BY_TASK_ID_SQL = text("""
     SELECT task_id, attempt, outcome, will_retry,
@@ -350,6 +379,16 @@ SELECT_TASK_ATTEMPTS_BY_TASK_ID_SQL = text("""
     WHERE task_id = :task_id
     ORDER BY attempt DESC
 """)
+
+# Slim status probe for result-wait polling: the full row drags the
+# (potentially TOASTed) args/kwargs/result payload columns along on every
+# poll iteration; status+name is all the loop needs until terminal.
+GET_TASK_STATUS_NAME_SQL = text("""
+    SELECT status, task_name FROM horsies_tasks WHERE id = :id
+""")
+
+# Sentinel returned by _probe_result_row while the row is non-terminal.
+_STILL_WAITING = object()
 
 REQUEUE_STALE_CLAIMED_SQL = text("""
     UPDATE horsies_tasks AS t
@@ -362,7 +401,11 @@ REQUEUE_STALE_CLAIMED_SQL = text("""
         finalizing_by_worker_id = NULL,
         updated_at = NOW()
     FROM (
-        SELECT t2.id, hb.last_heartbeat, t2.claimed_at
+        -- Staleness predicate sits inside the locking subquery so only
+        -- genuinely stale rows are row-locked; locking every CLAIMED row
+        -- stalled concurrent lease renewals and made the claim path skip
+        -- reclaimable rows for the duration of this scan.
+        SELECT t2.id
         FROM horsies_tasks t2
         LEFT JOIN LATERAL (
             SELECT sent_at AS last_heartbeat
@@ -372,13 +415,13 @@ REQUEUE_STALE_CLAIMED_SQL = text("""
             LIMIT 1
         ) hb ON TRUE
         WHERE t2.status = 'CLAIMED'
+          AND (
+            (hb.last_heartbeat IS NULL AND t2.claimed_at IS NOT NULL AND t2.claimed_at < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL))
+            OR (hb.last_heartbeat IS NOT NULL AND hb.last_heartbeat < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL))
+          )
         FOR UPDATE OF t2 SKIP LOCKED
     ) s
     WHERE t.id = s.id
-      AND (
-        (s.last_heartbeat IS NULL AND s.claimed_at IS NOT NULL AND s.claimed_at < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL))
-        OR (s.last_heartbeat IS NOT NULL AND s.last_heartbeat < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL))
-      )
 """)
 
 
@@ -403,7 +446,9 @@ class PostgresBroker:
         self._app: Horsies | None = None  # Set by Horsies.get_broker()
 
         engine_cfg = self._runtime_engine_config()
-        self.async_engine = create_async_engine(self.config.database_url, **engine_cfg)
+        self.async_engine = create_async_engine(
+            self.config.database_url.get_secret_value(), **engine_cfg,
+        )
         self.session_factory = async_sessionmaker(
             self.async_engine, expire_on_commit=False
         )
@@ -469,11 +514,13 @@ class PostgresBroker:
         return int.from_bytes(h[:8], byteorder='big', signed=True)
 
     def _legacy_schema_advisory_key(self) -> int:
-        return self._legacy_schema_advisory_key_for_url(self.config.database_url)
+        return self._legacy_schema_advisory_key_for_url(
+            self.config.database_url.get_secret_value()
+        )
 
     def _legacy_schema_advisory_keys(self) -> tuple[int, ...]:
         urls = {
-            self.config.database_url,
+            self.config.database_url.get_secret_value(),
             self.config.effective_session_database_url,
         }
         return tuple(
@@ -555,7 +602,7 @@ class PostgresBroker:
 
     async def _run_with_schema_engine(self, fn: Any) -> None:
         schema_url = self.config.effective_session_database_url
-        if schema_url == self.config.database_url:
+        if schema_url == self.config.database_url.get_secret_value():
             await fn(self.async_engine)
             return
 
@@ -652,6 +699,23 @@ class PostgresBroker:
             await conn.execute(BACKFILL_TASK_IS_WORKFLOW_TASK_SQL)
             await conn.execute(ADD_TASK_FINALIZING_COLUMNS_SQL)
             await conn.execute(CREATE_TASKS_ERROR_CODE_INDEX_SQL)
+
+            # Migration (v3): claim-path indexes.
+            await conn.execute(CREATE_TASKS_CLAIM_PENDING_INDEX_SQL)
+            await conn.execute(CREATE_TASKS_CLAIM_EXPIRED_INDEX_SQL)
+            # Migration (v7): ordered walk for deep expired backlogs.
+            await conn.execute(CREATE_TASKS_CLAIM_EXPIRED_ORDERED_INDEX_SQL)
+            await conn.execute(CREATE_TASKS_WORKER_STATUS_INDEX_SQL)
+            await conn.execute(CREATE_WORKER_STATES_WORKER_SNAPSHOT_INDEX_SQL)
+
+            # Migration (v4): widen timeseries PKs to BIGINT.
+            await conn.execute(WIDEN_HEARTBEATS_ID_TO_BIGINT_SQL)
+            await conn.execute(WIDEN_WORKER_STATES_ID_TO_BIGINT_SQL)
+
+            # Migration (v5): drop write-amplifying single-column indexes;
+            # partial replacement for good_until.
+            await conn.execute(DROP_REDUNDANT_TASK_INDEXES_SQL)
+            await conn.execute(CREATE_TASKS_GOOD_UNTIL_PARTIAL_INDEX_SQL)
 
             # Migration: create horsies_task_attempts table and indexes.
             await conn.execute(CREATE_TASK_ATTEMPTS_TABLE_SQL)
@@ -939,6 +1003,49 @@ class PostgresBroker:
             raw_result=raw_value,
         ))
 
+    async def _probe_result_row(
+        self,
+        session: AsyncSession,
+        task_id: str,
+        *,
+        non_terminal_snapshot: bool = False,
+    ) -> 'BrokerResult[RawResultRecord | None] | object':
+        """Slim status probe for the result-wait loop.
+
+        Polls status+name only; the full row (with potentially TOASTed
+        payload columns) is fetched once, when a terminal status is
+        observed.
+
+        Returns the loop's final ``BrokerResult`` when the wait is over,
+        or the ``_STILL_WAITING`` sentinel to keep polling. With
+        ``non_terminal_snapshot=True`` (timeout path) a non-terminal row is
+        returned as a payload-less record instead of the sentinel.
+        """
+        probe = await session.execute(
+            GET_TASK_STATUS_NAME_SQL, {'id': task_id},
+        )
+        probe_row = probe.fetchone()
+        if probe_row is None:
+            return Ok(None)
+        status = TaskStatus(str(probe_row.status))
+        if status in (
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.EXPIRED,
+        ):
+            row = await session.get(TaskModel, task_id)
+            if row is None:
+                return Ok(None)
+            return self._build_raw_result_record(row, task_id)
+        if status == TaskStatus.CANCELLED or non_terminal_snapshot:
+            return Ok(RawResultRecord(
+                task_id=task_id,
+                task_name=str(probe_row.task_name),
+                status=status,
+                raw_result=None,
+            ))
+        return _STILL_WAITING
+
     async def get_raw_result_record_async(
         self,
         task_id: str,
@@ -977,27 +1084,18 @@ class PostgresBroker:
 
             # Quick path: row may already be terminal.
             async with self.session_factory() as session:
-                row = await session.get(TaskModel, task_id)
-                if row is None:
-                    return Ok(None)
-                if row.status in (
-                    TaskStatus.COMPLETED,
-                    TaskStatus.FAILED,
-                    TaskStatus.EXPIRED,
-                ):
-                    return self._build_raw_result_record(row, task_id)
-                if row.status == TaskStatus.CANCELLED:
-                    return Ok(RawResultRecord(
-                        task_id=task_id,
-                        task_name=row.task_name,
-                        status=row.status,
-                        raw_result=None,
-                    ))
+                outcome = await self._probe_result_row(session, task_id)
+                if outcome is not _STILL_WAITING:
+                    return cast(
+                        'BrokerResult[RawResultRecord | None]', outcome,
+                    )
 
             # Listen + poll loop.
             q: asyncio.Queue[Any] | None = None
             try:
-                listen_r = await self.listener.listen('task_done')
+                listen_r = await self.listener.listen_payload(
+                    'task_done', task_id,
+                )
             except RuntimeError as e:
                 self.logger.debug(
                     'LISTEN unavailable; falling back to polling for '
@@ -1031,23 +1129,15 @@ class PostgresBroker:
                             # to terminal between checks; one more read
                             # to capture the latest snapshot.
                             async with self.session_factory() as session:
-                                row = await session.get(TaskModel, task_id)
-                                if row is None:
-                                    return Ok(None)
-                                if row.status in (
-                                    TaskStatus.COMPLETED,
-                                    TaskStatus.FAILED,
-                                    TaskStatus.EXPIRED,
-                                ):
-                                    return self._build_raw_result_record(
-                                        row, task_id,
-                                    )
-                                return Ok(RawResultRecord(
-                                    task_id=task_id,
-                                    task_name=row.task_name,
-                                    status=row.status,
-                                    raw_result=None,
-                                ))
+                                outcome = await self._probe_result_row(
+                                    session,
+                                    task_id,
+                                    non_terminal_snapshot=True,
+                                )
+                                return cast(
+                                    'BrokerResult[RawResultRecord | None]',
+                                    outcome,
+                                )
 
                     wait_time = (
                         min(poll_interval, remaining_timeout)
@@ -1073,25 +1163,17 @@ class PostgresBroker:
                         await asyncio.sleep(wait_time)
 
                     async with self.session_factory() as session:
-                        row = await session.get(TaskModel, task_id)
-                        if row is None:
-                            return Ok(None)
-                        if row.status in (
-                            TaskStatus.COMPLETED,
-                            TaskStatus.FAILED,
-                            TaskStatus.EXPIRED,
-                        ):
-                            return self._build_raw_result_record(row, task_id)
-                        if row.status == TaskStatus.CANCELLED:
-                            return Ok(RawResultRecord(
-                                task_id=task_id,
-                                task_name=row.task_name,
-                                status=row.status,
-                                raw_result=None,
-                            ))
+                        outcome = await self._probe_result_row(
+                            session, task_id,
+                        )
+                        if outcome is not _STILL_WAITING:
+                            return cast(
+                                'BrokerResult[RawResultRecord | None]',
+                                outcome,
+                            )
             finally:
                 if q is not None:
-                    await self._unsubscribe_task_done_safely(q)
+                    await self._unsubscribe_task_done_safely(task_id, q)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1126,10 +1208,12 @@ class PostgresBroker:
                 exc,
             )
 
-    async def _unsubscribe_task_done_safely(self, q: asyncio.Queue[Any]) -> None:
+    async def _unsubscribe_task_done_safely(
+        self, task_id: str, q: asyncio.Queue[Any],
+    ) -> None:
         """Ensure task_done unsubscribe completes even under repeated cancellation."""
         unsubscribe_task = asyncio.create_task(
-            self.listener.unsubscribe('task_done', q)
+            self.listener.unsubscribe_payload('task_done', task_id, q)
         )
         cancelled_during_cleanup = False
         while not unsubscribe_task.done():
@@ -1685,17 +1769,19 @@ class PostgresBroker:
 
                             # Best-effort: notify workers so they wake at next_retry_at
                             # rather than waiting for the next poll cycle.
+                            # Reuses the already-open session post-commit — a
+                            # second pool checkout per retried task is real
+                            # churn during mass crash recovery.
                             queue_name = ctx_row.queue_name or 'default'
                             try:
-                                async with self.session_factory() as notify_session:
-                                    await notify_session.execute(
-                                        text('SELECT pg_notify(:ch, :p)'),
-                                        {
-                                            'ch': f'task_queue_{queue_name}',
-                                            'p': f'retry:{task_id}',
-                                        },
-                                    )
-                                    await notify_session.commit()
+                                await session.execute(
+                                    text('SELECT pg_notify(:ch, :p)'),
+                                    {
+                                        'ch': f'task_queue_{queue_name}',
+                                        'p': f'retry:{task_id}',
+                                    },
+                                )
+                                await session.commit()
                             except Exception:
                                 pass  # Non-fatal; polling will pick it up
                         else:
@@ -1812,16 +1898,28 @@ class PostgresBroker:
                 )
             result_json = ser_r.ok_value
 
-            async with self.session_factory() as session:
-                res = await session.execute(
-                    EXPIRE_PENDING_TASKS_SQL,
-                    {
-                        'result': result_json,
-                        'error_code': OutcomeCode.TASK_EXPIRED.value,
-                    },
-                )
-                await session.commit()
-                return Ok(getattr(res, 'rowcount', 0) or 0)
+            total_expired = 0
+            for _ in range(_EXPIRE_MAX_BATCHES_PER_PASS):
+                async with self.session_factory() as session:
+                    res = await session.execute(
+                        EXPIRE_PENDING_TASKS_SQL,
+                        {
+                            'result': result_json,
+                            'error_code': OutcomeCode.TASK_EXPIRED.value,
+                            'batch_size': _EXPIRE_BATCH_SIZE,
+                        },
+                    )
+                    await session.commit()
+                batch_expired = int(getattr(res, 'rowcount', 0) or 0)
+                total_expired += batch_expired
+                if batch_expired < _EXPIRE_BATCH_SIZE:
+                    return Ok(total_expired)
+            self.logger.warning(
+                'expire_pending_tasks reached the per-pass batch cap after '
+                'expiring %s task(s); the remainder expires next interval',
+                total_expired,
+            )
+            return Ok(total_expired)
         except Exception as exc:
             return _broker_err(
                 BrokerErrorCode.CLEANUP_FAILED,

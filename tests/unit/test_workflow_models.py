@@ -237,6 +237,69 @@ class MockTaskWrapperWithParams(TaskFunction[Any, Any]):
 
 
 @dataclass
+class MockTaskWrapperWithOptionalParam(TaskFunction[Any, Any]):
+    """Mock TaskWrapper whose args_from target has a default value."""
+
+    task_name: str
+    task_ok_type: Any = Any
+
+    def __call__(
+        self,
+        maybe_result: TaskResult[int, TaskError] | None = None,
+    ) -> TaskResult[Any, TaskError]:
+        return TaskResult(ok=None)
+
+    def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+        return self
+
+    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    def node(
+        self,
+        *,
+        waits_for: Any = None,
+        workflow_ctx_from: Any = None,
+        args_from: Any = None,
+        queue: Any = None,
+        priority: Any = None,
+        allow_failed_deps: bool = False,
+        join: Any = 'all',
+        min_success: Any = None,
+        good_until: Any = None,
+        node_id: Any = None,
+    ) -> NodeFactory[Any, Any]:
+        return NodeFactory(
+            fn=self,  # type: ignore[arg-type]
+            waits_for=waits_for,
+            workflow_ctx_from=workflow_ctx_from,
+            args_from=args_from,
+            queue=queue,
+            priority=priority,
+            allow_failed_deps=allow_failed_deps,
+            join=join,
+            min_success=min_success,
+            good_until=good_until,
+            node_id=node_id,
+        )
+
+
+@dataclass
 class MockTaskWrapperWithKwargs(TaskFunction[Any, Any]):
     """Mock TaskWrapper that accepts **kwargs (validation should allow any key)."""
 
@@ -1796,6 +1859,56 @@ class TestWorkflowSpecValidation:
         ) as exc_info:
             WorkflowSpec(name='any_with_min', tasks=[node_a, node_b])
         assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_JOIN
+
+    def test_any_join_args_from_without_default_raises(self) -> None:
+        """join='any' + args_from targeting a no-default param is rejected.
+
+        With a non-'all' join the source may not be terminal when the node
+        becomes ready, so the kwarg may not be injected — a required
+        parameter would crash with a TypeError depending on completion
+        order.
+        """
+        fn_a = MockTaskWrapperInt(task_name='task_a_int')
+        fn_b = MockTaskWrapperWithParams(task_name='task_b_required')
+
+        node_a = TaskNode(fn=fn_a)
+        node_c = TaskNode(fn=MockTaskWrapperInt(task_name='task_c_int'))
+        node_b = TaskNode(
+            fn=fn_b,
+            waits_for=[node_a, node_c],
+            kwargs={'flag': True},
+            args_from={'required': node_a},
+            join='any',
+        )
+
+        with pytest.raises(
+            WorkflowValidationError, match='has no default'
+        ) as exc_info:
+            WorkflowSpec(
+                name='any_args_from_no_default',
+                tasks=[node_a, node_c, node_b],
+            )
+        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_JOIN
+
+    def test_any_join_args_from_with_default_accepted(self) -> None:
+        """join='any' + args_from is supported when the param has a default."""
+        fn_a = MockTaskWrapperInt(task_name='task_a_int')
+        fn_b = MockTaskWrapperWithOptionalParam(task_name='task_b_optional')
+
+        node_a = TaskNode(fn=fn_a)
+        node_c = TaskNode(fn=MockTaskWrapperInt(task_name='task_c_int'))
+        node_b = TaskNode(
+            fn=fn_b,
+            waits_for=[node_a, node_c],
+            args_from={'maybe_result': node_a},
+            join='any',
+        )
+
+        spec = WorkflowSpec(
+            name='any_args_from_with_default',
+            tasks=[node_a, node_c, node_b],
+        )
+        assert spec.tasks[2].join == 'any'
 
     def test_valid_quorum_join(self) -> None:
         """Valid quorum configuration passes validation."""

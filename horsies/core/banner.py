@@ -177,7 +177,11 @@ def print_banner(
     _write_kv(lines, 'queues', queues_str)
 
     # Broker info (mask password)
-    _write_kv(lines, 'broker', mask_database_url(app.config.broker.database_url))
+    _write_kv(
+        lines,
+        'broker',
+        mask_database_url(app.config.broker.database_url.get_secret_value()),
+    )
     if (
         app.config.broker.session_database_url is not None
         and app.config.broker.session_database_url != app.config.broker.database_url

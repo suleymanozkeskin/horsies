@@ -2050,3 +2050,46 @@ class TestRunSchedulerCoroutine:
         with pytest.raises(RuntimeError, match='scheduler init failed'):
             await captured_coro[0]
         broker.close_async.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# CLI numeric argument validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestCliNumericValidation:
+    """Numeric worker flags are validated at the argparse boundary.
+
+    --processes 0 previously reached ProcessPoolExecutor(max_workers=0)
+    and crashed with a raw ValueError; negative claim knobs flowed into
+    claim SQL / capacity math unchecked.
+    """
+
+    def test_processes_zero_rejected(self) -> None:
+        from horsies.core.cli import _positive_int
+
+        with pytest.raises(Exception, match='must be >= 1'):
+            _positive_int('0')
+
+    def test_processes_negative_rejected(self) -> None:
+        from horsies.core.cli import _positive_int
+
+        with pytest.raises(Exception, match='must be >= 1'):
+            _positive_int('-2')
+
+    def test_processes_positive_accepted(self) -> None:
+        from horsies.core.cli import _positive_int
+
+        assert _positive_int('4') == 4
+
+    def test_claim_knobs_reject_negative(self) -> None:
+        from horsies.core.cli import _non_negative_int
+
+        with pytest.raises(Exception, match='must be >= 0'):
+            _non_negative_int('-1')
+
+    def test_claim_knobs_accept_zero_auto(self) -> None:
+        from horsies.core.cli import _non_negative_int
+
+        assert _non_negative_int('0') == 0

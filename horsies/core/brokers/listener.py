@@ -7,13 +7,14 @@ Architecture:
 
 Flow:
   1. Task submission: INSERT into tasks table -> PostgreSQL trigger -> NOTIFY task_new/task_queue_*
-  2. Worker notification: Workers listen to task_new + queue-specific channels
+  2. Worker notification: Workers listen to queue-specific channels
   3. Task processing: Worker picks up task, processes it, updates status
   4. Completion notification: UPDATE tasks status -> PostgreSQL trigger -> NOTIFY task_done
   5. Result retrieval: Clients listen to task_done channel, filter by task_id
 
 Key channels:
-  - task_new: Global notification for any new task (workers)
+  - task_new: Global notification for any new task (external observers;
+    workers listen to queue channels only to avoid a thundering herd)
   - task_queue_*: Queue-specific notifications (workers)
   - task_done: Task completion notifications (result waiters)
 """
@@ -28,6 +29,7 @@ from asyncio import Task, Queue  # precise type for Pylance/pyright
 
 import psycopg
 from psycopg import AsyncConnection, InterfaceError, OperationalError, Notify
+from psycopg.conninfo import make_conninfo
 from psycopg import sql
 
 from horsies.core.brokers.result_types import (
@@ -42,6 +44,19 @@ from horsies.core.utils.db import is_retryable_connection_error
 logger = get_logger('listener')
 
 _SUBSCRIBER_QUEUE_MAXSIZE: int = 4096
+
+# TCP keepalives for the long-lived notification connections: the
+# dispatcher blocks indefinitely in conn.notifies(), so a silently
+# dropped connection (NAT/firewall idle timeout, no FIN) would otherwise
+# hang it forever with only the poll fallback masking the stall.
+def _keepalive_conninfo(database_url: str) -> str:
+    return make_conninfo(
+        database_url,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=3,
+    )
 
 
 class PostgresListener:
@@ -104,6 +119,14 @@ class PostgresListener:
         # Multiple subscribers can wait on the same channel independently.
         self._subs: DefaultDict[str, Set[Queue[Notify]]] = defaultdict(set)
 
+        # Payload-keyed subscribers: (channel, payload) → queues. Result
+        # waiters use these so a busy channel (task_done carries every
+        # completion cluster-wide) is not fanned into every waiter's queue;
+        # the dispatcher delivers only to the matching payload key.
+        self._payload_subs: DefaultDict[
+            tuple[str, str], Set[Queue[Notify]]
+        ] = defaultdict(set)
+
         # Background dispatcher task consuming conn.notifies() and distributing to subscriber queues.
         self._dispatcher_task: Optional[Task[None]] = None
 
@@ -145,13 +168,20 @@ class PostgresListener:
         """
         subs = self._subs.get(channel_name)
         if subs is None:
-            return True
+            return not self._channel_has_payload_subs(channel_name)
         if q is not None:
             subs.discard(q)
         if not subs:
             self._subs.pop(channel_name, None)
-            return True
+            return not self._channel_has_payload_subs(channel_name)
         return False
+
+    def _channel_has_payload_subs(self, channel_name: str) -> bool:
+        """Whether any payload-keyed subscriber still needs this channel."""
+        return any(
+            key[0] == channel_name and queues
+            for key, queues in self._payload_subs.items()
+        )
 
     async def start(self) -> BrokerResult[None]:
         """Establish notification connections (autocommit) and start health monitor.
@@ -197,7 +227,7 @@ class PostgresListener:
                 async with self._dispatcher_lock:
                     if self._dispatcher_conn is None or self._dispatcher_conn.closed:
                         self._dispatcher_conn = await psycopg.AsyncConnection.connect(
-                            self.database_url,
+                            _keepalive_conninfo(self.database_url),
                             autocommit=True,
                         )
                         created_dispatcher = True
@@ -208,7 +238,7 @@ class PostgresListener:
                 async with self._command_lock:
                     if self._command_conn is None or self._command_conn.closed:
                         self._command_conn = await psycopg.AsyncConnection.connect(
-                            self.database_url,
+                            _keepalive_conninfo(self.database_url),
                             autocommit=True,
                         )
                         created_command = True
@@ -384,6 +414,18 @@ class PostgresListener:
                     # Signal notification activity for the health monitor.
                     self._notification_activity.set()
 
+                    # Deliver to payload-keyed subscribers (exact match only).
+                    payload_key = (notification.channel, notification.payload)
+                    for q in list(self._payload_subs.get(payload_key, ())):
+                        try:
+                            q.put_nowait(notification)
+                        except asyncio.QueueFull:
+                            logger.warning(
+                                'Notification dropped on channel %r: payload '
+                                'subscriber queue full',
+                                notification.channel,
+                            )
+
                     # Distribute to all subscriber queues for this channel
                     # Use list() snapshot to avoid mutation during iteration
                     for q in list(self._subs.get(notification.channel, ())):
@@ -406,8 +448,14 @@ class PostgresListener:
             except asyncio.CancelledError:
                 # Graceful shutdown: stop dispatching and exit the task.
                 raise
-            except Exception:
-                # Unexpected issue: brief pause to avoid a hot loop, then try again.
+            except Exception as exc:
+                # Unexpected issue: brief pause to avoid a hot loop, then try
+                # again. Logged — a persistent non-OperationalError failure
+                # would otherwise be an invisible busy-reconnect loop.
+                logger.error(
+                    'Listener dispatcher failed unexpectedly; reconnecting: %s',
+                    exc,
+                )
                 await self._close_connections()
                 await asyncio.sleep(0.5)
                 continue
@@ -487,6 +535,87 @@ class PostgresListener:
                     exception=exc,
                 )
             )
+
+    async def listen_payload(
+        self, channel_name: str, payload: str
+    ) -> BrokerResult[Queue[Notify]]:
+        """Subscribe to a channel filtered to one exact payload.
+
+        Server-side this is a plain channel LISTEN (issued once per channel,
+        shared with channel-level subscribers); the dispatcher delivers a
+        notification to this queue only when its payload matches. Use for
+        single-value waits on busy channels (e.g. one task_id on task_done).
+
+        Returns Ok(queue) on success, Err(BrokerOperationError) on failure.
+        Raises RuntimeError if called from a non-owner event loop.
+        """
+        self._bind_or_validate_loop()
+        conn_r = await self._ensure_connections()
+        if is_err(conn_r):
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
+                    message=(
+                        f'Failed to subscribe to {channel_name!r}: '
+                        f'{conn_r.err_value.message}'
+                    ),
+                    retryable=conn_r.err_value.retryable,
+                    exception=conn_r.err_value.exception,
+                )
+            )
+
+        try:
+            async with self._lock:
+                if channel_name not in self._listen_channels:
+                    dispatcher_was_running = await self._pause_dispatcher()
+                    try:
+                        disp_conn = await self._ensure_dispatcher_connection()
+                        await disp_conn.execute(
+                            sql.SQL('LISTEN {}').format(sql.Identifier(channel_name))
+                        )
+                        self._listen_channels.add(channel_name)
+                    finally:
+                        if dispatcher_was_running:
+                            self._start_dispatcher_if_needed()
+                    self._start_dispatcher_if_needed()
+
+                q: Queue[Notify] = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_MAXSIZE)
+                self._payload_subs[(channel_name, payload)].add(q)
+                self._start_health_monitor_if_needed()
+                return Ok(q)
+        except (OperationalError, InterfaceError, OSError) as exc:
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
+                    message=f'Failed to subscribe to {channel_name!r}: {exc}',
+                    retryable=is_retryable_connection_error(exc),
+                    exception=exc,
+                )
+            )
+
+    async def unsubscribe_payload(
+        self, channel_name: str, payload: str, q: Queue[Notify]
+    ) -> None:
+        """Remove a payload-keyed subscription.
+
+        Drops the server-side LISTEN when neither channel-level nor
+        payload-keyed subscribers remain for the channel.
+        """
+        self._bind_or_validate_loop()
+        async with self._lock:
+            key = (channel_name, payload)
+            queues = self._payload_subs.get(key)
+            if queues is not None:
+                queues.discard(q)
+                if not queues:
+                    self._payload_subs.pop(key, None)
+            if (
+                channel_name not in self._subs
+                and not self._channel_has_payload_subs(channel_name)
+                and channel_name in self._listen_channels
+            ):
+                await self._unlisten_on_dispatcher(channel_name)
+                self._listen_channels.discard(channel_name)
 
     async def listen_many(
         self,
@@ -680,5 +809,6 @@ class PostgresListener:
 
         # Release local bookkeeping to avoid process-lifetime growth.
         self._subs.clear()
+        self._payload_subs.clear()
         self._listen_channels.clear()
         self._owner_loop = None

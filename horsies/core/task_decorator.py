@@ -212,7 +212,15 @@ class TaskHandle(Generic[T]):
         message: str,
         data: dict[str, Any],
         exception: BaseException | None = None,
+        cache: bool = True,
     ) -> TaskResult[T, TaskError]:
+        """Build an err TaskResult, caching it when the error is final.
+
+        ``cache=False`` is for transient retrieval errors (broker outage,
+        not-found racing the enqueue): caching them would poison the handle
+        — every later ``get()`` would replay the error after the condition
+        cleared. Mirrors the WAIT_TIMEOUT path, which never caches.
+        """
         error_result: TaskResult[T, TaskError] = TaskResult(
             err=TaskError(
                 error_code=error_code,
@@ -221,8 +229,9 @@ class TaskHandle(Generic[T]):
                 exception=exception,
             )
         )
-        self._cached_result = error_result
-        self._result_fetched = True
+        if cache:
+            self._cached_result = error_result
+            self._result_fetched = True
         return error_result
 
     def _record_to_task_result(
@@ -264,6 +273,9 @@ class TaskHandle(Generic[T]):
                 message=broker_err.message,
                 data={'task_id': self.task_id, 'broker_code': code.value},
                 exception=broker_err.exception,
+                # A generic broker error is transient; the strict-serde
+                # codes are properties of the stored payload / handle.
+                cache=err_code is not OperationalErrorCode.BROKER_ERROR,
             )
         record = broker_result.ok_value
         if record is None:
@@ -271,6 +283,9 @@ class TaskHandle(Generic[T]):
                 error_code=RetrievalCode.TASK_NOT_FOUND,
                 message=f'Task {self.task_id} not found in database',
                 data={'task_id': self.task_id},
+                # Possibly a handle reconstructed by id racing the enqueue
+                # commit; a later get() may find the row.
+                cache=False,
             )
         from horsies.core.types.status import TaskStatus as _TaskStatus
 
@@ -421,6 +436,7 @@ class TaskHandle(Generic[T]):
                     message='Broker error while retrieving task result',
                     data={'task_id': self.task_id},
                     exception=exc,
+                    cache=False,
                 )
             return self._record_to_task_result(broker_result, timeout_ms)
         else:
@@ -474,6 +490,7 @@ class TaskHandle(Generic[T]):
                     message='Broker error while retrieving task result',
                     data={'task_id': self.task_id},
                     exception=exc,
+                    cache=False,
                 )
             return self._record_to_task_result(broker_result, timeout_ms)
         else:
@@ -904,8 +921,14 @@ def create_task_wrapper(
             # Runtime type validation: validate result against declared types
             try:
                 if result.is_ok():
-                    # Validate ok value against T
-                    ok_type_adapter.validate_python(result.ok)
+                    # Validate ok value against T. Lax validation coerces
+                    # (e.g. '5' → 5 for a declared int); return the coerced
+                    # value so an in-process caller sees the same value a
+                    # wire consumer decodes — otherwise local and remote
+                    # observations of the same task diverge.
+                    validated_ok = ok_type_adapter.validate_python(result.ok)
+                    if validated_ok is not result.ok:
+                        result = TaskResult(ok=validated_ok)
                 else:
                     # Validate err value against E
                     err_type_adapter.validate_python(result.err)
@@ -1291,7 +1314,10 @@ def create_task_wrapper(
         try:
             validated_queue_name = app.validate_queue_name(queue_name)
             priority = effective_priority(app, validated_queue_name)
-        except BaseException as exc:
+        except Exception as exc:
+            # Exception, not BaseException: a KeyboardInterrupt/SystemExit
+            # arriving mid-send must propagate as a shutdown signal, not be
+            # swallowed into Err(VALIDATION_FAILED).
             return Err(TaskSendError(
                 code=TaskSendErrorCode.VALIDATION_FAILED,
                 message=f'Queue validation failed for {task_name}: {exc}',

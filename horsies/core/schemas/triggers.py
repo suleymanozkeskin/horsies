@@ -26,11 +26,22 @@ CREATE_TASK_NOTIFY_FUNCTION_SQL = text("""
     $$ LANGUAGE plpgsql;
 """)
 
+# Split INSERT/UPDATE triggers with WHEN clauses: hot-path updates that do
+# not change status (lease renewals, finalizing markers) must not invoke
+# plpgsql at all. WHEN is evaluated without function-call overhead.
 CREATE_TASK_NOTIFY_TRIGGER_SQL = text("""
     DROP TRIGGER IF EXISTS horsies_task_notify_trigger ON horsies_tasks;
-    CREATE TRIGGER horsies_task_notify_trigger
-        AFTER INSERT OR UPDATE ON horsies_tasks
+    DROP TRIGGER IF EXISTS horsies_task_notify_insert_trigger ON horsies_tasks;
+    DROP TRIGGER IF EXISTS horsies_task_notify_update_trigger ON horsies_tasks;
+    CREATE TRIGGER horsies_task_notify_insert_trigger
+        AFTER INSERT ON horsies_tasks
         FOR EACH ROW
+        WHEN (NEW.status = 'PENDING')
+        EXECUTE FUNCTION horsies_notify_task_changes();
+    CREATE TRIGGER horsies_task_notify_update_trigger
+        AFTER UPDATE ON horsies_tasks
+        FOR EACH ROW
+        WHEN (OLD.status IS DISTINCT FROM NEW.status)
         EXECUTE FUNCTION horsies_notify_task_changes();
 """)
 
@@ -52,9 +63,16 @@ CREATE_TASK_STATUS_NOTIFY_FUNCTION_SQL = text("""
 
 CREATE_TASK_STATUS_NOTIFY_TRIGGER_SQL = text("""
     DROP TRIGGER IF EXISTS horsies_task_status_notify_trigger ON horsies_tasks;
-    CREATE TRIGGER horsies_task_status_notify_trigger
-        AFTER INSERT OR UPDATE ON horsies_tasks
+    DROP TRIGGER IF EXISTS horsies_task_status_notify_insert_trigger ON horsies_tasks;
+    DROP TRIGGER IF EXISTS horsies_task_status_notify_update_trigger ON horsies_tasks;
+    CREATE TRIGGER horsies_task_status_notify_insert_trigger
+        AFTER INSERT ON horsies_tasks
         FOR EACH ROW
+        EXECUTE FUNCTION horsies_notify_task_status_change();
+    CREATE TRIGGER horsies_task_status_notify_update_trigger
+        AFTER UPDATE ON horsies_tasks
+        FOR EACH ROW
+        WHEN (OLD.status IS DISTINCT FROM NEW.status)
         EXECUTE FUNCTION horsies_notify_task_status_change();
 """)
 
@@ -102,6 +120,7 @@ CREATE_WORKFLOW_NOTIFY_TRIGGER_SQL = text("""
     CREATE TRIGGER horsies_workflow_notify_trigger
         AFTER UPDATE ON horsies_workflows
         FOR EACH ROW
+        WHEN (OLD.status IS DISTINCT FROM NEW.status)
         EXECUTE FUNCTION horsies_notify_workflow_changes();
 """)
 
@@ -122,8 +141,15 @@ CREATE_WORKFLOW_STATUS_NOTIFY_FUNCTION_SQL = text("""
 
 CREATE_WORKFLOW_STATUS_NOTIFY_TRIGGER_SQL = text("""
     DROP TRIGGER IF EXISTS horsies_workflow_status_notify_trigger ON horsies_workflows;
-    CREATE TRIGGER horsies_workflow_status_notify_trigger
-        AFTER INSERT OR UPDATE ON horsies_workflows
+    DROP TRIGGER IF EXISTS horsies_workflow_status_notify_insert_trigger ON horsies_workflows;
+    DROP TRIGGER IF EXISTS horsies_workflow_status_notify_update_trigger ON horsies_workflows;
+    CREATE TRIGGER horsies_workflow_status_notify_insert_trigger
+        AFTER INSERT ON horsies_workflows
         FOR EACH ROW
+        EXECUTE FUNCTION horsies_notify_workflow_status_change();
+    CREATE TRIGGER horsies_workflow_status_notify_update_trigger
+        AFTER UPDATE ON horsies_workflows
+        FOR EACH ROW
+        WHEN (OLD.status IS DISTINCT FROM NEW.status)
         EXECUTE FUNCTION horsies_notify_workflow_status_change();
 """)

@@ -22,8 +22,8 @@ broker = PostgresConfig(
 | `database_url` | `str` | required | SQLAlchemy connection URL |
 | `session_database_url` | `str \| None` | `None` | Direct/session-capable URL for schema setup and LISTEN/NOTIFY |
 | `pgbouncer_transaction_mode` | `bool` | `False` | Disable prepared statements for transaction-pooled PgBouncer |
-| `pool_size` | `int` | 30 | Connection pool size |
-| `max_overflow` | `int` | 30 | Additional connections beyond pool_size |
+| `pool_size` | `int` | 5 | Connection pool size (raise for high-throughput producers) |
+| `max_overflow` | `int` | 10 | Additional connections beyond pool_size |
 | `worker_pool_size` | `int \| None` | 3 | Worker coordinator pool size; `None` inherits `pool_size` |
 | `worker_max_overflow` | `int \| None` | 2 | Worker coordinator overflow; `None` inherits `max_overflow` |
 | `worker_child_pool_min_size` | `int` | 0 | Minimum connections kept by each child worker process |

@@ -1,13 +1,126 @@
 ---
 title: Changelog
-summary: Notable changes per release. 0.1.6 hardens worker lifecycle recovery; 0.1.5 adds ping_workers min_responses; 0.1.4 adds the worker & database health API; 0.1.3 adds CronSchedule; 0.1.2 is a breaking release headlined by the strict-serde redesign.
+summary: Notable changes per release. 0.1.7 is a correctness and performance hardening release (full-project review); 0.1.6 hardens worker lifecycle recovery; 0.1.5 adds ping_workers min_responses; 0.1.4 adds the worker & database health API; 0.1.3 adds CronSchedule; 0.1.2 is a breaking release headlined by the strict-serde redesign.
 related: [./monitoring/worker-health, ./migrations/migration-to-0-1-2, ./internals/serialization]
-tags: [changelog, releases, breaking-changes, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
+tags: [changelog, releases, breaking-changes, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
 ---
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 horsies is pre-1.0: breaking changes may land in minor or patch releases, and
 there is no migration contract between pre-1.0 versions.
+
+## 0.1.7 — 2026-06-10
+
+Correctness and performance hardening from a full-project review.
+Schema migrates from v2 to v7 automatically on first broker start.
+
+### Breaking
+
+- `catch_up_missed=False` now matches its documentation: after scheduler
+  downtime, only the most recent due slot fires (skipped slots are
+  logged) and the schedule resumes strictly in the future. The previous
+  behavior accidentally replayed the entire backlog one run per tick;
+  deployments relying on that replay must set `catch_up_missed=True`.
+- `PostgresConfig.database_url` and `session_database_url` are now
+  pydantic `SecretStr` — `repr()`/`model_dump()` mask credentials. Code
+  reading these fields must call `.get_secret_value()`. String inputs
+  validate as before.
+- Producer pool defaults dropped from `30 + 30` to SQLAlchemy's `5 + 10`
+  (`pool_size` / `max_overflow`); raise them explicitly for
+  high-throughput producers.
+- Scheduler startup no longer deletes `horsies_schedule_state` rows
+  absent from its config (this broke rolling deploys and shared-database
+  topologies); orphan rows are kept and logged.
+- `TaskSchedule` positional `args` are rejected at scheduler startup
+  (they always failed at enqueue; now they fail fast).
+- Spec validation rejects `join='any'`/`'quorum'` nodes whose
+  `args_from` targets a parameter without a default
+  (`WORKFLOW_INVALID_JOIN`), and `@app.task` registration rejects Enums
+  with non-JSON-native member values.
+
+### Fixed
+
+- Worker finalize/retry SQL now requires claim ownership: a stale
+  finalizer (its task reaper-requeued and re-claimed by another worker)
+  could overwrite the new owner's in-flight attempt, corrupt the attempt
+  history, or trigger a third execution.
+- Workflow terminal marks require `status='RUNNING'`: a task left
+  running through `cancel()` could flip a CANCELLED workflow to
+  COMPLETED/FAILED on completion and cascade the resurrection into
+  parent workflows.
+- `resume_workflow` / `cascade_resume_to_children` decode stored
+  dependency results with the app registry again — resumed `args_from`
+  consumers received `RESULT_DESERIALIZATION_ERROR` sentinels instead of
+  the real upstream results.
+- `stop()` shuts the executor down before draining finalizers: a task
+  finishing after the drain timeout had its completed result discarded
+  and was recorded (and possibly re-executed) as `WORKER_CRASHED`.
+- Subworkflow completion takes the parent workflow lock before promoting
+  dependents, closing a fan-in race that left nodes PENDING with all
+  dependencies terminal until the next reaper sweep.
+- `TaskHandle.get()` no longer caches transient errors: one broker
+  hiccup or a not-found racing the enqueue poisoned the handle
+  permanently.
+- Schedules no longer wedge on permanent enqueue errors (e.g.
+  `PAYLOAD_MISMATCH` after a deploy changed kwargs): the doomed slot is
+  skipped and the schedule keeps running.
+- `_schedule_retry` reads the queue name from the already-locked row
+  instead of a second pooled session (pool-starvation deadlock under
+  mass failure), and finalize retryability is keyed on the recovery DB
+  outcome instead of the child-future exception type.
+- `import_file_path` rolls back `sys.modules` and its cache when module
+  execution fails (a broken module was silently returned as success on
+  the next import) and no longer registers basename aliases that shadow
+  other importable modules.
+- A deterministic result-encode failure during workflow completion now
+  degrades to a FAILED node with a serialization-error envelope instead
+  of looping phase-2 finalize retries forever.
+
+### Performance
+
+- Claim path: partial composite indexes for both eligibility arms plus
+  a split-arm `CLAIM_SQL` — measured ~430× faster claim passes at a
+  50k-row pending backlog. The pending arm walks its composite in
+  `ORDER BY` order and stops at the limit; the expired arm carries two
+  complementary partial indexes (expiry filter for the few-expired
+  steady state, ordered composite for deep expired backlogs — measured
+  30.7ms → 0.11ms at 50k expired rows) with the planner choosing per
+  data distribution. The cluster-wide claim advisory lock is taken only when
+  cluster/queue caps require serialized accounting, and its key is a
+  fixed constant (DSN-derived keys silently split the lock between
+  workers using different DSN spellings of the same database).
+- Workers subscribe to their queue channels only: the global `task_new`
+  channel woke every worker for every insert cluster-wide (thundering
+  herd). The trigger still emits `task_new` for external observers.
+- Notify triggers split into INSERT/UPDATE pairs gated by
+  `WHEN (OLD.status IS DISTINCT FROM NEW.status)` — lease renewals no
+  longer invoke plpgsql per row.
+- Result waiters get payload-keyed dispatch on `task_done` (one shared
+  LISTEN, per-task delivery) and the wait loop polls a slim status
+  probe instead of the full row with TOASTed payload columns.
+- Reaper passes are gated by a cluster-wide try-advisory-lock (one
+  executing reaper per interval instead of one per worker), stale-claim
+  requeue locks only genuinely stale rows, pending expiry runs in
+  bounded SKIP LOCKED batches, and two per-iteration session-churn
+  sites are gone.
+- Six write-amplifying single-column indexes on `horsies_tasks` dropped
+  (every lifecycle UPDATE wrote entries into all of them); dependency
+  lookups use `@>` so the GIN index actually applies; heartbeat and
+  worker-state timeseries PKs widened to BIGINT (int4 sequences
+  exhausted in months at heartbeat rates).
+- Listener notification connections enable TCP keepalives so silently
+  dropped connections surface within ~60s instead of hanging the
+  dispatcher.
+
+### Changed
+
+- In-process task calls return the lax-coerced ok value (e.g. `Ok('5')`
+  for a declared `int` returns `5`), matching what wire consumers
+  decode.
+- `WorkerConfig.__repr__` masks its DSN fields.
+- New docs: datetime round-trip caveats, scheduler DST behavior,
+  exception-mapper exact-class matching, and the database trust
+  boundary.
 
 ## 0.1.6 — 2026-06-04
 

@@ -155,18 +155,52 @@ def import_file_path(
     mod = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = mod
 
-    # Also register under basename for compatibility
+    # Also register under basename for compatibility — but never shadow a
+    # different importable module (a task file named e.g. json.py must not
+    # become sys.modules['json']).
     registered_names = [module_name]
     basename = os.path.splitext(os.path.basename(file_path))[0]
-    if basename != module_name and basename not in sys.modules:
+    if (
+        basename != module_name
+        and basename not in sys.modules
+        and _basename_alias_is_safe(basename, file_path)
+    ):
         sys.modules[basename] = mod
         registered_names.append(basename)
 
-    # Update cache
+    # Update cache before exec so circular imports of the same file resolve
+    # to the in-progress module (sys.modules semantics).
     _realpath_to_modules[file_path] = registered_names
 
-    spec.loader.exec_module(mod)
+    try:
+        spec.loader.exec_module(mod)
+    except BaseException:
+        # Mirror importlib: a failed import must not leave a half-executed
+        # module importable — the next import_file_path of the same file
+        # would silently return it as success.
+        for name in registered_names:
+            sys.modules.pop(name, None)
+        _realpath_to_modules.pop(file_path, None)
+        raise
     return mod
+
+
+def _basename_alias_is_safe(basename: str, file_path: str) -> bool:
+    """Whether registering ``sys.modules[basename]`` shadows nothing.
+
+    Safe when the import machinery resolves ``basename`` to the same file
+    (the alias then prevents a double import) or to nothing at all. Unsafe
+    when it resolves to a different module (stdlib / site-packages / another
+    local file).
+    """
+    try:
+        existing_spec = importlib.util.find_spec(basename)
+    except (ImportError, ValueError):
+        return False
+    if existing_spec is None:
+        return True
+    origin = existing_spec.origin
+    return origin is not None and os.path.realpath(origin) == file_path
 
 
 def unload_file_path(file_path: str) -> list[str]:

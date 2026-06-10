@@ -1,9 +1,11 @@
-"""Integration tests for finalize-path status guards.
+"""Integration tests for finalize-path status and ownership guards.
 
 Proves that a late-returning worker cannot overwrite a task's status after the
-reaper has already reclaimed it.  Each test inserts a task in RUNNING state,
-simulates the reaper moving it to FAILED/PENDING, then fires the guarded SQL
-and asserts the UPDATE is a no-op (RETURNING yields no row).
+reaper has already reclaimed it, and that a stale worker cannot clobber an
+attempt that was re-claimed by another worker (row RUNNING again under a new
+owner).  Each test inserts a task in RUNNING state, simulates the competing
+transition, then fires the guarded SQL and asserts the UPDATE is a no-op
+(RETURNING yields no row).
 """
 
 from __future__ import annotations
@@ -23,17 +25,26 @@ from horsies.core.worker.worker import (
     MARK_TASK_FAILED_SQL,
     MARK_TASK_FAILED_WORKER_SQL,
     SCHEDULE_TASK_RETRY_SQL,
+    SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
 )
 from tests.integration.conftest import compute_test_enqueue_sha
 
 pytestmark = [pytest.mark.integration]
+
+# Stable worker ids for ownership-guard scenarios.
+OWNER_WORKER_ID = 'worker-owner-aaaa'
+OTHER_WORKER_ID = 'worker-other-bbbb'
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-async def _insert_running_task(session: AsyncSession) -> str:
+async def _insert_running_task(
+    session: AsyncSession,
+    *,
+    claimed_by_worker_id: str = OWNER_WORKER_ID,
+) -> str:
     """Insert a minimal horsies_tasks row in RUNNING state and return its id."""
     task_id = str(uuid.uuid4())
     sent_at, sha = compute_test_enqueue_sha(task_name='guard_test')
@@ -42,13 +53,18 @@ async def _insert_running_task(session: AsyncSession) -> str:
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha)
+                 max_retries, started_at, enqueue_sha, claimed_by_worker_id)
             VALUES
                 (:id, 'guard_test', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 3, NOW(), :enqueue_sha)
+                 3, NOW(), :enqueue_sha, :claimed_by_worker_id)
         """),
-        {'id': task_id, 'sent_at': sent_at, 'enqueue_sha': sha},
+        {
+            'id': task_id,
+            'sent_at': sent_at,
+            'enqueue_sha': sha,
+            'claimed_by_worker_id': claimed_by_worker_id,
+        },
     )
     await session.flush()
     return task_id
@@ -152,7 +168,12 @@ async def test_complete_guard_blocks_when_not_running(
     now = datetime.now(timezone.utc)
     result = await session.execute(
         MARK_TASK_COMPLETED_SQL,
-        {'now': now, 'result_json': '{"ok": "late_result"}', 'id': task_id},
+        {
+            'now': now,
+            'result_json': '{"ok": "late_result"}',
+            'id': task_id,
+            'wid': OWNER_WORKER_ID,
+        },
     )
     returned_row = result.fetchone()
 
@@ -175,7 +196,12 @@ async def test_complete_guard_succeeds_when_running(
     now = datetime.now(timezone.utc)
     result = await session.execute(
         MARK_TASK_COMPLETED_SQL,
-        {'now': now, 'result_json': '{"ok": "result"}', 'id': task_id},
+        {
+            'now': now,
+            'result_json': '{"ok": "result"}',
+            'id': task_id,
+            'wid': OWNER_WORKER_ID,
+        },
     )
     returned_row = result.fetchone()
 
@@ -199,7 +225,13 @@ async def test_fail_guard_blocks_when_not_running(
     now = datetime.now(timezone.utc)
     result = await session.execute(
         MARK_TASK_FAILED_SQL,
-        {'now': now, 'result_json': '{"err": {"error_code": "LATE"}}', 'id': task_id, 'error_code': 'LATE'},
+        {
+            'now': now,
+            'result_json': '{"err": {"error_code": "LATE"}}',
+            'id': task_id,
+            'wid': OWNER_WORKER_ID,
+            'error_code': 'LATE',
+        },
     )
     returned_row = result.fetchone()
 
@@ -222,7 +254,6 @@ async def test_fail_worker_guard_blocks_when_not_running(
     # Simulate reaper intervention
     await _set_task_status(session, task_id, 'FAILED')
 
-    now = datetime.now(timezone.utc)
     result = await session.execute(
         MARK_TASK_FAILED_WORKER_SQL,
         {
@@ -230,6 +261,7 @@ async def test_fail_worker_guard_blocks_when_not_running(
             'result_json': '{"err": {"error_code": "BROKER_ERROR"}}',
             'error_code': 'BROKER_ERROR',
             'id': task_id,
+            'wid': OWNER_WORKER_ID,
         },
     )
     returned_row = result.fetchone()
@@ -253,7 +285,12 @@ async def test_retry_guard_blocks_when_not_running(
     next_retry = datetime.now(timezone.utc)
     result = await session.execute(
         SCHEDULE_TASK_RETRY_SQL,
-        {'id': task_id, 'retry_count': 1, 'next_retry_at': next_retry},
+        {
+            'id': task_id,
+            'wid': OWNER_WORKER_ID,
+            'retry_count': 1,
+            'next_retry_at': next_retry,
+        },
     )
     returned_row = result.fetchone()
 
@@ -276,7 +313,12 @@ async def test_retry_guard_succeeds_when_running(
     next_retry = datetime.now(timezone.utc)
     result = await session.execute(
         SCHEDULE_TASK_RETRY_SQL,
-        {'id': task_id, 'retry_count': 1, 'next_retry_at': next_retry},
+        {
+            'id': task_id,
+            'wid': OWNER_WORKER_ID,
+            'retry_count': 1,
+            'next_retry_at': next_retry,
+        },
     )
     returned_row = result.fetchone()
 
@@ -321,7 +363,12 @@ async def test_reaper_then_complete_race_sequence(
     late_result = '{"ok": "I completed successfully!"}'
     comp_res = await session.execute(
         MARK_TASK_COMPLETED_SQL,
-        {'now': now, 'result_json': late_result, 'id': task_id},
+        {
+            'now': now,
+            'result_json': late_result,
+            'id': task_id,
+            'wid': OWNER_WORKER_ID,
+        },
     )
     assert comp_res.fetchone() is None, 'Late COMPLETED must be blocked'
 
@@ -361,7 +408,12 @@ async def test_reaper_then_retry_race_sequence(
     next_retry = datetime.now(timezone.utc)
     retry_res = await session.execute(
         SCHEDULE_TASK_RETRY_SQL,
-        {'id': task_id, 'retry_count': 1, 'next_retry_at': next_retry},
+        {
+            'id': task_id,
+            'wid': OWNER_WORKER_ID,
+            'retry_count': 1,
+            'next_retry_at': next_retry,
+        },
     )
     assert retry_res.fetchone() is None, 'Late retry must be blocked'
 
@@ -424,3 +476,193 @@ async def test_retry_config_sql_returns_good_until_and_db_now(
     if db_now.tzinfo is None:
         db_now = db_now.replace(tzinfo=timezone.utc)
     assert good_until < db_now
+
+
+# ---------------------------------------------------------------------------
+# Ownership guards: a stale worker must not clobber a re-claimed attempt
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_context_select_blocks_on_ownership_mismatch(
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """Context SELECT returns no row when another worker owns the RUNNING task."""
+    task_id = await _insert_running_task(
+        session, claimed_by_worker_id=OTHER_WORKER_ID
+    )
+
+    row = (
+        await session.execute(
+            SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
+            {'id': task_id, 'wid': OWNER_WORKER_ID},
+        )
+    ).fetchone()
+    assert row is None, (
+        'Context SELECT must not match a RUNNING row owned by another worker'
+    )
+
+    # Sanity: the actual owner still matches.
+    owner_row = (
+        await session.execute(
+            SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
+            {'id': task_id, 'wid': OTHER_WORKER_ID},
+        )
+    ).fetchone()
+    assert owner_row is not None
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_complete_guard_blocks_on_ownership_mismatch(
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """MARK_TASK_COMPLETED_SQL is a no-op when another worker owns the row."""
+    task_id = await _insert_running_task(
+        session, claimed_by_worker_id=OTHER_WORKER_ID
+    )
+
+    result = await session.execute(
+        MARK_TASK_COMPLETED_SQL,
+        {
+            'result_json': '{"ok": "stale_result"}',
+            'id': task_id,
+            'wid': OWNER_WORKER_ID,
+        },
+    )
+    assert result.fetchone() is None, (
+        'MARK_TASK_COMPLETED_SQL must be a no-op on ownership mismatch'
+    )
+    assert await _get_task_status(session, task_id) == 'RUNNING', (
+        'Re-claimed RUNNING attempt must be left untouched'
+    )
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_fail_guard_blocks_on_ownership_mismatch(
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """MARK_TASK_FAILED_SQL is a no-op when another worker owns the row."""
+    task_id = await _insert_running_task(
+        session, claimed_by_worker_id=OTHER_WORKER_ID
+    )
+
+    result = await session.execute(
+        MARK_TASK_FAILED_SQL,
+        {
+            'result_json': '{"err": {"error_code": "STALE"}}',
+            'id': task_id,
+            'wid': OWNER_WORKER_ID,
+            'error_code': 'STALE',
+        },
+    )
+    assert result.fetchone() is None, (
+        'MARK_TASK_FAILED_SQL must be a no-op on ownership mismatch'
+    )
+    assert await _get_task_status(session, task_id) == 'RUNNING'
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_retry_guard_blocks_on_ownership_mismatch(
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """SCHEDULE_TASK_RETRY_SQL must not flip another worker's RUNNING row to PENDING."""
+    task_id = await _insert_running_task(
+        session, claimed_by_worker_id=OTHER_WORKER_ID
+    )
+
+    next_retry = datetime.now(timezone.utc)
+    result = await session.execute(
+        SCHEDULE_TASK_RETRY_SQL,
+        {
+            'id': task_id,
+            'wid': OWNER_WORKER_ID,
+            'retry_count': 2,
+            'next_retry_at': next_retry,
+        },
+    )
+    assert result.fetchone() is None, (
+        'SCHEDULE_TASK_RETRY_SQL must be a no-op on ownership mismatch'
+    )
+    assert await _get_task_status(session, task_id) == 'RUNNING', (
+        'In-flight attempt of the new owner must not be requeued by a stale worker'
+    )
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_stale_finalizer_after_reclaim_race_sequence(
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """Full race: reaper requeues, another worker re-claims and runs, stale
+    finalizer of the original worker fires.
+
+    Timeline:
+      T=0  Worker A runs task (RUNNING, owner=A); its heartbeats stall.
+      T=1  Reaper requeues the stale task (PENDING, owner cleared, retry+1).
+      T=2  Worker B claims and starts it (RUNNING, owner=B).
+      T=3  A's child finishes; A's finalize fires MARK_TASK_COMPLETED with wid=A.
+      T=4  Assert: blocked — task stays RUNNING under B with no result written.
+    """
+    task_id = await _insert_running_task(
+        session, claimed_by_worker_id=OWNER_WORKER_ID
+    )
+
+    # T=1: Reaper requeue (status-only transition, ownership cleared)
+    await session.execute(
+        text("""
+            UPDATE horsies_tasks
+            SET status = 'PENDING',
+                retry_count = retry_count + 1,
+                claimed_by_worker_id = NULL,
+                started_at = NULL,
+                updated_at = NOW()
+            WHERE id = :id
+        """),
+        {'id': task_id},
+    )
+
+    # T=2: Worker B claims and starts running
+    await session.execute(
+        text("""
+            UPDATE horsies_tasks
+            SET status = 'RUNNING',
+                claimed_by_worker_id = :wid,
+                started_at = NOW(),
+                updated_at = NOW()
+            WHERE id = :id
+        """),
+        {'id': task_id, 'wid': OTHER_WORKER_ID},
+    )
+    await session.flush()
+
+    # T=3: Worker A's stale finalizer fires — must be blocked
+    comp_res = await session.execute(
+        MARK_TASK_COMPLETED_SQL,
+        {
+            'result_json': '{"ok": "stale A result"}',
+            'id': task_id,
+            'wid': OWNER_WORKER_ID,
+        },
+    )
+    assert comp_res.fetchone() is None, (
+        'Stale finalizer must be blocked while B\'s attempt is RUNNING'
+    )
+
+    # T=4: B's in-flight attempt is untouched
+    row = (
+        await session.execute(
+            text("""
+                SELECT status, claimed_by_worker_id, result
+                FROM horsies_tasks WHERE id = :id
+            """),
+            {'id': task_id},
+        )
+    ).fetchone()
+    assert row is not None
+    assert row[0] == 'RUNNING'
+    assert row[1] == OTHER_WORKER_ID
+    assert row[2] is None, 'Stale result must not be written'
