@@ -192,6 +192,64 @@ def _discard_inherited_broker(app: Horsies) -> None:
         logger.warning('Failed to reset inherited broker in child: %s', exc)
 
 
+# Exit code for a failed/hung on_child_process_start hook. Distinct from
+# generic child crashes so the parent stops the worker instead of
+# restart-looping on an unfixable child boot.
+CHILD_HOOK_FAILURE_EXIT_CODE = 173
+
+# Per-hook execution budget (cf. Celery's 4s worker_process_init limit).
+CHILD_HOOK_TIMEOUT_SECONDS = 10.0
+
+
+def _exit_for_hung_hook(hook_name: str) -> None:
+    """Watchdog target: a hook exceeded its budget; terminate the child."""
+    logger.critical(
+        "on_child_process_start hook '%s' exceeded %.0fs in child %s; "
+        'terminating child',
+        hook_name,
+        CHILD_HOOK_TIMEOUT_SECONDS,
+        os.getpid(),
+    )
+    os._exit(CHILD_HOOK_FAILURE_EXIT_CODE)
+
+
+def _run_child_start_hooks(app: Horsies) -> None:
+    """Run app-registered child-start hooks; any failure is terminal.
+
+    Fail-closed by design: a failed pool-policy install must not silently
+    proceed to the state the hook exists to prevent. Failure or timeout
+    logs the hook name and exits with CHILD_HOOK_FAILURE_EXIT_CODE, which
+    the parent recognizes and stops the worker rather than restart-looping.
+    Best-effort work belongs inside the hook's own try/except.
+    """
+    for hook in app.get_child_process_start_hooks():
+        hook_name = getattr(hook, '__qualname__', repr(hook))
+        watchdog = threading.Timer(
+            CHILD_HOOK_TIMEOUT_SECONDS,
+            _exit_for_hung_hook,
+            args=(hook_name,),
+        )
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            hook()
+        except BaseException as exc:
+            watchdog.cancel()
+            logger.critical(
+                "on_child_process_start hook '%s' failed in child %s: %s",
+                hook_name,
+                os.getpid(),
+                exc,
+            )
+            os._exit(CHILD_HOOK_FAILURE_EXIT_CODE)
+        watchdog.cancel()
+        logger.debug(
+            "[child %s] on_child_process_start hook '%s' completed",
+            os.getpid(),
+            hook_name,
+        )
+
+
 def _child_initializer(
     app_locator: str,
     imports: Sequence[str],
@@ -253,6 +311,11 @@ def _child_initializer(
     keys = app.tasks.keys_list()
     _debug_imports_log(f'[child {os.getpid()}] registered_tasks={keys}')
 
+    # App-owned per-child setup (engine disposal / pool policy) runs after
+    # task imports so app engines exist, and before horsies opens its own
+    # child pool so a failing hook aborts cleanly.
+    _run_child_start_hooks(app)
+
     # Initialize per-process connection pool (after all imports complete)
     _initialize_worker_pool(
         database_url,
@@ -270,6 +333,7 @@ def _heartbeat_worker(
     stop_event: threading.Event,
     sender_worker_id: str,
     heartbeat_interval_ms: int = 30_000,
+    timeout_ms: int | None = None,
 ) -> None:
     """
     Runs in a separate thread within the task process.
@@ -287,6 +351,16 @@ def _heartbeat_worker(
     # Convert to seconds only for threading.Event.wait()
     heartbeat_interval_seconds = heartbeat_interval_ms / 1000.0
     consecutive_failures = 0
+    # Reaper backstop for timed-out tasks: stop beating past the deadline
+    # (plus one interval of grace) so the staleness machinery reclaims the
+    # task even if the parent worker died before it could kill this child.
+    # The thread cannot kill the process itself — that needs the GIL, which
+    # hung user code may never release.
+    deadline_monotonic: float | None = None
+    if timeout_ms is not None:
+        deadline_monotonic = (
+            time.monotonic() + timeout_ms / 1000.0 + heartbeat_interval_seconds
+        )
 
     def send_heartbeat() -> bool:
         nonlocal consecutive_failures
@@ -333,6 +407,18 @@ def _heartbeat_worker(
         # Wait for interval, but check stop_event periodically
         if stop_event.wait(timeout=heartbeat_interval_seconds):
             break  # stop_event was set
+
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= deadline_monotonic
+        ):
+            logger.warning(
+                'Task %s exceeded timeout_ms=%s; stopping runner heartbeats '
+                'so the reaper can reclaim it',
+                task_id,
+                timeout_ms,
+            )
+            break
 
         # Use pooled connection for heartbeat
         send_heartbeat()
@@ -699,6 +785,7 @@ def _start_heartbeat_thread(
     heartbeat_stop_event: threading.Event,
     worker_id: str,
     runner_heartbeat_interval_ms: int,
+    timeout_ms: int | None = None,
 ) -> threading.Thread:
     heartbeat_thread = threading.Thread(
         target=_heartbeat_worker,
@@ -708,6 +795,7 @@ def _start_heartbeat_thread(
             heartbeat_stop_event,
             worker_id,
             runner_heartbeat_interval_ms,
+            timeout_ms,
         ),
         daemon=True,
         name=f'heartbeat-{task_id[:8]}',
@@ -748,6 +836,7 @@ def _run_task_entry(
     master_worker_id: str,
     runner_heartbeat_interval_ms: int = 30_000,
     is_workflow_task: bool = True,
+    timeout_ms: Optional[int] = None,
 ) -> Tuple[bool, str, Optional[str]]:
     """
     Child-process entry.
@@ -791,6 +880,7 @@ def _run_task_entry(
         heartbeat_stop_event,
         master_worker_id,
         runner_heartbeat_interval_ms,
+        timeout_ms,
     )
 
     try:

@@ -101,6 +101,7 @@ export default defineConfig({
 						{ label: 'Worker Architecture', slug: 'workers/worker-architecture' },
 						{ label: 'Concurrency', slug: 'workers/concurrency' },
 						{ label: 'Heartbeats & Recovery', slug: 'workers/heartbeats-recovery' },
+						{ label: 'Child-Process Hooks', slug: 'workers/child-process-hooks' },
 					],
 				},
 				{

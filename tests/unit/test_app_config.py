@@ -558,6 +558,35 @@ class TestQueueModeValidation:
             )
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
 
+    def test_max_concurrency_none_means_uncapped(self) -> None:
+        """max_concurrency=None is the explicit uncapped sentinel."""
+        queue = CustomQueueConfig(name='bulk', max_concurrency=None)
+        assert queue.max_concurrency is None
+
+    def test_max_concurrency_zero_pauses_claiming(self) -> None:
+        """0 is a valid edge: the queue is claimable-from by nobody."""
+        queue = CustomQueueConfig(name='drained', max_concurrency=0)
+        assert queue.max_concurrency == 0
+
+    def test_max_concurrency_negative_rejected(self) -> None:
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            CustomQueueConfig(name='bad', max_concurrency=-1)
+
+    def test_format_for_logging_uncapped_queue_labelled(self) -> None:
+        """None renders as 'uncapped' in the startup banner, not 'None'."""
+        config = AppConfig(
+            queue_mode=QueueMode.CUSTOM,
+            broker=BROKER,
+            custom_queues=[
+                CustomQueueConfig(name='bulk', max_concurrency=None),
+            ],
+        )
+        formatted = config._format_for_logging()
+        assert 'max_concurrency=uncapped' in formatted
+        assert 'max_concurrency=None' not in formatted
+
     def test_custom_mode_with_valid_queues(self) -> None:
         """CUSTOM mode with valid unique queues should succeed."""
         config = AppConfig(

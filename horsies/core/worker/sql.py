@@ -68,7 +68,7 @@ SET status = 'CLAIMED',
     updated_at = now()
 FROM next
 WHERE t.id = next.id
-RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name, t.is_workflow_task;
+RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name, t.is_workflow_task, t.task_options;
 """)
 
 

@@ -70,6 +70,12 @@ config = AppConfig(
 )
 ```
 
+`max_concurrency=None` declares the queue uncapped: no per-queue limit is
+enforced and the claim pass skips the in-flight count query for that queue
+(worker- and cluster-level limits still apply), mirroring
+`cluster_wide_cap=None`. `max_concurrency=0` is a valid edge that pauses
+claiming from the queue.
+
 Use cases:
 
 - Rate limiting external API calls

@@ -91,6 +91,7 @@ class OutcomeCode(str, Enum):
 
     TASK_CANCELLED = 'TASK_CANCELLED'
     TASK_EXPIRED = 'TASK_EXPIRED'
+    TASK_TIMEOUT = 'TASK_TIMEOUT'
     WORKFLOW_PAUSED = 'WORKFLOW_PAUSED'
     WORKFLOW_FAILED = 'WORKFLOW_FAILED'
     WORKFLOW_CANCELLED = 'WORKFLOW_CANCELLED'
@@ -590,6 +591,15 @@ class TaskOptions(BaseModel):
         queue_name: Target queue name (validated against app config at definition time)
         good_until: Task expiry deadline (task skipped if not claimed by this time)
         retry_policy: Retry timing and backoff configuration (includes auto_retry_for)
+        timeout_ms: Execution time limit. Measured by the worker parent from
+            dispatch to the child process (child setup overhead, typically
+            milliseconds, counts toward it). On expiry the task fails with
+            OutcomeCode.TASK_TIMEOUT and the child process is killed; retry
+            only happens when 'TASK_TIMEOUT' is listed in auto_retry_for.
+            Killing a child breaks the shared process pool — sibling
+            in-flight tasks on the same worker are requeued/retried through
+            crash recovery — so timeouts are for exceptional hangs, not
+            routine control flow.
     """
 
     model_config = ConfigDict(extra='forbid')
@@ -598,6 +608,9 @@ class TaskOptions(BaseModel):
     queue_name: Optional[str] = None
     good_until: Optional[datetime.datetime] = None
     retry_policy: Optional[RetryPolicy] = None
+    timeout_ms: Annotated[
+        int, Field(ge=1000, description='Execution time limit in milliseconds (>= 1s)')
+    ] | None = None
 
     @field_validator('good_until')
     @classmethod
