@@ -200,6 +200,15 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
         *,
         avoid_parent_fd_inheritance: bool = False,
     ) -> ProcessPoolExecutor:
+        """Construct the child process pool (children spawn lazily on submit).
+
+        Raises:
+            OSError: pool resource allocation failed (fd/semaphore
+                exhaustion). On the start path the resilience policy in
+                ``_start_with_resilience_config`` decides retry vs fail-fast;
+                on the restart path ``_restart_executor`` wraps it into
+                ``ExecutorRestartFailedError``.
+        """
         child_database_url = to_psycopg_url(self.cfg.dsn)
         kwargs: dict[str, Any] = {}
         if avoid_parent_fd_inheritance:
@@ -383,6 +392,11 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
             return
 
     async def _cleanup_after_failed_start(self) -> None:
+        """Tear down partial start state so the resilience loop can retry.
+
+        Total: every I/O step (listener close, executor shutdown) contains
+        and logs its own failure (cancellation exempt).
+        """
         # Cancel any background loops spawned before the failure so a retry
         # starts clean instead of leaking orphans and spawning duplicates.
         # _stop is left unset: the resilience loop must be free to retry.
@@ -415,6 +429,13 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
         exc: BaseException,
         backoff: _RetryBackoff,
     ) -> None:
+        """Clean up, back off, and let the resilience loop retry the start.
+
+        Raises:
+            BaseException: re-raises the active start error (bare ``raise``)
+                once the configured retry budget is exhausted — before any
+                cleanup; final-failure state is left to process exit.
+        """
         if not backoff.can_retry():
             logger.error(
                 f'Worker start failed after {backoff.attempts} attempts: {exc}'
@@ -430,6 +451,20 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
         await self._sleep_with_stop(delay)
 
     async def _start_with_resilience_config(self) -> None:
+        """Start the worker under the configured startup-retry policy.
+
+        Each attempt is bounded at 30s. Timeouts and transient connection
+        errors are backoff-retried per the resilience config. Returns
+        without starting (and without raising) when stop is requested
+        mid-backoff; ``run_forever`` checks ``_stop`` after this call.
+
+        Raises:
+            Exception: a non-retryable start error, or a retryable one after
+                the retry budget is exhausted — fail-fast at boot; the CLI
+                exits non-zero. On the exhausted-timeout arm the attempt was
+                cancelled mid-start, so partial state is left to process
+                exit rather than torn down.
+        """
         backoff = self._make_retry_backoff()
         while not self._stop.is_set():
             try:
@@ -447,6 +482,17 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
     # ----- lifecycle -----
 
     async def start(self) -> None:
+        """Bring up the worker: preload, warm children, listen, spawn loops.
+
+        Raises:
+            Exception: any startup failure propagates.
+                ``_preload_modules_main`` runs before any state exists and
+                propagates bare; everything after it (executor warmup incl.
+                ChildHookFailedError, LISTEN/subscription errors) propagates
+                after ``_cleanup_after_failed_start`` tears down partial
+                state. ``_start_with_resilience_config`` owns the
+                retry-vs-fail-fast decision.
+        """
         logger.debug('Starting worker')
         # Preload the app and task modules in the main process to fail fast
         self._preload_modules_main()
@@ -549,6 +595,12 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
         force: bool = False,
         finalizer_timeout_s: float = _FINALIZER_DRAIN_TIMEOUT_S,
     ) -> None:
+        """Stop loops, bound-shutdown the executor, drain finalizers, close.
+
+        Best-effort total: every I/O step contains and logs its own failure,
+        so a ``stop()`` inside ``run_forever``'s ``finally`` cannot mask the
+        original crash (cancellation exempt).
+        """
         self._stop.set()
         # Service loops are safe to cancel.
         if self._service_tasks:
@@ -582,43 +634,65 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
             loop = asyncio.get_running_loop()
             executor = self._executor
             self._executor = None
-            shutdown_future = loop.run_in_executor(
-                None, lambda: executor.shutdown(wait=True, cancel_futures=True)
-            )
+            shutdown_future: asyncio.Future[None] | None = None
             try:
+                # Submit inside the try: at interpreter shutdown the loop's
+                # default thread pool can refuse new futures, and stop() runs
+                # in run_forever's finally where a raise here would mask the
+                # original crash.
+                shutdown_future = loop.run_in_executor(
+                    None, lambda: executor.shutdown(wait=True, cancel_futures=True)
+                )
                 await asyncio.wait_for(
                     asyncio.shield(shutdown_future),
                     timeout=executor_shutdown_grace_s,
                 )
             except asyncio.TimeoutError:
-                # _processes is a private-but-stable CPython mapping
-                # (pid -> Process); there is no public way to enumerate a
-                # pool's children.
-                from multiprocessing.process import BaseProcess
+                # Raises inside this handler bypass the sibling except arm,
+                # so the best-effort kill contains its own failures.
+                try:
+                    # _processes is a private-but-stable CPython mapping
+                    # (pid -> Process); there is no public way to enumerate
+                    # a pool's children. Snapshot before iterating: the
+                    # pool's management thread can prune entries while
+                    # shutdown is hung.
+                    from multiprocessing.process import BaseProcess
 
-                processes = cast(
-                    'dict[int, BaseProcess]',
-                    getattr(executor, '_processes', None) or {},
-                )
-                pids = [
-                    proc.pid
-                    for proc in processes.values()
-                    if proc.pid is not None
-                ]
-                logger.error(
-                    'Executor shutdown exceeded %.0fs (hung task?); killing '
-                    '%d child process(es): %s',
-                    executor_shutdown_grace_s,
-                    len(pids),
-                    pids,
-                )
-                for pid in pids:
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                with contextlib.suppress(Exception):
-                    await shutdown_future
+                    processes = cast(
+                        'dict[int, BaseProcess]',
+                        getattr(executor, '_processes', None) or {},
+                    )
+                    pids = [
+                        proc.pid
+                        for proc in list(processes.values())
+                        if proc.pid is not None
+                    ]
+                    logger.error(
+                        'Executor shutdown exceeded %.0fs (hung task?); killing '
+                        '%d child process(es): %s',
+                        executor_shutdown_grace_s,
+                        len(pids),
+                        pids,
+                    )
+                    for pid in pids:
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        except OSError as kill_exc:
+                            logger.warning(
+                                'Failed to SIGKILL child pid=%s: %s',
+                                pid,
+                                kill_exc,
+                            )
+                except Exception as kill_arm_exc:
+                    logger.error(
+                        'Best-effort kill of hung children failed: %s',
+                        kill_arm_exc,
+                    )
+                if shutdown_future is not None:
+                    with contextlib.suppress(Exception):
+                        await shutdown_future
             except Exception as e:
                 logger.error(f'Error shutting down executor: {e}')
             logger.info('Worker executor shutdown')
@@ -666,6 +740,11 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
         This ensures Pydantic validations and module-level side effects run once
         and any configuration errors surface during startup rather than inside
         the child process initializer.
+
+        Raises:
+            Exception: import/validation failures are logged and re-raised —
+                fail-fast at boot. Runs before ``start()`` creates any state,
+                so there is nothing to clean up.
         """
         try:
             sys_path_roots_resolved = _build_sys_path_roots(
@@ -709,7 +788,18 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
     # ----- main loop -----
 
     async def run_forever(self) -> None:
-        """Main orchestrator loop."""
+        """Main orchestrator loop — the worker's recovery seam.
+
+        Claim-pass and notify-wait errors land here: transient connection
+        errors are backoff-retried per the resilience config; anything else
+        (including ExecutorRestartFailedError and an exhausted backoff)
+        re-raises so the process exits non-zero for a supervisor restart.
+        ``stop()`` always runs once the loop is entered; startup failures
+        exit via ``_cleanup_after_failed_start`` instead.
+
+        Raises:
+            Exception: the non-retryable or retry-exhausted loop error.
+        """
         await self._start_with_resilience_config()
         if self._stop.is_set():
             return
@@ -748,7 +838,11 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
             await self.stop()
 
     async def _wait_for_any_notify(self, poll_interval_ms: int) -> None:
-        """Wait on any subscribed queue channel; coalesce a burst."""
+        """Wait on any subscribed queue channel; coalesce a burst.
+
+        Pending waiter tasks are cancelled and awaited on every exit path;
+        an unexpected escape lands in ``run_forever``'s loop policy.
+        """
         import contextlib
 
         queue_tasks = [
@@ -758,11 +852,18 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
         stop_task = asyncio.create_task(self._stop.wait())
         all_tasks = queue_tasks + [stop_task]
         timeout_seconds = max(0.0, poll_interval_ms / 1000.0)
-        done, pending = await asyncio.wait(
-            all_tasks,
-            return_when=asyncio.FIRST_COMPLETED,
-            timeout=timeout_seconds,
-        )
+        try:
+            done, pending = await asyncio.wait(
+                all_tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+                timeout=timeout_seconds,
+            )
+        except asyncio.CancelledError:
+            # asyncio.wait does not cancel its awaitables on cancellation;
+            # without this the waiter tasks linger until loop teardown.
+            for t in all_tasks:
+                t.cancel()
+            raise
 
         # Check if stop was signaled
         if self._stop.is_set():

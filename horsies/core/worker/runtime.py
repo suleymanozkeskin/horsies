@@ -161,7 +161,13 @@ def _parse_timeout_ms(task_options_json: Any, task_id: str) -> int | None:
 
 
 def _collect_psutil_metrics() -> tuple[float, float, float]:
-    """Collect process metrics. Blocking — must run in a thread."""
+    """Collect process metrics. Blocking — must run in a thread.
+
+    Raises:
+        Exception: psutil import/OS failures propagate to the sole caller,
+            ``_update_worker_state``, whose broad containment logs and skips
+            the snapshot.
+    """
     import psutil
 
     process = psutil.Process()
