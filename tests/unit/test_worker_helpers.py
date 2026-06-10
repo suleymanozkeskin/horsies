@@ -45,8 +45,10 @@ from horsies.core.worker.worker import (
     _FINALIZE_STAGE_PHASE2,
     _is_retryable_db_error,
     _RequeueOutcome,
+    _RetryError,
 )
 from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.models.tasks import OperationalErrorCode
 
 
 # ---------------------------------------------------------------------------
@@ -3851,3 +3853,113 @@ class TestReaperGatePoolCapacity:
 
         assert worker._run_reaper_pass.await_count == 1
         worker.sf.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Retry Err mapping at caller seams
+# ---------------------------------------------------------------------------
+
+
+def _make_running_ctx_session(worker: Worker) -> AsyncMock:
+    """Session whose first execute returns a RUNNING in-flight ctx row."""
+    now = datetime.now(timezone.utc)
+    ctx_row = SimpleNamespace(
+        status='RUNNING',
+        retry_count=0,
+        db_now=now,
+        started_at=now,
+        claimed_by_worker_id=worker.worker_instance_id,
+        worker_hostname='host',
+        worker_pid=123,
+        worker_process_name='proc',
+        queue_name='default',
+    )
+    ctx_result = MagicMock()
+    ctx_result.fetchone.return_value = ctx_row
+
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.execute = AsyncMock(return_value=ctx_result)
+    session.commit = AsyncMock()
+    return session
+
+
+def _retry_error(task_id: str = 'task-1') -> _RetryError:
+    return _RetryError(
+        error_code=OperationalErrorCode.BROKER_ERROR,
+        message='DB error reading retry info: boom',
+        task_id=task_id,
+        retryable=True,
+        data={'exception_type': 'OperationalError'},
+    )
+
+
+@pytest.mark.unit
+class TestRecoverRetryErrMapping:
+    """_recover_worker_future_failure maps retry Err arms to DB_ERROR."""
+
+    @pytest.mark.asyncio
+    async def test_should_retry_err_returns_db_error(self) -> None:
+        """Err from the retry decision aborts recovery with DB_ERROR."""
+        worker = _make_worker()
+        session = _make_running_ctx_session(worker)
+        worker.sf = MagicMock(return_value=session)
+        worker._should_retry_task = AsyncMock(  # type: ignore[method-assign]
+            return_value=Err(_retry_error()),
+        )
+
+        outcome = await worker._recover_worker_future_failure('task-1', 'pool broke')
+
+        assert outcome is _RequeueOutcome.DB_ERROR
+        session.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_schedule_retry_err_returns_db_error(self) -> None:
+        """Err from retry scheduling aborts recovery with DB_ERROR."""
+        worker = _make_worker()
+        session = _make_running_ctx_session(worker)
+        worker.sf = MagicMock(return_value=session)
+        worker._should_retry_task = AsyncMock(  # type: ignore[method-assign]
+            return_value=Ok(True),
+        )
+        worker._schedule_retry = AsyncMock(  # type: ignore[method-assign]
+            return_value=Err(_retry_error()),
+        )
+
+        outcome = await worker._recover_worker_future_failure('task-1', 'pool broke')
+
+        assert outcome is _RequeueOutcome.DB_ERROR
+        session.commit.assert_not_awaited()
+
+
+@pytest.mark.unit
+class TestFinalizeErrorFromRetryError:
+    """_finalize_error_from_retry_error translation preserves the failure."""
+
+    def test_translation_targets_phase1_and_preserves_fields(self) -> None:
+        worker = _make_worker()
+        retry_err = _retry_error(task_id='task-9')
+
+        finalize_err = worker._finalize_error_from_retry_error(retry_err)
+
+        assert finalize_err.stage == _FINALIZE_STAGE_PHASE1
+        assert finalize_err.error_code == OperationalErrorCode.BROKER_ERROR
+        assert finalize_err.message == retry_err.message
+        assert finalize_err.task_id == 'task-9'
+        assert finalize_err.retryable is True
+        assert finalize_err.data == retry_err.data
+
+    def test_translation_preserves_non_retryable(self) -> None:
+        worker = _make_worker()
+        retry_err = _RetryError(
+            error_code=OperationalErrorCode.BROKER_ERROR,
+            message='DB error persisting retry schedule: boom',
+            task_id='task-9',
+            retryable=False,
+        )
+
+        finalize_err = worker._finalize_error_from_retry_error(retry_err)
+
+        assert finalize_err.retryable is False
+        assert finalize_err.data is None

@@ -48,6 +48,7 @@ from horsies.core.worker.runtime import (
     _FINALIZE_STAGE_PHASE2,
     _FinalizeError,
     _RequeueOutcome,
+    _RetryError,
 )
 from horsies.core.worker.sql import (
     CHECK_WORKFLOW_TASK_EXISTS_SQL,
@@ -105,10 +106,12 @@ class FinalizeMixin:
         ) -> _RequeueOutcome: ...
         async def _should_retry_task(
             self, task_id: str, error: TaskError, session: AsyncSession
-        ) -> bool: ...
+        ) -> Result[bool, _RetryError]: ...
         async def _schedule_retry(
             self, task_id: str, session: AsyncSession, queue_name: str
-        ) -> Literal['scheduled', 'reaper_reclaimed', 'expired']: ...
+        ) -> Result[
+            Literal['scheduled', 'reaper_reclaimed', 'expired'], _RetryError
+        ]: ...
         async def _sleep_with_stop(self, delay_seconds: float) -> None: ...
         def _spawn_background(
             self,
@@ -231,6 +234,17 @@ class FinalizeMixin:
             task_id=task_id,
             retryable=retryable,
             data=data,
+        )
+
+    def _finalize_error_from_retry_error(self, err: _RetryError) -> _FinalizeError:
+        """Translate a retry-concern DB failure into a phase1 finalize error."""
+        return _FinalizeError(
+            error_code=err.error_code,
+            message=err.message,
+            stage=_FINALIZE_STAGE_PHASE1,
+            task_id=err.task_id,
+            retryable=err.retryable,
+            data=err.data,
         )
 
     def _with_finalize_context(
@@ -510,12 +524,26 @@ class FinalizeMixin:
                         case _:
                             pass
 
-                    should_retry = await self._should_retry_task(task_id, task_error, s)
-                    if should_retry:
-                        retry_outcome = await self._schedule_retry(
+                    should_retry_r = await self._should_retry_task(
+                        task_id, task_error, s,
+                    )
+                    if is_err(should_retry_r):
+                        return Err(
+                            self._finalize_error_from_retry_error(
+                                should_retry_r.err_value,
+                            ),
+                        )
+                    if should_retry_r.ok_value:
+                        retry_r = await self._schedule_retry(
                             task_id, s, queue_name=ctx_row.queue_name or 'default',
                         )
-                        match retry_outcome:
+                        if is_err(retry_r):
+                            return Err(
+                                self._finalize_error_from_retry_error(
+                                    retry_r.err_value,
+                                ),
+                            )
+                        match retry_r.ok_value:
                             case 'scheduled':
                                 # Retry scheduled: write FAILED attempt with will_retry=True
                                 await s.execute(

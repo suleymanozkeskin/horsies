@@ -17,7 +17,10 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from horsies.core.codec.json_io import loads_json
 from horsies.core.logging import get_logger
-from horsies.core.types.result import is_err
+from horsies.core.models.tasks import OperationalErrorCode
+from horsies.core.types.result import Err, Ok, Result, is_err
+from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.worker.runtime import _RetryError
 from horsies.core.worker.sql import (
     GET_TASK_RETRY_CONFIG_SQL,
     GET_TASK_RETRY_INFO_SQL,
@@ -58,36 +61,52 @@ class RetryMixin:
         task_id: str,
         error: TaskError,
         session: AsyncSession,
-    ) -> bool:
-        """Check if a task should be retried based on its configuration and current retry count."""
-        result = await session.execute(
-            GET_TASK_RETRY_INFO_SQL,
-            {'id': task_id},
-        )
-        row = result.fetchone()
+    ) -> Result[bool, _RetryError]:
+        """Decide if a task should be retried per its retry policy and count.
+
+        Ok(False) covers every "no" outcome (missing row, exhausted retries,
+        unparseable options, expired good_until) — those are policy, not
+        failures. Err means the retry info could not be read at all.
+        """
+        try:
+            result = await session.execute(
+                GET_TASK_RETRY_INFO_SQL,
+                {'id': task_id},
+            )
+            row = result.fetchone()
+        except Exception as exc:
+            return Err(
+                _RetryError(
+                    error_code=OperationalErrorCode.BROKER_ERROR,
+                    message=f'DB error reading retry info: {exc}',
+                    task_id=task_id,
+                    retryable=is_retryable_connection_error(exc),
+                    data={'exception_type': type(exc).__name__},
+                ),
+            )
 
         if not row:
-            return False
+            return Ok(False)
 
         retry_count = row.retry_count or 0
         max_retries = row.max_retries or 0
 
         if retry_count >= max_retries or max_retries == 0:
-            return False
+            return Ok(False)
 
         # Parse task options to check auto_retry_for (nested in retry_policy)
         try:
             if not row.task_options:
-                return False
+                return Ok(False)
             opts_r = loads_json(row.task_options)
             if is_err(opts_r):
-                return False
+                return Ok(False)
             task_options_data = opts_r.ok_value
             if not isinstance(task_options_data, dict):
-                return False
+                return Ok(False)
             retry_policy_raw = task_options_data.get('retry_policy', {})
             if not isinstance(retry_policy_raw, dict):
-                return False
+                return Ok(False)
             auto_retry_for = retry_policy_raw.get('auto_retry_for')
         except Exception as exc:
             # Corrupt task_options must not silently disable retries.
@@ -97,10 +116,10 @@ class RetryMixin:
                 task_id,
                 exc,
             )
-            return False
+            return Ok(False)
 
         if not isinstance(auto_retry_for, list) or not auto_retry_for:
-            return False
+            return Ok(False)
 
         # Match error code against auto_retry_for (enum value or string)
         code = (
@@ -122,17 +141,17 @@ class RetryMixin:
                         task_id,
                         good_until,
                     )
-                    return False
-            return True
+                    return Ok(False)
+            return Ok(True)
 
-        return False
+        return Ok(False)
 
     async def _schedule_retry(
         self,
         task_id: str,
         session: AsyncSession,
         queue_name: str,
-    ) -> Literal['scheduled', 'reaper_reclaimed', 'expired']:
+    ) -> Result[Literal['scheduled', 'reaper_reclaimed', 'expired'], _RetryError]:
         """Schedule a task for retry by updating its status and next retry time.
 
         ``queue_name`` comes from the caller's already-locked task row; the
@@ -141,19 +160,32 @@ class RetryMixin:
         a row lock — a pool-starvation deadlock under mass failure.
 
         Returns:
-        - 'scheduled' when retry was persisted
-        - 'reaper_reclaimed' when task is no longer RUNNING
-        - 'expired' when retry would land at/after good_until
+        - Ok('scheduled') when retry was persisted
+        - Ok('reaper_reclaimed') when task is no longer RUNNING
+        - Ok('expired') when retry would land at/after good_until
+        - Err(_RetryError) when a DB call failed; the caller's session is
+          no longer usable for further work in this transaction
         """
         # Get current retry configuration
-        result = await session.execute(
-            GET_TASK_RETRY_CONFIG_SQL,
-            {'id': task_id},
-        )
-        row = result.fetchone()
+        try:
+            result = await session.execute(
+                GET_TASK_RETRY_CONFIG_SQL,
+                {'id': task_id},
+            )
+            row = result.fetchone()
+        except Exception as exc:
+            return Err(
+                _RetryError(
+                    error_code=OperationalErrorCode.BROKER_ERROR,
+                    message=f'DB error reading retry config: {exc}',
+                    task_id=task_id,
+                    retryable=is_retryable_connection_error(exc),
+                    data={'exception_type': type(exc).__name__},
+                ),
+            )
 
         if not row:
-            return 'reaper_reclaimed'
+            return Ok('reaper_reclaimed')
 
         retry_count = (row.retry_count or 0) + 1
 
@@ -198,25 +230,48 @@ class RetryMixin:
                     next_retry_at,
                     good_until,
                 )
-                return 'expired'
+                return Ok('expired')
 
         # Update task for retry — guarded by status = 'RUNNING' + ownership
-        res = await session.execute(
-            SCHEDULE_TASK_RETRY_SQL,
-            {
-                'id': task_id,
-                'wid': self.worker_instance_id,
-                'retry_count': retry_count,
-                'next_retry_at': next_retry_at,
-            },
-        )
-        if res.fetchone() is None:
-            # Distinguish expiry guard rejections from true reaper reclaim races.
-            postcheck = await session.execute(
-                GET_TASK_RETRY_POSTCHECK_SQL,
-                {'id': task_id},
+        try:
+            res = await session.execute(
+                SCHEDULE_TASK_RETRY_SQL,
+                {
+                    'id': task_id,
+                    'wid': self.worker_instance_id,
+                    'retry_count': retry_count,
+                    'next_retry_at': next_retry_at,
+                },
             )
-            postcheck_row = postcheck.fetchone()
+            schedule_row = res.fetchone()
+        except Exception as exc:
+            return Err(
+                _RetryError(
+                    error_code=OperationalErrorCode.BROKER_ERROR,
+                    message=f'DB error persisting retry schedule: {exc}',
+                    task_id=task_id,
+                    retryable=is_retryable_connection_error(exc),
+                    data={'exception_type': type(exc).__name__},
+                ),
+            )
+        if schedule_row is None:
+            # Distinguish expiry guard rejections from true reaper reclaim races.
+            try:
+                postcheck = await session.execute(
+                    GET_TASK_RETRY_POSTCHECK_SQL,
+                    {'id': task_id},
+                )
+                postcheck_row = postcheck.fetchone()
+            except Exception as exc:
+                return Err(
+                    _RetryError(
+                        error_code=OperationalErrorCode.BROKER_ERROR,
+                        message=f'DB error post-checking retry rejection: {exc}',
+                        task_id=task_id,
+                        retryable=is_retryable_connection_error(exc),
+                        data={'exception_type': type(exc).__name__},
+                    ),
+                )
             if postcheck_row is not None:
                 status_value = postcheck_row.status
                 is_running = (
@@ -238,13 +293,13 @@ class RetryMixin:
                                 next_retry_at,
                                 post_good_until,
                             )
-                            return 'expired'
+                            return Ok('expired')
             logger.warning(
                 f'Task {task_id} retry aborted: status/ownership changed '
                 f'(reaper reclaim or re-claim by another worker). '
                 f'Skipping to prevent double-execution.'
             )
-            return 'reaper_reclaimed'
+            return Ok('reaper_reclaimed')
 
         # Schedule a delayed notification using asyncio for the task's actual queue
         self._spawn_background(
@@ -259,7 +314,7 @@ class RetryMixin:
         logger.info(
             f'Scheduled task {task_id} for retry #{retry_count} at {next_retry_at}'
         )
-        return 'scheduled'
+        return Ok('scheduled')
 
     def _calculate_retry_delay(
         self,

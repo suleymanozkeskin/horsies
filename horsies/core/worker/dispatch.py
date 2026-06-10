@@ -29,7 +29,7 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.types.result import Result, is_err
 from horsies.core.worker.child_runner import _run_task_entry
-from horsies.core.worker.runtime import _FinalizeError, _RequeueOutcome
+from horsies.core.worker.runtime import _FinalizeError, _RequeueOutcome, _RetryError
 from horsies.core.worker.sql import (
     MARK_TASK_FAILED_SQL,
     SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
@@ -86,10 +86,12 @@ class DispatchMixin:
         ) -> None: ...
         async def _should_retry_task(
             self, task_id: str, error: TaskError, session: AsyncSession
-        ) -> bool: ...
+        ) -> Result[bool, _RetryError]: ...
         async def _schedule_retry(
             self, task_id: str, session: AsyncSession, queue_name: str
-        ) -> Literal['scheduled', 'reaper_reclaimed', 'expired']: ...
+        ) -> Result[
+            Literal['scheduled', 'reaper_reclaimed', 'expired'], _RetryError
+        ]: ...
         def _spawn_background(
             self,
             coro: Coroutine[Any, Any, Any],
@@ -211,12 +213,28 @@ class DispatchMixin:
                     'worker_process_name': ctx_row.worker_process_name,
                 }
 
-                should_retry = await self._should_retry_task(task_id, task_error, s)
-                if should_retry:
-                    retry_outcome = await self._schedule_retry(
+                should_retry_r = await self._should_retry_task(
+                    task_id, task_error, s,
+                )
+                if is_err(should_retry_r):
+                    logger.error(
+                        'Retry decision failed while recovering task %s: %s',
+                        task_id,
+                        should_retry_r.err_value.message,
+                    )
+                    return _RequeueOutcome.DB_ERROR
+                if should_retry_r.ok_value:
+                    retry_r = await self._schedule_retry(
                         task_id, s, queue_name=ctx_row.queue_name or 'default',
                     )
-                    match retry_outcome:
+                    if is_err(retry_r):
+                        logger.error(
+                            'Retry scheduling failed while recovering task %s: %s',
+                            task_id,
+                            retry_r.err_value.message,
+                        )
+                        return _RequeueOutcome.DB_ERROR
+                    match retry_r.ok_value:
                         case 'scheduled':
                             await s.execute(
                                 UPSERT_TASK_ATTEMPT_SQL,
@@ -433,11 +451,32 @@ class DispatchMixin:
                 }
 
                 retry_scheduled = False
-                if await self._should_retry_task(task_id, task_error, s):
-                    retry_outcome = await self._schedule_retry(
+                should_retry_r = await self._should_retry_task(
+                    task_id, task_error, s,
+                )
+                if is_err(should_retry_r):
+                    logger.error(
+                        'Retry decision failed for timed-out task %s: %s; '
+                        'killing the child anyway (crash recovery will '
+                        'classify the row)',
+                        task_id,
+                        should_retry_r.err_value.message,
+                    )
+                    return
+                if should_retry_r.ok_value:
+                    retry_r = await self._schedule_retry(
                         task_id, s, queue_name=ctx_row.queue_name or 'default',
                     )
-                    retry_scheduled = retry_outcome == 'scheduled'
+                    if is_err(retry_r):
+                        logger.error(
+                            'Retry scheduling failed for timed-out task %s: %s; '
+                            'killing the child anyway (crash recovery will '
+                            'classify the row)',
+                            task_id,
+                            retry_r.err_value.message,
+                        )
+                        return
+                    retry_scheduled = retry_r.ok_value == 'scheduled'
 
                 await s.execute(
                     UPSERT_TASK_ATTEMPT_SQL,
