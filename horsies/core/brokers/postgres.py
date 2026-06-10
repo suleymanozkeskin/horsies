@@ -110,6 +110,7 @@ from horsies.core.schemas.indexes import (
     CREATE_TASK_ATTEMPTS_FINISHED_AT_INDEX_SQL,
     CREATE_TASKS_CLAIM_EXPIRED_INDEX_SQL,
     CREATE_TASKS_CLAIM_PENDING_INDEX_SQL,
+    CREATE_TASKS_CLAIM_EXPIRED_ORDERED_INDEX_SQL,
     CREATE_TASKS_ERROR_CODE_INDEX_SQL,
     CREATE_TASKS_WORKER_STATUS_INDEX_SQL,
     CREATE_WORKER_STATES_WORKER_SNAPSHOT_INDEX_SQL,
@@ -702,6 +703,8 @@ class PostgresBroker:
             # Migration (v3): claim-path indexes.
             await conn.execute(CREATE_TASKS_CLAIM_PENDING_INDEX_SQL)
             await conn.execute(CREATE_TASKS_CLAIM_EXPIRED_INDEX_SQL)
+            # Migration (v7): ordered walk for deep expired backlogs.
+            await conn.execute(CREATE_TASKS_CLAIM_EXPIRED_ORDERED_INDEX_SQL)
             await conn.execute(CREATE_TASKS_WORKER_STATUS_INDEX_SQL)
             await conn.execute(CREATE_WORKER_STATES_WORKER_SNAPSHOT_INDEX_SQL)
 
