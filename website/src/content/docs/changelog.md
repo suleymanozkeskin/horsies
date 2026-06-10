@@ -13,6 +13,14 @@ there is no migration contract between pre-1.0 versions.
 
 ### Added
 
+- Per-child-process hook: `@app.on_child_process_start` registers sync
+  zero-argument functions that run once in every worker child, after
+  task imports and before horsies opens its own child pool. The
+  supported seam for disposing fork-inherited app engines and setting
+  worker-specific pool policy (Celery `worker_process_init` /
+  Dramatiq `after_process_boot` parity). Fail-closed: a raising or
+  hung hook (10 s budget) exits the child with a dedicated code and
+  the worker stops with the hook named instead of restart-looping.
 - Per-task execution timeout: `@app.task(..., timeout_ms=...)` (minimum
   1000 ms, measured from dispatch). On expiry the worker records a
   `TASK_TIMEOUT` attempt, fails the task — or schedules a retry when
@@ -20,6 +28,13 @@ there is no migration contract between pre-1.0 versions.
   process. The kill restarts the worker's process pool; sibling tasks
   in flight recover through crash recovery. A deadline that fires
   before user code starts requeues the task instead.
+
+### Changed
+
+- Global workflow-recovery passes are capped at 200 rows per candidate
+  query per pass; resume-scoped passes remain uncapped. Successive
+  passes converge on large backlogs without one pass holding its
+  session and transaction throughout.
 
 ## 0.1.7 — 2026-06-10
 
