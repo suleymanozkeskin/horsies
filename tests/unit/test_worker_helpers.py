@@ -3941,14 +3941,26 @@ class TestFinalizeErrorFromRetryError:
         worker = _make_worker()
         retry_err = _retry_error(task_id='task-9')
 
-        finalize_err = worker._finalize_error_from_retry_error(retry_err)
+        finalize_err = worker._finalize_error_from_retry_error(
+            retry_err,
+            ok=False,
+            result_json_str='{"err": {"error_code": "BOOM"}}',
+            failed_reason=None,
+        )
 
         assert finalize_err.stage == _FINALIZE_STAGE_PHASE1
         assert finalize_err.error_code == OperationalErrorCode.BROKER_ERROR
         assert finalize_err.message == retry_err.message
         assert finalize_err.task_id == 'task-9'
         assert finalize_err.retryable is True
-        assert finalize_err.data == retry_err.data
+        assert finalize_err.data == {
+            'exception_type': 'OperationalError',
+            'outcome': {
+                'ok': False,
+                'result_json_str': '{"err": {"error_code": "BOOM"}}',
+                'failed_reason': None,
+            },
+        }
 
     def test_translation_preserves_non_retryable(self) -> None:
         worker = _make_worker()
@@ -3959,7 +3971,51 @@ class TestFinalizeErrorFromRetryError:
             retryable=False,
         )
 
-        finalize_err = worker._finalize_error_from_retry_error(retry_err)
+        finalize_err = worker._finalize_error_from_retry_error(
+            retry_err,
+            ok=True,
+            result_json_str='{"ok": 1}',
+            failed_reason=None,
+        )
 
         assert finalize_err.retryable is False
-        assert finalize_err.data is None
+        assert finalize_err.data == {
+            'outcome': {
+                'ok': True,
+                'result_json_str': '{"ok": 1}',
+                'failed_reason': None,
+            },
+        }
+
+
+@pytest.mark.unit
+class TestRetryErrPhase1Replay:
+    """Mapped retry-seam errors must carry the payload phase1 replay needs.
+
+    Regression: the first mapping passed _RetryError.data through bare, so
+    _retry_finalize_phase1 hit its missing-outcome guard and abandoned the
+    retry after one backoff sleep instead of replaying persistence.
+    """
+
+    @pytest.mark.asyncio
+    async def test_phase1_retry_replays_persistence_from_mapped_error(self) -> None:
+        worker = _make_worker()
+        finalize_err = worker._finalize_error_from_retry_error(
+            _retry_error(task_id='task-1'),
+            ok=True,
+            result_json_str='{"ok": 42}',
+            failed_reason=None,
+        )
+        worker._persist_task_terminal_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=Ok(None),
+        )
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._retry_finalize_phase1(finalize_err, delay_s=0.0)
+
+        worker._persist_task_terminal_state.assert_awaited_once()
+        kwargs = worker._persist_task_terminal_state.await_args.kwargs
+        assert kwargs['task_id'] == 'task-1'
+        assert kwargs['ok'] is True
+        assert kwargs['result_json_str'] == '{"ok": 42}'
+        assert kwargs['failed_reason'] is None

@@ -218,8 +218,9 @@ class DispatchMixin:
                 )
                 if is_err(should_retry_r):
                     logger.error(
-                        'Retry decision failed while recovering task %s: %s',
+                        'Retry decision failed while recovering task %s (%s): %s',
                         task_id,
+                        reason,
                         should_retry_r.err_value.message,
                     )
                     return _RequeueOutcome.DB_ERROR
@@ -229,8 +230,9 @@ class DispatchMixin:
                     )
                     if is_err(retry_r):
                         logger.error(
-                            'Retry scheduling failed while recovering task %s: %s',
+                            'Retry scheduling failed while recovering task %s (%s): %s',
                             task_id,
+                            reason,
                             retry_r.err_value.message,
                         )
                         return _RequeueOutcome.DB_ERROR

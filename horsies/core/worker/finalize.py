@@ -236,15 +236,34 @@ class FinalizeMixin:
             data=data,
         )
 
-    def _finalize_error_from_retry_error(self, err: _RetryError) -> _FinalizeError:
-        """Translate a retry-concern DB failure into a phase1 finalize error."""
+    def _finalize_error_from_retry_error(
+        self,
+        err: _RetryError,
+        *,
+        ok: bool,
+        result_json_str: str,
+        failed_reason: str | None,
+    ) -> _FinalizeError:
+        """Translate a retry-concern DB failure into a phase1 finalize error.
+
+        The outcome triple must ride along in ``data``: ``_retry_finalize_phase1``
+        replays ``_persist_task_terminal_state`` from ``data['outcome']`` and
+        abandons the retry if it is missing.
+        """
         return _FinalizeError(
             error_code=err.error_code,
             message=err.message,
             stage=_FINALIZE_STAGE_PHASE1,
             task_id=err.task_id,
             retryable=err.retryable,
-            data=err.data,
+            data={
+                **(err.data or {}),
+                'outcome': {
+                    'ok': ok,
+                    'result_json_str': result_json_str,
+                    'failed_reason': failed_reason,
+                },
+            },
         )
 
     def _with_finalize_context(
@@ -531,6 +550,9 @@ class FinalizeMixin:
                         return Err(
                             self._finalize_error_from_retry_error(
                                 should_retry_r.err_value,
+                                ok=ok,
+                                result_json_str=result_json_str,
+                                failed_reason=failed_reason,
                             ),
                         )
                     if should_retry_r.ok_value:
@@ -541,6 +563,9 @@ class FinalizeMixin:
                             return Err(
                                 self._finalize_error_from_retry_error(
                                     retry_r.err_value,
+                                    ok=ok,
+                                    result_json_str=result_json_str,
+                                    failed_reason=failed_reason,
                                 ),
                             )
                         match retry_r.ok_value:
