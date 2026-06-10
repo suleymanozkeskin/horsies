@@ -2170,6 +2170,33 @@ class TestRestartExecutor:
         with pytest.raises(ExecutorRestartFailedError):
             await worker._dispatch_one('task-1', 'some_task', None, None)
 
+    @pytest.mark.asyncio
+    async def test_finalize_path_fatal_restart_error_escapes_unfolded(self) -> None:
+        """The fatal error escapes _finalize_after instead of folding to Err.
+
+        Pins the documented mechanism: _handle_broken_pool is awaited inside
+        the BrokenProcessPool except handler, so its raise bypasses
+        _finalize_after's sibling except arms and lands in the background
+        finalizer task (logged by _spawn_background's done-callback); the
+        worker crashes on the next claim pass.
+        """
+        worker = _make_worker()
+        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
+            return_value=_RequeueOutcome.REQUEUED,
+        )
+        worker._restart_executor = AsyncMock(  # type: ignore[method-assign]
+            side_effect=ExecutorRestartFailedError(
+                'executor restart failed: pool died',
+            ),
+        )
+        fut: asyncio.Future[tuple[bool, str, str | None]] = (
+            asyncio.get_running_loop().create_future()
+        )
+        fut.set_exception(BrokenProcessPool('pool died'))
+
+        with pytest.raises(ExecutorRestartFailedError):
+            await worker._finalize_after(fut, 'task-1')
+
 
 @pytest.mark.unit
 class TestCleanupAfterFailedStart:

@@ -145,9 +145,11 @@ class DispatchMixin:
         Raises:
             ExecutorRestartFailedError: from ``_restart_executor``
                 (process-fatal). On the dispatch path it propagates to the
-                main loop; on the ``_finalize_after`` path it is folded into
-                a finalize error — the next claim pass retries the restart
-                and crashes the worker if it fails again.
+                main loop. On the ``_finalize_after`` path it escapes the
+                background finalizer task (a raise inside an except handler
+                bypasses the sibling arms) and is logged by the task reaper;
+                the worker is left executorless, so the next claim pass
+                retries the restart and crashes if it fails again.
         """
         outcome = await self._recover_worker_future_failure(
             task_id,
