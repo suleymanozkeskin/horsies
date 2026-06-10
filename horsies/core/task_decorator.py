@@ -921,8 +921,14 @@ def create_task_wrapper(
             # Runtime type validation: validate result against declared types
             try:
                 if result.is_ok():
-                    # Validate ok value against T
-                    ok_type_adapter.validate_python(result.ok)
+                    # Validate ok value against T. Lax validation coerces
+                    # (e.g. '5' → 5 for a declared int); return the coerced
+                    # value so an in-process caller sees the same value a
+                    # wire consumer decodes — otherwise local and remote
+                    # observations of the same task diverge.
+                    validated_ok = ok_type_adapter.validate_python(result.ok)
+                    if validated_ok is not result.ok:
+                        result = TaskResult(ok=validated_ok)
                 else:
                     # Validate err value against E
                     err_type_adapter.validate_python(result.err)

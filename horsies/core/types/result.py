@@ -242,6 +242,9 @@ class Err(Generic[E]):
         return 'Err({})'.format(repr(self._value))
 
     def __eq__(self, other: Any) -> bool:
+        # Delegates to payload equality. Note: Python exceptions compare
+        # by identity, so Err(ValueError('x')) != Err(ValueError('x')) —
+        # compare err_value type/args explicitly in tests and dedup code.
         return isinstance(other, Err) and self._value == other._value
 
     def __ne__(self, other: Any) -> bool:
