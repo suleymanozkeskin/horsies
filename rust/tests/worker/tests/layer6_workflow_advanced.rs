@@ -2322,3 +2322,64 @@ async fn test_backing_task_lock_blocks_concurrent_claim() {
 
     tx.rollback().await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// T6.x: Cancelling a parent cascades to its child workflows (parity with
+// horsies PR #66). A RUNNING child workflow must be cancelled, not left
+// executing.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial]
+async fn test_cancel_cascades_to_child_workflow() {
+    let pool = pool().await;
+    db::clean_tables(&pool).await;
+
+    // Two independent RUNNING workflows; link the second as a child of the
+    // first (as a sub-workflow launch would set parent_workflow_id). No worker
+    // runs, so both stay RUNNING with their root tasks ENQUEUED.
+    let mut pb = WorkflowSpecBuilder::new("e2e_cancel_cascade_parent");
+    pb.task(
+        wf_step::node()
+            .unwrap()
+            .node_id("p")
+            .kwargs(r#"{"step":"P"}"#.to_owned()),
+    );
+    let parent_id = start_wf(&pool, &pb.build().unwrap()).await;
+
+    let mut cb = WorkflowSpecBuilder::new("e2e_cancel_cascade_child");
+    cb.task(
+        wf_step::node()
+            .unwrap()
+            .node_id("c")
+            .kwargs(r#"{"step":"C"}"#.to_owned()),
+    );
+    let child_id = start_wf(&pool, &cb.build().unwrap()).await;
+
+    sqlx::query("UPDATE horsies_workflows SET parent_workflow_id = $1 WHERE id = $2")
+        .bind(&parent_id)
+        .bind(&child_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert!(cancel_workflow(&pool, &parent_id).await.unwrap());
+
+    let parent_status: String =
+        sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+            .bind(&parent_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let child_status: String =
+        sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+            .bind(&child_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(parent_status, "CANCELLED");
+    assert_eq!(
+        child_status, "CANCELLED",
+        "cancellation must cascade to the child workflow",
+    );
+}

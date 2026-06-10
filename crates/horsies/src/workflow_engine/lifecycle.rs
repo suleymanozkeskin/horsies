@@ -140,6 +140,11 @@ const FIND_RUNNING_CHILDREN_SQL: &str = "\
 SELECT id FROM horsies_workflows
 WHERE parent_workflow_id = $1 AND status = 'RUNNING'";
 
+/// Find non-terminal child workflows of a given parent (for cancel cascade).
+const FIND_CANCELLABLE_CHILDREN_SQL: &str = "\
+SELECT id FROM horsies_workflows
+WHERE parent_workflow_id = $1 AND status IN ('PENDING', 'RUNNING', 'PAUSED')";
+
 /// Pause a single child workflow (RUNNING -> PAUSED).
 const PAUSE_CHILD_WORKFLOW_SQL: &str = "\
 UPDATE horsies_workflows
@@ -346,6 +351,10 @@ async fn cancel_workflow_inner(pool: &PgPool, workflow_id: &str) -> Result<bool,
 
     tx.commit().await?;
 
+    // Cascade cancellation to non-terminal descendant workflows so RUNNING
+    // children stop executing (parity with horsies PR #66).
+    cascade_cancel_to_children(pool, workflow_id).await?;
+
     tracing::info!(workflow_id, "workflow cancelled");
     Ok(true)
 }
@@ -431,6 +440,16 @@ async fn resume_workflow_inner(
     // this, the workflow would remain stuck in RUNNING forever.
     engine::check_workflow_completion(pool, workflow_id, registry).await?;
 
+    // Recovery completion pass: a child workflow may have COMPLETED while the
+    // parent was paused, leaving the parent's sub-workflow node stale. Run the
+    // recovery sweep immediately so the parent picks it up now rather than
+    // waiting for the periodic reaper (parity with horsies PR #66).
+    if let Err(e) =
+        crate::workflow_engine::recovery::recover_stuck_workflows(pool, registry).await
+    {
+        tracing::warn!(workflow_id, error = %e, "resume recovery pass failed (non-fatal)");
+    }
+
     Ok(true)
 }
 
@@ -473,6 +492,70 @@ pub(crate) async fn cascade_pause_to_children(
             );
 
             // Add to queue to pause its children.
+            queue.push_back(child.id);
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Cascade cancel to children (parity with horsies PR #66)
+// ---------------------------------------------------------------------------
+
+/// Iteratively cancel all non-terminal descendant workflows using BFS.
+///
+/// For each cancelled child, runs the same backing-task cleanup as a top-level
+/// cancel (cancel queued tasks, skip not-yet-started workflow_tasks) and
+/// notifies `workflow_done` so handle waiters wake. Without this, cancelling a
+/// parent leaves RUNNING child workflows executing.
+async fn cascade_cancel_to_children(
+    pool: &PgPool,
+    workflow_id: &str,
+) -> Result<(), WorkflowError> {
+    let mut queue: VecDeque<String> = VecDeque::new();
+    queue.push_back(workflow_id.to_owned());
+
+    while let Some(current_id) = queue.pop_front() {
+        let children: Vec<IdRow> = sqlx::query_as(FIND_CANCELLABLE_CHILDREN_SQL)
+            .bind(&current_id)
+            .fetch_all(pool)
+            .await?;
+
+        for child in children {
+            let cancelled: Option<IdRow> = sqlx::query_as(CANCEL_WORKFLOW_SQL)
+                .bind(&child.id)
+                .fetch_optional(pool)
+                .await?;
+
+            if cancelled.is_some() {
+                // Same cleanup steps as a top-level cancel.
+                sqlx::query(CANCEL_ENQUEUED_HORSIES_TASKS_SQL)
+                    .bind(&child.id)
+                    .execute(pool)
+                    .await?;
+                sqlx::query(SKIP_PENDING_READY_TASKS_SQL)
+                    .bind(&child.id)
+                    .execute(pool)
+                    .await?;
+                sqlx::query(SKIP_CANCELLED_ENQUEUED_TASKS_SQL)
+                    .bind(&child.id)
+                    .execute(pool)
+                    .await?;
+                sqlx::query("SELECT pg_notify('workflow_done', $1)")
+                    .bind(&child.id)
+                    .execute(pool)
+                    .await?;
+
+                tracing::debug!(
+                    parent_workflow_id = %current_id,
+                    child_workflow_id = %child.id,
+                    "cascade: child workflow cancelled",
+                );
+            }
+
+            // Recurse into this child regardless: its own children may be
+            // non-terminal even if it was already terminal.
             queue.push_back(child.id);
         }
     }
