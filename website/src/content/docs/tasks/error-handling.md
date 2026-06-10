@@ -57,6 +57,12 @@ def fetch_api_data(url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
 
 To avoid try/except boilerplate for mapping exceptions to error codes, use `exception_mapper`:
 
+> **Exact-class matching.** The mapper looks up `type(exc)` exactly —
+> subclasses do **not** inherit a parent's mapping. Mapping
+> `ConnectionError` will not catch `ConnectionResetError`; map each
+> concrete class you expect (this matters when retry policies key on
+> the mapped error code).
+
 ```python
 @app.task(
     "fetch_api_data",

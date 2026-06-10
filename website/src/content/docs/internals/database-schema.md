@@ -159,6 +159,17 @@ CREATE TRIGGER horsies_task_notify_trigger
     EXECUTE FUNCTION horsies_notify_task_changes();
 ```
 
+## Trust Boundary
+
+Treat **database write access as task-execution privilege**: anyone who
+can INSERT into `horsies_tasks` can run any registered task with any
+kwargs that pass its typed signature, and can read stored results and
+tracebacks. There is no separate authentication layer between the
+tables and the workers (the same model as Celery with the JSON
+serializer). Task names resolve only against the in-process registry —
+rows cannot trigger arbitrary imports or code loading — but scope DB
+credentials accordingly.
+
 ## Schema Creation
 
 Tables created automatically via SQLAlchemy's `Base.metadata.create_all()`:

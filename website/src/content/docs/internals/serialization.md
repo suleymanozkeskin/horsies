@@ -105,6 +105,10 @@ Values flowing through a task signature must classify as **one** of:
 
 - A JSON primitive (`None`, `bool`, `int`, `float`, `str`).
 - `datetime.datetime` / `date` / `time`, `uuid.UUID`, `decimal.Decimal` (Pydantic coerces these to/from JSON strings via the declared type).
+  Datetime caveats: a `ZoneInfo`-aware datetime decodes with a **fixed-offset** timezone
+  (same instant, zone semantics lost — DST arithmetic on the consumer differs), and
+  **naive** datetimes round-trip naive (ambiguous across workers in different timezones —
+  prefer UTC-aware values).
 - `JsonValue` (at boundary positions only).
 - An `Enum` subclass.
 - A concrete `BaseModel` subclass (not bare `BaseModel`).

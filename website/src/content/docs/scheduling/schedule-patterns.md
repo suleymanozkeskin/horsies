@@ -345,6 +345,21 @@ CronSchedule(
 )
 ```
 
+## DST Behavior
+
+For timezone-local patterns (`DailySchedule`, `WeeklySchedule`,
+`MonthlySchedule`, `CronSchedule`, `HourlySchedule` with a non-UTC
+timezone):
+
+- **Spring forward** (nonexistent local time, e.g. 02:30 in
+  `America/New_York` on the transition day): that day's run is
+  **skipped** — there is no matching wall-clock instant.
+- **Fall back** (ambiguous local time): only the **first** occurrence
+  fires; the repeated hour's second occurrence is skipped.
+
+Schedule at times outside transition windows (or in UTC) when every
+run matters.
+
 ## Pattern Selection Guide
 
 | Need | Pattern |
