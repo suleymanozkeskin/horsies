@@ -875,7 +875,15 @@ class FinalizeMixin:
             )
 
     async def _handle_finalize_error(self, err: Any) -> None:
-        """Handle finalize Result errors with bounded retries."""
+        """Handle finalize Result errors with bounded retries.
+
+        Total: ``err`` is ``Any`` because the background-task done-callback
+        hands over an untyped ``Err`` payload; the isinstance guard is the
+        boundary defense. Retry coroutines are spawned on the running loop
+        (done-callbacks only execute while the loop runs, so there is no
+        closed-loop raise window); their failures terminate at the
+        done-callback.
+        """
         if not isinstance(err, _FinalizeError):
             logger.error(
                 f'Unexpected finalize error payload type: {type(err).__name__}'
@@ -945,7 +953,13 @@ class FinalizeMixin:
             )
 
     async def _retry_finalize_future(self, err: _FinalizeError, delay_s: float) -> None:
-        """Retry requeue after a child future failed before producing an outcome."""
+        """Retry requeue after a child future failed before producing an outcome.
+
+        Total by composition: every subcall either returns a Result/outcome
+        value or is itself total. Cancellation is the exemption: it escapes
+        every await and the done-callback drops it silently. Any other
+        escape is logged by the background-task done-callback.
+        """
         await self._sleep_with_stop(delay_s)
         if self._stop.is_set():
             return
@@ -977,7 +991,13 @@ class FinalizeMixin:
         )
 
     async def _retry_finalize_phase1(self, err: _FinalizeError, delay_s: float) -> None:
-        """Retry phase-1 terminal persistence from captured child outcome payload."""
+        """Retry phase-1 terminal persistence from captured child outcome payload.
+
+        Total by composition: every subcall either returns a Result/outcome
+        value or is itself total. Cancellation is the exemption: it escapes
+        every await and the done-callback drops it silently. Any other
+        escape is logged by the background-task done-callback.
+        """
         await self._sleep_with_stop(delay_s)
         if self._stop.is_set():
             return
@@ -1041,7 +1061,13 @@ class FinalizeMixin:
         self._clear_finalize_retry_attempts(err.task_id, _FINALIZE_STAGE_PHASE2)
 
     async def _retry_finalize_phase2(self, err: _FinalizeError, delay_s: float) -> None:
-        """Retry phase-2 workflow advancement from persisted terminal task result."""
+        """Retry phase-2 workflow advancement from persisted terminal task result.
+
+        Total by composition: every subcall either returns a Result/outcome
+        value or is itself total. Cancellation is the exemption: it escapes
+        every await and the done-callback drops it silently. Any other
+        escape is logged by the background-task done-callback.
+        """
         await self._sleep_with_stop(delay_s)
         if self._stop.is_set():
             return
@@ -1077,6 +1103,12 @@ class FinalizeMixin:
 
         This method is called after a task completes (success or failure).
         It updates the workflow_task record and triggers dependency resolution.
+
+        Raises:
+            Exception: DB and engine errors propagate to the single caller,
+                ``_finalize_workflow_phase``, which folds them into
+                ``Err(_FinalizeError(stage=phase2))`` with retryable
+                classification.
         """
         from horsies.core.workflows.engine import on_workflow_task_complete
 
