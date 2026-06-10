@@ -133,7 +133,13 @@ def _build_sys_path_roots(
 
 
 def import_by_path(path: str, module_name: str | None = None) -> Any:
-    """Import module from file path."""
+    """Import module from file path.
+
+    Raises:
+        Exception: import/filesystem errors propagate to the boot path
+            (parent preload fails fast at start; child-initializer failure
+            kills the child).
+    """
     return import_file_path(path, module_name)
 
 
@@ -143,6 +149,11 @@ def _locate_app(app_locator: str) -> Horsies:
     app_locator examples:
       - 'package.module:app'         -> import module, take variable attr
       - '/abs/path/to/file.py:app'   -> load from file path
+
+    Raises:
+        Exception: import/attribute/validation failures propagate to the
+            boot path (parent preload fails fast at start; child-initializer
+            failure kills the child).
     """
     logger.info(f'Locating app from {app_locator}')
     if not app_locator or ':' not in app_locator:
@@ -260,6 +271,15 @@ def _child_initializer(
     child_pool_min_size: int = 0,
     child_pool_max_size: int = 2,
 ) -> None:
+    """Child-process bootstrap: locate the app, import tasks, open the pool.
+
+    Raises:
+        Exception: any bootstrap failure propagates out of the initializer,
+            which kills this child; the parent recovers via warmup failure /
+            BrokenProcessPool. A failing on_child_process_start hook does
+            not raise — _run_child_start_hooks exits the child with
+            CHILD_HOOK_FAILURE_EXIT_CODE (fail-closed).
+    """
     # Ignore SIGINT in child processes - let the parent handle shutdown gracefully
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
@@ -340,6 +360,11 @@ def _heartbeat_worker(
     Sends heartbeats at configured interval until stopped or process dies.
 
     Uses the per-process connection pool for efficient connection reuse.
+
+    Total per beat: send_heartbeat contains DB errors and returns False.
+    The loop keeps beating until stopped or the timeout deadline —
+    consecutive failures are tracked for logging only, deliberately: a
+    recovered DB resumes reaper protection, and a stopped thread could not.
 
     Args:
         task_id: The task ID
@@ -438,6 +463,13 @@ def _is_retryable_db_error(exc: BaseException) -> bool:
 
 
 def _get_workflow_status_for_task(cursor: Cursor[Any], task_id: str) -> str | None:
+    """Read the owning workflow's status for a task (None if not in one).
+
+    Raises:
+        Exception: DB errors propagate to the two wrapped callers:
+            _preflight_workflow_check folds them into WORKFLOW_CHECK_FAILED,
+            _confirm_ownership_and_set_running into OWNERSHIP_UNCONFIRMED.
+    """
     cursor.execute(
         """
         SELECT w.status FROM horsies_workflows w
@@ -461,6 +493,13 @@ def _handle_workflow_stop_before_start(
     task_id: str,
     workflow_status: str,
 ) -> Tuple[bool, str, Optional[str]]:
+    """Skip a task whose workflow is PAUSED/CANCELLED; return the wire tuple.
+
+    Raises:
+        Exception: DB errors propagate to the two wrapped callers:
+            _preflight_workflow_check folds them into WORKFLOW_CHECK_FAILED,
+            _confirm_ownership_and_set_running into OWNERSHIP_UNCONFIRMED.
+    """
     logger.info(
         f'Blocking task {task_id} execution before start - workflow is {workflow_status}'
     )
@@ -787,6 +826,15 @@ def _start_heartbeat_thread(
     runner_heartbeat_interval_ms: int,
     timeout_ms: int | None = None,
 ) -> threading.Thread:
+    """Start the daemon heartbeat thread for a running task.
+
+    Raises:
+        RuntimeError: thread start failed (resource exhaustion). Runs before
+            _run_task_entry's containment, so it escapes the child as a
+            future failure; the parent recovers via
+            _recover_worker_future_failure (the row is RUNNING by then, so
+            retry policy applies).
+    """
     heartbeat_thread = threading.Thread(
         target=_heartbeat_worker,
         args=(
@@ -849,6 +897,12 @@ def _run_task_entry(
     Do not mistake the 'ok' here as the task's own success/failure.
     It's only a signal that the worker was able to produce a valid JSON.
     The task's own success/failure is determined by the TaskResult's ok/err fields.
+
+    This is the child's containment seam: the execution body is wrapped in
+    ``except BaseException`` and folds everything into the wire tuple. The
+    pre-try steps (preflight, ownership confirm) return wire tuples
+    themselves; only ``_start_heartbeat_thread`` can escape (see its
+    docstring) and is recovered by the parent as a future failure.
     """
     logger.info(f'Starting task execution: {task_name}')
 
