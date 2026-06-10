@@ -47,6 +47,7 @@ from horsies.core.errors import (
 )
 import inspect
 import os
+import threading
 import importlib
 import glob
 import sys
@@ -110,6 +111,7 @@ class Horsies:
     def __init__(self, config: AppConfig):
         self.config = config
         self._broker: Optional['PostgresBroker'] = None
+        self._broker_init_lock = threading.Lock()
         self.tasks: TaskRegistry[Callable[..., Any]] = TaskRegistry()
         self.logger = get_logger('app')
         self._discovered_task_modules: list[str] = []
@@ -917,13 +919,18 @@ class Horsies:
         """Get the configured PostgreSQL broker for this app"""
         try:
             if self._broker is None:
-                broker_config = (
-                    self.config.broker.worker_runtime_config()
-                    if self._role == 'worker'
-                    else self.config.broker
-                )
-                self._broker = PostgresBroker(broker_config)
-                self._broker.app = self  # Store app reference for subworkflow support
+                # Serialized: two threads racing the None check would each
+                # construct a PostgresBroker (one engine/pool leaks).
+                with self._broker_init_lock:
+                    if self._broker is None:
+                        broker_config = (
+                            self.config.broker.worker_runtime_config()
+                            if self._role == 'worker'
+                            else self.config.broker
+                        )
+                        broker = PostgresBroker(broker_config)
+                        broker.app = self  # app ref for subworkflow support
+                        self._broker = broker
             return self._broker
         except HorsiesError:
             raise
@@ -1654,6 +1661,8 @@ class Horsies:
         # here and restore it after construction (see the try/finally below) so
         # app.workflow() never leaves a persistent side effect on the caller's
         # TaskNode — reusing one node across configs must be order-independent.
+        # Caveat: the save/restore is not thread-safe; do not build specs
+        # sharing the same node objects from concurrent threads.
         saved_node_config: list[tuple[TaskNode[Any], str | None, int | None]] = []
         for node in tasks:
             # SubWorkflowNode doesn't have queue/priority - handled at execution time

@@ -1308,7 +1308,10 @@ def create_task_wrapper(
         try:
             validated_queue_name = app.validate_queue_name(queue_name)
             priority = effective_priority(app, validated_queue_name)
-        except BaseException as exc:
+        except Exception as exc:
+            # Exception, not BaseException: a KeyboardInterrupt/SystemExit
+            # arriving mid-send must propagate as a shutdown signal, not be
+            # swallowed into Err(VALIDATION_FAILED).
             return Err(TaskSendError(
                 code=TaskSendErrorCode.VALIDATION_FAILED,
                 message=f'Queue validation failed for {task_name}: {exc}',

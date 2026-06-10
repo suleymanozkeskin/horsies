@@ -2675,6 +2675,9 @@ class TestPreloadTaskModulesAdditionalPaths:
         scheduler.app.suppress_sends = MagicMock(
             side_effect=_suppress_side_effect,
         )
+        # The finally-restore passes the saved prior flag (spec change,
+        # 0.1.7); pin it to False so the failing restore path is exercised.
+        scheduler.app._suppress_sends = False
 
         with pytest.raises(AttributeError, match='no suppress_sends'):
             with patch(

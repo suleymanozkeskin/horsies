@@ -628,6 +628,9 @@ class Scheduler:
             )
             return
 
+        # Save/restore rather than force-False: a caller that already
+        # suppressed sends (e.g. app.check()) must keep its setting.
+        prev_suppress = self.app._suppress_sends
         self.app.suppress_sends(True)
         try:
             for module in modules:
@@ -646,7 +649,7 @@ class Scheduler:
                     except Exception as e:
                         logger.warning(f"Failed to import task module '{module}': {e}")
         finally:
-            self.app.suppress_sends(False)
+            self.app.suppress_sends(prev_suppress)
 
     def _resolve_schedule_queue(self, schedule: TaskSchedule) -> str:
         """
