@@ -294,16 +294,19 @@ pub async fn cancel_workflow(pool: &PgPool, workflow_id: &str) -> HandleResult<b
         .map_err(|e| to_handle_error(e, workflow_id))
 }
 
-async fn cancel_workflow_inner(pool: &PgPool, workflow_id: &str) -> Result<bool, WorkflowError> {
-    // Run the whole cancellation in one transaction so the backing-task locks
-    // taken below are held until the status flip and cleanup commit together.
+/// Lock the backing tasks + workflow_tasks, flip the workflow status to
+/// CANCELLED, and run the backing-task cleanup — all in one transaction so the
+/// locks are held from before the status flip through commit. Worker claiming
+/// uses `FOR UPDATE SKIP LOCKED`, so these locks close the window where a worker
+/// could claim a queued task during the uncommitted cancellation (horsies #65).
+///
+/// Returns `true` if the workflow was non-terminal and got cancelled.
+async fn cancel_one_workflow_in_tx(
+    pool: &PgPool,
+    workflow_id: &str,
+) -> Result<bool, WorkflowError> {
     let mut tx = pool.begin().await?;
 
-    // Lock the backing horsies_tasks rows and the workflow_task rows BEFORE
-    // flipping the workflow status. Worker claiming uses `FOR UPDATE SKIP
-    // LOCKED` on horsies_tasks, so holding these locks closes the window where
-    // a worker could claim a queued task during the uncommitted cancellation
-    // (mirrors horsies PR #65).
     sqlx::query(LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL)
         .bind(workflow_id)
         .execute(&mut *tx)
@@ -326,30 +329,35 @@ async fn cancel_workflow_inner(pool: &PgPool, workflow_id: &str) -> Result<bool,
 
     if cancelled.is_none() {
         tx.rollback().await?;
-        ensure_workflow_exists(pool, workflow_id).await?;
         return Ok(false);
     }
 
-    // Step 1: Cancel not-yet-started horsies_tasks (PENDING/CLAIMED/RUNNING)
-    // for ENQUEUED wf_tasks, so workers cannot pick them up after we commit.
+    // Cancel not-yet-started horsies_tasks (PENDING/CLAIMED/RUNNING) for
+    // ENQUEUED wf_tasks, so workers cannot pick them up after we commit.
     sqlx::query(CANCEL_ENQUEUED_HORSIES_TASKS_SQL)
         .bind(workflow_id)
         .execute(&mut *tx)
         .await?;
-
-    // Step 2: Skip PENDING/READY wf_tasks (not ENQUEUED or RUNNING).
+    // Skip PENDING/READY wf_tasks (not ENQUEUED or RUNNING).
     sqlx::query(SKIP_PENDING_READY_TASKS_SQL)
         .bind(workflow_id)
         .execute(&mut *tx)
         .await?;
-
-    // Step 3: Skip ENQUEUED wf_tasks whose horsies_tasks were just cancelled.
+    // Skip ENQUEUED wf_tasks whose horsies_tasks were just cancelled.
     sqlx::query(SKIP_CANCELLED_ENQUEUED_TASKS_SQL)
         .bind(workflow_id)
         .execute(&mut *tx)
         .await?;
 
     tx.commit().await?;
+    Ok(true)
+}
+
+async fn cancel_workflow_inner(pool: &PgPool, workflow_id: &str) -> Result<bool, WorkflowError> {
+    if !cancel_one_workflow_in_tx(pool, workflow_id).await? {
+        ensure_workflow_exists(pool, workflow_id).await?;
+        return Ok(false);
+    }
 
     // Cascade cancellation to non-terminal descendant workflows so RUNNING
     // children stop executing (parity with horsies PR #66).
@@ -505,10 +513,12 @@ pub(crate) async fn cascade_pause_to_children(
 
 /// Iteratively cancel all non-terminal descendant workflows using BFS.
 ///
-/// For each cancelled child, runs the same backing-task cleanup as a top-level
-/// cancel (cancel queued tasks, skip not-yet-started workflow_tasks) and
-/// notifies `workflow_done` so handle waiters wake. Without this, cancelling a
-/// parent leaves RUNNING child workflows executing.
+/// Each descendant gets the same lock-before-flip + cleanup treatment as a
+/// top-level cancel (`cancel_one_workflow_in_tx`), so a concurrent worker claim
+/// cannot slip a child's queued task through during the cascade (parity with
+/// horsies PR #66/#67). The `workflow_done` NOTIFY is fired by the status-flip
+/// DB trigger, so no manual notify is needed. Without this cascade, cancelling
+/// a parent leaves RUNNING child workflows executing.
 async fn cascade_cancel_to_children(
     pool: &PgPool,
     workflow_id: &str,
@@ -523,30 +533,7 @@ async fn cascade_cancel_to_children(
             .await?;
 
         for child in children {
-            let cancelled: Option<IdRow> = sqlx::query_as(CANCEL_WORKFLOW_SQL)
-                .bind(&child.id)
-                .fetch_optional(pool)
-                .await?;
-
-            if cancelled.is_some() {
-                // Same cleanup steps as a top-level cancel.
-                sqlx::query(CANCEL_ENQUEUED_HORSIES_TASKS_SQL)
-                    .bind(&child.id)
-                    .execute(pool)
-                    .await?;
-                sqlx::query(SKIP_PENDING_READY_TASKS_SQL)
-                    .bind(&child.id)
-                    .execute(pool)
-                    .await?;
-                sqlx::query(SKIP_CANCELLED_ENQUEUED_TASKS_SQL)
-                    .bind(&child.id)
-                    .execute(pool)
-                    .await?;
-                sqlx::query("SELECT pg_notify('workflow_done', $1)")
-                    .bind(&child.id)
-                    .execute(pool)
-                    .await?;
-
+            if cancel_one_workflow_in_tx(pool, &child.id).await? {
                 tracing::debug!(
                     parent_workflow_id = %current_id,
                     child_workflow_id = %child.id,
