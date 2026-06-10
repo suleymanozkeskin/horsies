@@ -140,6 +140,17 @@ class DispatchMixin:
         exc: BaseException,
         failed_executor: Optional[ProcessPoolExecutor] = None,
     ) -> None:
+        """Recover the task whose pool broke, then replace the executor.
+
+        Raises:
+            ExecutorRestartFailedError: from ``_restart_executor``
+                (process-fatal). On the dispatch path it propagates to the
+                main loop. On the ``_finalize_after`` path it escapes the
+                background finalizer task (a raise inside an except handler
+                bypasses the sibling arms) and is logged by the task reaper;
+                the worker is left executorless, so the next claim pass
+                retries the restart and crashes if it fails again.
+        """
         outcome = await self._recover_worker_future_failure(
             task_id,
             f'Broken process pool: {exc}',
@@ -316,7 +327,17 @@ class DispatchMixin:
         is_workflow_task: bool = True,
         timeout_ms: Optional[int] = None,
     ) -> None:
-        """Submit to process pool; attach completion handler."""
+        """Submit to process pool; attach completion handler.
+
+        Total for per-task failures: dispatch errors requeue or recover the
+        task and return.
+
+        Raises:
+            ExecutorRestartFailedError: from ``_restart_executor``
+                (process-fatal; propagates through the claim loop to the
+                main loop, which lets the worker crash for a supervisor
+                restart).
+        """
         if self._executor is None:
             await self._restart_executor('Executor missing before dispatch')
             if self._executor is None:

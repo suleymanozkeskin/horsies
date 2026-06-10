@@ -111,6 +111,7 @@ from horsies.core.worker.runtime import (  # noqa: F401,E402
     _FINALIZE_RETRY_MAX_DELAY_S as _FINALIZE_RETRY_MAX_DELAY_S,
     _REAPER_MAX_PERMANENT_FAILURES as _REAPER_MAX_PERMANENT_FAILURES,
     ChildHookFailedError as ChildHookFailedError,
+    ExecutorRestartFailedError as ExecutorRestartFailedError,
     _RetryBackoff as _RetryBackoff,
     _FinalizeError as _FinalizeError,
     _RetryError as _RetryError,
@@ -293,6 +294,14 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
         reason: str,
         failed_executor: Optional[ProcessPoolExecutor] = None,
     ) -> None:
+        """Replace the process pool and warm the new children.
+
+        Raises:
+            ExecutorRestartFailedError: pool creation/warmup failed at the
+                OS level. Process-fatal: propagates to the main loop so the
+                supervisor restarts the worker (a hook failure stops the
+                worker via ``_stop_for_child_hook_failure`` instead).
+        """
         if self._stop.is_set():
             return
         async with self._executor_restart_lock:
@@ -311,6 +320,16 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
                 except ChildHookFailedError as exc:
                     self._stop_for_child_hook_failure(exc)
                     return
+                except Exception as exc:
+                    logger.critical(
+                        'Executor restart failed; worker cannot run tasks '
+                        '(%s): %s',
+                        reason,
+                        exc,
+                    )
+                    raise ExecutorRestartFailedError(
+                        f'executor restart failed: {reason}',
+                    ) from exc
                 logger.warning(f'Executor created after restart request: {reason}')
                 return
 
@@ -330,6 +349,16 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
                 )
             except ChildHookFailedError as exc:
                 self._stop_for_child_hook_failure(exc)
+            except Exception as exc:
+                logger.critical(
+                    'Executor restart failed; worker cannot run tasks '
+                    '(%s): %s',
+                    reason,
+                    exc,
+                )
+                raise ExecutorRestartFailedError(
+                    f'executor restart failed: {reason}',
+                ) from exc
 
     def _stop_for_child_hook_failure(self, exc: ChildHookFailedError) -> None:
         """Stop the worker on a hook failure instead of restart-looping.
