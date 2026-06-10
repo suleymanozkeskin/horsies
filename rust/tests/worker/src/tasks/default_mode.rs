@@ -173,6 +173,7 @@ pub fn register(app: &mut Horsies) -> Result<(), Box<dyn std::error::Error>> {
         async_task_fn!(healthcheck, ()),
         "default",
     )?;
+    app.register_with_queue("e2e_cron_task", async_task_fn!(healthcheck, ()), "default")?;
 
     Ok(())
 }

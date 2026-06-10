@@ -209,6 +209,482 @@ impl MonthlySchedule {
     }
 }
 
+/// Months of the year.
+///
+/// Snake-case string values keep the serialized form stable, mirroring
+/// [`Weekday`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Month {
+    January,
+    February,
+    March,
+    April,
+    May,
+    June,
+    July,
+    August,
+    September,
+    October,
+    November,
+    December,
+}
+
+/// Canonical ordinal for enum-domain cron fields.
+///
+/// Month is January=1..December=12; Weekday is Monday=0..Sunday=6 (matching
+/// `chrono::Weekday::num_days_from_monday`). A single source of truth shared by
+/// validation and the scheduler matcher.
+pub trait CronOrdinal: Copy {
+    /// Ordinal value used for range/step semantics.
+    fn cron_ordinal(self) -> i64;
+}
+
+impl CronOrdinal for Month {
+    fn cron_ordinal(self) -> i64 {
+        match self {
+            Month::January => 1,
+            Month::February => 2,
+            Month::March => 3,
+            Month::April => 4,
+            Month::May => 5,
+            Month::June => 6,
+            Month::July => 7,
+            Month::August => 8,
+            Month::September => 9,
+            Month::October => 10,
+            Month::November => 11,
+            Month::December => 12,
+        }
+    }
+}
+
+impl CronOrdinal for Weekday {
+    fn cron_ordinal(self) -> i64 {
+        match self {
+            Weekday::Monday => 0,
+            Weekday::Tuesday => 1,
+            Weekday::Wednesday => 2,
+            Weekday::Thursday => 3,
+            Weekday::Friday => 4,
+            Weekday::Saturday => 5,
+            Weekday::Sunday => 6,
+        }
+    }
+}
+
+/// Leap-aware maximum day for a month ordinal (February allows 29). Used by the
+/// construction-time satisfiability check.
+fn month_max_days(month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => 29,
+        _ => 0,
+    }
+}
+
+fn default_cron_step() -> u32 {
+    1
+}
+
+/// Cron term over an integer field (minute, hour, day-of-month).
+///
+/// Per-field domain bounds are enforced by [`CronSchedule::validate`], which
+/// names the offending field — the variants are domain-agnostic. Wire tags
+/// match the Python implementation (`every`/`step`/`values`/`range`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CronNumericTerm {
+    /// `*` — every value in the field's domain.
+    Every,
+    /// `*/n` — every nth value across the field's full domain (anchored at the
+    /// domain start). `step` must be <= the field span.
+    Step { step: u32 },
+    /// `a,b,c` — an explicit set of integer values.
+    Values { values: Vec<i64> },
+    /// `a-b` or `a-b/n` — an inclusive integer range with an optional step.
+    Range {
+        start: i64,
+        end: i64,
+        #[serde(default = "default_cron_step")]
+        step: u32,
+    },
+}
+
+/// Cron term over an enum field (`Month` or `Weekday`), generic over the enum
+/// type so month and day-of-week stay distinct on the type level.
+///
+/// Wire tags match the Python implementation
+/// (`every`/`enum_values`/`enum_range`/`enum_step`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CronEnumTerm<T> {
+    /// `*` — every value in the field's domain.
+    Every,
+    /// `a,b,c` — explicit enum values.
+    EnumValues { values: Vec<T> },
+    /// `a-b` or `a-b/n` — inclusive range by canonical ordinal, optional step.
+    EnumRange {
+        start: T,
+        end: T,
+        #[serde(default = "default_cron_step")]
+        step: u32,
+    },
+    /// `*/n` — every nth value across the field's full domain, by ordinal.
+    EnumStep { step: u32 },
+}
+
+/// Day dimension selector.
+///
+/// A single sum type forces an explicit choice when both day-of-month and
+/// day-of-week are restricted, eliminating cron's silent OR ambiguity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DaySelector {
+    /// Both day-of-month and day-of-week unrestricted.
+    EveryDay,
+    /// Restrict by day-of-month only.
+    ByMonthDay {
+        day_of_month: Vec<CronNumericTerm>,
+    },
+    /// Restrict by day-of-week only.
+    ByWeekday {
+        day_of_week: Vec<CronEnumTerm<Weekday>>,
+    },
+    /// Fire when day-of-month OR day-of-week matches (cron's "13th or Friday").
+    EitherDay {
+        day_of_month: Vec<CronNumericTerm>,
+        day_of_week: Vec<CronEnumTerm<Weekday>>,
+    },
+    /// Fire only when day-of-month AND day-of-week both match (intersection).
+    BothDays {
+        day_of_month: Vec<CronNumericTerm>,
+        day_of_week: Vec<CronEnumTerm<Weekday>>,
+    },
+}
+
+/// Typed 5-field cron-style schedule (with step extensions).
+///
+/// Expresses what a `minute hour day-of-month month day-of-week` crontab line
+/// can, through typed fields instead of a cron-expression string. Fires at
+/// second :00 (minute granularity). The `day` field collapses day-of-month and
+/// day-of-week into an explicit [`DaySelector`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CronSchedule {
+    /// Minute field terms (0–59).
+    pub minute: Vec<CronNumericTerm>,
+    /// Hour field terms (0–23).
+    pub hour: Vec<CronNumericTerm>,
+    /// Month field terms.
+    pub month: Vec<CronEnumTerm<Month>>,
+    /// Day-of-month / day-of-week selector.
+    pub day: DaySelector,
+}
+
+/// Build a field-scoped validation error message.
+fn invalid_cron_field(field: &str, detail: &str) -> String {
+    format!("invalid cron '{}' field: {}", field, detail)
+}
+
+/// Validate integer-domain terms against `[lo, hi]`.
+fn validate_numeric_terms(
+    terms: &[CronNumericTerm],
+    field: &str,
+    lo: i64,
+    hi: i64,
+) -> Result<(), String> {
+    let span = hi - lo;
+    for term in terms {
+        match term {
+            CronNumericTerm::Every => {}
+            CronNumericTerm::Step { step } => {
+                if *step == 0 {
+                    return Err(invalid_cron_field(field, "step must be >= 1"));
+                }
+                if *step as i64 > span {
+                    return Err(invalid_cron_field(
+                        field,
+                        &format!(
+                            "step {} exceeds the {} span {}; use explicit values instead",
+                            step, field, span,
+                        ),
+                    ));
+                }
+            }
+            CronNumericTerm::Values { values } => {
+                if values.is_empty() {
+                    return Err(invalid_cron_field(field, "values must not be empty"));
+                }
+                for value in values {
+                    if *value < lo || *value > hi {
+                        return Err(invalid_cron_field(
+                            field,
+                            &format!("value {} out of range {}-{}", value, lo, hi),
+                        ));
+                    }
+                }
+            }
+            CronNumericTerm::Range { start, end, step } => {
+                if *step == 0 {
+                    return Err(invalid_cron_field(field, "range step must be >= 1"));
+                }
+                if *start < lo || *start > hi {
+                    return Err(invalid_cron_field(
+                        field,
+                        &format!("range start {} out of range {}-{}", start, lo, hi),
+                    ));
+                }
+                if *end < lo || *end > hi {
+                    return Err(invalid_cron_field(
+                        field,
+                        &format!("range end {} out of range {}-{}", end, lo, hi),
+                    ));
+                }
+                if start > end {
+                    return Err(invalid_cron_field(
+                        field,
+                        &format!("range start {} exceeds end {}", start, end),
+                    ));
+                }
+                if *step as i64 > span {
+                    return Err(invalid_cron_field(
+                        field,
+                        &format!("range step {} exceeds span {}", step, span),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate enum-domain terms: range ordering (no wrap-around) and step span.
+///
+/// Enum values are in-domain by construction, so only ordering and step bounds
+/// need checking. `span` is the field's ordinal span (11 for month, 6 for
+/// day-of-week).
+fn validate_enum_terms<T: CronOrdinal + std::fmt::Debug>(
+    terms: &[CronEnumTerm<T>],
+    field: &str,
+    span: i64,
+) -> Result<(), String> {
+    for term in terms {
+        match term {
+            CronEnumTerm::Every => {}
+            CronEnumTerm::EnumStep { step } => {
+                if *step == 0 {
+                    return Err(invalid_cron_field(field, "step must be >= 1"));
+                }
+                if *step as i64 > span {
+                    return Err(invalid_cron_field(
+                        field,
+                        &format!("step {} exceeds the {} span {}", step, field, span),
+                    ));
+                }
+            }
+            CronEnumTerm::EnumValues { values } => {
+                if values.is_empty() {
+                    return Err(invalid_cron_field(field, "values must not be empty"));
+                }
+            }
+            CronEnumTerm::EnumRange { start, end, step } => {
+                if *step == 0 {
+                    return Err(invalid_cron_field(field, "range step must be >= 1"));
+                }
+                if start.cron_ordinal() > end.cron_ordinal() {
+                    return Err(invalid_cron_field(
+                        field,
+                        &format!(
+                            "range start {:?} comes after end {:?}; \
+                             wrap-around ranges are not allowed, use explicit values",
+                            start, end,
+                        ),
+                    ));
+                }
+                if *step as i64 > span {
+                    return Err(invalid_cron_field(
+                        field,
+                        &format!("range step {} exceeds span {}", step, span),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate the day dimension's contained day-of-month / day-of-week terms.
+fn validate_day_selector(day: &DaySelector) -> Result<(), String> {
+    match day {
+        DaySelector::EveryDay => Ok(()),
+        DaySelector::ByMonthDay { day_of_month } => {
+            if day_of_month.is_empty() {
+                return Err(invalid_cron_field("day_of_month", "must have at least one term"));
+            }
+            validate_numeric_terms(day_of_month, "day_of_month", 1, 31)
+        }
+        DaySelector::ByWeekday { day_of_week } => {
+            if day_of_week.is_empty() {
+                return Err(invalid_cron_field("day_of_week", "must have at least one term"));
+            }
+            validate_enum_terms(day_of_week, "day_of_week", 6)
+        }
+        DaySelector::EitherDay {
+            day_of_month,
+            day_of_week,
+        }
+        | DaySelector::BothDays {
+            day_of_month,
+            day_of_week,
+        } => {
+            if day_of_month.is_empty() {
+                return Err(invalid_cron_field("day_of_month", "must have at least one term"));
+            }
+            if day_of_week.is_empty() {
+                return Err(invalid_cron_field("day_of_week", "must have at least one term"));
+            }
+            validate_numeric_terms(day_of_month, "day_of_month", 1, 31)?;
+            validate_enum_terms(day_of_week, "day_of_week", 6)
+        }
+    }
+}
+
+/// Reject schedules whose month × day-of-month combination can never occur.
+///
+/// Only `ByMonthDay` and `BothDays` constrain day-of-month such that the
+/// schedule can be empty (e.g. February + day 30). `EitherDay` always fires via
+/// its weekday branch; `ByWeekday`/`EveryDay` are always satisfiable.
+fn validate_satisfiable(month: &[CronEnumTerm<Month>], day: &DaySelector) -> Result<(), String> {
+    let day_of_month = match day {
+        DaySelector::ByMonthDay { day_of_month }
+        | DaySelector::BothDays { day_of_month, .. } => day_of_month,
+        DaySelector::EveryDay
+        | DaySelector::ByWeekday { .. }
+        | DaySelector::EitherDay { .. } => return Ok(()),
+    };
+    let month_set = expand_enum_field(month, 1, 12);
+    let dom_set = expand_numeric_field(day_of_month, 1, 31);
+    let feasible = month_set
+        .iter()
+        .any(|m| dom_set.iter().any(|d| *d <= month_max_days(*m)));
+    if !feasible {
+        let mut months: Vec<i64> = month_set.iter().copied().collect();
+        months.sort_unstable();
+        let mut days: Vec<i64> = dom_set.iter().copied().collect();
+        days.sort_unstable();
+        return Err(format!(
+            "cron schedule can never fire: no selected day-of-month exists in any \
+             selected month (months: {:?}, days-of-month: {:?})",
+            months, days,
+        ));
+    }
+    Ok(())
+}
+
+/// Expand numeric terms into the concrete set of matched values in `[lo, hi]`.
+///
+/// Shared by validation (satisfiability) and the scheduler matcher so term
+/// expansion is never reimplemented. `step` is clamped to >= 1 defensively;
+/// validation rejects step 0 before this is reachable on a real config.
+pub fn expand_numeric_field(terms: &[CronNumericTerm], lo: i64, hi: i64) -> HashSet<i64> {
+    let mut result = HashSet::new();
+    for term in terms {
+        match term {
+            CronNumericTerm::Every => {
+                result.extend(lo..=hi);
+            }
+            CronNumericTerm::Step { step } => {
+                let step = (*step as i64).max(1);
+                let mut value = lo;
+                while value <= hi {
+                    result.insert(value);
+                    value += step;
+                }
+            }
+            CronNumericTerm::Values { values } => {
+                result.extend(values.iter().copied().filter(|v| *v >= lo && *v <= hi));
+            }
+            CronNumericTerm::Range { start, end, step } => {
+                let step = (*step as i64).max(1);
+                let mut value = *start;
+                while value <= *end {
+                    if value >= lo && value <= hi {
+                        result.insert(value);
+                    }
+                    value += step;
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Expand enum terms into the concrete set of ordinals in `[lo, hi]`.
+///
+/// Month ordinals are 1–12, weekday ordinals 0–6. Shared by validation and the
+/// scheduler matcher.
+pub fn expand_enum_field<T: CronOrdinal>(
+    terms: &[CronEnumTerm<T>],
+    lo: i64,
+    hi: i64,
+) -> HashSet<i64> {
+    let mut result = HashSet::new();
+    for term in terms {
+        match term {
+            CronEnumTerm::Every => {
+                result.extend(lo..=hi);
+            }
+            CronEnumTerm::EnumStep { step } => {
+                let step = (*step as i64).max(1);
+                let mut value = lo;
+                while value <= hi {
+                    result.insert(value);
+                    value += step;
+                }
+            }
+            CronEnumTerm::EnumValues { values } => {
+                result.extend(values.iter().map(|v| v.cron_ordinal()));
+            }
+            CronEnumTerm::EnumRange { start, end, step } => {
+                let step = (*step as i64).max(1);
+                let mut value = start.cron_ordinal();
+                let end = end.cron_ordinal();
+                while value <= end {
+                    result.insert(value);
+                    value += step;
+                }
+            }
+        }
+    }
+    result
+}
+
+impl CronSchedule {
+    /// Validate per-field domains, range ordering, step span, and month ×
+    /// day-of-month satisfiability.
+    ///
+    /// Returns the first error encountered (single-error style, consistent with
+    /// the other schedule pattern validators in this module).
+    pub fn validate(&self) -> Result<(), String> {
+        if self.minute.is_empty() {
+            return Err(invalid_cron_field("minute", "must have at least one term"));
+        }
+        if self.hour.is_empty() {
+            return Err(invalid_cron_field("hour", "must have at least one term"));
+        }
+        if self.month.is_empty() {
+            return Err(invalid_cron_field("month", "must have at least one term"));
+        }
+        validate_numeric_terms(&self.minute, "minute", 0, 59)?;
+        validate_numeric_terms(&self.hour, "hour", 0, 23)?;
+        validate_enum_terms(&self.month, "month", 11)?;
+        validate_day_selector(&self.day)?;
+        validate_satisfiable(&self.month, &self.day)?;
+        Ok(())
+    }
+}
+
 /// Union of all schedule pattern types.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -218,6 +694,7 @@ pub enum SchedulePattern {
     Daily(DailySchedule),
     Weekly(WeeklySchedule),
     Monthly(MonthlySchedule),
+    Cron(CronSchedule),
 }
 
 /// Definition of a scheduled task.
@@ -400,6 +877,7 @@ impl ScheduleConfig {
                 SchedulePattern::Hourly(hourly) => hourly.validate()?,
                 SchedulePattern::Weekly(weekly) => weekly.validate()?,
                 SchedulePattern::Monthly(monthly) => monthly.validate()?,
+                SchedulePattern::Cron(cron) => cron.validate()?,
                 SchedulePattern::Daily(_) => {} // NaiveTime handles its own bounds
             }
 
@@ -1101,5 +1579,430 @@ mod tests {
         assert!(config.enabled);
         assert!(config.schedules.is_empty());
         assert_eq!(config.check_interval_seconds, 1);
+    }
+
+    // ----------------------------------------------------------------------
+    // CronSchedule (ported from Python test_schedule_cron.py)
+    // ----------------------------------------------------------------------
+
+    fn num_values(values: Vec<i64>) -> CronNumericTerm {
+        CronNumericTerm::Values { values }
+    }
+
+    // -- construction --
+
+    #[test]
+    fn cron_minimal_valid() {
+        let cron = CronSchedule {
+            minute: vec![num_values(vec![0])],
+            hour: vec![CronNumericTerm::Every],
+            month: vec![CronEnumTerm::Every],
+            day: DaySelector::EveryDay,
+        };
+        assert!(cron.validate().is_ok());
+    }
+
+    #[test]
+    fn cron_mixed_terms_in_one_field() {
+        let cron = CronSchedule {
+            minute: vec![
+                num_values(vec![0, 30]),
+                CronNumericTerm::Range {
+                    start: 10,
+                    end: 20,
+                    step: 5,
+                },
+            ],
+            hour: vec![CronNumericTerm::Step { step: 4 }],
+            month: vec![CronEnumTerm::Every],
+            day: DaySelector::EveryDay,
+        };
+        assert!(cron.validate().is_ok());
+    }
+
+    #[test]
+    fn cron_enum_range_and_step() {
+        let cron = CronSchedule {
+            minute: vec![CronNumericTerm::Every],
+            hour: vec![CronNumericTerm::Every],
+            month: vec![
+                CronEnumTerm::EnumRange {
+                    start: Month::March,
+                    end: Month::September,
+                    step: 2,
+                },
+                CronEnumTerm::EnumStep { step: 3 },
+            ],
+            day: DaySelector::EveryDay,
+        };
+        assert!(cron.validate().is_ok());
+    }
+
+    // -- single-error domain validation --
+
+    #[test]
+    fn cron_minute_out_of_domain() {
+        let cron = CronSchedule {
+            minute: vec![num_values(vec![60])],
+            hour: vec![CronNumericTerm::Every],
+            month: vec![CronEnumTerm::Every],
+            day: DaySelector::EveryDay,
+        };
+        let err = cron.validate().unwrap_err();
+        assert!(err.contains("minute"));
+        assert!(err.contains("60"));
+    }
+
+    #[test]
+    fn cron_hour_out_of_domain() {
+        let cron = CronSchedule {
+            minute: vec![CronNumericTerm::Every],
+            hour: vec![num_values(vec![24])],
+            month: vec![CronEnumTerm::Every],
+            day: DaySelector::EveryDay,
+        };
+        let err = cron.validate().unwrap_err();
+        assert!(err.contains("hour"));
+        assert!(err.contains("24"));
+    }
+
+    #[test]
+    fn cron_day_of_month_out_of_domain() {
+        let cron = CronSchedule {
+            minute: vec![CronNumericTerm::Every],
+            hour: vec![CronNumericTerm::Every],
+            month: vec![CronEnumTerm::Every],
+            day: DaySelector::ByMonthDay {
+                day_of_month: vec![num_values(vec![32])],
+            },
+        };
+        let err = cron.validate().unwrap_err();
+        assert!(err.contains("day_of_month"));
+        assert!(err.contains("32"));
+    }
+
+    #[test]
+    fn cron_numeric_range_start_after_end() {
+        let cron = CronSchedule {
+            minute: vec![CronNumericTerm::Range {
+                start: 30,
+                end: 10,
+                step: 1,
+            }],
+            hour: vec![CronNumericTerm::Every],
+            month: vec![CronEnumTerm::Every],
+            day: DaySelector::EveryDay,
+        };
+        let err = cron.validate().unwrap_err();
+        assert!(err.contains("minute"));
+        assert!(err.contains("exceeds end"));
+    }
+
+    #[test]
+    fn cron_weekday_range_wraparound_rejected() {
+        let cron = CronSchedule {
+            minute: vec![CronNumericTerm::Every],
+            hour: vec![CronNumericTerm::Every],
+            month: vec![CronEnumTerm::Every],
+            day: DaySelector::ByWeekday {
+                day_of_week: vec![CronEnumTerm::EnumRange {
+                    start: Weekday::Friday,
+                    end: Weekday::Monday,
+                    step: 1,
+                }],
+            },
+        };
+        let err = cron.validate().unwrap_err();
+        assert!(err.contains("day_of_week"));
+        assert!(err.contains("wrap-around"));
+    }
+
+    #[test]
+    fn cron_month_range_wraparound_rejected() {
+        let cron = CronSchedule {
+            minute: vec![CronNumericTerm::Every],
+            hour: vec![CronNumericTerm::Every],
+            month: vec![CronEnumTerm::EnumRange {
+                start: Month::December,
+                end: Month::January,
+                step: 1,
+            }],
+            day: DaySelector::EveryDay,
+        };
+        let err = cron.validate().unwrap_err();
+        assert!(err.contains("month"));
+        assert!(err.contains("wrap-around"));
+    }
+
+    // -- step span --
+
+    #[test]
+    fn cron_minute_step_at_span_allowed() {
+        let cron = CronSchedule {
+            minute: vec![CronNumericTerm::Step { step: 59 }],
+            hour: vec![CronNumericTerm::Every],
+            month: vec![CronEnumTerm::Every],
+            day: DaySelector::EveryDay,
+        };
+        assert!(cron.validate().is_ok());
+    }
+
+    #[test]
+    fn cron_minute_step_over_span_rejected() {
+        let cron = CronSchedule {
+            minute: vec![CronNumericTerm::Step { step: 60 }],
+            hour: vec![CronNumericTerm::Every],
+            month: vec![CronEnumTerm::Every],
+            day: DaySelector::EveryDay,
+        };
+        assert!(cron.validate().unwrap_err().contains("minute"));
+    }
+
+    #[test]
+    fn cron_day_of_month_step_at_span_allowed() {
+        let cron = CronSchedule {
+            minute: vec![CronNumericTerm::Every],
+            hour: vec![CronNumericTerm::Every],
+            month: vec![CronEnumTerm::Every],
+            day: DaySelector::ByMonthDay {
+                day_of_month: vec![CronNumericTerm::Step { step: 30 }],
+            },
+        };
+        assert!(cron.validate().is_ok());
+    }
+
+    #[test]
+    fn cron_day_of_month_step_over_span_rejected() {
+        let cron = CronSchedule {
+            minute: vec![CronNumericTerm::Every],
+            hour: vec![CronNumericTerm::Every],
+            month: vec![CronEnumTerm::Every],
+            day: DaySelector::ByMonthDay {
+                day_of_month: vec![CronNumericTerm::Step { step: 31 }],
+            },
+        };
+        assert!(cron.validate().unwrap_err().contains("day_of_month"));
+    }
+
+    #[test]
+    fn cron_month_step_at_span_allowed() {
+        let cron = CronSchedule {
+            minute: vec![CronNumericTerm::Every],
+            hour: vec![CronNumericTerm::Every],
+            month: vec![CronEnumTerm::EnumStep { step: 11 }],
+            day: DaySelector::EveryDay,
+        };
+        assert!(cron.validate().is_ok());
+    }
+
+    #[test]
+    fn cron_month_step_over_span_rejected() {
+        let cron = CronSchedule {
+            minute: vec![CronNumericTerm::Every],
+            hour: vec![CronNumericTerm::Every],
+            month: vec![CronEnumTerm::EnumStep { step: 12 }],
+            day: DaySelector::EveryDay,
+        };
+        assert!(cron.validate().unwrap_err().contains("month"));
+    }
+
+    // -- satisfiability --
+
+    fn feb_only() -> Vec<CronEnumTerm<Month>> {
+        vec![CronEnumTerm::EnumValues {
+            values: vec![Month::February],
+        }]
+    }
+
+    #[test]
+    fn cron_february_30_rejected() {
+        let cron = CronSchedule {
+            minute: vec![num_values(vec![0])],
+            hour: vec![num_values(vec![0])],
+            month: feb_only(),
+            day: DaySelector::ByMonthDay {
+                day_of_month: vec![num_values(vec![30])],
+            },
+        };
+        assert!(cron.validate().unwrap_err().contains("never fire"));
+    }
+
+    #[test]
+    fn cron_february_29_allowed() {
+        let cron = CronSchedule {
+            minute: vec![num_values(vec![0])],
+            hour: vec![num_values(vec![0])],
+            month: feb_only(),
+            day: DaySelector::ByMonthDay {
+                day_of_month: vec![num_values(vec![29])],
+            },
+        };
+        assert!(cron.validate().is_ok());
+    }
+
+    #[test]
+    fn cron_april_31_rejected() {
+        let cron = CronSchedule {
+            minute: vec![num_values(vec![0])],
+            hour: vec![num_values(vec![0])],
+            month: vec![CronEnumTerm::EnumValues {
+                values: vec![Month::April],
+            }],
+            day: DaySelector::ByMonthDay {
+                day_of_month: vec![num_values(vec![31])],
+            },
+        };
+        assert!(cron.validate().unwrap_err().contains("never fire"));
+    }
+
+    #[test]
+    fn cron_either_day_impossible_dom_still_valid() {
+        // EitherDay always fires via the weekday branch, so an impossible
+        // day-of-month does not make it unsatisfiable.
+        let cron = CronSchedule {
+            minute: vec![num_values(vec![0])],
+            hour: vec![num_values(vec![0])],
+            month: feb_only(),
+            day: DaySelector::EitherDay {
+                day_of_month: vec![num_values(vec![30])],
+                day_of_week: vec![CronEnumTerm::EnumValues {
+                    values: vec![Weekday::Monday],
+                }],
+            },
+        };
+        assert!(cron.validate().is_ok());
+    }
+
+    #[test]
+    fn cron_both_days_impossible_dom_rejected() {
+        let cron = CronSchedule {
+            minute: vec![num_values(vec![0])],
+            hour: vec![num_values(vec![0])],
+            month: feb_only(),
+            day: DaySelector::BothDays {
+                day_of_month: vec![num_values(vec![30])],
+                day_of_week: vec![CronEnumTerm::EnumValues {
+                    values: vec![Weekday::Monday],
+                }],
+            },
+        };
+        assert!(cron.validate().unwrap_err().contains("never fire"));
+    }
+
+    // -- empty fields & step zero --
+
+    #[test]
+    fn cron_empty_minute_rejected() {
+        let cron = CronSchedule {
+            minute: vec![],
+            hour: vec![CronNumericTerm::Every],
+            month: vec![CronEnumTerm::Every],
+            day: DaySelector::EveryDay,
+        };
+        assert!(cron.validate().unwrap_err().contains("minute"));
+    }
+
+    #[test]
+    fn cron_step_zero_rejected() {
+        let cron = CronSchedule {
+            minute: vec![CronNumericTerm::Step { step: 0 }],
+            hour: vec![CronNumericTerm::Every],
+            month: vec![CronEnumTerm::Every],
+            day: DaySelector::EveryDay,
+        };
+        assert!(cron.validate().unwrap_err().contains("step"));
+    }
+
+    // -- serde --
+
+    #[test]
+    fn cron_serde_carries_discriminators() {
+        let cron = CronSchedule {
+            minute: vec![num_values(vec![15])],
+            hour: vec![CronNumericTerm::Step { step: 4 }],
+            month: vec![CronEnumTerm::Every],
+            day: DaySelector::EveryDay,
+        };
+        let json = serde_json::to_string(&cron).unwrap();
+        assert!(json.contains(r#""kind":"values""#));
+        assert!(json.contains(r#""kind":"step""#));
+        assert!(json.contains(r#""kind":"every""#));
+        assert!(json.contains(r#""kind":"every_day""#));
+    }
+
+    #[test]
+    fn cron_direct_round_trip() {
+        let cron = CronSchedule {
+            minute: vec![num_values(vec![0])],
+            hour: vec![CronNumericTerm::Range {
+                start: 8,
+                end: 18,
+                step: 2,
+            }],
+            month: vec![CronEnumTerm::EnumValues {
+                values: vec![Month::June, Month::July],
+            }],
+            day: DaySelector::BothDays {
+                day_of_month: vec![num_values(vec![1, 15])],
+                day_of_week: vec![CronEnumTerm::EnumValues {
+                    values: vec![Weekday::Monday],
+                }],
+            },
+        };
+        let json = serde_json::to_string(&cron).unwrap();
+        let back: CronSchedule = serde_json::from_str(&json).unwrap();
+        assert_eq!(cron, back);
+    }
+
+    #[test]
+    fn cron_month_enum_serializes_as_string() {
+        let json = serde_json::to_string(&Month::February).unwrap();
+        assert_eq!(json, r#""february""#);
+        let back: Month = serde_json::from_str(r#""december""#).unwrap();
+        assert_eq!(back, Month::December);
+    }
+
+    #[test]
+    fn cron_task_schedule_round_trip() {
+        let sched = TaskSchedule::new(
+            "cron-job",
+            "my_task",
+            SchedulePattern::Cron(CronSchedule {
+                minute: vec![num_values(vec![0])],
+                hour: vec![CronNumericTerm::Step { step: 6 }],
+                month: vec![CronEnumTerm::Every],
+                day: DaySelector::EveryDay,
+            }),
+        );
+        let json = serde_json::to_string(&sched).unwrap();
+        assert!(json.contains(r#""type":"cron""#));
+        let back: TaskSchedule = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back.pattern, SchedulePattern::Cron(_)));
+    }
+
+    #[test]
+    fn cron_config_validate_propagates_errors() {
+        let config = ScheduleConfig {
+            enabled: true,
+            schedules: vec![TaskSchedule {
+                name: "bad-cron".to_owned(),
+                task_name: "task_a".to_owned(),
+                pattern: SchedulePattern::Cron(CronSchedule {
+                    minute: vec![num_values(vec![99])],
+                    hour: vec![CronNumericTerm::Every],
+                    month: vec![CronEnumTerm::Every],
+                    day: DaySelector::EveryDay,
+                }),
+                args: serde_json::Value::Null,
+                kwargs: serde_json::Value::Null,
+                queue_name: None,
+                enabled: true,
+                timezone: "UTC".to_owned(),
+                catch_up_missed: false,
+                max_catch_up_runs: 100,
+            }],
+            check_interval_seconds: 1,
+        };
+        assert!(config.validate().is_err());
     }
 }

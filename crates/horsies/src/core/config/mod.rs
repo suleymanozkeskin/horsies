@@ -11,6 +11,7 @@ pub use queue::{CustomQueueConfig, CustomQueueConfigError, QueueMode};
 pub use recovery::{RecoveryConfig, RecoveryConfigError};
 pub use resilience::{ResilienceConfigError, WorkerResilienceConfig};
 pub use schedule::{
-    DailySchedule, HourlySchedule, IntervalSchedule, MonthlySchedule, ScheduleConfig,
-    SchedulePattern, TaskSchedule, Weekday, WeeklySchedule,
+    CronEnumTerm, CronNumericTerm, CronOrdinal, CronSchedule, DailySchedule, DaySelector,
+    HourlySchedule, IntervalSchedule, Month, MonthlySchedule, ScheduleConfig, SchedulePattern,
+    TaskSchedule, Weekday, WeeklySchedule,
 };

@@ -80,6 +80,20 @@ fn write_scheduler_config() -> tempfile::NamedTempFile {
                     "pattern": {"type": "interval", "seconds": 1},
                     "catch_up_missed": true,
                     "max_catch_up_runs": 100
+                },
+                {
+                    "name": "e2e_schedule_cron_every_minute",
+                    "task_name": "e2e_cron_task",
+                    "pattern": {
+                        "type": "cron",
+                        "minute": [{"kind": "every"}],
+                        "hour": [{"kind": "every"}],
+                        "month": [{"kind": "every"}],
+                        "day": {"kind": "every_day"}
+                    },
+                    "timezone": "UTC",
+                    "catch_up_missed": false,
+                    "max_catch_up_runs": 100
                 }
             ]
         },
@@ -623,4 +637,93 @@ async fn test_scheduler_restart_reuses_existing_state() {
             "config_hash should be unchanged after restart"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// T3.12: Cron Schedule Fires On Due Minute
+// ---------------------------------------------------------------------------
+
+/// A `CronSchedule` initializes, fires when due, advances next_run_at, and
+/// enqueues its task.
+///
+/// Covers the cron-specific risk surface: scheduler initialization of a cron
+/// pattern, config-hash/JSON round-trip, due-state handling, and enqueue. No
+/// worker is needed — the scheduler enqueues the task row itself.
+///
+/// Unlike the Python T3.12, this does not restart the scheduler between the
+/// backdate and the fire: the Rust scheduler re-reads `next_run_at` from the DB
+/// on every tick, so a single running instance picks up the backdated slot.
+#[tokio::test]
+#[serial]
+async fn test_cron_schedule_fires_on_due_minute() {
+    use chrono::Timelike;
+
+    let pool = pool().await;
+    db::clean_tables(&pool).await;
+
+    let config_file = write_scheduler_config();
+    let config_path = config_file.path().to_str().unwrap().to_owned();
+
+    let cron_name = "e2e_schedule_cron_every_minute";
+
+    let _scheduler = start_scheduler(&config_path, "scheduler started", Duration::from_secs(10));
+
+    // Phase 1: the cron schedule initializes with run_count 0.
+    let found = wait_for_schedule_state(&pool, cron_name, Duration::from_secs(5)).await;
+    assert!(found, "cron schedule state should be initialized");
+    let init_count: i32 =
+        sqlx::query_scalar("SELECT run_count FROM horsies_schedule_state WHERE schedule_name = $1")
+            .bind(cron_name)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(init_count, 0, "run_count should be 0 before firing");
+
+    // Phase 2: backdate next_run_at to the current minute slot so it is due.
+    let due_slot = chrono::Utc::now()
+        .with_second(0)
+        .unwrap()
+        .with_nanosecond(0)
+        .unwrap();
+    sqlx::query("UPDATE horsies_schedule_state SET next_run_at = $1 WHERE schedule_name = $2")
+        .bind(due_slot)
+        .bind(cron_name)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Phase 3: the running scheduler picks up the due slot, fires, and advances.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut fired = false;
+    while tokio::time::Instant::now() < deadline {
+        let row: Option<(i32, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+            "SELECT run_count, next_run_at FROM horsies_schedule_state WHERE schedule_name = $1",
+        )
+        .bind(cron_name)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        if let Some((run_count, next)) = row {
+            if run_count >= 1 && next.map(|n| n > due_slot).unwrap_or(false) {
+                fired = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(
+        fired,
+        "cron schedule should fire and advance next_run_at past the due slot"
+    );
+
+    // The scheduler enqueued the cron task (observable without a worker).
+    let cron_tasks: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM horsies_tasks WHERE task_name = 'e2e_cron_task'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        cron_tasks >= 1,
+        "scheduler should have enqueued at least one e2e_cron_task row"
+    );
 }

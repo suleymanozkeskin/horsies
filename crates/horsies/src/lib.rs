@@ -49,9 +49,10 @@ pub use horsies_macros::{blocking_task, task};
 pub use crate::core::RegisteredTask;
 pub use crate::core::{
     mask_database_url, resolve_node_task_options, AnyNode, AppConfigError, BackoffStrategy,
-    BuiltInTaskCode, ContractCode, CustomQueueConfig, CustomQueueConfigError, DailySchedule,
-    ErrorCategory, ErrorCode, HandleErrorCode, HandleOperationError, HandleResult, HourlySchedule,
-    InputField, IntervalSchedule, JoinType, MonthlySchedule, NodeKey, NodeRef, OnError,
+    BuiltInTaskCode, ContractCode, CronEnumTerm, CronNumericTerm, CronOrdinal, CronSchedule,
+    CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector, ErrorCategory, ErrorCode,
+    HandleErrorCode, HandleOperationError, HandleResult, HourlySchedule, InputField,
+    IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey, NodeRef, OnError,
     OperationalErrorCode, OutcomeCode, PostgresConfig, PostgresConfigError, QueueMode,
     RecoveryConfig, RecoveryConfigError, RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec,
     ResilienceConfigError, ResolvedEnqueue, RetrievalCode, RetryPolicy, RetryPolicyError,
