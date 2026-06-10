@@ -129,6 +129,30 @@ def urgent_task() -> TaskResult[str, TaskError]:
     ...
 ```
 
+### Set an Execution Timeout
+
+`timeout_ms` bounds task execution time, measured from the moment a worker dispatches the task to a child process. Minimum 1000 (1 second).
+
+```python
+@app.task("resize_video", timeout_ms=120_000)
+def resize_video(video_id: str) -> TaskResult[str, TaskError]:
+    ...
+```
+
+On expiry, the worker kills the child process and the task fails with `TASK_TIMEOUT`. If the deadline elapses before user code starts, the task is requeued instead. Timeouts are terminal by default; opt into retries by adding `"TASK_TIMEOUT"` to `auto_retry_for`:
+
+```python
+@app.task(
+    "resize_video",
+    timeout_ms=120_000,
+    retry_policy=RetryPolicy.fixed([60, 300], auto_retry_for=["TASK_TIMEOUT"]),
+)
+def resize_video(video_id: str) -> TaskResult[str, TaskError]:
+    ...
+```
+
+Killing the child restarts the worker's process pool: sibling tasks running on the same worker are interrupted and recovered through crash recovery (requeued, or retried per their own policies). Size `timeout_ms` as a hang backstop well above normal runtime, not as routine control flow.
+
 ### Register Tasks for Workers
 
 ```python
@@ -180,6 +204,7 @@ def task_two() -> TaskResult[str, TaskError]:
 | `retry_policy` | `RetryPolicy` | No | Retry timing, backoff, and auto-retry triggers |
 | `exception_mapper` | `dict[type[BaseException], str]` | No | Maps exception classes to error codes |
 | `default_unhandled_error_code` | `str` | No | Error code for unmapped exceptions (overrides global) |
+| `timeout_ms` | `int` | No | Execution time limit in milliseconds (>= 1000), measured from dispatch. On expiry the child process is killed and the task fails with `TASK_TIMEOUT` |
 
 **Returns:** Decorated function that can be called directly or via `.send()` / `.send_async()`.
 

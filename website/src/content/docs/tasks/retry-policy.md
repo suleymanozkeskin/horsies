@@ -123,7 +123,7 @@ def api_call() -> TaskResult[dict[str, JsonValue], TaskError]:
 `auto_retry_for` accepts:
 
 - Error codes from `TaskError`: `"RATE_LIMITED"`, `"SERVICE_UNAVAILABLE"`
-- Library error codes: `"UNHANDLED_EXCEPTION"`, `"WORKER_CRASHED"`
+- Library error codes: `"UNHANDLED_EXCEPTION"`, `"WORKER_CRASHED"`, `"TASK_TIMEOUT"`
 - Codes must use `UPPER_SNAKE_CASE` (exception class names like `"TimeoutError"` are rejected)
 
 ## Exception Mapper

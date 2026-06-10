@@ -18,6 +18,7 @@ Covers all parameters, error codes, serialization rules, retry patterns, and pit
     retry_policy: RetryPolicy | None = None,
     exception_mapper: dict[type[BaseException], str] | None = None,
     default_unhandled_error_code: str | None = None,
+    timeout_ms: int | None = None,
 )
 def my_task(...) -> TaskResult[T, TaskError]: ...
 ```
@@ -29,6 +30,7 @@ def my_task(...) -> TaskResult[T, TaskError]: ...
 | `retry_policy` | `RetryPolicy \| None` | `None` | See RetryPolicy section. |
 | `exception_mapper` | `dict[type[BaseException], str] \| None` | `None` | Per-task exception-to-error-code mapping. See ExceptionMapper section. |
 | `default_unhandled_error_code` | `str \| None` | `None` | Override global default for unmapped exceptions. Must be `UPPER_SNAKE_CASE`. |
+| `timeout_ms` | `int \| None` | `None` | Execution time limit in ms (>= 1000), measured from dispatch. On expiry the child process is SIGKILLed and the task fails with `TASK_TIMEOUT`; retry is opt-in via `auto_retry_for`. The kill restarts the worker's process pool — sibling tasks recover through crash recovery. A deadline that fires before user code starts requeues the task instead. |
 
 `good_until` is **not** accepted at definition time — it is a per-send concern. Passing it raises `HRS-102`. Use `.with_options(good_until=...)` at send time instead. For workflow nodes, use `.node(good_until=...)`.
 
@@ -154,6 +156,7 @@ Terminal lifecycle outcomes for tasks and workflows:
 
 - `TASK_CANCELLED` — task was cancelled
 - `TASK_EXPIRED` — task's `good_until` deadline passed before execution started (PENDING or CLAIMED)
+- `TASK_TIMEOUT` — task exceeded its `timeout_ms`; child process killed, retry opt-in via `auto_retry_for`
 - `WORKFLOW_PAUSED` — workflow is paused
 - `WORKFLOW_FAILED` — workflow has failed
 - `WORKFLOW_CANCELLED` — workflow was cancelled
