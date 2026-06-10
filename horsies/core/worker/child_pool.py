@@ -44,6 +44,15 @@ def _initialize_worker_pool(
 
     In production: Called by _child_initializer in spawned worker processes.
     In tests: Can be called directly to set up the pool for direct _run_task_entry calls.
+
+    Raises:
+        ValueError: invalid pool sizing.
+        Exception: conninfo parse errors raise from the constructor — in
+            production out of the child initializer, killing the child.
+            Connection failures do NOT raise here: ``open=True`` starts the
+            pool without connecting (min_size defaults to 0), so an
+            unreachable database surfaces at first acquisition as a
+            PoolTimeout inside task pre-flight / heartbeat containment.
     """
     global _worker_pool
     if _worker_pool is not None:
