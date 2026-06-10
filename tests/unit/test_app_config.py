@@ -53,8 +53,10 @@ class TestPostgresConfigPgBouncer:
             database_url='postgresql+psycopg://user:pass@localhost/db',
         )
 
-        assert config.pool_size == 30
-        assert config.max_overflow == 30
+        # Producer defaults follow SQLAlchemy's (spec change, 0.1.7);
+        # the old 30+30 let one producer pin 60 server connections.
+        assert config.pool_size == 5
+        assert config.max_overflow == 10
         assert config.worker_pool_size == 3
         assert config.worker_max_overflow == 2
         assert config.worker_child_pool_min_size == 0
