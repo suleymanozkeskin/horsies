@@ -1,6 +1,6 @@
 ---
 title: Changelog
-summary: Notable changes per release. 0.1.7 is a correctness and performance hardening release (full-project review); 0.1.6 hardens worker lifecycle recovery; 0.1.5 adds ping_workers min_responses; 0.1.4 adds the worker & database health API; 0.1.3 adds CronSchedule; 0.1.2 is a breaking release headlined by the strict-serde redesign.
+summary: Notable changes per release. 0.1.7 adds task timeouts, child-process hooks, uncapped queue concurrency, and correctness/performance hardening; 0.1.6 hardens worker lifecycle recovery.
 related: [./monitoring/worker-health, ./migrations/migration-to-0-1-2, ./internals/serialization]
 tags: [changelog, releases, breaking-changes, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
 ---
@@ -10,6 +10,12 @@ horsies is pre-1.0: breaking changes may land in minor or patch releases, and
 there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
+
+## 0.1.7 — 2026-06-10
+
+Correctness and performance hardening from a full-project review, plus task
+timeouts, child-process hooks, and uncapped queue concurrency.
+Schema migrates from v2 to v7 automatically on first broker start.
 
 ### Added
 
@@ -33,18 +39,6 @@ there is no migration contract between pre-1.0 versions.
   process. The kill restarts the worker's process pool; sibling tasks
   in flight recover through crash recovery. A deadline that fires
   before user code starts requeues the task instead.
-
-### Changed
-
-- Global workflow-recovery passes are capped at 200 rows per candidate
-  query per pass; resume-scoped passes remain uncapped. Successive
-  passes converge on large backlogs without one pass holding its
-  session and transaction throughout.
-
-## 0.1.7 — 2026-06-10
-
-Correctness and performance hardening from a full-project review.
-Schema migrates from v2 to v7 automatically on first broker start.
 
 ### Breaking
 
@@ -146,6 +140,10 @@ Schema migrates from v2 to v7 automatically on first broker start.
 
 ### Changed
 
+- Global workflow-recovery passes are capped at 200 rows per candidate
+  query per pass; resume-scoped passes remain uncapped. Successive
+  passes converge on large backlogs without one pass holding its
+  session and transaction throughout.
 - In-process task calls return the lax-coerced ok value (e.g. `Ok('5')`
   for a declared `int` returns `5`), matching what wire consumers
   decode.
