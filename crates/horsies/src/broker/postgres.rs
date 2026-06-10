@@ -17,6 +17,7 @@ use crate::core::{
 
 use crate::broker::bound_handle::TaskHandle;
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
+use crate::broker::health::DatabasePing;
 use crate::broker::result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult};
 use crate::broker::row::task::{
     ClaimedId, ClaimedTaskRow, ExpiredTaskRow, SetRunningRow, StaleTaskRow, TaskAttemptRow,
@@ -1886,6 +1887,28 @@ impl PostgresBroker {
         Ok(())
     }
 
+    /// Active database liveness probe: a timed `SELECT 1` round-trip.
+    ///
+    /// Returns a [`DatabasePing`] carrying the measured latency, or a
+    /// `DB_PING_FAILED` broker error. Unlike [`health_check`](Self::health_check)
+    /// (which callers use as a plain reachability gate), this surfaces latency
+    /// for monitoring. Mirrors Python's `ping_database_async`.
+    pub async fn ping_database(&self) -> BrokerResult<DatabasePing> {
+        let start = std::time::Instant::now();
+        let probe: Result<(i32,), sqlx::Error> =
+            sqlx::query_as(HEALTH_CHECK_SQL).fetch_one(&self.pool).await;
+        match probe {
+            Ok(_) => Ok(DatabasePing {
+                latency_ms: start.elapsed().as_secs_f64() * 1000.0,
+            }),
+            Err(e) => Err(BrokerOperationError {
+                code: BrokerErrorCode::DbPingFailed,
+                message: format!("database ping failed: {}", e),
+                retryable: true,
+            }),
+        }
+    }
+
     /// Verify LISTEN/NOTIFY delivery once per broker in PgBouncer mode.
     ///
     /// Reconnect loops may call this repeatedly; successful probes are cached so
@@ -2520,6 +2543,15 @@ mod tests {
                 broker.get_task_info("some-task-id", true, false).await;
             let _result: BrokerResult<Option<TaskInfo>> =
                 broker.get_task_info("some-task-id", true, true).await;
+        }
+    }
+
+    /// Verify that ping_database returns BrokerResult<DatabasePing>.
+    #[test]
+    fn ping_database_return_type_contract() {
+        #[allow(unused, unreachable_code)]
+        async fn _check(broker: &PostgresBroker) {
+            let _result: BrokerResult<DatabasePing> = broker.ping_database().await;
         }
     }
 
