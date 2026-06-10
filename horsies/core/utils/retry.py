@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import random
+import sys
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, cast
@@ -22,19 +23,25 @@ def _sanitize_intervals(raw: Any) -> list[float]:
     """Return validated retry intervals.
 
     The intervals come from an untrusted deserialized dict; anything that is
-    not a non-empty list of finite numbers falls back to the defaults, so
-    delay calculation is total.
+    not a non-empty list of finite, float-representable numbers falls back to
+    the defaults, so delay calculation is total. Ints are range-checked
+    before conversion: ``float()``/``math.isfinite()`` raise OverflowError on
+    ints beyond float range.
     """
     if not isinstance(raw, list) or not raw:
         return list(_DEFAULT_RETRY_INTERVALS)
     entries = cast('list[Any]', raw)
     sanitized: list[float] = []
     for value in entries:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return list(_DEFAULT_RETRY_INTERVALS)
-        if not math.isfinite(value):
-            return list(_DEFAULT_RETRY_INTERVALS)
-        sanitized.append(float(value))
+        match value:
+            case bool():
+                return list(_DEFAULT_RETRY_INTERVALS)
+            case int() if -sys.float_info.max <= value <= sys.float_info.max:
+                sanitized.append(float(value))
+            case float() if math.isfinite(value):
+                sanitized.append(value)
+            case _:
+                return list(_DEFAULT_RETRY_INTERVALS)
     return sanitized
 
 

@@ -89,6 +89,16 @@ class TestCalculateRetryDelay:
         policy = {'intervals': [True, False], 'backoff_strategy': 'fixed', 'jitter': False}
         assert calculate_retry_delay(1, policy) == 60.0
 
+    def test_int_beyond_float_range_falls_back_to_defaults(self) -> None:
+        # Regression: math.isfinite()/float() raise OverflowError on ints
+        # beyond float range, so a huge JSON int crashed the helper.
+        policy = {'intervals': [10**400], 'backoff_strategy': 'fixed', 'jitter': False}
+        assert calculate_retry_delay(1, policy) == 60.0
+
+    def test_negative_int_beyond_float_range_falls_back_to_defaults(self) -> None:
+        policy = {'intervals': [-(10**400)], 'backoff_strategy': 'fixed', 'jitter': False}
+        assert calculate_retry_delay(1, policy) == 60.0
+
     def test_non_finite_intervals_fall_back_to_defaults(self) -> None:
         policy = {
             'intervals': [float('nan')],
