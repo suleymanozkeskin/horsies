@@ -130,6 +130,15 @@ def slow_task(duration_ms: int) -> TaskResult[str, TaskError]:
     return TaskResult(ok=f'slept_{duration_ms}')
 
 
+@app.task(task_name='e2e_timeout_sleeper', timeout_ms=2_000)
+def timeout_sleeper(duration_ms: int) -> TaskResult[str, TaskError]:
+    """Sleeps past its 2s timeout_ms so the parent-side deadline kill fires."""
+    import time
+
+    time.sleep(duration_ms / 1000)
+    return TaskResult(ok=f'slept_{duration_ms}')
+
+
 @app.task(task_name='e2e_unserializable')
 def unserializable_result_task() -> TaskResult[int, TaskError]:
     """Task that declares int return but actually returns a callable.
