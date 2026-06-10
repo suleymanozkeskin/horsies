@@ -28,7 +28,6 @@ from horsies.core.worker.sql import (
     COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
     COUNT_QUEUE_IN_FLIGHT_SOFT_SQL,
     COUNT_RUNNING_FOR_WORKER_SQL,
-    COUNT_RUNNING_IN_QUEUE_SQL,
     GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL,
     RESET_PAUSED_WORKFLOW_TASKS_SQL,
     SKIP_CANCELLED_WORKFLOW_TASKS_SQL,
@@ -72,6 +71,16 @@ class ClaimMixin:
           - per-queue max_concurrency (CUSTOM mode)
           - worker global concurrency (processes)
         Returns True if anything was claimed.
+
+        Raises:
+            Exception: DB errors propagate to the main loop, which
+                backoff-retries transient connection errors and crashes the
+                worker on anything else. Rows already committed CLAIMED when
+                a later step fails are recovered by claim-lease expiry; with
+                the worker still alive, the claimer heartbeat renews their
+                leases until max_claim_renew_age_ms caps it, so recovery
+                waits out renewal-cap + lease (the reaper's stale-claimed
+                path needs a dead claimer heartbeat and does not apply).
         """
         # Guard: Check if we've already claimed too many tasks
         # Default depends on mode:
@@ -247,6 +256,11 @@ class ClaimMixin:
         - CANCELLED workflow: hard-cancel task + mark workflow_task SKIPPED
 
         Returns the filtered list of rows that should be dispatched.
+
+        Raises:
+            Exception: DB errors propagate to the main loop (runs after the
+                claim transaction committed; the claimed batch is recovered
+                by lease expiry if this step fails).
         """
         if not rows:
             return rows
@@ -374,6 +388,9 @@ class ClaimMixin:
 
         CLAIM_SQL RETURNING provides id/task_name/args/kwargs atomically,
         eliminating the previous claim-commit → separate-load gap.
+
+        DB errors propagate to the claim pass (the caller owns the
+        transaction).
         """
         res = await s.execute(
             CLAIM_SQL,
@@ -389,67 +406,40 @@ class ClaimMixin:
         cols = res.keys()
         return [dict(zip(cols, row)) for row in res.fetchall()]
 
-    async def _count_claimed_for_worker(self, session: AsyncSession | None = None) -> int:
-        """Count only CLAIMED tasks for this worker (not yet RUNNING)."""
-        if session is not None:
-            res = await session.execute(
-                COUNT_CLAIMED_FOR_WORKER_SQL,
-                {'wid': self.worker_instance_id},
-            )
-            row = res.fetchone()
-            return int(row.cnt) if row else 0
-        async with self.sf() as s:
-            res = await s.execute(
-                COUNT_CLAIMED_FOR_WORKER_SQL,
-                {'wid': self.worker_instance_id},
-            )
-            row = res.fetchone()
-            return int(row.cnt) if row else 0
+    async def _count_claimed_for_worker(self, session: AsyncSession) -> int:
+        """Count only CLAIMED tasks for this worker (not yet RUNNING).
 
-    async def _count_only_running_for_worker(
-        self, session: AsyncSession | None = None
-    ) -> int:
-        """Count only RUNNING tasks for this worker (excludes CLAIMED)."""
-        if session is not None:
-            res = await session.execute(
-                COUNT_RUNNING_FOR_WORKER_SQL,
-                {'wid': self.worker_instance_id},
-            )
-            row = res.fetchone()
-            return int(row.cnt) if row else 0
-        async with self.sf() as s:
-            res = await s.execute(
-                COUNT_RUNNING_FOR_WORKER_SQL,
-                {'wid': self.worker_instance_id},
-            )
-            row = res.fetchone()
-            return int(row.cnt) if row else 0
+        DB errors propagate to the caller's containment (claim pass or
+        health snapshot).
+        """
+        res = await session.execute(
+            COUNT_CLAIMED_FOR_WORKER_SQL,
+            {'wid': self.worker_instance_id},
+        )
+        row = res.fetchone()
+        return int(row.cnt) if row else 0
 
-    async def _count_in_flight_for_worker(
-        self, session: AsyncSession | None = None
-    ) -> int:
-        """Count RUNNING + CLAIMED tasks for this worker (hard cap mode)."""
-        if session is not None:
-            res = await session.execute(
-                COUNT_IN_FLIGHT_FOR_WORKER_SQL,
-                {'wid': self.worker_instance_id},
-            )
-            row = res.fetchone()
-            return int(row.cnt) if row else 0
-        async with self.sf() as s:
-            res = await s.execute(
-                COUNT_IN_FLIGHT_FOR_WORKER_SQL,
-                {'wid': self.worker_instance_id},
-            )
-            row = res.fetchone()
-            return int(row.cnt) if row else 0
+    async def _count_only_running_for_worker(self, session: AsyncSession) -> int:
+        """Count only RUNNING tasks for this worker (excludes CLAIMED).
 
-    async def _count_running_in_queue(self, queue_name: str) -> int:
-        """Count RUNNING tasks in a given queue across the cluster."""
-        async with self.sf() as s:
-            res = await s.execute(
-                COUNT_RUNNING_IN_QUEUE_SQL,
-                {'q': queue_name},
-            )
-            row = res.fetchone()
-            return int(row.cnt) if row else 0
+        DB errors propagate to the caller's containment (claim pass or
+        health snapshot).
+        """
+        res = await session.execute(
+            COUNT_RUNNING_FOR_WORKER_SQL,
+            {'wid': self.worker_instance_id},
+        )
+        row = res.fetchone()
+        return int(row.cnt) if row else 0
+
+    async def _count_in_flight_for_worker(self, session: AsyncSession) -> int:
+        """Count RUNNING + CLAIMED tasks for this worker (hard cap mode).
+
+        DB errors propagate to the claim pass.
+        """
+        res = await session.execute(
+            COUNT_IN_FLIGHT_FOR_WORKER_SQL,
+            {'wid': self.worker_instance_id},
+        )
+        row = res.fetchone()
+        return int(row.cnt) if row else 0

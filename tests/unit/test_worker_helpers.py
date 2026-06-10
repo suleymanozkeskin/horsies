@@ -3713,33 +3713,11 @@ class TestClaimAndDispatchBranches:
         worker = _make_worker()
 
         session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
         result_mock = MagicMock()
         result_mock.fetchone.return_value = None
         session.execute = AsyncMock(return_value=result_mock)
-        worker.sf = MagicMock(return_value=session)
 
-        count = await worker._count_only_running_for_worker()
-
-        assert count == 0
-
-    # --- U-9h ---
-
-    @pytest.mark.asyncio
-    async def test_count_running_in_queue_row_none(self) -> None:
-        """fetchone() returns None → returns 0."""
-        worker = _make_worker()
-
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        result_mock = MagicMock()
-        result_mock.fetchone.return_value = None
-        session.execute = AsyncMock(return_value=result_mock)
-        worker.sf = MagicMock(return_value=session)
-
-        count = await worker._count_running_in_queue('some_queue')
+        count = await worker._count_only_running_for_worker(session)
 
         assert count == 0
 

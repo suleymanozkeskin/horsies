@@ -58,10 +58,10 @@ class HealthMixin:
         # Cross-concern methods provided by sibling mixins / Worker.
         def _claim_lease_ms(self) -> int: ...
         async def _count_claimed_for_worker(
-            self, session: AsyncSession | None = None
+            self, session: AsyncSession
         ) -> int: ...
         async def _count_only_running_for_worker(
-            self, session: AsyncSession | None = None
+            self, session: AsyncSession
         ) -> int: ...
 
     async def _claimer_heartbeat_loop(self) -> None:
