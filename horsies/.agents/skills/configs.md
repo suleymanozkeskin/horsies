@@ -203,7 +203,7 @@ config = AppConfig(
 |---|---|---|---|---|
 | `name` | `str` | required | — | Unique queue name |
 | `priority` | `int` | `1` | 1–100 | 1 = highest, 100 = lowest |
-| `max_concurrency` | `int` | `5` | — | Max simultaneous RUNNING tasks for this queue |
+| `max_concurrency` | `int \| None` | `5` | `>= 0` | Max simultaneous RUNNING tasks for this queue. `None` = uncapped (omitted from the worker's per-queue counting entirely); `0` = pause claiming; negative rejected |
 
 Lower priority number = claimed first. `cluster_wide_cap` still applies as an upper bound.
 

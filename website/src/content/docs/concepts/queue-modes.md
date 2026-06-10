@@ -74,7 +74,7 @@ def ship_to_address() -> TaskResult[str, TaskError]:
 |-------|------|---------|-------------|
 | `name` | `str` | required | Unique queue identifier |
 | `priority` | `int` | 1 | Priority level (1=highest, 100=lowest) |
-| `max_concurrency` | `int` | 5 | Max simultaneous RUNNING tasks in this queue |
+| `max_concurrency` | `int \| None` | 5 | Max simultaneous RUNNING tasks in this queue; `None` = uncapped, `0` = pause claiming |
 
 ## How Priority Works
 
@@ -93,6 +93,9 @@ This means "critical" tasks (priority=1) are always processed before "low" tasks
 - If `critical` has `max_concurrency=10`, at most 10 critical tasks run at once
 - This is checked during claiming, not just per-worker
 - Useful for rate-limiting external API calls or database-heavy operations
+- `max_concurrency=None` removes the per-queue limit entirely (worker and
+  cluster limits still apply) and skips the per-claim in-flight count for
+  that queue; `max_concurrency=0` pauses claiming from the queue
 
 ## When to Use Each Mode
 

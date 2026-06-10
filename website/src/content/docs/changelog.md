@@ -13,6 +13,11 @@ there is no migration contract between pre-1.0 versions.
 
 ### Added
 
+- `CustomQueueConfig.max_concurrency` accepts `None` as an explicit
+  uncapped sentinel (mirroring `cluster_wide_cap=None`): no per-queue
+  limit is enforced and the claim pass skips that queue's in-flight
+  count query. `0` remains valid (pauses claiming); negative values are
+  now rejected at config validation.
 - Per-child-process hook: `@app.on_child_process_start` registers sync
   zero-argument functions that run once in every worker child, after
   task imports and before horsies opens its own child pool. The
