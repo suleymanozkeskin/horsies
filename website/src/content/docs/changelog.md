@@ -39,7 +39,7 @@ there is no migration contract between pre-1.0 versions.
 ## 0.1.7 — 2026-06-10
 
 Correctness and performance hardening from a full-project review.
-Schema migrates from v2 to v6 automatically on first broker start.
+Schema migrates from v2 to v7 automatically on first broker start.
 
 ### Breaking
 
@@ -106,9 +106,13 @@ Schema migrates from v2 to v6 automatically on first broker start.
 ### Performance
 
 - Claim path: partial composite indexes for both eligibility arms plus
-  a split-arm `CLAIM_SQL` (each arm walks its index in order and stops
-  at the limit) — measured ~430× faster claim passes at a 50k-row
-  backlog. The cluster-wide claim advisory lock is taken only when
+  a split-arm `CLAIM_SQL` — measured ~430× faster claim passes at a
+  50k-row pending backlog. The pending arm walks its composite in
+  `ORDER BY` order and stops at the limit; the expired arm carries two
+  complementary partial indexes (expiry filter for the few-expired
+  steady state, ordered composite for deep expired backlogs — measured
+  30.7ms → 0.11ms at 50k expired rows) with the planner choosing per
+  data distribution. The cluster-wide claim advisory lock is taken only when
   cluster/queue caps require serialized accounting, and its key is a
   fixed constant (DSN-derived keys silently split the lock between
   workers using different DSN spellings of the same database).

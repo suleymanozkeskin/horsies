@@ -1190,6 +1190,16 @@ class Worker:
         h = hashlib.sha256(b'horsies:reaper:v1').digest()
         return int.from_bytes(h[:8], byteorder='big', signed=True)
 
+    def _reaper_gate_enabled(self) -> bool:
+        """Whether the advisory reaper gate can be used without starving the pool.
+
+        A gated pass needs two simultaneous coordinator connections: the
+        gate session holding the xact lock, plus the pass body's own
+        session. With total pool capacity below two, the second checkout
+        blocks until pool timeout — so the gate must be skipped.
+        """
+        return (self.cfg.parent_pool_size + self.cfg.parent_max_overflow) >= 2
+
     # Stale detection is handled via heartbeat policy for RUNNING tasks.
 
     def _claim_lease_ms(self) -> int:
@@ -3344,6 +3354,24 @@ class Worker:
                 if self._app is not None:
                     temp_broker.app = self._app
 
+            # The gate session holds a pool connection (and the xact lock)
+            # for the duration of the pass, while the pass body checks out
+            # its own session from the same pool — peak two connections.
+            # A single-connection coordinator pool would deadlock on the
+            # second checkout until pool timeout, every interval, so the
+            # gate is skipped there: SKIP LOCKED keeps concurrent passes
+            # safe — the gate only dedupes redundant work across workers.
+            gate_enabled = self._reaper_gate_enabled()
+            if not gate_enabled:
+                logger.warning(
+                    'Reaper gate disabled: coordinator pool has a single '
+                    'connection (pool_size=%s, max_overflow=%s); passes run '
+                    'ungated (safe via SKIP LOCKED, may be redundant across '
+                    'workers)',
+                    self.cfg.parent_pool_size,
+                    self.cfg.parent_max_overflow,
+                )
+
             while not self._stop.is_set():
                 try:
                     # Gate: every worker runs this loop, but one executing
@@ -3352,19 +3380,24 @@ class Worker:
                     # is held by the gate session for the duration of the
                     # pass and releases automatically (xact scope) if the
                     # holder dies mid-pass.
-                    async with self.sf() as gate_session:
-                        gate_result = await gate_session.execute(
-                            REAPER_GATE_TRY_LOCK_SQL,
-                            {'key': self._advisory_key_reaper()},
+                    if not gate_enabled:
+                        await self._run_reaper_pass(
+                            temp_broker, recovery_cfg, state,
                         )
-                        if bool(gate_result.scalar()):
-                            await self._run_reaper_pass(
-                                temp_broker, recovery_cfg, state,
+                    else:
+                        async with self.sf() as gate_session:
+                            gate_result = await gate_session.execute(
+                                REAPER_GATE_TRY_LOCK_SQL,
+                                {'key': self._advisory_key_reaper()},
                             )
-                        else:
-                            logger.debug(
-                                'Reaper pass skipped: another worker holds the gate',
-                            )
+                            if bool(gate_result.scalar()):
+                                await self._run_reaper_pass(
+                                    temp_broker, recovery_cfg, state,
+                                )
+                            else:
+                                logger.debug(
+                                    'Reaper pass skipped: another worker holds the gate',
+                                )
                 except Exception as e:
                     logger.error(f'Reaper loop error: {e}')
 

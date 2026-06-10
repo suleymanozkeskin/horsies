@@ -3769,3 +3769,85 @@ class TestHandlePing:
         await worker._handle_ping('{"correlation_id": "c"}')  # missing reply_channel
 
         session.execute.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Reaper gate vs coordinator pool capacity
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestReaperGatePoolCapacity:
+    """The advisory gate needs two coordinator connections (gate + pass).
+
+    Regression: with parent_pool_size=1, max_overflow=0 the gate session
+    owned the pool's only connection while the pass body blocked on a
+    second checkout until pool timeout, every interval. Capacity below two
+    must run passes ungated (SKIP LOCKED keeps concurrent passes safe).
+    """
+
+    @staticmethod
+    def _capacity_worker(pool_size: int, max_overflow: int) -> Worker:
+        cfg = WorkerConfig(
+            dsn="postgresql+psycopg://u:p@localhost/db",
+            psycopg_dsn="postgresql://u:p@localhost/db",
+            queues=["default"],
+            parent_pool_size=pool_size,
+            parent_max_overflow=max_overflow,
+            recovery_config=RecoveryConfig(check_interval_ms=1_000),
+        )
+        return Worker(
+            session_factory=MagicMock(),
+            listener=MagicMock(),
+            cfg=cfg,
+        )
+
+    def test_gate_disabled_for_single_connection_pool(self) -> None:
+        assert self._capacity_worker(1, 0)._reaper_gate_enabled() is False
+
+    def test_gate_enabled_with_overflow_headroom(self) -> None:
+        assert self._capacity_worker(1, 1)._reaper_gate_enabled() is True
+
+    def test_gate_enabled_at_defaults(self) -> None:
+        worker = _make_worker()
+        assert worker._reaper_gate_enabled() is True
+
+    @pytest.mark.asyncio
+    async def test_single_connection_pool_runs_pass_ungated(self) -> None:
+        """Capacity 1: the pass runs without ever opening a gate session."""
+        worker = self._capacity_worker(1, 0)
+        worker.broker = MagicMock()  # temp_broker = self.broker, no real engine
+
+        async def _pass(*args: Any, **kwargs: Any) -> None:
+            worker._stop.set()
+
+        worker._run_reaper_pass = AsyncMock(side_effect=_pass)  # type: ignore[method-assign]
+
+        await asyncio.wait_for(worker._reaper_loop(), timeout=3.0)
+
+        assert worker._run_reaper_pass.await_count == 1
+        worker.sf.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_two_connection_pool_gates_the_pass(self) -> None:
+        """Capacity 2: the gate session is opened and the held lock runs the pass."""
+        worker = self._capacity_worker(1, 1)
+        worker.broker = MagicMock()
+
+        gate_result = MagicMock()
+        gate_result.scalar.return_value = True
+        session = MagicMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(return_value=gate_result)
+        worker.sf = MagicMock(return_value=session)  # type: ignore[method-assign]
+
+        async def _pass(*args: Any, **kwargs: Any) -> None:
+            worker._stop.set()
+
+        worker._run_reaper_pass = AsyncMock(side_effect=_pass)  # type: ignore[method-assign]
+
+        await asyncio.wait_for(worker._reaper_loop(), timeout=3.0)
+
+        assert worker._run_reaper_pass.await_count == 1
+        worker.sf.assert_called_once()
