@@ -17,8 +17,12 @@ from sqlalchemy import text
 #     uses); replace full good_until index with a partial one.
 # v6: split notify triggers into INSERT/UPDATE pairs with WHEN clauses so
 #     non-status updates (lease renewals etc.) never invoke plpgsql.
+# v7: ordered partial index for the expired claim arm
+#     (idx_horsies_tasks_claim_expired_ordered) — the v3 expiry-filter
+#     index cannot serve the arm's ORDER BY, so deep expired backlogs
+#     paid a full sort under SKIP LOCKED.
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))

@@ -88,6 +88,19 @@ class _MixedScalarValued(enum.Enum):
     NOTHING = None
 
 
+class _NaNValued(enum.Enum):
+    WEIRD = float('nan')
+
+
+class _InfValued(enum.Enum):
+    HUGE = float('inf')
+    TINY = float('-inf')
+
+
+class _FiniteFloatValued(enum.Enum):
+    HALF = 0.5
+
+
 class _Cat(BaseModel):
     kind: Literal['cat'] = 'cat'
     name: str
@@ -182,6 +195,26 @@ class TestAllowedScalars:
 
     def test_enum_with_mixed_scalar_values_allowed(self) -> None:
         def f(x: _MixedScalarValued) -> TaskResult[int, TaskError]: ...
+        _check(f)
+
+    def test_enum_with_nan_value_rejected(self) -> None:
+        """NaN is not JSON-native: it encodes to None on the wire, so the
+        consumer can never reconstruct the member by value."""
+        def f(x: _NaNValued) -> TaskResult[int, TaskError]: ...
+        with pytest.raises(
+            SignatureValidationError, match='JSON-native scalars'
+        ):
+            _check(f)
+
+    def test_enum_with_infinity_values_rejected(self) -> None:
+        def f(x: _InfValued) -> TaskResult[int, TaskError]: ...
+        with pytest.raises(
+            SignatureValidationError, match='JSON-native scalars'
+        ):
+            _check(f)
+
+    def test_enum_with_finite_float_value_allowed(self) -> None:
+        def f(x: _FiniteFloatValued) -> TaskResult[int, TaskError]: ...
         _check(f)
 
 
