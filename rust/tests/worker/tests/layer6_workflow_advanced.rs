@@ -2184,3 +2184,141 @@ async fn filter_nonrunnable_unclaims_own_paused_task() {
     .unwrap();
     assert_eq!(wt_status, "READY", "own paused task should reset to READY");
 }
+
+// ---------------------------------------------------------------------------
+// T6.x: Cancellation locks backing tasks before the status flip (parity with
+// horsies PR #65). Three facets: a RUNNING backing task whose workflow_task is
+// still ENQUEUED is cancellable (user code starts only after the wf_task
+// RUNNING handoff); a cancelled task is no longer claimable; and a FOR UPDATE
+// lock on the backing task blocks a concurrent FOR UPDATE SKIP LOCKED claim.
+// ---------------------------------------------------------------------------
+
+async fn enqueued_backing_task_id(pool: &PgPool, wf_id: &str) -> String {
+    sqlx::query_scalar(
+        "SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",
+    )
+    .bind(wf_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn horsies_task_status(pool: &PgPool, task_id: &str) -> String {
+    sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+#[serial]
+async fn test_cancel_cancels_running_backing_task_with_enqueued_wf_task() {
+    let pool = pool().await;
+    db::clean_tables(&pool).await;
+
+    // Single root task; no worker, so it sits ENQUEUED with a backing
+    // horsies_tasks row.
+    let mut b = WorkflowSpecBuilder::new("e2e_cancel_running_backing");
+    b.task(
+        wf_step::node()
+            .unwrap()
+            .node_id("a")
+            .kwargs(r#"{"step":"A"}"#.to_owned()),
+    );
+    let spec = b.build().unwrap();
+    let wf_id = start_wf(&pool, &spec).await;
+    let task_id = enqueued_backing_task_id(&pool, &wf_id).await;
+
+    // Simulate the mid-handshake window: backing task RUNNING while the
+    // workflow_task is still ENQUEUED (user code has not started yet).
+    sqlx::query("UPDATE horsies_tasks SET status = 'RUNNING' WHERE id = $1")
+        .bind(&task_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let cancelled = cancel_workflow(&pool, &wf_id).await.unwrap();
+    assert!(cancelled);
+
+    assert_eq!(
+        horsies_task_status(&pool, &task_id).await,
+        "CANCELLED",
+        "a RUNNING backing task whose wf_task is still ENQUEUED must be cancelled",
+    );
+    assert_eq!(get_workflow_task_status(&pool, &wf_id, 0).await, "SKIPPED");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_cancel_makes_queued_backing_task_unclaimable() {
+    let pool = pool().await;
+    db::clean_tables(&pool).await;
+
+    let mut b = WorkflowSpecBuilder::new("e2e_cancel_unclaimable");
+    b.task(
+        wf_step::node()
+            .unwrap()
+            .node_id("a")
+            .kwargs(r#"{"step":"A"}"#.to_owned()),
+    );
+    let spec = b.build().unwrap();
+    let wf_id = start_wf(&pool, &spec).await;
+    let task_id = enqueued_backing_task_id(&pool, &wf_id).await;
+
+    let cancelled = cancel_workflow(&pool, &wf_id).await.unwrap();
+    assert!(cancelled);
+    assert_eq!(horsies_task_status(&pool, &task_id).await, "CANCELLED");
+
+    // A worker claim must not return the cancelled task.
+    let broker = PostgresBroker::from_pool(pool.clone());
+    let claimed = broker
+        .claim("default", 10, "cancel-race-worker", None)
+        .await
+        .unwrap();
+    assert!(
+        claimed.iter().all(|r| r.id != task_id),
+        "cancelled backing task must not be claimable",
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_backing_task_lock_blocks_concurrent_claim() {
+    let pool = pool().await;
+    db::clean_tables(&pool).await;
+
+    let mut b = WorkflowSpecBuilder::new("e2e_cancel_lock_blocks_claim");
+    b.task(
+        wf_step::node()
+            .unwrap()
+            .node_id("a")
+            .kwargs(r#"{"step":"A"}"#.to_owned()),
+    );
+    let spec = b.build().unwrap();
+    let wf_id = start_wf(&pool, &spec).await;
+    let task_id = enqueued_backing_task_id(&pool, &wf_id).await;
+
+    // Hold a FOR UPDATE lock on the backing task, as cancellation does before
+    // flipping the workflow status.
+    let mut tx = pool.begin().await.unwrap();
+    let _locked: Vec<(String,)> =
+        sqlx::query_as("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE")
+            .bind(&task_id)
+            .fetch_all(&mut *tx)
+            .await
+            .unwrap();
+
+    // A concurrent worker claim (FOR UPDATE SKIP LOCKED) must skip the locked row.
+    let broker = PostgresBroker::from_pool(pool.clone());
+    let claimed = broker
+        .claim("default", 10, "cancel-race-worker", None)
+        .await
+        .unwrap();
+    assert!(
+        claimed.iter().all(|r| r.id != task_id),
+        "claim must skip a backing task locked by an in-flight cancellation",
+    );
+
+    tx.rollback().await.unwrap();
+}

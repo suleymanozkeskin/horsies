@@ -22,19 +22,33 @@ SET status = 'CANCELLED', completed_at = NOW(), updated_at = NOW()
 WHERE id = $1 AND status IN ('PENDING', 'RUNNING', 'PAUSED')
 RETURNING id";
 
-/// Step 1: Sync ENQUEUED workflow_tasks whose horsies_tasks are already RUNNING.
-/// Prevents skipping tasks that are actively executing.
-const SYNC_RUNNING_ENQUEUED_ON_CANCEL_SQL: &str = "\
-UPDATE horsies_workflow_tasks wt
-SET status = 'RUNNING',
-    started_at = COALESCE(wt.started_at, NOW())
+/// Lock the workflow's backing horsies_tasks rows before flipping the workflow
+/// status, so a concurrent worker claim (which uses `FOR UPDATE SKIP LOCKED`)
+/// cannot pick them up during the cancellation window. Excludes terminal rows.
+const LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL: &str = "\
+SELECT t.id
 FROM horsies_tasks t
+JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
 WHERE wt.workflow_id = $1
-  AND wt.task_id = t.id
-  AND wt.status = 'ENQUEUED'
-  AND t.status = 'RUNNING'";
+  AND wt.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
+  AND t.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
+FOR UPDATE OF t";
 
-/// Step 2: Cancel PENDING/CLAIMED horsies_tasks for ENQUEUED workflow_tasks.
+/// Lock the workflow's non-terminal workflow_task rows for the duration of the
+/// cancellation transaction.
+const LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL: &str = "\
+SELECT id
+FROM horsies_workflow_tasks
+WHERE workflow_id = $1
+  AND status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
+FOR UPDATE";
+
+/// Step 1: Cancel not-yet-started horsies_tasks for ENQUEUED workflow_tasks.
+///
+/// A backing task may briefly be RUNNING while its workflow_task is still
+/// ENQUEUED (between the task-claim RUNNING update and the workflow_task
+/// RUNNING handoff). User code runs only after that handoff, so this state is
+/// still cancellable — RUNNING is included alongside PENDING/CLAIMED.
 const CANCEL_ENQUEUED_HORSIES_TASKS_SQL: &str = "\
 UPDATE horsies_tasks t
 SET status = 'CANCELLED',
@@ -47,15 +61,15 @@ FROM horsies_workflow_tasks wt
 WHERE wt.workflow_id = $1
   AND wt.task_id = t.id
   AND wt.status = 'ENQUEUED'
-  AND t.status IN ('PENDING', 'CLAIMED')";
+  AND t.status IN ('PENDING', 'CLAIMED', 'RUNNING')";
 
-/// Step 3: Skip PENDING/READY workflow_tasks (not ENQUEUED or RUNNING).
+/// Step 2: Skip PENDING/READY workflow_tasks (not ENQUEUED or RUNNING).
 const SKIP_PENDING_READY_TASKS_SQL: &str = "\
 UPDATE horsies_workflow_tasks
 SET status = 'SKIPPED'
 WHERE workflow_id = $1 AND status IN ('PENDING', 'READY')";
 
-/// Step 4: Skip ENQUEUED workflow_tasks whose horsies_tasks were just cancelled.
+/// Step 3: Skip ENQUEUED workflow_tasks whose horsies_tasks were just cancelled.
 const SKIP_CANCELLED_ENQUEUED_TASKS_SQL: &str = "\
 UPDATE horsies_workflow_tasks wt
 SET status = 'SKIPPED',
@@ -276,40 +290,61 @@ pub async fn cancel_workflow(pool: &PgPool, workflow_id: &str) -> HandleResult<b
 }
 
 async fn cancel_workflow_inner(pool: &PgPool, workflow_id: &str) -> Result<bool, WorkflowError> {
+    // Run the whole cancellation in one transaction so the backing-task locks
+    // taken below are held until the status flip and cleanup commit together.
+    let mut tx = pool.begin().await?;
+
+    // Lock the backing horsies_tasks rows and the workflow_task rows BEFORE
+    // flipping the workflow status. Worker claiming uses `FOR UPDATE SKIP
+    // LOCKED` on horsies_tasks, so holding these locks closes the window where
+    // a worker could claim a queued task during the uncommitted cancellation
+    // (mirrors horsies PR #65).
+    sqlx::query(LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL)
+        .bind(workflow_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL)
+        .bind(workflow_id)
+        .execute(&mut *tx)
+        .await?;
+    // Re-lock backing tasks: an in-flight enqueue may have linked a new task
+    // row while we waited on the workflow_task locks above.
+    sqlx::query(LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL)
+        .bind(workflow_id)
+        .execute(&mut *tx)
+        .await?;
+
     let cancelled: Option<IdRow> = sqlx::query_as(CANCEL_WORKFLOW_SQL)
         .bind(workflow_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
     if cancelled.is_none() {
+        tx.rollback().await?;
         ensure_workflow_exists(pool, workflow_id).await?;
         return Ok(false);
     }
 
-    // Step 1: Sync ENQUEUED wf_tasks whose horsies_tasks are already RUNNING.
-    // This prevents skipping actively-executing tasks in step 3.
-    sqlx::query(SYNC_RUNNING_ENQUEUED_ON_CANCEL_SQL)
-        .bind(workflow_id)
-        .execute(pool)
-        .await?;
-
-    // Step 2: Cancel PENDING/CLAIMED horsies_tasks for ENQUEUED wf_tasks.
+    // Step 1: Cancel not-yet-started horsies_tasks (PENDING/CLAIMED/RUNNING)
+    // for ENQUEUED wf_tasks, so workers cannot pick them up after we commit.
     sqlx::query(CANCEL_ENQUEUED_HORSIES_TASKS_SQL)
         .bind(workflow_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
-    // Step 3: Skip PENDING/READY wf_tasks (not ENQUEUED or RUNNING).
+    // Step 2: Skip PENDING/READY wf_tasks (not ENQUEUED or RUNNING).
     sqlx::query(SKIP_PENDING_READY_TASKS_SQL)
         .bind(workflow_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
-    // Step 4: Skip ENQUEUED wf_tasks whose horsies_tasks were just cancelled.
+    // Step 3: Skip ENQUEUED wf_tasks whose horsies_tasks were just cancelled.
     sqlx::query(SKIP_CANCELLED_ENQUEUED_TASKS_SQL)
         .bind(workflow_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+
+    tx.commit().await?;
 
     tracing::info!(workflow_id, "workflow cancelled");
     Ok(true)
