@@ -140,7 +140,15 @@ jobs:
       - name: E2E - Fanout saturation
         env:
           DB_PASSWORD: testpassword
-        run: uv run pytest tests/e2e/test_fanout_saturation.py -v --tb=short
+        run: |
+          uv run pytest tests/e2e/test_fanout_saturation.py -v --tb=short
+          pkill -TERM -f "horsies worker" 2>/dev/null || true
+          sleep 5
+
+      - name: E2E - Task timeout
+        env:
+          DB_PASSWORD: testpassword
+        run: uv run pytest tests/e2e/test_task_timeout.py -v --tb=short
 
   pgbouncer:
     runs-on: ubuntu-latest
