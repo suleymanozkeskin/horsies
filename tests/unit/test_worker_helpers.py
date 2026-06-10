@@ -2975,7 +2975,7 @@ class TestUpdateWorkerState:
         worker._started_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
 
         monkeypatch.setattr(
-            'horsies.core.worker.worker._collect_psutil_metrics',
+            'horsies.core.worker.health._collect_psutil_metrics',
             lambda: (100.0, 5.5, 12.3),
         )
         worker._count_only_running_for_worker = AsyncMock(return_value=3)  # type: ignore[assignment]
@@ -3021,7 +3021,7 @@ class TestUpdateWorkerState:
         """Exception in _update_worker_state is logged, does not propagate."""
         worker = _make_worker()
         monkeypatch.setattr(
-            'horsies.core.worker.worker._collect_psutil_metrics',
+            'horsies.core.worker.health._collect_psutil_metrics',
             MagicMock(side_effect=RuntimeError('psutil boom')),
         )
 
