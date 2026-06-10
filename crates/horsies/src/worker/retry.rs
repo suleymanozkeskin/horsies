@@ -26,21 +26,25 @@ pub fn calculate_retry_delay(attempt: u32, task_options_json: Option<&str>) -> f
         }
     };
 
+    // Floor before jitter so 1.0 is the bottom of the spread, not a clamp that
+    // destroys uniformity at small base delays. Jitter is applied upward, so the
+    // floored value is the bottom of the jitter range (parity with horsies #78).
+    let base_delay = base_delay.max(1.0);
+
     let delay = if jitter {
-        let jitter_range = base_delay * 0.25;
         let mut rng = rand::thread_rng();
-        base_delay + rng.gen_range(-jitter_range..=jitter_range)
+        base_delay + rng.gen_range(0.0..=base_delay * 0.25)
     } else {
         base_delay
     };
 
-    // Apply the opt-in max delay cap after backoff and jitter, before the floor.
-    let delay = match max_delay_seconds {
+    // Apply the opt-in max delay cap after backoff and jitter. The cap is a
+    // positive integer >= 1 and base_delay is already >= 1.0, so the result
+    // stays >= 1.0 without a trailing floor.
+    match max_delay_seconds {
         Some(cap) if cap > 0 => delay.min(cap as f64),
         _ => delay,
-    };
-
-    delay.max(1.0)
+    }
 }
 
 /// Determine if a failed task should be retried.
@@ -276,7 +280,7 @@ mod tests {
 
     #[test]
     fn jitter_preserves_sub_second_precision() {
-        // With a small base (2s), jitter should produce fractional values (1.5–2.5s).
+        // With a small base (2s), upward jitter produces fractional values (2.0–2.5s).
         let opts =
             r#"{"retry_policy": {"intervals": [2], "backoff_strategy": "fixed", "jitter": true}}"#;
         let mut saw_fractional = false;
@@ -291,8 +295,31 @@ mod tests {
     }
 
     #[test]
+    fn jitter_does_not_collapse_lower_half_onto_floor() {
+        // Parity with horsies #78: previously symmetric ±25% jitter followed by
+        // a trailing max(1.0) snapped the entire lower half of a small base
+        // delay's jitter window onto exactly 1.0, destroying the spread. With
+        // floor-then-upward-jitter, base=1 spreads uniformly over [1.0, 1.25]
+        // and is no longer pinned to the 1.0 floor.
+        let opts =
+            r#"{"retry_policy": {"intervals": [1], "backoff_strategy": "fixed", "jitter": true}}"#;
+        let samples: Vec<f64> = (0..400)
+            .map(|_| calculate_retry_delay(1, Some(opts)))
+            .collect();
+        for &d in &samples {
+            assert!((1.0..=1.25).contains(&d), "delay {d} outside [1.0, 1.25]");
+        }
+        let exactly_floor = samples.iter().filter(|&&d| d == 1.0).count();
+        assert!(
+            exactly_floor < samples.len() / 8,
+            "{exactly_floor}/{} samples collapsed onto the 1.0 floor; jitter spread destroyed",
+            samples.len(),
+        );
+    }
+
+    #[test]
     fn delay_floored_at_one_second() {
-        // Even with jitter pushing down, the floor is 1.0s.
+        // The floor is 1.0s: small base delays are raised to 1.0 before jitter.
         let opts =
             r#"{"retry_policy": {"intervals": [1], "backoff_strategy": "fixed", "jitter": true}}"#;
         for _ in 0..50 {
