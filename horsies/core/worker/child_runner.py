@@ -192,6 +192,64 @@ def _discard_inherited_broker(app: Horsies) -> None:
         logger.warning('Failed to reset inherited broker in child: %s', exc)
 
 
+# Exit code for a failed/hung on_child_process_start hook. Distinct from
+# generic child crashes so the parent stops the worker instead of
+# restart-looping on an unfixable child boot.
+CHILD_HOOK_FAILURE_EXIT_CODE = 173
+
+# Per-hook execution budget (cf. Celery's 4s worker_process_init limit).
+CHILD_HOOK_TIMEOUT_SECONDS = 10.0
+
+
+def _exit_for_hung_hook(hook_name: str) -> None:
+    """Watchdog target: a hook exceeded its budget; terminate the child."""
+    logger.critical(
+        "on_child_process_start hook '%s' exceeded %.0fs in child %s; "
+        'terminating child',
+        hook_name,
+        CHILD_HOOK_TIMEOUT_SECONDS,
+        os.getpid(),
+    )
+    os._exit(CHILD_HOOK_FAILURE_EXIT_CODE)
+
+
+def _run_child_start_hooks(app: Horsies) -> None:
+    """Run app-registered child-start hooks; any failure is terminal.
+
+    Fail-closed by design: a failed pool-policy install must not silently
+    proceed to the state the hook exists to prevent. Failure or timeout
+    logs the hook name and exits with CHILD_HOOK_FAILURE_EXIT_CODE, which
+    the parent recognizes and stops the worker rather than restart-looping.
+    Best-effort work belongs inside the hook's own try/except.
+    """
+    for hook in app.get_child_process_start_hooks():
+        hook_name = getattr(hook, '__qualname__', repr(hook))
+        watchdog = threading.Timer(
+            CHILD_HOOK_TIMEOUT_SECONDS,
+            _exit_for_hung_hook,
+            args=(hook_name,),
+        )
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            hook()
+        except BaseException as exc:
+            watchdog.cancel()
+            logger.critical(
+                "on_child_process_start hook '%s' failed in child %s: %s",
+                hook_name,
+                os.getpid(),
+                exc,
+            )
+            os._exit(CHILD_HOOK_FAILURE_EXIT_CODE)
+        watchdog.cancel()
+        logger.debug(
+            "[child %s] on_child_process_start hook '%s' completed",
+            os.getpid(),
+            hook_name,
+        )
+
+
 def _child_initializer(
     app_locator: str,
     imports: Sequence[str],
@@ -252,6 +310,11 @@ def _child_initializer(
 
     keys = app.tasks.keys_list()
     _debug_imports_log(f'[child {os.getpid()}] registered_tasks={keys}')
+
+    # App-owned per-child setup (engine disposal / pool policy) runs after
+    # task imports so app engines exist, and before horsies opens its own
+    # child pool so a failing hook aborts cleanly.
+    _run_child_start_hooks(app)
 
     # Initialize per-process connection pool (after all imports complete)
     _initialize_worker_pool(

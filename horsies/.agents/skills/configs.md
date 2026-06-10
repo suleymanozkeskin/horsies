@@ -77,7 +77,23 @@ broker = app.get_broker()
 
 # List registered task names
 names = app.list_tasks()  # list[str]
+
+# Per-child-process hook: sync zero-arg fn, runs once in every worker child
+# (after task imports, before horsies' own child pool). Use for disposing
+# fork-inherited app engines + rebinding worker-specific pool policy.
+@app.on_child_process_start
+def reset_db_for_child() -> None: ...
+
+hooks = app.get_child_process_start_hooks()  # list[ChildProcessStartHook]
 ```
+
+`on_child_process_start` rules: deduped by function identity; async functions
+rejected (`HRS-214`); hooks fire on every child start including executor
+restarts, so bodies must be idempotent. Fail-closed: a raising or hung hook
+(10s budget) exits the child with a dedicated code and the worker STOPS with
+the hook named — it does not restart-loop. Engine rebind requires indirection
+(task code reads via a `get_engine()` accessor; `Engine.poolclass` is fixed at
+construction). See website docs `workers/child-process-hooks`.
 
 ### Direct Broker Methods
 

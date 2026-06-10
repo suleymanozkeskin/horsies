@@ -66,6 +66,7 @@ from horsies.core.worker.config import WorkerConfig  # noqa: F401
 from horsies.core.worker.child_pool import _initialize_worker_pool  # noqa: F401
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.worker.child_runner import (  # noqa: F401
+    CHILD_HOOK_FAILURE_EXIT_CODE,
     _locate_app,
     _child_initializer,
     _run_task_entry,
@@ -241,6 +242,14 @@ def _collect_psutil_metrics() -> tuple[float, float, float]:
     )
 
 
+class ChildHookFailedError(RuntimeError):
+    """A child exited because an on_child_process_start hook failed.
+
+    Deliberately not a retryable error: the hook re-runs on every child
+    start, so restarting the executor would loop on the same failure.
+    """
+
+
 def _warm_child_process(delay_seconds: float = 0.1) -> int:
     """No-op child task used to force process startup before parent DB sockets open."""
     if delay_seconds > 0:
@@ -379,8 +388,18 @@ class Worker:
         self._executor = executor
         try:
             await self._warm_executor()
-        except Exception:
+        except Exception as warm_exc:
             self._executor = None
+            # Snapshot child processes before shutdown clears the mapping;
+            # joined Process objects keep their exitcode afterwards.
+            from multiprocessing.process import BaseProcess
+
+            child_processes = list(
+                cast(
+                    'dict[int, BaseProcess]',
+                    getattr(executor, '_processes', None) or {},
+                ).values()
+            )
             loop = asyncio.get_running_loop()
             try:
                 await loop.run_in_executor(
@@ -390,6 +409,15 @@ class Worker:
                 logger.error(
                     f'Error shutting down failed executor warmup: {shutdown_exc}'
                 )
+            if any(
+                p.exitcode == CHILD_HOOK_FAILURE_EXIT_CODE
+                for p in child_processes
+            ):
+                raise ChildHookFailedError(
+                    'on_child_process_start hook failed in a worker child '
+                    '(see the child log line above for the hook name); '
+                    'fix the hook — the worker will not restart-loop on it'
+                ) from warm_exc
             raise
 
     async def _restart_executor(
@@ -408,9 +436,13 @@ class Worker:
                 )
                 return
             if self._executor is None:
-                await self._create_warmed_executor(
-                    avoid_parent_fd_inheritance=self._parent_db_sockets_open,
-                )
+                try:
+                    await self._create_warmed_executor(
+                        avoid_parent_fd_inheritance=self._parent_db_sockets_open,
+                    )
+                except ChildHookFailedError as exc:
+                    self._stop_for_child_hook_failure(exc)
+                    return
                 logger.warning(f'Executor created after restart request: {reason}')
                 return
 
@@ -424,9 +456,22 @@ class Worker:
                 )
             except Exception as e:
                 logger.error(f'Error shutting down broken executor: {e}')
-            await self._create_warmed_executor(
-                avoid_parent_fd_inheritance=self._parent_db_sockets_open,
-            )
+            try:
+                await self._create_warmed_executor(
+                    avoid_parent_fd_inheritance=self._parent_db_sockets_open,
+                )
+            except ChildHookFailedError as exc:
+                self._stop_for_child_hook_failure(exc)
+
+    def _stop_for_child_hook_failure(self, exc: ChildHookFailedError) -> None:
+        """Stop the worker on a hook failure instead of restart-looping.
+
+        The hook re-runs in every replacement child, so retrying the
+        executor restart would fail the same way forever. run_forever
+        observes the stop flag and shuts down gracefully.
+        """
+        logger.critical('Stopping worker: %s', exc)
+        self._stop.set()
 
     def _make_retry_backoff(self) -> _RetryBackoff:
         return _RetryBackoff(

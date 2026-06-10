@@ -75,6 +75,9 @@ OutT = TypeVar('OutT')
 _E = TypeVar('_E', bound=HorsiesError)
 _F = TypeVar('_F', bound=Callable[..., Any])
 
+# Sync, zero-argument callable run once per worker child process.
+ChildProcessStartHook = Callable[[], None]
+
 # Sentinel attribute name stamped on functions decorated with @app.workflow_builder
 _BUILDER_ATTR = '__horsies_workflow_builder__'
 
@@ -120,6 +123,9 @@ class Horsies:
         self._suppress_sends: bool = False
         # Role indicates context: 'producer', 'worker', or 'scheduler'
         self._role: str = 'producer'
+        # Hooks run once per worker child process, after task imports and
+        # before the child opens its own connection pool.
+        self._child_process_start_hooks: list[ChildProcessStartHook] = []
 
         if os.getenv('HORSIES_CHILD_PROCESS') == '1':
             self.logger.info(
@@ -136,6 +142,50 @@ class Horsies:
         """Set the role and log it. Called by CLI after discovery."""
         self._role = role
         self.logger.info(f'horsies running as {role}')
+
+    def on_child_process_start(
+        self,
+        fn: ChildProcessStartHook,
+    ) -> ChildProcessStartHook:
+        """Register a hook that runs once in every worker child process.
+
+        Hooks run after task-module imports and before the child opens its
+        own connection pool, in registration order. They fire on every child
+        start, including executor restarts, so bodies must be idempotent.
+        A hook that raises or hangs terminates the child and stops the
+        worker (fail-closed); catch inside the hook for best-effort work.
+
+        The canonical body disposes engines inherited from a forked parent
+        (`engine.dispose(close=False)`) and rebinds app-owned engines to a
+        worker-appropriate pool.
+        """
+        if not callable(fn):
+            raise ConfigurationError(
+                message='on_child_process_start requires a callable',
+                code=ErrorCode.CONFIG_INVALID_CHILD_HOOK,
+                notes=[f'got {type(fn).__name__!r}'],
+                help_text='register a zero-argument sync function',
+            )
+        if inspect.iscoroutinefunction(fn):
+            raise ConfigurationError(
+                message='on_child_process_start hooks must be sync',
+                code=ErrorCode.CONFIG_INVALID_CHILD_HOOK,
+                notes=[
+                    f"hook '{getattr(fn, '__name__', repr(fn))}' is an async function",
+                    'hooks run during child-process boot, before any event loop exists',
+                ],
+                help_text=(
+                    'use a sync function; for async engines dispose via '
+                    'async_engine.sync_engine.dispose(close=False)'
+                ),
+            )
+        if all(existing is not fn for existing in self._child_process_start_hooks):
+            self._child_process_start_hooks.append(fn)
+        return fn
+
+    def get_child_process_start_hooks(self) -> list[ChildProcessStartHook]:
+        """Snapshot of registered child-process start hooks, in order."""
+        return list(self._child_process_start_hooks)
 
     def get_valid_queue_names(self) -> list[str]:
         """Get list of valid queue names based on configuration"""

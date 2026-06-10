@@ -63,3 +63,50 @@ class TestWorkflowRecoveryDelegation:
         mock_check_completion.assert_awaited_once_with(
             session, 'wf-1', broker
         )
+
+
+@pytest.mark.unit
+class TestRecoveryScanRowCap:
+    """Global passes bind GLOBAL_SCAN_ROW_CAP; scoped passes are uncapped.
+
+    Regression for the connection-economy fix: one global reaper pass must
+    not hold its session and transaction across an unbounded backlog, while
+    a resume-scoped pass must recover its tree completely.
+    """
+
+    @staticmethod
+    def _capture_session(captured: list[Any]) -> AsyncMock:
+        session = AsyncMock()
+
+        async def _execute(
+            stmt: Any, params: dict[str, Any], *_args: Any, **_kwargs: Any
+        ) -> MagicMock:
+            captured.append(params.get('max_rows', 'MISSING'))
+            return _rows_result([])
+
+        session.execute = AsyncMock(side_effect=_execute)
+        return session
+
+    @pytest.mark.asyncio
+    async def test_global_pass_binds_row_cap(self) -> None:
+        captured: list[Any] = []
+        session = self._capture_session(captured)
+
+        recovered = await recovery.recover_stuck_workflows(session, MagicMock())
+
+        assert recovered == 0
+        assert len(captured) == 6
+        assert all(value == recovery.GLOBAL_SCAN_ROW_CAP for value in captured)
+
+    @pytest.mark.asyncio
+    async def test_scoped_pass_is_uncapped(self) -> None:
+        captured: list[Any] = []
+        session = self._capture_session(captured)
+
+        recovered = await recovery.recover_stuck_workflows(
+            session, MagicMock(), scope_workflow_ids=['wf-1'],
+        )
+
+        assert recovered == 0
+        assert len(captured) == 6
+        assert all(value is None for value in captured)

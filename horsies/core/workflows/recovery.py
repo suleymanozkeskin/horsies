@@ -133,6 +133,18 @@ def _decode_recovered_task_result(
 # (resume-time race closure), candidates are restricted to that tree. The
 # explicit ``::varchar[]`` cast avoids "could not determine data type" on the
 # NULL bind (workflow ids are VARCHAR(36) columns).
+#
+# Each query also carries ``LIMIT CAST(:max_rows AS bigint)``: the global
+# reaper pass binds GLOBAL_SCAN_ROW_CAP so one pass cannot hold its session
+# and transaction across an unbounded backlog (every recovered row does
+# engine work — enqueues, completion callbacks). ``LIMIT NULL`` is a no-op,
+# which is what scoped resume passes bind: a resumed tree must be recovered
+# completely, not left partially processed until the next reaper cycle.
+# Processed candidates leave the result set by changing status, so
+# successive capped passes converge without an ORDER BY.
+
+# Rows a single global recovery pass will process per candidate query.
+GLOBAL_SCAN_ROW_CAP = 200
 
 GET_PENDING_WITH_TERMINAL_DEPS_SQL = text("""
     SELECT wt.workflow_id, wt.task_index, w.depth, w.root_workflow_id
@@ -147,6 +159,7 @@ GET_PENDING_WITH_TERMINAL_DEPS_SQL = text("""
             AND wt.dependencies @> ARRAY[dep.task_index]
             AND NOT (dep.status = ANY(:wf_task_terminal_states))
       )
+    LIMIT CAST(:max_rows AS bigint)
 """)
 
 
@@ -159,6 +172,7 @@ GET_READY_NOT_ENQUEUED_SQL = text("""
       AND wt.is_subworkflow = FALSE
       AND w.status = 'RUNNING'
       AND (CAST(:scope_ids AS varchar[]) IS NULL OR wt.workflow_id = ANY(CAST(:scope_ids AS varchar[])))
+    LIMIT CAST(:max_rows AS bigint)
 """)
 
 GET_READY_SUBWORKFLOWS_NOT_STARTED_SQL = text("""
@@ -170,6 +184,7 @@ GET_READY_SUBWORKFLOWS_NOT_STARTED_SQL = text("""
       AND wt.sub_workflow_id IS NULL
       AND w.status = 'RUNNING'
       AND (CAST(:scope_ids AS varchar[]) IS NULL OR wt.workflow_id = ANY(CAST(:scope_ids AS varchar[])))
+    LIMIT CAST(:max_rows AS bigint)
 """)
 
 GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL = text("""
@@ -181,6 +196,7 @@ GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL = text("""
       AND wt.status = 'RUNNING'
       AND parent.status = 'RUNNING'
       AND (CAST(:scope_ids AS varchar[]) IS NULL OR child.id = ANY(CAST(:scope_ids AS varchar[])))
+    LIMIT CAST(:max_rows AS bigint)
 """)
 
 GET_CRASHED_WORKER_TASKS_SQL = text("""
@@ -195,6 +211,7 @@ GET_CRASHED_WORKER_TASKS_SQL = text("""
       AND w.status = 'RUNNING'
       AND UPPER(t.status) IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
       AND (CAST(:scope_ids AS varchar[]) IS NULL OR wt.workflow_id = ANY(CAST(:scope_ids AS varchar[])))
+    LIMIT CAST(:max_rows AS bigint)
 """)
 
 GET_TERMINAL_WORKFLOW_CANDIDATES_SQL = text("""
@@ -210,6 +227,7 @@ GET_TERMINAL_WORKFLOW_CANDIDATES_SQL = text("""
             AND NOT (wt2.status = ANY(:wf_task_terminal_states))
       )
     GROUP BY w.id, w.error, w.success_policy
+    LIMIT CAST(:max_rows AS bigint)
 """)
 
 # Resolve the descendant tree (self + all transitive children) for a resumed
@@ -253,6 +271,9 @@ async def recover_stuck_workflows(
     """
     recovered = 0
     scope_ids = scope_workflow_ids
+    # Global scans are capped per pass; scoped resume passes are not (see
+    # the comment above the candidate queries).
+    max_rows = GLOBAL_SCAN_ROW_CAP if scope_ids is None else None
 
     from horsies.core.workflows.engine import get_dependency_results, try_make_ready_and_enqueue
 
@@ -264,7 +285,7 @@ async def recover_stuck_workflows(
     # subworkflow routing, and dependent cascade.
     pending_ready = await session.execute(
         GET_PENDING_WITH_TERMINAL_DEPS_SQL,
-        {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES, 'scope_ids': scope_ids},
+        {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES, 'scope_ids': scope_ids, 'max_rows': max_rows},
     )
 
     for row in pending_ready.fetchall():
@@ -287,7 +308,7 @@ async def recover_stuck_workflows(
     # Excludes SubWorkflowNodes (handled separately)
     ready_not_enqueued = await session.execute(
         GET_READY_NOT_ENQUEUED_SQL,
-        {'scope_ids': scope_ids},
+        {'scope_ids': scope_ids, 'max_rows': max_rows},
     )
 
     for row in ready_not_enqueued.fetchall():
@@ -330,7 +351,7 @@ async def recover_stuck_workflows(
     # NOTE: This requires broker to start the child workflow, so we just mark them for retry
     ready_subworkflows = await session.execute(
         GET_READY_SUBWORKFLOWS_NOT_STARTED_SQL,
-        {'scope_ids': scope_ids},
+        {'scope_ids': scope_ids, 'max_rows': max_rows},
     )
 
     for row in ready_subworkflows.fetchall():
@@ -379,7 +400,7 @@ async def recover_stuck_workflows(
     # This happens if the on_subworkflow_complete callback failed or was interrupted
     completed_children = await session.execute(
         GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL,
-        {'scope_ids': scope_ids},
+        {'scope_ids': scope_ids, 'max_rows': max_rows},
     )
 
     for row in completed_children.fetchall():
@@ -405,7 +426,7 @@ async def recover_stuck_workflows(
     # - workflow_tasks row stays RUNNING/ENQUEUED indefinitely
     crashed_worker_tasks = await session.execute(
         GET_CRASHED_WORKER_TASKS_SQL,
-        {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES, 'scope_ids': scope_ids},
+        {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES, 'scope_ids': scope_ids, 'max_rows': max_rows},
     )
 
     for row in crashed_worker_tasks.fetchall():
@@ -476,7 +497,7 @@ async def recover_stuck_workflows(
     # This happens if worker crashed after completing last task but before updating workflow
     terminal_candidates = await session.execute(
         GET_TERMINAL_WORKFLOW_CANDIDATES_SQL,
-        {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES, 'scope_ids': scope_ids},
+        {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES, 'scope_ids': scope_ids, 'max_rows': max_rows},
     )
 
     for row in terminal_candidates.fetchall():
