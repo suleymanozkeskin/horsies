@@ -18,6 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
 from tests.integration.conftest import compute_test_enqueue_sha
@@ -147,7 +148,7 @@ async def test_should_retry_no_task_row_returns_false(
     async with worker.sf() as s:
         result = await worker._should_retry_task(str(uuid.uuid4()), error, s)
 
-    assert result is False
+    assert result == Ok(False)
 
 
 # 6b -----------------------------------------------------------------------
@@ -167,7 +168,7 @@ async def test_should_retry_max_retries_zero_returns_false(
     async with worker.sf() as s:
         result = await worker._should_retry_task(task_id, error, s)
 
-    assert result is False
+    assert result == Ok(False)
 
 
 # 6c -----------------------------------------------------------------------
@@ -187,7 +188,7 @@ async def test_should_retry_count_exhausted_returns_false(
     async with worker.sf() as s:
         result = await worker._should_retry_task(task_id, error, s)
 
-    assert result is False
+    assert result == Ok(False)
 
 
 # 6d -----------------------------------------------------------------------
@@ -207,7 +208,7 @@ async def test_should_retry_no_task_options_returns_false(
     async with worker.sf() as s:
         result = await worker._should_retry_task(task_id, error, s)
 
-    assert result is False
+    assert result == Ok(False)
 
 
 # 6e -----------------------------------------------------------------------
@@ -231,7 +232,7 @@ async def test_should_retry_code_matches_returns_true(
     async with worker.sf() as s:
         result = await worker._should_retry_task(task_id, error, s)
 
-    assert result is True
+    assert result == Ok(True)
 
 
 # 6f -----------------------------------------------------------------------
@@ -252,7 +253,7 @@ async def test_should_retry_code_no_match_returns_false(
     async with worker.sf() as s:
         result = await worker._should_retry_task(task_id, error, s)
 
-    assert result is False
+    assert result == Ok(False)
 
 
 # 6g -----------------------------------------------------------------------
@@ -276,7 +277,7 @@ async def test_should_retry_good_until_expired_returns_false(
     async with worker.sf() as s:
         result = await worker._should_retry_task(task_id, error, s)
 
-    assert result is False
+    assert result == Ok(False)
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +301,7 @@ async def test_schedule_retry_no_row_returns_reaper_reclaimed(
                 str(uuid.uuid4()), s, queue_name='default',
             )
 
-    assert result == 'reaper_reclaimed'
+    assert result == Ok('reaper_reclaimed')
 
 
 # 6h-extra: _schedule_retry with NULL task_options → uses default policy (line 1615)
@@ -325,7 +326,7 @@ async def test_schedule_retry_null_task_options_uses_defaults(
         result = await worker._schedule_retry(task_id, s, queue_name='default')
         await s.commit()
 
-    assert result == 'scheduled'
+    assert result == Ok('scheduled')
 
     row = await _get_task_row(session, task_id)
     assert row.status == 'PENDING'
@@ -356,7 +357,7 @@ async def test_schedule_retry_happy_path_scheduled(
         result = await worker._schedule_retry(task_id, s, queue_name='default')
         await s.commit()
 
-    assert result == 'scheduled'
+    assert result == Ok('scheduled')
 
     # Verify DB state
     row = await _get_task_row(session, task_id)
@@ -389,7 +390,7 @@ async def test_schedule_retry_good_until_exceeded_returns_expired(
     async with worker.sf() as s:
         result = await worker._schedule_retry(task_id, s, queue_name='default')
 
-    assert result == 'expired'
+    assert result == Ok('expired')
 
     # DB should still be RUNNING (no UPDATE executed)
     row = await _get_task_row(session, task_id)
@@ -416,7 +417,7 @@ async def test_schedule_retry_reaper_reclaimed(
     async with worker.sf() as s:
         result = await worker._schedule_retry(task_id, s, queue_name='default')
 
-    assert result == 'reaper_reclaimed'
+    assert result == Ok('reaper_reclaimed')
 
 
 # 6k -----------------------------------------------------------------------
@@ -473,7 +474,7 @@ async def test_schedule_retry_sql_guard_expiry_postcheck_returns_expired(
             task_id, wrapped, queue_name='default',  # type: ignore[arg-type]
         )
 
-    assert result == 'expired'
+    assert result == Ok('expired')
 
     # DB should still be RUNNING (SCHEDULE SQL was rejected by guard)
     row = await _get_task_row(session, task_id)

@@ -5,13 +5,44 @@ Pure functions — no DB access, no I/O. Callers provide pre-fetched data.
 
 from __future__ import annotations
 
+import math
 import random
+import sys
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 from horsies.core.codec.json_io import loads_json
 from horsies.core.types.result import is_err
+
+# 1min, 5min, 15min
+_DEFAULT_RETRY_INTERVALS: list[float] = [60.0, 300.0, 900.0]
+
+
+def _sanitize_intervals(raw: Any) -> list[float]:
+    """Return validated retry intervals.
+
+    The intervals come from an untrusted deserialized dict; anything that is
+    not a non-empty list of finite, float-representable numbers falls back to
+    the defaults, so delay calculation is total. Ints are range-checked
+    before conversion: ``float()``/``math.isfinite()`` raise OverflowError on
+    ints beyond float range.
+    """
+    if not isinstance(raw, list) or not raw:
+        return list(_DEFAULT_RETRY_INTERVALS)
+    entries = cast('list[Any]', raw)
+    sanitized: list[float] = []
+    for value in entries:
+        match value:
+            case bool():
+                return list(_DEFAULT_RETRY_INTERVALS)
+            case int() if -sys.float_info.max <= value <= sys.float_info.max:
+                sanitized.append(float(value))
+            case float() if math.isfinite(value):
+                sanitized.append(value)
+            case _:
+                return list(_DEFAULT_RETRY_INTERVALS)
+    return sanitized
 
 
 def calculate_retry_delay(
@@ -20,6 +51,9 @@ def calculate_retry_delay(
 ) -> float:
     """Calculate the delay in seconds for a retry attempt.
 
+    Total: corrupt policy data (missing, empty, or non-numeric intervals,
+    unknown backoff strategy) falls back to defaults instead of raising.
+
     Args:
         retry_attempt: 1-based attempt number (retry_count + 1).
         retry_policy_data: Deserialized retry_policy dict from task_options.
@@ -27,21 +61,18 @@ def calculate_retry_delay(
     Returns:
         Delay in seconds (minimum 1.0).
     """
-    intervals = retry_policy_data.get(
-        'intervals', [60, 300, 900],
-    )  # 1min, 5min, 15min
+    intervals = _sanitize_intervals(retry_policy_data.get('intervals'))
     backoff_strategy = retry_policy_data.get('backoff_strategy', 'fixed')
     jitter = retry_policy_data.get('jitter', True)
     max_delay_seconds = retry_policy_data.get('max_delay_seconds')
 
-    if backoff_strategy == 'fixed':
-        clamped_index = min(retry_attempt - 1, len(intervals) - 1)
-        base_delay = intervals[clamped_index]
-    elif backoff_strategy == 'exponential':
-        base_interval = intervals[0] if intervals else 60
-        base_delay = base_interval * (2 ** (retry_attempt - 1))
-    else:
-        base_delay = intervals[0] if intervals else 60
+    match backoff_strategy:
+        case 'exponential':
+            base_delay = intervals[0] * (2 ** (retry_attempt - 1))
+        case 'fixed':
+            base_delay = intervals[min(retry_attempt - 1, len(intervals) - 1)]
+        case _:
+            base_delay = intervals[0]
 
     # Floor before jitter so 1.0 is the bottom of the spread, not a clamp
     # that collapses the lower half of a symmetric window onto 1.0 (which
