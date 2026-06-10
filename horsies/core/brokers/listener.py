@@ -29,6 +29,7 @@ from asyncio import Task, Queue  # precise type for Pylance/pyright
 
 import psycopg
 from psycopg import AsyncConnection, InterfaceError, OperationalError, Notify
+from psycopg.conninfo import make_conninfo
 from psycopg import sql
 
 from horsies.core.brokers.result_types import (
@@ -43,6 +44,19 @@ from horsies.core.utils.db import is_retryable_connection_error
 logger = get_logger('listener')
 
 _SUBSCRIBER_QUEUE_MAXSIZE: int = 4096
+
+# TCP keepalives for the long-lived notification connections: the
+# dispatcher blocks indefinitely in conn.notifies(), so a silently
+# dropped connection (NAT/firewall idle timeout, no FIN) would otherwise
+# hang it forever with only the poll fallback masking the stall.
+def _keepalive_conninfo(database_url: str) -> str:
+    return make_conninfo(
+        database_url,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=3,
+    )
 
 
 class PostgresListener:
@@ -213,7 +227,7 @@ class PostgresListener:
                 async with self._dispatcher_lock:
                     if self._dispatcher_conn is None or self._dispatcher_conn.closed:
                         self._dispatcher_conn = await psycopg.AsyncConnection.connect(
-                            self.database_url,
+                            _keepalive_conninfo(self.database_url),
                             autocommit=True,
                         )
                         created_dispatcher = True
@@ -224,7 +238,7 @@ class PostgresListener:
                 async with self._command_lock:
                     if self._command_conn is None or self._command_conn.closed:
                         self._command_conn = await psycopg.AsyncConnection.connect(
-                            self.database_url,
+                            _keepalive_conninfo(self.database_url),
                             autocommit=True,
                         )
                         created_command = True
