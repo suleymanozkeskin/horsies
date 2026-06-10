@@ -34,6 +34,7 @@ __all__ = [
     '_FINALIZE_RETRY_MAX_DELAY_S',
     '_REAPER_MAX_PERMANENT_FAILURES',
     'ChildHookFailedError',
+    'ExecutorRestartFailedError',
     '_RetryBackoff',
     '_FinalizeError',
     '_RetryError',
@@ -177,6 +178,18 @@ class ChildHookFailedError(RuntimeError):
 
     Deliberately not a retryable error: the hook re-runs on every child
     start, so restarting the executor would loop on the same failure.
+    """
+
+
+class ExecutorRestartFailedError(RuntimeError):
+    """Replacing the process pool failed at the OS level.
+
+    Process-fatal by design: the failure modes (fd/pid/memory/semaphore
+    exhaustion, children dying during warmup) are host conditions a waiting
+    worker cannot fix, and a worker without an executor only looks healthy
+    (heartbeat loops keep running) while doing no work. Propagates to the
+    main loop and crashes the worker so the supervisor restarts it with a
+    clean slate.
     """
 
 

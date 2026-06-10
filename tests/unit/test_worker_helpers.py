@@ -46,6 +46,8 @@ from horsies.core.worker.worker import (
     _is_retryable_db_error,
     _RequeueOutcome,
     _RetryError,
+    ChildHookFailedError,
+    ExecutorRestartFailedError,
 )
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.tasks import OperationalErrorCode
@@ -2110,6 +2112,63 @@ class TestRestartExecutor:
         worker._create_executor.assert_called_once()
         worker._warm_executor.assert_awaited_once()
         assert worker._executor is first_replacement
+
+    @pytest.mark.asyncio
+    async def test_create_failure_raises_typed_fatal_error(self) -> None:
+        """OS-level pool creation failure surfaces as ExecutorRestartFailedError."""
+        worker = _make_worker()
+        worker._executor = None
+        worker._create_executor = MagicMock(  # type: ignore[assignment]
+            side_effect=OSError(24, 'Too many open files'),
+        )
+
+        with pytest.raises(ExecutorRestartFailedError) as excinfo:
+            await worker._restart_executor('broken pool')
+
+        assert isinstance(excinfo.value.__cause__, OSError)
+        assert 'broken pool' in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_warm_failure_on_replacement_raises_typed_fatal_error(self) -> None:
+        """Warmup failure while replacing an executor surfaces typed, after shutdown."""
+        worker = _make_worker()
+        old_executor = MagicMock()
+        worker._executor = old_executor
+        worker._create_executor = MagicMock(return_value=MagicMock())  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock(  # type: ignore[assignment]
+            side_effect=RuntimeError('worker child warmup started 0/4 process(es)'),
+        )
+
+        with pytest.raises(ExecutorRestartFailedError):
+            await worker._restart_executor('broken pool')
+
+        old_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+
+    @pytest.mark.asyncio
+    async def test_hook_failure_stops_worker_instead_of_raising(self) -> None:
+        """ChildHookFailedError keeps its stop path; no fatal raise."""
+        worker = _make_worker()
+        worker._executor = None
+        worker._create_warmed_executor = AsyncMock(  # type: ignore[method-assign]
+            side_effect=ChildHookFailedError('hook failed'),
+        )
+        worker._stop_for_child_hook_failure = MagicMock()  # type: ignore[method-assign]
+
+        await worker._restart_executor('broken pool')
+
+        worker._stop_for_child_hook_failure.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_dispatch_one_propagates_fatal_restart_error(self) -> None:
+        """_dispatch_one must not swallow the process-fatal restart failure."""
+        worker = _make_worker()
+        worker._executor = None
+        worker._restart_executor = AsyncMock(  # type: ignore[method-assign]
+            side_effect=ExecutorRestartFailedError('executor restart failed: boom'),
+        )
+
+        with pytest.raises(ExecutorRestartFailedError):
+            await worker._dispatch_one('task-1', 'some_task', None, None)
 
 
 @pytest.mark.unit
