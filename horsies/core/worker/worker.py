@@ -2,8 +2,10 @@
 # pyright: reportPrivateUsage=false
 from __future__ import annotations
 import asyncio
+import contextlib
 import uuid
 import os
+import signal
 import multiprocessing
 import random
 import socket
@@ -15,7 +17,7 @@ from enum import Enum
 from datetime import datetime, timezone, timedelta
 from importlib import import_module
 from collections.abc import Coroutine
-from typing import Any, Optional, Literal, TYPE_CHECKING
+from typing import Any, Optional, Literal, TYPE_CHECKING, cast
 import hashlib
 import sys
 from psycopg.types.json import Jsonb
@@ -44,6 +46,7 @@ from horsies.core.models.tasks import (
     TaskResult,
     TaskError,
     OperationalErrorCode,
+    OutcomeCode,
     BuiltInTaskCode,
 )
 from horsies.core.logging import get_logger
@@ -193,6 +196,36 @@ class _ReaperPassState:
     mark_failed_permanent_failures: int = 0
     mark_failed_disabled: bool = False
     next_retention_cleanup_at: float = 0.0
+
+
+def _parse_timeout_ms(task_options_json: Any, task_id: str) -> int | None:
+    """Extract timeout_ms from a stored task_options JSON string.
+
+    Total: any malformed payload yields None (no timeout) with a warning —
+    a corrupt row must not block dispatch.
+    """
+    if not task_options_json or not isinstance(task_options_json, str):
+        return None
+    parsed = loads_json(task_options_json)
+    if is_err(parsed):
+        logger.warning(
+            'Task %s task_options unparseable while reading timeout_ms: %s',
+            task_id,
+            parsed.err_value,
+        )
+        return None
+    options = parsed.ok_value
+    if not isinstance(options, dict):
+        return None
+    raw = options.get('timeout_ms')
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        logger.warning(
+            'Task %s has invalid timeout_ms %r; ignoring', task_id, raw,
+        )
+        return None
+    return raw
 
 
 def _collect_psutil_metrics() -> tuple[float, float, float]:
@@ -591,6 +624,12 @@ class Worker:
             await asyncio.gather(*finalizer_tasks, return_exceptions=True)
             self._finalizer_tasks.clear()
 
+        # Bound for the executor wait below: a task that ignores shutdown
+        # this long is hung and gets SIGKILLed (crash recovery + ownership
+        # guards classify the rows); without a bound, one hung task made
+        # the worker unkillable except by external SIGKILL.
+        executor_shutdown_grace_s = 300.0
+
         # Shutdown the executor BEFORE draining finalizers: finalizers block
         # on child futures, and the executor wait is what bounds child
         # completion. Draining first burned the timeout on still-running
@@ -602,10 +641,43 @@ class Worker:
             loop = asyncio.get_running_loop()
             executor = self._executor
             self._executor = None
+            shutdown_future = loop.run_in_executor(
+                None, lambda: executor.shutdown(wait=True, cancel_futures=True)
+            )
             try:
-                await loop.run_in_executor(
-                    None, lambda: executor.shutdown(wait=True, cancel_futures=True)
+                await asyncio.wait_for(
+                    asyncio.shield(shutdown_future),
+                    timeout=executor_shutdown_grace_s,
                 )
+            except asyncio.TimeoutError:
+                # _processes is a private-but-stable CPython mapping
+                # (pid → Process); there is no public way to enumerate a
+                # pool's children.
+                from multiprocessing.process import BaseProcess
+
+                processes = cast(
+                    'dict[int, BaseProcess]',
+                    getattr(executor, '_processes', None) or {},
+                )
+                pids = [
+                    proc.pid
+                    for proc in processes.values()
+                    if proc.pid is not None
+                ]
+                logger.error(
+                    'Executor shutdown exceeded %.0fs (hung task?); killing '
+                    '%d child process(es): %s',
+                    executor_shutdown_grace_s,
+                    len(pids),
+                    pids,
+                )
+                for pid in pids:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                with contextlib.suppress(Exception):
+                    await shutdown_future
             except Exception as e:
                 logger.error(f'Error shutting down executor: {e}')
             logger.info('Worker executor shutdown')
@@ -957,6 +1029,7 @@ class Worker:
                 row['kwargs'],
                 row.get('queue_name') or 'default',
                 bool(row.get('is_workflow_task', False)),
+                timeout_ms=_parse_timeout_ms(row.get('task_options'), row['id']),
             )
         return len(claimed_rows) > 0
 
@@ -1381,6 +1454,7 @@ class Worker:
         kwargs_json: Optional[str],
         queue_name: str = 'default',
         is_workflow_task: bool = True,
+        timeout_ms: Optional[int] = None,
     ) -> None:
         """Submit to process pool; attach completion handler."""
         if self._executor is None:
@@ -1424,6 +1498,7 @@ class Worker:
                 self.worker_instance_id,
                 runner_heartbeat_interval_ms,
                 is_workflow_task,
+                timeout_ms,
             )
         except BrokenProcessPool as exc:
             await self._handle_broken_pool(task_id, exc, executor)
@@ -1445,12 +1520,149 @@ class Worker:
 
         # When done, record the outcome
         self._spawn_background(
-            self._finalize_after(fut, task_id, queue_name, is_workflow_task, executor),
+            self._finalize_after(
+                fut,
+                task_id,
+                queue_name,
+                is_workflow_task,
+                executor,
+                timeout_ms=timeout_ms,
+            ),
             name=f'finalize-{task_id}',
             finalizer=True,
         )
 
     # ----- finalize (write back to DB + notify) -----
+
+    async def _handle_task_timeout(self, task_id: str, timeout_ms: int) -> None:
+        """Persist TASK_TIMEOUT for an over-deadline task and SIGKILL its child.
+
+        Ownership-guarded like every finalize path: a row already resolved by
+        another actor (reaper reclaim, cancel) is left alone. A CLAIMED row
+        (child never confirmed RUNNING) is requeued instead of killed — the
+        child's ownership confirm will come back CLAIM_LOST.
+
+        The kill happens on both the retry-scheduled and terminal-failure
+        branches: the hung child keeps executing user code either way, and a
+        zombie attempt racing a re-claimed retry would be a double execution.
+        """
+        kill_pid: int | None = None
+        try:
+            async with self.sf() as s:
+                ctx_result = await s.execute(
+                    SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
+                    {'id': task_id, 'wid': self.worker_instance_id},
+                )
+                ctx_row = ctx_result.fetchone()
+                if ctx_row is None:
+                    return
+
+                status_value = (
+                    ctx_row.status.value
+                    if hasattr(ctx_row.status, 'value')
+                    else str(ctx_row.status)
+                )
+                if status_value == 'CLAIMED':
+                    await s.execute(
+                        UNCLAIM_CLAIMED_TASK_SQL,
+                        {'id': task_id, 'wid': self.worker_instance_id},
+                    )
+                    await s.commit()
+                    logger.warning(
+                        'Task %s hit timeout_ms=%s before user code started; '
+                        'requeued',
+                        task_id,
+                        timeout_ms,
+                    )
+                    return
+
+                kill_pid = ctx_row.worker_pid
+                task_error = TaskError(
+                    error_code=OutcomeCode.TASK_TIMEOUT,
+                    message=f'Task exceeded timeout_ms={timeout_ms}',
+                    data={'task_id': task_id, 'timeout_ms': timeout_ms},
+                )
+                attempt_num = (ctx_row.retry_count or 0) + 1
+                db_now = ctx_row.db_now or datetime.now(timezone.utc)
+                attempt_started_at = ctx_row.started_at or db_now
+                attempt_worker = {
+                    'worker_id': ctx_row.claimed_by_worker_id,
+                    'worker_hostname': ctx_row.worker_hostname,
+                    'worker_pid': ctx_row.worker_pid,
+                    'worker_process_name': ctx_row.worker_process_name,
+                }
+
+                retry_scheduled = False
+                if await self._should_retry_task(task_id, task_error, s):
+                    retry_outcome = await self._schedule_retry(
+                        task_id, s, queue_name=ctx_row.queue_name or 'default',
+                    )
+                    retry_scheduled = retry_outcome == 'scheduled'
+
+                await s.execute(
+                    UPSERT_TASK_ATTEMPT_SQL,
+                    {
+                        'task_id': task_id,
+                        'attempt': attempt_num,
+                        'outcome': 'FAILED',
+                        'will_retry': retry_scheduled,
+                        'started_at': attempt_started_at,
+                        'finished_at': db_now,
+                        'error_code': OutcomeCode.TASK_TIMEOUT.value,
+                        'error_message': task_error.message,
+                        'failed_reason': task_error.message,
+                        **attempt_worker,
+                    },
+                )
+                if retry_scheduled:
+                    await s.commit()
+                    return
+
+                task_result: TaskResult[None, TaskError] = TaskResult(
+                    err=task_error,
+                )
+                mark_result = await s.execute(
+                    MARK_TASK_FAILED_SQL,
+                    {
+                        'result_json': serialize_error_payload(task_result),
+                        'id': task_id,
+                        'wid': self.worker_instance_id,
+                        'error_code': OutcomeCode.TASK_TIMEOUT.value,
+                    },
+                )
+                if mark_result.fetchone() is None:
+                    await s.rollback()
+                    return
+                await s.commit()
+                phase2_r = await self._finalize_workflow_phase(
+                    task_id,
+                    task_result,
+                    queue_name=ctx_row.queue_name or 'default',
+                    is_workflow_task=bool(ctx_row.is_workflow_task),
+                )
+                if is_err(phase2_r):
+                    await self._handle_finalize_error(phase2_r.err_value)
+        except Exception as exc:
+            logger.error(
+                'Failed to persist TASK_TIMEOUT for task %s: %s; killing the '
+                'child anyway (crash recovery will classify the row)',
+                task_id,
+                exc,
+            )
+        finally:
+            if kill_pid:
+                try:
+                    os.kill(kill_pid, signal.SIGKILL)
+                    logger.warning(
+                        'Killed child pid=%s for timed-out task %s '
+                        '(timeout_ms=%s); the process pool restarts and '
+                        'sibling tasks recover via crash recovery',
+                        kill_pid,
+                        task_id,
+                        timeout_ms,
+                    )
+                except ProcessLookupError:
+                    pass
 
     async def _finalize_after(
         self,
@@ -1459,9 +1671,26 @@ class Worker:
         queue_name: str = 'default',
         is_workflow_task: bool = True,
         executor: Optional[ProcessPoolExecutor] = None,
+        timeout_ms: Optional[int] = None,
     ) -> Result[None, _FinalizeError]:
         try:
-            ok, result_json_str, failed_reason = await fut
+            if timeout_ms is not None:
+                try:
+                    # shield: wait_for must not cancel the executor future —
+                    # the child keeps running regardless, and the original
+                    # future is awaited again below after the kill.
+                    ok, result_json_str, failed_reason = await asyncio.wait_for(
+                        asyncio.shield(fut), timeout=timeout_ms / 1000.0,
+                    )
+                except asyncio.TimeoutError:
+                    await self._handle_task_timeout(task_id, timeout_ms)
+                    # The SIGKILL breaks the shared process pool; awaiting
+                    # the original future routes into the BrokenProcessPool
+                    # branch below, which restarts the executor (sibling
+                    # tasks recover through their own finalizers).
+                    ok, result_json_str, failed_reason = await fut
+            else:
+                ok, result_json_str, failed_reason = await fut
         except asyncio.CancelledError:
             raise
         except BrokenProcessPool as exc:

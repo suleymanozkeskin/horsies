@@ -331,6 +331,7 @@ class TestReclaimUnderCap:
             kwargs_json: str | None,
             queue_name: str = 'default',
             is_workflow_task: bool = True,
+            timeout_ms: int | None = None,
         ) -> None:
             _ = (task_name, args_json, kwargs_json, queue_name, is_workflow_task)
             dispatched_ids.append(task_id)
