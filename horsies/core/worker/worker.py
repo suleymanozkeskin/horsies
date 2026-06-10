@@ -696,7 +696,7 @@ class Worker:
                 )
             except asyncio.TimeoutError:
                 # _processes is a private-but-stable CPython mapping
-                # (pid → Process); there is no public way to enumerate a
+                # (pid -> Process); there is no public way to enumerate a
                 # pool's children.
                 from multiprocessing.process import BaseProcess
 
