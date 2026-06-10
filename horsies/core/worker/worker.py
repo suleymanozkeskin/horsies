@@ -1696,18 +1696,47 @@ class Worker:
             )
         finally:
             if kill_pid:
-                try:
-                    os.kill(kill_pid, signal.SIGKILL)
-                    logger.warning(
-                        'Killed child pid=%s for timed-out task %s '
-                        '(timeout_ms=%s); the process pool restarts and '
-                        'sibling tasks recover via crash recovery',
-                        kill_pid,
-                        task_id,
-                        timeout_ms,
-                    )
-                except ProcessLookupError:
-                    pass
+                self._kill_owned_child(kill_pid, task_id, timeout_ms)
+
+    def _kill_owned_child(
+        self, kill_pid: int, task_id: str, timeout_ms: int
+    ) -> None:
+        """SIGKILL a timed-out child only if it is a live child of ours.
+
+        The pid comes from the task row and can be stale: a concurrent
+        timeout or broken pool may already have restarted the executor and
+        reaped the child, after which the OS is free to reuse the pid for
+        an unrelated process. Membership in the live executor's process map
+        confines the kill to processes this worker owns; a missing pid
+        means the pool teardown already terminated the child.
+        """
+        from multiprocessing.process import BaseProcess
+
+        live_children = cast(
+            'dict[int, BaseProcess]',
+            getattr(self._executor, '_processes', None) or {},
+        )
+        if kill_pid not in live_children:
+            logger.warning(
+                'Skipping kill for timed-out task %s: pid=%s is not a live '
+                'child of the current executor (already reaped or pool '
+                'restarted)',
+                task_id,
+                kill_pid,
+            )
+            return
+        try:
+            os.kill(kill_pid, signal.SIGKILL)
+            logger.warning(
+                'Killed child pid=%s for timed-out task %s '
+                '(timeout_ms=%s); the process pool restarts and '
+                'sibling tasks recover via crash recovery',
+                kill_pid,
+                task_id,
+                timeout_ms,
+            )
+        except ProcessLookupError:
+            pass
 
     async def _finalize_after(
         self,
