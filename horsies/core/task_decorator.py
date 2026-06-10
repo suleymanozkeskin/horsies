@@ -1023,6 +1023,7 @@ def create_task_wrapper(
                 queue_name=task_options.queue_name if task_options else None,
                 good_until=good_until,
                 retry_policy=task_options.retry_policy if task_options else None,
+                timeout_ms=task_options.timeout_ms if task_options else None,
             )
         except Exception as exc:
             return Err(TaskSendError(

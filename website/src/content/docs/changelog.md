@@ -9,6 +9,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 horsies is pre-1.0: breaking changes may land in minor or patch releases, and
 there is no migration contract between pre-1.0 versions.
 
+## Unreleased
+
+### Added
+
+- Per-task execution timeout: `@app.task(..., timeout_ms=...)` (minimum
+  1000 ms, measured from dispatch). On expiry the worker records a
+  `TASK_TIMEOUT` attempt, fails the task — or schedules a retry when
+  `"TASK_TIMEOUT"` is in `auto_retry_for` — and kills the child
+  process. The kill restarts the worker's process pool; sibling tasks
+  in flight recover through crash recovery. A deadline that fires
+  before user code starts requeues the task instead.
+
 ## 0.1.7 — 2026-06-10
 
 Correctness and performance hardening from a full-project review.

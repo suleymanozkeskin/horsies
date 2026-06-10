@@ -270,6 +270,7 @@ def _heartbeat_worker(
     stop_event: threading.Event,
     sender_worker_id: str,
     heartbeat_interval_ms: int = 30_000,
+    timeout_ms: int | None = None,
 ) -> None:
     """
     Runs in a separate thread within the task process.
@@ -287,6 +288,16 @@ def _heartbeat_worker(
     # Convert to seconds only for threading.Event.wait()
     heartbeat_interval_seconds = heartbeat_interval_ms / 1000.0
     consecutive_failures = 0
+    # Reaper backstop for timed-out tasks: stop beating past the deadline
+    # (plus one interval of grace) so the staleness machinery reclaims the
+    # task even if the parent worker died before it could kill this child.
+    # The thread cannot kill the process itself — that needs the GIL, which
+    # hung user code may never release.
+    deadline_monotonic: float | None = None
+    if timeout_ms is not None:
+        deadline_monotonic = (
+            time.monotonic() + timeout_ms / 1000.0 + heartbeat_interval_seconds
+        )
 
     def send_heartbeat() -> bool:
         nonlocal consecutive_failures
@@ -333,6 +344,18 @@ def _heartbeat_worker(
         # Wait for interval, but check stop_event periodically
         if stop_event.wait(timeout=heartbeat_interval_seconds):
             break  # stop_event was set
+
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= deadline_monotonic
+        ):
+            logger.warning(
+                'Task %s exceeded timeout_ms=%s; stopping runner heartbeats '
+                'so the reaper can reclaim it',
+                task_id,
+                timeout_ms,
+            )
+            break
 
         # Use pooled connection for heartbeat
         send_heartbeat()
@@ -699,6 +722,7 @@ def _start_heartbeat_thread(
     heartbeat_stop_event: threading.Event,
     worker_id: str,
     runner_heartbeat_interval_ms: int,
+    timeout_ms: int | None = None,
 ) -> threading.Thread:
     heartbeat_thread = threading.Thread(
         target=_heartbeat_worker,
@@ -708,6 +732,7 @@ def _start_heartbeat_thread(
             heartbeat_stop_event,
             worker_id,
             runner_heartbeat_interval_ms,
+            timeout_ms,
         ),
         daemon=True,
         name=f'heartbeat-{task_id[:8]}',
@@ -748,6 +773,7 @@ def _run_task_entry(
     master_worker_id: str,
     runner_heartbeat_interval_ms: int = 30_000,
     is_workflow_task: bool = True,
+    timeout_ms: Optional[int] = None,
 ) -> Tuple[bool, str, Optional[str]]:
     """
     Child-process entry.
@@ -791,6 +817,7 @@ def _run_task_entry(
         heartbeat_stop_event,
         master_worker_id,
         runner_heartbeat_interval_ms,
+        timeout_ms,
     )
 
     try:

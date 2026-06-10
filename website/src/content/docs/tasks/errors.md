@@ -76,6 +76,7 @@ Terminal outcome codes for tasks and workflows.
 | ---- | ----------- | ----------- |
 | `TASK_CANCELLED` | Task was cancelled before completion | No |
 | `TASK_EXPIRED` | Task's `good_until` deadline passed before execution started (PENDING or CLAIMED) | No |
+| `TASK_TIMEOUT` | Task exceeded its `timeout_ms` execution limit; the child process was killed | Yes, if in `auto_retry_for` |
 | `WORKFLOW_PAUSED` | Workflow was paused | No |
 | `WORKFLOW_FAILED` | Workflow failed | No |
 | `WORKFLOW_CANCELLED` | Workflow was cancelled | No |
