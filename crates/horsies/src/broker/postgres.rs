@@ -17,11 +17,11 @@ use crate::core::{
 
 use crate::broker::bound_handle::TaskHandle;
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
-use crate::broker::health::DatabasePing;
+use crate::broker::health::{DatabasePing, WorkerStateSnapshot};
 use crate::broker::result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult};
 use crate::broker::row::task::{
     ClaimedId, ClaimedTaskRow, ExpiredTaskRow, SetRunningRow, StaleTaskRow, TaskAttemptRow,
-    TaskInfoRow, TaskResultRow, TaskRunningContextRow, WorkerStatsRow,
+    TaskInfoRow, TaskResultRow, TaskRunningContextRow,
 };
 use crate::broker::shared_listener::SharedNotifyListener;
 
@@ -414,26 +414,40 @@ ORDER BY hb.last_heartbeat NULLS FIRST";
 ///
 /// Groups by `(worker_hostname, worker_pid, worker_process_name)` and
 /// includes the oldest task start time and most recent heartbeat.
-const GET_WORKER_STATS_SQL: &str = "\
+/// Latest snapshot per worker (cluster-wide), including idle workers.
+const LIST_WORKER_STATES_SQL: &str = "\
+SELECT DISTINCT ON (worker_id)
+    worker_id, snapshot_at, hostname, pid, processes, max_claim_batch,
+    max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
+    queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
+    memory_usage_mb, memory_percent, cpu_percent, worker_started_at
+FROM horsies_worker_states
+ORDER BY worker_id, snapshot_at DESC";
+
+/// Latest snapshot for a single worker.
+const GET_WORKER_STATE_LATEST_SQL: &str = "\
 SELECT
-    t.worker_hostname,
-    t.worker_pid,
-    t.worker_process_name,
-    COUNT(*)::BIGINT AS active_tasks,
-    MIN(t.started_at) AS oldest_task_start,
-    MAX(hb.last_heartbeat) AS latest_heartbeat
-FROM horsies_tasks t
-LEFT JOIN LATERAL (
-    SELECT sent_at AS last_heartbeat
-    FROM horsies_heartbeats h
-    WHERE h.task_id = t.id AND h.role = 'runner'
-    ORDER BY sent_at DESC
-    LIMIT 1
-) hb ON TRUE
-WHERE t.status = 'RUNNING'
-  AND t.worker_hostname IS NOT NULL
-GROUP BY t.worker_hostname, t.worker_pid, t.worker_process_name
-ORDER BY active_tasks DESC";
+    worker_id, snapshot_at, hostname, pid, processes, max_claim_batch,
+    max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
+    queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
+    memory_usage_mb, memory_percent, cpu_percent, worker_started_at
+FROM horsies_worker_states
+WHERE worker_id = $1
+ORDER BY snapshot_at DESC
+LIMIT 1";
+
+/// History for a single worker, newest first. A `NULL` limit (`$2`) returns all
+/// retained rows; callers pass an explicit cap to bound the fetch.
+const GET_WORKER_STATE_HISTORY_SQL: &str = "\
+SELECT
+    worker_id, snapshot_at, hostname, pid, processes, max_claim_batch,
+    max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
+    queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
+    memory_usage_mb, memory_percent, cpu_percent, worker_started_at
+FROM horsies_worker_states
+WHERE worker_id = $1
+ORDER BY snapshot_at DESC
+LIMIT $2";
 
 /// Find PENDING tasks whose `good_until` deadline has passed.
 ///
@@ -1999,23 +2013,48 @@ impl PostgresBroker {
         Ok(rows)
     }
 
-    /// Gather per-worker statistics for RUNNING tasks.
+    /// Latest state snapshot per worker (cluster-wide), including idle workers.
     ///
-    /// Groups RUNNING tasks by `(worker_hostname, worker_pid, worker_process_name)`
-    /// and returns the count of active tasks, the oldest task start time, and the
-    /// most recent runner heartbeat for each worker.
-    ///
-    /// Useful for load-balancing dashboards and detecting overloaded workers.
-    ///
-    /// Mirrors `PostgresBroker.get_worker_stats()` in the Python library.
-    pub async fn get_worker_stats(&self) -> Result<Vec<WorkerStatsRow>, BrokerError> {
-        let rows: Vec<WorkerStatsRow> = sqlx::query_as(GET_WORKER_STATS_SQL)
+    /// Reads the `horsies_worker_states` timeseries, so every worker that has
+    /// reported a snapshot appears regardless of current load — unlike the
+    /// retired `get_worker_stats` (which counted RUNNING tasks only and missed
+    /// idle workers). Mirrors Python's `list_worker_states_async`.
+    pub async fn list_worker_states(&self) -> BrokerResult<Vec<WorkerStateSnapshot>> {
+        sqlx::query_as(LIST_WORKER_STATES_SQL)
             .fetch_all(&self.pool)
             .await
-            .map_err(BrokerError::Database)?;
+            .map_err(|e| monitoring_query_error("list_worker_states", e))
+    }
 
-        tracing::debug!(count = rows.len(), "worker stats query");
-        Ok(rows)
+    /// Latest state snapshot for one worker, or `None` if it has never reported.
+    ///
+    /// Mirrors Python's `get_worker_state_async`.
+    pub async fn get_worker_state(
+        &self,
+        worker_id: &str,
+    ) -> BrokerResult<Option<WorkerStateSnapshot>> {
+        sqlx::query_as(GET_WORKER_STATE_LATEST_SQL)
+            .bind(worker_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| monitoring_query_error("get_worker_state", e))
+    }
+
+    /// State-snapshot history for one worker, newest first.
+    ///
+    /// `limit` of `None` returns all retained rows; pass `Some(n)` to bound the
+    /// fetch. Mirrors Python's `get_worker_state_history_async`.
+    pub async fn get_worker_state_history(
+        &self,
+        worker_id: &str,
+        limit: Option<i64>,
+    ) -> BrokerResult<Vec<WorkerStateSnapshot>> {
+        sqlx::query_as(GET_WORKER_STATE_HISTORY_SQL)
+            .bind(worker_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| monitoring_query_error("get_worker_state_history", e))
     }
 
     /// Find PENDING tasks that have expired (past their `good_until` deadline).
@@ -2072,6 +2111,15 @@ impl PostgresBroker {
 
 fn is_terminal_status(status: &str) -> bool {
     matches!(status, "COMPLETED" | "FAILED" | "CANCELLED" | "EXPIRED")
+}
+
+/// Build a `MONITORING_QUERY_FAILED` broker error for a failed read query.
+fn monitoring_query_error(operation: &str, err: sqlx::Error) -> BrokerOperationError {
+    BrokerOperationError {
+        code: BrokerErrorCode::MonitoringQueryFailed,
+        message: format!("{} failed: {}", operation, err),
+        retryable: true,
+    }
 }
 
 /// Parse the result row into a `TaskResult<T>`.

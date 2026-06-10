@@ -165,19 +165,6 @@ pub struct StaleTaskRow {
     pub last_heartbeat: Option<DateTime<Utc>>,
 }
 
-/// Row returned by the worker-stats monitoring query.
-///
-/// Aggregates RUNNING task counts per worker for load visibility.
-#[derive(Debug, Clone, Serialize, FromRow)]
-pub struct WorkerStatsRow {
-    pub worker_hostname: Option<String>,
-    pub worker_pid: Option<i32>,
-    pub worker_process_name: Option<String>,
-    pub active_tasks: i64,
-    pub oldest_task_start: Option<DateTime<Utc>>,
-    pub latest_heartbeat: Option<DateTime<Utc>>,
-}
-
 /// Row returned by the expired-tasks monitoring query.
 ///
 /// Represents a PENDING task whose `good_until` deadline has passed,

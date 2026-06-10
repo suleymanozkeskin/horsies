@@ -12,7 +12,7 @@ pub mod shared_listener;
 
 pub use bound_handle::TaskHandle;
 pub use error::{is_retryable_sqlx_error, BrokerError};
-pub use health::DatabasePing;
+pub use health::{DatabasePing, WorkerStateSnapshot};
 pub use listener::NotifyListener;
 pub use migrations::{run_horsies_migrations, MIGRATIONS_TABLE};
 pub use postgres::{compute_enqueue_sha, PostgresBroker, UPSERT_TASK_ATTEMPT_SQL};
@@ -20,7 +20,7 @@ pub use result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult};
 pub use row::heartbeat::HeartbeatRow;
 pub use row::task::{
     ClaimedTaskRow, ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow, TaskResultRow,
-    TaskRunningContextRow, WorkerStatsRow,
+    TaskRunningContextRow,
 };
 pub use row::worker_state::WorkerStateRow;
 pub use row::workflow::{WorkflowRow, WorkflowTaskRow};
