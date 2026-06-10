@@ -131,13 +131,6 @@ COUNT_IN_FLIGHT_FOR_WORKER_SQL = text("""
                AND (claim_expires_at IS NULL OR claim_expires_at > now())))
 """)
 
-COUNT_RUNNING_IN_QUEUE_SQL = text("""
-    SELECT COUNT(*) AS cnt
-    FROM horsies_tasks
-    WHERE status = 'RUNNING'
-      AND queue_name = :q
-""")
-
 GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL = text("""
     SELECT t.id, w.status
     FROM horsies_tasks t
