@@ -71,6 +71,40 @@ class TestCalculateRetryDelay:
         result = calculate_retry_delay(1, {})
         assert result >= 1.0
 
+    def test_empty_intervals_falls_back_to_defaults(self) -> None:
+        # Regression: 'fixed' with intervals=[] used to raise IndexError.
+        policy = {'intervals': [], 'backoff_strategy': 'fixed', 'jitter': False}
+        assert calculate_retry_delay(1, policy) == 60.0
+
+    def test_empty_intervals_exponential_falls_back_to_defaults(self) -> None:
+        policy = {'intervals': [], 'backoff_strategy': 'exponential', 'jitter': False}
+        assert calculate_retry_delay(2, policy) == 120.0
+
+    def test_non_numeric_intervals_fall_back_to_defaults(self) -> None:
+        # Regression: string entries used to raise TypeError in arithmetic.
+        policy = {'intervals': ['fast', 'slow'], 'backoff_strategy': 'fixed', 'jitter': False}
+        assert calculate_retry_delay(1, policy) == 60.0
+
+    def test_bool_intervals_fall_back_to_defaults(self) -> None:
+        policy = {'intervals': [True, False], 'backoff_strategy': 'fixed', 'jitter': False}
+        assert calculate_retry_delay(1, policy) == 60.0
+
+    def test_non_finite_intervals_fall_back_to_defaults(self) -> None:
+        policy = {
+            'intervals': [float('nan')],
+            'backoff_strategy': 'fixed',
+            'jitter': False,
+        }
+        assert calculate_retry_delay(1, policy) == 60.0
+
+    def test_non_list_intervals_fall_back_to_defaults(self) -> None:
+        policy = {'intervals': 'abc', 'backoff_strategy': 'fixed', 'jitter': False}
+        assert calculate_retry_delay(1, policy) == 60.0
+
+    def test_unknown_backoff_strategy_uses_first_interval(self) -> None:
+        policy = {'intervals': [10, 20], 'backoff_strategy': 'quadratic', 'jitter': False}
+        assert calculate_retry_delay(3, policy) == 10.0
+
     def test_jitter_above_floor_does_not_collapse_lower_half(self) -> None:
         # Regression: jitter is applied upward from the 1.0 floor, not as a
         # symmetric window that a trailing max(1.0, ...) clamps. base=1.0 used
