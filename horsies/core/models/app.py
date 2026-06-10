@@ -268,8 +268,13 @@ class AppConfig(BaseModel):
         if self.queue_mode == QueueMode.CUSTOM and self.custom_queues:
             lines.append('  custom_queues:')
             for queue in self.custom_queues:
+                concurrency_label = (
+                    'uncapped'
+                    if queue.max_concurrency is None
+                    else queue.max_concurrency
+                )
                 lines.append(
-                    f'    - {queue.name} (priority={queue.priority}, max_concurrency={queue.max_concurrency})'
+                    f'    - {queue.name} (priority={queue.priority}, max_concurrency={concurrency_label})'
                 )
 
         # Cluster-wide cap and prefetch settings

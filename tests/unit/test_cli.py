@@ -13,6 +13,7 @@ import pytest
 
 from horsies.core.app import Horsies
 from horsies.core.cli import (
+    _build_queue_settings,
     _ensure_schema_with_retry,
     _is_file_path,
     _parse_locator,
@@ -1409,6 +1410,54 @@ class TestWorkerCommandAdditionalBranches:
 # ---------------------------------------------------------------------------
 # check_command — additional branch coverage
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestBuildQueueSettings:
+    """Uncapped queues are omitted from the worker concurrency map."""
+
+    @staticmethod
+    def _custom_app(queues: list[Any]) -> MagicMock:
+        app = MagicMock()
+        app.config.queue_mode.name = 'CUSTOM'
+        app.config.custom_queues = queues
+        return app
+
+    @staticmethod
+    def _queue(name: str, priority: int, max_concurrency: int | None) -> MagicMock:
+        q = MagicMock()
+        q.name = name
+        q.priority = priority
+        q.max_concurrency = max_concurrency
+        return q
+
+    def test_capped_queue_present_in_both_maps(self) -> None:
+        app = self._custom_app([self._queue('fast', 1, 10)])
+
+        priorities, concurrency = _build_queue_settings(app)
+
+        assert priorities == {'fast': 1}
+        assert concurrency == {'fast': 10}
+
+    def test_uncapped_queue_omitted_from_concurrency_map(self) -> None:
+        """None queues keep their priority but get no concurrency entry —
+        the worker's claim pass only counts queues present in the map."""
+        app = self._custom_app([
+            self._queue('fast', 1, 10),
+            self._queue('bulk', 2, None),
+        ])
+
+        priorities, concurrency = _build_queue_settings(app)
+
+        assert priorities == {'fast': 1, 'bulk': 2}
+        assert concurrency == {'fast': 10}
+
+    def test_default_mode_yields_empty_maps(self) -> None:
+        app = MagicMock()
+        app.config.queue_mode.name = 'DEFAULT'
+        app.config.custom_queues = None
+
+        assert _build_queue_settings(app) == ({}, {})
 
 
 @pytest.mark.unit

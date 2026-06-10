@@ -163,6 +163,23 @@ def _is_file_path(path: str) -> bool:
     return path.endswith('.py') or os.path.sep in path or '/' in path
 
 
+def _build_queue_settings(app: Horsies) -> tuple[dict[str, int], dict[str, int]]:
+    """Build (queue_priorities, queue_max_concurrency) for CUSTOM mode.
+
+    Uncapped queues (``max_concurrency=None``) are omitted from the
+    concurrency map: the worker's claim pass only counts and limits
+    queues present in it.
+    """
+    queue_priorities: dict[str, int] = {}
+    queue_max_concurrency: dict[str, int] = {}
+    if app.config.queue_mode.name == 'CUSTOM' and app.config.custom_queues:
+        for q in app.config.custom_queues:
+            queue_priorities[q.name] = q.priority
+            if q.max_concurrency is not None:
+                queue_max_concurrency[q.name] = q.max_concurrency
+    return queue_priorities, queue_max_concurrency
+
+
 def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
     """
     Import module and discover horsies instance.
@@ -402,15 +419,11 @@ def worker_command(args: argparse.Namespace) -> None:
     logger.info(f'Worker will process queues: {queues}')
 
     # Build per-queue settings for CUSTOM mode
-    queue_priorities: dict[str, int] = {}
-    queue_max_concurrency: dict[str, int] = {}
     try:
-        if app.config.queue_mode.name == 'CUSTOM' and app.config.custom_queues:
-            for q in app.config.custom_queues:
-                queue_priorities[q.name] = q.priority
-                queue_max_concurrency[q.name] = q.max_concurrency
+        queue_priorities, queue_max_concurrency = _build_queue_settings(app)
     except Exception as exc:
         logger.error(f'Failed to parse custom queue config: {exc}')
+        queue_priorities, queue_max_concurrency = {}, {}
 
     # Get discovered task modules
     discovered_modules = app.get_discovered_task_modules()

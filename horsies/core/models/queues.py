@@ -1,5 +1,7 @@
 # app/core/models/queues.py
 from enum import Enum
+from typing import Annotated
+
 from pydantic import BaseModel, Field
 
 
@@ -16,8 +18,12 @@ class CustomQueueConfig(BaseModel):
         App level concurrency is still respected.
         If you have set app level concurrency to 5 but queue level to 10,
         it will still be limited to 5.
+        ``None`` means uncapped: no per-queue limit is enforced or counted
+        (worker- and cluster-level limits still apply), mirroring
+        ``cluster_wide_cap=None``. ``0`` is valid and pauses claiming from
+        the queue. Negative values are rejected.
     """
 
     name: str
     priority: int = Field(default=1, ge=1, le=100)
-    max_concurrency: int = 5
+    max_concurrency: Annotated[int, Field(ge=0)] | None = 5
