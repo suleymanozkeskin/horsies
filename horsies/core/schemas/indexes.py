@@ -37,11 +37,27 @@ CREATE_HEARTBEATS_TASK_ROLE_SENT_INDEX_SQL = text("""
     ON horsies_heartbeats (task_id, role, sent_at DESC);
 """)
 
-# Claim-path indexes (schema v3). CLAIM_SQL filters one queue for PENDING
-# rows (ordered by priority, enqueued_at, id) or expired CLAIMED leases;
-# without these, the planner falls back to the single-column queue_name /
-# status indexes — poisoned by retained terminal rows — and sorts the whole
-# eligible backlog on every claim pass.
+# Claim-path indexes (schema v3 + v7). CLAIM_SQL filters one queue for
+# PENDING rows or expired CLAIMED leases, ordered by (priority,
+# enqueued_at, id); without these, the planner falls back to the
+# single-column queue_name / status indexes — poisoned by retained
+# terminal rows — and sorts the whole eligible backlog on every claim
+# pass.
+#
+# The pending arm has one ordered composite. The expired arm needs TWO
+# complementary indexes because its filter (claim_expires_at range) and
+# its ORDER BY use different columns, so no single index serves both:
+#   - claim_expired (v3): expiry-filter index. Optimal in steady state
+#     (few/zero expired among many active leases) — finds the expired
+#     subset directly, then top-N sorts the small set.
+#   - claim_expired_ordered (v7): ordered walk over CLAIMED rows.
+#     Optimal for deep expired backlogs (mass crash recovery), where
+#     the filter index would feed tens of thousands of rows into a
+#     full sort (SKIP LOCKED's LockRows sits above the Sort node, so
+#     the sort cannot stop at the LIMIT).
+# The planner picks per data distribution; measured (50k rows): deep
+# backlog 30.7ms -> 0.11ms with the ordered index, steady state 0.11ms
+# via the filter index (planner correctly ignores the ordered one).
 CREATE_TASKS_CLAIM_PENDING_INDEX_SQL = text("""
     CREATE INDEX IF NOT EXISTS idx_horsies_tasks_claim_pending
     ON horsies_tasks (queue_name, priority, enqueued_at, id)
@@ -51,6 +67,12 @@ CREATE_TASKS_CLAIM_PENDING_INDEX_SQL = text("""
 CREATE_TASKS_CLAIM_EXPIRED_INDEX_SQL = text("""
     CREATE INDEX IF NOT EXISTS idx_horsies_tasks_claim_expired
     ON horsies_tasks (queue_name, claim_expires_at)
+    WHERE status = 'CLAIMED';
+""")
+
+CREATE_TASKS_CLAIM_EXPIRED_ORDERED_INDEX_SQL = text("""
+    CREATE INDEX IF NOT EXISTS idx_horsies_tasks_claim_expired_ordered
+    ON horsies_tasks (queue_name, priority, enqueued_at, id)
     WHERE status = 'CLAIMED';
 """)
 
