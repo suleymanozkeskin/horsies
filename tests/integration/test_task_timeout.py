@@ -3,14 +3,16 @@
 
 Covers Worker._handle_task_timeout: the parent-side handler invoked when a
 dispatched task outruns TaskOptions.timeout_ms. The SIGKILL targets the
-row's recorded worker_pid; tests use a nonexistent pid so the suppressed
-ProcessLookupError path runs instead of killing anything.
+row's recorded worker_pid, confined to live children of the current
+executor; these workers have no executor, so the containment skip runs
+instead of killing anything.
 """
 
 from __future__ import annotations
 
 import json
 import uuid
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -32,9 +34,21 @@ pytestmark = [pytest.mark.integration]
 TEST_WORKER_ID = 'w-timeout-test'
 OTHER_WORKER_ID = 'w-timeout-other'
 
-# A pid that cannot exist (pid_max is far below this on macOS and Linux),
-# so os.kill raises ProcessLookupError, which the handler suppresses.
+# A pid that cannot exist (pid_max is far below this on macOS and Linux);
+# it is also never in the executor's process map, so the containment check
+# skips the kill.
 FAKE_DEAD_PID = 2**22 - 1
+
+
+def _make_worker_without_engine() -> Worker:
+    cfg = WorkerConfig(
+        dsn='postgresql+psycopg://u:p@localhost/db',
+        psycopg_dsn='postgresql://u:p@localhost/db',
+        queues=['default'],
+    )
+    worker = Worker(session_factory=MagicMock(), listener=MagicMock(), cfg=cfg)
+    worker.worker_instance_id = TEST_WORKER_ID
+    return worker
 
 
 def _make_worker(engine: AsyncEngine) -> Worker:
@@ -214,6 +228,62 @@ async def test_timeout_retries_when_opted_in(
     assert attempt is not None
     assert attempt.will_retry is True
     assert attempt.error_code == OutcomeCode.TASK_TIMEOUT.value
+
+
+class TestKillContainment:
+    """The timeout SIGKILL only targets live children of the current executor.
+
+    Regression for pid-reuse containment: a concurrent timeout or broken
+    pool can restart the executor and reap the child before the kill
+    fires, after which the OS may recycle the pid for an unrelated
+    process. A raw os.kill on the stale pid would hit that process.
+    """
+
+    @staticmethod
+    def _kill_recorder(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+        import horsies.core.worker.worker as worker_module
+
+        killed: list[int] = []
+
+        def recording_kill(pid: int, sig: int) -> None:
+            killed.append(pid)
+
+        monkeypatch.setattr(worker_module.os, 'kill', recording_kill)
+        return killed
+
+    def test_pid_in_live_executor_is_killed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        killed = self._kill_recorder(monkeypatch)
+        worker = _make_worker_without_engine()
+        worker._executor = SimpleNamespace(  # type: ignore[assignment]
+            _processes={FAKE_DEAD_PID: object()},
+        )
+
+        worker._kill_owned_child(FAKE_DEAD_PID, 't', 5_000)
+
+        assert killed == [FAKE_DEAD_PID]
+
+    def test_stale_pid_not_in_executor_is_skipped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        killed = self._kill_recorder(monkeypatch)
+        worker = _make_worker_without_engine()
+        worker._executor = SimpleNamespace(_processes={})  # type: ignore[assignment]
+
+        worker._kill_owned_child(FAKE_DEAD_PID, 't', 5_000)
+
+        assert killed == []
+
+    def test_no_executor_skips_kill(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        killed = self._kill_recorder(monkeypatch)
+        worker = _make_worker_without_engine()
+
+        worker._kill_owned_child(FAKE_DEAD_PID, 't', 5_000)
+
+        assert killed == []
 
 
 class TestTimeoutWireRoundTrip:
