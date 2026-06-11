@@ -11,6 +11,54 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
+Workflow-completion performance redesign, supervisor-contract fixes, and the
+close of the raise-contract documentation track. Schema migrates v7 → v8
+automatically on first broker start.
+
+### Changed
+
+- Workflow completion at scale: terminal-set resolution rewritten as a
+  payload-free edge read plus in-process set difference (finalizing
+  completion at 1000 tasks: 168.7ms → 11.7ms under the workflow lock);
+  child-workflow info collapsed to a single-pass query; new composite
+  index `(workflow_id, status, task_index)` (schema v8) removes the
+  per-failure first-failed scan.
+- Subworkflow parent propagation is de-nested: each ancestor level now
+  advances in its own transaction instead of recursing root-ward while
+  holding every descendant's `FOR UPDATE` lock. A child workflow's
+  `workflow_done` NOTIFY is therefore visible slightly before its parent
+  node advances (waiters re-read their own workflow's status on wake).
+  A crash between propagation levels is healed by workflow recovery;
+  full self-healing requires `recovery_config` (the CLI wires it;
+  programmatic workers should too).
+
+### Fixed
+
+- A worker whose executor restart failed from a background finalizer
+  path now exits non-zero for supervisor restart instead of running on
+  as an executorless zombie that claims nothing.
+- `horsies worker` exits 1 (was 0) when startup times out after
+  exhausting the resilience retry budget — a clean exit suppressed
+  supervisor restarts.
+- Listener `UNLISTEN` failures during unsubscribe no longer raise into
+  result-waiter cleanup paths, and the channel is always untracked so a
+  reconnect cannot resurrect a ghost `LISTEN`.
+- `app.check()`: a workflow builder whose signature cannot be
+  introspected now folds into the validation report instead of crashing
+  the check phase.
+
+### Removed
+
+- `ScheduleStateManager.delete_state` — dead since schedulers stopped
+  deleting foreign schedule-state rows at startup; no production caller.
+
+### Documentation
+
+- Raise-contract docstrings across the worker package, workflow engine,
+  scheduler, app/CLI boundary, and listener: every fallible function now
+  names the seam that recovers from its failure and how (the
+  fallible-audit Result-conversion track is closed).
+
 ## 0.1.7 — 2026-06-10
 
 Correctness and performance hardening from a full-project review, plus task

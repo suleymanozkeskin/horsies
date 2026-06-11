@@ -155,6 +155,14 @@ def effective_priority(
     app: 'Horsies',
     queue_name: str,
 ) -> int:
+    """Resolve the effective priority for a queue.
+
+    Raises:
+        ConfigurationError: queue_name not in custom_queues (CUSTOM mode).
+            The send path folds this into Err(VALIDATION_FAILED) in
+            ``_prepare_send``; ``app.workflow()`` and the scheduler
+            pre-validate the queue before calling.
+    """
     if app.config.queue_mode.name == 'DEFAULT':
         return 100  # default priority, least important
     config = next(
