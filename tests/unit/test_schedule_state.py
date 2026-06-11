@@ -165,6 +165,38 @@ class TestGetDueStates:
 
 
 # =============================================================================
+# get_existing_names
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestGetExistingNames:
+    """Tests for ScheduleStateManager.get_existing_names."""
+
+    @pytest.mark.asyncio
+    async def test_empty_input_returns_empty_set_without_db_call(self) -> None:
+        """Guard clause: empty names returns set() without DB call."""
+        manager, session = _make_manager()
+
+        result = await manager.get_existing_names([])
+
+        assert result == set()
+        session.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_returns_existing_subset(self) -> None:
+        """Returns only the names that have rows."""
+        manager, session = _make_manager()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value = iter(['a', 'c'])
+        session.execute = AsyncMock(return_value=mock_result)
+
+        result = await manager.get_existing_names(['a', 'b', 'c'])
+
+        assert result == {'a', 'c'}
+
+
+# =============================================================================
 # initialize_state
 # =============================================================================
 

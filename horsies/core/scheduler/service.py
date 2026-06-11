@@ -7,6 +7,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 import inspect
 from sqlalchemy import text
 from horsies.core.app import Horsies
@@ -176,8 +177,9 @@ class Scheduler:
         Detects configuration changes and recalculates next_run_at when pattern or timezone changes.
 
         Per-schedule isolation: one schedule's init/recalc failure is logged
-        and the rest proceed (a failed-init schedule stays dormant until the
-        next restart — see ScheduleStateManager.initialize_state).
+        and the rest proceed; a schedule left without a state row is
+        recreated by the tick loop's missing-row check
+        (`_ensure_states_exist`).
 
         Raises:
             RuntimeError: state manager not initialized (programmer error;
@@ -279,12 +281,12 @@ class Scheduler:
         """Check all schedules and execute those that are due.
 
         Per-schedule isolation: _check_schedule errors are logged and the
-        remaining due schedules still run. The get_due_states read raises
-        to run_forever's tick handler (retry next tick).
+        remaining due schedules still run. The existence and due-states
+        reads raise to run_forever's tick handler (retry next tick).
 
         Raises:
             RuntimeError: scheduler not initialized (programmer error).
-            Exception: DB failure reading due states.
+            Exception: DB failure reading state rows.
         """
         if not self.state_manager or not self.broker:
             raise RuntimeError('Scheduler not properly initialized')
@@ -298,6 +300,8 @@ class Scheduler:
         }
         if not enabled_schedules:
             return
+
+        await self._ensure_states_exist(enabled_schedules, now)
 
         # Bulk fetch due states to avoid O(N) per-tick queries
         due_states = await self.state_manager.get_due_states(
@@ -315,6 +319,51 @@ class Scheduler:
             except Exception as e:
                 logger.error(
                     f"Error checking schedule '{schedule.name}': {e}", exc_info=True
+                )
+
+    async def _ensure_states_exist(
+        self,
+        enabled_schedules: dict[str, TaskSchedule],
+        now: datetime,
+    ) -> None:
+        """Recreate state rows missing for enabled schedules (self-heal).
+
+        Closes the startup-init liveness gap: a schedule whose state-row
+        creation failed during start() — or whose row was deleted
+        externally — was invisible to get_due_states and stayed dormant
+        until a restart. Initialization is idempotent (existing-row guard;
+        a concurrent scheduler's IntegrityError lands in the per-schedule
+        except below and the next tick sees the winner's row).
+
+        Per-schedule isolation: one schedule's init failure is logged and
+        retried next tick; the rest of the tick proceeds.
+
+        Raises:
+            RuntimeError: state manager not initialized (programmer error).
+            Exception: DB failure on the existence read — raises to
+                run_forever's tick handler (retry next tick).
+        """
+        if not self.state_manager:
+            raise RuntimeError('State manager not initialized')
+
+        existing = await self.state_manager.get_existing_names(
+            list(enabled_schedules.keys()),
+        )
+        missing = enabled_schedules.keys() - existing
+        for name in sorted(missing):
+            logger.warning(
+                f"Schedule '{name}' has no state row (failed startup init "
+                f'or external delete); initializing now',
+            )
+            try:
+                await self._initialize_single_schedule(
+                    enabled_schedules[name], now,
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to initialize schedule '{name}' "
+                    f'(will retry next tick): {e}',
+                    exc_info=True,
                 )
 
     def _schedule_advisory_key(self, schedule_name: str) -> int:
@@ -724,10 +773,22 @@ class Scheduler:
         return self.app.validate_queue_name(queue_name)
 
     def _validate_schedules(self) -> None:
-        """Fail fast on invalid schedules (missing tasks/queues)."""
+        """Fail fast on invalid schedules (missing tasks/queues/timezones)."""
         for sched in self.schedule_config.schedules:
             if not sched.enabled:
                 continue
+            try:
+                ZoneInfo(sched.timezone)
+            except Exception as exc:
+                # Reject here so a permanently bad timezone exits 1 at boot
+                # instead of failing calculate_next_run on every tick
+                # (the missing-row self-heal would retry it forever).
+                raise ConfigurationError(
+                    message=f"invalid timezone for schedule '{sched.name}'",
+                    code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                    notes=[f'timezone: {sched.timezone!r}', f'error: {exc}'],
+                    help_text='use an IANA timezone name, e.g. "UTC" or "Europe/Berlin"',
+                ) from exc
             if sched.task_name not in self.app.tasks:
                 available = list(self.app.tasks.keys())
                 raise RegistryError(

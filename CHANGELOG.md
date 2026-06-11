@@ -43,6 +43,10 @@ automatically on first broker start.
 - `app.check()`: a workflow builder whose signature cannot be
   introspected now folds into the validation report instead of crashing
   the check phase.
+- Schedule state rows self-heal: a schedule whose state-row creation
+  failed at scheduler startup (or whose row was deleted externally) was
+  invisible to the tick loop and stayed dormant until a restart. Each
+  tick now recreates missing rows for enabled schedules.
 
 ### Removed
 
