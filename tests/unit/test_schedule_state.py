@@ -310,41 +310,6 @@ class TestUpdateNextRun:
 
 
 # =============================================================================
-# delete_state
-# =============================================================================
-
-
-@pytest.mark.unit
-class TestDeleteState:
-    """Tests for ScheduleStateManager.delete_state."""
-
-    @pytest.mark.asyncio
-    async def test_successful_delete_returns_true(self) -> None:
-        """Rows deleted > 0 returns True."""
-        manager, session = _make_manager()
-        mock_result = MagicMock()
-        mock_result.rowcount = 1
-        session.execute = AsyncMock(return_value=mock_result)
-
-        result = await manager.delete_state('sched-1')
-
-        assert result is True
-        session.commit.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_not_found_returns_false(self) -> None:
-        """Rows deleted == 0 returns False."""
-        manager, session = _make_manager()
-        mock_result = MagicMock()
-        mock_result.rowcount = 0
-        session.execute = AsyncMock(return_value=mock_result)
-
-        result = await manager.delete_state('nonexistent')
-
-        assert result is False
-
-
-# =============================================================================
 # get_all_states
 # =============================================================================
 
@@ -354,43 +319,26 @@ class TestGetAllStates:
     """Tests for ScheduleStateManager.get_all_states."""
 
     @pytest.mark.asyncio
-    async def test_returns_constructed_models_from_rows(self) -> None:
-        """Constructs ScheduleStateModel from raw SQL rows."""
+    async def test_returns_orm_loaded_models(self) -> None:
+        """Returns the ORM-selected models as a list."""
         manager, session = _make_manager()
-        now = _utc_now()
-        columns = [
-            'schedule_name',
-            'last_run_at',
-            'next_run_at',
-            'last_task_id',
-            'run_count',
-            'config_hash',
-            'updated_at',
-        ]
-        rows = [
-            ('sched-a', None, now, None, 5, 'hash1', now),
-            ('sched-b', now, now, 'task-1', 10, None, now),
-        ]
+        states = [_make_state('sched-a'), _make_state('sched-b')]
         mock_result = MagicMock()
-        mock_result.fetchall.return_value = rows
-        mock_result.keys.return_value = columns
+        mock_result.scalars.return_value = iter(states)
         session.execute = AsyncMock(return_value=mock_result)
 
         result = await manager.get_all_states()
 
-        assert len(result) == 2
-        assert result[0].schedule_name == 'sched-a'
-        assert result[0].run_count == 5
-        assert result[1].schedule_name == 'sched-b'
-        assert result[1].last_task_id == 'task-1'
+        assert result == states
+        stmt = session.execute.await_args.args[0]
+        assert 'ORDER BY horsies_schedule_state.schedule_name' in str(stmt)
 
     @pytest.mark.asyncio
     async def test_returns_empty_list_when_no_states(self) -> None:
         """Returns empty list when no schedule states exist."""
         manager, session = _make_manager()
         mock_result = MagicMock()
-        mock_result.fetchall.return_value = []
-        mock_result.keys.return_value = []
+        mock_result.scalars.return_value = iter([])
         session.execute = AsyncMock(return_value=mock_result)
 
         result = await manager.get_all_states()
