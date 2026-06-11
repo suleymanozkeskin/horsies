@@ -70,11 +70,13 @@ class ScheduleStateManager:
             Exception: DB errors propagate to the per-schedule isolation
                 seams, which log and continue with the remaining schedules.
                 From `_check_and_run_schedules` the row is still due, so
-                the next tick retries; from `_initialize_schedules`
-                (startup-only) that schedule's init/config-check is skipped
-                until the next scheduler restart. On the session-reusing
-                path the raise unwinds `_check_schedule`'s transaction,
-                releasing the schedule advisory lock.
+                the next tick retries; from `_initialize_schedules` the
+                schedule's init/config-check is skipped — a missing row is
+                then recreated by the tick loop's missing-row check
+                (`_ensure_states_exist`), while a config-hash recheck for
+                an existing row waits for the next restart. On the
+                session-reusing path the raise unwinds `_check_schedule`'s
+                transaction, releasing the schedule advisory lock.
         """
         if session is not None:
             return await session.get(ScheduleStateModel, schedule_name)
@@ -120,6 +122,38 @@ class ScheduleStateManager:
             result = await session.execute(stmt)
             return list(result.scalars())
 
+    async def get_existing_names(
+        self,
+        schedule_names: list[str],
+    ) -> set[str]:
+        """
+        Return the subset of schedule_names that have a state row.
+
+        Feeds the tick loop's missing-row check (`_ensure_states_exist`),
+        which re-initializes schedules whose row creation failed at
+        startup or whose row was deleted externally.
+
+        Args:
+            schedule_names: Schedule identifiers to check
+
+        Returns:
+            Names from schedule_names that exist in horsies_schedule_state
+
+        Raises:
+            Exception: DB errors propagate to `run_forever`'s per-tick
+                except, which logs and retries on the next tick. Read-only;
+                no state can be lost.
+        """
+        if not schedule_names:
+            return set()
+
+        async with self.session_factory() as session:
+            stmt = select(ScheduleStateModel.schedule_name).where(
+                ScheduleStateModel.schedule_name.in_(schedule_names),
+            )
+            result = await session.execute(stmt)
+            return set(result.scalars())
+
     async def initialize_state(
         self,
         schedule_name: str,
@@ -145,11 +179,11 @@ class ScheduleStateManager:
 
         Raises:
             Exception: DB errors propagate to the per-schedule isolation
-                seams (see `get_state`). A failure here is NOT retried on
-                the next tick: without a state row the schedule is never
-                returned by `get_due_states`, so it stays dormant until
-                the next scheduler restart re-runs initialization (which
-                the existing-row guard makes idempotent).
+                seams (see `get_state`). A schedule left without a state
+                row is invisible to `get_due_states`; the tick loop's
+                missing-row check (`_ensure_states_exist`) re-runs this
+                initialization on the next tick (idempotent via the
+                existing-row guard).
         """
         if session is not None:
             return await self._initialize_state_on_session(
@@ -266,8 +300,8 @@ class ScheduleStateManager:
         rowcount == 0 is log-only by design: no horsies code path deletes
         state rows, and both callers read the row in this same transaction
         first — 0 rows means an external delete landed in between. The
-        scheduler cannot heal a missing row mid-flight (`get_due_states`
-        never returns it again); startup reinitialization recreates it.
+        update is lost, and the tick loop's missing-row check recreates
+        the row (fresh next_run_at) on a subsequent tick.
         Raises DB errors to the caller's seam (see `update_after_run`).
         """
         # Use raw SQL for atomic update with increment
@@ -355,8 +389,8 @@ class ScheduleStateManager:
         as `_update_after_run_on_session`, except the startup config-change
         caller reads the row in an earlier short transaction (no advisory
         lock), so its read-then-update window is wider. Either way the
-        missing row is recreated only by startup reinitialization. Raises
-        DB errors to the caller's seam (see `update_next_run`).
+        missing row is recreated by the tick loop's missing-row check.
+        Raises DB errors to the caller's seam (see `update_next_run`).
         """
         # Build UPDATE query dynamically based on whether config_hash is provided
         if config_hash is not None:

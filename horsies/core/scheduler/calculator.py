@@ -54,9 +54,10 @@ def calculate_next_run(
             scheduler's per-schedule seams. From the tick seam
             (``_check_and_run_schedules``) the slot stays due and is
             retried next tick; from the startup seam
-            (``_initialize_schedules``) the schedule is skipped and
-            stays dormant until the next restart (no state row exists
-            to make it due — see ScheduleStateManager.initialize_state).
+            (``_initialize_schedules``) the schedule is skipped, and the
+            tick loop's missing-row check (``_ensure_states_exist``)
+            retries the initialization — which re-raises here every tick
+            until the pattern/tz input is fixed.
     """
     # Ensure from_time is UTC-aware
     if from_time.tzinfo is None:

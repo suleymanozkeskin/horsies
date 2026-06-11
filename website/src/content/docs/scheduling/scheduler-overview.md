@@ -133,16 +133,16 @@ This prevents duplicate executions when:
 - Multiple schedulers run (advisory locks serialize)
 - Network issues cause delays
 
-### Known behavior: failed initialization is restart-scoped
+### Self-healing state rows
 
-State rows are created once, at scheduler startup. If a schedule's row
+State rows are created at scheduler startup. If a schedule's row
 creation fails there (for example a transient database error during
-`start()`), that schedule is logged as failed and stays **dormant until
-the next scheduler restart** — the tick loop only visits schedules that
-already have a state row, so it cannot retry the initialization. Other
-schedules are unaffected. If you see
-`N schedule(s) failed to initialize` in the logs, restart the scheduler
-once the underlying issue is resolved.
+`start()`), the schedule is logged as failed and the **tick loop
+recreates the missing row on a later tick** — each tick checks for
+enabled schedules without a state row and re-runs their initialization.
+The same check recovers a row deleted externally. The recreated row's
+`next_run_at` is computed from the current time, so no missed-slot
+backlog is replayed.
 
 ## Catch-Up Logic
 

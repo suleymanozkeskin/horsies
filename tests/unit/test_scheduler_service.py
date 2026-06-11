@@ -1582,6 +1582,9 @@ class TestCheckAndRunSchedules:
         due_b.schedule_name = 'sched_b'
 
         state_manager = MagicMock()
+        state_manager.get_existing_names = AsyncMock(
+            return_value={'sched_a', 'sched_b'},
+        )
         state_manager.get_due_states = AsyncMock(return_value=[due_a, due_b])
         scheduler.state_manager = state_manager
         scheduler.broker = _make_broker_mock()
@@ -1622,6 +1625,9 @@ class TestCheckAndRunSchedules:
         due_b.schedule_name = 'sched_b'
 
         state_manager = MagicMock()
+        state_manager.get_existing_names = AsyncMock(
+            return_value={'sched_a', 'sched_b'},
+        )
         state_manager.get_due_states = AsyncMock(return_value=[due_a, due_b])
         scheduler.state_manager = state_manager
         scheduler.broker = _make_broker_mock()
@@ -2603,6 +2609,7 @@ class TestCheckAndRunSchedulesOrphanDueState:
         real_state.schedule_name = 'real'
 
         state_manager = MagicMock()
+        state_manager.get_existing_names = AsyncMock(return_value={'real'})
         state_manager.get_due_states = AsyncMock(return_value=[orphan_state, real_state])
         scheduler.state_manager = state_manager
         scheduler.broker = _make_broker_mock()
@@ -2618,6 +2625,108 @@ class TestCheckAndRunSchedulesOrphanDueState:
 
         # Only 'real' should be checked, orphan is skipped
         assert checked == ['real']
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestEnsureStatesExist:
+    """Tick-loop self-heal: missing state rows are re-initialized.
+
+    Regression for the startup-init liveness gap: a schedule whose row
+    creation failed at start() was invisible to get_due_states and stayed
+    dormant until restart.
+    """
+
+    def _scheduler_with_mock_manager(
+        self, names: list[str],
+    ) -> tuple[Scheduler, MagicMock]:
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(
+                    name=name,
+                    task_name='my_task',
+                    pattern=IntervalSchedule(seconds=5),
+                )
+                for name in names
+            ],
+        )
+        app = _make_app(schedule_config=config)
+        scheduler = Scheduler(app)
+        state_manager = MagicMock()
+        scheduler.state_manager = state_manager
+        scheduler.broker = _make_broker_mock()
+        return scheduler, state_manager
+
+    async def test_missing_row_reinitialized_on_tick(self) -> None:
+        """A schedule without a state row gets initialized by the tick."""
+        scheduler, state_manager = self._scheduler_with_mock_manager(
+            ['healthy', 'dormant'],
+        )
+        state_manager.get_existing_names = AsyncMock(return_value={'healthy'})
+        state_manager.get_due_states = AsyncMock(return_value=[])
+        inited: list[str] = []
+
+        async def _track_init(schedule: object, now: object) -> None:
+            inited.append(schedule.name)  # type: ignore[union-attr]
+
+        scheduler._initialize_single_schedule = AsyncMock(  # type: ignore[method-assign]
+            side_effect=_track_init,
+        )
+
+        await scheduler._check_and_run_schedules()
+
+        assert inited == ['dormant']
+        state_manager.get_due_states.assert_awaited_once()
+
+    async def test_init_failure_logged_and_tick_proceeds(self) -> None:
+        """A failing re-init neither raises nor blocks the rest of the tick."""
+        scheduler, state_manager = self._scheduler_with_mock_manager(
+            ['bad', 'also_missing'],
+        )
+        state_manager.get_existing_names = AsyncMock(return_value=set())
+        state_manager.get_due_states = AsyncMock(return_value=[])
+        attempted: list[str] = []
+
+        async def _flaky_init(schedule: object, now: object) -> None:
+            attempted.append(schedule.name)  # type: ignore[union-attr]
+            if schedule.name == 'also_missing':  # type: ignore[union-attr]
+                raise RuntimeError('db error')
+
+        scheduler._initialize_single_schedule = AsyncMock(  # type: ignore[method-assign]
+            side_effect=_flaky_init,
+        )
+
+        await scheduler._check_and_run_schedules()
+
+        # Both missing schedules attempted (sorted order), failure contained,
+        # and the tick still reached the due-states read.
+        assert attempted == ['also_missing', 'bad']
+        state_manager.get_due_states.assert_awaited_once()
+
+    async def test_no_missing_rows_no_init(self) -> None:
+        """All rows present: no initialization happens."""
+        scheduler, state_manager = self._scheduler_with_mock_manager(['a', 'b'])
+        state_manager.get_existing_names = AsyncMock(return_value={'a', 'b'})
+        state_manager.get_due_states = AsyncMock(return_value=[])
+        scheduler._initialize_single_schedule = AsyncMock()  # type: ignore[method-assign]
+
+        await scheduler._check_and_run_schedules()
+
+        scheduler._initialize_single_schedule.assert_not_awaited()
+
+    async def test_existence_read_failure_raises_to_tick_seam(self) -> None:
+        """A DB error on the existence read escapes to run_forever's
+        per-tick handler (the whole tick is retried next interval)."""
+        scheduler, state_manager = self._scheduler_with_mock_manager(['a'])
+        state_manager.get_existing_names = AsyncMock(
+            side_effect=RuntimeError('db down'),
+        )
+        state_manager.get_due_states = AsyncMock(return_value=[])
+
+        with pytest.raises(RuntimeError, match='db down'):
+            await scheduler._check_and_run_schedules()
+
+        state_manager.get_due_states.assert_not_awaited()
 
 
 @pytest.mark.unit
