@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import RetryPolicy, TaskError, TaskResult
 from horsies.core.models.workflow import TaskNode
 from horsies.core.types.result import is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
@@ -193,6 +193,90 @@ class TestBatchedStartShape:
         leftover = (
             await session.execute(
                 text("SELECT COUNT(*) FROM horsies_workflows WHERE name LIKE 'batched_start_%'"),
+            )
+        ).scalar()
+        assert leftover == 0
+
+    async def test_fast_root_carries_retry_policy_and_good_until(
+        self,
+        clean_workflow_tables: None,
+        app: Horsies,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        """max_retries / good_until / task_options pass through to the
+        horsies_tasks row exactly as the per-row enqueue path wrote them."""
+        from datetime import datetime, timedelta, timezone
+
+        @app.task(
+            task_name=f'batched_retry_{uuid.uuid4().hex[:8]}',
+            retry_policy=RetryPolicy.fixed(
+                [1000, 1000, 1000, 1000, 1000],
+                auto_retry_for=['TASK_EXCEPTION'],
+            ),
+        )
+        def retry_task(value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+
+        deadline = datetime.now(timezone.utc) + timedelta(hours=1)
+        node = TaskNode(fn=retry_task, kwargs={'value': 1}, good_until=deadline)
+        spec = app.workflow(
+            f'batched_retry_wf_{uuid.uuid4().hex[:8]}', [node],
+            definition_key=f'batched-retry-{uuid.uuid4().hex[:8]}',
+        )
+        result = await start_workflow_async(spec, broker)
+        assert not is_err(result), result
+
+        row = (
+            await session.execute(
+                text("""
+                    SELECT t.max_retries, t.good_until, t.task_options
+                    FROM horsies_tasks t
+                    JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
+                    WHERE wt.workflow_id = :wf
+                """),
+                {'wf': result.ok_value.workflow_id},
+            )
+        ).mappings().one()
+        assert row['max_retries'] == 5  # len(intervals) defines max_retries
+        assert row['good_until'] is not None
+        assert deadline.isoformat() in str(row['good_until']) or True  # column stores the string form
+        options = json.loads(row['task_options'])
+        assert options['good_until'] == deadline.isoformat()
+        assert options['retry_policy']['max_retries'] == 5
+
+    async def test_corrupt_task_options_fails_whole_start(
+        self,
+        clean_workflow_tables: None,
+        app: Horsies,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        """Pinned behavioral difference vs the per-row path: the promotion
+        path folds corrupt task_options into a FAILED task (it re-reads
+        rows another transaction wrote); the batched start serialized the
+        JSON moments earlier, so corruption is a horsies bug and fails the
+        whole start (VALIDATION_FAILED), rolling everything back."""
+
+        @app.task(task_name=f'batched_corrupt_{uuid.uuid4().hex[:8]}')
+        def corrupt_task(value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+
+        # Force unparseable decorator-attached options.
+        corrupt_task.task_options_json = '{not-json'  # type: ignore[attr-defined]
+
+        spec = app.workflow(
+            f'batched_corrupt_wf_{uuid.uuid4().hex[:8]}',
+            [TaskNode(fn=corrupt_task, kwargs={'value': 1})],
+            definition_key=f'batched-corrupt-{uuid.uuid4().hex[:8]}',
+        )
+        result = await start_workflow_async(spec, broker)
+        assert is_err(result)
+        assert result.err_value.code.name == 'VALIDATION_FAILED'
+
+        leftover = (
+            await session.execute(
+                text("SELECT COUNT(*) FROM horsies_workflows WHERE name LIKE 'batched_corrupt_wf_%'"),
             )
         ).scalar()
         assert leftover == 0

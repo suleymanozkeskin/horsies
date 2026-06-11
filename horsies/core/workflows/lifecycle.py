@@ -25,6 +25,7 @@ from horsies.core.codec.json_io import dumps_json, loads_json, SerializationErro
 from horsies.core.types.result import Ok, Err, is_err as _is_err
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
+    TaskNode,
     WorkflowHandle,
     SubWorkflowNode,
     validate_workflow_generic_output_match,
@@ -414,7 +415,7 @@ async def start_workflow_async(
                 # guarantee the old mid-loop raise had.
                 node_params: list[dict[str, Any]] = []
                 fast_root_task_params: list[dict[str, Any]] = []
-                slow_root_nodes: list[Any] = []
+                slow_root_nodes: list[TaskNode[Any] | SubWorkflowNode[Any]] = []
 
                 for node in spec.tasks:
                     dep_indices = [d.index for d in node.waits_for if d.index is not None]
