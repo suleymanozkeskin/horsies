@@ -716,6 +716,30 @@ class TestCheckScheduleSkipsMissedRuns:
 class TestValidateSchedules:
     """Tests for Scheduler._validate_schedules."""
 
+    def test_invalid_timezone_raises_configuration_error(self) -> None:
+        """Regression: a bad timezone fails at startup validation (exit 1)
+        instead of failing calculate_next_run on every tick — the
+        missing-row self-heal would otherwise retry it forever."""
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(
+                    name='s',
+                    task_name='my_task',
+                    pattern=IntervalSchedule(seconds=5),
+                    timezone='Not/AZone',
+                ),
+            ],
+        )
+        app = _make_app(schedule_config=config)
+        scheduler = Scheduler(app)
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            scheduler._validate_schedules()
+
+        exc = exc_info.value
+        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert 'invalid timezone' in exc.message
+
     def test_unregistered_task_raises_registry_error(self) -> None:
         """Schedule referencing unregistered task raises RegistryError HRS-300."""
         config = ScheduleConfig(

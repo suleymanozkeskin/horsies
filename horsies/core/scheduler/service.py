@@ -7,6 +7,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 import inspect
 from sqlalchemy import text
 from horsies.core.app import Horsies
@@ -772,10 +773,22 @@ class Scheduler:
         return self.app.validate_queue_name(queue_name)
 
     def _validate_schedules(self) -> None:
-        """Fail fast on invalid schedules (missing tasks/queues)."""
+        """Fail fast on invalid schedules (missing tasks/queues/timezones)."""
         for sched in self.schedule_config.schedules:
             if not sched.enabled:
                 continue
+            try:
+                ZoneInfo(sched.timezone)
+            except Exception as exc:
+                # Reject here so a permanently bad timezone exits 1 at boot
+                # instead of failing calculate_next_run on every tick
+                # (the missing-row self-heal would retry it forever).
+                raise ConfigurationError(
+                    message=f"invalid timezone for schedule '{sched.name}'",
+                    code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                    notes=[f'timezone: {sched.timezone!r}', f'error: {exc}'],
+                    help_text='use an IANA timezone name, e.g. "UTC" or "Europe/Berlin"',
+                ) from exc
             if sched.task_name not in self.app.tasks:
                 available = list(self.app.tasks.keys())
                 raise RegistryError(
