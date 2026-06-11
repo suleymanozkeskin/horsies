@@ -21,8 +21,12 @@ from sqlalchemy import text
 #     (idx_horsies_tasks_claim_expired_ordered) — the v3 expiry-filter
 #     index cannot serve the arm's ORDER BY, so deep expired backlogs
 #     paid a full sort under SKIP LOCKED.
+# v8: composite (workflow_id, status, task_index) on horsies_workflow_tasks
+#     (idx_horsies_workflow_tasks_wf_status_idx) — first-failed lookups ran
+#     an O(N) ordered scan per FAILED completion inside the workflow
+#     completion lock.
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))

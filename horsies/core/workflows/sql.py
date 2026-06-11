@@ -299,10 +299,10 @@ GET_WORKFLOW_COMPLETION_STATUS_SQL = text("""
         w.error,
         w.success_policy,
         w.name,
-        COUNT(*) FILTER (WHERE NOT (wt.status = ANY(:wf_task_terminal_states))) as incomplete,
-        COUNT(*) FILTER (WHERE wt.status = 'FAILED') as failed,
-        COUNT(*) FILTER (WHERE wt.status = 'COMPLETED') as completed,
-        COUNT(*) as total
+        COUNT(wt.id) FILTER (WHERE NOT (wt.status = ANY(:wf_task_terminal_states))) as incomplete,
+        COUNT(wt.id) FILTER (WHERE wt.status = 'FAILED') as failed,
+        COUNT(wt.id) FILTER (WHERE wt.status = 'COMPLETED') as completed,
+        COUNT(wt.id) as total
     FROM horsies_workflows w
     LEFT JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
     WHERE w.id = :wf_id
@@ -326,14 +326,21 @@ GET_PARENT_WORKFLOW_INFO_SQL = text("""
 """)
 # -- SQL constants for on_subworkflow_complete --
 
+# Single pass with COUNT FILTER instead of four correlated subqueries each
+# scanning the child's task set. total uses COUNT(wt.id), not COUNT(*):
+# the LEFT JOIN's null row must not count as 1 for a task-less workflow
+# (builder-unreachable, but free defense; FILTER counts are NULL-immune).
 GET_CHILD_WORKFLOW_INFO_SQL = text("""
     SELECT w.status, w.result, w.error, w.parent_workflow_id, w.parent_task_index,
-           (SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = w.id) as total,
-           (SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = w.id AND status = 'COMPLETED') as completed,
-           (SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = w.id AND status = 'FAILED') as failed,
-           (SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = w.id AND status = 'SKIPPED') as skipped
+           COUNT(wt.id) as total,
+           COUNT(wt.id) FILTER (WHERE wt.status = 'COMPLETED') as completed,
+           COUNT(wt.id) FILTER (WHERE wt.status = 'FAILED') as failed,
+           COUNT(wt.id) FILTER (WHERE wt.status = 'SKIPPED') as skipped
     FROM horsies_workflows w
+    LEFT JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
     WHERE w.id = :child_id
+    GROUP BY w.id, w.status, w.result, w.error, w.parent_workflow_id,
+             w.parent_task_index
 """)
 UPDATE_PARENT_NODE_RESULT_SQL = text("""
     UPDATE horsies_workflow_tasks
@@ -372,16 +379,25 @@ GET_OUTPUT_TASK_RESULT_SQL = text("""
     SELECT task_name, result FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id AND task_index = :idx
 """)
-GET_TERMINAL_TASK_RESULTS_SQL = text("""
-    SELECT wt.node_id, wt.task_index, wt.task_name, wt.result,
-           wt.sub_definition_key
-    FROM horsies_workflow_tasks wt
-    WHERE wt.workflow_id = :wf_id
-      AND NOT EXISTS (
-          SELECT 1 FROM horsies_workflow_tasks other
-          WHERE other.workflow_id = wt.workflow_id
-            AND other.dependencies @> ARRAY[wt.task_index]
-      )
+# Terminal-node resolution is two-step (payload-free edge read, then a
+# fetch of exactly the terminal rows) instead of a single anti-join: the
+# correlated form ran one GIN probe per row (162ms at N=1000 inside the
+# workflow completion lock), and a SQL-level anti-join rewrite is
+# plan-unstable — per-workflow row estimates come from per-table stats, so
+# the planner can flip to a nested-loop that re-runs the edge subquery per
+# row (measured 146ms). Computing the set difference in Python is O(N+E)
+# with no planner freedom.
+GET_WORKFLOW_DAG_EDGES_SQL = text("""
+    SELECT task_index, dependencies
+    FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id
+""")
+
+GET_TASK_RESULTS_BY_INDEXES_SQL = text("""
+    SELECT node_id, task_index, task_name, result, sub_definition_key
+    FROM horsies_workflow_tasks
+    WHERE workflow_id = :wf_id
+      AND task_index = ANY(:idxs)
 """)
 # -- SQL constants for _handle_workflow_task_failure --
 
