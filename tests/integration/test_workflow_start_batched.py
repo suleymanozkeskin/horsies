@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import event, text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
@@ -56,7 +56,6 @@ class TestBatchedStartShape:
         clean_workflow_tables: None,
         app: Horsies,
         broker: PostgresBroker,
-        engine: AsyncEngine,
     ) -> None:
         """Regression for the O(4N) start: 119 roots took ~477 sequential
         statements (~16s at 33ms RTT). The batched path must issue a flat,
@@ -239,8 +238,13 @@ class TestBatchedStartShape:
             )
         ).mappings().one()
         assert row['max_retries'] == 5  # len(intervals) defines max_retries
-        assert row['good_until'] is not None
-        assert deadline.isoformat() in str(row['good_until']) or True  # column stores the string form
+        # Column is timestamptz; the stored value derives from
+        # deadline.isoformat(), so parse-and-compare must be exact.
+        stored_deadline = row['good_until']
+        assert stored_deadline is not None
+        if isinstance(stored_deadline, str):
+            stored_deadline = datetime.fromisoformat(stored_deadline)
+        assert stored_deadline == deadline
         options = json.loads(row['task_options'])
         assert options['good_until'] == deadline.isoformat()
         assert options['retry_policy']['max_retries'] == 5
