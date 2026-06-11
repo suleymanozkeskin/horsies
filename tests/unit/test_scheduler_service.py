@@ -867,7 +867,6 @@ class TestInitializeSchedules:
         state_manager.get_all_states = AsyncMock(
             return_value=[foreign_state, kept_state],
         )
-        state_manager.delete_state = AsyncMock(return_value=True)
         state_manager.get_state = AsyncMock(return_value=None)
         state_manager.initialize_state = AsyncMock()
         state_manager.update_next_run = AsyncMock()
@@ -876,7 +875,6 @@ class TestInitializeSchedules:
         await scheduler._initialize_schedules()
 
         state_manager.get_all_states.assert_awaited_once()
-        state_manager.delete_state.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_one_bad_schedule_does_not_block_others(self) -> None:
@@ -905,7 +903,6 @@ class TestInitializeSchedules:
 
         state_manager = MagicMock()
         state_manager.get_all_states = AsyncMock(return_value=[])
-        state_manager.delete_state = AsyncMock()
         state_manager.get_state = AsyncMock(return_value=None)
 
         call_count = 0
@@ -1427,7 +1424,6 @@ class TestInitializeSchedulesAdditionalPaths:
 
         state_manager = MagicMock()
         state_manager.get_all_states = AsyncMock(return_value=[])
-        state_manager.delete_state = AsyncMock()
         state_manager.get_state = AsyncMock(return_value=None)
         state_manager.initialize_state = AsyncMock()
         scheduler.state_manager = state_manager
