@@ -1,7 +1,7 @@
 """Claim pipeline: budgeted, capped, ordered claiming per queue.
 
 ClaimMixin runs the claim-and-dispatch pass: compute the worker budget,
-serialize accounting under the cluster advisory mutex when caps demand
+serialize cap accounting under scoped advisory locks when caps demand
 it, claim per-queue batches with CLAIM_SQL, filter non-runnable
 workflow tasks, and hand rows to dispatch. Worker-internal mixin: the
 ``TYPE_CHECKING`` block declares the slice of ``Worker`` it relies on.
@@ -95,7 +95,7 @@ class ClaimMixin:
         else:
             # Hard cap mode: limit to processes
             max_claimed = self.cfg.processes
-        # Cluster-wide, lock-guarded claim to avoid races. One short transaction.
+        # Lock-guarded claim to avoid cap races. One short transaction.
         # CLAIM_SQL RETURNING provides dispatch payload directly (no separate load query).
         claimed_rows: list[dict[str, Any]] = []
 
@@ -358,6 +358,9 @@ class ClaimMixin:
 
         Workers in a capped cluster must share the same cap config — a
         mixed fleet already breaks cap semantics regardless of locking.
+        Version skew has the same shape: during a rolling deploy, old
+        workers (global key) and new workers (queue keys) do not contend,
+        so a queue cap can briefly overshoot by one pass's batch.
         """
         if self.cfg.cluster_wide_cap is not None:
             return [self._advisory_key_global()]

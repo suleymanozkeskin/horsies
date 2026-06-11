@@ -8,6 +8,8 @@ must contend) under a short asyncio timeout.
 
 from __future__ import annotations
 
+# pyright: reportPrivateUsage=false
+
 import asyncio
 from unittest.mock import MagicMock
 
