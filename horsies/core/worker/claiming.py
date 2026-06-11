@@ -99,25 +99,26 @@ class ClaimMixin:
         # CLAIM_SQL RETURNING provides dispatch payload directly (no separate load query).
         claimed_rows: list[dict[str, Any]] = []
 
-        # Queue order: if custom priorities provided, sort by priority; otherwise keep given order
-        if self.cfg.queue_priorities:
-            ordered_queues = sorted(
-                [q for q in self.cfg.queues if q in self.cfg.queue_priorities],
-                key=lambda q: self.cfg.queue_priorities.get(q, 100),
-            )
-        else:
-            ordered_queues = list(self.cfg.queues)
+        ordered_queues = self._ordered_claim_queues()
 
         # Open one transaction; serialize claim passes only when a
         # multi-worker read-then-act invariant exists (cluster/queue caps).
         # Without caps, CLAIM_SQL's FOR UPDATE SKIP LOCKED already makes
         # concurrent claiming safe, and the lock would only cap cluster
         # claim throughput at 1/claim-pass-latency.
+        #
+        # Lock scope: cluster_wide_cap takes the single global key (the
+        # invariant is global); otherwise one key per CAPPED queue in this
+        # pass, acquired in sorted order (deadlock prevention). Keys are
+        # transaction-scoped (PgBouncer transaction mode forbids session
+        # locks), so a mixed capped/uncapped pass holds the capped queues'
+        # locks while claiming its uncapped queues too — only passes with
+        # no capped queues are lock-free.
         async with self.sf() as s:
-            if self._claim_pass_needs_serialization():
+            for lock_key in self._claim_lock_keys(ordered_queues):
                 await s.execute(
                     CLAIM_ADVISORY_LOCK_SQL,
-                    {'key': self._advisory_key_global()},
+                    {'key': lock_key},
                 )
 
             # Compute local budget and optional global remaining
@@ -327,23 +328,57 @@ class ClaimMixin:
         blocked_task_ids = paused_task_ids | cancelled_task_ids
         return [row for row in rows if row['id'] not in blocked_task_ids]
 
-    def _claim_pass_needs_serialization(self) -> bool:
-        """Whether the claim pass must hold the cluster advisory lock.
+    def _ordered_claim_queues(self) -> list[str]:
+        """Queues this pass claims from, in claim order.
 
-        Serialization is required only for read-then-act cap accounting:
-        a cluster_wide_cap, or an active per-queue max_concurrency (CUSTOM
-        mode with a configured queue this worker claims from). Workers in a
-        capped cluster must share the same cap config — a mixed fleet
-        already breaks cap semantics regardless of locking.
+        CUSTOM mode sorts by priority and drops queues absent from
+        queue_priorities; DEFAULT mode keeps the configured order. The
+        claim loop and `_claim_lock_keys` must consume the SAME list so
+        the pass never locks a queue it will not claim from.
+        """
+        if self.cfg.queue_priorities:
+            return sorted(
+                [q for q in self.cfg.queues if q in self.cfg.queue_priorities],
+                key=lambda q: self.cfg.queue_priorities.get(q, 100),
+            )
+        return list(self.cfg.queues)
+
+    def _claim_lock_keys(self, ordered_queues: list[str]) -> list[int]:
+        """Advisory keys the claim pass must hold, in acquisition order.
+
+        Serialization exists only for read-then-act cap accounting:
+        - cluster_wide_cap: the invariant is global, so the single global
+          key (per-queue scoping cannot help; it also subsumes any queue
+          caps).
+        - per-queue max_concurrency: one key per capped queue in THIS
+          pass, sorted by key value so concurrent workers acquiring
+          multiple keys cannot deadlock. Workers claiming disjoint capped
+          queues no longer contend.
+        - no caps: empty (SKIP LOCKED alone is safe).
+
+        Workers in a capped cluster must share the same cap config — a
+        mixed fleet already breaks cap semantics regardless of locking.
         """
         if self.cfg.cluster_wide_cap is not None:
-            return True
+            return [self._advisory_key_global()]
         if not self.cfg.queue_priorities:
-            return False
-        return any(
-            queue_name in self.cfg.queue_max_concurrency
-            for queue_name in self.cfg.queues
+            return []
+        return sorted(
+            self._advisory_key_for_queue(queue_name)
+            for queue_name in ordered_queues
+            if queue_name in self.cfg.queue_max_concurrency
         )
+
+    def _advisory_key_for_queue(self, queue_name: str) -> int:
+        """Stable 64-bit advisory key scoping claim serialization to one queue.
+
+        Same fixed-namespace discipline as `_advisory_key_global` (a
+        DSN-derived ingredient would silently split the lock between
+        workers using different DSN spellings of the same database).
+        """
+        basis = b'horsies:claim:queue:v1:' + queue_name.encode('utf-8')
+        h = hashlib.sha256(basis).digest()
+        return int.from_bytes(h[:8], byteorder='big', signed=True)
 
     def _advisory_key_global(self) -> int:
         """Compute a stable 64-bit advisory lock key for claim serialization.

@@ -270,39 +270,73 @@ class TestAdvisoryKeyGlobal:
 
 
 @pytest.mark.unit
-class TestClaimPassNeedsSerialization:
-    """The claim advisory lock is taken only when cap accounting needs it."""
+class TestClaimLockKeys:
+    """Claim advisory keys are taken only when cap accounting needs them,
+    scoped per capped queue (cluster_wide_cap keeps the single global key)."""
 
-    def test_no_caps_skips_lock(self) -> None:
+    @staticmethod
+    def _keys(w: Worker) -> list[int]:
+        return w._claim_lock_keys(w._ordered_claim_queues())
+
+    def test_no_caps_takes_no_locks(self) -> None:
         w = _make_worker()
-        assert w._claim_pass_needs_serialization() is False
+        assert self._keys(w) == []
 
-    def test_cluster_wide_cap_requires_lock(self) -> None:
-        w = _make_worker(cluster_wide_cap=10)
-        assert w._claim_pass_needs_serialization() is True
-
-    def test_active_queue_cap_requires_lock(self) -> None:
+    def test_cluster_wide_cap_takes_only_the_global_key(self) -> None:
         w = _make_worker(
+            cluster_wide_cap=10,
             queues=["q1"],
             queue_priorities={"q1": 1},
             queue_max_concurrency={"q1": 5},
         )
-        assert w._claim_pass_needs_serialization() is True
+        assert self._keys(w) == [w._advisory_key_global()]
 
-    def test_priorities_without_concurrency_caps_skip_lock(self) -> None:
+    def test_capped_queues_get_one_sorted_key_each(self) -> None:
+        w = _make_worker(
+            queues=["q1", "q2", "q3"],
+            queue_priorities={"q1": 1, "q2": 2, "q3": 3},
+            queue_max_concurrency={"q1": 5, "q3": 2},
+        )
+        keys = self._keys(w)
+        expected = {w._advisory_key_for_queue("q1"), w._advisory_key_for_queue("q3")}
+        assert set(keys) == expected
+        assert keys == sorted(keys)  # deadlock prevention: stable order
+        assert w._advisory_key_global() not in keys
+
+    def test_priorities_without_concurrency_caps_take_no_locks(self) -> None:
         w = _make_worker(
             queues=["q1"],
             queue_priorities={"q1": 1},
         )
-        assert w._claim_pass_needs_serialization() is False
+        assert self._keys(w) == []
 
-    def test_cap_on_foreign_queue_skips_lock(self) -> None:
+    def test_cap_on_foreign_queue_takes_no_locks(self) -> None:
         w = _make_worker(
             queues=["q1"],
             queue_priorities={"q1": 1},
             queue_max_concurrency={"other_queue": 5},
         )
-        assert w._claim_pass_needs_serialization() is False
+        assert self._keys(w) == []
+
+    def test_keys_derive_from_the_claimed_list_not_raw_config(self) -> None:
+        """A capped queue dropped by the priority filter (absent from
+        queue_priorities) is not claimed, so it must not be locked."""
+        w = _make_worker(
+            queues=["q1", "unprioritized"],
+            queue_priorities={"q1": 1},
+            queue_max_concurrency={"q1": 5, "unprioritized": 5},
+        )
+        assert w._ordered_claim_queues() == ["q1"]
+        assert self._keys(w) == [w._advisory_key_for_queue("q1")]
+
+    def test_queue_keys_stable_and_distinct(self) -> None:
+        w = _make_worker()
+        k1 = w._advisory_key_for_queue("alpha")
+        assert k1 == w._advisory_key_for_queue("alpha")
+        assert k1 != w._advisory_key_for_queue("beta")
+        assert k1 != w._advisory_key_global()
+        # fits signed BIGINT (pg_advisory_xact_lock takes int8)
+        assert -(2**63) <= k1 < 2**63
 
 
 # ---------------------------------------------------------------------------
