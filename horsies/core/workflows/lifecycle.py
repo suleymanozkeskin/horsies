@@ -25,6 +25,7 @@ from horsies.core.codec.json_io import dumps_json, loads_json, SerializationErro
 from horsies.core.types.result import Ok, Err, is_err as _is_err
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
+    TaskNode,
     WorkflowHandle,
     SubWorkflowNode,
     validate_workflow_generic_output_match,
@@ -43,12 +44,13 @@ from horsies.core.workflows.start_types import (
     WorkflowStartErrorCode,
     WorkflowStartResult,
 )
+from horsies.core.utils.fingerprint import enqueue_fingerprint
 from horsies.core.workflows.sql import (
+    INSERT_TASK_FOR_WORKFLOW_SQL,
+    INSERT_WORKFLOW_TASKS_BULK_SQL,
     CHECK_WORKFLOW_EXISTS_SQL,
     GET_WORKFLOW_NAME_SQL,
     INSERT_WORKFLOW_SQL,
-    INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL,
-    INSERT_WORKFLOW_TASK_SQL,
     PAUSE_WORKFLOW_SQL,
     NOTIFY_WORKFLOW_DONE_SQL,
     GET_RUNNING_CHILD_WORKFLOWS_SQL,
@@ -136,6 +138,64 @@ def guard_no_positional_args(node_name: str, args: tuple[Any, ...]) -> None:
         )
 
 
+
+
+def _root_retry_and_deadline(
+    task_options_json: str | None,
+    node_name: str,
+) -> tuple[int, str | None, datetime | None]:
+    """Extract (max_retries, good_until_str, good_until_dt) for a fast-path root.
+
+    Mirrors enqueue_workflow_task's task_options parsing. One deliberate
+    difference: the promotion path folds corrupt options into a FAILED task
+    (it re-reads rows written by another transaction); here the JSON was
+    serialized moments ago in this same call, so corruption is a horsies
+    bug — raise SerializationError and fail the whole start loudly
+    (VALIDATION_FAILED, transaction rolled back).
+
+    Raises:
+        SerializationError: task_options_json does not parse to an object,
+            or retry_policy.max_retries is not an int.
+    """
+    max_retries = 0
+    good_until_str: str | None = None
+    good_until_dt: datetime | None = None
+    if not task_options_json:
+        return max_retries, good_until_str, good_until_dt
+
+    parsed_r = loads_json(task_options_json)
+    if _is_err(parsed_r) or not isinstance(parsed_r.ok_value, dict):
+        raise SerializationError(
+            f'Corrupt task_options for root node {node_name}',
+        )
+    options = parsed_r.ok_value
+    retry_policy = options.get('retry_policy')
+    if isinstance(retry_policy, dict):
+        # Default 3 mirrors RetryPolicy.max_retries (same as the engine).
+        max_retries_raw = retry_policy.get('max_retries', 3)
+        if isinstance(max_retries_raw, bool) or not isinstance(
+            max_retries_raw, int
+        ):
+            raise SerializationError(
+                f'Invalid max_retries in retry_policy for root node '
+                f'{node_name}: {max_retries_raw!r}',
+            )
+        max_retries = max_retries_raw
+    good_until_raw = options.get('good_until')
+    if good_until_raw is not None:
+        good_until_str = str(good_until_raw)
+        try:
+            good_until_dt = datetime.fromisoformat(good_until_str)
+        except (ValueError, TypeError) as exc:
+            # SHA will use None; good_until_str is still passed to the DB
+            # column. Loud — fingerprint and stored deadline diverge.
+            logger.warning(
+                'Unparseable good_until for root node %s (%r): %s',
+                node_name,
+                good_until_raw,
+                exc,
+            )
+    return max_retries, good_until_str, good_until_dt
 
 
 async def start_workflow_async(
@@ -331,11 +391,32 @@ async def start_workflow_async(
             ),
                     ))
 
-                # 2. Insert all workflow_tasks
-                # NOTE: Serialization failures (_ser_or_raise) can raise mid-loop after
-                # prior INSERTs have executed. This is safe because commit happens after
-                # the entire loop. An exception here rolls back the
-                # uncommitted transaction — no partial workflow state is persisted.
+                # 2+3. Build every node row in memory, then bulk insert.
+                # The previous shape executed one INSERT per node plus
+                # three statements per root, sequentially — O(4N) round
+                # trips in one transaction (~16s at N=119 against a
+                # ~33ms-RTT remote database). The batched shape is a fixed
+                # handful of pipelined statements.
+                #
+                # Fast-path roots (plain TaskNodes without args_from /
+                # workflow_ctx_from) are inserted directly as ENQUEUED with
+                # task_id pre-linked and their horsies_tasks row created in
+                # the same batch. The READY->ENQUEUED CAS that the
+                # promotion path performs is vacuous here: these rows are
+                # created in this same uncommitted transaction (see
+                # INSERT_WORKFLOW_TASKS_BULK_SQL). Subworkflow roots and
+                # args_from/ctx_from roots keep the per-row path below —
+                # they need recursive child starts or engine-owned
+                # context assembly and conflict checks.
+                #
+                # NOTE: serialization failures (_ser_or_raise) raise while
+                # building params, before any INSERT executes — the
+                # transaction rolls back with no partial state, same
+                # guarantee the old mid-loop raise had.
+                node_params: list[dict[str, Any]] = []
+                fast_root_task_params: list[dict[str, Any]] = []
+                slow_root_nodes: list[TaskNode[Any] | SubWorkflowNode[Any]] = []
+
                 for node in spec.tasks:
                     dep_indices = [d.index for d in node.waits_for if d.index is not None]
                     args_from_indices = {
@@ -346,109 +427,184 @@ async def start_workflow_async(
                         if node.workflow_ctx_from
                         else None
                     )
+                    args_from_json = (
+                        _ser_or_raise(dumps_json(args_from_indices), 'args_from')
+                        if args_from_indices
+                        else None
+                    )
+                    is_root = not node.waits_for
 
                     wt_id = str(uuid.uuid4())
 
                     if isinstance(node, SubWorkflowNode):
                         # SubWorkflowNode: no fn, queue, priority, good_until
                         guard_no_positional_args(node.name, node.args)
-                        await session.execute(
-                            INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL,
-                            {
-                                'id': wt_id,
-                                'wf_id': wf_id,
-                                'idx': node.index,
-                                'node_id': node.node_id,
-                                'name': node.name,
-                                'args': _ser_or_raise(dumps_json([]), 'positional args'),  # kwargs-only: positional args not persisted
-                                'kwargs': _ser_or_raise(
-                                    dumps_json(
-                                        encode_subworkflow_kwargs(
-                                            node.workflow_def, node.kwargs,
-                                        ),
+                        if is_root:
+                            slow_root_nodes.append(node)
+                        node_params.append({
+                            'id': wt_id,
+                            'wf_id': wf_id,
+                            'idx': node.index,
+                            'node_id': node.node_id,
+                            'name': node.name,
+                            'args': _ser_or_raise(dumps_json([]), 'positional args'),  # kwargs-only: positional args not persisted
+                            'kwargs': _ser_or_raise(
+                                dumps_json(
+                                    encode_subworkflow_kwargs(
+                                        node.workflow_def, node.kwargs,
                                     ),
-                                    f'kwargs for node {node.name}',
                                 ),
-                                'queue': 'default',  # SubWorkflowNode doesn't have queue
-                                'priority': 100,  # SubWorkflowNode doesn't have priority
-                                'deps': dep_indices,
-                                'args_from': _ser_or_raise(dumps_json(args_from_indices), 'args_from')
-                                if args_from_indices
-                                else None,
-                                'ctx_from': ctx_from_ids,
-                                'allow_failed': node.allow_failed_deps,
-                                'join_type': node.join,
-                                'min_success': node.min_success,
-                                'task_options': None,
-                                'status': 'PENDING' if dep_indices else 'READY',
-                                'sub_wf_name': node.workflow_def.name,
-                                'sub_def_key': node.workflow_def._require_definition_key(),
-                            },
-                        )
-                    else:
-                        # TaskNode: has fn, queue, priority, good_until
-                        task = node
-                        guard_no_positional_args(task.name, task.args)
+                                f'kwargs for node {node.name}',
+                            ),
+                            'queue': 'default',  # SubWorkflowNode doesn't have queue
+                            'priority': 100,  # SubWorkflowNode doesn't have priority
+                            'deps': dep_indices,
+                            'args_from': args_from_json,
+                            'ctx_from': ctx_from_ids,
+                            'allow_failed': node.allow_failed_deps,
+                            'join_type': node.join,
+                            'min_success': node.min_success,
+                            'task_options': None,
+                            'status': 'PENDING' if dep_indices else 'READY',
+                            'is_subworkflow': True,
+                            'sub_wf_name': node.workflow_def.name,
+                            'sub_def_key': node.workflow_def._require_definition_key(),
+                            'task_id': None,
+                            'is_enqueued': False,
+                        })
+                        continue
 
-                        # Get task_options_json from the task function (set by @task decorator)
-                        # and merge in TaskNode.good_until if set
-                        task_options_json: str | None = getattr(
-                            task.fn, 'task_options_json', None
-                        )
-                        if task.good_until is not None:
-                            # Merge good_until from TaskNode into task_options
-                            base_options: dict[str, Any] = {}
-                            if task_options_json:
-                                parsed_r = loads_json(task_options_json)
-                                if _is_err(parsed_r):
-                                    raise SerializationError(
-                                        f'Corrupt task_options_json for node {task.name}: {parsed_r.err_value}',
-                                    )
-                                if isinstance(parsed_r.ok_value, dict):
-                                    base_options = parsed_r.ok_value
-                            base_options['good_until'] = task.good_until.isoformat()
-                            task_options_json = _ser_or_raise(
-                                dumps_json(base_options),
-                                f'task_options for node {task.name}',
-                            )
+                    # TaskNode: has fn, queue, priority, good_until
+                    task = node
+                    guard_no_positional_args(task.name, task.args)
 
-                        await session.execute(
-                            INSERT_WORKFLOW_TASK_SQL,
-                            {
-                                'id': wt_id,
-                                'wf_id': wf_id,
-                                'idx': task.index,
-                                'node_id': task.node_id,
-                                'name': task.name,
-                                'args': _ser_or_raise(dumps_json([]), 'positional args'),  # kwargs-only: positional args not persisted
-                                'kwargs': _ser_or_raise(
-                                    dumps_json(
-                                        _encode_node_kwargs_or_raise(task),
-                                    ),
-                                    f'kwargs for node {task.name}',
-                                ),
-                                # Queue: use override, else task's declared queue, else "default"
-                                'queue': task.queue
-                                or getattr(task.fn, 'task_queue_name', None)
-                                or 'default',
-                                # Priority: use override, else default
-                                'priority': task.priority if task.priority is not None else 100,
-                                'deps': dep_indices,
-                                'args_from': _ser_or_raise(dumps_json(args_from_indices), 'args_from')
-                                if args_from_indices
-                                else None,
-                                'ctx_from': ctx_from_ids,
-                                'allow_failed': task.allow_failed_deps,
-                                'join_type': task.join,
-                                'min_success': task.min_success,
-                                'task_options': task_options_json,
-                                'status': 'PENDING' if dep_indices else 'READY',
-                            },
+                    # Get task_options_json from the task function (set by @task decorator)
+                    # and merge in TaskNode.good_until if set
+                    task_options_json: str | None = getattr(
+                        task.fn, 'task_options_json', None
+                    )
+                    if task.good_until is not None:
+                        # Merge good_until from TaskNode into task_options
+                        base_options: dict[str, Any] = {}
+                        if task_options_json:
+                            parsed_r = loads_json(task_options_json)
+                            if _is_err(parsed_r):
+                                raise SerializationError(
+                                    f'Corrupt task_options_json for node {task.name}: {parsed_r.err_value}',
+                                )
+                            if isinstance(parsed_r.ok_value, dict):
+                                base_options = parsed_r.ok_value
+                        base_options['good_until'] = task.good_until.isoformat()
+                        task_options_json = _ser_or_raise(
+                            dumps_json(base_options),
+                            f'task_options for node {task.name}',
                         )
 
-                # 3. Enqueue root tasks (no dependencies)
-                root_nodes = [t for t in spec.tasks if not t.waits_for]
-                for root_node in root_nodes:
+                    encoded_kwargs = _encode_node_kwargs_or_raise(task)
+                    # Queue: use override, else task's declared queue, else "default"
+                    resolved_queue = (
+                        task.queue
+                        or getattr(task.fn, 'task_queue_name', None)
+                        or 'default'
+                    )
+                    resolved_priority = (
+                        task.priority if task.priority is not None else 100
+                    )
+                    args_json = _ser_or_raise(dumps_json([]), 'positional args')  # kwargs-only: positional args not persisted
+
+                    is_fast_root = (
+                        is_root and not args_from_indices and not ctx_from_ids
+                    )
+                    task_id: str | None = None
+                    if is_fast_root:
+                        task_id = str(uuid.uuid4())
+                        max_retries, good_until_str, good_until_dt = (
+                            _root_retry_and_deadline(task_options_json, task.name)
+                        )
+                        # Task-row kwargs = node kwargs + workflow_meta
+                        # (mirrors enqueue_workflow_task; args_from/ctx
+                        # injection is structurally absent on fast roots).
+                        task_kwargs: dict[str, Any] = dict(encoded_kwargs)
+                        task_kwargs['__h_workflow_meta__'] = {
+                            'workflow_id': wf_id,
+                            'task_index': task.index,
+                            'task_name': task.name,
+                        }
+                        task_kwargs_json = _ser_or_raise(
+                            dumps_json(task_kwargs),
+                            f'task kwargs for node {task.name}',
+                        )
+                        task_sent_at = datetime.now(timezone.utc)
+                        sha = enqueue_fingerprint(
+                            task_name=task.name,
+                            queue_name=resolved_queue,
+                            priority=resolved_priority,
+                            args_json=args_json,
+                            kwargs_json=task_kwargs_json,
+                            sent_at=task_sent_at,
+                            good_until=good_until_dt,
+                            enqueue_delay_seconds=None,
+                            task_options=task_options_json,
+                        )
+                        fast_root_task_params.append({
+                            'id': task_id,
+                            'name': task.name,
+                            'queue': resolved_queue,
+                            'priority': resolved_priority,
+                            'args': args_json,
+                            'kwargs': task_kwargs_json,
+                            'sent_at': task_sent_at,
+                            'max_retries': max_retries,
+                            'task_options': task_options_json,
+                            'good_until': good_until_str,
+                            'enqueue_sha': sha,
+                        })
+                    elif is_root:
+                        slow_root_nodes.append(task)
+
+                    node_params.append({
+                        'id': wt_id,
+                        'wf_id': wf_id,
+                        'idx': task.index,
+                        'node_id': task.node_id,
+                        'name': task.name,
+                        'args': args_json,
+                        'kwargs': _ser_or_raise(
+                            dumps_json(encoded_kwargs),
+                            f'kwargs for node {task.name}',
+                        ),
+                        'queue': resolved_queue,
+                        'priority': resolved_priority,
+                        'deps': dep_indices,
+                        'args_from': args_from_json,
+                        'ctx_from': ctx_from_ids,
+                        'allow_failed': task.allow_failed_deps,
+                        'join_type': task.join,
+                        'min_success': task.min_success,
+                        'task_options': task_options_json,
+                        'status': 'ENQUEUED'
+                        if is_fast_root
+                        else ('PENDING' if dep_indices else 'READY'),
+                        'is_subworkflow': False,
+                        'sub_wf_name': None,
+                        'sub_def_key': None,
+                        'task_id': task_id,
+                        'is_enqueued': task_id is not None,
+                    })
+
+                if node_params:
+                    await session.execute(
+                        INSERT_WORKFLOW_TASKS_BULK_SQL, node_params,
+                    )
+                if fast_root_task_params:
+                    await session.execute(
+                        INSERT_TASK_FOR_WORKFLOW_SQL, fast_root_task_params,
+                    )
+
+                # Slow-path roots: subworkflows start child workflows
+                # recursively; args_from/ctx_from roots go through the
+                # engine's enqueue (context assembly, conflict checks).
+                for root_node in slow_root_nodes:
                     if root_node.index is not None:
                         if isinstance(root_node, SubWorkflowNode):
                             # Start child workflow

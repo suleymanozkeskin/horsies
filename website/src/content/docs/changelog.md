@@ -11,6 +11,19 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
+### Performance
+
+- Workflow start is batched: node rows and fast-path root tasks (plain
+  TaskNodes without `args_from`/`workflow_ctx_from`) are built in memory
+  and inserted in a fixed handful of pipelined statements instead of one
+  INSERT per node plus three statements per root. Measured against a
+  remote (~33ms RTT) Postgres: starting a 119-root workflow dropped from
+  ~16s to ~0.35s; statement count is flat in workflow size. Subworkflow
+  roots and `args_from`/`ctx_from` roots keep the per-row path. Start
+  semantics are unchanged: `Ok(handle)` still means durably persisted,
+  one transaction, idempotent restart by workflow_id, whole-start
+  rollback on failure.
+
 ### Changed
 
 - The claim advisory lock is scoped per capped queue (cluster_wide_cap

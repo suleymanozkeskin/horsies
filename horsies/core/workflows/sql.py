@@ -33,6 +33,29 @@ INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL = text("""
             :task_options, :status, TRUE, :sub_wf_name,
             :sub_def_key, NOW())
 """)
+# Unified bulk node insert for workflow start (executemany over all nodes
+# in one pipelined batch). Differences from the per-row inserts above:
+# - covers BOTH node kinds (sub_* fields NULL + is_subworkflow FALSE for
+#   TaskNodes);
+# - fast-path roots are inserted directly as ENQUEUED with task_id set and
+#   started_at = NOW() — mirroring ENQUEUE_WORKFLOW_TASK_SQL's column
+#   effects. The READY->ENQUEUED CAS that statement performs protects the
+#   cross-transaction promotion path; at start time these rows are created
+#   in the same uncommitted transaction, so the CAS is vacuous.
+# - :is_enqueued is a separate boolean param (not derived from :status) to
+#   avoid psycopg AmbiguousParameter on a twice-used parameter.
+INSERT_WORKFLOW_TASKS_BULK_SQL = text("""
+    INSERT INTO horsies_workflow_tasks
+    (id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+     queue_name, priority, dependencies, args_from, workflow_ctx_from,
+     allow_failed_deps, join_type, min_success, task_options, status,
+     is_subworkflow, sub_workflow_name, sub_definition_key, task_id,
+     started_at, created_at)
+    VALUES (:id, :wf_id, :idx, :node_id, :name, :args, :kwargs, :queue, :priority,
+            :deps, :args_from, :ctx_from, :allow_failed, :join_type, :min_success,
+            :task_options, :status, :is_subworkflow, :sub_wf_name, :sub_def_key,
+            :task_id, CASE WHEN :is_enqueued THEN NOW() END, NOW())
+""")
 INSERT_WORKFLOW_TASK_SQL = text("""
     INSERT INTO horsies_workflow_tasks
     (id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
