@@ -16,7 +16,7 @@ import asyncio
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
 from pydantic import ValidationError
 from sqlalchemy import text
@@ -39,11 +39,13 @@ from horsies.core.models.tasks import (
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.worker.runtime import (
     _FINALIZE_FUTURE_MAX_RETRIES,
+    _FINALIZE_PARENT_MAX_RETRIES,
     _FINALIZE_PHASE1_MAX_RETRIES,
     _FINALIZE_PHASE2_MAX_RETRIES,
     _FINALIZE_RETRY_BASE_DELAY_S,
     _FINALIZE_RETRY_MAX_DELAY_S,
     _FINALIZE_STAGE_FUTURE,
+    _FINALIZE_STAGE_PARENT,
     _FINALIZE_STAGE_PHASE1,
     _FINALIZE_STAGE_PHASE2,
     _FinalizeError,
@@ -698,7 +700,16 @@ class FinalizeMixin:
         queue_name: str = 'default',
         is_workflow_task: bool = True,
     ) -> Result[None, _FinalizeError]:
-        """Phase 2 of finalization: workflow advancement and worker wake notifications."""
+        """Phase 2 of finalization: workflow advancement and worker wake notifications.
+
+        Parent propagation queued by the completion check is driven AFTER
+        this transaction commits, one fresh transaction per ancestor level
+        (_drive_parent_propagations) — the pre-denest in-transaction
+        recursion accumulated FOR UPDATE locks root-ward across the chain.
+        """
+        from horsies.core.workflows.engine import pop_pending_parent_propagations
+
+        pending_propagations: list[str] = []
         try:
             async with self.sf() as s:
                 # Handle workflow task completion (if this task is part of a workflow)
@@ -723,8 +734,7 @@ class FinalizeMixin:
 
                 # Trigger automatically sends NOTIFY on UPDATE; commit to flush NOTIFYs
                 await s.commit()
-
-            return Ok(None)
+                pending_propagations = pop_pending_parent_propagations(s)
         except Exception as exc:
             return Err(
                 self._make_finalize_error(
@@ -742,6 +752,14 @@ class FinalizeMixin:
                     },
                 )
             )
+
+        # Outside the try deliberately: a phase2 retry cannot re-reach
+        # propagation past the task-level terminal CAS, so propagation must
+        # never fold into a phase2 error. The driver is total — each level's
+        # failure goes to the parent_propagation retry stage.
+        if pending_propagations:
+            await self._drive_parent_propagations(pending_propagations)
+        return Ok(None)
 
     async def _load_persisted_task_result(
         self, task_id: str
@@ -898,6 +916,8 @@ class FinalizeMixin:
             max_attempts = _FINALIZE_PHASE1_MAX_RETRIES
         elif stage == _FINALIZE_STAGE_PHASE2:
             max_attempts = _FINALIZE_PHASE2_MAX_RETRIES
+        elif stage == _FINALIZE_STAGE_PARENT:
+            max_attempts = _FINALIZE_PARENT_MAX_RETRIES
         else:
             logger.error(
                 f'Finalize error ({task_id}) stage={stage}: {err.message}; data={err.data}'
@@ -943,6 +963,12 @@ class FinalizeMixin:
             self._spawn_background(
                 self._retry_finalize_phase1(err, delay),
                 name=f'finalize-retry-phase1-{task_id}',
+                finalizer=True,
+            )
+        elif stage == _FINALIZE_STAGE_PARENT:
+            self._spawn_background(
+                self._retry_finalize_parent(err, delay),
+                name=f'finalize-retry-parent-{task_id}',
                 finalizer=True,
             )
         else:
@@ -1089,6 +1115,74 @@ class FinalizeMixin:
             return
 
         self._clear_finalize_retry_attempts(err.task_id, _FINALIZE_STAGE_PHASE2)
+
+    async def _drive_parent_propagations(self, child_workflow_ids: list[str]) -> None:
+        """Advance parent workflows, one fresh transaction per ancestor level.
+
+        Each completed child workflow advances its parent in its own
+        transaction; a level's completion check may queue the grandparent,
+        extending the worklist — iterative, never recursive, no nested
+        FOR UPDATE locks.
+
+        Total: a level's failure folds into a parent_propagation-stage
+        finalize error carrying the remaining worklist; the bounded retry
+        re-enters the chain from there (a phase2 retry could not — the
+        task-level terminal CAS blocks it). Recovery case 1.6 is the
+        backstop when retries exhaust or the worker dies (requires
+        recovery_config; without it a dropped chain waits for resume).
+        """
+        from horsies.core.workflows.engine import (
+            on_subworkflow_complete,
+            pop_pending_parent_propagations,
+        )
+
+        worklist = list(child_workflow_ids)
+        while worklist:
+            child_id = worklist.pop(0)
+            try:
+                async with self.sf() as s:
+                    await on_subworkflow_complete(s, child_id, self.broker)
+                    await s.commit()
+                    worklist.extend(pop_pending_parent_propagations(s))
+            except Exception as exc:
+                await self._handle_finalize_error(
+                    self._make_finalize_error(
+                        task_id=child_id,
+                        stage=_FINALIZE_STAGE_PARENT,
+                        message='Parent propagation failed after child workflow completed',
+                        retryable=is_retryable_connection_error(exc),
+                        data={
+                            'child_workflow_ids': [child_id, *worklist],
+                            'exception_type': type(exc).__name__,
+                            'exception': str(exc)[:500],
+                        },
+                    )
+                )
+                return
+            self._clear_finalize_retry_attempts(child_id, _FINALIZE_STAGE_PARENT)
+
+    async def _retry_finalize_parent(self, err: _FinalizeError, delay_s: float) -> None:
+        """Re-enter the parent-propagation chain from the captured worklist.
+
+        Total by composition: every subcall either returns a Result/outcome
+        value or is itself total. Cancellation is the exemption: it escapes
+        every await and the done-callback drops it silently. Any other
+        escape is logged by the background-task done-callback.
+        """
+        await self._sleep_with_stop(delay_s)
+        if self._stop.is_set():
+            return
+
+        raw_ids = (err.data or {}).get('child_workflow_ids')
+        if not isinstance(raw_ids, list) or not all(
+            isinstance(i, str) for i in cast('list[Any]', raw_ids)
+        ):
+            logger.error(
+                f'Parent-propagation retry missing worklist payload for {err.task_id}'
+            )
+            self._clear_finalize_retry_attempts(err.task_id, _FINALIZE_STAGE_PARENT)
+            return
+        await self._drive_parent_propagations(cast('list[str]', raw_ids))
 
     async def _handle_workflow_task_if_needed(
         self,

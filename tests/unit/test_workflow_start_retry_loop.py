@@ -125,6 +125,7 @@ class TestRetryOnTransientErrors:
 
         # First two calls raise, third succeeds
         mock_session = AsyncMock()
+        mock_session.info = {}
         insert_result = MagicMock()
         insert_result.scalar_one_or_none.return_value = 'wf-1'
         mock_session.execute = AsyncMock(return_value=insert_result)
@@ -169,6 +170,7 @@ class TestRetryOnTransientErrors:
         schema_err.exception = None
 
         mock_session = AsyncMock()
+        mock_session.info = {}
         insert_result = MagicMock()
         insert_result.scalar_one_or_none.return_value = 'wf-1'
         mock_session.execute = AsyncMock(return_value=insert_result)

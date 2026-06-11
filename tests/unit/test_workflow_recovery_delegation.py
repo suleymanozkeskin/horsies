@@ -24,6 +24,7 @@ class TestWorkflowRecoveryDelegation:
     @pytest.mark.asyncio
     async def test_case_2_3_delegates_to_check_workflow_completion(self) -> None:
         session = AsyncMock()
+        session.info = {}
 
         async def _execute(stmt: Any, *_args: Any, **_kwargs: Any) -> MagicMock:
             if stmt is recovery.GET_PENDING_WITH_TERMINAL_DEPS_SQL:
@@ -77,6 +78,7 @@ class TestRecoveryScanRowCap:
     @staticmethod
     def _capture_session(captured: list[Any]) -> AsyncMock:
         session = AsyncMock()
+        session.info = {}
 
         async def _execute(
             stmt: Any, params: dict[str, Any], *_args: Any, **_kwargs: Any
