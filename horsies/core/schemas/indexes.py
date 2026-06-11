@@ -12,6 +12,15 @@ CREATE_WORKFLOW_TASKS_DEPS_INDEX_SQL = text("""
     ON horsies_workflow_tasks USING GIN(dependencies);
 """)
 
+# v8: serves the first-failed lookups (GET_FIRST_FAILED_TASK_RESULT_SQL and
+# the required-task variant), which filter workflow_id + status and order by
+# task_index. Without it, every FAILED completion paid an O(N) ordered scan
+# of the workflow's rows inside the completion lock.
+CREATE_WORKFLOW_TASKS_WF_STATUS_IDX_INDEX_SQL = text("""
+    CREATE INDEX IF NOT EXISTS idx_horsies_workflow_tasks_wf_status_idx
+    ON horsies_workflow_tasks (workflow_id, status, task_index);
+""")
+
 # Composite index for latest-heartbeat lookups.
 # Also defined in TaskHeartbeatModel.__table_args__ for fresh installs via create_all;
 # the raw SQL here is the upgrade path for existing databases missing the index.

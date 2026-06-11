@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,8 +58,9 @@ from horsies.core.workflows.sql import (
     GET_PARENT_WORKFLOW_INFO_SQL,
     GET_SUBWORKFLOW_SUMMARIES_SQL,
     GET_TASK_CONFIG_SQL,
+    GET_TASK_RESULTS_BY_INDEXES_SQL,
     GET_TASK_STATUSES_SQL,
-    GET_TERMINAL_TASK_RESULTS_SQL,
+    GET_WORKFLOW_DAG_EDGES_SQL,
     GET_WORKFLOW_COMPLETION_STATUS_SQL,
     GET_WORKFLOW_DEPTH_SQL,
     GET_WORKFLOW_NAME_SQL,
@@ -2438,6 +2440,22 @@ async def get_workflow_failure_error(
 
 
 
+def _compute_terminal_indexes(edge_rows: Sequence[Any]) -> list[int]:
+    """Indexes of tasks that no other task depends on (terminal DAG nodes).
+
+    Pure set difference over payload-free edge rows (task_index,
+    dependencies); O(N+E). Lives in Python instead of an anti-join because
+    per-workflow row estimates make the SQL plan unstable (see
+    GET_WORKFLOW_DAG_EDGES_SQL).
+    """
+    all_indexes: set[int] = set()
+    referenced: set[int] = set()
+    for row in edge_rows:
+        all_indexes.add(row.task_index)
+        referenced.update(row.dependencies or ())
+    return sorted(all_indexes - referenced)
+
+
 async def get_workflow_final_result(
     session: AsyncSession,
     workflow_id: str,
@@ -2468,15 +2486,23 @@ async def get_workflow_final_result(
         return output_row.result if output_row and output_row.result else 'null'
 
     # Find terminal tasks (not in any other task's dependencies).
+    # Two-step: payload-free edge read, set difference in Python, then
+    # fetch exactly the terminal rows (see GET_WORKFLOW_DAG_EDGES_SQL for
+    # why this is not a single anti-join).
     # Strict-serde phase 5/6: each row already carries a
     # `__h_task_result__` envelope (worker emits these via
     # `encode_task_result`). Per-node typed decode happens at the
     # WorkflowHandle layer using the spec's source-node ok_types.
     # Here we store the raw envelopes verbatim into the workflow's
     # outer envelope so the handle can dispatch on them.
-    terminal_results = await session.execute(
-        GET_TERMINAL_TASK_RESULTS_SQL,
+    edge_rows = await session.execute(
+        GET_WORKFLOW_DAG_EDGES_SQL,
         {'wf_id': workflow_id},
+    )
+    terminal_indexes = _compute_terminal_indexes(edge_rows.fetchall())
+    terminal_results = await session.execute(
+        GET_TASK_RESULTS_BY_INDEXES_SQL,
+        {'wf_id': workflow_id, 'idxs': terminal_indexes},
     )
 
     results_dict: dict[str, Json] = {}

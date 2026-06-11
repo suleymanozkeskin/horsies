@@ -46,7 +46,8 @@ from horsies.core.workflows.sql import (
     GET_SUBWORKFLOW_SUMMARIES_SQL,
     GET_TASK_CONFIG_SQL,
     GET_TASK_STATUSES_SQL,
-    GET_TERMINAL_TASK_RESULTS_SQL,
+    GET_TASK_RESULTS_BY_INDEXES_SQL,
+    GET_WORKFLOW_DAG_EDGES_SQL,
     GET_WORKFLOW_COMPLETION_STATUS_SQL,
     GET_WORKFLOW_NAME_SQL,
     GET_WORKFLOW_ON_ERROR_SQL,
@@ -1433,7 +1434,11 @@ class TestGetWorkflowFinalResult:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is GET_WORKFLOW_OUTPUT_INDEX_SQL:
                 return _one_result(SimpleNamespace(output_task_index=None))
-            if stmt is GET_TERMINAL_TASK_RESULTS_SQL:
+            if stmt is GET_WORKFLOW_DAG_EDGES_SQL:
+                return _rows_result([
+                    SimpleNamespace(task_index=0, dependencies=[]),
+                ])
+            if stmt is GET_TASK_RESULTS_BY_INDEXES_SQL:
                 return _rows_result([
                     SimpleNamespace(node_id=123, task_index=0, result='null'),
                 ])
@@ -1459,7 +1464,11 @@ class TestGetWorkflowFinalResult:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is GET_WORKFLOW_OUTPUT_INDEX_SQL:
                 return _one_result(SimpleNamespace(output_task_index=None))
-            if stmt is GET_TERMINAL_TASK_RESULTS_SQL:
+            if stmt is GET_WORKFLOW_DAG_EDGES_SQL:
+                return _rows_result([
+                    SimpleNamespace(task_index=0, dependencies=[]),
+                ])
+            if stmt is GET_TASK_RESULTS_BY_INDEXES_SQL:
                 # Strict-serde phase 6: the SQL projection now includes
                 # ``task_name`` for the outputless envelope's embedded
                 # task_name_by_id map.

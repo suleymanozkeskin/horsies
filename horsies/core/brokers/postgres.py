@@ -115,6 +115,7 @@ from horsies.core.schemas.indexes import (
     CREATE_TASKS_WORKER_STATUS_INDEX_SQL,
     CREATE_WORKER_STATES_WORKER_SNAPSHOT_INDEX_SQL,
     CREATE_WORKFLOW_TASKS_DEPS_INDEX_SQL,
+    CREATE_WORKFLOW_TASKS_WF_STATUS_IDX_INDEX_SQL,
 )
 from horsies.core.schemas.migrations import (
     CREATE_TASK_ATTEMPTS_TABLE_SQL,
@@ -560,6 +561,9 @@ class PostgresBroker:
         """
         # GIN index for efficient dependency array lookups
         await conn.execute(CREATE_WORKFLOW_TASKS_DEPS_INDEX_SQL)
+
+        # Migration (v8): first-failed lookups inside the completion lock.
+        await conn.execute(CREATE_WORKFLOW_TASKS_WF_STATUS_IDX_INDEX_SQL)
 
         # Migration: add task_options column for existing installs
         await conn.execute(ADD_TASK_OPTIONS_COLUMN_SQL)
