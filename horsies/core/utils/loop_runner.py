@@ -39,6 +39,13 @@ class LoopRunner:
             return self._loop
 
     def start(self) -> None:
+        """Start the runner thread if not already running.
+
+        Raises:
+            LoopRunnerError: runner already stopped, or the thread/loop
+                failed to start (state reset so retry is possible).
+                Broker/handle/lifecycle sync facades fold this into Err.
+        """
         with self._state_lock:
             if self._closed:
                 raise LoopRunnerError(
@@ -81,7 +88,15 @@ class LoopRunner:
     def call(
         self, coro_fn: Callable[..., Awaitable[Any]], *args: Any, **kwargs: Any
     ) -> Any:
-        """Run an async function and block until it completes, from sync code."""
+        """Run an async function and block until it completes, from sync code.
+
+        Raises:
+            LoopRunnerError: runner stopped or scheduling onto the loop
+                failed. Broker/handle/lifecycle sync facades fold this
+                into Err.
+            Exception: the awaited coroutine's own exception, re-raised
+                verbatim by fut.result().
+        """
         if not self._started:
             self.start()
         with self._state_lock:

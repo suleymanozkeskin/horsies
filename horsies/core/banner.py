@@ -145,6 +145,11 @@ def print_banner(
         role: The role (worker, scheduler, producer)
         show_tasks: Whether to list discovered tasks
         file: Output file (default: sys.stdout)
+
+    Raises:
+        OSError: writing to ``file`` failed (e.g. BrokenPipeError on a
+            closed stdout). Callers are the CLI startup paths; the error
+            aborts startup per ``main()``'s exit contract (non-zero).
     """
     if file is None:
         file = sys.stdout

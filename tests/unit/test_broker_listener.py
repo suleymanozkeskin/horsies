@@ -804,6 +804,43 @@ class TestUnlisten:
         assert 'ch' not in listener._listen_channels
 
     @pytest.mark.asyncio
+    async def test_unlisten_failure_contained_and_channel_dropped(self) -> None:
+        """Regression: a connection error during UNLISTEN must not raise
+        into subscriber-cleanup callers, and the channel must still leave
+        _listen_channels so a reconnect cannot resurrect a ghost LISTEN."""
+        listener = _make_listener()
+        q: asyncio.Queue[Notify] = asyncio.Queue()
+        listener._subs['task_done'] = {q}
+        listener._listen_channels.add('task_done')
+        dispatcher_conn = _make_mock_conn()
+        dispatcher_conn.execute = AsyncMock(
+            side_effect=OperationalError('connection dropped'),
+        )
+        listener._dispatcher_conn = dispatcher_conn
+
+        await listener.unlisten('task_done', q)  # must not raise
+
+        assert 'task_done' not in listener._listen_channels
+        assert 'task_done' not in listener._subs
+
+    @pytest.mark.asyncio
+    async def test_unsubscribe_failure_contained_and_channel_dropped(self) -> None:
+        """Same containment contract for unsubscribe()."""
+        listener = _make_listener()
+        q: asyncio.Queue[Notify] = asyncio.Queue()
+        listener._subs['ch'] = {q}
+        listener._listen_channels.add('ch')
+        dispatcher_conn = _make_mock_conn()
+        dispatcher_conn.execute = AsyncMock(
+            side_effect=OperationalError('connection dropped'),
+        )
+        listener._dispatcher_conn = dispatcher_conn
+
+        await listener.unsubscribe('ch', q)  # must not raise
+
+        assert 'ch' not in listener._listen_channels
+
+    @pytest.mark.asyncio
     async def test_no_unlisten_when_dispatcher_conn_closed(self) -> None:
         """Should not issue UNLISTEN when dispatcher connection is closed."""
         listener = _make_listener()

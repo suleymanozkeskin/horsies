@@ -152,6 +152,26 @@ class TestCheckWorkflowBuilders:
         assert errors == []
         assert call_count == 1
 
+    def test_unintrospectable_builder_folds_to_e029(self) -> None:
+        """Regression: a builder whose signature inspect cannot resolve
+        folds into the report (HRS-029) instead of crashing the check
+        phase (check-phase containment contract)."""
+        app = _make_app()
+
+        @app.workflow_builder()
+        def my_builder() -> WorkflowSpec[Any]:
+            return mock.MagicMock(spec=WorkflowSpec)
+
+        with mock.patch(
+            'horsies.core.app.inspect.signature',
+            side_effect=ValueError('no signature found'),
+        ):
+            errors = app._check_workflow_builders()
+
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION
+        assert 'not introspectable' in errors[0].message
+
     def test_zero_arg_builder_exception_wrapped_as_e029(self) -> None:
         """Unexpected exception from builder is wrapped with HRS-029."""
         app = _make_app()

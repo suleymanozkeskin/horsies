@@ -76,6 +76,13 @@ class Scheduler:
         Schema initialization retry is handled at the CLI orchestration level
         (see scheduler_command in cli.py), not here. This method assumes the
         schema is ready or will succeed on first attempt.
+
+        Raises:
+            RuntimeError: schema initialization failed (broker Err unwrapped).
+            HorsiesError: broker construction failed (``get_broker``).
+            RegistryError | ConfigurationError: schedule validation failed.
+                All propagate through run_forever to the CLI boundary —
+                fail-fast at boot, exit 1; nothing has been enqueued yet.
         """
         if self._initialized:
             return
@@ -106,7 +113,11 @@ class Scheduler:
         logger.info('Scheduler started successfully')
 
     async def stop(self) -> None:
-        """Clean shutdown of scheduler."""
+        """Clean shutdown of scheduler.
+
+        Total: broker close returns a Result that is logged on Err, so a
+        stop inside run_forever's finally cannot mask the original error.
+        """
         self._stop.set()
 
         if self.broker:
@@ -123,7 +134,17 @@ class Scheduler:
         self._stop.set()
 
     async def run_forever(self) -> None:
-        """Main scheduler loop."""
+        """Main scheduler loop — the scheduler's recovery seam.
+
+        Per-tick errors (get_due_states, per-schedule escapes) are logged
+        and the next tick retries; no error type changes the response, so
+        no classification happens here. start() failures and anything
+        escaping the tick handler propagate to the CLI boundary (exit 1).
+        stop() always runs via finally once the loop is entered.
+
+        Raises:
+            Exception: startup failure or a bug escaping the tick handler.
+        """
         logger.info('Starting scheduler loop')
 
         try:
@@ -153,6 +174,14 @@ class Scheduler:
         Initialize state for all configured schedules.
 
         Detects configuration changes and recalculates next_run_at when pattern or timezone changes.
+
+        Per-schedule isolation: one schedule's init/recalc failure is logged
+        and the rest proceed (a failed-init schedule stays dormant until the
+        next restart — see ScheduleStateManager.initialize_state).
+
+        Raises:
+            RuntimeError: state manager not initialized (programmer error;
+                start() wires it before calling this).
         """
         if not self.state_manager:
             raise RuntimeError('State manager not initialized')
@@ -247,7 +276,16 @@ class Scheduler:
             )
 
     async def _check_and_run_schedules(self) -> None:
-        """Check all schedules and execute those that are due."""
+        """Check all schedules and execute those that are due.
+
+        Per-schedule isolation: _check_schedule errors are logged and the
+        remaining due schedules still run. The get_due_states read raises
+        to run_forever's tick handler (retry next tick).
+
+        Raises:
+            RuntimeError: scheduler not initialized (programmer error).
+            Exception: DB failure reading due states.
+        """
         if not self.state_manager or not self.broker:
             raise RuntimeError('Scheduler not properly initialized')
 
@@ -294,6 +332,11 @@ class Scheduler:
         Compute hash of schedule configuration for change detection.
 
         Includes pattern and timezone to detect when schedule needs recalculation.
+
+        Raises:
+            RuntimeError: dumps_json rejected model_dump(mode='json') output
+                — impossible for valid patterns, so this is a horsies bug
+                surfacing loudly, not an operational error to retry.
         """
         from horsies.core.codec.json_io import dumps_json
 
@@ -321,6 +364,16 @@ class Scheduler:
 
         Uses PostgreSQL advisory lock to prevent race conditions when multiple
         scheduler processes are running.
+
+        Error handling: the execution body contains its own failures
+        (rollback, slot stays due, next tick retries; enqueue errors are
+        typed Results classified retryable/permanent). The pre-execution
+        state reads raise to _check_and_run_schedules' per-schedule except;
+        the session context unwinds, releasing the advisory lock.
+
+        Raises:
+            RuntimeError: scheduler not initialized (programmer error).
+            Exception: DB failure on the advisory lock or state reads.
         """
         if not self.state_manager or not self.broker:
             raise RuntimeError('Scheduler not properly initialized')
@@ -655,6 +708,12 @@ class Scheduler:
         """
         Determine the queue name for a schedule, preferring the schedule's explicit queue,
         otherwise falling back to the task's declared queue (stored on the task wrapper).
+
+        Raises:
+            ConfigurationError: queue not valid for this app config (from
+                validate_queue_name). Startup validation wraps it per
+                schedule; the enqueue path treats it as a programming
+                error because _validate_schedules already proved it valid.
         """
         task = self.app.tasks.get(schedule.task_name)
         task_queue = getattr(task, 'task_queue_name', None) if task else None

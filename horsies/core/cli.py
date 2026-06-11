@@ -44,6 +44,14 @@ async def _ensure_schema_with_retry(
     resilience: WorkerResilienceConfig,
     logger: logging.Logger,
 ) -> None:
+    """Initialize the schema, backoff-retrying retryable broker errors.
+
+    Raises:
+        RuntimeError: a non-retryable initialization error, or a retryable
+            one after the retry budget — chained from the broker error.
+            Both command paths log it and exit 1; nothing was claimed or
+            started yet, so there is no partial state to recover.
+    """
     attempts = 0
     while True:
         result = await broker.ensure_schema_initialized()
@@ -193,6 +201,13 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
 
     Returns:
         (app_instance, variable_name, module_name, sys_path_root)
+
+    Raises:
+        ConfigurationError: locator invalid, module/file missing, attribute
+            missing, not a Horsies instance, or ambiguous discovery.
+        Exception: import errors from the user's module body propagate
+            unwrapped. Every command catches both at its boundary and
+            exits 1.
     """
     logger = get_logger('cli')
 
@@ -368,7 +383,12 @@ def setup_logging(loglevel: str) -> None:
 
 
 def worker_command(args: argparse.Namespace) -> None:
-    """Handle worker command."""
+    """Handle worker command.
+
+    Exit contract (supervisor-facing): 0 only on operator-initiated stop
+    (signal/KeyboardInterrupt); any failure — discovery, validation,
+    schema init, worker crash, startup timeout — logs and exits 1.
+    """
     logger = get_logger('cli')
 
     # Setup logging first
@@ -545,8 +565,11 @@ def worker_command(args: argparse.Namespace) -> None:
             logger.info('Worker interrupted by user')
             return
         except asyncio.TimeoutError:
+            # Retry-exhausted startup timeout: the worker never came up.
+            # Exit non-zero — a clean exit here told the supervisor nothing
+            # went wrong, so nothing restarted the worker.
             logger.error('Worker startup timed out')
-            return
+            sys.exit(1)
     except KeyboardInterrupt:
         logger.info('Worker interrupted by user')
         return
@@ -556,7 +579,12 @@ def worker_command(args: argparse.Namespace) -> None:
 
 
 def scheduler_command(args: argparse.Namespace) -> None:
-    """Handle scheduler command."""
+    """Handle scheduler command.
+
+    Exit contract (supervisor-facing): 0 only on operator-initiated stop;
+    any failure — discovery, config/validation, schema init, scheduler
+    crash — logs and exits 1.
+    """
     logger = get_logger('cli')
 
     # Setup logging first
@@ -685,7 +713,11 @@ def scheduler_command(args: argparse.Namespace) -> None:
 
 
 def check_command(args: argparse.Namespace) -> None:
-    """Handle check command — validate app configuration without starting services."""
+    """Handle check command — validate app configuration without starting services.
+
+    Exit contract: 0 when all validations pass, 1 otherwise (discovery
+    failures and collected validation errors both end at sys.exit(1)).
+    """
     logger = get_logger('cli')
 
     # Setup logging
@@ -723,7 +755,10 @@ def check_command(args: argparse.Namespace) -> None:
 
 
 def get_docs_command(args: argparse.Namespace) -> None:
-    """Handle get-docs command."""
+    """Handle get-docs command.
+
+    Exit contract: any failure (import, filesystem) prints and exits 1.
+    """
     output_dir: str = args.output
     try:
         from horsies.core.docs_fetcher import fetch_docs
@@ -735,7 +770,12 @@ def get_docs_command(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    """Main CLI entry point."""
+    """Main CLI entry point.
+
+    Argparse errors exit 2 (argparse convention); command failures exit 1
+    via each command's own boundary. An exception escaping a command is a
+    horsies bug and surfaces as a traceback (non-zero exit) by design.
+    """
     try:
         parser = argparse.ArgumentParser(
             prog='horsies',

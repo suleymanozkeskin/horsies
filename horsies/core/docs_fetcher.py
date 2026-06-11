@@ -33,7 +33,16 @@ class DocsFetchError(Exception):
 
 
 def fetch_docs(*, output_dir: str = DEFAULT_OUTPUT_DIR) -> int:
-    """Fetch horsies docs into output_dir. Returns file count."""
+    """Fetch horsies docs into output_dir. Returns file count.
+
+    Strategy: git sparse checkout, falling back to tarball on
+    DocsFetchError (the one type-branching seam in this module).
+
+    Raises:
+        DocsFetchError: both strategies failed.
+        OSError: filesystem failure (mkdir/copy/swap). Recovery seam is
+            ``get_docs_command``: print and exit 1.
+    """
     output_path = Path(output_dir)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 

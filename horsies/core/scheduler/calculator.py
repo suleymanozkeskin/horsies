@@ -47,7 +47,16 @@ def calculate_next_run(
         Next run time as UTC-aware datetime
 
     Raises:
-        ValueError: If timezone is invalid or pattern type is unknown
+        ValueError: from_time naive or timezone invalid.
+        RuntimeError: no valid candidate within the pattern's scan bound
+            (DST-gap edge) or a non-tz-aware result — a horsies bug or
+            pathological tz data, surfaced loudly. Both land in the
+            scheduler's per-schedule seams. From the tick seam
+            (``_check_and_run_schedules``) the slot stays due and is
+            retried next tick; from the startup seam
+            (``_initialize_schedules``) the schedule is skipped and
+            stays dormant until the next restart (no state row exists
+            to make it due — see ScheduleStateManager.initialize_state).
     """
     # Ensure from_time is UTC-aware
     if from_time.tzinfo is None:

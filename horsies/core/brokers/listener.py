@@ -206,8 +206,11 @@ class PostgresListener:
             )
 
     async def _start_listening(self, conn: AsyncConnection) -> None:
-        """
-        Start listening to all _listen_channels for the given connection.
+        """Start listening to all _listen_channels for the given connection.
+
+        Raises connection/SQL errors to the sole caller
+        (_ensure_connections), whose try folds them into Err and rolls
+        back the partially created connections.
         """
         for channel in self._listen_channels:
             await conn.execute(sql.SQL('LISTEN {}').format(sql.Identifier(channel)))
@@ -288,13 +291,24 @@ class PostgresListener:
         Unwraps the Result from _ensure_connections, re-raising the original
         exception on Err so the dispatcher loop's existing exception handling
         (OperationalError catch + reconnect) continues to work.
+
+        Raises:
+            OperationalError | InterfaceError | OSError: the connection
+                failure from _ensure_connections, re-raised at this seam.
+                Callers: the dispatcher loop (backoff + reconnect) and
+                listen/listen_many/listen_payload (fold to Err).
+            RuntimeError: Err carried no exception, or the connection was
+                torn down concurrently (close/health reset run without
+                self._lock) between ensure and this check — same exposure
+                the bare assert had, now explicit and -O-proof.
         """
         if self._dispatcher_conn is None or self._dispatcher_conn.closed:
             conn_r = await self._ensure_connections()
             if is_err(conn_r):
                 err = conn_r.err_value
                 raise err.exception or RuntimeError(err.message)
-        assert self._dispatcher_conn is not None
+        if self._dispatcher_conn is None:
+            raise RuntimeError('dispatcher connection missing after ensure')
         return self._dispatcher_conn
 
     async def _unlisten_on_dispatcher(self, channel_name: str) -> None:
@@ -308,6 +322,27 @@ class PostgresListener:
         finally:
             if dispatcher_was_running:
                 self._start_dispatcher_if_needed()
+
+    async def _drop_server_listen(self, channel_name: str) -> None:
+        """Drop the server-side LISTEN and stop tracking the channel.
+
+        Total: UNLISTEN failures are contained. The callers are subscriber
+        cleanup paths (result waiters, handle teardown) that cannot act on a
+        server-side cleanup error — raising there masked the caller's own
+        outcome. If the connection is dead, the server already forgot the
+        LISTEN; if it is alive but the command failed, the untracked channel
+        delivers notifies with no subscriber (dispatcher drops them) and the
+        next reconnect does not re-LISTEN it. Either way the channel must
+        leave _listen_channels, or reconnect resurrects a ghost LISTEN.
+        """
+        try:
+            await self._unlisten_on_dispatcher(channel_name)
+        except (OperationalError, InterfaceError, OSError) as exc:
+            logger.warning(
+                f"UNLISTEN '{channel_name}' failed; dropping channel "
+                f'tracking anyway: {exc}'
+            )
+        self._listen_channels.discard(channel_name)
 
     async def _close_connections(self) -> None:
         """Close raw connections and reset to None for reconnection."""
@@ -340,7 +375,12 @@ class PostgresListener:
             )
 
     async def _handle_health_disconnect(self) -> None:
-        """Reset listener connections after health monitor detects a dead connection."""
+        """Reset listener connections after health monitor detects a dead connection.
+
+        Total in practice: _pause_dispatcher suppresses the awaited
+        cancellation and _close_connections contains close failures; the
+        health-monitor loop's broad except is the backstop either way.
+        """
         async with self._lock:
             dispatcher_was_running = await self._pause_dispatcher()
             await self._close_connections()
@@ -614,8 +654,7 @@ class PostgresListener:
                 and not self._channel_has_payload_subs(channel_name)
                 and channel_name in self._listen_channels
             ):
-                await self._unlisten_on_dispatcher(channel_name)
-                self._listen_channels.discard(channel_name)
+                await self._drop_server_listen(channel_name)
 
     async def listen_many(
         self,
@@ -712,8 +751,7 @@ class PostgresListener:
             no_local_subs = self._remove_local_subscription(channel_name, q)
             # If nobody is listening locally, drop the server-side LISTEN.
             if no_local_subs and channel_name in self._listen_channels:
-                await self._unlisten_on_dispatcher(channel_name)
-                self._listen_channels.discard(channel_name)
+                await self._drop_server_listen(channel_name)
 
     async def unsubscribe(
         self, channel_name: str, q: Optional[Queue[Notify]] = None
@@ -742,8 +780,7 @@ class PostgresListener:
         async with self._lock:
             no_local_subs = self._remove_local_subscription(channel_name, q)
             if no_local_subs and channel_name in self._listen_channels:
-                await self._unlisten_on_dispatcher(channel_name)
-                self._listen_channels.discard(channel_name)
+                await self._drop_server_listen(channel_name)
 
     async def close(self) -> None:
         """
@@ -752,6 +789,13 @@ class PostgresListener:
 
         If called from a non-owner loop, close is handed off to the owner loop
         to avoid cross-loop task/connection misuse during teardown.
+
+        Raises:
+            Exception: _close_impl itself is best-effort total, but the
+                cross-loop handoff can raise (owner loop closing mid-flight
+                fails the wrapped future). Both production callers contain
+                this: broker.close_async folds it into its error list,
+                worker stop/cleanup paths log it.
         """
         current_loop = asyncio.get_running_loop()
         if (
@@ -789,9 +833,11 @@ class PostgresListener:
         await self._close_impl()
 
     async def _close_impl(self) -> None:
-        """
-        Stop the dispatcher, health monitor and close the notification connection.
-        Safe to call more than once.
+        """Stop the dispatcher, health monitor and close the notification connection.
+
+        Safe to call more than once. Best-effort total: task cancellation
+        awaits suppress CancelledError/RuntimeError and connection closes
+        are contained in _close_connections; bookkeeping is always cleared.
         """
         if self._health_check_task:
             self._health_check_task.cancel()

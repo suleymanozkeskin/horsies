@@ -1319,7 +1319,7 @@ class TestWorkerCommandAdditionalBranches:
     @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
     @patch('horsies.core.cli.setup_logging', autospec=True)
     @patch('horsies.core.cli.discover_app', autospec=True)
-    def test_timeout_error_during_run_returns_gracefully(
+    def test_timeout_error_during_run_exits_nonzero(
         self,
         mock_discover: MagicMock,
         _mock_logging: MagicMock,
@@ -1327,7 +1327,8 @@ class TestWorkerCommandAdditionalBranches:
         _mock_banner: MagicMock,
         mock_run: MagicMock,
     ) -> None:
-        """asyncio.TimeoutError during run → graceful return, no sys.exit (lines 471-472)."""
+        """Startup timeout → exit 1 (supervisor contract: the worker never
+        came up; a clean exit would suppress the supervisor restart)."""
         # Arrange
         import asyncio as _asyncio
 
@@ -1338,9 +1339,10 @@ class TestWorkerCommandAdditionalBranches:
         mock_run.side_effect = _closing_run_side_effect(_asyncio.TimeoutError())
         args = _make_worker_namespace()
 
-        # Act — should NOT raise SystemExit
-        worker_command(args)
+        with pytest.raises(SystemExit) as excinfo:
+            worker_command(args)
 
+        assert excinfo.value.code == 1
         mock_run.assert_called_once()
 
     @patch('horsies.core.cli.asyncio.run', autospec=True)
