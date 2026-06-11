@@ -534,7 +534,7 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | HRS-026 | `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED` | Non-empty positional args |
 | HRS-027 | `WORKFLOW_CHECK_CASES_REQUIRED` | Builder needs cases= |
 | HRS-028 | `WORKFLOW_CHECK_CASE_INVALID` | Invalid case kwarg dict |
-| HRS-029 | `WORKFLOW_CHECK_BUILDER_EXCEPTION` | Builder raised or returned wrong type |
+| HRS-029 | `WORKFLOW_CHECK_BUILDER_EXCEPTION` | Builder raised, returned wrong type, or signature not introspectable |
 | HRS-030 | `WORKFLOW_CHECK_UNDECORATED_BUILDER` | Returns WorkflowSpec without decorator |
 | HRS-031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails serialization |
 

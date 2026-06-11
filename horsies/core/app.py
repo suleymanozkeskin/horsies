@@ -413,11 +413,13 @@ class Horsies:
             Empty list means all validations passed.
 
         Raises:
-            Exception: every phase contains its own expected failures into
-                the returned list; an exception escaping here is a horsies
-                bug, and it propagates to the CLI command (uncaught →
-                traceback, non-zero exit) rather than being masked as a
-                validation error.
+            Exception: each phase contains its expected failures into the
+                returned list (import errors, builder raises, bad cases).
+                An escape — a horsies bug, or exotic module-level
+                machinery the collectors don't guard (e.g. a module
+                __getattr__ raising during member scans) — propagates to
+                the CLI command (traceback, non-zero exit) rather than
+                being masked as a validation error.
         """
         all_errors: list[HorsiesError] = []
 
@@ -1740,10 +1742,11 @@ class Horsies:
             WorkflowSpec ready to start
 
         Raises:
-            MultipleValidationErrors: queue/mode violations collected across
-                all nodes (via ``raise_collected``), reported together.
-            HorsiesError: broker initialization failure (``get_broker``) or
-                a missing ``definition_key`` on a definition-backed spec.
+            MultipleValidationErrors: queue/mode violations collected here,
+                or graph violations collected by WorkflowSpec construction.
+            HorsiesError: broker initialization failure (``get_broker``),
+                spec validation (WorkflowValidationError), or a missing
+                ``definition_key`` on a definition-backed spec.
                 Definition-time fail-fast by design: a spec that cannot be
                 built must crash where it is declared, not at send time.
         """

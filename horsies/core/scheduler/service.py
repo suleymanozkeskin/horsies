@@ -79,6 +79,7 @@ class Scheduler:
 
         Raises:
             RuntimeError: schema initialization failed (broker Err unwrapped).
+            HorsiesError: broker construction failed (``get_broker``).
             RegistryError | ConfigurationError: schedule validation failed.
                 All propagate through run_forever to the CLI boundary —
                 fail-fast at boot, exit 1; nothing has been enqueued yet.

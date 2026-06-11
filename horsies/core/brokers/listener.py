@@ -296,7 +296,11 @@ class PostgresListener:
             OperationalError | InterfaceError | OSError: the connection
                 failure from _ensure_connections, re-raised at this seam.
                 Callers: the dispatcher loop (backoff + reconnect) and
-                listen_many (folds to Err for its caller).
+                listen/listen_many/listen_payload (fold to Err).
+            RuntimeError: Err carried no exception, or the connection was
+                torn down concurrently (close/health reset run without
+                self._lock) between ensure and this check — same exposure
+                the bare assert had, now explicit and -O-proof.
         """
         if self._dispatcher_conn is None or self._dispatcher_conn.closed:
             conn_r = await self._ensure_connections()
@@ -304,8 +308,6 @@ class PostgresListener:
                 err = conn_r.err_value
                 raise err.exception or RuntimeError(err.message)
         if self._dispatcher_conn is None:
-            # Unreachable when _ensure_connections returned Ok; explicit so
-            # the invariant survives -O (assert stripping) and narrows types.
             raise RuntimeError('dispatcher connection missing after ensure')
         return self._dispatcher_conn
 
