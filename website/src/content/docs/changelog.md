@@ -1,8 +1,8 @@
 ---
 title: Changelog
-summary: Notable changes per release. 0.1.7 adds task timeouts, child-process hooks, uncapped queue concurrency, and correctness/performance hardening; 0.1.6 hardens worker lifecycle recovery.
+summary: Notable changes per release. 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing; 0.1.7 adds task timeouts, child-process hooks, and uncapped queue concurrency.
 related: [./monitoring/worker-health, ./migrations/migration-to-0-1-2, ./internals/serialization]
-tags: [changelog, releases, breaking-changes, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
+tags: [changelog, releases, breaking-changes, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
 ---
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
@@ -11,9 +11,12 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
-Workflow-completion performance redesign, supervisor-contract fixes, and the
-close of the raise-contract documentation track. Schema migrates v7 → v8
-automatically on first broker start.
+## 0.1.8 — 2026-06-11
+
+Workflow-completion performance redesign, supervisor-contract fixes,
+scheduler state self-healing, and the close of the raise-contract
+documentation track. Schema migrates v7 → v8 automatically on first
+broker start.
 
 ### Changed
 
@@ -31,6 +34,12 @@ automatically on first broker start.
   A crash between propagation levels is healed by workflow recovery;
   full self-healing requires `recovery_config` (the CLI wires it;
   programmatic workers should too).
+
+### Breaking
+
+- `TaskSchedule.timezone` is validated at scheduler startup: an invalid
+  IANA name now exits 1 at boot (`CONFIG_INVALID_SCHEDULE`) instead of
+  leaving the schedule silently dormant with a per-tick init failure.
 
 ### Fixed
 
