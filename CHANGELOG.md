@@ -8,6 +8,15 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+### Changed
+
+- The claim advisory lock is scoped per capped queue (cluster_wide_cap
+  keeps the single global key): workers claiming disjoint capped queues
+  no longer serialize against each other. During a rolling deploy, old
+  and new workers do not contend with each other, so a per-queue cap can
+  briefly overshoot by up to one pass's batch until the fleet is on one
+  version.
+
 ## [0.1.8] - 2026-06-11
 
 Workflow-completion performance redesign, supervisor-contract fixes,

@@ -247,17 +247,23 @@ for queue in queues:
 
 ## Advisory Locks
 
-Global advisory lock serializes claiming across workers:
+Claim passes take transaction-scoped advisory locks only when cap
+accounting needs read-then-act serialization, scoped to the invariant:
 
-```python
-# Taken during claim pass
-await session.execute(
-    text("SELECT pg_advisory_xact_lock(:key)"),
-    {"key": self._advisory_key_global()},
-)
-```
+- `cluster_wide_cap` set: one **global** key — the cap is global, so all
+  claim passes serialize.
+- per-queue `max_concurrency` (no cluster cap): one key **per capped
+  queue** in the pass, acquired in sorted order. Workers claiming
+  disjoint capped queues do not contend; a mixed capped/uncapped pass
+  holds its capped queues' locks for the whole pass (locks are
+  transaction-scoped).
+- no caps: no lock — `FOR UPDATE SKIP LOCKED` alone makes concurrent
+  claiming safe.
 
-This prevents race conditions when multiple workers claim simultaneously.
+During a rolling deploy across this change, old workers hold the global
+key while new workers hold per-queue keys; the two do not contend, so a
+per-queue cap can briefly overshoot by up to one pass's batch until the
+fleet is on one version.
 
 ## Example Configurations
 
