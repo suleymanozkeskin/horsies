@@ -8,6 +8,11 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-06-11
+
+Workflow-start batching and per-queue claim-lock scoping: round-trip
+elimination on the two hot multi-statement paths.
+
 ### Performance
 
 - Workflow start is batched: node rows and fast-path root tasks (plain
