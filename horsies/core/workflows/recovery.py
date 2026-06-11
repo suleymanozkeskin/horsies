@@ -514,4 +514,11 @@ async def recover_stuck_workflows(
         logger.info(f'Recovered terminal workflow via completion check: {workflow_id}')
         recovered += 1
 
+    # Drain parent propagations queued by any completion check above. The
+    # in-session drain matches the pre-denest in-transaction behavior on
+    # this cold path; the worker hot path uses fresh transactions per level.
+    from horsies.core.workflows.engine import drain_parent_propagations_in_session
+
+    await drain_parent_propagations_in_session(session, broker)
+
     return recovered

@@ -31,6 +31,7 @@ from horsies.core.models.workflow import (
     OnError,
 )
 from horsies.core.workflows.engine import (
+    drain_parent_propagations_in_session,
     on_subworkflow_complete,
     on_workflow_task_complete,
 )
@@ -301,6 +302,7 @@ class TestSubworkflowIntegration:
         row = res.fetchone()
         if row and row[0]:
             await on_workflow_task_complete(session, row[0], result, broker)
+            await drain_parent_propagations_in_session(session, broker)
             await session.commit()
 
     async def _get_workflow_task_row(
@@ -354,6 +356,7 @@ class TestSubworkflowIntegration:
         child_task_id = await self._get_child_task_id(session, child_id)
         assert isinstance(child_task_id, str)
         await on_workflow_task_complete(session, child_task_id, child_result, broker)
+        await drain_parent_propagations_in_session(session, broker)
         await session.commit()
         return child_id
 
@@ -534,6 +537,7 @@ class TestSubworkflowIntegration:
         await on_workflow_task_complete(
             session, child_task_id, TaskResult(ok=7), broker
         )
+        await drain_parent_propagations_in_session(session, broker)
         await session.commit()
 
         row_after = await self._get_workflow_task_row(session, handle.workflow_id, 1)
@@ -708,6 +712,7 @@ class TestSubworkflowIntegration:
         try:
             with caplog.at_level(logging.DEBUG, logger='horsies.workflow.engine'):
                 await on_subworkflow_complete(session, child_id, broker)
+                await drain_parent_propagations_in_session(session, broker)
                 await session.commit()
         finally:
             engine_logger.propagate = False
@@ -951,10 +956,12 @@ class TestSubworkflowIntegration:
         await on_workflow_task_complete(
             session, child1_task_id, TaskResult(ok=1), broker
         )
+        await drain_parent_propagations_in_session(session, broker)
         await session.commit()
         await on_workflow_task_complete(
             session, child2_task_id, TaskResult(ok=5), broker
         )
+        await drain_parent_propagations_in_session(session, broker)
         await session.commit()
 
         # Post task should now be ENQUEUED
@@ -1921,6 +1928,7 @@ class TestSubworkflowRecovery:
         task_row = res.fetchone()
         assert task_row is not None and task_row[0] is not None
         await on_workflow_task_complete(session, task_row[0], TaskResult(ok=2), broker)
+        await drain_parent_propagations_in_session(session, broker)
         await session.commit()
 
         # Verify child is RUNNING (started normally)

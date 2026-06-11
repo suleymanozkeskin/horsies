@@ -2060,15 +2060,20 @@ async def check_workflow_completion(
         {'wf_id': workflow_id},
     )
 
-    # If this is a child workflow, notify parent
+    # If this is a child workflow, queue parent advancement instead of
+    # recursing in-transaction: the old recursion held this workflow's
+    # FOR UPDATE lock while taking the parent's (and grandparent's, ...),
+    # accumulating locks root-ward across the whole ancestor chain. The
+    # driver runs each level in its own transaction; a crash between
+    # levels is healed by recovery case 1.6 (child terminal, parent node
+    # not updated).
     parent_result = await session.execute(
         GET_PARENT_WORKFLOW_INFO_SQL,
         {'wf_id': workflow_id},
     )
     parent_row = parent_result.fetchone()
     if parent_row and parent_row.parent_workflow_id is not None:
-        # This is a child workflow - notify parent
-        await on_subworkflow_complete(session, workflow_id, broker)
+        _queue_parent_propagation(session, workflow_id)
 
 
 
@@ -2438,6 +2443,53 @@ async def get_workflow_failure_error(
 
 
 
+
+
+_PENDING_PROPAGATIONS_KEY = 'horsies_pending_parent_propagations'
+
+
+def _queue_parent_propagation(session: AsyncSession, child_workflow_id: str) -> None:
+    """Record that ``child_workflow_id`` completed and its parent needs
+    advancing.
+
+    Stored on ``session.info`` instead of threading a return signal through
+    the call graph between ``check_workflow_completion`` and its drivers.
+    The driver pops the queue after its transaction and runs each parent
+    advancement in a fresh transaction (worker hot path) or an in-session
+    drain (recovery/lifecycle cold paths).
+    """
+    pending = session.info.setdefault(_PENDING_PROPAGATIONS_KEY, [])
+    if child_workflow_id not in pending:
+        pending.append(child_workflow_id)
+
+
+def pop_pending_parent_propagations(session: AsyncSession) -> list[str]:
+    """Drain the queued parent propagations for this session."""
+    pending = session.info.get(_PENDING_PROPAGATIONS_KEY)
+    if not pending:
+        return []
+    drained = list(pending)
+    pending.clear()
+    return drained
+
+
+async def drain_parent_propagations_in_session(
+    session: AsyncSession,
+    broker: 'PostgresBroker | None' = None,
+) -> None:
+    """In-session propagation drain for recovery/lifecycle cold paths.
+
+    Runs each queued parent advancement in the caller's transaction —
+    behavior-identical to the pre-denest in-transaction recursion (locks
+    accumulate within this transaction, acceptable on cold paths). The
+    worker hot path uses fresh transactions per level instead
+    (FinalizeMixin._drive_parent_propagations).
+    """
+    worklist = pop_pending_parent_propagations(session)
+    while worklist:
+        child_id = worklist.pop(0)
+        await on_subworkflow_complete(session, child_id, broker)
+        worklist.extend(pop_pending_parent_propagations(session))
 
 
 def _compute_terminal_indexes(edge_rows: Sequence[Any]) -> list[int]:

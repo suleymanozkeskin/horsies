@@ -220,6 +220,10 @@ async def test_notify_failure_swallowed(
                 self._s = await self._inner.__aenter__()
                 return self
 
+            @property
+            def info(self) -> Any:
+                return self._s.info
+
             async def __aexit__(self, *args: Any) -> None:
                 await self._inner.__aexit__(*args)
 
@@ -314,6 +318,10 @@ async def test_queue_name_used_in_notify_channel(
             async def __aenter__(self) -> 'CapturingSession':
                 self._s = await self._inner.__aenter__()
                 return self
+
+            @property
+            def info(self) -> Any:
+                return self._s.info
 
             async def __aexit__(self, *args: Any) -> None:
                 await self._inner.__aexit__(*args)

@@ -170,6 +170,7 @@ async def start_workflow_async(
     """
     # Deferred import to avoid circular dependency with engine.py
     from horsies.core.workflows.engine import (
+        drain_parent_propagations_in_session,
         enqueue_workflow_task,
         enqueue_subworkflow_task,
     )
@@ -471,6 +472,13 @@ async def start_workflow_async(
                                 all_dep_task_names={},
                                 broker=broker,
                             )
+
+                # A failed child-root enqueue inside enqueue_subworkflow_task
+                # can fail-and-finalize the child workflow, queueing a parent
+                # propagation in this session — drain it before commit or it
+                # dies with the session (review-caught hole; recovery 1.6
+                # would be the only healer).
+                await drain_parent_propagations_in_session(session, broker)
 
                 await session.commit()
 
@@ -804,6 +812,7 @@ async def resume_workflow(
         enqueue_workflow_task,
         enqueue_subworkflow_task,
         check_workflow_completion,
+        drain_parent_propagations_in_session,
     )
 
     try:
@@ -890,6 +899,11 @@ async def resume_workflow(
             # Resume may transition pending tasks directly to SKIPPED/terminal without
             # any subsequent task completion callback to trigger finalization.
             await check_workflow_completion(session, workflow_id, broker)
+
+            # Drain parent propagations queued by the completion checks above
+            # (incl. the cascade's) — in-session on this cold path, matching
+            # the pre-denest in-transaction behavior.
+            await drain_parent_propagations_in_session(session, broker)
 
             await session.commit()
 
