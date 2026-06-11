@@ -6,6 +6,197 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0: breaking changes may land in minor or patch releases,
 and there is no migration contract between pre-1.0 versions.
 
+## [Unreleased]
+
+Workflow-completion performance redesign, supervisor-contract fixes, and the
+close of the raise-contract documentation track. Schema migrates v7 → v8
+automatically on first broker start.
+
+### Changed
+
+- Workflow completion at scale: terminal-set resolution rewritten as a
+  payload-free edge read plus in-process set difference (finalizing
+  completion at 1000 tasks: 168.7ms → 11.7ms under the workflow lock);
+  child-workflow info collapsed to a single-pass query; new composite
+  index `(workflow_id, status, task_index)` (schema v8) removes the
+  per-failure first-failed scan.
+- Subworkflow parent propagation is de-nested: each ancestor level now
+  advances in its own transaction instead of recursing root-ward while
+  holding every descendant's `FOR UPDATE` lock. A child workflow's
+  `workflow_done` NOTIFY is therefore visible slightly before its parent
+  node advances (waiters re-read their own workflow's status on wake).
+  A crash between propagation levels is healed by workflow recovery;
+  full self-healing requires `recovery_config` (the CLI wires it;
+  programmatic workers should too).
+
+### Fixed
+
+- A worker whose executor restart failed from a background finalizer
+  path now exits non-zero for supervisor restart instead of running on
+  as an executorless zombie that claims nothing.
+- `horsies worker` exits 1 (was 0) when startup times out after
+  exhausting the resilience retry budget — a clean exit suppressed
+  supervisor restarts.
+- Listener `UNLISTEN` failures during unsubscribe no longer raise into
+  result-waiter cleanup paths, and the channel is always untracked so a
+  reconnect cannot resurrect a ghost `LISTEN`.
+- `app.check()`: a workflow builder whose signature cannot be
+  introspected now folds into the validation report instead of crashing
+  the check phase.
+
+### Removed
+
+- `ScheduleStateManager.delete_state` — dead since schedulers stopped
+  deleting foreign schedule-state rows at startup; no production caller.
+
+### Documentation
+
+- Raise-contract docstrings across the worker package, workflow engine,
+  scheduler, app/CLI boundary, and listener: every fallible function now
+  names the seam that recovers from its failure and how (the
+  fallible-audit Result-conversion track is closed).
+
+## [0.1.7] - 2026-06-10
+
+Correctness and performance hardening from a full-project review, plus task
+timeouts, child-process hooks, and uncapped queue concurrency.
+Schema migrates from v2 to v7 automatically on first broker start.
+
+### Added
+
+- `CustomQueueConfig.max_concurrency` accepts `None` as an explicit
+  uncapped sentinel (mirroring `cluster_wide_cap=None`): no per-queue
+  limit is enforced and the claim pass skips that queue's in-flight
+  count query. `0` remains valid (pauses claiming); negative values are
+  now rejected at config validation.
+- Per-child-process hook: `@app.on_child_process_start` registers sync
+  zero-argument functions that run once in every worker child, after
+  task imports and before horsies opens its own child pool. The
+  supported seam for disposing fork-inherited app engines and setting
+  worker-specific pool policy (Celery `worker_process_init` /
+  Dramatiq `after_process_boot` parity). Fail-closed: a raising or
+  hung hook (10 s budget) exits the child with a dedicated code and
+  the worker stops with the hook named instead of restart-looping.
+- Per-task execution timeout: `@app.task(..., timeout_ms=...)` (minimum
+  1000 ms, measured from dispatch). On expiry the worker records a
+  `TASK_TIMEOUT` attempt, fails the task — or schedules a retry when
+  `"TASK_TIMEOUT"` is in `auto_retry_for` — and kills the child
+  process. The kill restarts the worker's process pool; sibling tasks
+  in flight recover through crash recovery. A deadline that fires
+  before user code starts requeues the task instead.
+
+### Breaking
+
+- `catch_up_missed=False` now matches its documentation: after scheduler
+  downtime, only the most recent due slot fires (skipped slots are
+  logged) and the schedule resumes strictly in the future. The previous
+  behavior accidentally replayed the entire backlog one run per tick;
+  deployments relying on that replay must set `catch_up_missed=True`.
+- `PostgresConfig.database_url` and `session_database_url` are now
+  pydantic `SecretStr` — `repr()`/`model_dump()` mask credentials. Code
+  reading these fields must call `.get_secret_value()`. String inputs
+  validate as before.
+- Producer pool defaults dropped from `30 + 30` to SQLAlchemy's `5 + 10`
+  (`pool_size` / `max_overflow`); raise them explicitly for
+  high-throughput producers.
+- Scheduler startup no longer deletes `horsies_schedule_state` rows
+  absent from its config (this broke rolling deploys and shared-database
+  topologies); orphan rows are kept and logged.
+- `TaskSchedule` positional `args` are rejected at scheduler startup
+  (they always failed at enqueue; now they fail fast).
+- Spec validation rejects `join='any'`/`'quorum'` nodes whose
+  `args_from` targets a parameter without a default
+  (`WORKFLOW_INVALID_JOIN`), and `@app.task` registration rejects Enums
+  with non-JSON-native member values.
+
+### Fixed
+
+- Worker finalize/retry SQL now requires claim ownership: a stale
+  finalizer (its task reaper-requeued and re-claimed by another worker)
+  could overwrite the new owner's in-flight attempt, corrupt the attempt
+  history, or trigger a third execution.
+- Workflow terminal marks require `status='RUNNING'`: a task left
+  running through `cancel()` could flip a CANCELLED workflow to
+  COMPLETED/FAILED on completion and cascade the resurrection into
+  parent workflows.
+- `resume_workflow` / `cascade_resume_to_children` decode stored
+  dependency results with the app registry again — resumed `args_from`
+  consumers received `RESULT_DESERIALIZATION_ERROR` sentinels instead of
+  the real upstream results.
+- `stop()` shuts the executor down before draining finalizers: a task
+  finishing after the drain timeout had its completed result discarded
+  and was recorded (and possibly re-executed) as `WORKER_CRASHED`.
+- Subworkflow completion takes the parent workflow lock before promoting
+  dependents, closing a fan-in race that left nodes PENDING with all
+  dependencies terminal until the next reaper sweep.
+- `TaskHandle.get()` no longer caches transient errors: one broker
+  hiccup or a not-found racing the enqueue poisoned the handle
+  permanently.
+- Schedules no longer wedge on permanent enqueue errors (e.g.
+  `PAYLOAD_MISMATCH` after a deploy changed kwargs): the doomed slot is
+  skipped and the schedule keeps running.
+- `_schedule_retry` reads the queue name from the already-locked row
+  instead of a second pooled session (pool-starvation deadlock under
+  mass failure), and finalize retryability is keyed on the recovery DB
+  outcome instead of the child-future exception type.
+- `import_file_path` rolls back `sys.modules` and its cache when module
+  execution fails (a broken module was silently returned as success on
+  the next import) and no longer registers basename aliases that shadow
+  other importable modules.
+- A deterministic result-encode failure during workflow completion now
+  degrades to a FAILED node with a serialization-error envelope instead
+  of looping phase-2 finalize retries forever.
+
+### Performance
+
+- Claim path: partial composite indexes for both eligibility arms plus
+  a split-arm `CLAIM_SQL` — measured ~430× faster claim passes at a
+  50k-row pending backlog. The pending arm walks its composite in
+  `ORDER BY` order and stops at the limit; the expired arm carries two
+  complementary partial indexes (expiry filter for the few-expired
+  steady state, ordered composite for deep expired backlogs — measured
+  30.7ms → 0.11ms at 50k expired rows) with the planner choosing per
+  data distribution. The cluster-wide claim advisory lock is taken only when
+  cluster/queue caps require serialized accounting, and its key is a
+  fixed constant (DSN-derived keys silently split the lock between
+  workers using different DSN spellings of the same database).
+- Workers subscribe to their queue channels only: the global `task_new`
+  channel woke every worker for every insert cluster-wide (thundering
+  herd). The trigger still emits `task_new` for external observers.
+- Notify triggers split into INSERT/UPDATE pairs gated by
+  `WHEN (OLD.status IS DISTINCT FROM NEW.status)` — lease renewals no
+  longer invoke plpgsql per row.
+- Result waiters get payload-keyed dispatch on `task_done` (one shared
+  LISTEN, per-task delivery) and the wait loop polls a slim status
+  probe instead of the full row with TOASTed payload columns.
+- Reaper passes are gated by a cluster-wide try-advisory-lock (one
+  executing reaper per interval instead of one per worker), stale-claim
+  requeue locks only genuinely stale rows, pending expiry runs in
+  bounded SKIP LOCKED batches, and two per-iteration session-churn
+  sites are gone.
+- Six write-amplifying single-column indexes on `horsies_tasks` dropped
+  (every lifecycle UPDATE wrote entries into all of them); dependency
+  lookups use `@>` so the GIN index actually applies; heartbeat and
+  worker-state timeseries PKs widened to BIGINT (int4 sequences
+  exhausted in months at heartbeat rates).
+- Listener notification connections enable TCP keepalives so silently
+  dropped connections surface within ~60s instead of hanging the
+  dispatcher.
+
+### Changed
+
+- Global workflow-recovery passes are capped at 200 rows per candidate
+  query per pass; resume-scoped passes remain uncapped. Successive
+  passes converge on large backlogs without one pass holding its
+  session and transaction throughout.
+- In-process task calls return the lax-coerced ok value (e.g. `Ok('5')`
+  for a declared `int` returns `5`), matching what wire consumers
+  decode.
+- `WorkerConfig.__repr__` masks its DSN fields.
+- New docs: datetime round-trip caveats, scheduler DST behavior,
+  exception-mapper exact-class matching, and the database trust
+  boundary.
+
 ## [0.1.6] - 2026-06-04
 
 ### Added
