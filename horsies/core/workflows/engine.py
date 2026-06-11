@@ -332,6 +332,10 @@ async def _fail_enqueued_task(
 ) -> None:
     """Mark an ENQUEUED workflow task as FAILED when pre-enqueue parsing fails.
 
+    Raises:
+        Exception: errors propagate to the public engine entry points,
+            whose callers own the typed recovery seams.
+
     Without this, an early return after the READY→ENQUEUED transition
     strands the task (ENQUEUED, task_id IS NULL, no recovery path).
 
@@ -463,6 +467,15 @@ async def enqueue_workflow_task(
 
     Returns:
         task_id if enqueued, None if already enqueued, not ready, or workflow not RUNNING.
+
+    Raises:
+        Exception: DB/engine errors propagate to the typed seams that own
+            recovery: the workflow start path folds them into
+            WorkflowStartError(ENQUEUE_FAILED) with its own retry loop,
+            resume/lifecycle operations fold them into
+            HandleOperationError, the worker folds them into a phase2
+            finalize error with bounded retries, and the reaper contains
+            each recovery pass as one unit.
     """
     # Atomic: READY → ENQUEUED only if still READY AND workflow is RUNNING
     # PAUSE guard: JOIN with workflows ensures we don't enqueue while paused
@@ -759,6 +772,15 @@ async def enqueue_subworkflow_task(
 ) -> str | None:
     """
     Start a child workflow for a SubWorkflowNode.
+
+    Raises:
+        Exception: DB/engine errors propagate to the typed seams that own
+            recovery: the workflow start path folds them into
+            WorkflowStartError(ENQUEUE_FAILED) with its own retry loop,
+            resume/lifecycle operations fold them into
+            HandleOperationError, the worker folds them into a phase2
+            finalize error with bounded retries, and the reaper contains
+            each recovery pass as one unit.
 
     Args:
         session: Database session
@@ -1261,6 +1283,10 @@ async def _build_workflow_context_data(
     """
     Build serializable workflow context data.
 
+    Raises:
+        Exception: errors propagate to the public engine entry points,
+            whose callers own the typed recovery seams.
+
     Returns a plain dict that can be JSON-serialized and reconstructed
     on the worker side into a WorkflowContext.
 
@@ -1348,6 +1374,13 @@ async def on_workflow_task_complete(
     """
     Called from worker._finalize_after when a task completes.
     Handles workflow task status update and dependency resolution.
+
+    Raises:
+        Exception: DB/engine errors propagate to the typed seams that own
+            recovery: the worker folds them into a phase2 finalize error
+            with bounded retries, workflow lifecycle operations fold them
+            into HandleOperationError, and the reaper contains each
+            recovery pass as one unit.
 
     Strict-serde phase 7: ``broker`` is required (explicit `None` allowed for
     unit-test branches that return before dependency propagation). Removing
@@ -1477,6 +1510,10 @@ async def _process_dependents(
     """
     Find tasks that depend on the completed task and enqueue if ready.
 
+    Raises:
+        Exception: errors propagate to the public engine entry points,
+            whose callers own the typed recovery seams.
+
     Args:
         session: Database session
         workflow_id: Workflow ID
@@ -1522,6 +1559,13 @@ async def try_make_ready_and_enqueue(
 ) -> None:
     """
     Check if task's join condition is satisfied and handle accordingly.
+
+    Raises:
+        Exception: DB/engine errors propagate to the typed seams that own
+            recovery: the worker folds them into a phase2 finalize error
+            with bounded retries, workflow lifecycle operations fold them
+            into HandleOperationError, and the reaper contains each
+            recovery pass as one unit.
 
     Supports three join modes:
     - "all": task runs when ALL dependencies are terminal (default)
@@ -1734,6 +1778,13 @@ async def get_dependency_results(
     """
     Fetch TaskResults for dependencies in terminal states.
 
+    Raises:
+        Exception: DB/engine errors propagate to the typed seams that own
+            recovery: the worker folds them into a phase2 finalize error
+            with bounded retries, workflow lifecycle operations fold them
+            into HandleOperationError, and the reaper contains each
+            recovery pass as one unit.
+
     - COMPLETED/FAILED: returns actual TaskResult from stored result
     - SKIPPED: returns sentinel TaskResult with UPSTREAM_SKIPPED error
 
@@ -1818,6 +1869,10 @@ async def get_dependency_results_with_names(
     Fetch TaskResults with index, name, and node_id mappings.
     Used for building WorkflowContext.
 
+    Raises:
+        Exception: errors propagate to the public engine entry points,
+            whose callers own the typed recovery seams.
+
     - COMPLETED/FAILED: returns actual TaskResult from stored result
     - SKIPPED: returns sentinel TaskResult with UPSTREAM_SKIPPED error
 
@@ -1901,6 +1956,16 @@ async def check_workflow_completion(
     """
     Check if all workflow tasks are complete and update workflow status.
     Handles cases where workflow may already be FAILED but DAG is still resolving.
+
+    Raises:
+        Exception: DB/engine errors propagate to the typed seams that own
+            recovery: the worker folds them into a phase2 finalize error
+            with bounded retries, workflow lifecycle operations fold them
+            into HandleOperationError, and the reaper contains each
+            recovery pass as one unit.
+
+    Result-typing of this completion-path function is deferred to the
+    workflow-completion redesign.
 
     If success_policy is set, evaluates success cases instead of "any failure → FAILED".
 
@@ -2015,6 +2080,13 @@ async def on_subworkflow_complete(
     """
     Called when a child workflow completes.
     Updates parent node status and propagates to parent DAG.
+
+    Raises:
+        Exception: DB/engine errors propagate to the typed seams that own
+            recovery: the worker folds them into a phase2 finalize error
+            with bounded retries, workflow lifecycle operations fold them
+            into HandleOperationError, and the reaper contains each
+            recovery pass as one unit.
     """
     from horsies.core.models.tasks import TaskResult, SubWorkflowError
 
@@ -2042,6 +2114,24 @@ async def on_subworkflow_complete(
     if parent_wf_id is None:
         # Not a child workflow (or already detached)
         return
+
+    # Fail closed on a non-terminal/unknown status. An unknown string would
+    # raise ValueError from WorkflowStatus() below — and the recovery pass
+    # re-raises per pass, a poison loop. A valid-but-non-terminal status
+    # would silently fail the parent node of a still-live child. All call
+    # sites gate on terminal children, so this only fires on corrupt rows.
+    match child_status:
+        case 'COMPLETED' | 'FAILED' | 'CANCELLED':
+            pass
+        case _:
+            logger.error(
+                'Subworkflow %s completion called with non-terminal/unknown '
+                'status %r; refusing to propagate to parent %s',
+                child_workflow_id,
+                child_status,
+                parent_wf_id,
+            )
+            return
 
     # 2. Build SubWorkflowSummary
     # SubWorkflowSummary.output is `Any` — typed decode is the parent
@@ -2198,6 +2288,9 @@ async def evaluate_workflow_success(
     """
     Evaluate whether workflow succeeded.
 
+    Result-typing of this completion-path function is deferred to the
+    workflow-completion redesign.
+
     If success_policy is None: default behavior (any failed → False)
     If success_policy is set: True if any SuccessCase is satisfied
     """
@@ -2255,6 +2348,9 @@ async def get_workflow_failure_error(
 ) -> str | None:
     """
     Get error for a failed workflow.
+
+    Result-typing of this completion-path function is deferred to the
+    workflow-completion redesign.
 
     If success_policy is set but no case satisfied, returns WORKFLOW_SUCCESS_CASE_NOT_MET.
     Otherwise, returns the first failed required task's error.
@@ -2349,6 +2445,9 @@ async def get_workflow_final_result(
     """
     Get the final workflow result.
 
+    Result-typing of this completion-path function is deferred to the
+    workflow-completion redesign.
+
     If output_task_index is set: return that task's result
     Otherwise: return dict of terminal task results (tasks with no dependents)
     """
@@ -2435,6 +2534,10 @@ async def _handle_workflow_task_failure(
 ) -> bool:
     """
     Handle a failed workflow task based on on_error policy.
+
+    Raises:
+        Exception: errors propagate to the public engine entry points,
+            whose callers own the typed recovery seams.
 
     Returns True if dependency propagation should continue, False to stop (PAUSE mode).
 

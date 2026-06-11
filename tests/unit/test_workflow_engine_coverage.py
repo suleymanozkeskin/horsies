@@ -1628,6 +1628,54 @@ class TestOnChildWorkflowComplete:
         session.execute = AsyncMock(side_effect=_dispatch)
         await on_subworkflow_complete(session, 'child-1')
 
+    @staticmethod
+    def _info_only_session(status: str) -> tuple[AsyncMock, list[Any]]:
+        row = SimpleNamespace(
+            status=status,
+            result=None,
+            error=None,
+            parent_workflow_id='wf-parent',
+            parent_task_index=0,
+            total=2, completed=1, failed=0, skipped=0,
+        )
+        executed_statements: list[Any] = []
+
+        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
+            executed_statements.append(stmt)
+            if stmt is GET_CHILD_WORKFLOW_INFO_SQL:
+                return _one_result(row)
+            return _one_result(SimpleNamespace())
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=_dispatch)
+        return session, executed_statements
+
+    @pytest.mark.asyncio
+    async def test_non_terminal_child_status_refuses_to_propagate(self) -> None:
+        """Regression: a valid-but-non-terminal status (RUNNING) used to walk
+        into the failure branches and silently fail the parent node of a
+        still-live child; now it logs and returns without touching the
+        parent."""
+        session, executed_statements = self._info_only_session('RUNNING')
+
+        await on_subworkflow_complete(session, 'child-1')
+
+        # Only the info read ran; no parent-side statements followed.
+        assert executed_statements == [GET_CHILD_WORKFLOW_INFO_SQL]
+        session.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unknown_child_status_refuses_to_propagate(self) -> None:
+        """Regression: a corrupt/unknown status used to raise ValueError from
+        WorkflowStatus(), which the recovery pass re-raised every pass
+        (poison loop); now it logs and returns without raising."""
+        session, executed_statements = self._info_only_session('GARBAGE')
+
+        await on_subworkflow_complete(session, 'child-1')
+
+        assert executed_statements == [GET_CHILD_WORKFLOW_INFO_SQL]
+        session.commit.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_error_deser_none_falls_back_to_raw_string(self) -> None:
         """When error JSON deser returns None → uses raw string[:200]."""
