@@ -261,6 +261,14 @@ class Horsies:
         """
         Decorator to register a task with this app.
         Task options are validated against TaskOptions model and app configuration.
+
+        Raises:
+            TaskDefinitionError: invalid options, mapper, or error code.
+            ConfigurationError: queue name not in app config.
+            RegistryError: duplicate task name from a different source.
+                All three fire at import/definition time by design — a task
+                that cannot be registered must crash the import, not surface
+                at first send.
         """
 
         def decorator(fn: Callable[P, 'TaskResult[T, TaskError]']):
@@ -403,6 +411,13 @@ class Horsies:
         Returns:
             List of all HorsiesError instances found across phases.
             Empty list means all validations passed.
+
+        Raises:
+            Exception: every phase contains its own expected failures into
+                the returned list; an exception escaping here is a horsies
+                bug, and it propagates to the CLI command (uncaught →
+                traceback, non-zero exit) rather than being masked as a
+                validation error.
         """
         all_errors: list[HorsiesError] = []
 
@@ -967,7 +982,14 @@ class Horsies:
         return list(self.tasks.keys_list())
 
     def get_broker(self) -> 'PostgresBroker':
-        """Get the configured PostgreSQL broker for this app"""
+        """Get the configured PostgreSQL broker for this app.
+
+        Raises:
+            HorsiesError: broker construction failed (BROKER_INIT_FAILED;
+                non-HorsiesError causes are wrapped). Construction happens
+                once per process — callers treat this as fail-fast
+                configuration error, not a retryable condition.
+        """
         try:
             if self._broker is None:
                 # Serialized: two threads racing the None check would each
@@ -1544,6 +1566,11 @@ class Horsies:
         Examples:
             paths = app.expand_module_globs(['src/**/*_tasks.py'])
             app.discover_tasks(paths)
+
+        Raises:
+            OSError: filesystem failure during glob/realpath expansion.
+                Called at app-definition time — fail-fast where the config
+                is declared.
         """
         exclude_patterns = exclude or ['*_test.py', 'test_*.py', 'conftest.py']
         results: list[str] = []
@@ -1595,6 +1622,15 @@ class Horsies:
 
         If modules is None, imports the modules discovered by discover_tasks().
         Returns the list of module identifiers that were imported.
+
+        Raises:
+            Exception: import errors (ImportError, module-level raises,
+                registration errors) propagate — fail-fast at the import
+                site. ``check()`` is the error-collecting variant
+                (``_check_task_imports``); use it to report instead of
+                crash. Missing module FILES are warn-and-skip here because
+                discovery globs may legitimately go stale; bad module CODE
+                must not be skipped.
         """
         modules_to_import = (
             self._discovered_task_modules if modules is None else modules
@@ -1704,7 +1740,12 @@ class Horsies:
             WorkflowSpec ready to start
 
         Raises:
-            ValueError: If any TaskNode.queue is not in app config
+            MultipleValidationErrors: queue/mode violations collected across
+                all nodes (via ``raise_collected``), reported together.
+            HorsiesError: broker initialization failure (``get_broker``) or
+                a missing ``definition_key`` on a definition-backed spec.
+                Definition-time fail-fast by design: a spec that cannot be
+                built must crash where it is declared, not at send time.
         """
         report = ValidationReport('workflow')
         # WorkflowSpec shallow-copies each node, so the resolved queue/priority
@@ -1853,11 +1894,27 @@ class Horsies:
         self,
         meta: _WorkflowBuilderMeta,
     ) -> list[HorsiesError]:
-        """Run a single builder (all cases or auto-invoke) and collect errors."""
+        """Run a single builder (all cases or auto-invoke) and collect errors.
+
+        Total: introspection and invocation failures fold into the returned
+        error list (check-phase containment), never raise.
+        """
         errors: list[HorsiesError] = []
         fn = meta.fn
         fn_name = getattr(fn, '__qualname__', fn.__name__)
-        sig = inspect.signature(fn)
+        try:
+            sig = inspect.signature(fn)
+        except (ValueError, TypeError) as exc:
+            errors.append(
+                ConfigurationError(
+                    message=f"builder '{fn_name}' signature is not introspectable",
+                    code=ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
+                    location=meta.location,
+                    notes=[f'inspect.signature failed: {exc}'],
+                    help_text='register a plain function (or functools.partial with a resolvable signature) as the builder',
+                ),
+            )
+            return errors
 
         # Determine if builder has required params
         required_params = [
