@@ -2177,8 +2177,9 @@ class TestRestartExecutor:
         Pins the documented mechanism: _handle_broken_pool is awaited inside
         the BrokenProcessPool except handler, so its raise bypasses
         _finalize_after's sibling except arms and lands in the background
-        finalizer task (logged by _spawn_background's done-callback); the
-        worker crashes on the next claim pass.
+        finalizer task, where _spawn_background's done-callback captures it
+        as process-fatal and stops the worker (see
+        TestBackgroundFatalCapture).
         """
         worker = _make_worker()
         worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
@@ -2196,6 +2197,87 @@ class TestRestartExecutor:
 
         with pytest.raises(ExecutorRestartFailedError):
             await worker._finalize_after(fut, 'task-1')
+
+
+@pytest.mark.unit
+class TestBackgroundFatalCapture:
+    """ExecutorRestartFailedError from a background task crashes the worker.
+
+    Pins the zombie-window fix: before this, the done-callback only logged
+    the error and the executorless worker kept running until the next
+    claim pass happened to retry the restart.
+    """
+
+    @pytest.mark.asyncio
+    async def test_on_done_captures_fatal_error_and_stops(self) -> None:
+        """The done-callback stores the fatal error and sets stop."""
+        worker = _make_worker()
+        fatal = ExecutorRestartFailedError('executor restart failed: boom')
+
+        async def _doomed() -> None:
+            raise fatal
+
+        task = worker._spawn_background(_doomed(), name='doomed-finalizer')
+        await asyncio.gather(task, return_exceptions=True)
+        # Done-callbacks run via call_soon; yield once so _on_done fires.
+        await asyncio.sleep(0)
+
+        assert worker._fatal_background_error is fatal
+        assert worker._stop.is_set()
+
+    @pytest.mark.asyncio
+    async def test_on_done_leaves_nonfatal_errors_logged_only(self) -> None:
+        """A non-fatal background failure neither stops nor stores."""
+        worker = _make_worker()
+
+        async def _doomed() -> None:
+            raise RuntimeError('transient background failure')
+
+        task = worker._spawn_background(_doomed(), name='flaky-loop')
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0)
+
+        assert worker._fatal_background_error is None
+        assert not worker._stop.is_set()
+
+    @pytest.mark.asyncio
+    async def test_run_forever_reraises_captured_fatal_after_stop(self) -> None:
+        """run_forever exits non-zero (raises), not a plain graceful stop."""
+        worker = _make_worker()
+        worker._start_with_resilience_config = AsyncMock()  # type: ignore[method-assign]
+        worker.stop = AsyncMock(side_effect=worker._stop.set)  # type: ignore[method-assign]
+        fatal = ExecutorRestartFailedError('executor restart failed: boom')
+
+        async def _claim_pass_spawning_doomed_finalizer() -> None:
+            async def _doomed() -> None:
+                raise fatal
+
+            worker._spawn_background(_doomed(), name='doomed-finalizer')
+            await asyncio.sleep(0.01)
+
+        worker._claim_and_dispatch_all = (  # type: ignore[method-assign]
+            AsyncMock(side_effect=_claim_pass_spawning_doomed_finalizer)
+        )
+        worker._wait_for_any_notify = AsyncMock()  # type: ignore[method-assign]
+
+        # Bounded so a regression (fatal swallowed -> loop spins forever)
+        # fails fast instead of hanging the suite.
+        with pytest.raises(ExecutorRestartFailedError) as excinfo:
+            await asyncio.wait_for(worker.run_forever(), timeout=10.0)
+
+        assert excinfo.value is fatal
+
+    @pytest.mark.asyncio
+    async def test_run_forever_reraises_fatal_on_early_stop_exit(self) -> None:
+        """The early stop-is-set return path also re-raises a captured fatal."""
+        worker = _make_worker()
+        worker._start_with_resilience_config = AsyncMock()  # type: ignore[method-assign]
+        fatal = ExecutorRestartFailedError('executor restart failed: boom')
+        worker._fatal_background_error = fatal
+        worker._stop.set()
+
+        with pytest.raises(ExecutorRestartFailedError):
+            await worker.run_forever()
 
 
 @pytest.mark.unit

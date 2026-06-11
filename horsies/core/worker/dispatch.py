@@ -147,9 +147,9 @@ class DispatchMixin:
                 (process-fatal). On the dispatch path it propagates to the
                 main loop. On the ``_finalize_after`` path it escapes the
                 background finalizer task (a raise inside an except handler
-                bypasses the sibling arms) and is logged by the task reaper;
-                the worker is left executorless, so the next claim pass
-                retries the restart and crashes if it fails again.
+                bypasses the sibling arms) into ``_on_done``, which captures
+                it and stops the worker; ``run_forever`` re-raises it for a
+                non-zero exit — no executorless zombie window.
         """
         outcome = await self._recover_worker_future_failure(
             task_id,

@@ -161,6 +161,7 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
         self._service_tasks: set[asyncio.Task[Any]] = set()
         self._finalizer_tasks: set[asyncio.Task[Any]] = set()
         self._finalize_retry_attempts: dict[tuple[str, str], int] = {}
+        self._fatal_background_error: ExecutorRestartFailedError | None = None
 
     def request_stop(self) -> None:
         """Request worker to stop gracefully."""
@@ -184,7 +185,22 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
                 return
             exc = t.exception()
             if exc is not None:
-                logger.error(f'Background task {t.get_name()!r} failed: {exc}')
+                match exc:
+                    case ExecutorRestartFailedError():
+                        # Process-fatal: an executorless worker that keeps
+                        # running is a zombie. Capture the error and stop;
+                        # run_forever re-raises it so the process exits
+                        # non-zero for a supervisor restart.
+                        logger.critical(
+                            f'Background task {t.get_name()!r} hit a '
+                            f'process-fatal error; stopping worker: {exc}'
+                        )
+                        self._fatal_background_error = exc
+                        self._stop.set()
+                    case _:
+                        logger.error(
+                            f'Background task {t.get_name()!r} failed: {exc}'
+                        )
                 return
             if finalizer:
                 result = t.result()
@@ -379,6 +395,18 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
         """
         logger.critical('Stopping worker: %s', exc)
         self._stop.set()
+
+    def _raise_captured_fatal_error(self) -> None:
+        """Re-raise a process-fatal error captured from a background task.
+
+        Raises:
+            ExecutorRestartFailedError: ``_on_done`` captured it from a
+                background task (finalizer dispatch path) and set stop;
+                re-raising here makes ``run_forever`` exit non-zero so the
+                supervisor restarts the worker with a fresh executor.
+        """
+        if self._fatal_background_error is not None:
+            raise self._fatal_background_error
 
     def _make_retry_backoff(self) -> _RetryBackoff:
         return _RetryBackoff(
@@ -796,14 +824,19 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
         errors are backoff-retried per the resilience config; anything else
         (including ExecutorRestartFailedError and an exhausted backoff)
         re-raises so the process exits non-zero for a supervisor restart.
+        An ExecutorRestartFailedError that escaped a BACKGROUND task is
+        captured by ``_on_done`` (which sets stop) and re-raised here after
+        shutdown — same non-zero exit, no zombie executorless worker.
         ``stop()`` always runs once the loop is entered; startup failures
         exit via ``_cleanup_after_failed_start`` instead.
 
         Raises:
-            Exception: the non-retryable or retry-exhausted loop error.
+            Exception: the non-retryable or retry-exhausted loop error, or
+                the captured background ExecutorRestartFailedError.
         """
         await self._start_with_resilience_config()
         if self._stop.is_set():
+            self._raise_captured_fatal_error()
             return
         logger.info('Worker started')
         try:
@@ -838,6 +871,7 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
                     raise
         finally:
             await self.stop()
+        self._raise_captured_fatal_error()
 
     async def _wait_for_any_notify(self, poll_interval_ms: int) -> None:
         """Wait on any subscribed queue channel; coalesce a burst.
