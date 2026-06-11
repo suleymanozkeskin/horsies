@@ -133,6 +133,17 @@ This prevents duplicate executions when:
 - Multiple schedulers run (advisory locks serialize)
 - Network issues cause delays
 
+### Known behavior: failed initialization is restart-scoped
+
+State rows are created once, at scheduler startup. If a schedule's row
+creation fails there (for example a transient database error during
+`start()`), that schedule is logged as failed and stays **dormant until
+the next scheduler restart** — the tick loop only visits schedules that
+already have a state row, so it cannot retry the initialization. Other
+schedules are unaffected. If you see
+`N schedule(s) failed to initialize` in the logs, restart the scheduler
+once the underlying issue is resolved.
+
 ## Catch-Up Logic
 
 When `catch_up_missed=True`, missed runs are executed:

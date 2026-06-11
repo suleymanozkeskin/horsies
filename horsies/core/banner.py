@@ -251,20 +251,3 @@ def print_banner(
     # Print everything
     output = '\n'.join(lines)
     print(output, file=file)
-
-
-def print_simple_banner(file: TextIO | None = None) -> None:
-    """Print just the ASCII art banner without config."""
-    if file is None:
-        file = sys.stdout
-
-    version = get_version()
-
-    # Horse art - cyan
-    colored_horse = _color(HORSE_BRAILLE, Colors.CYAN)
-    print(colored_horse, file=file)
-
-    # Logo with version - bright yellow bold
-    logo = LOGO_TEXT.replace('{version}', f'v{version}')
-    colored_logo = _color(logo, Colors.BRIGHT_YELLOW, Colors.BOLD)
-    print(colored_logo, file=file)
