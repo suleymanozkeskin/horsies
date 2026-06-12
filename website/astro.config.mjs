@@ -92,6 +92,7 @@ export default defineConfig({
 						{ label: 'Queue Modes', slug: 'concepts/queue-modes' },
 						{ label: 'App Config', slug: 'configuration/app-config' },
 						{ label: 'Broker Config', slug: 'configuration/broker-config' },
+						{ label: 'Remote PostgreSQL', slug: 'configuration/remote-postgres' },
 						{ label: 'Recovery Config', slug: 'configuration/recovery-config' },
 					],
 				},

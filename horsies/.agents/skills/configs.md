@@ -135,12 +135,15 @@ config = PostgresConfig(
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `database_url` | `str` | required | Must start with `"postgresql+psycopg"` (HRS-203 otherwise) |
+| `session_database_url` | `str | None` | `None` | Direct/session-capable URL for LISTEN and schema setup; required when `database_url` is transaction-pooled |
+| `pgbouncer_transaction_mode` | `bool` | `False` | Disable prepared statements for transaction-pooled `database_url`; requires `session_database_url` |
 | `pool_size` | `int` | `5` | Connection pool size (raise for high-throughput producers) |
 | `max_overflow` | `int` | `10` | Extra connections beyond pool_size |
 | `worker_pool_size` | `int | None` | `3` | Worker coordinator pool size; `None` inherits `pool_size` |
 | `worker_max_overflow` | `int | None` | `2` | Worker coordinator overflow; `None` inherits `max_overflow` |
 | `worker_child_pool_min_size` | `int` | `0` | Minimum connections kept by each child worker process |
 | `worker_child_pool_max_size` | `int` | `2` | Maximum connections allowed per child worker process |
+| `worker_child_pool_check` | `bool` | `True` | Health-check child pool connections on checkout; one round trip per checkout, disable alongside `pool_pre_ping` on high-RTT links |
 | `pool_timeout` | `int` | `30` | Seconds to wait for a connection |
 | `pool_recycle` | `int` | `1800` | Seconds before connections are recycled |
 | `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use |

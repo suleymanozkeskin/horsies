@@ -28,8 +28,9 @@ broker = PostgresConfig(
 | `worker_max_overflow` | `int \| None` | 2 | Worker coordinator overflow; `None` inherits `max_overflow` |
 | `worker_child_pool_min_size` | `int` | 0 | Minimum connections kept by each child worker process |
 | `worker_child_pool_max_size` | `int` | 2 | Maximum connections allowed per child worker process |
+| `worker_child_pool_check` | `bool` | `True` | Health-check child pool connections on checkout; see [Remote PostgreSQL](remote-postgres) |
 | `pool_timeout` | `int` | 30 | Seconds to wait for connection |
-| `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use |
+| `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use; see [Remote PostgreSQL](remote-postgres) |
 | `echo` | `bool` | `False` | Echo SQL statements to logs |
 | `pool_recycle` | `int` | 1800 | Recycle connections after N seconds |
 
