@@ -216,7 +216,7 @@ wheels = [
 
 [[package]]
 name = "horsies"
-version = "0.1.10"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "greenlet" },
