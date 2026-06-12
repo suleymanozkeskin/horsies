@@ -217,17 +217,44 @@ GET_SUBWORKFLOW_SUMMARIES_SQL = text("""
 """)
 # -- SQL constants for on_workflow_task_complete --
 
-GET_WORKFLOW_TASK_BY_TASK_ID_SQL = text("""
-    SELECT workflow_id, task_index, task_name
-    FROM horsies_workflow_tasks
-    WHERE task_id = :tid
-""")
-UPDATE_WORKFLOW_TASK_RESULT_SQL = text("""
-    UPDATE horsies_workflow_tasks
-    SET status = :status, result = :result, completed_at = NOW()
-    WHERE workflow_id = :wf_id AND task_index = :idx
-      AND NOT (status = ANY(:terminal_states))
-    RETURNING task_index
+# Single round trip replacing the old locate -> lock -> CAS-update triple
+# (each statement cost one RTT under the workflow lock; see the RTT
+# hot-path audit). One statement does all three:
+#   - `found` locates the workflow task by its backing task id and takes
+#     the workflow row's FOR UPDATE lock (serializes completion handling
+#     per workflow — same lock discipline as before).
+#   - `upd` CAS-updates the node to its terminal status (no-op if a
+#     concurrent path already made it terminal).
+#   - The outer SELECT returns the progression context (wf_status, depth,
+#     root_workflow_id, on_error) so no follow-up reads are needed: the
+#     held lock freezes the workflow row for the rest of the transaction
+#     (pause/cancel are UPDATEs on the same row and block on it), and
+#     data-modifying CTEs always execute exactly once, so the CAS runs
+#     even though the outer query only reads `found`.
+# Zero rows = not a workflow task, or its workflow row is missing; the
+# caller treats both as a no-op (matches the old early returns).
+COMPLETE_WORKFLOW_TASK_SQL = text("""
+    WITH found AS (
+        SELECT wt.workflow_id, wt.task_index,
+               w.status AS wf_status, w.depth, w.root_workflow_id, w.on_error
+        FROM horsies_workflow_tasks wt
+        JOIN horsies_workflows w ON w.id = wt.workflow_id
+        WHERE wt.task_id = :tid
+        FOR UPDATE OF w
+    ),
+    upd AS (
+        UPDATE horsies_workflow_tasks wt
+        SET status = :status, result = :result, completed_at = NOW()
+        FROM found
+        WHERE wt.workflow_id = found.workflow_id
+          AND wt.task_index = found.task_index
+          AND NOT (wt.status = ANY(:terminal_states))
+        RETURNING wt.task_index
+    )
+    SELECT found.workflow_id, found.task_index, found.wf_status,
+           found.depth, found.root_workflow_id, found.on_error,
+           EXISTS (SELECT 1 FROM upd) AS cas_won
+    FROM found
 """)
 GET_WORKFLOW_STATUS_SQL = text(
     """SELECT status FROM horsies_workflows WHERE id = :wf_id"""

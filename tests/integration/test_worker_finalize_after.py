@@ -227,7 +227,7 @@ async def test_happy_path_success_completes_and_clears(
     worker._finalize_retry_attempts[(task_id, _FINALIZE_STAGE_PHASE1)] = 2
     worker._finalize_retry_attempts[(task_id, _FINALIZE_STAGE_PHASE2)] = 1
 
-    result = await worker._finalize_after(fut, task_id)
+    result = await worker._finalize_after(fut, task_id, task_name='finalize_after_test')
 
     assert is_ok(result)
     assert result.ok_value is None
@@ -256,7 +256,7 @@ async def test_phase1_skip_returns_ok_none(
     # Seed phase-1 retry attempts to verify they get cleared on skip
     worker._finalize_retry_attempts[(task_id, _FINALIZE_STAGE_PHASE1)] = 1
 
-    result = await worker._finalize_after(fut, task_id)
+    result = await worker._finalize_after(fut, task_id, task_name='finalize_after_test')
 
     assert is_ok(result)
     assert result.ok_value is None
@@ -291,7 +291,7 @@ async def test_phase1_err_propagated_with_finalize_context(
         return_value=Ok(None),
     )
 
-    result = await worker._finalize_after(fut, task_id)
+    result = await worker._finalize_after(fut, task_id, task_name='finalize_after_test')
 
     assert is_err(result)
     assert result.err_value.error_code == expected_err.error_code
@@ -300,6 +300,7 @@ async def test_phase1_err_propagated_with_finalize_context(
     assert result.err_value.data == {
         'queue_name': 'default',
         'is_workflow_task': True,
+        'task_name': 'finalize_after_test',
     }
     worker._finalize_workflow_phase.assert_not_awaited()
 
@@ -327,7 +328,7 @@ async def test_phase2_err_propagated_but_db_stays_terminal(
         return_value=Err(phase2_err),
     )
 
-    result = await worker._finalize_after(fut, task_id)
+    result = await worker._finalize_after(fut, task_id, task_name='finalize_after_test')
 
     assert is_err(result)
     assert result.err_value is phase2_err
@@ -354,7 +355,7 @@ async def test_broken_process_pool_returns_err(
     # Mock _handle_broken_pool to avoid executor restart side-effects
     worker._handle_broken_pool = AsyncMock()  # type: ignore[method-assign]
 
-    result = await worker._finalize_after(fut, task_id)
+    result = await worker._finalize_after(fut, task_id, task_name='finalize_after_test')
 
     assert is_err(result)
     err = result.err_value
@@ -421,7 +422,7 @@ async def test_generic_future_exception_requeues_and_returns_err(
         return_value=MagicMock(value='NOT_OWNER_OR_NOT_CLAIMED'),
     )
 
-    result = await worker._finalize_after(fut, task_id)
+    result = await worker._finalize_after(fut, task_id, task_name='finalize_after_test')
 
     assert is_err(result)
     err = result.err_value
@@ -452,7 +453,7 @@ async def test_phase1_ok_none_clears_only_phase1_attempts(
     worker._finalize_retry_attempts[(task_id, _FINALIZE_STAGE_PHASE1)] = 3
     worker._finalize_retry_attempts[(task_id, _FINALIZE_STAGE_PHASE2)] = 2
 
-    result = await worker._finalize_after(fut, task_id)
+    result = await worker._finalize_after(fut, task_id, task_name='finalize_after_test')
 
     assert is_ok(result)
     # Phase-1 cleared
@@ -482,7 +483,7 @@ async def test_full_success_clears_both_retry_stages(
     worker._finalize_retry_attempts[(task_id, _FINALIZE_STAGE_PHASE1)] = 1
     worker._finalize_retry_attempts[(task_id, _FINALIZE_STAGE_PHASE2)] = 1
 
-    result = await worker._finalize_after(fut, task_id)
+    result = await worker._finalize_after(fut, task_id, task_name='finalize_after_test')
 
     assert is_ok(result)
     assert (task_id, _FINALIZE_STAGE_PHASE1) not in worker._finalize_retry_attempts

@@ -485,7 +485,9 @@ async def recover_stuck_workflows(
         # apply on_error policy, process dependents, and check workflow completion
         from horsies.core.workflows.engine import on_workflow_task_complete
 
-        await on_workflow_task_complete(session, task_id, result, broker)
+        await on_workflow_task_complete(
+            session, task_id, result, broker, task_name=task_name,
+        )
         logger.info(
             f'Recovered crashed worker workflow task: workflow={workflow_id}, '
             f'task_index={task_index}, task_id={task_id}, task_status={task_status}'

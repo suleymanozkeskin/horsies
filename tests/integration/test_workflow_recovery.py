@@ -26,6 +26,7 @@ from horsies.core.workflows.recovery import recover_stuck_workflows
 
 from .conftest import make_simple_task, make_failing_task, make_workflow_spec, start_ok
 from horsies.core.models.workflow import SuccessPolicy, SuccessCase
+from tests.integration.conftest import task_name_for
 
 
 def _strict_result_json(result: TaskResult[Any, TaskError]) -> str:
@@ -1357,6 +1358,7 @@ class TestWorkflowRecovery:
 
         await on_workflow_task_complete(
             session, child_task_id, TaskResult(ok=42), broker,
+            task_name=await task_name_for(session, child_task_id),
         )
         await session.commit()
 

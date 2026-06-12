@@ -301,7 +301,10 @@ class TestSubworkflowIntegration:
         )
         row = res.fetchone()
         if row and row[0]:
-            await on_workflow_task_complete(session, row[0], result, broker)
+            await on_workflow_task_complete(
+            session, row[0], result, broker,
+            task_name=await task_name_for(session, row[0]),
+        )
             await drain_parent_propagations_in_session(session, broker)
             await session.commit()
 
@@ -355,7 +358,10 @@ class TestSubworkflowIntegration:
 
         child_task_id = await self._get_child_task_id(session, child_id)
         assert isinstance(child_task_id, str)
-        await on_workflow_task_complete(session, child_task_id, child_result, broker)
+        await on_workflow_task_complete(
+            session, child_task_id, child_result, broker,
+            task_name=await task_name_for(session, child_task_id),
+        )
         await drain_parent_propagations_in_session(session, broker)
         await session.commit()
         return child_id
@@ -535,7 +541,8 @@ class TestSubworkflowIntegration:
         assert isinstance(child_task_id, str)
 
         await on_workflow_task_complete(
-            session, child_task_id, TaskResult(ok=7), broker
+            session, child_task_id, TaskResult(ok=7), broker,
+            task_name=await task_name_for(session, child_task_id),
         )
         await drain_parent_propagations_in_session(session, broker)
         await session.commit()
@@ -954,12 +961,14 @@ class TestSubworkflowIntegration:
         assert isinstance(child1_task_id, str) and isinstance(child2_task_id, str)
 
         await on_workflow_task_complete(
-            session, child1_task_id, TaskResult(ok=1), broker
+            session, child1_task_id, TaskResult(ok=1), broker,
+            task_name=await task_name_for(session, child1_task_id),
         )
         await drain_parent_propagations_in_session(session, broker)
         await session.commit()
         await on_workflow_task_complete(
-            session, child2_task_id, TaskResult(ok=5), broker
+            session, child2_task_id, TaskResult(ok=5), broker,
+            task_name=await task_name_for(session, child2_task_id),
         )
         await drain_parent_propagations_in_session(session, broker)
         await session.commit()
@@ -1927,7 +1936,10 @@ class TestSubworkflowRecovery:
         )
         task_row = res.fetchone()
         assert task_row is not None and task_row[0] is not None
-        await on_workflow_task_complete(session, task_row[0], TaskResult(ok=2), broker)
+        await on_workflow_task_complete(
+            session, task_row[0], TaskResult(ok=2), broker,
+            task_name=await task_name_for(session, task_row[0]),
+        )
         await drain_parent_propagations_in_session(session, broker)
         await session.commit()
 
@@ -2033,6 +2045,7 @@ class TestSubworkflowRecovery:
 
 
 from pydantic import BaseModel  # noqa: E402
+from tests.integration.conftest import task_name_for
 
 
 class _TypedPayload(BaseModel):

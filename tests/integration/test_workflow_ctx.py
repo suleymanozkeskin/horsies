@@ -27,6 +27,7 @@ from horsies.core.worker.current import set_current_app
 from horsies.core.worker.worker import _run_task_entry, _initialize_worker_pool
 
 from .conftest import make_simple_task, make_no_ctx_task, make_workflow_spec, start_ok
+from tests.integration.conftest import task_name_for
 
 
 def _is_str_keyed_dict(value: object) -> TypeGuard[dict[str, Any]]:
@@ -95,7 +96,10 @@ class TestWorkflowCtx:
         )
         row = res.fetchone()
         if row and row[0]:
-            await on_workflow_task_complete(session, row[0], result, broker)
+            await on_workflow_task_complete(
+            session, row[0], result, broker,
+            task_name=await task_name_for(session, row[0]),
+        )
             await session.commit()
 
     async def _get_task_kwargs(

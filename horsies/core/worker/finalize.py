@@ -53,7 +53,6 @@ from horsies.core.worker.runtime import (
     _RetryError,
 )
 from horsies.core.worker.sql import (
-    CHECK_WORKFLOW_TASK_EXISTS_SQL,
     MARK_TASK_COMPLETED_SQL,
     MARK_TASK_FAILED_SQL,
     MARK_TASK_FAILED_WORKER_SQL,
@@ -131,6 +130,8 @@ class FinalizeMixin:
         is_workflow_task: bool = True,
         executor: Optional[ProcessPoolExecutor] = None,
         timeout_ms: Optional[int] = None,
+        *,
+        task_name: str,
     ) -> Result[None, _FinalizeError]:
         try:
             if timeout_ms is not None:
@@ -198,6 +199,7 @@ class FinalizeMixin:
                     phase1_r.err_value,
                     queue_name=queue_name,
                     is_workflow_task=is_workflow_task,
+                    task_name=task_name,
                 )
             )
         tr = phase1_r.ok_value
@@ -212,6 +214,7 @@ class FinalizeMixin:
             tr,
             queue_name=queue_name,
             is_workflow_task=is_workflow_task,
+            task_name=task_name,
         )
         if is_err(phase2_r):
             return phase2_r
@@ -274,10 +277,12 @@ class FinalizeMixin:
         *,
         queue_name: str,
         is_workflow_task: bool,
+        task_name: str,
     ) -> _FinalizeError:
         data = dict(err.data or {})
         data.setdefault('queue_name', queue_name or 'default')
         data.setdefault('is_workflow_task', is_workflow_task)
+        data.setdefault('task_name', task_name)
         return _FinalizeError(
             error_code=err.error_code,
             message=err.message,
@@ -287,12 +292,21 @@ class FinalizeMixin:
             data=data,
         )
 
-    def _finalize_context_from_error(self, err: _FinalizeError) -> tuple[str, bool]:
+    def _finalize_context_from_error(
+        self, err: _FinalizeError,
+    ) -> tuple[str, bool, str]:
+        """Recover (queue_name, is_workflow_task, task_name) from error data.
+
+        A missing task_name degrades to '' — the engine's ok_type
+        resolution then falls back to ``Any`` (same degradation as a
+        broker-less completion), it does not fail the retry.
+        """
         data = err.data or {}
         is_workflow_task_raw = data.get('is_workflow_task')
         return (
             str(data.get('queue_name') or 'default'),
             is_workflow_task_raw if isinstance(is_workflow_task_raw, bool) else True,
+            str(data.get('task_name') or ''),
         )
 
     def _clear_finalize_retry_attempts(self, task_id: str, stage: str) -> None:
@@ -699,6 +713,7 @@ class FinalizeMixin:
         *,
         queue_name: str = 'default',
         is_workflow_task: bool = True,
+        task_name: str,
     ) -> Result[None, _FinalizeError]:
         """Phase 2 of finalization: workflow advancement and worker wake notifications.
 
@@ -718,6 +733,7 @@ class FinalizeMixin:
                     task_id,
                     tr,
                     is_workflow_task=is_workflow_task,
+                    task_name=task_name,
                 )
 
                 # Proactively wake workers of this queue to re-check
@@ -763,8 +779,14 @@ class FinalizeMixin:
 
     async def _load_persisted_task_result(
         self, task_id: str
-    ) -> Result[TaskResult[Any, TaskError], _FinalizeError]:
-        """Load a terminal task's persisted TaskResult for phase-2 replay retries."""
+    ) -> Result[tuple[TaskResult[Any, TaskError], str], _FinalizeError]:
+        """Load a terminal task's persisted (TaskResult, task_name) for
+        phase-2 replay retries.
+
+        task_name comes from the reloaded row (source of truth for the
+        engine's ok_type resolution); '' when the column is NULL — the
+        engine then degrades to an ``Any`` encode, it does not fail.
+        """
         try:
             async with self.sf() as s:
                 res = await s.execute(GET_TASK_STATUS_RESULT_SQL, {'id': task_id})
@@ -837,7 +859,7 @@ class FinalizeMixin:
                                 retryable=False,
                             )
                         )
-                    return Ok(TaskResult(err=err_value))
+                    return Ok((TaskResult(err=err_value), str(source_task_name or '')))
                 source_task = (
                     self._app.tasks.get(source_task_name)
                     if self._app is not None and source_task_name is not None
@@ -877,7 +899,7 @@ class FinalizeMixin:
                             retryable=False,
                         )
                     )
-                return Ok(decoded_tr)
+                return Ok((decoded_tr, str(source_task_name or '')))
         except Exception as exc:
             return Err(
                 self._make_finalize_error(
@@ -1057,12 +1079,15 @@ class FinalizeMixin:
             failed_reason=failed_reason,
         )
         if is_err(phase1_r):
-            queue_name, is_workflow_task = self._finalize_context_from_error(err)
+            queue_name, is_workflow_task, task_name = (
+                self._finalize_context_from_error(err)
+            )
             await self._handle_finalize_error(
                 self._with_finalize_context(
                     phase1_r.err_value,
                     queue_name=queue_name,
                     is_workflow_task=is_workflow_task,
+                    task_name=task_name,
                 )
             )
             return
@@ -1072,12 +1097,15 @@ class FinalizeMixin:
             self._clear_finalize_retry_attempts(err.task_id, _FINALIZE_STAGE_PHASE1)
             return
 
-        queue_name, is_workflow_task = self._finalize_context_from_error(err)
+        queue_name, is_workflow_task, task_name = (
+            self._finalize_context_from_error(err)
+        )
         phase2_r = await self._finalize_workflow_phase(
             err.task_id,
             tr,
             queue_name=queue_name,
             is_workflow_task=is_workflow_task,
+            task_name=task_name,
         )
         if is_err(phase2_r):
             await self._handle_finalize_error(phase2_r.err_value)
@@ -1102,13 +1130,17 @@ class FinalizeMixin:
         if is_err(load_r):
             await self._handle_finalize_error(load_r.err_value)
             return
+        tr, loaded_task_name = load_r.ok_value
 
-        queue_name, is_workflow_task = self._finalize_context_from_error(err)
+        queue_name, is_workflow_task, _ = self._finalize_context_from_error(err)
         phase2_r = await self._finalize_workflow_phase(
             err.task_id,
-            load_r.ok_value,
+            tr,
             queue_name=queue_name,
             is_workflow_task=is_workflow_task,
+            # The reloaded task row's name, not the error-data copy: the
+            # row is the source of truth for ok_type resolution.
+            task_name=loaded_task_name,
         )
         if is_err(phase2_r):
             await self._handle_finalize_error(phase2_r.err_value)
@@ -1191,12 +1223,18 @@ class FinalizeMixin:
         result: 'TaskResult[Any, TaskError]',
         *,
         is_workflow_task: bool = True,
+        task_name: str,
     ) -> None:
         """
         Check if task is part of a workflow and handle accordingly.
 
         This method is called after a task completes (success or failure).
         It updates the workflow_task record and triggers dependency resolution.
+
+        The old pre-flight existence check is gone: the engine's single
+        locate+lock+CAS statement returns zero rows for a non-workflow
+        task and the call no-ops, at the same one-statement cost the
+        check itself had.
 
         Raises:
             Exception: DB and engine errors propagate to the single caller,
@@ -1209,14 +1247,7 @@ class FinalizeMixin:
         if not is_workflow_task:
             return
 
-        # Quick check: is this task linked to a workflow?
-        check = await session.execute(
-            CHECK_WORKFLOW_TASK_EXISTS_SQL,
-            {'tid': task_id},
-        )
-
-        if check.fetchone() is None:
-            return  # Not a workflow task
-
         # Handle workflow task completion
-        await on_workflow_task_complete(session, task_id, result, self.broker)
+        await on_workflow_task_complete(
+            session, task_id, result, self.broker, task_name=task_name,
+        )

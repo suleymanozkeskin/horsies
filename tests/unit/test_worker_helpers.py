@@ -877,7 +877,7 @@ class TestFinalizeAfterRequeueOutcome:
         fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
         fut.set_exception(OperationalError('connection reset'))
 
-        result = await worker._finalize_after(fut, 'task-10')
+        result = await worker._finalize_after(fut, 'task-10', task_name='helper_task')
 
         assert isinstance(result, Err)
         err: _FinalizeError = result.err_value
@@ -900,7 +900,7 @@ class TestFinalizeAfterRequeueOutcome:
         fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
         fut.set_exception(OperationalError('original connection error'))
 
-        result = await worker._finalize_after(fut, 'task-11')
+        result = await worker._finalize_after(fut, 'task-11', task_name='helper_task')
 
         assert isinstance(result, Err)
         err: _FinalizeError = result.err_value
@@ -923,7 +923,7 @@ class TestFinalizeAfterRequeueOutcome:
         fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
         fut.set_exception(OperationalError('transient'))
 
-        result = await worker._finalize_after(fut, 'task-12')
+        result = await worker._finalize_after(fut, 'task-12', task_name='helper_task')
 
         assert isinstance(result, Err)
         err: _FinalizeError = result.err_value
@@ -943,7 +943,7 @@ class TestFinalizeAfterRequeueOutcome:
         fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
         fut.set_exception(ValueError('bad data'))
 
-        result = await worker._finalize_after(fut, 'task-13')
+        result = await worker._finalize_after(fut, 'task-13', task_name='helper_task')
 
         assert isinstance(result, Err)
         err: _FinalizeError = result.err_value
@@ -1693,6 +1693,7 @@ class TestRetryFinalizePhase1:
             _SENTINEL_TASK_RESULT,
             queue_name='default',
             is_workflow_task=True,
+            task_name='',
         )
         assert key_p1 not in worker._finalize_retry_attempts
         assert key_p2 not in worker._finalize_retry_attempts
@@ -1722,6 +1723,7 @@ class TestRetryFinalizePhase1:
                 },
                 'queue_name': 'critical',
                 'is_workflow_task': False,
+                'task_name': 'ctx_task',
             },
         )
 
@@ -1732,6 +1734,7 @@ class TestRetryFinalizePhase1:
             _SENTINEL_TASK_RESULT,
             queue_name='critical',
             is_workflow_task=False,
+            task_name='ctx_task',
         )
 
     # --- U-3e: _persist fails → delegates ---
@@ -1760,6 +1763,7 @@ class TestRetryFinalizePhase1:
         assert retry_err.data == {
             'queue_name': 'default',
             'is_workflow_task': True,
+            'task_name': '',
         }
 
     # --- U-3f: _persist Ok(None) → clears phase1 only ---
@@ -1879,7 +1883,7 @@ class TestRetryFinalizePhase2:
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
         worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok(_SENTINEL_TASK_RESULT),
+            return_value=Ok((_SENTINEL_TASK_RESULT, 'loaded_task')),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Ok(None),
@@ -1895,6 +1899,7 @@ class TestRetryFinalizePhase2:
             _SENTINEL_TASK_RESULT,
             queue_name='default',
             is_workflow_task=True,
+            task_name='loaded_task',
         )
         assert key not in worker._finalize_retry_attempts
 
@@ -1904,7 +1909,7 @@ class TestRetryFinalizePhase2:
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
         worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok(_SENTINEL_TASK_RESULT),
+            return_value=Ok((_SENTINEL_TASK_RESULT, 'loaded_task')),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Ok(None),
@@ -1925,6 +1930,8 @@ class TestRetryFinalizePhase2:
             _SENTINEL_TASK_RESULT,
             queue_name='critical',
             is_workflow_task=False,
+            # Reloaded row name wins over error-data context.
+            task_name='loaded_task',
         )
 
     # --- U-3k: _finalize_workflow fails → delegates ---
@@ -1942,7 +1949,7 @@ class TestRetryFinalizePhase2:
             retryable=True,
         )
         worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok(_SENTINEL_TASK_RESULT),
+            return_value=Ok((_SENTINEL_TASK_RESULT, 'loaded_task')),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Err(wf_err),
@@ -2230,7 +2237,7 @@ class TestRestartExecutor:
         fut.set_exception(BrokenProcessPool('pool died'))
 
         with pytest.raises(ExecutorRestartFailedError):
-            await worker._finalize_after(fut, 'task-1')
+            await worker._finalize_after(fut, 'task-1', task_name='helper_task')
 
 
 @pytest.mark.unit

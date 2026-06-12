@@ -39,6 +39,7 @@ from horsies.core.workflows.engine import (
 )
 
 from .conftest import make_simple_task, start_ok
+from tests.integration.conftest import task_name_for
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +175,7 @@ class TestCascadeResumeMissingCompletionCheck:
             child_task_c_id,
             TaskResult(err=TaskError(error_code='CHILD_FAIL', message='C failed')),
             broker,
+            task_name=await task_name_for(session, child_task_c_id),
         )
         await session.commit()
         session.expire_all()
@@ -203,6 +205,7 @@ class TestCascadeResumeMissingCompletionCheck:
             parent_task_a_id,
             TaskResult(err=TaskError(error_code='PARENT_FAIL', message='A failed')),
             broker,
+            task_name=await task_name_for(session, parent_task_a_id),
         )
         await session.commit()
         session.expire_all()

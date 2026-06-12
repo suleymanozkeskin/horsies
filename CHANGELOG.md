@@ -8,6 +8,38 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+### Performance
+
+- Task completion runs in half the round trips. The completion path's
+  locate -> lock -> CAS-update triple is one statement
+  (`COMPLETE_WORKFLOW_TASK_SQL`: locate the node by backing task id, take
+  the workflow row's FOR UPDATE lock, CAS to terminal status, return the
+  progression context), the post-update status/depth reads are gone (the
+  held lock freezes the workflow row, so the locked row's values are
+  authoritative), the completion check no longer re-acquires the
+  already-held lock, and the failure path no longer re-acquires it a
+  third time or re-reads `on_error`. Per success completion with one
+  pending dependent: 10 statements -> 5; failed completion
+  (on_error=FAIL): 14 -> 7. Measured against a remote (~33-45ms RTT)
+  Postgres: 491ms -> 328ms per completion (failure path 654ms -> 335ms).
+  Completions of the same workflow serialize on the workflow row lock,
+  so the shorter lock-held window raises the per-workflow completion
+  ceiling from ~2.3-3/s to ~3.2-4.3/s.
+
+### Changed
+
+- `on_workflow_task_complete` requires a keyword-only `task_name`
+  (callers read it from the task row they already hold); the result
+  envelope is encoded before the first statement. The worker threads
+  `task_name` through dispatch and both finalize retry stages; the
+  phase2 pre-flight workflow-task existence check is removed (the merged
+  statement self-detects non-workflow tasks at the same cost).
+- The completion-encode failure fallback (a horsies bug path: the result
+  envelope cannot be encoded) now stores
+  `TaskError.data={'task_id','task_name'}` instead of
+  `{'workflow_id','task_index'}` — the workflow context is not known
+  before the merged statement runs.
+
 ## [0.1.9] - 2026-06-11
 
 Workflow-start batching and per-queue claim-lock scoping: round-trip

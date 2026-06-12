@@ -31,6 +31,7 @@ from horsies.core.errors import ErrorCode
 from horsies.core.workflows.engine import on_workflow_task_complete
 
 from .conftest import make_simple_task, start_ok
+from tests.integration.conftest import task_name_for
 
 
 # =============================================================================
@@ -393,6 +394,7 @@ class TestSubworkflowKwargsOnly:
 
         await on_workflow_task_complete(
             session, task_row[0], TaskResult(ok=7), broker,
+            task_name=await task_name_for(session, task_row[0]),
         )
         await session.commit()
 
