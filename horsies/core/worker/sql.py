@@ -307,6 +307,65 @@ NOTIFY_TASK_QUEUE_SQL = text("""
     SELECT pg_notify(:c2, :p)
 """)
 
+# Fused ok-path finalization for plain (non-workflow) tasks: lock the
+# RUNNING row, upsert the COMPLETED attempt from the locked row's own
+# context, CAS the task to COMPLETED, and fire the capacity wake — one
+# statement, one transaction. Empty result = status/ownership changed
+# (reaper reclaim or re-claim); nothing is written in that case.
+FINALIZE_TASK_COMPLETED_SQL = text("""
+    WITH ctx AS (
+        SELECT id, retry_count, started_at, claimed_by_worker_id,
+               worker_hostname, worker_pid, worker_process_name,
+               clock_timestamp() AS db_now
+        FROM horsies_tasks
+        WHERE id = :id
+          AND status = 'RUNNING'
+          AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
+        FOR UPDATE
+    ),
+    attempt AS (
+        INSERT INTO horsies_task_attempts (
+            task_id, attempt, outcome, will_retry,
+            started_at, finished_at,
+            error_code, error_message, failed_reason,
+            worker_id, worker_hostname, worker_pid, worker_process_name
+        )
+        SELECT ctx.id, COALESCE(ctx.retry_count, 0) + 1, 'COMPLETED', FALSE,
+               COALESCE(ctx.started_at, ctx.db_now), ctx.db_now,
+               NULL, NULL, NULL,
+               ctx.claimed_by_worker_id, ctx.worker_hostname, ctx.worker_pid,
+               ctx.worker_process_name
+        FROM ctx
+        ON CONFLICT (task_id, attempt) DO UPDATE SET
+            outcome = EXCLUDED.outcome,
+            will_retry = EXCLUDED.will_retry,
+            started_at = EXCLUDED.started_at,
+            finished_at = EXCLUDED.finished_at,
+            error_code = EXCLUDED.error_code,
+            error_message = EXCLUDED.error_message,
+            failed_reason = EXCLUDED.failed_reason,
+            worker_id = EXCLUDED.worker_id,
+            worker_hostname = EXCLUDED.worker_hostname,
+            worker_pid = EXCLUDED.worker_pid,
+            worker_process_name = EXCLUDED.worker_process_name
+    ),
+    upd AS (
+        UPDATE horsies_tasks t
+        SET status = 'COMPLETED',
+            completed_at = NOW(),
+            result = :result_json,
+            error_code = NULL,
+            finalizing_at = NULL,
+            finalizing_by_worker_id = NULL,
+            updated_at = NOW()
+        FROM ctx
+        WHERE t.id = ctx.id
+        RETURNING t.id
+    )
+    SELECT upd.id, pg_notify(:notify_channel, :notify_payload)
+    FROM upd
+""")
+
 GET_TASK_RETRY_INFO_SQL = text("""
     SELECT retry_count, max_retries, task_options, good_until, clock_timestamp() AS db_now
     FROM horsies_tasks
