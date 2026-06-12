@@ -8,6 +8,64 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-12
+
+Worker hot-path statement budget halved (27.2 -> 12.8 statements per task
+measured at 33ms RTT): optional per-checkout health checks, child pre-exec
+collapsed to one transaction, and plain-task ok-path finalization fused into
+a single statement. Remote soft-cap throughput 2.35x; local 1.15-1.36x.
+Fixes a reaper-breaker misclassification that could strand CLAIMED tasks
+after connection-slot exhaustion. No schema change (still v8).
+
+### Performance
+
+- Child pre-exec runs one transaction instead of three: the redundant
+  pre-flight expire/workflow check is deleted (the RUNNING transition's
+  guards and miss-path diagnosis already enforce it atomically) and the
+  first runner heartbeat rides the RUNNING transaction. (#134)
+- Plain-task ok-path finalization is one statement
+  (`FINALIZE_TASK_COMPLETED_SQL`): lock, attempt upsert, COMPLETED CAS,
+  and capacity notify in a single transaction; phase 2 is skipped for
+  this path. Err results, workflow tasks, and decode failures keep the
+  multi-statement flow. (#134)
+- The child result payload is decoded before any SQL; `WORKFLOW_STOPPED`
+  results finalize without opening a session. (#134)
+
+### Added
+
+- `worker_child_pool_check` (`PostgresConfig`, default `true`): disable
+  the per-checkout health check on child pools; pairs with
+  `pool_pre_ping=false` for high-RTT deployments (~20% of the per-task
+  statement budget at 30ms+ RTT). (#134)
+- Remote PostgreSQL deployment guide: connection-budget formula, pooled
+  multi-worker setup, prefetch at high RTT, health-check trade-offs.
+  (#136)
+
+### Fixed
+
+- `sqlalchemy.exc.TimeoutError` (engine pool checkout timeout) now
+  classifies as retryable. Previously three consecutive reaper passes
+  during connection-slot exhaustion latched the stale-CLAIMED requeue
+  breaker off for the process lifetime, leaving orphaned CLAIMED tasks
+  without their designed backstop after the pressure cleared. The
+  mark-failed breaker had the same exposure. (#135)
+
+### Changed
+
+- The first runner heartbeat commits atomically with the RUNNING
+  transition: a task row is never observable as RUNNING without
+  heartbeat coverage. The heartbeat thread no longer sends an immediate
+  beat. (#134)
+- Capacity notify for plain ok-path tasks fires on the finalize commit
+  instead of a separate phase-2 transaction. (#134)
+
+### Tests
+
+- Reaper breaker state machine pinned: counter resets on transient
+  failures and successes, 3-failure latch, latched operations skipped,
+  breaker independence, pool-timeout-counts-as-transient end to end.
+  (#137)
+
 ## [0.1.10] - 2026-06-12
 
 Round-trip elimination across every workflow hot path (completion,
