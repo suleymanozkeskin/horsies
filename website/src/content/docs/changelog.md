@@ -28,11 +28,17 @@ there is no migration contract between pre-1.0 versions.
   payload builder is shared with the per-node path so they cannot
   diverge.
   One documented corner vs the sequential path: under `on_error=PAUSE`,
-  multiple payload-build failures in one promotion level (a horsies bug
-  path — corrupt persisted rows) now mark every failing node of that
-  level FAILED, where the sequential loop stopped order-dependently
-  after the first. Post-resume state converges; the batched form
-  surfaces all corrupt nodes at once.
+  a payload-build failure in a promotion level (a horsies bug path —
+  corrupt persisted rows) pauses the workflow, and the level's GOOD
+  siblings still get their task rows (they passed the READY->ENQUEUED
+  CAS while the workflow was RUNNING), where the sequential loop
+  enqueued only the siblings it processed before the failure; multiple
+  failing nodes all mark FAILED instead of order-dependently the first.
+  Deliberate: dropping the inserts would strand ENQUEUED nodes with no
+  task row (the no-recovery state), while an enqueued task under a
+  paused workflow is the already-supported concurrent-pause race — the
+  post-claim guard unclaims it and resume picks it up. Pinned by
+  test_pause_policy_build_failure_with_good_sibling.
 - Task completion runs in half the round trips. The completion path's
   locate -> lock -> CAS-update triple is one statement
   (`COMPLETE_WORKFLOW_TASK_SQL`: locate the node by backing task id, take

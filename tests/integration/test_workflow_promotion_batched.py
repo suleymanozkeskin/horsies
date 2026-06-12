@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import TaskError, TaskResult
-from horsies.core.models.workflow import TaskNode, WorkflowContext
+from horsies.core.models.workflow import OnError, TaskNode, WorkflowContext
 from horsies.core.types.result import is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
 
@@ -326,3 +326,80 @@ class TestBatchedPromotionSemantics:
         ).one()
         assert row.task_id is None
         assert 'task_options' in str(row.result)
+
+    async def test_pause_policy_build_failure_with_good_sibling(
+        self,
+        clean_workflow_tables: None,
+        app: Horsies,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        """Pinned behavioral corner vs the sequential path: under
+        on_error=PAUSE, a payload-build failure pauses the workflow, and
+        the good sibling of the SAME batch still gets its task row (it
+        passed the READY->ENQUEUED CAS while the workflow was RUNNING).
+
+        Deliberate: dropping the insert would strand the sibling as
+        ENQUEUED with task_id NULL (the no-recovery state); an enqueued
+        task under a paused workflow is the already-supported concurrent
+        pause race — the post-claim guard unclaims it and resume picks it
+        up. The sequential path reached the identical row set when the
+        failing node happened to be processed last."""
+        fn = _make_task(app, 'pause_corner')
+
+        @app.task(task_name=f'pause_corrupt_{uuid.uuid4().hex[:8]}')
+        def corrupt_fn(value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+
+        corrupt_fn.task_options_json = '{not-json'  # type: ignore[attr-defined]
+
+        root = TaskNode(fn=fn, kwargs={'value': 0})
+        good = TaskNode(fn=fn, kwargs={'value': 1}, waits_for=[root])
+        bad = TaskNode(fn=corrupt_fn, kwargs={'value': 2}, waits_for=[root])
+        spec = app.workflow(
+            f'batched_pause_{uuid.uuid4().hex[:6]}', [root, good, bad],
+            on_error=OnError.PAUSE,
+            definition_key=f'batched-pause-{uuid.uuid4().hex[:6]}',
+        )
+        start_r = await start_workflow_async(spec, broker)
+        assert not is_err(start_r), start_r
+        wf_id = start_r.ok_value.workflow_id
+
+        await complete_task(session, broker, wf_id, 0, TaskResult(ok=0))
+        await session.commit()
+
+        statuses = await _statuses(session, wf_id)
+        assert statuses == {0: 'COMPLETED', 1: 'ENQUEUED', 2: 'FAILED'}
+        wf_status = (
+            await session.execute(
+                text('SELECT status FROM horsies_workflows WHERE id = :wf'),
+                {'wf': wf_id},
+            )
+        ).scalar()
+        assert wf_status == 'PAUSED'
+
+        # The good sibling's task row exists and is linked (not stranded).
+        good_task = (
+            await session.execute(
+                text("""
+                    SELECT t.status FROM horsies_tasks t
+                    JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
+                    WHERE wt.workflow_id = :wf AND wt.task_index = 1
+                """),
+                {'wf': wf_id},
+            )
+        ).scalar()
+        assert good_task == 'PENDING'  # claimable once resumed
+
+        # Resume restores the workflow; the enqueued sibling rides along.
+        from horsies.core.workflows.lifecycle import resume_workflow
+
+        resume_r = await resume_workflow(broker, wf_id)
+        assert not is_err(resume_r), resume_r
+        wf_status_after = (
+            await session.execute(
+                text('SELECT status FROM horsies_workflows WHERE id = :wf'),
+                {'wf': wf_id},
+            )
+        ).scalar()
+        assert wf_status_after == 'RUNNING'
