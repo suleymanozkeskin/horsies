@@ -280,6 +280,9 @@ async def test_success_writes_completed_attempt(
     result = await worker._persist_task_terminal_state(
         task_id=task_id, now=NOW, ok=True,
         result_json_str=result_json, failed_reason=None,
+        task_name='attempt_history_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
@@ -320,6 +323,9 @@ async def test_terminal_failure_writes_failed_attempt_and_error_code(
     result = await worker._persist_task_terminal_state(
         task_id=task_id, now=NOW, ok=True,
         result_json_str=result_json, failed_reason=None,
+        task_name='attempt_history_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
@@ -367,6 +373,9 @@ async def test_retryable_failure_writes_attempt_with_will_retry(
     result = await worker._persist_task_terminal_state(
         task_id=task_id, now=NOW, ok=True,
         result_json_str=result_json, failed_reason=None,
+        task_name='attempt_retry_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
@@ -405,6 +414,9 @@ async def test_worker_failure_writes_worker_failure_attempt(
     result = await worker._persist_task_terminal_state(
         task_id=task_id, now=NOW, ok=False,
         result_json_str='', failed_reason='Segfault in child',
+        task_name='attempt_history_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
@@ -592,6 +604,9 @@ async def test_replay_does_not_create_duplicate_attempt(
     r1 = await worker._persist_task_terminal_state(
         task_id=task_id, now=NOW, ok=True,
         result_json_str=result_json, failed_reason=None,
+        task_name='attempt_history_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
     assert is_ok(r1)
 
@@ -603,6 +618,9 @@ async def test_replay_does_not_create_duplicate_attempt(
     r2 = await worker._persist_task_terminal_state(
         task_id=task_id, now=NOW, ok=True,
         result_json_str=result_json, failed_reason=None,
+        task_name='attempt_history_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
     assert is_ok(r2)
     assert r2.ok_value is None  # guard caught it
@@ -629,6 +647,9 @@ async def test_claim_lost_writes_no_attempt(
     result = await worker._persist_task_terminal_state(
         task_id=task_id, now=NOW, ok=False,
         result_json_str='', failed_reason='CLAIM_LOST',
+        task_name='attempt_history_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
@@ -651,6 +672,9 @@ async def test_workflow_stopped_error_code_writes_no_attempt(
     result = await worker._persist_task_terminal_state(
         task_id=task_id, now=NOW, ok=True,
         result_json_str=result_json, failed_reason=None,
+        task_name='attempt_history_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
@@ -677,6 +701,9 @@ async def test_corrupt_json_writes_serialization_error_attempt(
     result = await worker._persist_task_terminal_state(
         task_id=task_id, now=NOW, ok=True,
         result_json_str='not json {', failed_reason=None,
+        task_name='attempt_history_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
@@ -714,6 +741,9 @@ async def test_attempt_number_reflects_retry_count(
     result = await worker._persist_task_terminal_state(
         task_id=task_id, now=NOW, ok=True,
         result_json_str=result_json, failed_reason=None,
+        task_name='attempt_history_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
