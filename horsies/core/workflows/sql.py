@@ -261,11 +261,68 @@ GET_WORKFLOW_STATUS_SQL = text(
 )
 # -- SQL constants for _process_dependents --
 
-GET_DEPENDENT_TASKS_SQL = text("""
-    SELECT task_index FROM horsies_workflow_tasks
-    WHERE workflow_id = :wf_id
-      AND dependencies @> ARRAY[CAST(:completed_idx AS INTEGER)]
-      AND status = 'PENDING'
+# Batched dependent evaluation: one row per PENDING dependent of ANY of the
+# source indexes (the just-terminal nodes of this cascade level), carrying
+# the node config plus its dependency-status counts as jsonb. Replaces the
+# old per-dependent GET_TASK_CONFIG + GET_DEP_STATUS_COUNTS pair (2 RTTs
+# per dependent under the workflow lock; see the RTT hot-path audit).
+# The w.status = 'RUNNING' filter is the old Python-side wf_status guard
+# folded into the query: zero rows when paused/cancelled, same outcome.
+GET_DEPENDENTS_EVAL_SQL = text("""
+    SELECT d.task_index, d.dependencies, d.allow_failed_deps, d.join_type,
+           d.min_success, d.workflow_ctx_from, d.is_subworkflow,
+           (SELECT jsonb_object_agg(s.status, s.cnt)
+            FROM (SELECT src.status, COUNT(*) AS cnt
+                  FROM horsies_workflow_tasks src
+                  WHERE src.workflow_id = d.workflow_id
+                    AND src.task_index = ANY(d.dependencies)
+                  GROUP BY src.status) s) AS dep_status_counts
+    FROM horsies_workflow_tasks d
+    JOIN horsies_workflows w ON w.id = d.workflow_id
+    WHERE d.workflow_id = :wf_id
+      AND d.dependencies && CAST(:source_idxs AS INTEGER[])
+      AND d.status = 'PENDING'
+      AND w.status = 'RUNNING'
+    ORDER BY d.task_index
+""")
+# Batch variants of the per-node promotion CAS statements. Each preserves
+# the per-row CAS verbatim (the status predicate re-evaluates per row), so
+# rows another path already advanced simply drop out of RETURNING.
+MARK_TASKS_READY_BATCH_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET status = 'READY'
+    WHERE workflow_id = :wf_id AND task_index = ANY(:idxs) AND status = 'PENDING'
+    RETURNING task_index
+""")
+SKIP_PENDING_TASKS_BATCH_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET status = 'SKIPPED'
+    WHERE workflow_id = :wf_id AND task_index = ANY(:idxs) AND status = 'PENDING'
+    RETURNING task_index
+""")
+SKIP_READY_TASKS_BATCH_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET status = 'SKIPPED'
+    WHERE workflow_id = :wf_id AND task_index = ANY(:idxs) AND status = 'READY'
+    RETURNING task_index
+""")
+# Batched READY -> ENQUEUED CAS. Identical jobs as the single-row
+# ENQUEUE_WORKFLOW_TASK_SQL: per-row CAS, pause guard (workflows join on
+# RUNNING), and payload source (RETURNING feeds the bulk task INSERT).
+# Rows must be CAS'd BEFORE any horsies_tasks insert — the returned set is
+# the only set inserted, so a missed guard can never orphan a task row.
+ENQUEUE_WORKFLOW_TASKS_BATCH_SQL = text("""
+    UPDATE horsies_workflow_tasks wt
+    SET status = 'ENQUEUED', started_at = NOW()
+    FROM horsies_workflows w
+    WHERE wt.workflow_id = :wf_id
+      AND wt.task_index = ANY(:idxs)
+      AND wt.status = 'READY'
+      AND w.id = wt.workflow_id
+      AND w.status = 'RUNNING'
+    RETURNING wt.task_index, wt.task_name, wt.task_args, wt.task_kwargs,
+              wt.queue_name, wt.priority, wt.args_from, wt.workflow_ctx_from,
+              wt.task_options
 """)
 GET_WORKFLOW_DEPTH_SQL = text(
     """SELECT depth, root_workflow_id FROM horsies_workflows WHERE id = :wf_id"""
