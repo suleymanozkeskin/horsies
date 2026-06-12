@@ -4339,3 +4339,168 @@ class TestPersistTerminalStateFusedPath:
         assert result.ok_value is None
         worker.sf.assert_not_called()
         execute.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Reaper breaker state machine (_run_reaper_pass failure counters)
+# ---------------------------------------------------------------------------
+
+from sqlalchemy.exc import TimeoutError as SATimeoutError
+
+from horsies.core.worker.runtime import (
+    _REAPER_MAX_PERMANENT_FAILURES,
+    _ReaperPassState,
+)
+
+
+def _reaper_err(*, retryable: bool, exc: BaseException | None = None) -> Err[BrokerOperationError]:
+    return Err(
+        BrokerOperationError(
+            code=BrokerErrorCode.CLEANUP_FAILED,
+            message='cleanup failed',
+            retryable=retryable,
+            exception=exc or Exception('boom'),
+        )
+    )
+
+
+def _make_reaper_broker(
+    requeue_result: Any,
+    mark_result: Any = None,
+) -> MagicMock:
+    broker = MagicMock()
+    broker.requeue_stale_claimed = AsyncMock(return_value=requeue_result)
+    broker.mark_stale_tasks_as_failed = AsyncMock(
+        return_value=mark_result if mark_result is not None else Ok(0),
+    )
+    broker.expire_pending_tasks = AsyncMock(return_value=Ok(0))
+    session = MagicMock()
+    session.commit = AsyncMock()
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=session)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    broker.session_factory = MagicMock(return_value=cm)
+    return broker
+
+
+def _fresh_reaper_state() -> _ReaperPassState:
+    # Retention cleanup is schedule-gated; push it out so passes only
+    # exercise the breaker paths under test.
+    return _ReaperPassState(next_retention_cleanup_at=float('inf'))
+
+
+async def _run_pass(worker: Worker, broker: MagicMock, state: _ReaperPassState) -> None:
+    from unittest.mock import patch as _patch
+
+    with _patch(
+        'horsies.core.workflows.recovery.recover_stuck_workflows',
+        AsyncMock(return_value=0),
+    ):
+        await worker._run_reaper_pass(broker, RecoveryConfig(), state)
+
+
+@pytest.mark.unit
+class TestReaperRequeueBreaker:
+    """requeue_stale_claimed breaker: transient resets, permanent latches."""
+
+    @pytest.mark.asyncio
+    async def test_retryable_failure_resets_counter(self) -> None:
+        worker = _make_worker()
+        state = _fresh_reaper_state()
+        state.requeue_permanent_failures = _REAPER_MAX_PERMANENT_FAILURES - 1
+        broker = _make_reaper_broker(_reaper_err(retryable=True))
+
+        await _run_pass(worker, broker, state)
+
+        assert state.requeue_permanent_failures == 0
+        assert state.requeue_disabled is False
+
+    @pytest.mark.asyncio
+    async def test_pool_timeout_counts_as_transient(self) -> None:
+        """A pool checkout timeout must never advance the permanent counter.
+
+        Regression pin: this exact shape, classified non-retryable, latched
+        the breaker off during connection-slot exhaustion and stranded
+        orphaned CLAIMED tasks after the pressure cleared.
+        """
+        from horsies.core.brokers.postgres import _broker_err
+
+        worker = _make_worker()
+        state = _fresh_reaper_state()
+        state.requeue_permanent_failures = _REAPER_MAX_PERMANENT_FAILURES - 1
+        err = _broker_err(
+            BrokerErrorCode.CLEANUP_FAILED,
+            'requeue_stale_claimed failed',
+            SATimeoutError('QueuePool limit of size 5 overflow 2 reached'),
+        )
+        broker = _make_reaper_broker(err)
+
+        await _run_pass(worker, broker, state)
+
+        assert state.requeue_permanent_failures == 0
+        assert state.requeue_disabled is False
+
+    @pytest.mark.asyncio
+    async def test_consecutive_permanent_failures_latch(self) -> None:
+        worker = _make_worker()
+        state = _fresh_reaper_state()
+        broker = _make_reaper_broker(_reaper_err(retryable=False))
+
+        for expected in range(1, _REAPER_MAX_PERMANENT_FAILURES + 1):
+            await _run_pass(worker, broker, state)
+            assert state.requeue_permanent_failures == expected
+
+        assert state.requeue_disabled is True
+
+    @pytest.mark.asyncio
+    async def test_disabled_skips_requeue_call(self) -> None:
+        worker = _make_worker()
+        state = _fresh_reaper_state()
+        state.requeue_disabled = True
+        broker = _make_reaper_broker(Ok(0))
+
+        await _run_pass(worker, broker, state)
+
+        broker.requeue_stale_claimed.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_success_resets_counter(self) -> None:
+        worker = _make_worker()
+        state = _fresh_reaper_state()
+        state.requeue_permanent_failures = _REAPER_MAX_PERMANENT_FAILURES - 1
+        broker = _make_reaper_broker(Ok(2))
+
+        await _run_pass(worker, broker, state)
+
+        assert state.requeue_permanent_failures == 0
+        assert state.requeue_disabled is False
+
+
+@pytest.mark.unit
+class TestReaperMarkFailedBreaker:
+    """mark_stale_tasks_as_failed breaker mirrors the requeue breaker."""
+
+    @pytest.mark.asyncio
+    async def test_consecutive_permanent_failures_latch(self) -> None:
+        worker = _make_worker()
+        state = _fresh_reaper_state()
+        broker = _make_reaper_broker(Ok(0), _reaper_err(retryable=False))
+
+        for _ in range(_REAPER_MAX_PERMANENT_FAILURES):
+            await _run_pass(worker, broker, state)
+
+        assert state.mark_failed_disabled is True
+        # Breakers are independent: requeue stays live.
+        assert state.requeue_disabled is False
+
+    @pytest.mark.asyncio
+    async def test_disabled_skips_mark_failed_call(self) -> None:
+        worker = _make_worker()
+        state = _fresh_reaper_state()
+        state.mark_failed_disabled = True
+        broker = _make_reaper_broker(Ok(0))
+
+        await _run_pass(worker, broker, state)
+
+        broker.mark_stale_tasks_as_failed.assert_not_called()
+        broker.requeue_stale_claimed.assert_called_once()
