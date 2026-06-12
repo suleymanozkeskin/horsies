@@ -631,12 +631,18 @@ async def start_workflow_async(
                                 broker=broker,
                             )
 
+                # A synchronously terminal child workflow can queue parent
+                # propagation while slow roots run. Drain before the fast-root
+                # gate so a child failure can pause THIS workflow before any
+                # runnable fast-root task rows land.
+                if slow_root_nodes:
+                    await drain_parent_propagations_in_session(session, broker)
+
                 # Fast-root task rows land only if the workflow is still
-                # runnable: a slow root's failure may have paused it (the
-                # workflow row was created in this transaction, so its own
-                # failure handler is the only possible status writer). On
-                # pause, the fast roots revert to READY — the paused
-                # workflow gains no runnable task rows, and resume
+                # runnable: a slow root's failure, or drained child->parent
+                # propagation from a synchronously failed child, may have
+                # paused it. On pause, the fast roots revert to READY — the
+                # paused workflow gains no runnable task rows, and resume
                 # re-enqueues READY nodes through the normal path.
                 if fast_root_task_params:
                     runnable = True
@@ -658,13 +664,6 @@ async def start_workflow_async(
                             REVERT_PRELINKED_FAST_ROOTS_SQL,
                             {'wf_id': wf_id, 'idxs': fast_root_indexes},
                         )
-
-                # A failed child-root enqueue inside enqueue_subworkflow_task
-                # can fail-and-finalize the child workflow, queueing a parent
-                # propagation in this session — drain it before commit or it
-                # dies with the session (review-caught hole; recovery 1.6
-                # would be the only healer).
-                await drain_parent_propagations_in_session(session, broker)
 
                 await session.commit()
 

@@ -272,3 +272,104 @@ class TestBulkChildStart:
             )
         ).scalar()
         assert good_status == 'ENQUEUED'
+
+    async def test_nested_parent_propagation_pause_reverts_child_fast_siblings(
+        self,
+        clean_workflow_tables: None,
+        app: Horsies,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        """Nested variant of the pause gate: a child workflow's slow root
+        can synchronously fail/finalize its own child and queue propagation
+        back into the child. Drain that propagation before the child's fast
+        root task rows land."""
+        from horsies.core.models.workflow import OnError
+
+        suffix = uuid.uuid4().hex[:8]
+
+        @app.task(task_name=f'nested_pause_fast_{suffix}')
+        def fast_task(value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+
+        @app.task(task_name=f'nested_pause_bad_{suffix}')
+        def bad_grandchild_task() -> TaskResult[int, TaskError]:
+            return TaskResult(ok=0)
+
+        bad_grandchild_task.task_options_json = '{not-json'  # type: ignore[attr-defined]
+
+        class BadGrandchild(WorkflowDefinition[int]):
+            name = f'nested_pause_grandchild_{suffix}'
+            definition_key = f'nested-pause-grandchild-{suffix}'
+
+            @classmethod
+            def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
+                node = TaskNode(fn=bad_grandchild_task)
+                return app.workflow(name=cls.name, tasks=[node], output=node)
+
+        class PausingChild(WorkflowDefinition[int]):
+            name = f'nested_pause_child_{suffix}'
+            definition_key = f'nested-pause-child-{suffix}'
+
+            @classmethod
+            def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
+                fast = TaskNode(fn=fast_task, kwargs={'value': 1})
+                nested = SubWorkflowNode(workflow_def=BadGrandchild)
+                return app.workflow(
+                    name=cls.name,
+                    tasks=[fast, nested],
+                    output=fast,
+                    on_error=OnError.PAUSE,
+                )
+
+        parent_id = await _start_parent(app, broker, PausingChild)
+        child_id = await _child_id(session, parent_id)
+
+        rows = (
+            await session.execute(
+                text("""
+                    SELECT task_index, status, task_id FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf ORDER BY task_index
+                """),
+                {'wf': child_id},
+            )
+        ).fetchall()
+        statuses = {r.task_index: r.status for r in rows}
+        assert statuses[0] == 'READY'
+        assert rows[0].task_id is None
+        assert statuses[1] == 'FAILED'
+
+        child_status = (
+            await session.execute(
+                text('SELECT status FROM horsies_workflows WHERE id = :wf'),
+                {'wf': child_id},
+            )
+        ).scalar()
+        assert child_status == 'PAUSED'
+
+        n_tasks = (
+            await session.execute(
+                text("""
+                    SELECT COUNT(*) FROM horsies_tasks t
+                    JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
+                    WHERE wt.workflow_id = :wf
+                """),
+                {'wf': child_id},
+            )
+        ).scalar()
+        assert n_tasks == 0
+
+        from horsies.core.workflows.lifecycle import resume_workflow
+
+        resume_r = await resume_workflow(broker, child_id)
+        assert not is_err(resume_r), resume_r
+        fast_status = (
+            await session.execute(
+                text("""
+                    SELECT status FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf AND task_index = 0
+                """),
+                {'wf': child_id},
+            )
+        ).scalar()
+        assert fast_status == 'ENQUEUED'

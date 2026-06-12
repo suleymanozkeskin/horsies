@@ -1399,6 +1399,13 @@ async def enqueue_subworkflow_task(
                     session, child_id, child_root.index, {}, {}, broker,
                 )
 
+    # A nested SubWorkflowNode root can fail/finalize synchronously and queue
+    # propagation back into this child workflow. Drain before the fast-root
+    # gate so that propagation can pause this child before runnable task rows
+    # for fast siblings are inserted.
+    if slow_child_roots:
+        await drain_parent_propagations_in_session(session, broker)
+
     # 9. Fast TaskNode roots were inserted ENQUEUED with their task ids in
     # the bulk statement (the READY->ENQUEUED CAS is vacuous for rows
     # created in this same uncommitted transaction — same justification as

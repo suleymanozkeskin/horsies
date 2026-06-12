@@ -393,3 +393,102 @@ class TestStartPauseGate:
             )
         ).scalar()
         assert fast_status == 'ENQUEUED'
+
+    async def test_queued_parent_propagation_pause_reverts_fast_roots(
+        self,
+        clean_workflow_tables: None,
+        app: Horsies,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        """A child that synchronously fails/finalizes during start queues
+        parent propagation. That propagation must be drained before the
+        parent's fast-root task rows land, so on_error=PAUSE still leaves
+        zero runnable rows under the paused parent."""
+        from horsies.core.models.workflow import (
+            OnError,
+            SubWorkflowNode,
+            WorkflowDefinition,
+        )
+
+        @app.task(task_name=f'pause_prop_root_{uuid.uuid4().hex[:8]}')
+        def fast_task(value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+
+        @app.task(task_name=f'pause_prop_bad_child_{uuid.uuid4().hex[:8]}')
+        def bad_child_task() -> TaskResult[int, TaskError]:
+            return TaskResult(ok=0)
+
+        bad_child_task.task_options_json = '{not-json'  # type: ignore[attr-defined]
+
+        class BadChild(WorkflowDefinition[int]):
+            name = f'pause_prop_child_wf_{uuid.uuid4().hex[:8]}'
+            definition_key = f'pause-prop-child-{uuid.uuid4().hex[:8]}'
+
+            @classmethod
+            def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
+                node = TaskNode(fn=bad_child_task)
+                return app.workflow(name=cls.name, tasks=[node], output=node)
+
+        fast = TaskNode(fn=fast_task, kwargs={'value': 1})
+        sub = SubWorkflowNode(workflow_def=BadChild)
+        spec = app.workflow(
+            f'pause_prop_{uuid.uuid4().hex[:6]}',
+            [fast, sub],
+            on_error=OnError.PAUSE,
+            definition_key=f'pause-prop-{uuid.uuid4().hex[:6]}',
+        )
+
+        result = await start_workflow_async(spec, broker)
+        assert not is_err(result), result
+        wf_id = result.ok_value.workflow_id
+
+        rows = (
+            await session.execute(
+                text("""
+                    SELECT task_index, status, task_id
+                    FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf ORDER BY task_index
+                """),
+                {'wf': wf_id},
+            )
+        ).fetchall()
+        statuses = {r.task_index: r.status for r in rows}
+        assert statuses[0] == 'READY'
+        assert rows[0].task_id is None
+        assert statuses[1] == 'FAILED'
+
+        wf_status = (
+            await session.execute(
+                text('SELECT status FROM horsies_workflows WHERE id = :wf'),
+                {'wf': wf_id},
+            )
+        ).scalar()
+        assert wf_status == 'PAUSED'
+
+        n_tasks = (
+            await session.execute(
+                text("""
+                    SELECT COUNT(*) FROM horsies_tasks t
+                    JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
+                    WHERE wt.workflow_id = :wf
+                """),
+                {'wf': wf_id},
+            )
+        ).scalar()
+        assert n_tasks == 0
+
+        from horsies.core.workflows.lifecycle import resume_workflow
+
+        resume_r = await resume_workflow(broker, wf_id)
+        assert not is_err(resume_r), resume_r
+        fast_status = (
+            await session.execute(
+                text("""
+                    SELECT status FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf AND task_index = 0
+                """),
+                {'wf': wf_id},
+            )
+        ).scalar()
+        assert fast_status == 'ENQUEUED'
