@@ -3681,13 +3681,16 @@ class TestClaimAndDispatchBranches:
     async def test_max_claim_per_worker_guard_returns_false(self) -> None:
         """claimed_count >= max_claimed → returns False immediately."""
         worker = _make_claim_worker(max_claim_per_worker=3)
-        # Already at the limit
-        session = self._claim_session(self._counts_ns(my_claimed=3))
+        # Already at the limit on my_claimed specifically; my_running=0
+        # would open the budget if the guard (wrongly) consumed it.
+        worker._claim_batch_locked = AsyncMock()  # type: ignore[assignment]
+        session = self._claim_session(self._counts_ns(my_claimed=3, my_running=0))
         worker.sf = MagicMock(return_value=session)
 
         result = await worker._claim_and_dispatch_all()
 
         assert result is False
+        worker._claim_batch_locked.assert_not_awaited()
 
     # --- U-9c ---
 
