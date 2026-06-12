@@ -159,6 +159,23 @@ REVERT_ENQUEUED_TO_READY_BATCH_SQL = text("""
       AND status = 'ENQUEUED' AND task_id IS NULL
     RETURNING task_index
 """)
+# Pause-mid-start revert for prelinked fast roots: when a SLOW root's
+# failure pauses the (just-created) workflow before the fast roots' task
+# rows were inserted, the fast roots go back to READY with task_id and
+# started_at cleared — a paused workflow gains no runnable task rows, and
+# READY-with-no-task is the recovery-covered shape resume re-enqueues.
+# Unlike REVERT_ENQUEUED_TO_READY_BATCH_SQL (promotion path, task_id was
+# never set), these rows were bulk-inserted with task_id preset, so the
+# revert clears it. Safe: the workflow row was created in this same
+# transaction, so its status can only have been changed by this start's
+# own failure handler.
+REVERT_PRELINKED_FAST_ROOTS_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET status = 'READY', task_id = NULL, started_at = NULL
+    WHERE workflow_id = :wf_id AND task_index = ANY(:idxs)
+      AND status = 'ENQUEUED'
+    RETURNING task_index
+""")
 # -- SQL constants for enqueue_subworkflow_task --
 
 ENQUEUE_SUBWORKFLOW_TASK_SQL = text("""

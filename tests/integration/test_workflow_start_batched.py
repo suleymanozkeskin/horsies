@@ -284,3 +284,112 @@ class TestBatchedStartShape:
             )
         ).scalar()
         assert leftover == 0
+
+
+@pytest.mark.asyncio(loop_scope='function')
+class TestStartPauseGate:
+    async def test_pause_policy_slow_root_failure_reverts_fast_roots(
+        self,
+        clean_workflow_tables: None,
+        app: Horsies,
+        broker: PostgresBroker,
+        session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """on_error=PAUSE + a failing slow root (subworkflow whose
+        definition cannot be loaded) + fast TaskNode roots: the slow
+        root's failure pauses the workflow BEFORE the fast roots' task
+        rows land, so they revert to READY with no task rows. Resume
+        re-enqueues them through the normal path."""
+        import uuid as _uuid
+
+        from horsies.core.models.workflow import (
+            OnError,
+            SubWorkflowNode,
+            WorkflowDefinition,
+        )
+        from horsies.core.workflows import engine as engine_mod
+
+        @app.task(task_name=f'pause_gate_root_{_uuid.uuid4().hex[:8]}')
+        def fast_task(value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+
+        @app.task(task_name=f'pause_gate_child_{_uuid.uuid4().hex[:8]}')
+        def child_task() -> TaskResult[int, TaskError]:
+            return TaskResult(ok=0)
+
+        class GateChild(WorkflowDefinition[int]):
+            name = f'pause_gate_child_wf_{_uuid.uuid4().hex[:8]}'
+            definition_key = f'pause-gate-child-{_uuid.uuid4().hex[:8]}'
+
+            @classmethod
+            def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
+                node = TaskNode(fn=child_task)
+                return app.workflow(name=cls.name, tasks=[node], output=node)
+
+        fast = TaskNode(fn=fast_task, kwargs={'value': 1})
+        sub = SubWorkflowNode(workflow_def=GateChild)
+        spec = app.workflow(
+            f'pause_gate_{_uuid.uuid4().hex[:6]}', [fast, sub],
+            on_error=OnError.PAUSE,
+            definition_key=f'pause-gate-{_uuid.uuid4().hex[:6]}',
+        )
+
+        # Force the slow root's failure: the child definition cannot load.
+        monkeypatch.setattr(
+            engine_mod, '_load_workflow_def_from_key', lambda key: None,
+        )
+
+        result = await start_workflow_async(spec, broker)
+        assert not is_err(result), result
+        wf_id = result.ok_value.workflow_id
+
+        rows = (
+            await session.execute(
+                text("""
+                    SELECT task_index, status, task_id FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf ORDER BY task_index
+                """),
+                {'wf': wf_id},
+            )
+        ).fetchall()
+        statuses = {r.task_index: r.status for r in rows}
+        assert statuses[1] == 'FAILED'  # the unloadable subworkflow root
+        assert statuses[0] == 'READY'  # fast root reverted
+        assert rows[0].task_id is None
+
+        wf_status = (
+            await session.execute(
+                text('SELECT status FROM horsies_workflows WHERE id = :wf'),
+                {'wf': wf_id},
+            )
+        ).scalar()
+        assert wf_status == 'PAUSED'
+
+        n_tasks = (
+            await session.execute(
+                text("""
+                    SELECT COUNT(*) FROM horsies_tasks t
+                    JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
+                    WHERE wt.workflow_id = :wf
+                """),
+                {'wf': wf_id},
+            )
+        ).scalar()
+        assert n_tasks == 0
+
+        monkeypatch.undo()
+        from horsies.core.workflows.lifecycle import resume_workflow
+
+        resume_r = await resume_workflow(broker, wf_id)
+        assert not is_err(resume_r), resume_r
+        fast_status = (
+            await session.execute(
+                text("""
+                    SELECT status FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf AND task_index = 0
+                """),
+                {'wf': wf_id},
+            )
+        ).scalar()
+        assert fast_status == 'ENQUEUED'

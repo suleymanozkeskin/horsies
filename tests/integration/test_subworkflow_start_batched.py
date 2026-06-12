@@ -30,6 +30,7 @@ pytestmark = [pytest.mark.integration]
 
 def _child_def(
     app: Horsies, n_children: int, *, shape: str, corrupt_root: bool = False,
+    on_error: Any = None,
 ) -> type[WorkflowDefinition[int]]:
     """shape='flat': all roots. shape='chain': single root chain."""
     suffix = uuid.uuid4().hex[:8]
@@ -58,7 +59,12 @@ def _child_def(
                 fn = corrupt_fn if (corrupt_root and i == 0) else child_task
                 waits = [nodes[-1]] if (shape == 'chain' and nodes) else []
                 nodes.append(TaskNode(fn=fn, kwargs={'value': i}, waits_for=waits))
-            return app.workflow(name=cls.name, tasks=list(nodes), output=nodes[0])
+            kwargs: dict[str, Any] = {}
+            if on_error is not None:
+                kwargs['on_error'] = on_error
+            return app.workflow(
+                name=cls.name, tasks=list(nodes), output=nodes[0], **kwargs,
+            )
 
     return BulkChild
 
@@ -198,3 +204,71 @@ class TestBulkChildStart:
         # Parent node tracks the child workflow (RUNNING), not the
         # root's failure — same as the per-node path.
         assert parent_node == 'RUNNING'
+
+    async def test_pause_policy_slow_root_failure_reverts_fast_siblings(
+        self,
+        clean_workflow_tables: None,
+        app: Horsies,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        """Child on_error=PAUSE + corrupt (demoted) root + good fast root:
+        the slow root's failure pauses the child BEFORE the fast roots'
+        task rows land, so the fast sibling reverts to READY with no task
+        row — a paused child gains no runnable rows. Resume re-enqueues."""
+        from horsies.core.models.workflow import OnError
+
+        child_def = _child_def(
+            app, 2, shape='flat', corrupt_root=True, on_error=OnError.PAUSE,
+        )
+        parent_id = await _start_parent(app, broker, child_def)
+        child_id = await _child_id(session, parent_id)
+
+        rows = (
+            await session.execute(
+                text("""
+                    SELECT task_index, status, task_id FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf ORDER BY task_index
+                """),
+                {'wf': child_id},
+            )
+        ).fetchall()
+        statuses = {r.task_index: r.status for r in rows}
+        assert statuses[0] == 'FAILED'  # the corrupt root
+        assert statuses[1] == 'READY'  # reverted, not ENQUEUED
+        assert rows[1].task_id is None  # no runnable task row
+
+        child_status = (
+            await session.execute(
+                text('SELECT status FROM horsies_workflows WHERE id = :wf'),
+                {'wf': child_id},
+            )
+        ).scalar()
+        assert child_status == 'PAUSED'
+
+        n_tasks = (
+            await session.execute(
+                text("""
+                    SELECT COUNT(*) FROM horsies_tasks t
+                    JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
+                    WHERE wt.workflow_id = :wf
+                """),
+                {'wf': child_id},
+            )
+        ).scalar()
+        assert n_tasks == 0  # zero runnable rows under the paused child
+
+        from horsies.core.workflows.lifecycle import resume_workflow
+
+        resume_r = await resume_workflow(broker, child_id)
+        assert not is_err(resume_r), resume_r
+        good_status = (
+            await session.execute(
+                text("""
+                    SELECT status FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf AND task_index = 1
+                """),
+                {'wf': child_id},
+            )
+        ).scalar()
+        assert good_status == 'ENQUEUED'

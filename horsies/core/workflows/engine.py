@@ -85,6 +85,7 @@ from horsies.core.workflows.sql import (
     MARK_WORKFLOW_TASK_FAILED_SQL,
     NOTIFY_WORKFLOW_DONE_SQL,
     PAUSE_WORKFLOW_ON_ERROR_SQL,
+    REVERT_PRELINKED_FAST_ROOTS_SQL,
     SET_WORKFLOW_ERROR_SQL,
     SKIP_READY_WORKFLOW_TASK_SQL,
     SKIP_WORKFLOW_TASK_SQL,
@@ -1063,6 +1064,7 @@ async def enqueue_subworkflow_task(
 
     child_node_params: list[dict[str, Any]] = []
     child_root_task_params: list[dict[str, Any]] = []
+    child_fast_root_indexes: list[int] = []
     slow_child_roots: list[TaskNode[Any] | SubWorkflowNode[Any]] = []
     for child_node in child_spec.tasks:
         child_dep_indices = [
@@ -1299,6 +1301,7 @@ async def enqueue_subworkflow_task(
                     enqueue_delay_seconds=None,
                     task_options=child_task_options_json,
                 )
+                child_fast_root_indexes.append(child_task.index)
                 child_root_task_params.append({
                     'id': child_task_id,
                     'name': child_task.name,
@@ -1374,17 +1377,10 @@ async def enqueue_subworkflow_task(
         {'child_id': child_id, 'wf_id': workflow_id, 'idx': task_index},
     )
 
-    # 8. Fast TaskNode roots were inserted ENQUEUED with their task ids in
-    # the bulk statement (the READY->ENQUEUED CAS is vacuous for rows
-    # created in this same uncommitted transaction — same justification as
-    # the batched workflow start); their task rows land in one executemany.
-    if child_root_task_params:
-        await session.execute(
-            INSERT_TASK_FOR_WORKFLOW_SQL, child_root_task_params,
-        )
-
-    # Slow roots: SubWorkflowNode roots start their own child workflows;
-    # demoted TaskNode roots (unparseable options) take the per-node path.
+    # 8. Slow roots first: SubWorkflowNode roots start their own child
+    # workflows; demoted TaskNode roots (unparseable options) take the
+    # per-node path. A slow root's failure may pause THIS child workflow
+    # (its on_error policy), which must gate the fast roots below.
     for child_root in slow_child_roots:
         if child_root.index is not None:
             if isinstance(child_root, SubWorkflowNode):
@@ -1402,6 +1398,34 @@ async def enqueue_subworkflow_task(
                 await enqueue_workflow_task(
                     session, child_id, child_root.index, {}, {}, broker,
                 )
+
+    # 9. Fast TaskNode roots were inserted ENQUEUED with their task ids in
+    # the bulk statement (the READY->ENQUEUED CAS is vacuous for rows
+    # created in this same uncommitted transaction — same justification as
+    # the batched workflow start); their task rows land in one executemany.
+    # If a slow root's failure paused the child (the only possible status
+    # writer: its row was created in this transaction), revert the fast
+    # roots to READY instead — a paused workflow gains no runnable task
+    # rows, and resume re-enqueues READY nodes through the normal path.
+    if child_root_task_params:
+        child_runnable = True
+        if slow_child_roots:
+            status_check = await session.execute(
+                GET_WORKFLOW_STATUS_SQL, {'wf_id': child_id},
+            )
+            status_row = status_check.fetchone()
+            child_runnable = (
+                status_row is not None and status_row.status == 'RUNNING'
+            )
+        if child_runnable:
+            await session.execute(
+                INSERT_TASK_FOR_WORKFLOW_SQL, child_root_task_params,
+            )
+        else:
+            await session.execute(
+                REVERT_PRELINKED_FAST_ROOTS_SQL,
+                {'wf_id': child_id, 'idxs': child_fast_root_indexes},
+            )
 
     logger.info(f'Started child workflow {child_id} for {workflow_name}:{task_index}')
     return child_id

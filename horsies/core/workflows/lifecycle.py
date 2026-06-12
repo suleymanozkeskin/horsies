@@ -46,8 +46,10 @@ from horsies.core.workflows.start_types import (
 )
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 from horsies.core.workflows.sql import (
+    GET_WORKFLOW_STATUS_SQL,
     INSERT_TASK_FOR_WORKFLOW_SQL,
     INSERT_WORKFLOW_TASKS_BULK_SQL,
+    REVERT_PRELINKED_FAST_ROOTS_SQL,
     CHECK_WORKFLOW_EXISTS_SQL,
     GET_WORKFLOW_NAME_SQL,
     INSERT_WORKFLOW_SQL,
@@ -415,6 +417,7 @@ async def start_workflow_async(
                 # guarantee the old mid-loop raise had.
                 node_params: list[dict[str, Any]] = []
                 fast_root_task_params: list[dict[str, Any]] = []
+                fast_root_indexes: list[int] = []
                 slow_root_nodes: list[TaskNode[Any] | SubWorkflowNode[Any]] = []
 
                 for node in spec.tasks:
@@ -546,6 +549,7 @@ async def start_workflow_async(
                             enqueue_delay_seconds=None,
                             task_options=task_options_json,
                         )
+                        fast_root_indexes.append(task.index)
                         fast_root_task_params.append({
                             'id': task_id,
                             'name': task.name,
@@ -596,14 +600,12 @@ async def start_workflow_async(
                     await session.execute(
                         INSERT_WORKFLOW_TASKS_BULK_SQL, node_params,
                     )
-                if fast_root_task_params:
-                    await session.execute(
-                        INSERT_TASK_FOR_WORKFLOW_SQL, fast_root_task_params,
-                    )
-
-                # Slow-path roots: subworkflows start child workflows
-                # recursively; args_from/ctx_from roots go through the
-                # engine's enqueue (context assembly, conflict checks).
+                # Slow-path roots first: subworkflows start child
+                # workflows recursively; args_from/ctx_from roots go
+                # through the engine's enqueue (context assembly,
+                # conflict checks). A slow root's failure may pause THIS
+                # workflow (its on_error policy), which must gate the
+                # fast-root task rows below.
                 for root_node in slow_root_nodes:
                     if root_node.index is not None:
                         if isinstance(root_node, SubWorkflowNode):
@@ -628,6 +630,34 @@ async def start_workflow_async(
                                 all_dep_task_names={},
                                 broker=broker,
                             )
+
+                # Fast-root task rows land only if the workflow is still
+                # runnable: a slow root's failure may have paused it (the
+                # workflow row was created in this transaction, so its own
+                # failure handler is the only possible status writer). On
+                # pause, the fast roots revert to READY — the paused
+                # workflow gains no runnable task rows, and resume
+                # re-enqueues READY nodes through the normal path.
+                if fast_root_task_params:
+                    runnable = True
+                    if slow_root_nodes:
+                        status_check = await session.execute(
+                            GET_WORKFLOW_STATUS_SQL, {'wf_id': wf_id},
+                        )
+                        status_row = status_check.fetchone()
+                        runnable = (
+                            status_row is not None
+                            and status_row.status == 'RUNNING'
+                        )
+                    if runnable:
+                        await session.execute(
+                            INSERT_TASK_FOR_WORKFLOW_SQL, fast_root_task_params,
+                        )
+                    else:
+                        await session.execute(
+                            REVERT_PRELINKED_FAST_ROOTS_SQL,
+                            {'wf_id': wf_id, 'idxs': fast_root_indexes},
+                        )
 
                 # A failed child-root enqueue inside enqueue_subworkflow_task
                 # can fail-and-finalize the child workflow, queueing a parent

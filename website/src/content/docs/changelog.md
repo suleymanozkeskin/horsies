@@ -26,6 +26,14 @@ there is no migration contract between pre-1.0 versions.
   still recurse; a root whose task_options fail to parse demotes to the
   per-node path so corruption keeps failing that child root, not the
   parent.
+  A slow root's failure that pauses the workflow (its `on_error=PAUSE`)
+  now gates the fast roots: their task rows are inserted only if the
+  workflow is still RUNNING after the slow roots ran; otherwise they
+  revert to READY with task_id cleared — a paused workflow gains no
+  runnable task rows (the same strengthened pause contract as batched
+  promotion). This also closes the identical pre-existing corner in the
+  batched workflow START (shipped in 0.1.9), where fast-root task rows
+  landed before the slow-root loop.
 - Dependent promotion is batched per skip-cascade level. Completing a
   task that unblocks F plain-TaskNode dependents (args_from included)
   now runs a fixed pipeline — one grouped config+dependency-status
