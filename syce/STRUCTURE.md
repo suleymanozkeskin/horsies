@@ -77,12 +77,18 @@ The UI reads the current Horsies schema:
 SQL lives under `syce/sql/` and is embedded or mirrored by wrappers in
 `src/db/queries.rs`.
 
+Workflow queries include nested workflow metadata such as `definition_key`,
+`parent_workflow_id`, `parent_task_index`, `depth`, `root_workflow_id`,
+`is_subworkflow`, `sub_workflow_id`, `sub_definition_key`, and
+`sub_workflow_summary`.
+
 ## Main Views
 
 - Dashboard: cluster overview and aggregate health.
 - Workers: active/stale workers, capacity, queues, utilization, and history.
 - Tasks: aggregate status, filtered task list, task detail, attempts, failures.
-- Workflows: workflow list, task DAG/detail view, progress, terminal results.
+- Workflows: workflow list, nesting depth, task/subworkflow DAG detail,
+  progress, terminal results, and paused READY nodes.
 - Maintenance: operational actions and cleanup-oriented views.
 - Search/help/status bar/error modal: cross-cutting UI components.
 
