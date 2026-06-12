@@ -377,6 +377,18 @@ impl App {
             .filter(|w| {
                 w.id.to_lowercase().contains(query)
                     || w.name.to_lowercase().contains(query)
+                    || w
+                        .definition_key
+                        .as_deref()
+                        .is_some_and(|key| key.to_lowercase().contains(query))
+                    || w
+                        .parent_workflow_id
+                        .as_deref()
+                        .is_some_and(|id| id.to_lowercase().contains(query))
+                    || w
+                        .root_workflow_id
+                        .as_deref()
+                        .is_some_and(|id| id.to_lowercase().contains(query))
             })
             .map(|w| SearchMatch::Workflow {
                 workflow_id: w.id.clone(),

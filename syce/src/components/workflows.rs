@@ -104,6 +104,7 @@ impl<'a> Workflows<'a> {
         let header_style = Style::default().fg(theme.accent).bold();
         let header = Row::new(vec![
             Cell::from("ID"),
+            Cell::from("D"),
             Cell::from("Name"),
             Cell::from("Status"),
             Cell::from("Progress"),
@@ -153,6 +154,7 @@ impl<'a> Workflows<'a> {
 
                 Row::new(vec![
                     Cell::from(wf.short_id().to_string()),
+                    Cell::from(format!("{}", wf.depth)),
                     Cell::from(wf.name.clone()),
                     Cell::from(Span::styled(
                         wf.status.clone(),
@@ -169,6 +171,7 @@ impl<'a> Workflows<'a> {
         // Column constraints
         let widths = [
             Constraint::Length(10),  // ID (truncated)
+            Constraint::Length(3),   // Depth
             Constraint::Min(20),     // Name
             Constraint::Length(12),  // Status
             Constraint::Length(10),  // Progress

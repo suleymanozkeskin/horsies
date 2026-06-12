@@ -36,6 +36,11 @@ pub struct WorkflowRow {
     pub on_error: String,
     pub output_task_index: Option<i32>,
     pub success_policy: Option<JsonValue>,
+    pub definition_key: Option<String>,
+    pub parent_workflow_id: Option<String>,
+    pub parent_task_index: Option<i32>,
+    pub depth: i32,
+    pub root_workflow_id: Option<String>,
     pub result: Option<String>,
     pub error: Option<String>,
     pub sent_at: DateTime<Utc>,
@@ -136,6 +141,11 @@ impl WorkflowRow {
         }
     }
 
+    /// Whether this workflow is nested under another workflow.
+    pub fn is_subworkflow(&self) -> bool {
+        self.parent_workflow_id.is_some() || self.depth > 0
+    }
+
     /// Convert workflow to JSON string for clipboard
     pub fn to_clipboard_json(&self, tasks: &[WorkflowTaskRow]) -> String {
         #[derive(Serialize)]
@@ -170,6 +180,11 @@ pub struct WorkflowTaskRow {
     pub min_success: Option<i32>,
     pub task_options: Option<String>,
     pub task_id: Option<String>,
+    pub is_subworkflow: bool,
+    pub sub_workflow_id: Option<String>,
+    pub sub_workflow_name: Option<String>,
+    pub sub_definition_key: Option<String>,
+    pub sub_workflow_summary: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub result: Option<String>,

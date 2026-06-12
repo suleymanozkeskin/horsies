@@ -4,7 +4,7 @@
 
 ![Syce Dashboard](https://suleymanozkeskin.github.io/horsies/images/syce/dashboard.png)
 
-Syce connects directly to your Horsies PostgreSQL database to provide real-time visibility into your workers, tasks, and workflows without requiring any extra infrastructure.
+Syce connects directly to your Horsies PostgreSQL database to provide real-time visibility into your workers, tasks, workflows, and nested subworkflows without requiring any extra infrastructure.
 
 For PgBouncer transaction pooling, use the pooled URL for queries and a
 direct/session-capable URL for `LISTEN`:

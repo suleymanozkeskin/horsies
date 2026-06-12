@@ -141,6 +141,49 @@ impl<'a> WorkflowDetailPanel<'a> {
         }
     }
 
+    fn truncate_chars(value: &str, max_chars: usize) -> String {
+        if max_chars == 0 {
+            return String::new();
+        }
+        let char_count = value.chars().count();
+        if char_count <= max_chars {
+            value.to_string()
+        } else if max_chars <= 3 {
+            value.chars().take(max_chars).collect()
+        } else {
+            let truncated: String = value.chars().take(max_chars - 3).collect();
+            format!("{}...", truncated)
+        }
+    }
+
+    fn task_display_name(task: &WorkflowTaskRow) -> &str {
+        if task.is_subworkflow {
+            task.sub_workflow_name
+                .as_deref()
+                .unwrap_or(task.task_name.as_str())
+        } else {
+            task.task_name.as_str()
+        }
+    }
+
+    fn push_metadata_line(
+        lines: &mut Vec<DetailLine>,
+        label: &'static str,
+        value: &str,
+        theme: &Theme,
+        color: Color,
+    ) {
+        let line = Line::from(vec![
+            Span::styled("        ", Style::default()),
+            Span::styled(label, Style::default().fg(theme.muted)),
+            Span::styled(value.to_string(), Style::default().fg(color)),
+        ]);
+        lines.push(DetailLine::with_search_text(
+            line,
+            format!("{} {}", label.trim_end_matches(':').trim(), value),
+        ));
+    }
+
     fn status_color(status: &str, theme: &Theme) -> Color {
         if status.eq_ignore_ascii_case("PENDING") || status.eq_ignore_ascii_case("READY") {
             Color::Yellow
@@ -303,6 +346,17 @@ impl<'a> WorkflowDetailPanel<'a> {
                 // Check if this is the output task
                 let is_output = output_idx == Some(task.task_index);
                 let output_marker = if is_output { " ★" } else { "" };
+                let kind_label = if task.is_subworkflow {
+                    "workflow"
+                } else {
+                    "task"
+                };
+                let kind_color = if task.is_subworkflow {
+                    Color::Magenta
+                } else {
+                    theme.muted
+                };
+                let display_name = Self::task_display_name(task);
 
                 // Main task line
                 let task_line = Line::from(vec![
@@ -312,19 +366,94 @@ impl<'a> WorkflowDetailPanel<'a> {
                     ),
                     Span::styled(status_icon, Style::default().fg(status_color).bold()),
                     Span::styled(" ", Style::default()),
-                    Span::styled(task.task_name.clone(), Style::default().fg(theme.text).bold()),
+                    Span::styled(
+                        format!("{}: ", kind_label),
+                        Style::default().fg(kind_color),
+                    ),
+                    Span::styled(display_name.to_string(), Style::default().fg(theme.text).bold()),
                     Span::styled(output_marker, Style::default().fg(Color::Yellow).bold()),
                 ]);
-                let mut task_search_text = format!("Task {}", task.task_index);
+                let mut task_search_text = format!("Task {} {}", task.task_index, kind_label);
                 task_search_text.push(' ');
                 task_search_text.push_str(&line_to_string(&task_line));
+                if let Some(node_id) = task.node_id.as_deref() {
+                    task_search_text.push(' ');
+                    task_search_text.push_str(node_id);
+                }
                 if let Some(task_id) = task.task_id.as_deref() {
                     task_search_text.push(' ');
                     task_search_text.push_str(task_id);
                 }
+                if let Some(child_id) = task.sub_workflow_id.as_deref() {
+                    task_search_text.push(' ');
+                    task_search_text.push_str(child_id);
+                }
+                if let Some(definition_key) = task.sub_definition_key.as_deref() {
+                    task_search_text.push(' ');
+                    task_search_text.push_str(definition_key);
+                }
                 task_search_text.push(' ');
                 task_search_text.push_str(&task.status);
                 lines.push(DetailLine::with_search_text(task_line, task_search_text));
+
+                if let Some(node_id) = task.node_id.as_deref() {
+                    Self::push_metadata_line(
+                        &mut lines,
+                        "node: ",
+                        node_id,
+                        theme,
+                        theme.text,
+                    );
+                }
+
+                if let Some(task_id) = task.task_id.as_deref() {
+                    Self::push_metadata_line(
+                        &mut lines,
+                        "task id: ",
+                        task_id,
+                        theme,
+                        Color::Cyan,
+                    );
+                }
+
+                if task.is_subworkflow {
+                    if let Some(child_id) = task.sub_workflow_id.as_deref() {
+                        Self::push_metadata_line(
+                            &mut lines,
+                            "child id: ",
+                            child_id,
+                            theme,
+                            Color::Magenta,
+                        );
+                    }
+
+                    if let Some(definition_key) = task.sub_definition_key.as_deref() {
+                        Self::push_metadata_line(
+                            &mut lines,
+                            "definition: ",
+                            definition_key,
+                            theme,
+                            Color::Cyan,
+                        );
+                    }
+
+                    if let Some(summary) = task.sub_workflow_summary.as_deref() {
+                        let normalized = serde_json::from_str::<serde_json::Value>(summary)
+                            .ok()
+                            .and_then(|value| serde_json::to_string(&value).ok())
+                            .unwrap_or_else(|| summary.to_string());
+                        let display = Self::truncate_chars(&normalized, 96);
+                        let line = Line::from(vec![
+                            Span::styled("        ", Style::default()),
+                            Span::styled("summary: ", Style::default().fg(theme.muted)),
+                            Span::styled(display, Style::default().fg(theme.text)),
+                        ]);
+                        lines.push(DetailLine::with_search_text(
+                            line,
+                            format!("summary {}", normalized),
+                        ));
+                    }
+                }
 
                 // Dependencies line (if any)
                 if let Some(deps) = &task.dependencies {
@@ -459,10 +588,24 @@ impl<'a> WorkflowDetailPanel<'a> {
                     ])));
                 } else if task.status == "ENQUEUED" || task.status == "READY" {
                     let color = Self::status_color(&task.status, theme);
+                    let status_note = if task.status == "READY"
+                        && task.task_id.is_none()
+                        && self.workflow.status == "PAUSED"
+                    {
+                        " (no task row; resumes from READY)"
+                    } else if task.status == "ENQUEUED"
+                        && task.task_id.is_none()
+                        && !task.is_subworkflow
+                    {
+                        " (missing task row)"
+                    } else {
+                        ""
+                    };
                     lines.push(DetailLine::new(Line::from(vec![
                         Span::styled("        ", Style::default()),
                         Span::styled("status: ", Style::default().fg(theme.muted)),
                         Span::styled(task.status.clone(), Style::default().fg(color)),
+                        Span::styled(status_note, Style::default().fg(theme.muted)),
                     ])));
                 }
             }
@@ -519,6 +662,16 @@ impl<'a> WorkflowDetailPanel<'a> {
             Span::styled(self.workflow.id.clone(), Style::default().fg(theme.text)),
         ])));
 
+        let kind = if self.workflow.is_subworkflow() {
+            format!("Subworkflow (depth {})", self.workflow.depth)
+        } else {
+            "Root workflow".to_string()
+        };
+        lines.push(DetailLine::new(Line::from(vec![
+            Span::styled("Kind:         ", Style::default().fg(theme.muted)),
+            Span::styled(kind, Style::default().fg(theme.text)),
+        ])));
+
         let status_color = Self::status_color(&self.workflow.status, theme);
         lines.push(DetailLine::new(Line::from(vec![
             Span::styled("Status:       ", Style::default().fg(theme.muted)),
@@ -535,6 +688,33 @@ impl<'a> WorkflowDetailPanel<'a> {
                 Style::default().fg(theme.text),
             ),
         ])));
+
+        if let Some(definition_key) = &self.workflow.definition_key {
+            lines.push(DetailLine::new(Line::from(vec![
+                Span::styled("Definition:   ", Style::default().fg(theme.muted)),
+                Span::styled(definition_key.clone(), Style::default().fg(Color::Cyan)),
+            ])));
+        }
+
+        if let Some(parent_id) = &self.workflow.parent_workflow_id {
+            let parent = match self.workflow.parent_task_index {
+                Some(idx) => format!("{} task [{}]", parent_id, idx),
+                None => parent_id.clone(),
+            };
+            lines.push(DetailLine::new(Line::from(vec![
+                Span::styled("Parent:       ", Style::default().fg(theme.muted)),
+                Span::styled(parent, Style::default().fg(Color::Magenta)),
+            ])));
+        }
+
+        if let Some(root_id) = &self.workflow.root_workflow_id {
+            if root_id != &self.workflow.id {
+                lines.push(DetailLine::new(Line::from(vec![
+                    Span::styled("Root:         ", Style::default().fg(theme.muted)),
+                    Span::styled(root_id.clone(), Style::default().fg(Color::Magenta)),
+                ])));
+            }
+        }
 
         lines.push(DetailLine::new(Line::from(vec![
             Span::styled("Progress:     ", Style::default().fg(theme.muted)),
