@@ -140,7 +140,7 @@ def guard_no_positional_args(node_name: str, args: tuple[Any, ...]) -> None:
 
 
 
-def _root_retry_and_deadline(
+def root_retry_and_deadline(
     task_options_json: str | None,
     node_name: str,
 ) -> tuple[int, str | None, datetime | None]:
@@ -519,7 +519,7 @@ async def start_workflow_async(
                     if is_fast_root:
                         task_id = str(uuid.uuid4())
                         max_retries, good_until_str, good_until_dt = (
-                            _root_retry_and_deadline(task_options_json, task.name)
+                            root_retry_and_deadline(task_options_json, task.name)
                         )
                         # Task-row kwargs = node kwargs + workflow_meta
                         # (mirrors enqueue_workflow_task; args_from/ctx

@@ -21,18 +21,6 @@ INSERT_WORKFLOW_SQL = text("""
     ON CONFLICT (id) DO NOTHING
     RETURNING id
 """)
-INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL = text("""
-    INSERT INTO horsies_workflow_tasks
-    (id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
-     queue_name, priority, dependencies, args_from, workflow_ctx_from,
-     allow_failed_deps, join_type, min_success, task_options, status,
-     is_subworkflow, sub_workflow_name,
-     sub_definition_key, created_at)
-    VALUES (:id, :wf_id, :idx, :node_id, :name, :args, :kwargs, :queue, :priority,
-            :deps, :args_from, :ctx_from, :allow_failed, :join_type, :min_success,
-            :task_options, :status, TRUE, :sub_wf_name,
-            :sub_def_key, NOW())
-""")
 # Unified bulk node insert for workflow start (executemany over all nodes
 # in one pipelined batch). Differences from the per-row inserts above:
 # - covers BOTH node kinds (sub_* fields NULL + is_subworkflow FALSE for
@@ -55,16 +43,6 @@ INSERT_WORKFLOW_TASKS_BULK_SQL = text("""
             :deps, :args_from, :ctx_from, :allow_failed, :join_type, :min_success,
             :task_options, :status, :is_subworkflow, :sub_wf_name, :sub_def_key,
             :task_id, CASE WHEN :is_enqueued THEN NOW() END, NOW())
-""")
-INSERT_WORKFLOW_TASK_SQL = text("""
-    INSERT INTO horsies_workflow_tasks
-    (id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
-     queue_name, priority, dependencies, args_from, workflow_ctx_from,
-     allow_failed_deps, join_type, min_success, task_options, status,
-     is_subworkflow, created_at)
-    VALUES (:id, :wf_id, :idx, :node_id, :name, :args, :kwargs, :queue, :priority,
-            :deps, :args_from, :ctx_from, :allow_failed, :join_type, :min_success,
-            :task_options, :status, FALSE, NOW())
 """)
 # -- SQL constants for pause_workflow --
 
@@ -194,7 +172,8 @@ ENQUEUE_SUBWORKFLOW_TASK_SQL = text("""
       AND w.id = wt.workflow_id
       AND w.status = 'RUNNING'
     RETURNING wt.id, wt.sub_workflow_name, wt.task_args, wt.task_kwargs,
-              wt.args_from, wt.node_id, wt.sub_definition_key
+              wt.args_from, wt.node_id, wt.sub_definition_key,
+              w.name AS parent_workflow_name
 """)
 GET_WORKFLOW_NAME_SQL = text("""SELECT name FROM horsies_workflows WHERE id = :wf_id""")
 MARK_WORKFLOW_TASK_FAILED_SQL = text("""

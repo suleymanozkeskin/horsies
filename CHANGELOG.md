@@ -10,6 +10,19 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Performance
 
+- Subworkflow child start is bulk-inserted. Starting a SubWorkflowNode's
+  child workflow now writes all child node rows in one executemany over
+  the same bulk statement the batched workflow start uses, and child
+  TaskNode roots are inserted directly as ENQUEUED with their task rows
+  in a second executemany (child roots cannot carry
+  `args_from`/`workflow_ctx_from` — spec validation requires both to
+  reference `waits_for`). The parent workflow's name rides the enqueue
+  CAS RETURNING instead of a separate read. Statements: 4 + C + 3R ->
+  5 flat; measured against a remote (~33-45ms RTT) Postgres, a 50-child
+  flat child start dropped from ~9.3s to ~0.3s. SubWorkflowNode roots
+  still recurse; a root whose task_options fail to parse demotes to the
+  per-node path so corruption keeps failing that child root, not the
+  parent.
 - Dependent promotion is batched per skip-cascade level. Completing a
   task that unblocks F plain-TaskNode dependents (args_from included)
   now runs a fixed pipeline — one grouped config+dependency-status
