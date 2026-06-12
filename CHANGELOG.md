@@ -8,6 +8,13 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-06-12
+
+Round-trip elimination across every workflow hot path (completion,
+dependent promotion, subworkflow child start) and claim-pass cap
+accounting; the per-workflow completion ceiling roughly 2.4x at
+remote-database RTTs. No schema change (still v8).
+
 ### Performance
 
 - Claim-pass cap accounting is one statement. The worker-local claimed
