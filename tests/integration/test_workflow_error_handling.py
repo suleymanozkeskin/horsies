@@ -43,6 +43,7 @@ from .conftest import (
     start_ok,
 )
 from horsies.core.models.workflow import SuccessPolicy, SuccessCase
+from tests.integration.conftest import task_name_for
 
 
 # =============================================================================
@@ -69,7 +70,10 @@ async def _complete_task(
     )
     row = res.fetchone()
     if row and row[0]:
-        await on_workflow_task_complete(session, row[0], result, broker)
+        await on_workflow_task_complete(
+        session, row[0], result, broker,
+        task_name=await task_name_for(session, row[0]),
+    )
         await session.commit()
 
 

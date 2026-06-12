@@ -261,9 +261,10 @@ async def test_completed_ok_result_returns_task_result(
     result = await worker._load_persisted_task_result(task_id)
 
     assert is_ok(result)
-    tr = result.ok_value
+    tr, loaded_task_name = result.ok_value
     assert tr.is_ok()
     assert tr.unwrap() == 'hello'
+    assert loaded_task_name == 'load_result_test'
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +288,7 @@ async def test_failed_err_result_returns_task_result(
     result = await worker._load_persisted_task_result(task_id)
 
     assert is_ok(result)
-    tr = result.ok_value
+    tr, loaded_task_name = result.ok_value
     assert tr.is_err()
     task_error = tr.unwrap_err()
     assert task_error.error_code == 'DELIBERATE_FAIL'
@@ -354,8 +355,9 @@ async def test_unknown_task_err_result_uses_fast_path(
         f'expected Ok(TaskResult(err)) via err-fast-path, got Err: '
         f'{result.err_value if not is_ok(result) else None}'
     )
-    tr = result.ok_value
+    tr, loaded_task_name = result.ok_value
     assert tr.is_err()
     task_error = tr.unwrap_err()
+    assert loaded_task_name == 'unknown_task_xyz'
     assert task_error.error_code == OperationalErrorCode.WORKER_RESOLUTION_ERROR
     assert task_error.message == 'task not found in registry'

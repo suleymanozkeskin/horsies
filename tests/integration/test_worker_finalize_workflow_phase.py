@@ -144,6 +144,7 @@ async def test_non_workflow_task_notifies_and_returns_ok(
         task_id,
         tr,
         queue_name='high-priority',
+        task_name='wf_phase_test',
     )
 
     assert is_ok(result)
@@ -174,7 +175,9 @@ async def test_workflow_task_delegates_to_engine(
         'horsies.core.workflows.engine.on_workflow_task_complete',
         new_callable=AsyncMock,
     ) as mock_complete:
-        result = await worker._finalize_workflow_phase(task_id, tr)
+        result = await worker._finalize_workflow_phase(
+            task_id, tr, task_name='wf_phase_test',
+        )
 
     assert is_ok(result)
     mock_complete.assert_awaited_once()
@@ -230,7 +233,7 @@ async def test_notify_failure_swallowed(
             async def execute(self, stmt: Any, params: Any = None) -> Any:
                 nonlocal call_count
                 stmt_str = str(stmt) if hasattr(stmt, 'text') else str(stmt)
-                # Let CHECK_WORKFLOW_TASK_EXISTS through, fail on pg_notify
+                # Let the engine completion statement through, fail on pg_notify
                 if 'pg_notify' in stmt_str:
                     raise RuntimeError('NOTIFY channel unavailable')
                 call_count += 1
@@ -249,6 +252,7 @@ async def test_notify_failure_swallowed(
         task_id,
         tr,
         queue_name='high-priority',
+        task_name='wf_phase_test',
     )
 
     assert is_ok(result)
@@ -279,6 +283,7 @@ async def test_workflow_handler_exception_returns_err(
         task_id,
         tr,
         queue_name='high-priority',
+        task_name='wf_phase_test',
     )
 
     assert is_err(result)
@@ -345,6 +350,7 @@ async def test_queue_name_used_in_notify_channel(
         task_id,
         tr,
         queue_name='high-priority',
+        task_name='wf_phase_test',
     )
 
     assert is_ok(result)

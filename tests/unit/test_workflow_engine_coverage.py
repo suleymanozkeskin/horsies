@@ -37,6 +37,7 @@ from horsies.core.workflows.engine import (
     try_make_ready_and_enqueue,
 )
 from horsies.core.workflows.sql import (
+    COMPLETE_WORKFLOW_TASK_SQL,
     ENQUEUE_SUBWORKFLOW_TASK_SQL,
     ENQUEUE_WORKFLOW_TASK_SQL,
     GET_CHILD_WORKFLOW_INFO_SQL,
@@ -53,11 +54,9 @@ from horsies.core.workflows.sql import (
     GET_WORKFLOW_ON_ERROR_SQL,
     GET_WORKFLOW_OUTPUT_INDEX_SQL,
     GET_WORKFLOW_STATUS_SQL,
-    GET_WORKFLOW_TASK_BY_TASK_ID_SQL,
     LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
     MARK_TASK_READY_SQL,
     SET_WORKFLOW_ERROR_SQL,
-    UPDATE_WORKFLOW_TASK_RESULT_SQL,
 )
 
 
@@ -985,47 +984,70 @@ class TestEnqueueSubworkflowTask:
 @pytest.mark.unit
 class TestOnWorkflowTaskComplete:
     @pytest.mark.asyncio
-    async def test_task_not_found_returns_early(self) -> None:
+    async def test_task_or_workflow_not_found_returns_early(self) -> None:
+        """Zero rows from the merged statement covers both 'not a workflow
+        task' and 'workflow row missing' (the join eliminates either)."""
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
-            if stmt is GET_WORKFLOW_TASK_BY_TASK_ID_SQL:
+            if stmt is COMPLETE_WORKFLOW_TASK_SQL:
                 return _one_result(None)
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
         result = TaskResult(ok='done')
-        await on_workflow_task_complete(session, 'task-1', result, None)
-        # Should return without error
-
-    @pytest.mark.asyncio
-    async def test_lock_acquisition_fails_returns_early(self) -> None:
-        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
-            if stmt is GET_WORKFLOW_TASK_BY_TASK_ID_SQL:
-                return _one_result(SimpleNamespace(workflow_id='wf-1', task_index=0, task_name='task-a'))
-            if stmt is LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL:
-                return _one_result(None)
-            return _one_result(SimpleNamespace())
-
-        session = AsyncMock()
-        session.execute = AsyncMock(side_effect=_dispatch)
-        result = TaskResult(ok='done')
-        await on_workflow_task_complete(session, 'task-1', result, None)
+        await on_workflow_task_complete(
+            session, 'task-1', result, None, task_name='task-a',
+        )
+        # Exactly the merged statement ran — no follow-up progression.
+        assert session.execute.await_count == 1
 
     @pytest.mark.asyncio
     async def test_already_terminal_skips(self) -> None:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
-            if stmt is GET_WORKFLOW_TASK_BY_TASK_ID_SQL:
-                return _one_result(SimpleNamespace(workflow_id='wf-1', task_index=0, task_name='task-a'))
-            if stmt is LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL:
-                return _one_result(SimpleNamespace(id='wf-1'))
-            if stmt is UPDATE_WORKFLOW_TASK_RESULT_SQL:
-                return _one_result(None)  # CAS failed
+            if stmt is COMPLETE_WORKFLOW_TASK_SQL:
+                return _one_result(SimpleNamespace(
+                    workflow_id='wf-1', task_index=0, wf_status='RUNNING',
+                    depth=0, root_workflow_id='wf-1', on_error='fail',
+                    cas_won=False,  # CAS failed: already terminal
+                ))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
         result = TaskResult(ok='done')
-        await on_workflow_task_complete(session, 'task-1', result, None)
+        await on_workflow_task_complete(
+            session, 'task-1', result, None, task_name='task-a',
+        )
+        assert session.execute.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_paused_workflow_stores_result_without_propagation(self) -> None:
+        """The CAS write lands but the PAUSED status (frozen by the held
+        lock) suppresses dependent processing and the completion check."""
+        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
+            if stmt is COMPLETE_WORKFLOW_TASK_SQL:
+                return _one_result(SimpleNamespace(
+                    workflow_id='wf-1', task_index=0, wf_status='PAUSED',
+                    depth=0, root_workflow_id='wf-1', on_error='fail',
+                    cas_won=True,
+                ))
+            return _one_result(SimpleNamespace())
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=_dispatch)
+        result = TaskResult(ok='done')
+        with patch(
+            'horsies.core.workflows.engine._process_dependents',
+            new=AsyncMock(),
+        ) as mock_proc, patch(
+            'horsies.core.workflows.engine.check_workflow_completion',
+            new=AsyncMock(),
+        ) as mock_check:
+            await on_workflow_task_complete(
+                session, 'task-1', result, None, task_name='task-a',
+            )
+        mock_proc.assert_not_awaited()
+        mock_check.assert_not_awaited()
 
 
 # ── 6. try_make_ready_and_enqueue ────────────────────────────────────

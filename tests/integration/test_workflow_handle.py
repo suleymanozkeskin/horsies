@@ -30,6 +30,7 @@ from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
 
 from .conftest import make_simple_task, make_failing_task, make_workflow_spec, start_ok
+from tests.integration.conftest import task_name_for
 
 
 # =============================================================================
@@ -61,7 +62,10 @@ async def _complete_task(
         )
         row = res.fetchone()
         if row and row[0]:
-            await on_workflow_task_complete(session, row[0], result, broker)
+            await on_workflow_task_complete(
+            session, row[0], result, broker,
+            task_name=await task_name_for(session, row[0]),
+        )
             await session.commit()
             return
         if time.monotonic() >= deadline:

@@ -258,10 +258,6 @@ NOTIFY_TASK_QUEUE_SQL = text("""
     SELECT pg_notify(:c2, :p)
 """)
 
-CHECK_WORKFLOW_TASK_EXISTS_SQL = text("""
-    SELECT 1 FROM horsies_workflow_tasks WHERE task_id = :tid LIMIT 1
-""")
-
 GET_TASK_RETRY_INFO_SQL = text("""
     SELECT retry_count, max_retries, task_options, good_until, clock_timestamp() AS db_now
     FROM horsies_tasks
@@ -284,6 +280,7 @@ SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL = text("""
     SELECT id, status, retry_count, started_at, claimed_by_worker_id,
            worker_hostname, worker_pid, worker_process_name,
            queue_name, is_workflow_task, max_retries, task_options, good_until,
+           task_name,
            clock_timestamp() AS db_now
     FROM horsies_tasks
     WHERE id = :id

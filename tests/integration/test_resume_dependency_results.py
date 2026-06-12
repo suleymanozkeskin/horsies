@@ -26,6 +26,7 @@ from horsies.core.workflows.engine import (
 )
 
 from .conftest import start_ok
+from tests.integration.conftest import task_name_for
 
 pytestmark = [pytest.mark.integration]
 
@@ -107,6 +108,7 @@ async def test_resume_injects_real_dependency_results(
     assert producer_task_row is not None
     await on_workflow_task_complete(
         session, producer_task_row[0], TaskResult(ok=42), broker,
+        task_name=await task_name_for(session, producer_task_row[0]),
     )
     await session.commit()
 

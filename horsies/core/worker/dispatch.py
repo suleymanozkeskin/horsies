@@ -69,6 +69,8 @@ class DispatchMixin:
             is_workflow_task: bool = True,
             executor: Optional[ProcessPoolExecutor] = None,
             timeout_ms: Optional[int] = None,
+            *,
+            task_name: str,
         ) -> Result[None, _FinalizeError]: ...
         async def _finalize_workflow_phase(
             self,
@@ -77,6 +79,7 @@ class DispatchMixin:
             *,
             queue_name: str = 'default',
             is_workflow_task: bool = True,
+            task_name: str,
         ) -> Result[None, _FinalizeError]: ...
         async def _handle_finalize_error(self, err: Any) -> None: ...
         async def _restart_executor(
@@ -304,6 +307,7 @@ class DispatchMixin:
                     task_result,
                     queue_name=ctx_row.queue_name or 'default',
                     is_workflow_task=bool(ctx_row.is_workflow_task),
+                    task_name=str(ctx_row.task_name or ''),
                 )
                 if is_err(phase2_r):
                     await self._handle_finalize_error(phase2_r.err_value)
@@ -408,6 +412,7 @@ class DispatchMixin:
                 is_workflow_task,
                 executor,
                 timeout_ms=timeout_ms,
+                task_name=task_name,
             ),
             name=f'finalize-{task_id}',
             finalizer=True,
@@ -541,6 +546,7 @@ class DispatchMixin:
                     task_result,
                     queue_name=ctx_row.queue_name or 'default',
                     is_workflow_task=bool(ctx_row.is_workflow_task),
+                    task_name=str(ctx_row.task_name or ''),
                 )
                 if is_err(phase2_r):
                     await self._handle_finalize_error(phase2_r.err_value)

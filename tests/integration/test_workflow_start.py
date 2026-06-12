@@ -26,6 +26,7 @@ from horsies.core.workflows.start_types import WorkflowStartErrorCode
 from horsies.core.types.result import is_err
 
 from .conftest import (
+    task_name_for,
     make_simple_task,
     make_workflow_spec,
     make_identity_task,
@@ -497,7 +498,10 @@ class TestWorkflowStart:
         )
         row = res.fetchone()
         assert row is not None
-        await on_workflow_task_complete(session, row[0], TaskResult(ok=10), broker)
+        await on_workflow_task_complete(
+            session, row[0], TaskResult(ok=10), broker,
+            task_name=await task_name_for(session, row[0]),
+        )
         await session.commit()
 
         # Verify B task row has retry settings

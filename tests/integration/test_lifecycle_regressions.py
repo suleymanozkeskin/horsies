@@ -341,6 +341,7 @@ async def test_finalize_worker_failure_runs_phase2(
         task_id,
         queue_name='default',
         is_workflow_task=False,
+        task_name='lifecycle_regression_test',
     )
 
     assert is_ok(result)

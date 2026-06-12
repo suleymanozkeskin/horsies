@@ -57,6 +57,7 @@ from horsies.core.workflows.sql import (
     GET_OUTPUT_TASK_RESULT_SQL,
     GET_PARENT_WORKFLOW_INFO_SQL,
     GET_SUBWORKFLOW_SUMMARIES_SQL,
+    COMPLETE_WORKFLOW_TASK_SQL,
     GET_TASK_CONFIG_SQL,
     GET_TASK_RESULTS_BY_INDEXES_SQL,
     GET_TASK_STATUSES_SQL,
@@ -67,7 +68,6 @@ from horsies.core.workflows.sql import (
     GET_WORKFLOW_ON_ERROR_SQL,
     GET_WORKFLOW_OUTPUT_INDEX_SQL,
     GET_WORKFLOW_STATUS_SQL,
-    GET_WORKFLOW_TASK_BY_TASK_ID_SQL,
     INSERT_CHILD_WORKFLOW_SQL,
     INSERT_TASK_FOR_WORKFLOW_SQL,
     INSERT_WORKFLOW_TASK_SQL,
@@ -85,7 +85,6 @@ from horsies.core.workflows.sql import (
     SKIP_READY_WORKFLOW_TASK_SQL,
     SKIP_WORKFLOW_TASK_SQL,
     UPDATE_PARENT_NODE_RESULT_SQL,
-    UPDATE_WORKFLOW_TASK_RESULT_SQL,
 )
 
 logger = get_logger('workflow.engine')
@@ -378,8 +377,13 @@ async def _fail_enqueued_task(
             session, workflow_id, tr,
         )
         if should_continue:
+            # The failure handler above acquired the workflow lock (or the
+            # workflow row is missing, in which case the completion check's
+            # status read returns nothing).
             await _process_dependents(session, workflow_id, task_index, broker)
-            await check_workflow_completion(session, workflow_id, broker)
+            await check_workflow_completion(
+                session, workflow_id, broker, lock_held=True,
+            )
     else:
         # Loud, not silent: the node is FAILED but on_error handling,
         # dependent cascade, and the completion check did not run. The
@@ -443,8 +447,12 @@ async def _fail_subworkflow_load(
         session, workflow_id, failure_result,
     )
     if should_continue:
+        # Same lock provenance as _fail_enqueued_task: the failure handler
+        # holds the workflow lock past this point.
         await _process_dependents(session, workflow_id, task_index, broker)
-        await check_workflow_completion(session, workflow_id, broker)
+        await check_workflow_completion(
+            session, workflow_id, broker, lock_held=True,
+        )
 
 
 
@@ -1372,6 +1380,8 @@ async def on_workflow_task_complete(
     task_id: str,
     result: 'TaskResult[Any, TaskError]',
     broker: 'PostgresBroker | None',
+    *,
+    task_name: str,
 ) -> None:
     """
     Called from worker._finalize_after when a task completes.
@@ -1384,6 +1394,14 @@ async def on_workflow_task_complete(
             into HandleOperationError, and the reaper contains each
             recovery pass as one unit.
 
+    ``task_name`` is the completed task's registered name, read by the
+    caller from the task row it already holds (worker dispatch/finalize,
+    recovery case 1.7). It equals the workflow node's ``task_name`` by
+    construction (the node enqueue writes the task row from the node), and
+    is needed BEFORE any statement: the single locate+lock+CAS statement
+    binds the encoded result, and encoding resolves the source task's
+    ``task_ok_type`` from this name.
+
     Strict-serde phase 7: ``broker`` is required (explicit `None` allowed for
     unit-test branches that return before dependency propagation). Removing
     the implicit default surfaces missing-broker bugs at the call site instead
@@ -1391,37 +1409,15 @@ async def on_workflow_task_complete(
     encoding when `broker.app` is needed to resolve the source task's
     `task_ok_type`.
     """
-    # 1. Find workflow_task by task_id
-    wt_result = await session.execute(
-        GET_WORKFLOW_TASK_BY_TASK_ID_SQL,
-        {'tid': task_id},
-    )
-
-    row = wt_result.fetchone()
-    if row is None:
-        return  # Not a workflow task
-
-    workflow_id = row.workflow_id
-    task_index = row.task_index
-    task_name = row.task_name
-
-    # Serialize completion handling per workflow so concurrent task completions
-    # don't race dependency promotion (PENDING -> READY/SKIPPED).
-    lock_result = await session.execute(
-        LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
-        {'wf_id': workflow_id},
-    )
-    if lock_result.fetchone() is None:
-        return
-
-    # 2. Update workflow_task status and store result (CAS: skip if already terminal)
+    # 1. Decide terminal status and encode the result envelope before any
+    # statement. Strict-serde phase 7: re-encode through the wire envelope
+    # so downstream readers (`_decode_stored_task_result`, `_decode_err_only`,
+    # child→parent pass-through at on_subworkflow_complete) see the
+    # `__h_task_result__` marker. Prefer the source task's declared
+    # `task_ok_type` for write-time validation; fall back to `Any` when the
+    # broker/app is unavailable (test/recovery paths) so completion never
+    # fails on missing type metadata.
     new_status = 'COMPLETED' if result.is_ok() else 'FAILED'
-    # Strict-serde phase 7: re-encode through the wire envelope so downstream
-    # readers (`_decode_stored_task_result`, `_decode_err_only`, child→parent
-    # pass-through at on_subworkflow_complete) see the `__h_task_result__`
-    # marker. Prefer the source task's declared `task_ok_type` for write-time
-    # validation; fall back to `Any` when the broker/app is unavailable
-    # (test/recovery paths) so completion never fails on missing type metadata.
     ok_type_for_encode: Any = Any
     if broker is not None and broker.app is not None:
         resolved = _resolve_source_ok_type(broker.app, task_name)
@@ -1438,36 +1434,46 @@ async def on_workflow_task_complete(
         from horsies.core.models.tasks import TaskError, TaskResult
 
         logger.error(
-            'Failed to encode completion result for workflow=%s '
-            'task_index=%s: %s; storing a serialization-error envelope',
-            workflow_id,
-            task_index,
+            'Failed to encode completion result for task=%s '
+            'task_name=%s: %s; storing a serialization-error envelope',
+            task_id,
+            task_name,
             exc,
         )
         result = TaskResult(
             err=TaskError(
                 error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
                 message=f'Failed to encode completion result: {exc}',
-                data={'workflow_id': workflow_id, 'task_index': task_index},
+                data={'task_id': task_id, 'task_name': task_name},
             ),
         )
         new_status = 'FAILED'
         encoded_result = encode_task_result(result, type(None))
-    update_result = await session.execute(
-        UPDATE_WORKFLOW_TASK_RESULT_SQL,
+
+    # 2. One statement: locate the workflow task, take the workflow row's
+    # FOR UPDATE lock (serializes completion handling per workflow so
+    # concurrent completions don't race dependency promotion), CAS-update
+    # the node to its terminal status, and return the progression context.
+    row_result = await session.execute(
+        COMPLETE_WORKFLOW_TASK_SQL,
         {
+            'tid': task_id,
             'status': new_status,
             'result': _ser(
                 dumps_json(encoded_result),
                 'task completion result',
                 fallback='null',
             ),
-            'wf_id': workflow_id,
-            'idx': task_index,
             'terminal_states': WF_TASK_TERMINAL_VALUES,
         },
     )
-    if update_result.fetchone() is None:
+    row = row_result.fetchone()
+    if row is None:
+        return  # Not a workflow task (or its workflow row is missing)
+
+    workflow_id = row.workflow_id
+    task_index = row.task_index
+    if not row.cas_won:
         logger.debug(
             'Workflow task already terminal, skipping progression: '
             'workflow=%s task_index=%s task_id=%s',
@@ -1475,29 +1481,34 @@ async def on_workflow_task_complete(
         )
         return
 
-    # 3. Handle failure based on on_error policy
+    # 3. Handle failure based on on_error policy. The locked row's
+    # on_error is authoritative: the held lock freezes the workflow row.
     if result.is_err():
         should_continue = await _handle_workflow_task_failure(
-            session, workflow_id, result
+            session, workflow_id, result,
+            known_on_error=row.on_error,
         )
         if not should_continue:
             # PAUSE mode - stop processing, don't propagate to dependents
             return
 
-    # 4. Check if workflow is PAUSED (may have been paused by another task)
-    status_check = await session.execute(
-        GET_WORKFLOW_STATUS_SQL,
-        {'wf_id': workflow_id},
-    )
-    status_row = status_check.fetchone()
-    if status_row and status_row.status == 'PAUSED':
+    # 4. PAUSED guard. wf_status is the status at lock time; pause/cancel
+    # are UPDATEs on the locked workflow row, so it cannot change for the
+    # rest of this transaction. (The failure handler's pause path returns
+    # False above and never reaches here.)
+    if row.wf_status == 'PAUSED':
         return  # Don't propagate - workflow is paused
 
     # 5. Find and potentially enqueue dependent tasks
-    await _process_dependents(session, workflow_id, task_index, broker)
+    await _process_dependents(
+        session, workflow_id, task_index, broker,
+        depth=row.depth if row.depth is not None else 0,
+        root_workflow_id=row.root_workflow_id or workflow_id,
+    )
 
-    # 6. Check if workflow is complete
-    await check_workflow_completion(session, workflow_id, broker)
+    # 6. Check if workflow is complete (this transaction already holds the
+    # workflow lock taken in step 2)
+    await check_workflow_completion(session, workflow_id, broker, lock_held=True)
 
 
 
@@ -1508,6 +1519,9 @@ async def _process_dependents(
     workflow_id: str,
     completed_task_index: int,
     broker: 'PostgresBroker | None' = None,
+    *,
+    depth: int | None = None,
+    root_workflow_id: str | None = None,
 ) -> None:
     """
     Find tasks that depend on the completed task and enqueue if ready.
@@ -1521,6 +1535,10 @@ async def _process_dependents(
         workflow_id: Workflow ID
         completed_task_index: Index of the task that just completed
         broker: PostgreSQL broker (required for SubWorkflowNode enqueue)
+        depth: Workflow nesting depth when the caller already holds it
+            (hot completion/promotion paths); ``None`` reads it from the
+            workflows row (cold failure paths without workflow context).
+        root_workflow_id: Root workflow id, same sourcing rule as ``depth``.
     """
     # Find tasks that have completed_task_index in their dependencies
     dependents = await session.execute(
@@ -1528,18 +1546,23 @@ async def _process_dependents(
         {'wf_id': workflow_id, 'completed_idx': completed_task_index},
     )
 
-    # Get workflow depth and root for subworkflow support
-    wf_info = await session.execute(
-        GET_WORKFLOW_DEPTH_SQL,
-        {'wf_id': workflow_id},
-    )
-    wf_row = wf_info.fetchone()
-    depth = wf_row.depth if wf_row else 0
-    root_wf_id = wf_row.root_workflow_id if wf_row else workflow_id
+    if depth is None or root_workflow_id is None:
+        # Get workflow depth and root for subworkflow support
+        wf_info = await session.execute(
+            GET_WORKFLOW_DEPTH_SQL,
+            {'wf_id': workflow_id},
+        )
+        wf_row = wf_info.fetchone()
+        depth = int(wf_row.depth) if wf_row and wf_row.depth is not None else 0
+        root_workflow_id = (
+            str(wf_row.root_workflow_id)
+            if wf_row and wf_row.root_workflow_id is not None
+            else workflow_id
+        )
 
     for row in dependents.fetchall():
         await try_make_ready_and_enqueue(
-            session, broker, workflow_id, row.task_index, depth, root_wf_id,
+            session, broker, workflow_id, row.task_index, depth, root_workflow_id,
         )
 
 
@@ -1954,6 +1977,8 @@ async def check_workflow_completion(
     session: AsyncSession,
     workflow_id: str,
     broker: 'PostgresBroker | None' = None,
+    *,
+    lock_held: bool = False,
 ) -> None:
     """
     Check if all workflow tasks are complete and update workflow status.
@@ -1975,15 +2000,22 @@ async def check_workflow_completion(
         session: Active DB session.
         workflow_id: Workflow id to finalize.
         broker: Optional broker for parent propagation hooks.
+        lock_held: Pass ``True`` ONLY when this session's transaction
+            already holds this workflow's FOR UPDATE row lock (completion
+            and subworkflow-progression paths); skips the redundant
+            re-acquire round trip. Callers without the lock (recovery,
+            resume) keep the default — the internal acquire is the
+            serialization point for them.
     """
-    # Serialize completion checks per workflow to avoid races when multiple
-    # tasks finish concurrently in separate transactions.
-    lock_result = await session.execute(
-        LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
-        {'wf_id': workflow_id},
-    )
-    if lock_result.fetchone() is None:
-        return
+    if not lock_held:
+        # Serialize completion checks per workflow to avoid races when
+        # multiple tasks finish concurrently in separate transactions.
+        lock_result = await session.execute(
+            LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
+            {'wf_id': workflow_id},
+        )
+        if lock_result.fetchone() is None:
+            return
 
     # Get current workflow status, error, success_policy, and task counts
     result = await session.execute(
@@ -2279,8 +2311,11 @@ async def on_subworkflow_complete(
     # 8. Process parent dependents
     await _process_dependents(session, parent_wf_id, parent_task_idx, broker)
 
-    # 9. Check parent completion
-    await check_workflow_completion(session, parent_wf_id, broker)
+    # 9. Check parent completion (step 4 took the parent's lock in this
+    # transaction)
+    await check_workflow_completion(
+        session, parent_wf_id, broker, lock_held=True,
+    )
 
 
 
@@ -2609,6 +2644,8 @@ async def _handle_workflow_task_failure(
     session: AsyncSession,
     workflow_id: str,
     result: 'TaskResult[Any, TaskError]',
+    *,
+    known_on_error: str | None = None,
 ) -> bool:
     """
     Handle a failed workflow task based on on_error policy.
@@ -2619,29 +2656,38 @@ async def _handle_workflow_task_failure(
 
     Returns True if dependency propagation should continue, False to stop (PAUSE mode).
 
+    ``known_on_error``: pass the policy ONLY when this session's
+    transaction already holds the workflow's FOR UPDATE row lock AND read
+    ``on_error`` from that locked row (the completion path's single
+    locate+lock statement returns it); skips the redundant lock re-acquire
+    and policy read. Callers without the lock keep the default ``None``.
+
     Note: The failed task's result is already stored. Dependents will receive
     the TaskResult with is_err()=True if they have args_from pointing to this task.
     """
     from horsies.core.models.tasks import TaskError
 
-    lock_result = await session.execute(
-        LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
-        {'wf_id': workflow_id},
-    )
-    if lock_result.fetchone() is None:
-        return True
+    if known_on_error is None:
+        lock_result = await session.execute(
+            LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
+            {'wf_id': workflow_id},
+        )
+        if lock_result.fetchone() is None:
+            return True
 
-    # Get workflow's on_error policy
-    wf_result = await session.execute(
-        GET_WORKFLOW_ON_ERROR_SQL,
-        {'wf_id': workflow_id},
-    )
+        # Get workflow's on_error policy
+        wf_result = await session.execute(
+            GET_WORKFLOW_ON_ERROR_SQL,
+            {'wf_id': workflow_id},
+        )
 
-    wf_row = wf_result.fetchone()
-    if wf_row is None:
-        return True
+        wf_row = wf_result.fetchone()
+        if wf_row is None:
+            return True
 
-    on_error = wf_row.on_error
+        on_error = wf_row.on_error
+    else:
+        on_error = known_on_error
 
     # Extract TaskError for storage (not the full TaskResult). Route
     # through ``encode_task_error`` so SubWorkflowError subclass fields
@@ -2654,41 +2700,43 @@ async def _handle_workflow_task_failure(
         else None
     )
 
-    if on_error == 'fail':
-        # Store error but keep status RUNNING until DAG fully resolves
-        # This allows allow_failed_deps tasks to run and produce meaningful final result
-        # Status will be set to FAILED in check_workflow_completion when all tasks are terminal
-        first_failure_payload = await get_workflow_failure_error(
-            session, workflow_id, None
-        )
-        await session.execute(
-            SET_WORKFLOW_ERROR_SQL,
-            {'wf_id': workflow_id, 'error': first_failure_payload or error_payload},
-        )
-        return True  # Continue dependency propagation
+    match on_error:
+        case 'fail':
+            # Store error but keep status RUNNING until DAG fully resolves
+            # This allows allow_failed_deps tasks to run and produce meaningful final result
+            # Status will be set to FAILED in check_workflow_completion when all tasks are terminal
+            first_failure_payload = await get_workflow_failure_error(
+                session, workflow_id, None
+            )
+            await session.execute(
+                SET_WORKFLOW_ERROR_SQL,
+                {'wf_id': workflow_id, 'error': first_failure_payload or error_payload},
+            )
+            return True  # Continue dependency propagation
 
-    elif on_error == 'pause':
-        # Pause workflow for manual intervention - STOP all processing
-        pause_result = await session.execute(
-            PAUSE_WORKFLOW_ON_ERROR_SQL,
-            {'wf_id': workflow_id, 'error': error_payload},
-        )
-        if pause_result.fetchone() is None:
-            return False
+        case 'pause':
+            # Pause workflow for manual intervention - STOP all processing
+            pause_result = await session.execute(
+                PAUSE_WORKFLOW_ON_ERROR_SQL,
+                {'wf_id': workflow_id, 'error': error_payload},
+            )
+            if pause_result.fetchone() is None:
+                return False
 
-        await cascade_pause_to_children(session, workflow_id)
+            await cascade_pause_to_children(session, workflow_id)
 
-        # Notify of pause (so clients can react via get())
-        await session.execute(
-            NOTIFY_WORKFLOW_DONE_SQL,
-            {'wf_id': workflow_id},
-        )
+            # Notify of pause (so clients can react via get())
+            await session.execute(
+                NOTIFY_WORKFLOW_DONE_SQL,
+                {'wf_id': workflow_id},
+            )
 
-        return (
-            False  # Stop dependency propagation - pending tasks stay pending for resume
-        )
+            return (
+                False  # Stop dependency propagation - pending tasks stay pending for resume
+            )
 
-    return True  # Default: continue
+        case _:
+            return True  # Default: continue
 
 
 def _load_workflow_def_from_key(

@@ -15,6 +15,7 @@ from horsies.core.worker.worker import CLAIM_SQL
 from horsies.core.workflows.engine import on_workflow_task_complete
 
 from .conftest import make_simple_task, make_workflow_spec, start_ok
+from tests.integration.conftest import task_name_for
 
 
 @pytest.mark.integration
@@ -59,7 +60,10 @@ class TestDAGPatterns:
             f'task_id is NULL for workflow_id={workflow_id}, task_index={task_index} '
             f'— task was never enqueued'
         )
-        await on_workflow_task_complete(session, row[0], result, broker)
+        await on_workflow_task_complete(
+            session, row[0], result, broker,
+            task_name=await task_name_for(session, row[0]),
+        )
         await session.commit()
 
     async def _get_task_status(
