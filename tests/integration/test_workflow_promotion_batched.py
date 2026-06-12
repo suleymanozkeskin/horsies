@@ -327,24 +327,20 @@ class TestBatchedPromotionSemantics:
         assert row.task_id is None
         assert 'task_options' in str(row.result)
 
-    async def test_pause_policy_build_failure_with_good_sibling(
+    async def test_pause_policy_build_failure_reverts_siblings_to_ready(
         self,
         clean_workflow_tables: None,
         app: Horsies,
         broker: PostgresBroker,
         session: AsyncSession,
     ) -> None:
-        """Pinned behavioral corner vs the sequential path: under
-        on_error=PAUSE, a payload-build failure pauses the workflow, and
-        the good sibling of the SAME batch still gets its task row (it
-        passed the READY->ENQUEUED CAS while the workflow was RUNNING).
-
-        Deliberate: dropping the insert would strand the sibling as
-        ENQUEUED with task_id NULL (the no-recovery state); an enqueued
-        task under a paused workflow is the already-supported concurrent
-        pause race — the post-claim guard unclaims it and resume picks it
-        up. The sequential path reached the identical row set when the
-        failing node happened to be processed last."""
+        """Under on_error=PAUSE, a payload-build failure pauses the
+        workflow and the level's CAS'd-but-uninserted siblings revert to
+        READY: a paused workflow gains NO new runnable task rows, the
+        siblings are in the recoverable state (resume step 3 re-enqueues
+        READY nodes), and nothing is stranded ENQUEUED without a task
+        row. Stronger than the sequential path, whose post-pause state
+        depended on processing order."""
         fn = _make_task(app, 'pause_corner')
 
         @app.task(task_name=f'pause_corrupt_{uuid.uuid4().hex[:8]}')
@@ -369,7 +365,7 @@ class TestBatchedPromotionSemantics:
         await session.commit()
 
         statuses = await _statuses(session, wf_id)
-        assert statuses == {0: 'COMPLETED', 1: 'ENQUEUED', 2: 'FAILED'}
+        assert statuses == {0: 'COMPLETED', 1: 'READY', 2: 'FAILED'}
         wf_status = (
             await session.execute(
                 text('SELECT status FROM horsies_workflows WHERE id = :wf'),
@@ -378,7 +374,28 @@ class TestBatchedPromotionSemantics:
         ).scalar()
         assert wf_status == 'PAUSED'
 
-        # The good sibling's task row exists and is linked (not stranded).
+        # No runnable task row was created under the paused workflow, and
+        # the reverted sibling is not stranded (task_id NULL + READY is
+        # the recovery-covered shape, with started_at cleared).
+        good_row = (
+            await session.execute(
+                text("""
+                    SELECT task_id, started_at FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf AND task_index = 1
+                """),
+                {'wf': wf_id},
+            )
+        ).one()
+        assert good_row.task_id is None
+        assert good_row.started_at is None
+
+        # Resume re-enqueues the READY sibling through the normal path.
+        from horsies.core.workflows.lifecycle import resume_workflow
+
+        resume_r = await resume_workflow(broker, wf_id)
+        assert not is_err(resume_r), resume_r
+        statuses_after = await _statuses(session, wf_id)
+        assert statuses_after[1] == 'ENQUEUED'
         good_task = (
             await session.execute(
                 text("""
@@ -389,17 +406,4 @@ class TestBatchedPromotionSemantics:
                 {'wf': wf_id},
             )
         ).scalar()
-        assert good_task == 'PENDING'  # claimable once resumed
-
-        # Resume restores the workflow; the enqueued sibling rides along.
-        from horsies.core.workflows.lifecycle import resume_workflow
-
-        resume_r = await resume_workflow(broker, wf_id)
-        assert not is_err(resume_r), resume_r
-        wf_status_after = (
-            await session.execute(
-                text('SELECT status FROM horsies_workflows WHERE id = :wf'),
-                {'wf': wf_id},
-            )
-        ).scalar()
-        assert wf_status_after == 'RUNNING'
+        assert good_task == 'PENDING'  # claimable now that it resumed

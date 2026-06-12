@@ -166,6 +166,21 @@ INSERT_TASK_FOR_WORKFLOW_SQL = text("""
 LINK_WORKFLOW_TASK_SQL = text("""
     UPDATE horsies_workflow_tasks SET task_id = :tid WHERE workflow_id = :wf_id AND task_index = :idx
 """)
+# Pause-mid-level revert: when a payload-build failure's on_error=PAUSE
+# handler pauses the workflow, the level's already-CAS'd-but-not-inserted
+# siblings go back to READY (with started_at cleared, matching the
+# pre-enqueue shape). READY-with-no-task is the recoverable state by
+# design (resume step 3 enqueues READY nodes; recovery case 1 covers
+# READY not enqueued) — leaving them ENQUEUED without task rows would be
+# the stranded no-recovery state. Status predicate skips rows another
+# path already advanced (e.g. the FAILED node itself).
+REVERT_ENQUEUED_TO_READY_BATCH_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET status = 'READY', started_at = NULL
+    WHERE workflow_id = :wf_id AND task_index = ANY(:idxs)
+      AND status = 'ENQUEUED' AND task_id IS NULL
+    RETURNING task_index
+""")
 # -- SQL constants for enqueue_subworkflow_task --
 
 ENQUEUE_SUBWORKFLOW_TASK_SQL = text("""

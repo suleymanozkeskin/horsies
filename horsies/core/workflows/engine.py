@@ -51,6 +51,7 @@ from horsies.core.workflows.sql import (
     ENQUEUE_WORKFLOW_TASKS_BATCH_SQL,
     GET_DEPENDENTS_EVAL_SQL,
     MARK_TASKS_READY_BATCH_SQL,
+    REVERT_ENQUEUED_TO_READY_BATCH_SQL,
     SKIP_PENDING_TASKS_BATCH_SQL,
     SKIP_READY_TASKS_BATCH_SQL,
     GET_CHILD_WORKFLOW_INFO_SQL,
@@ -335,7 +336,7 @@ async def _fail_enqueued_task(
     message: str,
     broker: 'PostgresBroker | None' = None,
     error_code: 'OperationalErrorCode | str' = OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
-) -> None:
+) -> bool:
     """Mark an ENQUEUED workflow task as FAILED when pre-enqueue parsing fails.
 
     Raises:
@@ -347,6 +348,12 @@ async def _fail_enqueued_task(
 
     When broker is provided, also runs the full failure-propagation chain
     (on_error handling, dependent cascade, workflow completion check).
+
+    Returns False when the failure handler STOPPED processing (the
+    on_error=PAUSE policy paused this workflow); True otherwise. The
+    batched promotion level uses False to revert its remaining
+    CAS'd-but-uninserted siblings to READY instead of inserting runnable
+    task rows under the freshly paused workflow.
     """
     from horsies.core.models.tasks import TaskResult, TaskError
 
@@ -376,7 +383,7 @@ async def _fail_enqueued_task(
             task_index,
             failure_payload,
         )
-        return
+        return True
     if broker is not None:
         should_continue = await _handle_workflow_task_failure(
             session, workflow_id, tr,
@@ -389,6 +396,7 @@ async def _fail_enqueued_task(
             await check_workflow_completion(
                 session, workflow_id, broker, lock_held=True,
             )
+        return should_continue
     else:
         # Loud, not silent: the node is FAILED but on_error handling,
         # dependent cascade, and the completion check did not run. The
@@ -399,6 +407,7 @@ async def _fail_enqueued_task(
             workflow_id,
             task_index,
         )
+        return True
 
 
 async def _fail_subworkflow_load(
@@ -1768,6 +1777,7 @@ async def _promote_dependents_level(
 
         insert_params: list[dict[str, Any]] = []
         link_params: list[dict[str, Any]] = []
+        paused_mid_level = False
         for cas_row in cas_rows:
             build_r = await _build_enqueued_task_params(
                 session,
@@ -1788,10 +1798,15 @@ async def _promote_dependents_level(
             )
             if is_err(build_r):
                 err = build_r.err_value
-                await _fail_enqueued_task(
+                should_continue = await _fail_enqueued_task(
                     session, workflow_id, cas_row.task_index, err.message,
                     broker, error_code=err.error_code,
                 )
+                if not should_continue:
+                    # on_error=PAUSE paused the workflow: stop processing
+                    # this level (the pause contract) and revert below.
+                    paused_mid_level = True
+                    break
                 continue
             params = build_r.ok_value
             insert_params.append(params)
@@ -1801,7 +1816,19 @@ async def _promote_dependents_level(
                 'idx': cas_row.task_index,
             })
 
-        if insert_params:
+        if paused_mid_level:
+            # Revert every CAS'd-but-uninserted sibling of this level to
+            # READY (the recoverable state: resume step 3 re-enqueues
+            # READY nodes; recovery case 1 covers READY-not-enqueued).
+            # Inserting their task rows under the paused workflow — or
+            # leaving them ENQUEUED without task rows (the stranded
+            # no-recovery state) — would both be worse. The status+task_id
+            # predicate skips the FAILED node itself.
+            await session.execute(
+                REVERT_ENQUEUED_TO_READY_BATCH_SQL,
+                {'wf_id': workflow_id, 'idxs': enqueue_indexes},
+            )
+        elif insert_params:
             await session.execute(INSERT_TASK_FOR_WORKFLOW_SQL, insert_params)
             await session.execute(LINK_WORKFLOW_TASK_SQL, link_params)
 
