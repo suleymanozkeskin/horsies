@@ -13,6 +13,7 @@ class PostgresConfig(BaseModel):
         'worker_max_overflow',
         'worker_child_pool_min_size',
         'worker_child_pool_max_size',
+        'worker_child_pool_check',
     }
 
     # SecretStr: repr()/model_dump() of the config must never expose
@@ -55,6 +56,14 @@ class PostgresConfig(BaseModel):
     worker_child_pool_max_size: int = Field(
         default=2,
         description='Maximum connections allowed per child worker process',
+    )
+    worker_child_pool_check: bool = Field(
+        default=True,
+        description=(
+            'Health-check child pool connections on checkout. Each check is '
+            'a database round trip; disable on high-RTT links where the '
+            'per-statement retry handling already covers stale connections'
+        ),
     )
     pool_timeout: int = Field(
         default=30, description='The timeout for acquiring a connection from the pool'

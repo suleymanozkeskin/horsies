@@ -253,6 +253,7 @@ class TestChildInitializer:
             pgbouncer_transaction_mode=False,
             min_size=0,
             max_size=2,
+            check_on_checkout=True,
         )
 
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
@@ -284,6 +285,7 @@ class TestChildInitializer:
             pgbouncer_transaction_mode=True,
             child_pool_min_size=0,
             child_pool_max_size=1,
+            child_pool_check=False,
         )
 
         mock_init_pool.assert_called_once_with(
@@ -291,6 +293,7 @@ class TestChildInitializer:
             pgbouncer_transaction_mode=True,
             min_size=0,
             max_size=1,
+            check_on_checkout=False,
         )
 
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')

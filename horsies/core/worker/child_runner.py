@@ -270,6 +270,7 @@ def _child_initializer(
     pgbouncer_transaction_mode: bool = False,
     child_pool_min_size: int = 0,
     child_pool_max_size: int = 2,
+    child_pool_check: bool = True,
 ) -> None:
     """Child-process bootstrap: locate the app, import tasks, open the pool.
 
@@ -342,6 +343,7 @@ def _child_initializer(
         pgbouncer_transaction_mode=pgbouncer_transaction_mode,
         min_size=child_pool_min_size,
         max_size=child_pool_max_size,
+        check_on_checkout=child_pool_check,
     )
     logger.debug(f'[child {os.getpid()}] Connection pool initialized')
 

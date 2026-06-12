@@ -38,6 +38,7 @@ def _initialize_worker_pool(
     pgbouncer_transaction_mode: bool = False,
     min_size: int = 0,
     max_size: int = 2,
+    check_on_checkout: bool = True,
 ) -> None:
     """
     Initialize the per-process connection pool.
@@ -63,13 +64,17 @@ def _initialize_worker_pool(
         raise ValueError('max_size must be >= 1')
     if min_size > max_size:
         raise ValueError('min_size must be <= max_size')
+    # check_on_checkout=False skips the per-checkout health-check round
+    # trip (a full RTT on remote links); callers' statement-level error
+    # containment then absorbs the rare stale connection instead.
+    check = ConnectionPool.check_connection if check_on_checkout else None
     if pgbouncer_transaction_mode:
         _worker_pool = ConnectionPool(
             database_url,
             min_size=min_size,
             max_size=max_size,
             max_lifetime=300.0,
-            check=ConnectionPool.check_connection,
+            check=check,
             open=True,
             kwargs={'prepare_threshold': None},
         )
@@ -79,7 +84,7 @@ def _initialize_worker_pool(
             min_size=min_size,
             max_size=max_size,
             max_lifetime=300.0,
-            check=ConnectionPool.check_connection,
+            check=check,
             open=True,
         )
     atexit.register(_cleanup_worker_pool)

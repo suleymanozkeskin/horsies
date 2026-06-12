@@ -481,6 +481,7 @@ def worker_command(args: argparse.Namespace) -> None:
         parent_max_overflow=worker_postgres_config.max_overflow,
         child_pool_min_size=postgres_config.worker_child_pool_min_size,
         child_pool_max_size=postgres_config.worker_child_pool_max_size,
+        child_pool_check=postgres_config.worker_child_pool_check,
         queues=queues,
         processes=processes,
         app_locator=app_locator,

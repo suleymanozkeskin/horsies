@@ -33,6 +33,7 @@ class WorkerConfig:
     parent_max_overflow: int = 2
     child_pool_min_size: int = 0
     child_pool_max_size: int = 2
+    child_pool_check: bool = True
     # Claiming knobs
     # max_claim_batch: Optional top-level fairness limiter per queue per pass.
     # 0 = auto-fill available local/global capacity. Positive values explicitly cap claims.
