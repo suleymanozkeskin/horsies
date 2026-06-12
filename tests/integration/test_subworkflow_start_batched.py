@@ -151,7 +151,8 @@ class TestBulkChildStart:
         assert root.started_at is not None
         assert root.task_status == 'PENDING'  # claimable
         assert root.enqueue_sha
-        assert f'"workflow_id": "{child_id}"' in root.kwargs.replace("'", '"') or child_id in root.kwargs
+        # dumps_json uses compact separators — assert the exact wire form.
+        assert f'"workflow_id":"{child_id}"' in root.kwargs
 
         for dep in rows[1:]:
             assert dep.status == 'PENDING'
