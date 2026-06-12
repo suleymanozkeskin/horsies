@@ -376,6 +376,9 @@ class TestEnqueueSubworkflowTask:
             args_from=None,
             node_id='node-0',
             sub_definition_key='test.child.v1',
+            # Parent name rides the CAS RETURNING (the statement joins
+            # horsies_workflows), replacing the old GET_WORKFLOW_NAME read.
+            parent_workflow_name='test_wf',
         )
         defaults.update(overrides)
         return SimpleNamespace(**defaults)
@@ -391,29 +394,10 @@ class TestEnqueueSubworkflowTask:
         )
         assert result is None
 
-    @pytest.mark.asyncio
-    async def test_workflow_name_not_found_fails(self) -> None:
-        row = self._base_row()
-
-        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
-            if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
-                return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(None)
-            return _one_result(SimpleNamespace())
-
-        session = AsyncMock()
-        session.execute = AsyncMock(side_effect=_dispatch)
-        broker = MagicMock()
-        with patch(
-            'horsies.core.workflows.engine._fail_enqueued_task',
-            new=AsyncMock(),
-        ):
-            result = await enqueue_subworkflow_task(
-                session, broker, 'wf-1', 0, {},
-                parent_depth=0, root_workflow_id='root-wf',
-            )
-        assert result is None
+    # The old test_workflow_name_not_found_fails case is structurally
+    # unreachable now: the parent name rides the ENQUEUE CAS RETURNING,
+    # and a CAS hit implies the workflow row exists (the statement joins
+    # it). The missing-workflow case is the CAS-no-row path above.
 
     @pytest.mark.asyncio
     async def test_corrupt_kwargs_json_fails(self) -> None:

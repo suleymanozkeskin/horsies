@@ -9,7 +9,6 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql.elements import TextClause
 
 from pydantic import ValidationError as _PydanticValidationError
 
@@ -36,6 +35,7 @@ from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
     SubWorkflowNode,
+    TaskNode,
     SubWorkflowSummary,
     WorkflowStatus,
     WorkflowTaskStatus,
@@ -70,14 +70,12 @@ from horsies.core.workflows.sql import (
     GET_WORKFLOW_DAG_EDGES_SQL,
     GET_WORKFLOW_COMPLETION_STATUS_SQL,
     GET_WORKFLOW_DEPTH_SQL,
-    GET_WORKFLOW_NAME_SQL,
     GET_WORKFLOW_ON_ERROR_SQL,
     GET_WORKFLOW_OUTPUT_INDEX_SQL,
     GET_WORKFLOW_STATUS_SQL,
     INSERT_CHILD_WORKFLOW_SQL,
     INSERT_TASK_FOR_WORKFLOW_SQL,
-    INSERT_WORKFLOW_TASK_SQL,
-    INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL,
+    INSERT_WORKFLOW_TASKS_BULK_SQL,
     LINK_SUB_WORKFLOW_SQL,
     LINK_WORKFLOW_TASK_SQL,
     LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
@@ -87,6 +85,7 @@ from horsies.core.workflows.sql import (
     MARK_WORKFLOW_TASK_FAILED_SQL,
     NOTIFY_WORKFLOW_DONE_SQL,
     PAUSE_WORKFLOW_ON_ERROR_SQL,
+    REVERT_PRELINKED_FAST_ROOTS_SQL,
     SET_WORKFLOW_ERROR_SQL,
     SKIP_READY_WORKFLOW_TASK_SQL,
     SKIP_WORKFLOW_TASK_SQL,
@@ -856,21 +855,10 @@ async def enqueue_subworkflow_task(
     args_from_raw = row.args_from
     _node_id = row.node_id  # Unused but kept for row unpacking clarity
     sub_definition_key = row.sub_definition_key
+    # Parent name rides the CAS RETURNING (the statement already joins
+    # horsies_workflows); a CAS hit implies the workflow row exists.
+    workflow_name = row.parent_workflow_name
     # 2. Load the child workflow definition by its explicit definition_key.
-    workflow_name_result = await session.execute(
-        GET_WORKFLOW_NAME_SQL,
-        {'wf_id': workflow_id},
-    )
-    workflow_name_row = workflow_name_result.fetchone()
-    if workflow_name_row is None:
-        await _fail_enqueued_task(
-            session, workflow_id, task_index,
-            f'Workflow {workflow_id} not found during subworkflow enqueue', broker,
-            error_code=OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
-        )
-        return None
-
-    workflow_name = workflow_name_row.name
 
     workflow_def: type[WorkflowDefinition[Any]] | None = None
     if sub_definition_key:
@@ -1062,7 +1050,22 @@ async def enqueue_subworkflow_task(
     child_output_index = child_spec.output.index if child_spec.output else None
     child_sent_at = datetime.now(timezone.utc)
 
-    child_workflow_task_inserts: list[tuple[TextClause, dict[str, Any]]] = []
+    # Bulk insert params for ALL child nodes (one executemany), fast-root
+    # task rows (one executemany), and slow roots (per-node path). Same
+    # fast/slow split as the batched workflow start: child TaskNode roots
+    # cannot carry args_from/workflow_ctx_from (spec validation requires
+    # both to reference waits_for, and roots have none), so they are
+    # inserted directly as ENQUEUED with their task rows. SubWorkflowNode
+    # roots recurse; a root whose task_options fail to parse is demoted to
+    # the per-node path so corruption keeps failing THAT child root (not
+    # the parent), exactly as before.
+    from horsies.core.codec.json_io import SerializationError
+    from horsies.core.workflows.lifecycle import root_retry_and_deadline
+
+    child_node_params: list[dict[str, Any]] = []
+    child_root_task_params: list[dict[str, Any]] = []
+    child_fast_root_indexes: list[int] = []
+    slow_child_roots: list[TaskNode[Any] | SubWorkflowNode[Any]] = []
     for child_node in child_spec.tasks:
         child_dep_indices = [
             d.index for d in child_node.waits_for if d.index is not None
@@ -1121,32 +1124,34 @@ async def enqueue_subworkflow_task(
                     error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
                 )
                 return None
-            child_workflow_task_inserts.append((
-                INSERT_WORKFLOW_TASK_SUBWORKFLOW_SQL,
-                {
-                    'id': child_wt_id,
-                    'wf_id': child_id,
-                    'idx': child_sub.index,
-                    'node_id': child_sub.node_id,
-                    'name': child_sub.name,
-                    'args': _ser(dumps_json([]), 'positional args', fallback='[]'),
-                    'kwargs': child_kwargs_json,
-                    'queue': 'default',
-                    'priority': 100,
-                    'deps': child_dep_indices,
-                    'args_from': _ser(dumps_json(child_args_from_indices), 'child args_from')
-                    if child_args_from_indices
-                    else None,
-                    'ctx_from': child_ctx_from_ids,
-                    'allow_failed': child_sub.allow_failed_deps,
-                    'join_type': child_sub.join,
-                    'min_success': child_sub.min_success,
-                    'task_options': None,
-                    'status': 'PENDING' if child_dep_indices else 'READY',
-                    'sub_wf_name': child_sub.workflow_def.name,
-                    'sub_def_key': child_sub.workflow_def._require_definition_key(),
-                },
-            ))
+            child_node_params.append({
+                'id': child_wt_id,
+                'wf_id': child_id,
+                'idx': child_sub.index,
+                'node_id': child_sub.node_id,
+                'name': child_sub.name,
+                'args': _ser(dumps_json([]), 'positional args', fallback='[]'),
+                'kwargs': child_kwargs_json,
+                'queue': 'default',
+                'priority': 100,
+                'deps': child_dep_indices,
+                'args_from': _ser(dumps_json(child_args_from_indices), 'child args_from')
+                if child_args_from_indices
+                else None,
+                'ctx_from': child_ctx_from_ids,
+                'allow_failed': child_sub.allow_failed_deps,
+                'join_type': child_sub.join,
+                'min_success': child_sub.min_success,
+                'task_options': None,
+                'status': 'PENDING' if child_dep_indices else 'READY',
+                'is_subworkflow': True,
+                'sub_wf_name': child_sub.workflow_def.name,
+                'sub_def_key': child_sub.workflow_def._require_definition_key(),
+                'task_id': None,
+                'is_enqueued': False,
+            })
+            if not child_dep_indices:
+                slow_child_roots.append(child_sub)
         else:
             child_task = child_node
             try:
@@ -1231,34 +1236,116 @@ async def enqueue_subworkflow_task(
                     error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
                 )
                 return None
-            child_workflow_task_inserts.append((
-                INSERT_WORKFLOW_TASK_SQL,
-                {
-                    'id': child_wt_id,
-                    'wf_id': child_id,
-                    'idx': child_task.index,
-                    'node_id': child_task.node_id,
+            child_queue = (
+                child_task.queue
+                or getattr(child_task.fn, 'task_queue_name', None)
+                or 'default'
+            )
+            child_priority = (
+                child_task.priority if child_task.priority is not None else 100
+            )
+            child_args_json = _ser(dumps_json([]), 'positional args', fallback='[]')
+
+            is_fast_root = (
+                not child_dep_indices
+                and not child_args_from_indices
+                and not child_ctx_from_ids
+            )
+            child_task_id: str | None = None
+            max_retries: int = 0
+            good_until_str: str | None = None
+            good_until_dt: datetime | None = None
+            if is_fast_root:
+                try:
+                    max_retries, good_until_str, good_until_dt = (
+                        root_retry_and_deadline(
+                            child_task_options_json, child_task.name,
+                        )
+                    )
+                except SerializationError:
+                    # Corrupt decorator-attached options: demote to the
+                    # per-node path so the failure lands on THIS child
+                    # root (identical message/code to the old behavior),
+                    # not the parent node.
+                    is_fast_root = False
+            if is_fast_root and child_task.index is not None:
+                child_task_id = str(uuid.uuid4())
+                # Task-row kwargs = node kwargs + workflow_meta (mirrors
+                # enqueue_workflow_task; args_from/ctx injection is
+                # structurally absent on fast roots).
+                root_task_kwargs: dict[str, Any] = dict(encoded_child_task_kwargs)
+                root_task_kwargs['__h_workflow_meta__'] = {
+                    'workflow_id': child_id,
+                    'task_index': child_task.index,
+                    'task_name': child_task.name,
+                }
+                root_kwargs_json = _ser(
+                    dumps_json(root_task_kwargs), 'child root task kwargs',
+                )
+                if root_kwargs_json is None:
+                    await _fail_enqueued_task(
+                        session, workflow_id, task_index,
+                        f'Failed to serialize kwargs for child task {child_task.name}', broker,
+                        error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+                    )
+                    return None
+                root_sent_at = datetime.now(timezone.utc)
+                sha = enqueue_fingerprint(
+                    task_name=child_task.name,
+                    queue_name=child_queue,
+                    priority=child_priority,
+                    args_json=child_args_json,
+                    kwargs_json=root_kwargs_json,
+                    sent_at=root_sent_at,
+                    good_until=good_until_dt,
+                    enqueue_delay_seconds=None,
+                    task_options=child_task_options_json,
+                )
+                child_fast_root_indexes.append(child_task.index)
+                child_root_task_params.append({
+                    'id': child_task_id,
                     'name': child_task.name,
-                    'args': _ser(dumps_json([]), 'positional args', fallback='[]'),
-                    'kwargs': child_kwargs_json,
-                    'queue': child_task.queue
-                    or getattr(child_task.fn, 'task_queue_name', None)
-                    or 'default',
-                    'priority': child_task.priority
-                    if child_task.priority is not None
-                    else 100,
-                    'deps': child_dep_indices,
-                    'args_from': _ser(dumps_json(child_args_from_indices), 'child args_from')
-                    if child_args_from_indices
-                    else None,
-                    'ctx_from': child_ctx_from_ids,
-                    'allow_failed': child_task.allow_failed_deps,
-                    'join_type': child_task.join,
-                    'min_success': child_task.min_success,
+                    'queue': child_queue,
+                    'priority': child_priority,
+                    'args': child_args_json,
+                    'kwargs': root_kwargs_json,
+                    'sent_at': root_sent_at,
+                    'max_retries': max_retries,
                     'task_options': child_task_options_json,
-                    'status': 'PENDING' if child_dep_indices else 'READY',
-                },
-            ))
+                    'good_until': good_until_str,
+                    'enqueue_sha': sha,
+                })
+            elif not child_dep_indices:
+                slow_child_roots.append(child_task)
+
+            child_node_params.append({
+                'id': child_wt_id,
+                'wf_id': child_id,
+                'idx': child_task.index,
+                'node_id': child_task.node_id,
+                'name': child_task.name,
+                'args': child_args_json,
+                'kwargs': child_kwargs_json,
+                'queue': child_queue,
+                'priority': child_priority,
+                'deps': child_dep_indices,
+                'args_from': _ser(dumps_json(child_args_from_indices), 'child args_from')
+                if child_args_from_indices
+                else None,
+                'ctx_from': child_ctx_from_ids,
+                'allow_failed': child_task.allow_failed_deps,
+                'join_type': child_task.join,
+                'min_success': child_task.min_success,
+                'task_options': child_task_options_json,
+                'status': 'ENQUEUED'
+                if child_task_id is not None
+                else ('PENDING' if child_dep_indices else 'READY'),
+                'is_subworkflow': False,
+                'sub_wf_name': None,
+                'sub_def_key': None,
+                'task_id': child_task_id,
+                'is_enqueued': child_task_id is not None,
+            })
 
     # 6. Create child workflow with parent reference, then insert its complete
     # task set.
@@ -1281,8 +1368,8 @@ async def enqueue_subworkflow_task(
         },
     )
 
-    for stmt, params in child_workflow_task_inserts:
-        await session.execute(stmt, params)
+    if child_node_params:
+        await session.execute(INSERT_WORKFLOW_TASKS_BULK_SQL, child_node_params)
 
     # 7. Update parent's workflow_task with child_workflow_id and mark RUNNING
     await session.execute(
@@ -1290,9 +1377,11 @@ async def enqueue_subworkflow_task(
         {'child_id': child_id, 'wf_id': workflow_id, 'idx': task_index},
     )
 
-    # 8. Enqueue child's root tasks
-    child_root_nodes = [t for t in child_spec.tasks if not t.waits_for]
-    for child_root in child_root_nodes:
+    # 8. Slow roots first: SubWorkflowNode roots start their own child
+    # workflows; demoted TaskNode roots (unparseable options) take the
+    # per-node path. A slow root's failure may pause THIS child workflow
+    # (its on_error policy), which must gate the fast roots below.
+    for child_root in slow_child_roots:
         if child_root.index is not None:
             if isinstance(child_root, SubWorkflowNode):
                 await enqueue_subworkflow_task(
@@ -1309,6 +1398,41 @@ async def enqueue_subworkflow_task(
                 await enqueue_workflow_task(
                     session, child_id, child_root.index, {}, {}, broker,
                 )
+
+    # A nested SubWorkflowNode root can fail/finalize synchronously and queue
+    # propagation back into this child workflow. Drain before the fast-root
+    # gate so that propagation can pause this child before runnable task rows
+    # for fast siblings are inserted.
+    if slow_child_roots:
+        await drain_parent_propagations_in_session(session, broker)
+
+    # 9. Fast TaskNode roots were inserted ENQUEUED with their task ids in
+    # the bulk statement (the READY->ENQUEUED CAS is vacuous for rows
+    # created in this same uncommitted transaction — same justification as
+    # the batched workflow start); their task rows land in one executemany.
+    # If a slow root's failure paused the child (the only possible status
+    # writer: its row was created in this transaction), revert the fast
+    # roots to READY instead — a paused workflow gains no runnable task
+    # rows, and resume re-enqueues READY nodes through the normal path.
+    if child_root_task_params:
+        child_runnable = True
+        if slow_child_roots:
+            status_check = await session.execute(
+                GET_WORKFLOW_STATUS_SQL, {'wf_id': child_id},
+            )
+            status_row = status_check.fetchone()
+            child_runnable = (
+                status_row is not None and status_row.status == 'RUNNING'
+            )
+        if child_runnable:
+            await session.execute(
+                INSERT_TASK_FOR_WORKFLOW_SQL, child_root_task_params,
+            )
+        else:
+            await session.execute(
+                REVERT_PRELINKED_FAST_ROOTS_SQL,
+                {'wf_id': child_id, 'idxs': child_fast_root_indexes},
+            )
 
     logger.info(f'Started child workflow {child_id} for {workflow_name}:{task_index}')
     return child_id
