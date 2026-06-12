@@ -242,6 +242,7 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
                 self.cfg.pgbouncer_transaction_mode,
                 self.cfg.child_pool_min_size,
                 self.cfg.child_pool_max_size,
+                self.cfg.child_pool_check,
             ),
             **kwargs,
         )

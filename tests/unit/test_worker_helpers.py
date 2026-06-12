@@ -4184,3 +4184,158 @@ class TestRetryErrPhase1Replay:
         assert kwargs['ok'] is True
         assert kwargs['result_json_str'] == '{"ok": 42}'
         assert kwargs['failed_reason'] is None
+
+
+# ---------------------------------------------------------------------------
+# _persist_task_terminal_state: fused ok-path (FINALIZE_TASK_COMPLETED_SQL)
+# ---------------------------------------------------------------------------
+
+from horsies.core.worker.sql import (
+    FINALIZE_TASK_COMPLETED_SQL,
+    MARK_TASK_COMPLETED_SQL,
+)
+
+_OK_WIRE = '{"__h_task_result__":true,"ok":"hello","err":null}'
+_STOPPED_WIRE = (
+    '{"__h_task_result__":true,"ok":null,'
+    '"err":{"exception":null,"error_code":"WORKFLOW_STOPPED",'
+    '"data":null,"message":"stop"}}'
+)
+
+
+def _make_session_worker(
+    fetchone_results: list[Any],
+) -> tuple[Worker, AsyncMock, MagicMock]:
+    """Worker whose sf() yields a session with scripted fetchone results."""
+    worker = _make_worker()
+
+    session = MagicMock()
+    execute_results = [
+        MagicMock(fetchone=MagicMock(return_value=r)) for r in fetchone_results
+    ]
+    session.execute = AsyncMock(side_effect=execute_results)
+    session.commit = AsyncMock()
+
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=session)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    worker.sf = MagicMock(return_value=ctx)  # type: ignore[method-assign]
+
+    registry_task = SimpleNamespace(task_ok_type=str)
+    app = MagicMock()
+    app.tasks.get = MagicMock(return_value=registry_task)
+    worker._app = app
+    return worker, session.execute, session.commit
+
+
+@pytest.mark.unit
+class TestPersistTerminalStateFusedPath:
+    """Plain-task ok results take the one-statement fused path."""
+
+    @pytest.mark.asyncio
+    async def test_plain_ok_result_uses_fused_statement(self) -> None:
+        """Plain task + ok result → single fused statement, Ok(None)."""
+        worker, execute, commit = _make_session_worker(
+            fetchone_results=[MagicMock(id='task-1')],
+        )
+
+        result = await worker._persist_task_terminal_state(
+            task_id='task-1',
+            now=datetime.now(timezone.utc),
+            ok=True,
+            result_json_str=_OK_WIRE,
+            failed_reason=None,
+            task_name='my_task',
+            queue_name='q1',
+            is_workflow_task=False,
+        )
+
+        assert result.ok_value is None
+        execute.assert_awaited_once()
+        stmt, params = execute.await_args.args
+        assert stmt is FINALIZE_TASK_COMPLETED_SQL
+        assert params['id'] == 'task-1'
+        assert params['result_json'] == _OK_WIRE
+        assert params['notify_channel'] == 'task_queue_q1'
+        assert params['notify_payload'] == 'capacity:task-1'
+        commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_fused_row_gone_skips_without_commit(self) -> None:
+        """Status/ownership changed → Ok(None), nothing committed."""
+        worker, execute, commit = _make_session_worker(
+            fetchone_results=[None],
+        )
+
+        result = await worker._persist_task_terminal_state(
+            task_id='task-1',
+            now=datetime.now(timezone.utc),
+            ok=True,
+            result_json_str=_OK_WIRE,
+            failed_reason=None,
+            task_name='my_task',
+            queue_name='q1',
+            is_workflow_task=False,
+        )
+
+        assert result.ok_value is None
+        execute.assert_awaited_once()
+        commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_workflow_ok_result_keeps_legacy_path(self) -> None:
+        """Workflow task ok result → ctx select + attempt + CAS, Ok(tr)."""
+        ctx_row = SimpleNamespace(
+            task_name='my_task',
+            retry_count=0,
+            started_at=datetime.now(timezone.utc),
+            claimed_by_worker_id='w-1',
+            worker_hostname='host',
+            worker_pid=1,
+            worker_process_name='p',
+            queue_name='q1',
+            is_workflow_task=True,
+            db_now=datetime.now(timezone.utc),
+        )
+        worker, execute, commit = _make_session_worker(
+            # ctx SELECT, attempt UPSERT (fetchone unused), COMPLETED CAS
+            fetchone_results=[ctx_row, None, MagicMock(id='task-1')],
+        )
+
+        result = await worker._persist_task_terminal_state(
+            task_id='task-1',
+            now=datetime.now(timezone.utc),
+            ok=True,
+            result_json_str=_OK_WIRE,
+            failed_reason=None,
+            task_name='my_task',
+            queue_name='q1',
+            is_workflow_task=True,
+        )
+
+        tr = result.ok_value
+        assert tr is not None and tr.is_ok()
+        statements = [c.args[0] for c in execute.await_args_list]
+        assert FINALIZE_TASK_COMPLETED_SQL not in statements
+        assert statements[-1] is MARK_TASK_COMPLETED_SQL
+        commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_workflow_stopped_returns_none_without_sql(self) -> None:
+        """WORKFLOW_STOPPED err result → Ok(None) before any session opens."""
+        worker, execute, _ = _make_session_worker(fetchone_results=[])
+
+        result = await worker._persist_task_terminal_state(
+            task_id='task-1',
+            now=datetime.now(timezone.utc),
+            ok=True,
+            result_json_str=_STOPPED_WIRE,
+            failed_reason=None,
+            task_name='my_task',
+            queue_name='q1',
+            is_workflow_task=True,
+        )
+
+        assert result.ok_value is None
+        worker.sf.assert_not_called()
+        execute.assert_not_awaited()

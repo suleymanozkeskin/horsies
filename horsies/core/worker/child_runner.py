@@ -270,6 +270,7 @@ def _child_initializer(
     pgbouncer_transaction_mode: bool = False,
     child_pool_min_size: int = 0,
     child_pool_max_size: int = 2,
+    child_pool_check: bool = True,
 ) -> None:
     """Child-process bootstrap: locate the app, import tasks, open the pool.
 
@@ -342,6 +343,7 @@ def _child_initializer(
         pgbouncer_transaction_mode=pgbouncer_transaction_mode,
         min_size=child_pool_min_size,
         max_size=child_pool_max_size,
+        check_on_checkout=child_pool_check,
     )
     logger.debug(f'[child {os.getpid()}] Connection pool initialized')
 
@@ -425,9 +427,9 @@ def _heartbeat_worker(
             )
             return False
 
-    # Send an immediate heartbeat so freshly RUNNING tasks aren't considered stale
-    send_heartbeat()
-
+    # No immediate beat here: _confirm_ownership_and_set_running inserts the
+    # first heartbeat inside the RUNNING transaction, so coverage starts
+    # atomically with the state transition.
     while not stop_event.is_set():
         # Wait for interval, but check stop_event periodically
         if stop_event.wait(timeout=heartbeat_interval_seconds):
@@ -466,9 +468,9 @@ def _get_workflow_status_for_task(cursor: Cursor[Any], task_id: str) -> str | No
     """Read the owning workflow's status for a task (None if not in one).
 
     Raises:
-        Exception: DB errors propagate to the two wrapped callers:
-            _preflight_workflow_check folds them into WORKFLOW_CHECK_FAILED,
-            _confirm_ownership_and_set_running into OWNERSHIP_UNCONFIRMED.
+        Exception: DB errors propagate to the wrapped caller,
+            _confirm_ownership_and_set_running, which folds them into
+            OWNERSHIP_UNCONFIRMED.
     """
     cursor.execute(
         """
@@ -496,9 +498,9 @@ def _handle_workflow_stop_before_start(
     """Skip a task whose workflow is PAUSED/CANCELLED; return the wire tuple.
 
     Raises:
-        Exception: DB errors propagate to the two wrapped callers:
-            _preflight_workflow_check folds them into WORKFLOW_CHECK_FAILED,
-            _confirm_ownership_and_set_running into OWNERSHIP_UNCONFIRMED.
+        Exception: DB errors propagate to the wrapped caller,
+            _confirm_ownership_and_set_running, which folds them into
+            OWNERSHIP_UNCONFIRMED.
     """
     logger.info(
         f'Blocking task {task_id} execution before start - workflow is {workflow_status}'
@@ -622,42 +624,6 @@ def _update_workflow_task_running_with_retry(task_id: str) -> bool:
                     )
                     return False
     return False
-
-
-def _preflight_workflow_check(
-    task_id: str,
-    worker_id: str,
-    is_workflow_task: bool = True,
-) -> Optional[Tuple[bool, str, Optional[str]]]:
-    try:
-        pool = _get_worker_pool()
-        with pool.connection() as conn:
-            cursor = conn.cursor(row_factory=namedtuple_row)
-            expired_result = _expire_claimed_task_before_start(
-                cursor,
-                conn,
-                task_id,
-                worker_id,
-            )
-            if expired_result is not None:
-                return expired_result
-
-            if is_workflow_task:
-                workflow_status = _get_workflow_status_for_task(cursor, task_id)
-                match workflow_status:
-                    case 'PAUSED' | 'CANCELLED':
-                        return _handle_workflow_stop_before_start(
-                            cursor,
-                            conn,
-                            task_id,
-                            workflow_status,
-                        )
-                    case _:
-                        return None
-            return None
-    except Exception as e:
-        logger.error(f'Failed to check workflow status for task {task_id}: {e}')
-        return (False, '', 'WORKFLOW_CHECK_FAILED')
 
 
 def _expire_claimed_task_before_start(
@@ -811,6 +777,23 @@ def _confirm_ownership_and_set_running(
                     )
                     return (False, '', 'WORKFLOW_CHECK_FAILED')
 
+            # First runner heartbeat rides the RUNNING transition: the row
+            # can never be observed RUNNING without heartbeat coverage, and
+            # the heartbeat thread skips its immediate beat (one fewer
+            # round trip per task on remote links).
+            cursor.execute(
+                """
+                INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid)
+                VALUES (%s, %s, 'runner', NOW(), %s, %s)
+                """,
+                (
+                    task_id,
+                    worker_id + f':{os.getpid()}',
+                    socket.gethostname(),
+                    os.getpid(),
+                ),
+            )
+
             conn.commit()
         return None
     except Exception as e:
@@ -906,18 +889,11 @@ def _run_task_entry(
     """
     logger.info(f'Starting task execution: {task_name}')
 
-    # Pre-execute guard: check if workflow is PAUSED or CANCELLED
-    # If so, skip execution and mark task as SKIPPED
-    preflight_result = _preflight_workflow_check(
-        task_id,
-        master_worker_id,
-        is_workflow_task,
-    )
-    if preflight_result is not None:
-        return preflight_result
-
-    # Mark as RUNNING in DB at the actual start of execution (child process)
-    # CRITICAL: Include ownership check to prevent double-execution when claim lease expires
+    # Mark as RUNNING in DB at the actual start of execution (child process).
+    # CRITICAL: Include ownership check to prevent double-execution when claim
+    # lease expires. The statement's guards also cover expiry (good_until) and
+    # paused/cancelled workflows; its miss path diagnoses which one fired —
+    # there is deliberately no separate pre-flight round trip.
     ownership_result = _confirm_ownership_and_set_running(
         task_id,
         master_worker_id,

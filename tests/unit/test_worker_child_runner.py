@@ -8,7 +8,6 @@ D. _heartbeat_worker
 E. _get_workflow_status_for_task
 F. _handle_workflow_stop_before_start (wildcard branch)
 G. _update_workflow_task_running_with_retry
-H. _preflight_workflow_check
 I. _run_task_entry error paths
 J. Workflow injection deserialization errors in _run_task_entry
 """
@@ -38,7 +37,6 @@ from horsies.core.worker.child_runner import (
     _handle_workflow_stop_before_start,
     _heartbeat_worker,
     _is_retryable_db_error,
-    _preflight_workflow_check,
     _run_task_entry,
     _serialization_error_response,
     _update_workflow_task_running_with_retry,
@@ -253,6 +251,7 @@ class TestChildInitializer:
             pgbouncer_transaction_mode=False,
             min_size=0,
             max_size=2,
+            check_on_checkout=True,
         )
 
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
@@ -284,6 +283,7 @@ class TestChildInitializer:
             pgbouncer_transaction_mode=True,
             child_pool_min_size=0,
             child_pool_max_size=1,
+            child_pool_check=False,
         )
 
         mock_init_pool.assert_called_once_with(
@@ -291,6 +291,7 @@ class TestChildInitializer:
             pgbouncer_transaction_mode=True,
             min_size=0,
             max_size=1,
+            check_on_checkout=False,
         )
 
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
@@ -501,7 +502,12 @@ class TestHeartbeatWorker:
     """_heartbeat_worker loop and failure paths."""
 
     def test_stops_on_event_set(self) -> None:
-        """Heartbeat thread exits when stop_event is set."""
+        """Heartbeat thread exits without beating when stop_event is set.
+
+        The first heartbeat is inserted by the RUNNING transition
+        transaction, not by this thread, so a pre-stopped loop sends
+        nothing.
+        """
         cursor = _FakeCursor()
         conn = _FakeConn(cursor)
         pool = _FakePool(conn)
@@ -511,7 +517,6 @@ class TestHeartbeatWorker:
             'horsies.core.worker.child_runner._get_worker_pool',
             return_value=pool,
         ):
-            # Set stop event immediately so the loop exits after first heartbeat
             stop.set()
             _heartbeat_worker(
                 task_id='t-1',
@@ -521,9 +526,7 @@ class TestHeartbeatWorker:
                 heartbeat_interval_ms=100,
             )
 
-        # At least the initial heartbeat was sent
-        assert len(cursor.queries) >= 1
-        assert 'horsies_heartbeats' in cursor.queries[0][0]
+        assert cursor.queries == []
 
     def test_continues_after_send_failure(self) -> None:
         """Heartbeat thread keeps trying after a transient send failure."""
@@ -733,135 +736,12 @@ class TestUpdateWorkflowTaskRunningWithRetry:
 
 
 # ===================================================================
-# H. _preflight_workflow_check
-# ===================================================================
-
-
-@pytest.mark.unit
-class TestPreflightWorkflowCheck:
-    """_preflight_workflow_check dispatches or returns None."""
-
-    def test_running_workflow_returns_none(self) -> None:
-        """Non-stopped workflow → None (proceed with execution)."""
-        row = _FakeRow(status='RUNNING')
-        cursor = _FakeCursor(fetchone_return=row)
-        conn = _FakeConn(cursor)
-        pool = _FakePool(conn)
-
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            return_value=pool,
-        ), patch(
-            'horsies.core.worker.child_runner._expire_claimed_task_before_start',
-            return_value=None,
-        ):
-            result = _preflight_workflow_check('task-1', 'worker-A')
-
-        assert result is None
-
-    def test_no_workflow_returns_none(self) -> None:
-        """Task not in any workflow → None."""
-        cursor = _FakeCursor(fetchone_return=None)
-        conn = _FakeConn(cursor)
-        pool = _FakePool(conn)
-
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            return_value=pool,
-        ), patch(
-            'horsies.core.worker.child_runner._expire_claimed_task_before_start',
-            return_value=None,
-        ):
-            result = _preflight_workflow_check('task-1', 'worker-A')
-
-        assert result is None
-
-    def test_paused_workflow_dispatches_to_handler(self) -> None:
-        """PAUSED workflow → dispatches to _handle_workflow_stop_before_start."""
-        row = _FakeRow(status='PAUSED')
-        cursor = _FakeCursor(fetchone_return=row)
-        conn = _FakeConn(cursor)
-        pool = _FakePool(conn)
-
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            return_value=pool,
-        ), patch(
-            'horsies.core.worker.child_runner._expire_claimed_task_before_start',
-            return_value=None,
-        ):
-            result = _preflight_workflow_check('task-1', 'worker-A')
-
-        assert result is not None
-        ok, _, reason = result
-        assert ok is False
-        assert reason == 'WORKFLOW_STOPPED'
-
-    def test_cancelled_workflow_dispatches_to_handler(self) -> None:
-        """CANCELLED workflow → dispatches to _handle_workflow_stop_before_start."""
-        row = _FakeRow(status='CANCELLED')
-        cursor = _FakeCursor(fetchone_return=row)
-        conn = _FakeConn(cursor)
-        pool = _FakePool(conn)
-
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            return_value=pool,
-        ), patch(
-            'horsies.core.worker.child_runner._expire_claimed_task_before_start',
-            return_value=None,
-        ):
-            result = _preflight_workflow_check('task-1', 'worker-A')
-
-        assert result is not None
-        ok, _, reason = result
-        assert ok is False
-        assert reason == 'WORKFLOW_STOPPED'
-
-    def test_exception_returns_workflow_check_failed(self) -> None:
-        """DB exception → WORKFLOW_CHECK_FAILED."""
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            side_effect=RuntimeError('pool exploded'),
-        ):
-            result = _preflight_workflow_check('task-1', 'worker-A')
-
-        assert result is not None
-        ok, _, reason = result
-        assert ok is False
-        assert reason == 'WORKFLOW_CHECK_FAILED'
-
-    def test_expired_task_takes_precedence_over_paused_workflow(self) -> None:
-        """Expired claimed task is marked EXPIRED before workflow stop handling."""
-        sentinel = (False, '', OutcomeCode.TASK_EXPIRED.value)
-        row = _FakeRow(status='PAUSED')
-        cursor = _FakeCursor(fetchone_return=row)
-        conn = _FakeConn(cursor)
-        pool = _FakePool(conn)
-
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            return_value=pool,
-        ), patch(
-            'horsies.core.worker.child_runner._expire_claimed_task_before_start',
-            return_value=sentinel,
-        ), patch(
-            'horsies.core.worker.child_runner._handle_workflow_stop_before_start',
-        ) as stop_handler:
-            result = _preflight_workflow_check('task-1', 'worker-A')
-
-        assert result == sentinel
-        stop_handler.assert_not_called()
-
-
-# ===================================================================
 # I. _run_task_entry error paths
 # ===================================================================
 
 
 def _make_run_task_patches(
     *,
-    preflight: Any = None,
     ownership: Any = None,
     task_fn: Any = None,
     task_missing: bool = False,
@@ -871,9 +751,6 @@ def _make_run_task_patches(
     Returns a dict of patch targets → values suitable for use with `patch`.
     """
     patches: dict[str, Any] = {
-        'horsies.core.worker.child_runner._preflight_workflow_check': MagicMock(
-            return_value=preflight,
-        ),
         'horsies.core.worker.child_runner._confirm_ownership_and_set_running': MagicMock(
             return_value=ownership,
         ),
@@ -919,19 +796,6 @@ def _run_entry_defaults() -> dict[str, Any]:
 @pytest.mark.unit
 class TestRunTaskEntryErrorPaths:
     """Error paths in _run_task_entry."""
-
-    def test_preflight_blocks_execution(
-        self,
-        _run_entry_defaults: dict[str, Any],
-    ) -> None:
-        """When preflight returns a tuple, _run_task_entry returns it immediately."""
-        sentinel = (False, '', 'WORKFLOW_STOPPED')
-        patches = _make_run_task_patches(preflight=sentinel)
-
-        with _apply_patches(patches):
-            result = _run_task_entry(**_run_entry_defaults)
-
-        assert result == sentinel
 
     def test_ownership_blocks_execution(
         self,
@@ -1695,6 +1559,39 @@ class TestWorkflowTaskRunningSyncFailureAborts:
         assert result is None  # None = proceed to user code
         sql_blob = '\n'.join(q[0] for q in cursor.queries)
         assert "status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')" in sql_blob
+
+    def test_first_heartbeat_rides_running_transaction(self) -> None:
+        """The initial runner heartbeat is inserted before the RUNNING commit.
+
+        Regression pin for the WAN statement-budget work: a row must never
+        be observable as RUNNING without heartbeat coverage, and the
+        heartbeat must not cost a separate transaction.
+        """
+        from horsies.core.worker.child_runner import (
+            _confirm_ownership_and_set_running,
+        )
+
+        cursor = _FakeCursor(fetchone_return=_FakeRow(id='task-1'))
+        conn = _FakeConn(cursor)
+        pool = _FakePool(conn)
+
+        with patch(
+            'horsies.core.worker.child_runner._get_worker_pool',
+            return_value=pool,
+        ):
+            result = _confirm_ownership_and_set_running(
+                'task-1', 'worker-A', is_workflow_task=False,
+            )
+
+        assert result is None
+        heartbeat_queries = [
+            q for q in cursor.queries if 'horsies_heartbeats' in q[0]
+        ]
+        assert len(heartbeat_queries) == 1
+        _, params = heartbeat_queries[0]
+        assert params[0] == 'task-1'
+        assert params[1].startswith('worker-A:')
+        assert conn.commits == 1
 
 
 # ===================================================================
