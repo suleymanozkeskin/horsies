@@ -13,6 +13,29 @@ there is no migration contract between pre-1.0 versions.
 
 ### Performance
 
+- Dependent promotion is batched per skip-cascade level. Completing a
+  task that unblocks F plain-TaskNode dependents (args_from included)
+  now runs a fixed pipeline — one grouped config+dependency-status
+  evaluation, batched PENDING->READY / ->SKIPPED CAS writes, one grouped
+  dependency-results read, one batched READY->ENQUEUED CAS returning the
+  insert payloads, one bulk task INSERT and one bulk LINK — instead of 7
+  statements per dependent under the workflow lock. Statements are flat
+  in F (8 vs 6+7F+2); measured against a remote (~33-45ms RTT) Postgres,
+  a 1-root -> 119-dependent promotion dropped from ~34s to ~0.6s of
+  lock-held time. SubWorkflowNode and `workflow_ctx_from` dependents
+  keep the per-node path. Join semantics, skip cascades, pause/cancel
+  guards, per-row CAS, and per-node failure isolation are unchanged; the
+  payload builder is shared with the per-node path so they cannot
+  diverge.
+  One strengthening vs the sequential path: under `on_error=PAUSE`, a
+  payload-build failure in a promotion level (a horsies bug path —
+  corrupt persisted rows) pauses the workflow, stops the level, and
+  reverts the level's already-CAS'd-but-uninserted siblings to READY —
+  a paused workflow gains no new runnable task rows, and the siblings
+  sit in the recovery-covered shape (resume re-enqueues READY nodes).
+  The sequential loop's post-pause state depended on processing order
+  (siblings processed before the failure were already enqueued). Pinned
+  by test_pause_policy_build_failure_reverts_siblings_to_ready.
 - Task completion runs in half the round trips. The completion path's
   locate -> lock -> CAS-update triple is one statement
   (`COMPLETE_WORKFLOW_TASK_SQL`: locate the node by backing task id, take

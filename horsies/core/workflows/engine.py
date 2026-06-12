@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, TypeVar, cast
@@ -31,7 +32,7 @@ from horsies.core.codec.typed import (
     validate_task_result_envelope,
 )
 from horsies.core.utils.fingerprint import enqueue_fingerprint
-from horsies.core.types.result import is_err
+from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
     SubWorkflowNode,
@@ -47,11 +48,16 @@ from horsies.core.workflows.sql import (
     COUNT_CTX_TERMINAL_DEPS_SQL,
     ENQUEUE_SUBWORKFLOW_TASK_SQL,
     ENQUEUE_WORKFLOW_TASK_SQL,
+    ENQUEUE_WORKFLOW_TASKS_BATCH_SQL,
+    GET_DEPENDENTS_EVAL_SQL,
+    MARK_TASKS_READY_BATCH_SQL,
+    REVERT_ENQUEUED_TO_READY_BATCH_SQL,
+    SKIP_PENDING_TASKS_BATCH_SQL,
+    SKIP_READY_TASKS_BATCH_SQL,
     GET_CHILD_WORKFLOW_INFO_SQL,
     GET_DEP_STATUS_COUNTS_SQL,
     GET_DEPENDENCY_RESULTS_SQL,
     GET_DEPENDENCY_RESULTS_WITH_NAMES_SQL,
-    GET_DEPENDENT_TASKS_SQL,
     GET_FIRST_FAILED_REQUIRED_TASK_SQL,
     GET_FIRST_FAILED_TASK_RESULT_SQL,
     GET_OUTPUT_TASK_RESULT_SQL,
@@ -330,7 +336,7 @@ async def _fail_enqueued_task(
     message: str,
     broker: 'PostgresBroker | None' = None,
     error_code: 'OperationalErrorCode | str' = OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
-) -> None:
+) -> bool:
     """Mark an ENQUEUED workflow task as FAILED when pre-enqueue parsing fails.
 
     Raises:
@@ -342,6 +348,12 @@ async def _fail_enqueued_task(
 
     When broker is provided, also runs the full failure-propagation chain
     (on_error handling, dependent cascade, workflow completion check).
+
+    Returns False when the failure handler STOPPED processing (the
+    on_error=PAUSE policy paused this workflow); True otherwise. The
+    batched promotion level uses False to revert its remaining
+    CAS'd-but-uninserted siblings to READY instead of inserting runnable
+    task rows under the freshly paused workflow.
     """
     from horsies.core.models.tasks import TaskResult, TaskError
 
@@ -371,7 +383,7 @@ async def _fail_enqueued_task(
             task_index,
             failure_payload,
         )
-        return
+        return True
     if broker is not None:
         should_continue = await _handle_workflow_task_failure(
             session, workflow_id, tr,
@@ -384,6 +396,7 @@ async def _fail_enqueued_task(
             await check_workflow_completion(
                 session, workflow_id, broker, lock_held=True,
             )
+        return should_continue
     else:
         # Loud, not silent: the node is FAILED but on_error handling,
         # dependent cascade, and the completion check did not run. The
@@ -394,6 +407,7 @@ async def _fail_enqueued_task(
             workflow_id,
             task_index,
         )
+        return True
 
 
 async def _fail_subworkflow_load(
@@ -457,6 +471,21 @@ async def _fail_subworkflow_load(
 
 
 
+@dataclass
+class _EnqueueBuildError:
+    """Per-node payload-build failure.
+
+    Callers fold it into ``_fail_enqueued_task`` (the node is already
+    ENQUEUED when building starts — the CAS RETURNING is the payload
+    source — so the failure mark is required to avoid stranding it).
+    """
+
+    message: str
+    error_code: 'OperationalErrorCode | str' = (
+        OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED
+    )
+
+
 async def enqueue_workflow_task(
     session: AsyncSession,
     workflow_id: str,
@@ -498,33 +527,88 @@ async def enqueue_workflow_task(
     if row is None:
         return None  # Already enqueued, not ready, or workflow not RUNNING
 
-    # Parse retry config and good_until from task_options
-    task_options_str: str | None = row.task_options
+    build_r = await _build_enqueued_task_params(
+        session,
+        workflow_id,
+        task_index,
+        task_name=row.task_name,
+        task_args=row.task_args,
+        task_kwargs=row.task_kwargs,
+        queue_name=row.queue_name,
+        priority=row.priority,
+        args_from=row.args_from,
+        workflow_ctx_from=row.workflow_ctx_from,
+        task_options_str=row.task_options,
+        all_dep_results=all_dep_results,
+        all_dep_task_names=all_dep_task_names,
+        broker=broker,
+        all_dep_definition_keys=all_dep_definition_keys,
+    )
+    if is_err(build_r):
+        err = build_r.err_value
+        await _fail_enqueued_task(
+            session, workflow_id, task_index, err.message, broker,
+            error_code=err.error_code,
+        )
+        return None
+    insert_params = build_r.ok_value
+
+    await session.execute(INSERT_TASK_FOR_WORKFLOW_SQL, insert_params)
+
+    # Link workflow_task to actual task
+    task_id = str(insert_params['id'])
+    await session.execute(
+        LINK_WORKFLOW_TASK_SQL,
+        {'tid': task_id, 'wf_id': workflow_id, 'idx': task_index},
+    )
+
+    return task_id
+
+
+async def _build_enqueued_task_params(
+    session: AsyncSession,
+    workflow_id: str,
+    task_index: int,
+    *,
+    task_name: str,
+    task_args: str | None,
+    task_kwargs: str | None,
+    queue_name: str,
+    priority: int,
+    args_from: Any,
+    workflow_ctx_from: Any,
+    task_options_str: str | None,
+    all_dep_results: dict[int, 'TaskResult[Any, TaskError]'],
+    all_dep_task_names: dict[int, str] | None,
+    broker: 'PostgresBroker | None',
+    all_dep_definition_keys: dict[int, str | None] | None,
+) -> 'Result[dict[str, Any], _EnqueueBuildError]':
+    """Build the horsies_tasks INSERT params for an ENQUEUED workflow node.
+
+    Shared by the single-node enqueue path and the batched promotion
+    pipeline so the two cannot diverge: retry/good_until parsing,
+    args_from envelope encoding, workflow_ctx injection, meta injection,
+    kwargs serialization, and the enqueue fingerprint all live here.
+
+    Inputs come from the READY→ENQUEUED CAS RETURNING row. Failure means
+    THIS node fails (callers fold into ``_fail_enqueued_task``); the only
+    statements issued here are the workflow_ctx reads for ctx nodes.
+    """
     max_retries = 0
     good_until_str: str | None = None
     good_until_dt: datetime | None = None
     if task_options_str:
         options_data = _deser_json(task_options_str, 'task_options')
         if options_data is None:
-            await _fail_enqueued_task(
-                session,
-                workflow_id,
-                task_index,
+            return Err(_EnqueueBuildError(
                 f'Corrupt task_options JSON for task {task_index}',
-                broker,
                 error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-            )
-            return None
+            ))
         if not isinstance(options_data, dict):
-            await _fail_enqueued_task(
-                session,
-                workflow_id,
-                task_index,
+            return Err(_EnqueueBuildError(
                 f'Invalid task_options payload for task {task_index}: expected object',
-                broker,
                 error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-            )
-            return None
+            ))
         retry_policy = options_data.get('retry_policy')
         if isinstance(retry_policy, dict):
             # Default 3 mirrors RetryPolicy.max_retries; a non-int value
@@ -534,18 +618,13 @@ async def enqueue_workflow_task(
             if isinstance(max_retries_raw, bool) or not isinstance(
                 max_retries_raw, int
             ):
-                await _fail_enqueued_task(
-                    session,
-                    workflow_id,
-                    task_index,
-                    (
+                return Err(_EnqueueBuildError(
+                (
                         f'Invalid max_retries in retry_policy for task '
                         f'{task_index}: {max_retries_raw!r}'
                     ),
-                    broker,
-                    error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                )
-                return None
+                error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            ))
             max_retries = max_retries_raw
         good_until_raw = options_data.get('good_until')
         if good_until_raw is not None:
@@ -565,63 +644,41 @@ async def enqueue_workflow_task(
                 )
 
     # Start with static kwargs — corrupt kwargs is fatal for this task
-    raw_kwargs = _deser_json(row.task_kwargs, 'workflow task kwargs')
-    if raw_kwargs is None and row.task_kwargs:
-        await _fail_enqueued_task(
-            session,
-            workflow_id,
-            task_index,
-            f'Corrupt kwargs JSON for task {task_index}',
-            broker,
-            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-        )
-        return None
+    raw_kwargs = _deser_json(task_kwargs, 'workflow task kwargs')
+    if raw_kwargs is None and task_kwargs:
+        return Err(_EnqueueBuildError(
+                f'Corrupt kwargs JSON for task {task_index}',
+                error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            ))
     kwargs: dict[str, Any] = raw_kwargs if isinstance(raw_kwargs, dict) else {}
 
     # Inject args_from: map kwarg_name -> TaskResult from dependency
-    if row.args_from:
-        args_from_raw = row.args_from
+    if args_from:
+        args_from_raw = args_from
         # args_from is stored as JSONB, may come back as dict directly
         if isinstance(args_from_raw, str):
             args_from_map = _deser_json(args_from_raw, 'args_from')
             if args_from_map is None:
-                await _fail_enqueued_task(
-                    session,
-                    workflow_id,
-                    task_index,
-                    f'Corrupt args_from JSON for task {task_index}',
-                    broker,
-                    error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                )
-                return None
+                return Err(_EnqueueBuildError(
+                f'Corrupt args_from JSON for task {task_index}',
+                error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            ))
         else:
             args_from_map = args_from_raw
 
         if isinstance(args_from_map, dict):
             args_from_typed = _validate_args_from_map(args_from_map)
             if args_from_typed is None:
-                await _fail_enqueued_task(
-                    session,
-                    workflow_id,
-                    task_index,
-                    f'args_from has non-int values for task {task_index}',
-                    broker,
-                    error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                )
-                return None
+                return Err(_EnqueueBuildError(
+                f'args_from has non-int values for task {task_index}',
+                error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            ))
             for kwarg_name, dep_index in args_from_typed.items():
                 if kwarg_name in kwargs:
-                    await _fail_enqueued_task(
-                        session,
-                        workflow_id,
-                        task_index,
-                        (
+                    return Err(_EnqueueBuildError((
                             f"args_from key '{kwarg_name}' conflicts with static kwarg "
                             f"(task {task_index})"
-                        ),
-                        broker,
-                    )
-                    return None
+                        )))
                 dep_result = all_dep_results.get(dep_index)
                 if dep_result is not None:
                     source_task_name = (
@@ -630,18 +687,15 @@ async def enqueue_workflow_task(
                         else None
                     )
                     if source_task_name is None:
-                        await _fail_enqueued_task(
-                            session, workflow_id, task_index,
-                            (
+                        return Err(_EnqueueBuildError(
+                (
                                 f'Missing source task name for dep_index '
                                 f'{dep_index} (kwarg {kwarg_name!r}, '
                                 f'task {task_index}); cannot encode '
                                 f'args_from envelope'
                             ),
-                            broker,
-                            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                        )
-                        return None
+                error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            ))
                     app = broker.app if broker is not None else None
                     source_definition_key = (
                         all_dep_definition_keys.get(dep_index)
@@ -653,35 +707,29 @@ async def enqueue_workflow_task(
                         sub_definition_key=source_definition_key,
                     )
                     if source_ok_type is None:
-                        await _fail_enqueued_task(
-                            session, workflow_id, task_index,
-                            (
+                        return Err(_EnqueueBuildError(
+                (
                                 f'Source {source_task_name!r} not '
                                 f'registered or missing OkT; '
                                 f'cannot encode args_from envelope for '
                                 f'kwarg {kwarg_name!r} (task '
                                 f'{task_index})'
                             ),
-                            broker,
-                            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                        )
-                        return None
+                error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            ))
                     try:
                         inner = encode_task_result(
                             dep_result, source_ok_type,
                         )
                     except (StrictJsonError, _PydanticValidationError) as exc:
-                        await _fail_enqueued_task(
-                            session, workflow_id, task_index,
-                            (
+                        return Err(_EnqueueBuildError(
+                (
                                 f'encode_task_result failed for '
                                 f'kwarg {kwarg_name!r} (task '
                                 f'{task_index}): {exc}'
                             ),
-                            broker,
-                            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                        )
-                        return None
+                error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            ))
                     kwargs[kwarg_name] = {
                         _ENGINE_KEY_TASKRESULT_ENVELOPE: True,
                         'source_task_name': source_task_name,
@@ -690,13 +738,13 @@ async def enqueue_workflow_task(
                     }
 
     # Inject workflow_ctx if workflow_ctx_from is set
-    if row.workflow_ctx_from:
-        ctx_from_ids = cast(list[str], row.workflow_ctx_from)  # Already a list from PostgreSQL ARRAY
+    if workflow_ctx_from:
+        ctx_from_ids = cast(list[str], workflow_ctx_from)  # Already a list from PostgreSQL ARRAY
         ctx_data = await _build_workflow_context_data(
             session=session,
             workflow_id=workflow_id,
             task_index=task_index,
-            task_name=row.task_name,
+            task_name=task_name,
             ctx_from_ids=ctx_from_ids,
             app=broker.app if broker is not None else None,
         )
@@ -708,60 +756,47 @@ async def enqueue_workflow_task(
     kwargs[_ENGINE_KEY_WORKFLOW_META] = {
         'workflow_id': workflow_id,
         'task_index': task_index,
-        'task_name': row.task_name,
+        'task_name': task_name,
     }
 
     # Serialize kwargs before creating the task — fail early on corrupt data
     kwargs_json = _ser(dumps_json(kwargs), 'workflow task kwargs')
     if kwargs_json is None:
-        await _fail_enqueued_task(
-            session, workflow_id, task_index,
-            f'Failed to serialize kwargs for task {task_index}', broker,
-            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-        )
-        return None
+        return Err(_EnqueueBuildError(
+                f'Failed to serialize kwargs for task {task_index}',
+                error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            ))
 
     # Create actual task in tasks table
     task_id = str(uuid.uuid4())
     sent_at = datetime.now(timezone.utc)
     sha = enqueue_fingerprint(
-        task_name=row.task_name,
-        queue_name=row.queue_name,
-        priority=row.priority,
-        args_json=row.task_args,
+        task_name=task_name,
+        queue_name=queue_name,
+        priority=priority,
+        args_json=task_args,
         kwargs_json=kwargs_json,
         sent_at=sent_at,
         good_until=good_until_dt,
         enqueue_delay_seconds=None,
         task_options=task_options_str,
     )
-    await session.execute(
-        INSERT_TASK_FOR_WORKFLOW_SQL,
-        {
-            'id': task_id,
-            'name': row.task_name,
-            'queue': row.queue_name,
-            'priority': row.priority,
-            # Compat: new writes store [] for task_args (kwargs-only).
-            # Old persisted rows may still carry non-empty task_args;
-            # passing them through preserves backward compatibility.
-            'args': row.task_args,
-            'kwargs': kwargs_json,
-            'sent_at': sent_at,
-            'max_retries': max_retries,
-            'task_options': task_options_str,
-            'good_until': good_until_str,
-            'enqueue_sha': sha,
-        },
-    )
-
-    # Link workflow_task to actual task
-    await session.execute(
-        LINK_WORKFLOW_TASK_SQL,
-        {'tid': task_id, 'wf_id': workflow_id, 'idx': task_index},
-    )
-
-    return task_id
+    return Ok({
+        'id': task_id,
+        'name': task_name,
+        'queue': queue_name,
+        'priority': priority,
+        # Compat: new writes store [] for task_args (kwargs-only).
+        # Old persisted rows may still carry non-empty task_args;
+        # passing them through preserves backward compatibility.
+        'args': task_args,
+        'kwargs': kwargs_json,
+        'sent_at': sent_at,
+        'max_retries': max_retries,
+        'task_options': task_options_str,
+        'good_until': good_until_str,
+        'enqueue_sha': sha,
+    })
 
 
 
@@ -1524,7 +1559,16 @@ async def _process_dependents(
     root_workflow_id: str | None = None,
 ) -> None:
     """
-    Find tasks that depend on the completed task and enqueue if ready.
+    Find tasks that depend on the completed task and promote/skip them,
+    one batched pipeline per skip-cascade level.
+
+    Level 0's sources are the completed task; each level's newly SKIPPED
+    nodes become the next level's sources (their dependents must be
+    re-evaluated). Statuses advance monotonically PENDING -> terminal, so
+    the level count is bounded by the longest skip chain. A dependent is
+    re-evaluated at every level one of its deps skipped — no cross-level
+    dedupe (the join condition may only be satisfiable after a LATER
+    skip).
 
     Raises:
         Exception: errors propagate to the public engine entry points,
@@ -1540,12 +1584,6 @@ async def _process_dependents(
             workflows row (cold failure paths without workflow context).
         root_workflow_id: Root workflow id, same sourcing rule as ``depth``.
     """
-    # Find tasks that have completed_task_index in their dependencies
-    dependents = await session.execute(
-        GET_DEPENDENT_TASKS_SQL,
-        {'wf_id': workflow_id, 'completed_idx': completed_task_index},
-    )
-
     if depth is None or root_workflow_id is None:
         # Get workflow depth and root for subworkflow support
         wf_info = await session.execute(
@@ -1560,10 +1598,246 @@ async def _process_dependents(
             else workflow_id
         )
 
-    for row in dependents.fetchall():
-        await try_make_ready_and_enqueue(
-            session, broker, workflow_id, row.task_index, depth, root_workflow_id,
+    source_indexes = [completed_task_index]
+    while source_indexes:
+        source_indexes = await _promote_dependents_level(
+            session,
+            broker,
+            workflow_id,
+            source_indexes,
+            depth=depth,
+            root_workflow_id=root_workflow_id,
         )
+
+
+async def _promote_dependents_level(
+    session: AsyncSession,
+    broker: 'PostgresBroker | None',
+    workflow_id: str,
+    source_indexes: list[int],
+    *,
+    depth: int,
+    root_workflow_id: str,
+) -> list[int]:
+    """Evaluate and promote every PENDING dependent of the source indexes.
+
+    The batched pipeline for plain TaskNode dependents (the fast path —
+    args_from included; zero per-node statements for it):
+      1. one grouped eval (config + dep-status counts per dependent),
+      2. join/skip classification in Python — including the skip-on-ready
+         branch (join='all', failed deps, not allow_failed_deps), decided
+         BEFORE any enqueue so those nodes never get task rows,
+      3. batched PENDING->SKIPPED / PENDING->READY / READY->SKIPPED CAS
+         writes (per-row CAS preserved; CAS losers drop out via RETURNING),
+      4. one grouped dependency-results read for the union of dep sets,
+      5. batched READY->ENQUEUED CAS RETURNING the insert payloads —
+         strictly before any horsies_tasks INSERT, so a missed guard can
+         never orphan a task row,
+      6. per-row payload build in Python via the shared builder; a node
+         whose build fails diverts to ``_fail_enqueued_task`` (per-node
+         failure isolation, same as the sequential path),
+      7. one bulk task INSERT + one bulk LINK (executemany).
+
+    SubWorkflowNode and workflow_ctx_from dependents take the per-node
+    ``try_make_ready_and_enqueue`` path unchanged.
+
+    Returns the indexes this level transitioned to SKIPPED (the next
+    level's sources).
+    """
+    eval_rows = (
+        await session.execute(
+            GET_DEPENDENTS_EVAL_SQL,
+            {'wf_id': workflow_id, 'source_idxs': source_indexes},
+        )
+    ).fetchall()
+    if not eval_rows:
+        return []
+
+    skip_pending: list[int] = []
+    ready_indexes: list[int] = []
+    skip_after_ready: set[int] = set()
+    slow_indexes: list[int] = []
+    deps_by_index: dict[int, list[int]] = {}
+
+    for row in eval_rows:
+        task_index: int = row.task_index
+        raw_deps = row.dependencies
+        dependencies: list[int] = (
+            cast(list[int], raw_deps) if isinstance(raw_deps, list) else []
+        )
+        if not dependencies:
+            continue  # roots are never re-promoted here
+        raw_counts = row.dep_status_counts
+        status_counts: dict[str, int] = (
+            cast(dict[str, int], raw_counts) if isinstance(raw_counts, dict) else {}
+        )
+        allow_failed_deps: bool = (
+            row.allow_failed_deps if row.allow_failed_deps is not None else False
+        )
+        join_type: str = row.join_type or 'all'
+        min_success: int | None = row.min_success
+
+        completed = status_counts.get(WorkflowTaskStatus.COMPLETED.value, 0)
+        failed = status_counts.get(WorkflowTaskStatus.FAILED.value, 0)
+        skipped = status_counts.get(WorkflowTaskStatus.SKIPPED.value, 0)
+        terminal = completed + failed + skipped
+        total_deps = len(dependencies)
+
+        # Same join evaluation as try_make_ready_and_enqueue.
+        should_become_ready = False
+        should_skip = False
+        match join_type:
+            case 'all':
+                if terminal == total_deps:
+                    should_become_ready = True
+            case 'any':
+                if completed >= 1:
+                    should_become_ready = True
+                elif terminal == total_deps and completed == 0:
+                    should_skip = True
+            case 'quorum':
+                threshold = min_success or 1
+                if completed >= threshold:
+                    should_become_ready = True
+                else:
+                    remaining = total_deps - terminal
+                    if completed + remaining < threshold:
+                        should_skip = True
+            case _:
+                continue  # unknown join type: stay PENDING (matches the per-node path)
+
+        if should_skip:
+            skip_pending.append(task_index)
+            continue
+        if not should_become_ready:
+            continue  # stay PENDING
+
+        is_subworkflow: bool = (
+            row.is_subworkflow if row.is_subworkflow is not None else False
+        )
+        if is_subworkflow or as_str_list(row.workflow_ctx_from):
+            # Slow path: child-workflow start / ctx gating need per-node
+            # statements anyway; the per-node function re-reads fresh
+            # state inside this transaction.
+            slow_indexes.append(task_index)
+            continue
+
+        ready_indexes.append(task_index)
+        deps_by_index[task_index] = dependencies
+        if join_type == 'all' and (failed + skipped) > 0 and not allow_failed_deps:
+            # Will be marked READY then SKIPPED (history-equivalent with
+            # the sequential path); never enqueued.
+            skip_after_ready.add(task_index)
+
+    newly_skipped: list[int] = []
+
+    if skip_pending:
+        res = await session.execute(
+            SKIP_PENDING_TASKS_BATCH_SQL,
+            {'wf_id': workflow_id, 'idxs': skip_pending},
+        )
+        newly_skipped.extend(r.task_index for r in res.fetchall())
+
+    enqueue_indexes: list[int] = []
+    if ready_indexes:
+        res = await session.execute(
+            MARK_TASKS_READY_BATCH_SQL,
+            {'wf_id': workflow_id, 'idxs': ready_indexes},
+        )
+        ready_won = {r.task_index for r in res.fetchall()}
+        ready_to_skip = sorted(skip_after_ready & ready_won)
+        enqueue_indexes = sorted(ready_won - skip_after_ready)
+
+        if ready_to_skip:
+            res = await session.execute(
+                SKIP_READY_TASKS_BATCH_SQL,
+                {'wf_id': workflow_id, 'idxs': ready_to_skip},
+            )
+            newly_skipped.extend(r.task_index for r in res.fetchall())
+
+    if enqueue_indexes:
+        dep_union = sorted({
+            dep for idx in enqueue_indexes for dep in deps_by_index[idx]
+        })
+        dep_results, dep_task_names, dep_definition_keys = (
+            await get_dependency_results(
+                session,
+                workflow_id,
+                dep_union,
+                app=broker.app if broker is not None else None,
+            )
+        )
+
+        cas_rows = (
+            await session.execute(
+                ENQUEUE_WORKFLOW_TASKS_BATCH_SQL,
+                {'wf_id': workflow_id, 'idxs': enqueue_indexes},
+            )
+        ).fetchall()
+
+        insert_params: list[dict[str, Any]] = []
+        link_params: list[dict[str, Any]] = []
+        paused_mid_level = False
+        for cas_row in cas_rows:
+            build_r = await _build_enqueued_task_params(
+                session,
+                workflow_id,
+                cas_row.task_index,
+                task_name=cas_row.task_name,
+                task_args=cas_row.task_args,
+                task_kwargs=cas_row.task_kwargs,
+                queue_name=cas_row.queue_name,
+                priority=cas_row.priority,
+                args_from=cas_row.args_from,
+                workflow_ctx_from=cas_row.workflow_ctx_from,
+                task_options_str=cas_row.task_options,
+                all_dep_results=dep_results,
+                all_dep_task_names=dep_task_names,
+                broker=broker,
+                all_dep_definition_keys=dep_definition_keys,
+            )
+            if is_err(build_r):
+                err = build_r.err_value
+                should_continue = await _fail_enqueued_task(
+                    session, workflow_id, cas_row.task_index, err.message,
+                    broker, error_code=err.error_code,
+                )
+                if not should_continue:
+                    # on_error=PAUSE paused the workflow: stop processing
+                    # this level (the pause contract) and revert below.
+                    paused_mid_level = True
+                    break
+                continue
+            params = build_r.ok_value
+            insert_params.append(params)
+            link_params.append({
+                'tid': params['id'],
+                'wf_id': workflow_id,
+                'idx': cas_row.task_index,
+            })
+
+        if paused_mid_level:
+            # Revert every CAS'd-but-uninserted sibling of this level to
+            # READY (the recoverable state: resume step 3 re-enqueues
+            # READY nodes; recovery case 1 covers READY-not-enqueued).
+            # Inserting their task rows under the paused workflow — or
+            # leaving them ENQUEUED without task rows (the stranded
+            # no-recovery state) — would both be worse. The status+task_id
+            # predicate skips the FAILED node itself.
+            await session.execute(
+                REVERT_ENQUEUED_TO_READY_BATCH_SQL,
+                {'wf_id': workflow_id, 'idxs': enqueue_indexes},
+            )
+        elif insert_params:
+            await session.execute(INSERT_TASK_FOR_WORKFLOW_SQL, insert_params)
+            await session.execute(LINK_WORKFLOW_TASK_SQL, link_params)
+
+    for task_index in slow_indexes:
+        await try_make_ready_and_enqueue(
+            session, broker, workflow_id, task_index, depth, root_workflow_id,
+        )
+
+    return newly_skipped
 
 
 
