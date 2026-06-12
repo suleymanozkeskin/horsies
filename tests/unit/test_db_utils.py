@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 
 from psycopg import InterfaceError, OperationalError
-from sqlalchemy.exc import DBAPIError, OperationalError as SAOperationalError
+from sqlalchemy.exc import (
+    DBAPIError,
+    OperationalError as SAOperationalError,
+    TimeoutError as SATimeoutError,
+)
 
 from horsies.core.utils.db import is_dbapi_disconnect, is_retryable_connection_error
 
@@ -60,6 +64,23 @@ class TestIsRetryableConnectionError:
     def test_sqlalchemy_operational_error(self) -> None:
         exc = SAOperationalError('lost connection', {}, Exception('orig'))
         assert is_retryable_connection_error(exc) is True
+
+    def test_sqlalchemy_pool_timeout_retryable(self) -> None:
+        """Engine pool checkout timeout is transient, never a permanent failure.
+
+        Regression pin: this shape ("QueuePool limit reached") classified as
+        non-retryable and three consecutive reaper passes during a
+        connection-slot exhaustion latched the requeue breaker off for the
+        process lifetime, stranding orphaned CLAIMED tasks after recovery.
+        """
+        exc = SATimeoutError('QueuePool limit of size 5 overflow 2 reached')
+        assert is_retryable_connection_error(exc) is True
+
+    def test_psycopg_pool_timeout_retryable(self) -> None:
+        """psycopg_pool.PoolTimeout subclasses OperationalError; pin it too."""
+        from psycopg_pool import PoolTimeout
+
+        assert is_retryable_connection_error(PoolTimeout('pool exhausted')) is True
 
     def test_dbapi_error_with_disconnect(self) -> None:
         exc = _make_dbapi_error(connection_invalidated=True)
