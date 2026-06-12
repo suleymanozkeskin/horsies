@@ -256,6 +256,9 @@ async def test_claim_lost_skips(
         ok=False,
         result_json_str='',
         failed_reason='CLAIM_LOST',
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
@@ -280,6 +283,9 @@ async def test_ownership_unconfirmed_skips(
         ok=False,
         result_json_str='',
         failed_reason='OWNERSHIP_UNCONFIRMED',
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
@@ -304,6 +310,9 @@ async def test_workflow_check_failed_skips(
         ok=False,
         result_json_str='',
         failed_reason='WORKFLOW_CHECK_FAILED',
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
@@ -328,6 +337,9 @@ async def test_workflow_stopped_reason_skips(
         ok=False,
         result_json_str='',
         failed_reason='WORKFLOW_STOPPED',
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
@@ -358,6 +370,9 @@ async def test_worker_failure_marks_failed(
         ok=False,
         result_json_str='',
         failed_reason='Worker crash',
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
@@ -385,6 +400,9 @@ async def test_worker_failure_reaper_already_reclaimed(
         ok=False,
         result_json_str='',
         failed_reason='Worker crash',
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
@@ -415,6 +433,9 @@ async def test_corrupt_json_marks_serialization_error(
         ok=True,
         result_json_str='not json {',
         failed_reason=None,
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
@@ -442,6 +463,9 @@ async def test_invalid_task_result_structure_marks_error(
         ok=True,
         result_json_str='{"random": 1}',
         failed_reason=None,
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
@@ -476,6 +500,9 @@ async def test_err_workflow_stopped_code_skips(
         ok=True,
         result_json_str=result_json,
         failed_reason=None,
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
@@ -507,6 +534,9 @@ async def test_err_no_retry_marks_failed(
         ok=True,
         result_json_str=result_json,
         failed_reason=None,
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
@@ -543,6 +573,9 @@ async def test_err_retry_scheduled_to_pending(
         ok=True,
         result_json_str=result_json,
         failed_reason=None,
+        task_name='persist_retry_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
@@ -578,6 +611,9 @@ async def test_err_retry_expired_falls_through_to_failed(
         ok=True,
         result_json_str=result_json,
         failed_reason=None,
+        task_name='persist_retry_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
@@ -601,7 +637,12 @@ async def test_success_marks_completed(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Valid ok TaskResult → Ok(tr) with tr.is_ok(), task COMPLETED."""
+    """Valid plain-task ok result → fused path: Ok(None), task COMPLETED.
+
+    Ok(None) means fully finalized — the fused statement persisted the
+    attempt, transitioned the row, and fired the capacity notify, so
+    callers run no phase 2.
+    """
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
     result_json = _serialize_ok('hello')
@@ -612,13 +653,13 @@ async def test_success_marks_completed(
         ok=True,
         result_json_str=result_json,
         failed_reason=None,
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
-    tr = result.ok_value
-    assert tr is not None
-    assert tr.is_ok()
-    assert tr.unwrap() == 'hello'
+    assert result.ok_value is None
     status, db_result, _, _ = await _get_task_row(session, task_id)
     assert status == 'COMPLETED'
     assert db_result == result_json
@@ -642,6 +683,9 @@ async def test_success_reaper_reclaimed_no_mutation(
         ok=True,
         result_json_str=result_json,
         failed_reason=None,
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=False,
     )
 
     assert is_ok(result)
