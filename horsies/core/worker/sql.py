@@ -88,6 +88,55 @@ REAPER_GATE_TRY_LOCK_SQL = text("""
 # are reclaimable and must not consume cap budget.  The predicate for an
 # "active" claim is: claim_expires_at IS NULL OR claim_expires_at > now().
 
+# One round trip for ALL claim-pass cap accounting (replaces up to
+# 2 + Q + 1 sequential count statements under the claim advisory locks;
+# see the RTT hot-path audit). The in_flight CTE is the shared predicate
+# of every original count (RUNNING, or CLAIMED with an unexpired lease);
+# each column mirrors one original statement exactly:
+#   my_claimed       = COUNT_CLAIMED_FOR_WORKER_SQL
+#   my_running       = COUNT_RUNNING_FOR_WORKER_SQL
+#   my_in_flight     = COUNT_IN_FLIGHT_FOR_WORKER_SQL
+#   global_in_flight = COUNT_GLOBAL_IN_FLIGHT_SQL
+#   queue_hard_counts[q] = COUNT_QUEUE_IN_FLIGHT_HARD_SQL per capped queue
+#   queue_soft_counts[q] = COUNT_QUEUE_IN_FLIGHT_SOFT_SQL per capped queue
+# One deliberate improvement: all counts share a single now() instant
+# instead of one per statement. Empty :capped_queues -> NULL aggs -> {}.
+# The single-purpose constants below remain for health snapshots.
+CLAIM_PASS_COUNTS_SQL = text("""
+    WITH in_flight AS (
+        SELECT queue_name, status, claimed_by_worker_id
+        FROM horsies_tasks
+        WHERE status = 'RUNNING'
+           OR (status = 'CLAIMED'
+               AND (claim_expires_at IS NULL OR claim_expires_at > now()))
+    )
+    SELECT
+        COUNT(*) FILTER (
+            WHERE claimed_by_worker_id = CAST(:wid AS VARCHAR)
+              AND status = 'CLAIMED'
+        ) AS my_claimed,
+        COUNT(*) FILTER (
+            WHERE claimed_by_worker_id = CAST(:wid AS VARCHAR)
+              AND status = 'RUNNING'
+        ) AS my_running,
+        COUNT(*) FILTER (
+            WHERE claimed_by_worker_id = CAST(:wid AS VARCHAR)
+        ) AS my_in_flight,
+        COUNT(*) AS global_in_flight,
+        (SELECT jsonb_object_agg(g.queue_name, g.cnt)
+         FROM (SELECT queue_name, COUNT(*) AS cnt
+               FROM in_flight
+               WHERE queue_name = ANY(CAST(:capped_queues AS VARCHAR[]))
+               GROUP BY queue_name) g) AS queue_hard_counts,
+        (SELECT jsonb_object_agg(g.queue_name, g.cnt)
+         FROM (SELECT queue_name, COUNT(*) AS cnt
+               FROM in_flight
+               WHERE queue_name = ANY(CAST(:capped_queues AS VARCHAR[]))
+                 AND status = 'RUNNING'
+               GROUP BY queue_name) g) AS queue_soft_counts
+    FROM in_flight
+""")
+
 COUNT_GLOBAL_IN_FLIGHT_SQL = text("""
     SELECT COUNT(*) AS cnt FROM horsies_tasks
     WHERE status = 'RUNNING'

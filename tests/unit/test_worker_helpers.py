@@ -21,8 +21,6 @@ import logging
 from horsies.core.worker.worker import (
     Worker,
     WorkerConfig,
-    COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
-    COUNT_QUEUE_IN_FLIGHT_SOFT_SQL,
     DELETE_EXPIRED_HEARTBEATS_SQL,
     DELETE_EXPIRED_TASKS_SQL,
     DELETE_EXPIRED_WORKER_STATES_SQL,
@@ -3595,39 +3593,68 @@ def _make_claim_worker(
 class TestClaimAndDispatchBranches:
     """Tests for _claim_and_dispatch_all scattered branches (U-9)."""
 
+    @staticmethod
+    def _counts_ns(**overrides: object) -> SimpleNamespace:
+        """A CLAIM_PASS_COUNTS_SQL result row (all cap accounting in one)."""
+        defaults: dict[str, object] = dict(
+            my_claimed=0,
+            my_running=0,
+            my_in_flight=0,
+            global_in_flight=0,
+            queue_hard_counts=None,
+            queue_soft_counts=None,
+        )
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    @staticmethod
+    def _claim_session(counts: SimpleNamespace) -> AsyncMock:
+        """Session whose CLAIM_PASS_COUNTS_SQL execute returns *counts* and
+        whose other statements (locks, CLAIM_SQL) return empty results."""
+        from horsies.core.worker.sql import CLAIM_PASS_COUNTS_SQL
+
+        async def _execute(stmt: object, params: object = None) -> MagicMock:
+            result = MagicMock()
+            if stmt is CLAIM_PASS_COUNTS_SQL:
+                result.one.return_value = counts
+                return result
+            result.keys.return_value = ['id', 'task_name', 'args', 'kwargs']
+            result.fetchall.return_value = []
+            return result
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(side_effect=_execute)
+        session.commit = AsyncMock()
+        return session
+
     # --- U-9a ---
 
     @pytest.mark.asyncio
     async def test_softcap_mode_uses_running_count_only(self) -> None:
-        """With prefetch_buffer > 0, calls _count_only_running (not in_flight)."""
+        """Soft mode (prefetch_buffer > 0) budgets from my_running, not
+        my_in_flight: with my_in_flight saturated but my_running 0 the
+        worker still claims."""
         worker = _make_claim_worker(
             prefetch_buffer=2,
             processes=2,
         )
-        # Mock _count_claimed: under the limit
-        worker._count_claimed_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
-        # Mock _count_only_running (soft-cap path)
-        worker._count_only_running_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
-        # Mock _count_in_flight (hard-cap path — should NOT be called)
-        worker._count_in_flight_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+        claimed_calls: list[str] = []
 
-        # Session mock for advisory lock + commit
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        # No rows returned by claim
-        claim_result = MagicMock()
-        claim_result.keys.return_value = ['id', 'task_name', 'args', 'kwargs']
-        claim_result.fetchall.return_value = []
-        session.execute = AsyncMock(return_value=claim_result)
-        session.commit = AsyncMock()
+        async def _fake_claim_batch(s: object, qname: str, limit: int) -> list[dict[str, object]]:
+            claimed_calls.append(qname)
+            return []
+
+        worker._claim_batch_locked = _fake_claim_batch  # type: ignore[assignment]
+        # my_in_flight would zero the budget if (wrongly) consumed.
+        session = self._claim_session(self._counts_ns(my_running=0, my_in_flight=4))
         worker.sf = MagicMock(return_value=session)
 
         result = await worker._claim_and_dispatch_all()
 
-        assert result is False
-        worker._count_only_running_for_worker.assert_awaited_once()
-        worker._count_in_flight_for_worker.assert_not_awaited()
+        assert result is False  # nothing claimable, but the budget was open
+        assert claimed_calls  # soft mode used my_running=0 -> budget > 0
 
     @pytest.mark.asyncio
     async def test_softcap_budget_subtracts_existing_claimed_rows(self) -> None:
@@ -3637,16 +3664,10 @@ class TestClaimAndDispatchBranches:
             processes=8,
             max_claim_batch=0,
         )
-        worker._count_claimed_for_worker = AsyncMock(return_value=16)  # type: ignore[assignment]
-        worker._count_only_running_for_worker = AsyncMock(return_value=8)  # type: ignore[assignment]
-        worker._count_in_flight_for_worker = AsyncMock(return_value=24)  # type: ignore[assignment]
         worker._claim_batch_locked = AsyncMock()  # type: ignore[assignment]
-
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(return_value=MagicMock())
-        session.commit = AsyncMock()
+        session = self._claim_session(
+            self._counts_ns(my_claimed=16, my_running=8, my_in_flight=24),
+        )
         worker.sf = MagicMock(return_value=session)
 
         result = await worker._claim_and_dispatch_all()
@@ -3660,12 +3681,16 @@ class TestClaimAndDispatchBranches:
     async def test_max_claim_per_worker_guard_returns_false(self) -> None:
         """claimed_count >= max_claimed → returns False immediately."""
         worker = _make_claim_worker(max_claim_per_worker=3)
-        # Already at the limit
-        worker._count_claimed_for_worker = AsyncMock(return_value=3)  # type: ignore[assignment]
+        # Already at the limit on my_claimed specifically; my_running=0
+        # would open the budget if the guard (wrongly) consumed it.
+        worker._claim_batch_locked = AsyncMock()  # type: ignore[assignment]
+        session = self._claim_session(self._counts_ns(my_claimed=3, my_running=0))
+        worker.sf = MagicMock(return_value=session)
 
         result = await worker._claim_and_dispatch_all()
 
         assert result is False
+        worker._claim_batch_locked.assert_not_awaited()
 
     # --- U-9c ---
 
@@ -3678,9 +3703,6 @@ class TestClaimAndDispatchBranches:
             processes=10,
             max_claim_batch=10,
         )
-        worker._count_claimed_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
-        worker._count_in_flight_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
-
         claimed_queues: list[str] = []
 
         async def _fake_claim_batch(s: object, qname: str, limit: int) -> list[dict[str, object]]:
@@ -3688,12 +3710,7 @@ class TestClaimAndDispatchBranches:
             return []  # no rows, but tracks order
 
         worker._claim_batch_locked = _fake_claim_batch  # type: ignore[assignment]
-
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(return_value=MagicMock())
-        session.commit = AsyncMock()
+        session = self._claim_session(self._counts_ns())
         worker.sf = MagicMock(return_value=session)
 
         await worker._claim_and_dispatch_all()
@@ -3703,53 +3720,35 @@ class TestClaimAndDispatchBranches:
     # --- U-9d ---
 
     @pytest.mark.asyncio
-    async def test_global_inflight_row_none_defaults_to_zero(self) -> None:
-        """cluster_wide_cap set, fetchone() returns None → in_flight_global = 0."""
+    async def test_global_cap_exhausted_returns_false(self) -> None:
+        """cluster_wide_cap consumed from the merged counts row: when
+        global_in_flight reaches the cap, the pass claims nothing."""
         worker = _make_claim_worker(
             cluster_wide_cap=10,
             processes=4,
         )
-        worker._count_claimed_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
-        worker._count_in_flight_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
-
-        call_count = 0
-
-        async def _execute(stmt: object, params: object = None) -> MagicMock:
-            nonlocal call_count
-            call_count += 1
-            result = MagicMock()
-            if call_count == 1:
-                # Advisory lock — no return needed
-                return result
-            if call_count == 2:
-                # COUNT_GLOBAL_IN_FLIGHT_SQL → None row
-                result.fetchone.return_value = None
-                return result
-            # Claim SQL — no rows
-            result.keys.return_value = ['id', 'task_name', 'args', 'kwargs']
-            result.fetchall.return_value = []
-            return result
-
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(side_effect=_execute)
-        session.commit = AsyncMock()
+        worker._claim_batch_locked = AsyncMock()  # type: ignore[assignment]
+        session = self._claim_session(self._counts_ns(global_in_flight=10))
         worker.sf = MagicMock(return_value=session)
 
         result = await worker._claim_and_dispatch_all()
 
-        # Should not crash from None row — defaults to 0, continues
         assert result is False
+        worker._claim_batch_locked.assert_not_awaited()
 
     # --- U-9e ---
 
     @pytest.mark.asyncio
-    async def test_queue_concurrency_soft_vs_hard_sql(self) -> None:
-        """Verifies correct SQL is selected based on hard/soft cap mode."""
-        for prefetch, expected_sql in [
-            (0, COUNT_QUEUE_IN_FLIGHT_HARD_SQL),
-            (2, COUNT_QUEUE_IN_FLIGHT_SOFT_SQL),
+    async def test_queue_concurrency_soft_vs_hard_counts(self) -> None:
+        """Hard mode budgets queues from queue_hard_counts, soft mode from
+        queue_soft_counts (both prefetched by the merged statement)."""
+        for prefetch, counts, expect_claim in [
+            # hard mode: hard dict saturates the queue cap -> no claim,
+            # even though the soft dict says idle.
+            (0, dict(queue_hard_counts={'q1': 10}, queue_soft_counts={'q1': 0}), False),
+            # soft mode: soft dict idle -> claims, even though the hard
+            # dict says saturated.
+            (2, dict(queue_hard_counts={'q1': 10}, queue_soft_counts={'q1': 0}), True),
         ]:
             worker = _make_claim_worker(
                 queues=["q1"],
@@ -3758,34 +3757,21 @@ class TestClaimAndDispatchBranches:
                 queue_priorities={"q1": 1},
                 queue_max_concurrency={"q1": 10},
             )
-            worker._count_claimed_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
-            if prefetch == 0:
-                worker._count_in_flight_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
-            else:
-                worker._count_only_running_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+            claimed: list[str] = []
 
-            executed_stmts: list[object] = []
+            async def _fake_claim_batch(s: object, qname: str, limit: int) -> list[dict[str, object]]:
+                claimed.append(qname)
+                return []
 
-            async def _execute(stmt: object, params: object = None) -> MagicMock:
-                executed_stmts.append(stmt)
-                result = MagicMock()
-                result.fetchone.return_value = SimpleNamespace(cnt=0)
-                result.keys.return_value = ['id', 'task_name', 'args', 'kwargs']
-                result.fetchall.return_value = []
-                return result
-
-            session = AsyncMock()
-            session.__aenter__ = AsyncMock(return_value=session)
-            session.__aexit__ = AsyncMock(return_value=None)
-            session.execute = AsyncMock(side_effect=_execute)
-            session.commit = AsyncMock()
+            worker._claim_batch_locked = _fake_claim_batch  # type: ignore[assignment]
+            session = self._claim_session(self._counts_ns(**counts))
             worker.sf = MagicMock(return_value=session)
 
             await worker._claim_and_dispatch_all()
 
-            assert expected_sql in executed_stmts, (
-                f'Expected {expected_sql!r} for prefetch={prefetch}, '
-                f'got stmts: {executed_stmts}'
+            assert bool(claimed) is expect_claim, (
+                f'prefetch={prefetch}: expected claim={expect_claim}, '
+                f'claimed={claimed}'
             )
 
     # --- U-9f ---
@@ -3797,9 +3783,6 @@ class TestClaimAndDispatchBranches:
             queues=["q1", "q2"],
             processes=1,  # budget = 1
         )
-        worker._count_claimed_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
-        worker._count_in_flight_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
-
         claimed_queues: list[str] = []
 
         async def _fake_claim_batch(s: object, qname: str, limit: int) -> list[dict[str, object]]:
@@ -3814,12 +3797,7 @@ class TestClaimAndDispatchBranches:
             side_effect=lambda rows: rows,
         )
         worker._dispatch_one = AsyncMock()  # type: ignore[assignment]
-
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(return_value=MagicMock())
-        session.commit = AsyncMock()
+        session = self._claim_session(self._counts_ns())
         worker.sf = MagicMock(return_value=session)
 
         result = await worker._claim_and_dispatch_all()

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 from horsies.core.logging import get_logger
@@ -21,12 +21,10 @@ from horsies.core.worker.runtime import _parse_timeout_ms
 from horsies.core.worker.sql import (
     CANCEL_CANCELLED_WORKFLOW_TASKS_SQL,
     CLAIM_ADVISORY_LOCK_SQL,
+    CLAIM_PASS_COUNTS_SQL,
     CLAIM_SQL,
     COUNT_CLAIMED_FOR_WORKER_SQL,
-    COUNT_GLOBAL_IN_FLIGHT_SQL,
     COUNT_IN_FLIGHT_FOR_WORKER_SQL,
-    COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
-    COUNT_QUEUE_IN_FLIGHT_SOFT_SQL,
     COUNT_RUNNING_FOR_WORKER_SQL,
     GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL,
     RESET_PAUSED_WORKFLOW_TASKS_SQL,
@@ -121,11 +119,41 @@ class ClaimMixin:
                     {'key': lock_key},
                 )
 
-            # Compute local budget and optional global remaining
+            # Compute local budget and optional global remaining.
             # Hard cap mode (prefetch_buffer=0): count RUNNING + CLAIMED for strict enforcement
             # Soft cap mode (prefetch_buffer>0): count only RUNNING, allow prefetch with lease
+            # ALL cap-accounting counts (worker-local, global, per capped
+            # queue) arrive in ONE statement — under the advisory locks
+            # every count was a sequential round trip (2 + Q of them).
             hard_cap_mode = self.cfg.prefetch_buffer == 0
-            claimed_count = await self._count_claimed_for_worker(s)
+            capped_queues = [
+                qname for qname in ordered_queues
+                if self.cfg.queue_priorities
+                and qname in self.cfg.queue_max_concurrency
+            ]
+            counts_row = (
+                await s.execute(
+                    CLAIM_PASS_COUNTS_SQL,
+                    {
+                        'wid': self.worker_instance_id,
+                        'capped_queues': capped_queues,
+                    },
+                )
+            ).one()
+            raw_hard = counts_row.queue_hard_counts
+            raw_soft = counts_row.queue_soft_counts
+            queue_hard_counts: dict[str, int] = (
+                cast('dict[str, int]', raw_hard)
+                if isinstance(raw_hard, dict)
+                else {}
+            )
+            queue_soft_counts: dict[str, int] = (
+                cast('dict[str, int]', raw_soft)
+                if isinstance(raw_soft, dict)
+                else {}
+            )
+
+            claimed_count = int(counts_row.my_claimed)
             if claimed_count >= max_claimed:
                 await s.commit()
                 return False
@@ -133,13 +161,13 @@ class ClaimMixin:
 
             if hard_cap_mode:
                 # Hard cap: count both RUNNING and CLAIMED for this worker
-                local_in_flight = await self._count_in_flight_for_worker(s)
+                local_in_flight = int(counts_row.my_in_flight)
                 max_local_capacity = self.cfg.processes
             else:
                 # Soft cap: queue/global caps count only RUNNING, but local
                 # prefetch budget must include already CLAIMED rows so a worker
                 # cannot hoard beyond processes + prefetch_buffer.
-                local_in_flight = await self._count_only_running_for_worker(s)
+                local_in_flight = int(counts_row.my_running)
                 max_local_capacity = self.cfg.processes + self.cfg.prefetch_buffer
             local_available = max(
                 0,
@@ -153,14 +181,10 @@ class ClaimMixin:
             if self.cfg.cluster_wide_cap is not None:
                 # Hard cap mode: count RUNNING + CLAIMED globally
                 # (Note: prefetch_buffer must be 0 when cluster_wide_cap is set, enforced by config validation)
-                res = await s.execute(COUNT_GLOBAL_IN_FLIGHT_SQL)
-                row = res.fetchone()
-                if row:
-                    in_flight_global = int(row.cnt)
-                else:
-                    in_flight_global = 0
                 global_remaining = max(
-                    0, int(self.cfg.cluster_wide_cap) - in_flight_global
+                    0,
+                    int(self.cfg.cluster_wide_cap)
+                    - int(counts_row.global_in_flight),
                 )
 
             # Total claim budget for this pass: local budget capped by global remaining (if any)
@@ -178,27 +202,14 @@ class ClaimMixin:
 
                 # Compute queue remaining in cluster (only if custom-configured)
                 q_remaining: Optional[int] = None
-                if (
-                    self.cfg.queue_priorities
-                    and qname in self.cfg.queue_max_concurrency
-                ):
+                if qname in capped_queues:
                     # Hard cap mode: count RUNNING + CLAIMED for this queue
-                    # Soft cap mode: count only RUNNING
+                    # Soft cap mode: count only RUNNING. Both were fetched
+                    # by the merged counts statement above.
                     if hard_cap_mode:
-                        resq = await s.execute(
-                            COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
-                            {'q': qname},
-                        )
+                        in_flight_q = int(queue_hard_counts.get(qname, 0))
                     else:
-                        resq = await s.execute(
-                            COUNT_QUEUE_IN_FLIGHT_SOFT_SQL,
-                            {'q': qname},
-                        )
-                    row = resq.fetchone()
-                    if row:
-                        in_flight_q = int(row.cnt)
-                    else:
-                        in_flight_q = 0
+                        in_flight_q = int(queue_soft_counts.get(qname, 0))
                     max_q = int(self.cfg.queue_max_concurrency.get(qname, 0))
                     q_remaining = max(0, max_q - in_flight_q)
 

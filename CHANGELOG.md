@@ -10,6 +10,15 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Performance
 
+- Claim-pass cap accounting is one statement. The worker-local claimed
+  and in-flight counts, the optional cluster-wide count, and every capped
+  queue's hard/soft count arrive in a single FILTER-aggregate read
+  (`CLAIM_PASS_COUNTS_SQL`) instead of 2 + Q (+1) sequential statements
+  under the claim advisory locks: an empty pass over Q=3 capped queues
+  drops from 11 statements to 7. Count predicates are unchanged (verified
+  column-for-column against the single-purpose statements, which remain
+  for health snapshots); all counts now share one now() instant instead
+  of one per statement.
 - Subworkflow child start is bulk-inserted. Starting a SubWorkflowNode's
   child workflow now writes all child node rows in one executemany over
   the same bulk statement the batched workflow start uses, and child
