@@ -34,7 +34,8 @@ See [error handling](../tasks/error-handling) for more.
 
 PostgreSQL handles task storage, LISTEN/NOTIFY for real-time dispatch, advisory locks for coordination, and heartbeat tracking. All in a single database with single source of truth.
 
-The trade-off is clear: this architecture is not built for high-throughput, fan-out-heavy workloads. If you have throughput levels which your postgres instance can't handle, use a dedicated broker. If you need moderate throughput with one less thing to operate, horsies fits.
+The trade-off is clear: this architecture is not built for highest-throughput like redis based queues. 
+If you have throughput levels which your postgres instance can't handle, use a dedicated broker. If you need moderate throughput with one less thing to operate, horsies fits.
 
 Here `moderate` and `high` throughput is also relative to your postgres instance ( e.g. you will not get the same performance from a PlanetScale Postgres vs Heroku Postgres )
 
@@ -50,7 +51,7 @@ Every retry policy requires an explicit list of error codes to retry on. This gi
 
 ## How does horsies handle unhandled exceptions?
 
-They don't crash the worker and they don't disappear.
+They don't crash the worker and they don't disappear. You still get your `TaskError`.
 
 Any unhandled exception inside a task is caught, wrapped into a `TaskError` with `error_code=UNHANDLED_EXCEPTION`, and stored as a normal error result. The worker continues processing other tasks.
 
@@ -69,7 +70,7 @@ See [check command](../cli#horsies-check)
 
 Yes. Runs a separate process alongside workers with `horsies scheduler` command. It supports intervals with human readable models, not cron expressions. See [scheduler](../scheduling/scheduler-overview)
 
-## I have various needs with data pipelines, does horsies support worker side orchestration and execution?
+## Does horsies support worker side orchestration and execution of data pipelines?
 
 Yes, horsies provide DAG workflows. Stack your tasks as nodes in the workflow, decide the policy by filling `TaskNode` details. You can even use workflows within workflows, a node itself can be a workflow.
 E.g. `join: [all, any, quorum]`, `waits_for` ( which nodes must be completed prior to this step in the pipeline )
@@ -79,6 +80,8 @@ See [workflows](../concepts/workflows/workflow-api) and [subworkflows](../concep
 
 There is a terminal-based TUI called syce, capable of displaying the status of your workers, tasks and workflows in detail.
 See [syce](../monitoring/syce-overview)
+
+A web based ui is in the roadmap.
 
 ## Does horsies provide guidance files for coding agents?
 
@@ -101,16 +104,6 @@ public docs plus `llms.txt`.
 Yes. You do not need to waste a separate instance for each queue.
 Deploy workers only when you need more capacity, not when you want to have separate queue limitations.
 
-## How does execution work ?
-
-You can have as many workers as you like.
-
-They can consume the tasks from the specified database.
-
-Worker and its processes send heartbeats through the lifecycle of a task.
-
-Library utilises these heartbeats to keep track of health and take action.
-
 ## Is it production-ready?
 
 Horsies has exited alpha. The core task, workflow, scheduling, and PostgreSQL storage APIs are intended to remain compatible across patch releases.
@@ -118,6 +111,21 @@ Breaking API changes should be reserved for minor-version releases and documente
 
 The library has been tested on a large Celery-dependent codebase with successful results.
 
-## Is it optimised for linux?
+## Throughput expectations and comparisons
 
-Not yet, but planned.
+Compared with Redis/RabbitMQ-backed systems such as Celery, Dramatiq, RQ, Huey, or arq, Horsies trades raw broker throughput for Postgres-native durability and visibility. 
+Those systems should generally win fire-and-forget message benchmarks. Horsies is aimed at workloads where durable task state, typed results, retries, deadlines, workflow DAGs, worker health, and operational inspection are worth the extra database cost.
+
+The closest comparison is Procrastinate, because it is also PostgreSQL-backed. 
+Horsies is heavier than a plain Postgres task queue because it adds strict serialization, typed TaskResult handling, workflow state, subworkflows, success policies, and monitoring state. Benchmark against Procrastinate if plain Postgres task throughput is the main buying criterion.
+
+
+With the right deployment shape, it is still performant for typical SaaS background workloads where Horsies' additional features will prove its worth. 
+
+### How to get the most out of it:
+Use these defaults for throughput-sensitive deployments:
+
+- Co-locate workers and PostgreSQL. Game changer.
+- Use direct database connections when the connection budget allows it.
+- Use a transaction pooler when managed PostgreSQL connection limits require multiple workers.
+- Enable prefetch for high-RTT deployments with prefetch_buffer and claim_lease_ms.
