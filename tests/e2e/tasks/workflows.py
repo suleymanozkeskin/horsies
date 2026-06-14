@@ -120,6 +120,39 @@ spec_fanin = _workflow(
 
 
 # =============================================================================
+# Repro: Wide Fan-In Join (many roots -> one barrier)
+# =============================================================================
+
+
+@app.task(task_name='e2e_wf_join_barrier')
+def join_barrier_task() -> TaskResult[None, TaskError]:
+    """Small barrier task used to detect duplicate/orphan join enqueues."""
+    time.sleep(0.05)
+    return TaskResult(ok=None)
+
+
+node_wide_fanin_sources = [
+    TaskNode(
+        fn=slow_step_task,
+        kwargs={'step': f'wide_{idx}', 'delay_ms': 250},
+        node_id=f'wide_source_{idx}',
+    )
+    for idx in range(16)
+]
+node_wide_fanin_join = TaskNode(
+    fn=join_barrier_task,
+    waits_for=node_wide_fanin_sources,
+    node_id='wide_join_barrier',
+)
+
+spec_wide_fanin_join = _workflow(
+    name='e2e_wide_fanin_join',
+    tasks=[*node_wide_fanin_sources, node_wide_fanin_join],
+    output=node_wide_fanin_join,
+)
+
+
+# =============================================================================
 # L4.4: Diamond (A → B, C → D)
 # =============================================================================
 
