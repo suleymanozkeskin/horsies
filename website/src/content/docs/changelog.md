@@ -11,6 +11,21 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
+### Fixed
+
+- Outputless child workflows no longer leak the internal terminal-results
+  envelope into parent `SubWorkflowNode` results or `SubWorkflowSummary.output`.
+  Completed outputless children propagate as `TaskResult[None, TaskError]`
+  with `ok=None`.
+- Workflow recovery now isolates candidate failures so one poison workflow row
+  cannot abort the whole recovery pass.
+
+### Changed
+
+- `WorkflowDefinition[T]` with no `Meta.output` is now rejected for concrete
+  `T`. Use `WorkflowDefinition[None]` for outputless orchestration workflows,
+  or set `Meta.output` to a node producing the declared type.
+
 ## 0.2.0 — 2026-06-12
 
 Worker hot-path statement budget halved (27.2 -> 12.8 statements per task

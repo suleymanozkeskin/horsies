@@ -1392,6 +1392,48 @@ async def test_subworkflow_recovery_child_complete_parent_not_updated(
     assert_ok(handle.get(timeout_ms=2000), expected_value=11)
 
 
+async def test_subworkflow_recovery_failed_child_parent_not_updated(
+    broker: PostgresBroker,
+) -> None:
+    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+        handle = start_ok_sync(wf_tasks.spec_subworkflow_failure_fail_policy)
+        status = await wait_for_workflow_completion(
+            broker.session_factory, handle.workflow_id, timeout_s=15.0,
+        )
+        assert status == 'FAILED'
+
+    rows = await _workflow_task_rows(broker, handle.workflow_id)
+    child_id = rows[0]['sub_workflow_id']
+    assert isinstance(child_id, str)
+    async with broker.session_factory() as session:
+        await session.execute(
+            text("""
+                UPDATE horsies_workflows
+                SET status = 'RUNNING', result = NULL, error = NULL,
+                    completed_at = NULL, updated_at = NOW()
+                WHERE id = :wf_id
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        await session.execute(
+            text("""
+                UPDATE horsies_workflow_tasks
+                SET status = 'RUNNING', result = NULL,
+                    sub_workflow_summary = NULL, completed_at = NULL
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        await session.commit()
+
+    recovered = await _run_workflow_recovery(broker)
+    assert recovered >= 1
+    assert await get_workflow_status(
+        broker.session_factory, handle.workflow_id,
+    ) == 'FAILED'
+    _assert_subworkflow_error(handle.get(timeout_ms=2000), child_id=child_id)
+
+
 async def test_subworkflow_recovery_parent_crashed_mid_child(
     broker: PostgresBroker,
 ) -> None:

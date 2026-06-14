@@ -65,6 +65,54 @@ class TestWorkflowRecoveryDelegation:
             session, 'wf-1', broker
         )
 
+    @pytest.mark.asyncio
+    async def test_case_1_6_isolates_poison_child_and_continues(self) -> None:
+        session = AsyncMock()
+        session.info = {}
+
+        async def _execute(stmt: Any, *_args: Any, **_kwargs: Any) -> MagicMock:
+            if stmt is recovery.GET_PENDING_WITH_TERMINAL_DEPS_SQL:
+                return _rows_result([])
+            if stmt is recovery.GET_READY_NOT_ENQUEUED_SQL:
+                return _rows_result([])
+            if stmt is recovery.GET_READY_SUBWORKFLOWS_NOT_STARTED_SQL:
+                return _rows_result([])
+            if stmt is recovery.GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL:
+                return _rows_result([
+                    SimpleNamespace(
+                        id='child-poison',
+                        parent_workflow_id='parent-poison',
+                        parent_task_index=0,
+                        status='FAILED',
+                    ),
+                    SimpleNamespace(
+                        id='child-ok',
+                        parent_workflow_id='parent-ok',
+                        parent_task_index=0,
+                        status='FAILED',
+                    ),
+                ])
+            if stmt is recovery.GET_CRASHED_WORKER_TASKS_SQL:
+                return _rows_result([])
+            if stmt is recovery.GET_TERMINAL_WORKFLOW_CANDIDATES_SQL:
+                return _rows_result([])
+            return _rows_result([])
+
+        session.execute = AsyncMock(side_effect=_execute)
+        broker = MagicMock()
+
+        with patch(
+            'horsies.core.workflows.engine.on_subworkflow_complete',
+            new=AsyncMock(side_effect=[
+                RuntimeError("reserved key '__h_task_result__' in user-originated data"),
+                None,
+            ]),
+        ) as mock_on_subworkflow_complete:
+            recovered = await recovery.recover_stuck_workflows(session, broker)
+
+        assert recovered == 1
+        assert mock_on_subworkflow_complete.await_count == 2
+
 
 @pytest.mark.unit
 class TestRecoveryScanRowCap:

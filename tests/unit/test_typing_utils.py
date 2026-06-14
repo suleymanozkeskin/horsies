@@ -713,13 +713,60 @@ class TestValidateWorkflowGenericOutputMatch:
     """Tests for validate_workflow_generic_output_match()."""
 
     def test_no_output_skips_validation(self) -> None:
-        # Arrange
+        # Arrange: no generic parameter means the declared type is unresolvable.
         mock_cls = MagicMock()
         mock_spec = MagicMock()
         mock_spec.output = None
 
         # Act / Assert — should not raise
-        validate_workflow_generic_output_match(mock_cls, mock_spec)
+        with patch(
+            "horsies.core.models.workflow.typing_utils._resolve_workflow_def_ok_type",
+            autospec=True,
+            return_value=None,
+        ):
+            validate_workflow_generic_output_match(mock_cls, mock_spec)
+
+    def test_outputless_none_declared_type_no_error(self) -> None:
+        mock_cls = MagicMock()
+        mock_spec = MagicMock()
+        mock_spec.output = None
+
+        with patch(
+            "horsies.core.models.workflow.typing_utils._resolve_workflow_def_ok_type",
+            autospec=True,
+            return_value=type(None),
+        ):
+            validate_workflow_generic_output_match(mock_cls, mock_spec)
+
+    def test_outputless_any_declared_type_no_error(self) -> None:
+        mock_cls = MagicMock()
+        mock_spec = MagicMock()
+        mock_spec.output = None
+
+        with patch(
+            "horsies.core.models.workflow.typing_utils._resolve_workflow_def_ok_type",
+            autospec=True,
+            return_value=Any,
+        ):
+            validate_workflow_generic_output_match(mock_cls, mock_spec)
+
+    def test_outputless_concrete_declared_type_raises_e025(self) -> None:
+        mock_cls = MagicMock()
+        mock_spec = MagicMock()
+        mock_spec.output = None
+        mock_spec.name = "outputless_bad_contract"
+
+        with patch(
+            "horsies.core.models.workflow.typing_utils._resolve_workflow_def_ok_type",
+            autospec=True,
+            return_value=int,
+        ):
+            with pytest.raises(WorkflowValidationError) as exc_info:
+                validate_workflow_generic_output_match(mock_cls, mock_spec)
+
+        assert exc_info.value.code == ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert "Meta.output" in exc_info.value.message
+        assert "WorkflowDefinition[int]" in exc_info.value.message
 
     def test_unresolvable_declared_type_skips_validation(self) -> None:
         # Arrange

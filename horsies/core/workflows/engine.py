@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -117,6 +117,17 @@ OutT = TypeVar('OutT')
 _ENGINE_KEY_WORKFLOW_CTX = '__h_workflow_ctx__'
 _ENGINE_KEY_WORKFLOW_META = '__h_workflow_meta__'
 _ENGINE_KEY_TASKRESULT_ENVELOPE = '__h_taskresult_envelope__'
+
+
+def _is_outputless_workflow_envelope(value: Any) -> bool:
+    """Return True for the workflow-level outputless terminal-results envelope."""
+    if not isinstance(value, dict):
+        return False
+    envelope = cast('dict[str, Any]', value)
+    return (
+        envelope.get('__h_task_result__') is True
+        and envelope.get('__h_outputless_terminals__') is True
+    )
 
 
 def _decode_stored_task_result(
@@ -2577,10 +2588,22 @@ async def on_subworkflow_complete(
     # payload from the envelope without typed decode; the parent
     # decodes properly when it consumes the summary downstream.
     child_output: Any = None
+    child_result_payload: Any = None
+    child_result_is_outputless = False
     if child_result_json:
-        deser = _deser_json(child_result_json, 'child result json')
-        if isinstance(deser, dict) and deser.get('__h_task_result__') is True:
-            envelope = cast('dict[str, Any]', deser)
+        child_result_payload = _deser_json(child_result_json, 'child result json')
+        child_result_is_outputless = _is_outputless_workflow_envelope(
+            child_result_payload,
+        )
+        if isinstance(child_result_payload, dict):
+            envelope = cast('dict[str, Any]', child_result_payload)
+        else:
+            envelope = None
+        if (
+            envelope is not None
+            and envelope.get('__h_task_result__') is True
+            and not child_result_is_outputless
+        ):
             ok_slot = envelope.get('ok')
             err_slot = envelope.get('err')
             if err_slot is None:
@@ -2610,8 +2633,22 @@ async def on_subworkflow_complete(
     # 3. Determine parent node status and result
     if child_status == 'COMPLETED':
         parent_node_status = 'COMPLETED'
-        # Pass through child's output as TaskResult
-        parent_node_result = child_result_json
+        if child_result_is_outputless:
+            # An outputless workflow's final result is a workflow-level
+            # envelope whose ok slot contains nested per-node TaskResult
+            # envelopes. That shape is for WorkflowHandle.get() only; if
+            # stored as a SubWorkflowNode result or summary output, later
+            # typed encode/decode paths treat the nested __h_* markers as
+            # user data and reject them. A SubWorkflowNode for a workflow
+            # with no explicit output therefore completes with ok=None.
+            parent_node_result = _ser(
+                dumps_json(encode_task_result(TaskResult(ok=None), Any)),
+                'parent node outputless child result',
+                fallback='null',
+            )
+        else:
+            # Pass through child's explicit output as TaskResult.
+            parent_node_result = child_result_json
     else:
         parent_node_status = 'FAILED'
         # Create SubWorkflowError
@@ -2906,9 +2943,37 @@ def pop_pending_parent_propagations(session: AsyncSession) -> list[str]:
     return drained
 
 
+def snapshot_pending_parent_propagations(session: AsyncSession) -> list[str]:
+    """Copy the queued parent propagations without draining them.
+
+    ``session.info`` is plain Python state, so a SAVEPOINT rollback reverts
+    DB rows but not this queue. Callers that wrap a propagation in a nested
+    transaction (recovery isolation) snapshot here on entry and
+    ``restore_pending_parent_propagations`` on rollback to keep the queue
+    consistent with the rolled-back DB state.
+    """
+    pending = session.info.get(_PENDING_PROPAGATIONS_KEY)
+    if not pending:
+        return []
+    return list(pending)
+
+
+def restore_pending_parent_propagations(
+    session: AsyncSession,
+    snapshot: list[str],
+) -> None:
+    """Reset the queued parent propagations to a prior snapshot."""
+    if snapshot:
+        session.info[_PENDING_PROPAGATIONS_KEY] = list(snapshot)
+    else:
+        session.info.pop(_PENDING_PROPAGATIONS_KEY, None)
+
+
 async def drain_parent_propagations_in_session(
     session: AsyncSession,
     broker: 'PostgresBroker | None' = None,
+    *,
+    run_item: 'Callable[[str], Awaitable[None]] | None' = None,
 ) -> None:
     """In-session propagation drain for recovery/lifecycle cold paths.
 
@@ -2917,11 +2982,19 @@ async def drain_parent_propagations_in_session(
     accumulate within this transaction, acceptable on cold paths). The
     worker hot path uses fresh transactions per level instead
     (FinalizeMixin._drive_parent_propagations).
+
+    ``run_item`` lets a caller wrap each child's propagation (recovery
+    isolates each in a SAVEPOINT so one poison child cannot abort the
+    drain). When omitted, each propagation runs directly via
+    ``on_subworkflow_complete``.
     """
     worklist = pop_pending_parent_propagations(session)
     while worklist:
         child_id = worklist.pop(0)
-        await on_subworkflow_complete(session, child_id, broker)
+        if run_item is not None:
+            await run_item(child_id)
+        else:
+            await on_subworkflow_complete(session, child_id, broker)
         worklist.extend(pop_pending_parent_propagations(session))
 
 

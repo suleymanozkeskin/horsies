@@ -255,13 +255,31 @@ def validate_workflow_generic_output_match(
     Raises WorkflowValidationError (HRS-025) on mismatch.
     Skips validation when either side is unresolvable or Any.
     """
-    if spec.output is None:
-        return
-
     declared_ok = _resolve_workflow_def_ok_type(workflow_cls)
     if declared_ok is None or declared_ok is Any:
         # No generic parameter or explicitly Any — nothing to check
         return
+
+    if spec.output is None:
+        if declared_ok is type(None):
+            return
+        raise WorkflowValidationError(
+            code=ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
+            message=(
+                f"workflow '{spec.name}' declares WorkflowDefinition"
+                f'[{_format_type_name(declared_ok)}] but has no '
+                'Meta.output'
+            ),
+            notes=[
+                f'declared generic: {_format_type_name(declared_ok)}',
+                'actual output type: None',
+            ],
+            help_text=(
+                'set Meta.output to a node that produces the declared type, '
+                'or declare WorkflowDefinition[None] for an outputless '
+                'orchestration workflow'
+            ),
+        )
 
     actual_ok = _resolve_source_node_ok_type(spec.output)
     if actual_ok is None or actual_ok is Any:
@@ -290,6 +308,8 @@ def _format_type_name(annotation: Any | None) -> str:
         return 'unknown'
     if annotation is Any:
         return 'Any'
+    if annotation is type(None):
+        return 'None'
     # Plain classes: use qualname (e.g. 'AggregatedReport' not '<class ...>')
     if isinstance(annotation, type):
         return annotation.__qualname__

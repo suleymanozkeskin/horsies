@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 import pytest
@@ -21,8 +22,15 @@ from horsies.core.models.workflow import (
     WorkflowSpec,
     OnError,
 )
-from horsies.core.workflows.engine import on_workflow_task_complete
-from horsies.core.workflows.recovery import recover_stuck_workflows
+from horsies.core.workflows.engine import (
+    on_workflow_task_complete,
+    _queue_parent_propagation,  # pyright: ignore[reportPrivateUsage]
+    pop_pending_parent_propagations,
+)
+from horsies.core.workflows.recovery import (
+    recover_stuck_workflows,
+    _run_recovery_candidate,  # pyright: ignore[reportPrivateUsage]
+)
 
 from .conftest import make_simple_task, make_failing_task, make_workflow_spec, start_ok
 from horsies.core.models.workflow import SuccessPolicy, SuccessCase
@@ -106,6 +114,84 @@ class TestWorkflowRecovery:
         await session.execute(text('TRUNCATE horsies_workflow_tasks, horsies_workflows, horsies_tasks CASCADE'))
         await session.commit()
         return session, broker, app
+
+    async def _insert_probe_workflow(self, session: AsyncSession, wf_id: str) -> None:
+        """Insert a minimal RUNNING workflow row used as a SAVEPOINT probe."""
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflows
+                    (id, name, status, on_error, depth, root_workflow_id,
+                     created_at, updated_at)
+                VALUES (:id, 'savepoint_probe', 'RUNNING', 'FAIL', 0, :id,
+                        NOW(), NOW())
+            """),
+            {'id': wf_id},
+        )
+
+    async def _probe_exists(self, session: AsyncSession, wf_id: str) -> bool:
+        row = (
+            await session.execute(
+                text('SELECT 1 FROM horsies_workflows WHERE id = :id'),
+                {'id': wf_id},
+            )
+        ).fetchone()
+        return row is not None
+
+    async def test_run_recovery_candidate_failure_rolls_back_savepoint(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """A failing candidate rolls back its DB writes and restores the
+        in-memory propagation queue, leaving the surrounding pass intact."""
+        session, _broker, _app = setup
+
+        _queue_parent_propagation(session, 'baseline-child')
+        probe_id = str(uuid.uuid4())
+
+        async def _poison() -> bool:
+            await self._insert_probe_workflow(session, probe_id)
+            _queue_parent_propagation(session, 'candidate-child')
+            raise RuntimeError("reserved key '__h_task_result__'")
+
+        result = await _run_recovery_candidate(
+            session,
+            case='unit_probe',
+            action=_poison,
+        )
+
+        assert result is False
+        # SAVEPOINT rollback dropped the probe row...
+        assert not await self._probe_exists(session, probe_id)
+        # ...and the queue is restored to the pre-candidate snapshot.
+        assert session.info['horsies_pending_parent_propagations'] == [
+            'baseline-child',
+        ]
+        await session.rollback()
+
+    async def test_run_recovery_candidate_success_commits_savepoint(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """A succeeding candidate keeps its DB writes and queued propagations."""
+        session, _broker, _app = setup
+
+        probe_id = str(uuid.uuid4())
+
+        async def _succeed() -> bool:
+            await self._insert_probe_workflow(session, probe_id)
+            _queue_parent_propagation(session, 'candidate-child')
+            return True
+
+        result = await _run_recovery_candidate(
+            session,
+            case='unit_probe',
+            action=_succeed,
+        )
+
+        assert result is True
+        assert await self._probe_exists(session, probe_id)
+        assert pop_pending_parent_propagations(session) == ['candidate-child']
+        await session.rollback()
 
     async def test_recover_ready_not_enqueued(
         self,

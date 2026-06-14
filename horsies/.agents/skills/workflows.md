@@ -55,7 +55,7 @@ spec = ETLPipeline.build(app)
 
 - `node_id` auto-assigned from attribute name (`fetch`, `process`, `save`).
 - `definition_key` is required — a stable string key for persistence and runtime lookup. Auto-registered by the metaclass at import time.
-- Generic parameter `WorkflowDefinition[T]` types the output node result.
+- Generic parameter `WorkflowDefinition[T]` types the output node result. With no `Meta.output`, `T` must be `None` (`WorkflowDefinition[None]`) or `Any`; a concrete `T` without `Meta.output` raises HRS-025.
 - Nodes are collected in definition order by the metaclass.
 - Spec and all nodes are **frozen** (immutable) after construction.
 
@@ -149,6 +149,7 @@ Differences from `TaskNode`:
 - `kwargs` forwarded to `workflow_def.build_with(app, **kwargs)` at execution time.
 - `args_from` injects upstream `TaskResult` into `build_with()`.
 - Child status mirrors parent node: child COMPLETED → node COMPLETED with output; child FAILED → node FAILED with `SubWorkflowError`.
+- Outputless child (`WorkflowDefinition[None]`, no `Meta.output`): the parent node completes with `TaskResult[None, TaskError]` (`ok=None`). The child's terminal-results map is top-level `handle.get()` behavior only and is never exposed as a nested subworkflow output.
 
 ## NodeFactory / `.node()` — Two-Step Builder
 
@@ -530,7 +531,7 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | HRS-022 | `WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH` | Child uses default build_with() |
 | HRS-023 | `WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING` | Bad build_with() signature |
 | HRS-024 | `WORKFLOW_ARGS_FROM_TYPE_MISMATCH` | Incompatible TaskResult type |
-| HRS-025 | `WORKFLOW_OUTPUT_TYPE_MISMATCH` | Generic param doesn't match output |
+| HRS-025 | `WORKFLOW_OUTPUT_TYPE_MISMATCH` | Generic param doesn't match output, or concrete `WorkflowDefinition[T]` has no `Meta.output` |
 | HRS-026 | `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED` | Non-empty positional args |
 | HRS-027 | `WORKFLOW_CHECK_CASES_REQUIRED` | Builder needs cases= |
 | HRS-028 | `WORKFLOW_CHECK_CASE_INVALID` | Invalid case kwarg dict |

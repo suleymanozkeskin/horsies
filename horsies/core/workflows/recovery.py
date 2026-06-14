@@ -11,9 +11,11 @@ This module handles recovery of stuck workflows:
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession as _RuntimeAsyncSession
 
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.json_io import loads_json
@@ -34,6 +36,53 @@ if TYPE_CHECKING:
     from horsies.core.models.tasks import TaskResult, TaskError
 
 logger = get_logger('workflow.recovery')
+
+
+async def _run_recovery_candidate(
+    session: 'AsyncSession',
+    *,
+    case: str,
+    workflow_id: str | None = None,
+    task_index: int | None = None,
+    child_id: str | None = None,
+    task_id: str | None = None,
+    action: Callable[[], Awaitable[bool]],
+) -> bool:
+    """Run one recovery candidate without letting it poison the full pass.
+
+    The candidate's DB writes run in a SAVEPOINT so a failure rolls back its
+    partial state without aborting the surrounding recovery transaction. The
+    in-memory parent-propagation queue (``session.info``) is reverted in
+    lockstep, since a SAVEPOINT rollback does not touch Python state. A
+    SAVEPOINT requires a real ``AsyncSession``; mock-driven unit tests fall
+    back to running the action directly under the same try/except guard.
+    """
+    from horsies.core.workflows.engine import (
+        restore_pending_parent_propagations,
+        snapshot_pending_parent_propagations,
+    )
+
+    pending_snapshot = snapshot_pending_parent_propagations(session)
+    try:
+        if isinstance(session, _RuntimeAsyncSession):
+            async with session.begin_nested():
+                return await action()
+        return await action()
+    except Exception as exc:
+        restore_pending_parent_propagations(session, pending_snapshot)
+        logger.error(
+            'Workflow recovery candidate failed: case=%s workflow_id=%s '
+            'task_index=%s child_id=%s task_id=%s exception_type=%s '
+            'exception=%s',
+            case,
+            workflow_id,
+            task_index,
+            child_id,
+            task_id,
+            type(exc).__name__,
+            str(exc)[:500],
+        )
+        return False
 
 
 def _decode_recovered_task_result(
@@ -294,14 +343,24 @@ async def recover_stuck_workflows(
         depth = row.depth or 0
         root_wf_id = row.root_workflow_id or workflow_id
 
-        await try_make_ready_and_enqueue(
-            session, broker, workflow_id, task_index, depth, root_wf_id,
-        )
-        logger.info(
-            f'Recovery evaluated stuck PENDING task: '
-            f'workflow={workflow_id}, task_index={task_index}'
-        )
-        recovered += 1
+        async def _recover_pending_ready() -> bool:
+            await try_make_ready_and_enqueue(
+                session, broker, workflow_id, task_index, depth, root_wf_id,
+            )
+            logger.info(
+                f'Recovery evaluated stuck PENDING task: '
+                f'workflow={workflow_id}, task_index={task_index}'
+            )
+            return True
+
+        if await _run_recovery_candidate(
+            session,
+            case='pending_terminal_deps',
+            workflow_id=workflow_id,
+            task_index=task_index,
+            action=_recover_pending_ready,
+        ):
+            recovered += 1
 
     # Case 1: READY tasks not enqueued (task_id is NULL but status is READY)
     # This happens if worker crashed after marking READY but before creating task
@@ -319,31 +378,42 @@ async def recover_stuck_workflows(
             cast(list[int], raw_deps) if isinstance(raw_deps, list) else []
         )
 
-        # Fetch dependency results and re-enqueue. Strict-serde phase 6
-        # changed ``get_dependency_results`` to return a tuple of
-        # (results_by_index, task_names_by_index) so the engine can
-        # encode args_from envelopes with source-task metadata.
-        recovery_app = broker.app if broker is not None else None
-        dep_results, dep_task_names, dep_definition_keys = await get_dependency_results(
-            session, workflow_id, dependencies, app=recovery_app,
-        )
-
-        from horsies.core.workflows.engine import enqueue_workflow_task
-
-        task_id = await enqueue_workflow_task(
-            session,
-            workflow_id,
-            task_index,
-            dep_results,
-            dep_task_names,
-            broker,
-            all_dep_definition_keys=dep_definition_keys,
-        )
-        if task_id:
-            logger.info(
-                f'Recovered stuck READY task: workflow={workflow_id}, '
-                f'task_index={task_index}, new_task_id={task_id}'
+        async def _recover_ready_not_enqueued() -> bool:
+            # Fetch dependency results and re-enqueue. Strict-serde phase 6
+            # changed ``get_dependency_results`` to return a tuple of
+            # (results_by_index, task_names_by_index) so the engine can
+            # encode args_from envelopes with source-task metadata.
+            recovery_app = broker.app if broker is not None else None
+            dep_results, dep_task_names, dep_definition_keys = await get_dependency_results(
+                session, workflow_id, dependencies, app=recovery_app,
             )
+
+            from horsies.core.workflows.engine import enqueue_workflow_task
+
+            task_id = await enqueue_workflow_task(
+                session,
+                workflow_id,
+                task_index,
+                dep_results,
+                dep_task_names,
+                broker,
+                all_dep_definition_keys=dep_definition_keys,
+            )
+            if task_id:
+                logger.info(
+                    f'Recovered stuck READY task: workflow={workflow_id}, '
+                    f'task_index={task_index}, new_task_id={task_id}'
+                )
+                return True
+            return False
+
+        if await _run_recovery_candidate(
+            session,
+            case='ready_not_enqueued',
+            workflow_id=workflow_id,
+            task_index=task_index,
+            action=_recover_ready_not_enqueued,
+        ):
             recovered += 1
 
     # Case 1.5: READY SubWorkflowNodes not started (sub_workflow_id is NULL)
@@ -369,32 +439,42 @@ async def recover_stuck_workflows(
             )
             continue
 
-        from horsies.core.workflows.engine import (
-            enqueue_subworkflow_task,
-            get_dependency_results,
-        )
+        async def _recover_ready_subworkflow() -> bool:
+            from horsies.core.workflows.engine import (
+                enqueue_subworkflow_task,
+                get_dependency_results,
+            )
 
-        dep_indices: list[int] = (
-            cast(list[int], dependencies) if isinstance(dependencies, list) else []
-        )
-        dep_results, dep_task_names, _dep_definition_keys = await get_dependency_results(
-            session, workflow_id, dep_indices, app=broker.app,
-        )
-        await enqueue_subworkflow_task(
+            dep_indices: list[int] = (
+                dependencies if isinstance(dependencies, list) else []
+            )
+            dep_results, dep_task_names, _dep_definition_keys = await get_dependency_results(
+                session, workflow_id, dep_indices, app=broker.app,
+            )
+            await enqueue_subworkflow_task(
+                session,
+                broker,
+                workflow_id,
+                task_index,
+                dep_results,
+                dep_task_names,
+                depth,
+                root_wf_id,
+            )
+            logger.info(
+                f'Recovered stuck READY subworkflow (started): '
+                f'workflow={workflow_id}, task_index={task_index}'
+            )
+            return True
+
+        if await _run_recovery_candidate(
             session,
-            broker,
-            workflow_id,
-            task_index,
-            dep_results,
-            dep_task_names,
-            depth,
-            root_wf_id,
-        )
-        logger.info(
-            f'Recovered stuck READY subworkflow (started): '
-            f'workflow={workflow_id}, task_index={task_index}'
-        )
-        recovered += 1
+            case='ready_subworkflow_not_started',
+            workflow_id=workflow_id,
+            task_index=task_index,
+            action=_recover_ready_subworkflow,
+        ):
+            recovered += 1
 
     # Case 1.6: Child workflows completed but parent node not updated
     # This happens if the on_subworkflow_complete callback failed or was interrupted
@@ -409,15 +489,27 @@ async def recover_stuck_workflows(
         parent_task_idx = row.parent_task_index
         child_status = row.status
 
-        # Re-trigger the subworkflow completion callback
-        from horsies.core.workflows.engine import on_subworkflow_complete
+        async def _recover_completed_child() -> bool:
+            # Re-trigger the subworkflow completion callback.
+            from horsies.core.workflows.engine import on_subworkflow_complete
 
-        await on_subworkflow_complete(session, child_id, broker)
-        logger.info(
-            f'Recovered stuck child workflow completion: child={child_id}, '
-            f'parent={parent_wf_id}:{parent_task_idx}, child_status={child_status}'
-        )
-        recovered += 1
+            await on_subworkflow_complete(session, child_id, broker)
+            logger.info(
+                f'Recovered stuck child workflow completion: child={child_id}, '
+                f'parent={parent_wf_id}:{parent_task_idx}, '
+                f'child_status={child_status}'
+            )
+            return True
+
+        if await _run_recovery_candidate(
+            session,
+            case='completed_child_parent_not_updated',
+            workflow_id=parent_wf_id,
+            task_index=parent_task_idx,
+            child_id=child_id,
+            action=_recover_completed_child,
+        ):
+            recovered += 1
 
     # Case 1.7: workflow_tasks stuck non-terminal but underlying task is already terminal.
     # This happens when a worker crashes mid-execution:
@@ -437,62 +529,77 @@ async def recover_stuck_workflows(
         task_status = row.task_status  # uppercase: COMPLETED, FAILED, CANCELLED, or EXPIRED
         raw_task_result = row.task_result
 
-        from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode, RetrievalCode, OutcomeCode
+        async def _recover_crashed_worker_task() -> bool:
+            from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode, RetrievalCode, OutcomeCode
 
-        # Strict-serde phase 6: typed decode against the source task's
-        # ``task_ok_type``. Recovery has no direct app reference; resolve
-        # via the broker that owns this recovery cycle.
-        recovery_app = broker.app if broker is not None else None
-        if raw_task_result is not None:
-            result = _decode_recovered_task_result(
-                raw_task_result,
-                app=recovery_app,
-                task_name=task_name,
-                task_id=task_id,
-                task_status=task_status,
-            )
-        else:
-            # No result stored (e.g. crash before result, DB issue, or cancellation)
-            if task_status == 'CANCELLED':
-                error_code = OutcomeCode.TASK_CANCELLED
-                message = 'Task was cancelled before producing a result'
-            elif task_status == 'EXPIRED':
-                error_code = OutcomeCode.TASK_EXPIRED
-                message = 'Task expired before execution started (good_until passed)'
-            elif task_status == 'COMPLETED':
-                error_code = RetrievalCode.RESULT_NOT_AVAILABLE
-                message = 'Task completed but result is missing'
+            result: TaskResult[Any, TaskError]
+            # Strict-serde phase 6: typed decode against the source task's
+            # ``task_ok_type``. Recovery has no direct app reference; resolve
+            # via the broker that owns this recovery cycle.
+            recovery_app = broker.app if broker is not None else None
+            if raw_task_result is not None:
+                result = _decode_recovered_task_result(
+                    raw_task_result,
+                    app=recovery_app,
+                    task_name=task_name,
+                    task_id=task_id,
+                    task_status=task_status,
+                )
             else:
-                error_code = OperationalErrorCode.WORKER_CRASHED
-                message = (
-                    'Worker crashed during task execution '
-                    f'(task_status={task_status}, no result stored)'
+                # No result stored (e.g. crash before result, DB issue, or cancellation)
+                error_code: OutcomeCode | RetrievalCode | OperationalErrorCode
+                match task_status:
+                    case 'CANCELLED':
+                        error_code = OutcomeCode.TASK_CANCELLED
+                        message = 'Task was cancelled before producing a result'
+                    case 'EXPIRED':
+                        error_code = OutcomeCode.TASK_EXPIRED
+                        message = 'Task expired before execution started (good_until passed)'
+                    case 'COMPLETED':
+                        error_code = RetrievalCode.RESULT_NOT_AVAILABLE
+                        message = 'Task completed but result is missing'
+                    case _:
+                        error_code = OperationalErrorCode.WORKER_CRASHED
+                        message = (
+                            'Worker crashed during task execution '
+                            f'(task_status={task_status}, no result stored)'
+                        )
+
+                result = TaskResult(
+                    err=TaskError(
+                        error_code=error_code,
+                        message=message,
+                        data={
+                            'task_id': task_id,
+                            'task_status': task_status,
+                            'recovery': 'case_1_7',
+                        },
+                    ),
                 )
 
-            result = TaskResult(
-                err=TaskError(
-                    error_code=error_code,
-                    message=message,
-                    data={
-                        'task_id': task_id,
-                        'task_status': task_status,
-                        'recovery': 'case_1_7',
-                    },
-                ),
+            # Reuse the existing completion handler to update workflow_tasks,
+            # apply on_error policy, process dependents, and check workflow completion.
+            from horsies.core.workflows.engine import on_workflow_task_complete
+
+            await on_workflow_task_complete(
+                session, task_id, result, broker, task_name=task_name,
             )
+            logger.info(
+                f'Recovered crashed worker workflow task: workflow={workflow_id}, '
+                f'task_index={task_index}, task_id={task_id}, '
+                f'task_status={task_status}'
+            )
+            return True
 
-        # Reuse the existing completion handler to update workflow_tasks,
-        # apply on_error policy, process dependents, and check workflow completion
-        from horsies.core.workflows.engine import on_workflow_task_complete
-
-        await on_workflow_task_complete(
-            session, task_id, result, broker, task_name=task_name,
-        )
-        logger.info(
-            f'Recovered crashed worker workflow task: workflow={workflow_id}, '
-            f'task_index={task_index}, task_id={task_id}, task_status={task_status}'
-        )
-        recovered += 1
+        if await _run_recovery_candidate(
+            session,
+            case='crashed_worker_task_terminal',
+            workflow_id=workflow_id,
+            task_index=task_index,
+            task_id=task_id,
+            action=_recover_crashed_worker_task,
+        ):
+            recovered += 1
 
     # Case 2+3: Workflows with all tasks terminal but workflow still RUNNING
     # This handles both completed and failed workflows, respecting success_policy.
@@ -504,23 +611,53 @@ async def recover_stuck_workflows(
 
     for row in terminal_candidates.fetchall():
         workflow_id = row.id
-        # Delegate to the canonical completion path so recovery inherits locking,
-        # parent propagation, and finalization semantics from engine.py.
-        from horsies.core.workflows.engine import check_workflow_completion
+        async def _recover_terminal_workflow() -> bool:
+            # Delegate to the canonical completion path so recovery inherits locking,
+            # parent propagation, and finalization semantics from engine.py.
+            from horsies.core.workflows.engine import check_workflow_completion
 
-        await check_workflow_completion(
+            await check_workflow_completion(
+                session,
+                workflow_id,
+                broker,
+            )
+            logger.info(
+                f'Recovered terminal workflow via completion check: {workflow_id}'
+            )
+            return True
+
+        if await _run_recovery_candidate(
             session,
-            workflow_id,
-            broker,
+            case='terminal_workflow_running',
+            workflow_id=workflow_id,
+            action=_recover_terminal_workflow,
+        ):
+            recovered += 1
+
+    # Drain parent propagations queued by any completion check above. Reuse the
+    # engine's drain but isolate each child in its own SAVEPOINT, so one poison
+    # child cannot abort the rest of the recovery pass.
+    from horsies.core.workflows.engine import (
+        drain_parent_propagations_in_session,
+        on_subworkflow_complete,
+    )
+
+    async def _drain_queued_propagation(child_id: str) -> None:
+        async def _propagate() -> bool:
+            await on_subworkflow_complete(session, child_id, broker)
+            return True
+
+        await _run_recovery_candidate(
+            session,
+            case='queued_parent_propagation',
+            child_id=child_id,
+            action=_propagate,
         )
-        logger.info(f'Recovered terminal workflow via completion check: {workflow_id}')
-        recovered += 1
 
-    # Drain parent propagations queued by any completion check above. The
-    # in-session drain matches the pre-denest in-transaction behavior on
-    # this cold path; the worker hot path uses fresh transactions per level.
-    from horsies.core.workflows.engine import drain_parent_propagations_in_session
-
-    await drain_parent_propagations_in_session(session, broker)
+    await drain_parent_propagations_in_session(
+        session,
+        broker,
+        run_item=_drain_queued_propagation,
+    )
 
     return recovered
