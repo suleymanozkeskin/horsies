@@ -72,6 +72,7 @@ if TYPE_CHECKING:
 
     from horsies.core.app import Horsies
     from horsies.core.brokers.postgres import PostgresBroker
+    from horsies.core.worker.config import WorkerConfig
 
 logger = get_logger('worker')
 
@@ -87,6 +88,7 @@ class FinalizeMixin:
 
     if TYPE_CHECKING:
         # Worker state this mixin reads.
+        cfg: WorkerConfig
         sf: async_sessionmaker[AsyncSession]
         broker: PostgresBroker | None
         worker_instance_id: str
@@ -349,11 +351,23 @@ class FinalizeMixin:
                 case 'WORKFLOW_CHECK_FAILED':
                     # The worker holds this claim but the workflow_task linkage
                     # is missing or terminal (orphan). Cancel it instead of
-                    # leaving it CLAIMED — otherwise the reaper requeues and
-                    # re-dispatches it forever (it can never reach RUNNING). If
-                    # it is not, or is no longer, a terminable orphan owned by
-                    # us, the guarded UPDATE matches 0 rows and we fall back to
-                    # the prior skip.
+                    # leaving it CLAIMED — otherwise it can never reach RUNNING
+                    # and the reaper would only requeue it (skipped for orphans)
+                    # without making progress. If it is not, or is no longer, a
+                    # terminable orphan owned by us, the guarded UPDATE matches
+                    # 0 rows and we fall back to the prior skip.
+                    recovery_cfg = self.cfg.recovery_config
+                    if (
+                        recovery_cfg is None
+                        or not recovery_cfg.auto_terminate_orphaned_workflow_tasks
+                    ):
+                        # Self-heal disabled: leave it CLAIMED for inspection
+                        # (the reaper will not requeue or terminate it either).
+                        logger.debug(
+                            f'Task {task_id} WORKFLOW_CHECK_FAILED; orphan '
+                            f'self-heal disabled, leaving CLAIMED'
+                        )
+                        return Ok(None)
                     try:
                         async with self.sf() as s:
                             terminate_res = await s.execute(

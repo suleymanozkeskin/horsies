@@ -13,6 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.types.result import is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.sql import COUNT_IN_FLIGHT_FOR_WORKER_SQL
@@ -105,6 +106,7 @@ async def test_workflow_check_failed_cancels_orphan_and_frees_budget(
             dsn=db_url,
             psycopg_dsn=db_url.replace('+psycopg', ''),
             queues=['default'],
+            recovery_config=RecoveryConfig(),  # flag defaults True
         ),
     )
     worker.worker_instance_id = worker_id
@@ -123,6 +125,53 @@ async def test_workflow_check_failed_cancels_orphan_and_frees_budget(
     assert is_ok(result)
     assert await _task_status(session, task_id) == 'CANCELLED'
     assert await _in_flight_for_worker(session, worker_id) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio(loop_scope='function')
+async def test_workflow_check_failed_disabled_leaves_orphan_claimed(
+    clean_workflow_tables: None,
+    session: AsyncSession,
+    broker: PostgresBroker,
+    db_url: str,
+) -> None:
+    """With self-heal disabled, finalize leaves the orphan CLAIMED (inspection mode).
+
+    The flag gates the finalize-time cancellation symmetrically with the reaper
+    step: off => not cancelled at finalize, and (separately) not requeued by the
+    reaper either.
+    """
+    _ = clean_workflow_tables
+    worker_id = 'worker-orphan-disabled'
+    task_id = await _seed_orphaned_claimed_workflow_task(session, worker_id=worker_id)
+
+    worker = Worker(
+        session_factory=broker.session_factory,
+        listener=MagicMock(),
+        cfg=WorkerConfig(
+            dsn=db_url,
+            psycopg_dsn=db_url.replace('+psycopg', ''),
+            queues=['default'],
+            recovery_config=RecoveryConfig(
+                auto_terminate_orphaned_workflow_tasks=False,
+            ),
+        ),
+    )
+    worker.worker_instance_id = worker_id
+
+    result = await worker._persist_task_terminal_state(
+        task_id=task_id,
+        now=datetime.now(timezone.utc),
+        ok=False,
+        result_json_str='',
+        failed_reason='WORKFLOW_CHECK_FAILED',
+        task_name='workflow_join_barrier',
+        queue_name='default',
+        is_workflow_task=True,
+    )
+
+    assert is_ok(result)
+    assert await _task_status(session, task_id) == 'CLAIMED'
 
 
 @pytest.mark.integration

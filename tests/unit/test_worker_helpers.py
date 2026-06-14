@@ -469,6 +469,24 @@ class TestWorkerStop:
 # ---------------------------------------------------------------------------
 
 
+def _install_reaper_gate_session(worker: Worker) -> None:
+    """Give the reaper loop a cleanly-modeled gate session on ``worker.sf``.
+
+    The reaper gate runs ``await gate_session.execute(...)`` then a sync
+    ``gate_result.scalar()``. Without an explicit stub the bare ``MagicMock``
+    session factory leaks an un-awaited coroutine (a GC-time RuntimeWarning).
+    Here the gate always acquires the lock (``scalar() -> True``) so the pass
+    runs, matching production behavior for a single ungated worker.
+    """
+    gate_session = AsyncMock()
+    gate_session.__aenter__ = AsyncMock(return_value=gate_session)
+    gate_session.__aexit__ = AsyncMock(return_value=None)
+    gate_session.execute = AsyncMock(
+        return_value=MagicMock(scalar=MagicMock(return_value=True)),
+    )
+    worker.sf = MagicMock(return_value=gate_session)
+
+
 @pytest.mark.unit
 class TestReaperHeartbeatRetention:
     """Tests for heartbeat retention cleanup in the reaper loop."""
@@ -518,6 +536,7 @@ class TestReaperHeartbeatRetention:
             'horsies.core.workflows.recovery.recover_stuck_workflows', recover_mock
         )
 
+        _install_reaper_gate_session(worker)
         await worker._reaper_loop()
 
         assert any(
@@ -575,6 +594,7 @@ class TestReaperHeartbeatRetention:
             'horsies.core.workflows.recovery.recover_stuck_workflows', recover_mock
         )
 
+        _install_reaper_gate_session(worker)
         await worker._reaper_loop()
 
         recover_mock.assert_awaited()
@@ -636,6 +656,7 @@ class TestReaperHeartbeatRetention:
             'horsies.core.workflows.recovery.recover_stuck_workflows', recover_mock
         )
 
+        _install_reaper_gate_session(worker)
         await worker._reaper_loop()
 
         executed_statements = [
@@ -2659,6 +2680,7 @@ def _make_reaper_worker(
     )
 
     worker._test_created_brokers = created_brokers  # type: ignore[attr-defined]
+    _install_reaper_gate_session(worker)
     return worker
 
 
@@ -2927,6 +2949,12 @@ class TestReaperMatchArms:
 
     # --- U-6f: loop-level exception → logged, continues ---
 
+    # Injecting an exception/cancellation mid-pass abandons an in-flight
+    # AsyncMock call, whose coroutine surfaces as a benign GC-time
+    # RuntimeWarning (mock internals, not production code).
+    @pytest.mark.filterwarnings(
+        "ignore:coroutine 'AsyncMockMixin._execute_mock_call' was never awaited",
+    )
     @pytest.mark.asyncio
     async def test_loop_level_exception_logged_continues(
         self,
@@ -2989,6 +3017,9 @@ class TestReaperMatchArms:
 
     # --- U-6g: CancelledError → clean exit ---
 
+    @pytest.mark.filterwarnings(
+        "ignore:coroutine 'AsyncMockMixin._execute_mock_call' was never awaited",
+    )
     @pytest.mark.asyncio
     async def test_cancelled_error_clean_exit(
         self,
