@@ -131,6 +131,8 @@ class _ReaperPassState:
     requeue_disabled: bool = False
     mark_failed_permanent_failures: int = 0
     mark_failed_disabled: bool = False
+    terminate_orphans_permanent_failures: int = 0
+    terminate_orphans_disabled: bool = False
     next_retention_cleanup_at: float = 0.0
 
 

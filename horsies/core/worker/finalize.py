@@ -59,6 +59,7 @@ from horsies.core.worker.sql import (
     MARK_TASK_FAILED_WORKER_SQL,
     NOTIFY_TASK_QUEUE_SQL,
     SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
+    TERMINATE_ORPHANED_WORKFLOW_TASK_SQL,
     UPSERT_TASK_ATTEMPT_SQL,
 )
 from horsies.core.utils.db import is_retryable_connection_error
@@ -71,6 +72,7 @@ if TYPE_CHECKING:
 
     from horsies.core.app import Horsies
     from horsies.core.brokers.postgres import PostgresBroker
+    from horsies.core.worker.config import WorkerConfig
 
 logger = get_logger('worker')
 
@@ -86,6 +88,7 @@ class FinalizeMixin:
 
     if TYPE_CHECKING:
         # Worker state this mixin reads.
+        cfg: WorkerConfig
         sf: async_sessionmaker[AsyncSession]
         broker: PostgresBroker | None
         worker_instance_id: str
@@ -345,10 +348,67 @@ class FinalizeMixin:
         # Pre-exec aborts: no attempt row, no state change, no transaction.
         if not ok:
             match failed_reason:
+                case 'WORKFLOW_CHECK_FAILED':
+                    # The worker holds this claim but the workflow_task linkage
+                    # is missing or terminal (orphan). Cancel it instead of
+                    # leaving it CLAIMED — otherwise it can never reach RUNNING
+                    # and the reaper would only requeue it (skipped for orphans)
+                    # without making progress. If it is not, or is no longer, a
+                    # terminable orphan owned by us, the guarded UPDATE matches
+                    # 0 rows and we fall back to the prior skip.
+                    recovery_cfg = self.cfg.recovery_config
+                    if (
+                        recovery_cfg is None
+                        or not recovery_cfg.auto_terminate_orphaned_workflow_tasks
+                    ):
+                        # Self-heal disabled: leave it CLAIMED for inspection
+                        # (the reaper will not requeue or terminate it either).
+                        logger.debug(
+                            f'Task {task_id} WORKFLOW_CHECK_FAILED; orphan '
+                            f'self-heal disabled, leaving CLAIMED'
+                        )
+                        return Ok(None)
+                    try:
+                        async with self.sf() as s:
+                            terminate_res = await s.execute(
+                                TERMINATE_ORPHANED_WORKFLOW_TASK_SQL,
+                                {'id': task_id, 'wid': self.worker_instance_id},
+                            )
+                            terminated = terminate_res.fetchone() is not None
+                            await s.commit()
+                    except Exception as exc:
+                        return Err(
+                            self._make_finalize_error(
+                                task_id=task_id,
+                                stage=_FINALIZE_STAGE_PHASE1,
+                                message='Failed to terminate orphaned workflow task',
+                                retryable=is_retryable_connection_error(exc),
+                                data={
+                                    'exception_type': type(exc).__name__,
+                                    'exception': str(exc)[:500],
+                                    'outcome': {
+                                        'ok': ok,
+                                        'result_json_str': result_json_str,
+                                        'failed_reason': failed_reason,
+                                    },
+                                },
+                            )
+                        )
+                    if terminated:
+                        logger.info(
+                            f'Task {task_id} cancelled: orphaned workflow task '
+                            f'(no live workflow_task linkage)'
+                        )
+                    else:
+                        logger.debug(
+                            f'Task {task_id} WORKFLOW_CHECK_FAILED but not a '
+                            f'terminable orphan owned by this worker; skipping '
+                            f'finalization'
+                        )
+                    return Ok(None)
                 case (
                     'CLAIM_LOST'
                     | 'OWNERSHIP_UNCONFIRMED'
-                    | 'WORKFLOW_CHECK_FAILED'
                     | 'WORKFLOW_STOPPED'
                     | 'TASK_EXPIRED'
                 ):

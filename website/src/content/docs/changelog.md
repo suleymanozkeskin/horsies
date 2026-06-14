@@ -11,6 +11,23 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
+### Fixed
+
+- Orphaned workflow tasks (a `CLAIMED` workflow task whose `workflow_task`
+  linkage is missing or terminal) are no longer requeued and re-dispatched
+  forever. They are cancelled — at finalization when detected, and by a reaper
+  self-heal step — which frees in-flight budget and lets retention sweep them.
+- Retention no longer orphans a live task row: a terminal, expired workflow is
+  retained until every backing task is terminal, instead of deleting the
+  workflow/`workflow_task` rows while a backing task is still non-terminal.
+
+### Added
+
+- `RecoveryConfig.auto_terminate_orphaned_workflow_tasks` (default `True`):
+  cancel orphaned workflow tasks at finalization and in the reaper. When
+  `False` they are left `CLAIMED` for inspection (never requeued or
+  retention-deleted).
+
 ## 0.2.1 — 2026-06-14
 
 A failed outputless child workflow used through a `SubWorkflowNode` leaked the

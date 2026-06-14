@@ -23,6 +23,11 @@ class RecoveryConfig(BaseModel):
     Fields:
     - auto_requeue_stale_claimed: If True, automatically requeue tasks stuck in CLAIMED
     - claimed_stale_threshold_ms: Milliseconds without heartbeat before CLAIMED task is stale
+    - auto_terminate_orphaned_workflow_tasks: If True (default), cancel orphaned workflow
+      tasks (CLAIMED, workflow_task linkage missing or terminal) at finalization and in the
+      reaper. If False, they are left CLAIMED for inspection — never requeued (futile, they
+      cannot reach RUNNING) and never deleted by retention (their workflow is retained while
+      the backing task is non-terminal). Orphans are never requeued regardless of this flag.
     - auto_fail_stale_running: If True, automatically mark stale RUNNING tasks as FAILED
     - running_stale_threshold_ms: Milliseconds without heartbeat before RUNNING task is stale
     - finalizing_stale_threshold_ms: Milliseconds a task may remain finalizing before recovery
@@ -41,6 +46,16 @@ class RecoveryConfig(BaseModel):
     claimed_stale_threshold_ms: Annotated[int, Field(ge=1_000, le=3_600_000)] = Field(
         default=120_000,  # 2 minutes
         description='Milliseconds without claimer heartbeat before CLAIMED task is considered stale (1s-1hr)',
+    )
+
+    auto_terminate_orphaned_workflow_tasks: bool = Field(
+        default=True,
+        description=(
+            'Cancel orphaned workflow tasks (CLAIMED, workflow_task linkage missing '
+            'or terminal) at finalization and in the reaper. When False they are left '
+            'CLAIMED for inspection: never requeued (futile - they cannot reach RUNNING) '
+            'and never deleted by retention while the backing task is non-terminal'
+        ),
     )
 
     auto_fail_stale_running: bool = Field(

@@ -420,6 +420,54 @@ REQUEUE_STALE_CLAIMED_SQL = text("""
             (hb.last_heartbeat IS NULL AND t2.claimed_at IS NOT NULL AND t2.claimed_at < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL))
             OR (hb.last_heartbeat IS NOT NULL AND hb.last_heartbeat < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL))
           )
+          -- Never requeue an orphaned workflow task (no workflow_task row in a
+          -- runnable status): re-dispatch can only fail WORKFLOW_CHECK_FAILED
+          -- again, so requeuing is the churn engine. Orphans are cancelled by
+          -- terminate_orphaned_workflow_tasks instead.
+          AND NOT (
+              t2.is_workflow_task = TRUE
+              AND NOT EXISTS (
+                  SELECT 1 FROM horsies_workflow_tasks wt
+                  WHERE wt.task_id = t2.id
+                    AND wt.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
+              )
+          )
+        FOR UPDATE OF t2 SKIP LOCKED
+    ) s
+    WHERE t.id = s.id
+""")
+
+
+# Cancel orphaned workflow tasks the reaper finds stuck non-terminal: a
+# workflow task (is_workflow_task) with no workflow_task row in a runnable
+# status (linkage missing or terminal). These can never progress — the child's
+# workflow_task->RUNNING transition always fails — so they are made terminal
+# (CANCELLED) and their claim released, which frees in-flight budget and lets
+# retention sweep them. RUNNING is excluded (handled by auto_fail_stale_running
+# and a real orphan never reaches RUNNING). FOR UPDATE SKIP LOCKED avoids racing
+# an in-flight dispatch transaction.
+TERMINATE_ORPHANED_CLAIMED_WORKFLOW_TASKS_SQL = text("""
+    UPDATE horsies_tasks AS t
+    SET status = 'CANCELLED',
+        claimed = FALSE,
+        claimed_at = NULL,
+        claimed_by_worker_id = NULL,
+        claim_expires_at = NULL,
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
+        error_code = 'WORKFLOW_CHECK_FAILED',
+        failed_reason = 'Workflow task orphaned: no live workflow_task linkage',
+        updated_at = NOW()
+    FROM (
+        SELECT t2.id
+        FROM horsies_tasks t2
+        WHERE t2.is_workflow_task = TRUE
+          AND t2.status IN ('CLAIMED', 'PENDING', 'READY', 'ENQUEUED')
+          AND NOT EXISTS (
+              SELECT 1 FROM horsies_workflow_tasks wt
+              WHERE wt.task_id = t2.id
+                AND wt.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
+          )
         FOR UPDATE OF t2 SKIP LOCKED
     ) s
     WHERE t.id = s.id
@@ -1950,6 +1998,26 @@ class PostgresBroker:
             return _broker_err(
                 BrokerErrorCode.CLEANUP_FAILED,
                 f'requeue_stale_claimed failed: {exc}',
+                exc,
+            )
+
+    async def terminate_orphaned_workflow_tasks(self) -> BrokerResult[int]:
+        """Cancel orphaned workflow tasks (no live workflow_task linkage).
+
+        These can never reach RUNNING, so requeuing them only churns. Marking
+        them CANCELLED releases the claim and lets retention sweep them.
+        """
+        try:
+            async with self.session_factory() as session:
+                result = await session.execute(
+                    TERMINATE_ORPHANED_CLAIMED_WORKFLOW_TASKS_SQL,
+                )
+                await session.commit()
+                return Ok(getattr(result, 'rowcount', 0))
+        except Exception as exc:
+            return _broker_err(
+                BrokerErrorCode.CLEANUP_FAILED,
+                f'terminate_orphaned_workflow_tasks failed: {exc}',
                 exc,
             )
 

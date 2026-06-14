@@ -205,6 +205,7 @@ async def test_expired_terminal_workflows_deleted(
     wf_params = {
         'retention_hours': _RETENTION_HOURS,
         'wf_terminal_states': WORKFLOW_TERMINAL_VALUES,
+        'task_terminal_states': TASK_TERMINAL_VALUES,
     }
 
     # Delete workflow_tasks first (FK dependency), then workflows
@@ -221,6 +222,107 @@ async def test_expired_terminal_workflows_deleted(
     assert await _count(session, 'horsies_workflows') == 2
     # Survivor: old_running's workflow_task
     assert await _count(session, 'horsies_workflow_tasks') == 1
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_retention_keeps_terminal_workflow_with_live_task(
+    engine: AsyncEngine,
+    session: AsyncSession,
+) -> None:
+    """Lever 1: retention must not orphan a live task row.
+
+    A terminal+old workflow whose workflow_task still references a non-terminal
+    task is retained whole — workflow, workflow_task, and task all survive — so
+    the task never loses its linkage. Cleanup is only deferred until the backing
+    task becomes terminal (which orphan self-heal guarantees).
+    """
+    _ = engine
+    await _truncate_retention_tables(session)
+
+    workflow_id = str(uuid.uuid4())
+    task_id = str(uuid.uuid4())
+    sent_at, enqueue_sha = compute_test_enqueue_sha(
+        task_name='workflow_join_barrier',
+        queue_name='normal',
+        sent_at=datetime.now(timezone.utc) - timedelta(hours=48),
+    )
+
+    await session.execute(text("""
+        INSERT INTO horsies_workflows
+            (id, name, status, on_error, depth, root_workflow_id,
+             sent_at, created_at, started_at, updated_at, completed_at)
+        VALUES
+            (:id, 'wf_policy_complete_with_live_task', 'COMPLETED', 'FAIL', 0, :id,
+             NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours',
+             NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours',
+             NOW() - INTERVAL '48 hours')
+    """), {'id': workflow_id})
+    await session.execute(text("""
+        INSERT INTO horsies_tasks
+            (id, task_name, queue_name, priority, args, kwargs,
+             status, sent_at, enqueued_at, created_at, updated_at,
+             claimed, claimed_at, claimed_by_worker_id, claim_expires_at,
+             retry_count, max_retries, enqueue_sha, is_workflow_task)
+        VALUES
+            (:id, 'workflow_join_barrier', 'normal', 50, '[]', '{}',
+             'CLAIMED', :sent_at, NOW() - INTERVAL '48 hours',
+             NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours',
+             TRUE, NOW() - INTERVAL '48 hours', 'worker-retention-repro',
+             NOW() + INTERVAL '5 minutes', 0, 0, :enqueue_sha, TRUE)
+    """), {
+        'id': task_id,
+        'sent_at': sent_at,
+        'enqueue_sha': enqueue_sha,
+    })
+    await session.execute(text("""
+        INSERT INTO horsies_workflow_tasks
+            (id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+             queue_name, priority, dependencies, allow_failed_deps, join_type,
+             is_subworkflow, status, task_id, created_at)
+        VALUES
+            (:id, :wf_id, 0, 'join', 'workflow_join_barrier', '[]', '{}',
+             'normal', 50, '{}', FALSE, 'all',
+             FALSE, 'ENQUEUED', :task_id, NOW() - INTERVAL '48 hours')
+    """), {
+        'id': str(uuid.uuid4()),
+        'wf_id': workflow_id,
+        'task_id': task_id,
+    })
+    await session.commit()
+
+    params = {
+        'retention_hours': _RETENTION_HOURS,
+        'wf_terminal_states': WORKFLOW_TERMINAL_VALUES,
+        'task_terminal_states': TASK_TERMINAL_VALUES,
+    }
+    await session.execute(DELETE_EXPIRED_WORKFLOW_TASKS_SQL, params)
+    await session.execute(DELETE_EXPIRED_WORKFLOWS_SQL, params)
+    await session.execute(DELETE_EXPIRED_TASKS_SQL, params)
+    await session.commit()
+
+    row = (
+        await session.execute(
+            text("""
+                SELECT t.status, COUNT(wt.task_id) AS refs
+                FROM horsies_tasks t
+                LEFT JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
+                WHERE t.id = :task_id
+                GROUP BY t.status
+            """),
+            {'task_id': task_id},
+        )
+    ).one()
+
+    # Retention left the row whole: the non-terminal task keeps its linkage.
+    assert row.status == 'CLAIMED'
+    assert int(row.refs or 0) == 1
+    wf_present = (
+        await session.execute(
+            text('SELECT 1 FROM horsies_workflows WHERE id = :wf'),
+            {'wf': workflow_id},
+        )
+    ).fetchone() is not None
+    assert wf_present, 'workflow retained until its backing task is terminal'
 
 
 # ---------------------------------------------------------------------------

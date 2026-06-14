@@ -469,6 +469,24 @@ class TestWorkerStop:
 # ---------------------------------------------------------------------------
 
 
+def _install_reaper_gate_session(worker: Worker) -> None:
+    """Give the reaper loop a cleanly-modeled gate session on ``worker.sf``.
+
+    The reaper gate runs ``await gate_session.execute(...)`` then a sync
+    ``gate_result.scalar()``. Without an explicit stub the bare ``MagicMock``
+    session factory leaks an un-awaited coroutine (a GC-time RuntimeWarning).
+    Here the gate always acquires the lock (``scalar() -> True``) so the pass
+    runs, matching production behavior for a single ungated worker.
+    """
+    gate_session = AsyncMock()
+    gate_session.__aenter__ = AsyncMock(return_value=gate_session)
+    gate_session.__aexit__ = AsyncMock(return_value=None)
+    gate_session.execute = AsyncMock(
+        return_value=MagicMock(scalar=MagicMock(return_value=True)),
+    )
+    worker.sf = MagicMock(return_value=gate_session)
+
+
 @pytest.mark.unit
 class TestReaperHeartbeatRetention:
     """Tests for heartbeat retention cleanup in the reaper loop."""
@@ -478,6 +496,7 @@ class TestReaperHeartbeatRetention:
         worker = _make_worker()
         worker.cfg.recovery_config = RecoveryConfig(
             auto_requeue_stale_claimed=False,
+            auto_terminate_orphaned_workflow_tasks=False,
             auto_fail_stale_running=False,
             check_interval_ms=1_000,
             worker_state_retention_hours=None,
@@ -517,6 +536,7 @@ class TestReaperHeartbeatRetention:
             'horsies.core.workflows.recovery.recover_stuck_workflows', recover_mock
         )
 
+        _install_reaper_gate_session(worker)
         await worker._reaper_loop()
 
         assert any(
@@ -536,6 +556,7 @@ class TestReaperHeartbeatRetention:
         worker = _make_worker()
         worker.cfg.recovery_config = RecoveryConfig(
             auto_requeue_stale_claimed=False,
+            auto_terminate_orphaned_workflow_tasks=False,
             auto_fail_stale_running=False,
             check_interval_ms=1_000,
             heartbeat_retention_hours=12,
@@ -573,6 +594,7 @@ class TestReaperHeartbeatRetention:
             'horsies.core.workflows.recovery.recover_stuck_workflows', recover_mock
         )
 
+        _install_reaper_gate_session(worker)
         await worker._reaper_loop()
 
         recover_mock.assert_awaited()
@@ -585,6 +607,7 @@ class TestReaperHeartbeatRetention:
         worker = _make_worker()
         worker.cfg.recovery_config = RecoveryConfig(
             auto_requeue_stale_claimed=False,
+            auto_terminate_orphaned_workflow_tasks=False,
             auto_fail_stale_running=False,
             check_interval_ms=1_000,
             heartbeat_retention_hours=12,
@@ -633,6 +656,7 @@ class TestReaperHeartbeatRetention:
             'horsies.core.workflows.recovery.recover_stuck_workflows', recover_mock
         )
 
+        _install_reaper_gate_session(worker)
         await worker._reaper_loop()
 
         executed_statements = [
@@ -2567,8 +2591,10 @@ def _make_reaper_worker(
     *,
     auto_requeue: bool = False,
     auto_fail: bool = False,
+    auto_terminate: bool = False,
     requeue_results: list[Any] | None = None,
     mark_failed_results: list[Any] | None = None,
+    terminate_results: list[Any] | None = None,
     broker_close_result: Any = None,
 ) -> Worker:
     """Build a worker + fake broker for reaper loop tests.
@@ -2579,6 +2605,7 @@ def _make_reaper_worker(
     worker = _make_worker()
     worker.cfg.recovery_config = RecoveryConfig(
         auto_requeue_stale_claimed=auto_requeue,
+        auto_terminate_orphaned_workflow_tasks=auto_terminate,
         auto_fail_stale_running=auto_fail,
         check_interval_ms=1_000,
         heartbeat_retention_hours=None,
@@ -2616,6 +2643,18 @@ def _make_reaper_worker(
             worker._stop.set()
         return result
 
+    _terminate_results = list(terminate_results or [Ok(0)])
+    _terminate_idx = 0
+
+    async def _terminate_side_effect(**kwargs: Any) -> Any:
+        nonlocal _terminate_idx
+        idx = min(_terminate_idx, len(_terminate_results) - 1)
+        _terminate_idx += 1
+        result = _terminate_results[idx]
+        if _terminate_idx >= len(_terminate_results):
+            worker._stop.set()
+        return result
+
     close_rv = broker_close_result if broker_close_result is not None else Ok(None)
     created_brokers: list[Any] = []
 
@@ -2628,6 +2667,7 @@ def _make_reaper_worker(
             self.close_async = AsyncMock(return_value=close_rv)
             self.requeue_stale_claimed = _requeue_side_effect
             self.mark_stale_tasks_as_failed = _mark_failed_side_effect
+            self.terminate_orphaned_workflow_tasks = _terminate_side_effect
             self.expire_pending_tasks = AsyncMock(return_value=Ok(0))
             self.app: Any = None
 
@@ -2640,6 +2680,7 @@ def _make_reaper_worker(
     )
 
     worker._test_created_brokers = created_brokers  # type: ignore[attr-defined]
+    _install_reaper_gate_session(worker)
     return worker
 
 
@@ -2809,6 +2850,80 @@ class TestReaperMatchArms:
         critical_records = [r for r in caplog.records if r.levelno == logging.CRITICAL]
         assert len(critical_records) >= 1
 
+    # --- U-6d2: terminate-orphaned-workflow-tasks arms ---
+
+    @pytest.mark.asyncio
+    async def test_terminate_orphans_ok_logs_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Ok(n>0) from terminate_orphaned_workflow_tasks logs a warning."""
+        worker = _make_reaper_worker(
+            monkeypatch,
+            auto_terminate=True,
+            terminate_results=[Ok(4)],
+        )
+
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
+                await worker._reaper_loop()
+        finally:
+            _logger.propagate = False
+
+        assert 'cancelled 4 orphaned workflow' in caplog.text.lower()
+
+    @pytest.mark.asyncio
+    async def test_terminate_orphans_transient_err_resets_counter(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Transient Err from terminate_orphaned_workflow_tasks resets counter."""
+        worker = _make_reaper_worker(
+            monkeypatch,
+            auto_terminate=True,
+            terminate_results=[_broker_err(retryable=True, message='transient terminate')],
+        )
+
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
+                await worker._reaper_loop()
+        finally:
+            _logger.propagate = False
+
+        assert 'transient' in caplog.text.lower()
+
+    @pytest.mark.asyncio
+    async def test_terminate_orphans_permanent_err_3x_disables(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """3 consecutive permanent errors disable the terminate-orphans op."""
+        perm = _broker_err(retryable=False, message='perm terminate')
+        worker = _make_reaper_worker(
+            monkeypatch,
+            auto_terminate=True,
+            terminate_results=[perm, perm, perm],
+        )
+
+        _logger = logging.getLogger(self._LOGGER_NAME)
+        _logger.propagate = True
+        try:
+            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+                await worker._reaper_loop()
+        finally:
+            _logger.propagate = False
+
+        assert 'disabled' in caplog.text.lower()
+        critical_records = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+        assert len(critical_records) >= 1
+
     # --- U-6e: no worker broker → fallback to temp ---
 
     @pytest.mark.asyncio
@@ -2834,6 +2949,12 @@ class TestReaperMatchArms:
 
     # --- U-6f: loop-level exception → logged, continues ---
 
+    # Injecting an exception/cancellation mid-pass abandons an in-flight
+    # AsyncMock call, whose coroutine surfaces as a benign GC-time
+    # RuntimeWarning (mock internals, not production code).
+    @pytest.mark.filterwarnings(
+        "ignore:coroutine 'AsyncMockMixin._execute_mock_call' was never awaited",
+    )
     @pytest.mark.asyncio
     async def test_loop_level_exception_logged_continues(
         self,
@@ -2896,6 +3017,9 @@ class TestReaperMatchArms:
 
     # --- U-6g: CancelledError → clean exit ---
 
+    @pytest.mark.filterwarnings(
+        "ignore:coroutine 'AsyncMockMixin._execute_mock_call' was never awaited",
+    )
     @pytest.mark.asyncio
     async def test_cancelled_error_clean_exit(
         self,
@@ -4373,6 +4497,7 @@ def _make_reaper_broker(
     broker.mark_stale_tasks_as_failed = AsyncMock(
         return_value=mark_result if mark_result is not None else Ok(0),
     )
+    broker.terminate_orphaned_workflow_tasks = AsyncMock(return_value=Ok(0))
     broker.expire_pending_tasks = AsyncMock(return_value=Ok(0))
     session = MagicMock()
     session.commit = AsyncMock()
