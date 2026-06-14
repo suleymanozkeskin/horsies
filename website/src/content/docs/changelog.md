@@ -24,7 +24,9 @@ there is no migration contract between pre-1.0 versions.
 ### Added
 
 - `RecoveryConfig.auto_terminate_orphaned_workflow_tasks` (default `True`):
-  cancel orphaned workflow tasks in the reaper instead of requeuing them.
+  cancel orphaned workflow tasks at finalization and in the reaper. When
+  `False` they are left `CLAIMED` for inspection (never requeued or
+  retention-deleted).
 
 ## 0.2.1 — 2026-06-14
 
