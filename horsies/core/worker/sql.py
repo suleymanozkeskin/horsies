@@ -513,12 +513,32 @@ DELETE_EXPIRED_WORKFLOW_TASKS_SQL = text("""
     WHERE wt.workflow_id = w.id
       AND w.status = ANY(:wf_terminal_states)
       AND COALESCE(w.completed_at, w.updated_at, w.created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
+      -- Do not delete linkage while any backing task is still non-terminal,
+      -- which would orphan that horsies_tasks row (no workflow_task ref). All
+      -- backing tasks become terminal via orphan self-heal, so this only
+      -- defers cleanup, it does not block it.
+      AND NOT EXISTS (
+          SELECT 1
+          FROM horsies_workflow_tasks wt2
+          JOIN horsies_tasks t ON t.id = wt2.task_id
+          WHERE wt2.workflow_id = w.id
+            AND NOT (t.status = ANY(:task_terminal_states))
+      )
 """)
 
 DELETE_EXPIRED_WORKFLOWS_SQL = text("""
-    DELETE FROM horsies_workflows
-    WHERE status = ANY(:wf_terminal_states)
-      AND COALESCE(completed_at, updated_at, created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
+    DELETE FROM horsies_workflows w
+    WHERE w.status = ANY(:wf_terminal_states)
+      AND COALESCE(w.completed_at, w.updated_at, w.created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
+      -- Same guard as the workflow_tasks delete: keep the workflow until every
+      -- backing task is terminal so retention never strands a live task row.
+      AND NOT EXISTS (
+          SELECT 1
+          FROM horsies_workflow_tasks wt
+          JOIN horsies_tasks t ON t.id = wt.task_id
+          WHERE wt.workflow_id = w.id
+            AND NOT (t.status = ANY(:task_terminal_states))
+      )
 """)
 
 DELETE_EXPIRED_TASKS_SQL = text("""
@@ -533,6 +553,38 @@ DELETE_EXPIRED_TASKS_SQL = text("""
             AND NOT (w.status = ANY(:wf_terminal_states))
       )
 """)
+
+# Terminate a single orphaned workflow task this worker still holds CLAIMED.
+# An orphan is a workflow task with no workflow_task row in a runnable status
+# (linkage missing or already terminal) — the exact condition that makes the
+# child's workflow_task->RUNNING transition fail with WORKFLOW_CHECK_FAILED.
+# Scoped to this worker's own claim and re-checked here so a concurrent
+# legitimate transition (TOCTOU) leaves the row untouched (0 rows -> caller
+# keeps its prior skip behavior).
+TERMINATE_ORPHANED_WORKFLOW_TASK_SQL = text("""
+    UPDATE horsies_tasks
+    SET status = 'CANCELLED',
+        claimed = FALSE,
+        claimed_at = NULL,
+        claimed_by_worker_id = NULL,
+        claim_expires_at = NULL,
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
+        error_code = 'WORKFLOW_CHECK_FAILED',
+        failed_reason = 'Workflow task orphaned: no live workflow_task linkage',
+        updated_at = NOW()
+    WHERE id = :id
+      AND claimed_by_worker_id = :wid
+      AND status = 'CLAIMED'
+      AND is_workflow_task = TRUE
+      AND NOT EXISTS (
+          SELECT 1 FROM horsies_workflow_tasks wt
+          WHERE wt.task_id = horsies_tasks.id
+            AND wt.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
+      )
+    RETURNING id
+""")
+
 
 SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL = text("""
     SELECT task_name, retry_count, started_at, claimed_by_worker_id,

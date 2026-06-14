@@ -118,6 +118,50 @@ class ReaperMixin:
                             f'before disable): {err.message}',
                         )
 
+        # Cancel orphaned workflow tasks (no live workflow_task linkage). These
+        # cannot reach RUNNING, so requeue (above) skips them and they would
+        # otherwise stay CLAIMED forever; cancelling frees budget and lets
+        # retention sweep them.
+        if (
+            recovery_cfg.auto_terminate_orphaned_workflow_tasks
+            and not state.terminate_orphans_disabled
+        ):
+            match await temp_broker.terminate_orphaned_workflow_tasks():
+                case Ok(terminated):
+                    state.terminate_orphans_permanent_failures = 0
+                    if terminated > 0:
+                        logger.warning(
+                            f'Reaper cancelled {terminated} orphaned workflow '
+                            f'task(s) (no live workflow_task linkage)',
+                        )
+                case Err(err) if err.retryable:
+                    state.terminate_orphans_permanent_failures = 0
+                    logger.warning(
+                        f'Reaper terminate_orphaned_workflow_tasks transient '
+                        f'failure (will retry next cycle): {err.message}',
+                    )
+                case Err(err):
+                    state.terminate_orphans_permanent_failures += 1
+                    if (
+                        state.terminate_orphans_permanent_failures
+                        >= _REAPER_MAX_PERMANENT_FAILURES
+                    ):
+                        state.terminate_orphans_disabled = True
+                        logger.critical(
+                            f'Reaper terminate_orphaned_workflow_tasks disabled '
+                            f'after {state.terminate_orphans_permanent_failures} '
+                            f'consecutive permanent failures. Last error: '
+                            f'{err.message}. Requires deploy or manual '
+                            f'intervention.',
+                        )
+                    else:
+                        logger.error(
+                            f'Reaper terminate_orphaned_workflow_tasks permanent '
+                            f'failure ({state.terminate_orphans_permanent_failures}/'
+                            f'{_REAPER_MAX_PERMANENT_FAILURES} before disable): '
+                            f'{err.message}',
+                        )
+
         # Auto-fail stale RUNNING tasks
         if (
             recovery_cfg.auto_fail_stale_running
@@ -234,6 +278,10 @@ class ReaperMixin:
                         wf_params = {
                             'retention_hours': recovery_cfg.terminal_record_retention_hours,
                             'wf_terminal_states': WORKFLOW_TERMINAL_VALUES,
+                            # The workflow / workflow_task deletes now guard on
+                            # all backing tasks being terminal, to avoid
+                            # orphaning a live task row.
+                            'task_terminal_states': TASK_TERMINAL_VALUES,
                         }
                         task_params = {
                             'retention_hours': recovery_cfg.terminal_record_retention_hours,
