@@ -218,6 +218,7 @@ Controls stale task detection, automatic recovery, and data retention.
 |---|---|---|---|---|
 | `auto_requeue_stale_claimed` | `bool` | `True` | — | Requeue tasks stuck in CLAIMED |
 | `claimed_stale_threshold_ms` | `int` | `120_000` | 1s–1hr | Ms before CLAIMED task is stale |
+| `auto_terminate_orphaned_workflow_tasks` | `bool` | `True` | — | Cancel CLAIMED workflow tasks with no live workflow_task linkage (orphans) instead of requeuing forever |
 | `auto_fail_stale_running` | `bool` | `True` | — | Fail tasks stuck in RUNNING |
 | `running_stale_threshold_ms` | `int` | `300_000` | 1s–2hr | Ms before RUNNING task is stale |
 | `finalizing_stale_threshold_ms` | `int` | `300_000` | 1s–2hr | Ms a completed child may remain finalizing before recovery |
