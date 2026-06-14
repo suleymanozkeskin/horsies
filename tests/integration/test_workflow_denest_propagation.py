@@ -24,12 +24,21 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from horsies.core.codec.json_io import loads_json
+from horsies.core.codec.typed import decode_task_result
+from horsies.core.types.result import is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker, _FINALIZE_STAGE_PARENT
 
 pytestmark = [pytest.mark.integration]
 
 _CHILD_RESULT_ENVELOPE = '{"__h_task_result__": true, "ok": 7, "err": null}'
+_OUTPUTLESS_CHILD_RESULT_ENVELOPE = (
+    '{"__h_task_result__":true,"__h_outputless_terminals__":true,'
+    '"ok":{"results_by_id":{"terminal":{"__h_task_result__":true,'
+    '"ok":7,"err":null}},"task_name_by_id":{"terminal":"leaf_task"},'
+    '"definition_key_by_id":{"terminal":null}},"err":null}'
+)
 
 
 def _make_worker(engine: AsyncEngine) -> Worker:
@@ -124,6 +133,13 @@ async def _statuses(
     return str(node), str(wf)
 
 
+def _load_json(raw: str | None) -> Any:
+    assert raw is not None
+    loaded = loads_json(raw)
+    assert is_ok(loaded), f'JSON decode failed: {loaded}'
+    return loaded.ok_value
+
+
 async def _cleanup(session: AsyncSession, workflow_ids: list[str]) -> None:
     for wf_id in workflow_ids:
         await session.execute(
@@ -166,6 +182,123 @@ async def test_driver_advances_parent_from_already_terminal_child(
         assert worker._finalize_retry_attempts == {}
     finally:
         await _cleanup(session, [child_id, parent_id])
+
+
+@pytest.mark.asyncio
+async def test_outputless_child_propagates_as_none_output(
+    engine: AsyncEngine, session: AsyncSession,
+) -> None:
+    """A completed outputless child must not expose nested TaskResult
+    envelopes as the parent SubWorkflowNode output or summary output.
+
+    The child's outputless final result is a workflow-level handle payload.
+    Parent propagation stores a one-level TaskResult(ok=None) for the
+    SubWorkflowNode instead, so later strict-serde paths never see nested
+    ``__h_task_result__`` markers as user-originated data.
+    """
+    parent_id = await _insert_workflow(session, status='RUNNING')
+    child_id = await _insert_workflow(
+        session,
+        status='COMPLETED',
+        parent_workflow_id=parent_id,
+        parent_task_index=0,
+        result=_OUTPUTLESS_CHILD_RESULT_ENVELOPE,
+    )
+    await _insert_subworkflow_node(
+        session, workflow_id=parent_id, task_index=0, sub_workflow_id=child_id,
+    )
+    await session.commit()
+
+    worker = _make_worker(engine)
+    try:
+        await worker._drive_parent_propagations([child_id])
+
+        node_status, wf_status = await _statuses(session, parent_id)
+        assert (node_status, wf_status) == ('COMPLETED', 'COMPLETED')
+
+        row = (
+            await session.execute(
+                text("""
+                    SELECT result, sub_workflow_summary
+                    FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf AND task_index = 0
+                """),
+                {'wf': parent_id},
+            )
+        ).one()
+        stored_result = decode_task_result(_load_json(row.result), Any)
+        assert stored_result.is_ok()
+        assert stored_result.unwrap() is None
+
+        summary = _load_json(row.sub_workflow_summary)
+        assert isinstance(summary, dict)
+        assert summary['output'] is None
+    finally:
+        await _cleanup(session, [child_id, parent_id])
+
+
+@pytest.mark.asyncio
+async def test_recovery_isolates_poison_child_and_continues(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from horsies.core.workflows import engine as engine_mod
+    from horsies.core.workflows.recovery import recover_stuck_workflows
+
+    poison_parent_id = await _insert_workflow(session, status='RUNNING')
+    poison_child_id = await _insert_workflow(
+        session,
+        status='COMPLETED',
+        parent_workflow_id=poison_parent_id,
+        parent_task_index=0,
+        result=_CHILD_RESULT_ENVELOPE,
+    )
+    await _insert_subworkflow_node(
+        session,
+        workflow_id=poison_parent_id,
+        task_index=0,
+        sub_workflow_id=poison_child_id,
+    )
+
+    ok_parent_id = await _insert_workflow(session, status='RUNNING')
+    ok_child_id = await _insert_workflow(
+        session,
+        status='COMPLETED',
+        parent_workflow_id=ok_parent_id,
+        parent_task_index=0,
+        result=_CHILD_RESULT_ENVELOPE,
+    )
+    await _insert_subworkflow_node(
+        session,
+        workflow_id=ok_parent_id,
+        task_index=0,
+        sub_workflow_id=ok_child_id,
+    )
+    await session.commit()
+
+    real_on_subworkflow_complete = engine_mod.on_subworkflow_complete
+
+    async def _poison_first_child(*args: Any, **kwargs: Any) -> None:
+        if args[1] == poison_child_id:
+            raise RuntimeError(
+                "reserved key '__h_task_result__' in user-originated data",
+            )
+        await real_on_subworkflow_complete(*args, **kwargs)
+
+    monkeypatch.setattr(engine_mod, 'on_subworkflow_complete', _poison_first_child)
+    try:
+        recovered = await recover_stuck_workflows(session)
+        assert recovered == 1
+        assert await _statuses(session, poison_parent_id) == ('RUNNING', 'RUNNING')
+        assert await _statuses(session, ok_parent_id) == (
+            'COMPLETED',
+            'COMPLETED',
+        )
+    finally:
+        await _cleanup(
+            session,
+            [poison_child_id, poison_parent_id, ok_child_id, ok_parent_id],
+        )
 
 
 @pytest.mark.asyncio

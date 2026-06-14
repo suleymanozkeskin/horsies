@@ -436,6 +436,13 @@ class ParentWithDataFlow(WorkflowDefinition[ParentOutput]):
         output = processor
 ```
 
+Outputless child workflows are orchestration-only when used through
+`SubWorkflowNode`. If a `WorkflowDefinition` has no `Meta.output`, declare it
+as `WorkflowDefinition[None]`; the parent node receives `TaskResult[None,
+TaskError]` with `ok=None` when the child completes. The terminal-results map
+returned by a top-level outputless `app.workflow(...).get()` is not exposed as
+a nested subworkflow output.
+
 ---
 
 ## 7. Error Handling

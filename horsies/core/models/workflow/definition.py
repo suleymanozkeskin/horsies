@@ -297,8 +297,10 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
 
         # Build WorkflowSpec — split paths for correct type inference.
         # When output is set, overload resolves WorkflowSpec[OkT_co] directly.
-        # When output is None, we cast since OkT_co is meaningless for
-        # outputless workflows (they use results()/results_async() instead).
+        # When output is None, app.workflow() returns terminal results for a
+        # top-level handle. The validation below only allows this shape for
+        # WorkflowDefinition[None] (or Any), so SubWorkflowNode never promises
+        # a concrete output type that an outputless child cannot produce.
         if output is not None:
             spec = app.workflow(
                 name=cls.name,

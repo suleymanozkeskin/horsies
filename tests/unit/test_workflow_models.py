@@ -17,6 +17,7 @@ from horsies.core.models.workflow import (
     TaskNode,
     SubWorkflowNode,
     SubWorkflowSummary,
+    WorkflowTerminalResults,
     WorkflowSpec,
     WorkflowContext,
     WorkflowMeta,
@@ -2608,8 +2609,8 @@ class TestWorkflowOutputTypeMismatch:
         spec = AnyWorkflow.build(app)
         assert spec.output is not None
 
-    def test_no_output_skips_validation(self) -> None:
-        """Workflow without Meta.output skips type check."""
+    def test_concrete_output_type_requires_meta_output(self) -> None:
+        """WorkflowDefinition[int] without Meta.output is rejected."""
         fn_a = MockTaskWrapper(task_name='task_a')
         app = self._make_app()
 
@@ -2618,9 +2619,56 @@ class TestWorkflowOutputTypeMismatch:
             definition_key = _definition_key('no_output_workflow')
             task_a = TaskNode(fn=fn_a)
 
-        # Should not raise — no output to validate
+        with pytest.raises(WorkflowValidationError) as exc:
+            NoOutputWorkflow.build(app)
+
+        err = exc.value
+        assert err.code == ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert 'Meta.output' in err.message
+        assert 'int' in err.message
+
+    def test_none_output_type_allows_outputless_definition(self) -> None:
+        """WorkflowDefinition[None] may omit Meta.output."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+        app = self._make_app()
+
+        class NoOutputWorkflow(WorkflowDefinition[None]):
+            name = 'none_output_workflow'
+            definition_key = _definition_key('none_output_workflow')
+            task_a = TaskNode(fn=fn_a)
+
         spec = NoOutputWorkflow.build(app)
         assert spec.output is None
+
+    def test_any_output_type_allows_outputless_definition(self) -> None:
+        """WorkflowDefinition[Any] may omit Meta.output as a compatibility escape hatch."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+        app = self._make_app()
+
+        class NoOutputWorkflow(WorkflowDefinition[Any]):
+            name = 'any_outputless_workflow'
+            definition_key = _definition_key('any_outputless_workflow')
+            task_a = TaskNode(fn=fn_a)
+
+        spec = NoOutputWorkflow.build(app)
+        assert spec.output is None
+
+    def test_terminal_results_output_type_requires_explicit_output(self) -> None:
+        """WorkflowTerminalResults is top-level handle behavior, not a subworkflow output."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+        app = self._make_app()
+
+        class NoOutputWorkflow(WorkflowDefinition[WorkflowTerminalResults]):
+            name = 'terminal_results_outputless_workflow'
+            definition_key = _definition_key('terminal_results_outputless_workflow')
+            task_a = TaskNode(fn=fn_a)
+
+        with pytest.raises(WorkflowValidationError) as exc:
+            NoOutputWorkflow.build(app)
+
+        err = exc.value
+        assert err.code == ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert 'Meta.output' in err.message
 
     def test_subclass_compatible_output_accepted(self) -> None:
         """Subclass of declared type is compatible."""
