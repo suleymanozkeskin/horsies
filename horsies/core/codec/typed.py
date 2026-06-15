@@ -164,10 +164,16 @@ def encode_value(value: object, expected_type: TypeAnnotation) -> Json:
        through (bytes -> str, Decimal -> float, ...) at boundary
        positions and at all the JsonValue-derivative positions §3
        documents (`dict[str, JsonValue]`, `list[JsonValue]`, ...).
-    2. `TypeAdapter(expected_type).dump_python(value, mode='json')`.
-    3. `_scan_wire_json` rejects non-finite floats at any depth — TypeAdapter
+    2. `TypeAdapter(expected_type).validate_python(value)` rejects values
+       that do not satisfy `expected_type`. `dump_python` alone only
+       serializes — it coerces/passes a mistyped value (`dict` for a
+       `str` param, etc.) with a `PydanticSerializationUnexpectedValue`
+       warning instead of raising. Validating first makes the producer
+       fail closed, symmetric with `decode_value` on the consumer.
+    3. `TypeAdapter(expected_type).dump_python(validated, mode='json')`.
+    4. `_scan_wire_json` rejects non-finite floats at any depth — TypeAdapter
        preserves NaN/Inf even with `mode='json'`.
-    4. `_scan_reserved_keys` rejects user-originated reserved-namespace keys
+    5. `_scan_reserved_keys` rejects user-originated reserved-namespace keys
        (`__h_*` and `__builtin_task_code__`) at any depth.
 
     Args:
@@ -185,7 +191,8 @@ def encode_value(value: object, expected_type: TypeAnnotation) -> Json:
     """
     _apply_json_value_fence(value, expected_type)
     adapter = _get_adapter(expected_type)
-    dumped = adapter.dump_python(value, mode='json')
+    validated = adapter.validate_python(value)
+    dumped = adapter.dump_python(validated, mode='json')
     dumped_json = cast(Json, dumped)
     _scan_wire_json(dumped_json)
     if _is_task_error_type(expected_type):
