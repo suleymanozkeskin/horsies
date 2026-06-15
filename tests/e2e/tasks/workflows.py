@@ -34,7 +34,7 @@ def _workflow(*, name: str, tasks: list[Any], **kwargs: Any) -> Any:
 
 
 @app.task(task_name='e2e_wf_step')
-def step_task(step: str) -> TaskResult[str, TaskError]:
+def step_task(*, step: str) -> TaskResult[str, TaskError]:
     """Simple workflow step that returns the step name."""
     # Minimum 50ms execution to ensure distinguishable timestamps
     time.sleep(0.05)
@@ -42,7 +42,7 @@ def step_task(step: str) -> TaskResult[str, TaskError]:
 
 
 @app.task(task_name='e2e_wf_slow_step')
-def slow_step_task(step: str, delay_ms: int = 500) -> TaskResult[str, TaskError]:
+def slow_step_task(*, step: str, delay_ms: int = 500) -> TaskResult[str, TaskError]:
     """Workflow step with configurable delay for timing tests."""
     time.sleep(delay_ms / 1000)
     return TaskResult(ok=f'completed_{step}')
@@ -56,7 +56,7 @@ def final_result_task() -> TaskResult[dict[str, JsonValue], TaskError]:
 
 
 @app.task(task_name='e2e_wf_fail')
-def fail_task(error_code: str) -> TaskResult[int, TaskError]:
+def fail_task(*, error_code: str) -> TaskResult[int, TaskError]:
     """Always fails with the specified error code."""
     time.sleep(0.05)
     return TaskResult(
@@ -335,14 +335,14 @@ from horsies.core.models.workflow import WorkflowContext
 
 
 @app.task(task_name='e2e_wf_produce_int')
-def produce_int_task(value: int) -> TaskResult[int, TaskError]:
+def produce_int_task(*, value: int) -> TaskResult[int, TaskError]:
     """Produces an integer value."""
     time.sleep(0.05)
     return TaskResult(ok=value)
 
 
 @app.task(task_name='e2e_wf_double')
-def double_task(input_result: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
+def double_task(*, input_result: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
     """Doubles the input value from args_from injection."""
     time.sleep(0.05)
     if input_result.is_err():
@@ -352,7 +352,7 @@ def double_task(input_result: TaskResult[int, TaskError]) -> TaskResult[int, Tas
 
 @app.task(task_name='e2e_wf_sum_two')
 def sum_two_task(
-    first: TaskResult[int, TaskError],
+    *, first: TaskResult[int, TaskError],
     second: TaskResult[int, TaskError],
 ) -> TaskResult[int, TaskError]:
     """Sums two values from args_from injection."""
@@ -365,7 +365,7 @@ def sum_two_task(
 
 
 @app.task(task_name='e2e_wf_fail_with')
-def fail_with_task(error_code: str) -> TaskResult[int, TaskError]:
+def fail_with_task(*, error_code: str) -> TaskResult[int, TaskError]:
     """Returns an error with the specified code."""
     time.sleep(0.05)
     return TaskResult(
@@ -375,7 +375,7 @@ def fail_with_task(error_code: str) -> TaskResult[int, TaskError]:
 
 @app.task(task_name='e2e_wf_ctx_reader')
 def ctx_reader_task(
-    workflow_ctx: WorkflowContext | None = None,
+    *, workflow_ctx: WorkflowContext | None = None,
 ) -> TaskResult[int, TaskError]:
     """Reads integer value from workflow context."""
     time.sleep(0.05)
@@ -391,7 +391,7 @@ def ctx_reader_task(
 
 @app.task(task_name='e2e_wf_ctx_reader_str')
 def ctx_reader_str_task(
-    workflow_ctx: WorkflowContext | None = None,
+    *, workflow_ctx: WorkflowContext | None = None,
 ) -> TaskResult[str, TaskError]:
     """Reads string value from workflow context."""
     time.sleep(0.05)
@@ -412,7 +412,7 @@ def ctx_reader_str_task(
 
 @app.task(task_name='e2e_wf_ctx_sum')
 def ctx_sum_task(
-    workflow_ctx: WorkflowContext | None = None,
+    *, workflow_ctx: WorkflowContext | None = None,
 ) -> TaskResult[int, TaskError]:
     """Sums all integer results from workflow context."""
     time.sleep(0.05)
@@ -431,7 +431,7 @@ def ctx_sum_task(
 
 @app.task(task_name='e2e_wf_check_upstream_skipped')
 def check_upstream_skipped_task(
-    input_result: TaskResult[int, TaskError],
+    *, input_result: TaskResult[int, TaskError],
 ) -> TaskResult[str, TaskError]:
     """Checks if input is UPSTREAM_SKIPPED error."""
     time.sleep(0.05)
@@ -444,7 +444,7 @@ def check_upstream_skipped_task(
 
 
 @app.task(task_name='e2e_wf_passthrough')
-def passthrough_task(value: int) -> TaskResult[int, TaskError]:
+def passthrough_task(*, value: int) -> TaskResult[int, TaskError]:
     """Simple passthrough that returns the input value."""
     time.sleep(0.05)
     return TaskResult(ok=value)
@@ -452,7 +452,7 @@ def passthrough_task(value: int) -> TaskResult[int, TaskError]:
 
 @app.task(task_name='e2e_wf_mixed_reader')
 def mixed_reader_task(
-    from_args: TaskResult[int, TaskError],
+    *, from_args: TaskResult[int, TaskError],
     workflow_ctx: WorkflowContext | None = None,
 ) -> TaskResult[dict[str, int], TaskError]:
     """Reads from both args_from and workflow_ctx."""
@@ -480,7 +480,7 @@ def mixed_reader_task(
 
 
 @app.task(task_name='e2e_wf_produce_dict')
-def produce_dict_task(value: str) -> TaskResult[dict[str, JsonValue], TaskError]:
+def produce_dict_task(*, value: str) -> TaskResult[dict[str, JsonValue], TaskError]:
     """Produces a dict with nested structure."""
     time.sleep(0.05)
     return TaskResult(ok={'key': value, 'count': 42, 'nested': {'inner': True}})
@@ -488,7 +488,7 @@ def produce_dict_task(value: str) -> TaskResult[dict[str, JsonValue], TaskError]
 
 @app.task(task_name='e2e_wf_receive_dict')
 def receive_dict_task(
-    input_result: TaskResult[dict[str, JsonValue], TaskError],
+    *, input_result: TaskResult[dict[str, JsonValue], TaskError],
 ) -> TaskResult[dict[str, JsonValue], TaskError]:
     """Receives dict via args_from and returns it unchanged."""
     time.sleep(0.05)
@@ -499,7 +499,7 @@ def receive_dict_task(
 
 @app.task(task_name='e2e_wf_dual_reader')
 def dual_reader_task(
-    from_args: TaskResult[int, TaskError],
+    *, from_args: TaskResult[int, TaskError],
     workflow_ctx: WorkflowContext | None = None,
 ) -> TaskResult[dict[str, int], TaskError]:
     """Reads same node's result via both args_from and workflow_ctx."""
@@ -784,7 +784,7 @@ from horsies.core.models.tasks import RetryPolicy
 
 @app.task(task_name='e2e_wf_mark')
 def mark_task(
-    value: str,
+    *, value: str,
     workflow_ctx: WorkflowContext | None = None,
 ) -> TaskResult[str, TaskError]:
     """Returns the provided value."""
@@ -794,7 +794,7 @@ def mark_task(
 
 
 @app.task(task_name='e2e_wf_slow_mark')
-def slow_mark_task(value: str, delay_ms: int = 200) -> TaskResult[str, TaskError]:
+def slow_mark_task(*, value: str, delay_ms: int = 200) -> TaskResult[str, TaskError]:
     """Returns value after sleeping for delay_ms."""
     time.sleep(delay_ms / 1000)
     return TaskResult(ok=value)
@@ -805,7 +805,7 @@ def slow_mark_task(value: str, delay_ms: int = 200) -> TaskResult[str, TaskError
     retry_policy=RetryPolicy.exponential(base_seconds=1, max_retries=3, auto_retry_for=['RETRY_NEEDED']),
 )
 def retry_then_ok_task(
-    counter_file: str, succeed_on_attempt: int = 2
+    *, counter_file: str, succeed_on_attempt: int = 2
 ) -> TaskResult[str, TaskError]:
     """
     Fails until attempt number reaches succeed_on_attempt.
@@ -1034,13 +1034,13 @@ E2ESubPet: TypeAlias = Annotated[
 
 
 @app.task(task_name='e2e_sub_int_ok')
-def e2e_sub_int_ok_task(value: int = 11) -> TaskResult[int, TaskError]:
+def e2e_sub_int_ok_task(*, value: int = 11) -> TaskResult[int, TaskError]:
     time.sleep(0.05)
     return TaskResult(ok=value)
 
 
 @app.task(task_name='e2e_sub_int_fail')
-def e2e_sub_int_fail_task(error_code: str) -> TaskResult[int, TaskError]:
+def e2e_sub_int_fail_task(*, error_code: str) -> TaskResult[int, TaskError]:
     time.sleep(0.05)
     return TaskResult(
         err=TaskError(error_code=error_code, message=f'Subworkflow failed: {error_code}'),
@@ -1049,7 +1049,7 @@ def e2e_sub_int_fail_task(error_code: str) -> TaskResult[int, TaskError]:
 
 @app.task(task_name='e2e_sub_report_input')
 def e2e_sub_report_input_task(
-    input_is_err: bool,
+    *, input_is_err: bool,
     input_error_code: str | None,
     input_value: int | None,
 ) -> TaskResult[dict[str, JsonValue], TaskError]:
@@ -1063,7 +1063,7 @@ def e2e_sub_report_input_task(
 
 @app.task(task_name='e2e_sub_probe_failed_child')
 def e2e_sub_probe_failed_child_task(
-    child_result: TaskResult[int, TaskError],
+    *, child_result: TaskResult[int, TaskError],
     workflow_ctx: WorkflowContext | None = None,
 ) -> TaskResult[dict[str, JsonValue], TaskError]:
     time.sleep(0.05)
@@ -1121,7 +1121,7 @@ def e2e_sub_probe_failed_child_task(
 
 @app.task(task_name='e2e_sub_probe_success_ctx')
 def e2e_sub_probe_success_ctx_task(
-    workflow_ctx: WorkflowContext | None = None,
+    *, workflow_ctx: WorkflowContext | None = None,
 ) -> TaskResult[dict[str, JsonValue], TaskError]:
     time.sleep(0.05)
 
@@ -1171,7 +1171,7 @@ def e2e_sub_probe_success_ctx_task(
 
 @app.task(task_name='e2e_sub_pet_report')
 def e2e_sub_pet_report_task(
-    saw_dog_at_build: bool,
+    *, saw_dog_at_build: bool,
     type_name_at_build: str,
     kind_at_build: str | None,
     bark_volume_at_build: int | None,

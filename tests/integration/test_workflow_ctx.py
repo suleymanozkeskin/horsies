@@ -186,7 +186,7 @@ class TestWorkflowCtx:
 
         @app.task(task_name='ctx_inject_b')
         def ctx_reader(
-            workflow_ctx: WorkflowContext | None = None,
+            *, workflow_ctx: WorkflowContext | None = None,
         ) -> TaskResult[int, TaskError]:
             if workflow_ctx is None:
                 return TaskResult(err=TaskError(error_code='NO_CTX', message='missing'))
@@ -233,7 +233,7 @@ class TestWorkflowCtx:
 
         @app.task(task_name='no_ctx_from_b')
         def ctx_reader(
-            workflow_ctx: WorkflowContext | None = None,
+            *, workflow_ctx: WorkflowContext | None = None,
         ) -> TaskResult[int, TaskError]:
             if workflow_ctx is None:
                 return TaskResult(ok=0)
@@ -265,7 +265,7 @@ class TestWorkflowCtx:
 
         @app.task(task_name='meta_only_b')
         def meta_reader(
-            workflow_meta: WorkflowMeta | None = None,
+            *, workflow_meta: WorkflowMeta | None = None,
         ) -> TaskResult[int, TaskError]:
             if workflow_meta is None:
                 return TaskResult(ok=-1)
@@ -301,7 +301,7 @@ class TestWorkflowCtx:
 
         @app.task(task_name='ctx_multi_c')
         def ctx_reader(
-            workflow_ctx: WorkflowContext | None = None,
+            *, workflow_ctx: WorkflowContext | None = None,
         ) -> TaskResult[int, TaskError]:
             if workflow_ctx is None:
                 return TaskResult(err=TaskError(error_code='NO_CTX', message='missing'))
@@ -346,7 +346,7 @@ class TestWorkflowCtx:
 
         @app.task(task_name='ctx_skipped_c')
         def ctx_reader(
-            workflow_ctx: WorkflowContext | None = None,
+            *, workflow_ctx: WorkflowContext | None = None,
         ) -> TaskResult[str, TaskError]:
             if workflow_ctx is None:
                 return TaskResult(err=TaskError(error_code='NO_CTX', message='missing'))
@@ -402,7 +402,7 @@ class TestWorkflowCtx:
 
         @app.task(task_name='ctx_failed_c')
         def ctx_reader(
-            workflow_ctx: WorkflowContext | None = None,
+            *, workflow_ctx: WorkflowContext | None = None,
         ) -> TaskResult[str, TaskError]:
             if workflow_ctx is None:
                 return TaskResult(err=TaskError(error_code='NO_CTX', message='missing'))
@@ -478,7 +478,7 @@ class TestWorkflowCtx:
 
         @app.task(task_name='ctx_worker_b')
         def ctx_worker_b(
-            workflow_ctx: WorkflowContext | None = None,
+            *, workflow_ctx: WorkflowContext | None = None,
         ) -> TaskResult[int, TaskError]:
             if workflow_ctx is None:
                 return TaskResult(err=TaskError(error_code='NO_CTX', message='missing'))
@@ -548,7 +548,7 @@ class TestWorkflowCtx:
 
         @app.task(task_name='meta_worker_b')
         def meta_worker_b(
-            workflow_meta: WorkflowMeta,
+            *, workflow_meta: WorkflowMeta,
         ) -> TaskResult[str, TaskError]:
             return TaskResult(
                 ok=f'{workflow_meta.workflow_id}:{workflow_meta.task_index}:{workflow_meta.task_name}'
@@ -619,7 +619,7 @@ class TestWorkflowCtx:
 
         @app.task(task_name='ctx_missing_id_b')
         def ctx_missing_id_b(
-            workflow_ctx: WorkflowContext | None = None,
+            *, workflow_ctx: WorkflowContext | None = None,
         ) -> TaskResult[int, TaskError]:
             if workflow_ctx is None:
                 return TaskResult(err=TaskError(error_code='NO_CTX', message='missing'))
@@ -689,7 +689,7 @@ class TestWorkflowCtx:
 
         @app.task(task_name='e009_b')
         def ctx_reader(
-            workflow_ctx: WorkflowContext | None = None,
+            *, workflow_ctx: WorkflowContext | None = None,
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
 
@@ -719,7 +719,7 @@ class TestWorkflowCtx:
 
         @app.task(task_name='key_err_b')
         def ctx_reader(
-            workflow_ctx: WorkflowContext | None = None,
+            *, workflow_ctx: WorkflowContext | None = None,
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
 
@@ -758,7 +758,7 @@ class TestWorkflowCtx:
 
         @app.task(task_name='has_res_b')
         def ctx_reader(
-            workflow_ctx: WorkflowContext | None = None,
+            *, workflow_ctx: WorkflowContext | None = None,
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
 
@@ -790,7 +790,7 @@ class TestWorkflowCtx:
 
         @app.task(task_name='has_res_false_b')
         def ctx_reader(
-            workflow_ctx: WorkflowContext | None = None,
+            *, workflow_ctx: WorkflowContext | None = None,
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
 
@@ -830,7 +830,7 @@ class TestWorkflowCtx:
 
         @app.task(task_name='nodekey_b')
         def ctx_reader(
-            workflow_ctx: WorkflowContext | None = None,
+            *, workflow_ctx: WorkflowContext | None = None,
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
 
@@ -867,7 +867,7 @@ class TestWorkflowCtx:
 
         @app.task(task_name='empty_ctx_b')
         def ctx_reader(
-            workflow_ctx: WorkflowContext | None = None,
+            *, workflow_ctx: WorkflowContext | None = None,
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
 
@@ -896,7 +896,7 @@ class TestWorkflowCtx:
         task_a = make_simple_task(app, 'skip_ctx_a')
 
         @app.task(task_name='skip_ctx_b')
-        def no_ctx_task(value: int = 0) -> TaskResult[int, TaskError]:
+        def no_ctx_task(*, value: int = 0) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value + 100)
 
         # Build a workflow where node_b has workflow_ctx_from but the function

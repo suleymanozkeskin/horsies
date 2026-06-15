@@ -54,7 +54,7 @@ def healthcheck() -> TaskResult[str, TaskError]:
 
 
 @app.task(task_name='e2e_hook_unfixed_db_task')
-def db_task(sleep_ms: int) -> TaskResult[str, TaskError]:
+def db_task(*, sleep_ms: int) -> TaskResult[str, TaskError]:
     """Check out the app-owned engine and hold a connection across a slow query."""
     with app_engine.connect() as conn:
         conn.execute(text('SELECT pg_sleep(:s)'), {'s': sleep_ms / 1000.0})

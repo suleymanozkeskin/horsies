@@ -65,7 +65,7 @@ def healthcheck() -> TaskResult[str, TaskError]:
 
 
 @app.task(task_name='e2e_requeue_guard_task')
-def requeue_guard_task(token: str) -> TaskResult[str, TaskError]:
+def requeue_guard_task(*, token: str) -> TaskResult[str, TaskError]:
     """Return the token. Appends a marker line so executions are countable."""
     from pathlib import Path
 

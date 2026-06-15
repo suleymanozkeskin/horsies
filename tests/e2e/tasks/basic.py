@@ -19,13 +19,13 @@ def healthcheck() -> TaskResult[str, TaskError]:
 
 
 @app.task(task_name='e2e_simple')
-def simple_task(x: int) -> TaskResult[int, TaskError]:
+def simple_task(*, x: int) -> TaskResult[int, TaskError]:
     return TaskResult(ok=x * 2)
 
 
 @app.task(task_name='e2e_primitives')
 def primitives_task(
-    i: int,
+    *, i: int,
     f: float,
     s: str,
     b: bool,
@@ -36,7 +36,7 @@ def primitives_task(
 
 @app.task(task_name='e2e_collections')
 def collections_task(
-    lst: list[int],
+    *, lst: list[int],
     dct: dict[str, int],
     tpl: tuple[int, ...],
 ) -> TaskResult[dict[str, JsonValue], TaskError]:
@@ -49,7 +49,7 @@ class UserInput(BaseModel):
 
 
 @app.task(task_name='e2e_pydantic')
-def pydantic_task(user: UserInput) -> TaskResult[str, TaskError]:
+def pydantic_task(*, user: UserInput) -> TaskResult[str, TaskError]:
     return TaskResult(ok=f'{user.name} is {user.age}')
 
 
@@ -60,13 +60,13 @@ class DataInput:
 
 
 @app.task(task_name='e2e_dataclass')
-def dataclass_task(data: DataInput) -> TaskResult[int, TaskError]:
+def dataclass_task(*, data: DataInput) -> TaskResult[int, TaskError]:
     return TaskResult(ok=data.x + data.y)
 
 
 @app.task(task_name='e2e_kwargs')
 def kwargs_task(
-    required: int,
+    *, required: int,
     optional: str = 'default',
     multiplier: int = 1,
 ) -> TaskResult[str, TaskError]:
@@ -122,7 +122,7 @@ def error_code_task() -> TaskResult[str, TaskError]:
 
 
 @app.task(task_name='e2e_slow')
-def slow_task(duration_ms: int) -> TaskResult[str, TaskError]:
+def slow_task(*, duration_ms: int) -> TaskResult[str, TaskError]:
     """Task that sleeps for specified duration."""
     import time
 
@@ -131,7 +131,7 @@ def slow_task(duration_ms: int) -> TaskResult[str, TaskError]:
 
 
 @app.task(task_name='e2e_timeout_sleeper', timeout_ms=2_000)
-def timeout_sleeper(duration_ms: int) -> TaskResult[str, TaskError]:
+def timeout_sleeper(*, duration_ms: int) -> TaskResult[str, TaskError]:
     """Sleeps past its 2s timeout_ms so the parent-side deadline kill fires."""
     import time
 
@@ -155,7 +155,7 @@ def unserializable_result_task() -> TaskResult[int, TaskError]:
 
 
 @app.task(task_name='e2e_idempotent')
-def idempotent_task(token: str) -> TaskResult[str, TaskError]:
+def idempotent_task(*, token: str) -> TaskResult[str, TaskError]:
     """
     Task that uses atomic file creation to detect double execution.
     If the file already exists (token already used), returns an error.

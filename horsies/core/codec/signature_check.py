@@ -144,6 +144,18 @@ def check_task_signature(
                 reason='strict-serde rejects positional args; positional-only params cannot be bound by keyword',
                 fix='remove the `/` from the signature so the parameter is keyword-bindable',
             ))
+        if param.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD:
+            raise SignatureValidationError(_format_error(
+                task_name=task_name,
+                position=f"parameter '{param_name}'",
+                banned='positionally-bindable parameter',
+                reason='task parameters must be keyword-only; the queue transmits arguments by name and rejects positional args at send time',
+                fix=(
+                    "add a bare `*,` before the first parameter so every "
+                    "parameter is keyword-only: "
+                    "`def f(*, x: YourType) -> ...`"
+                ),
+            ))
 
         annot = hints.get(param_name)
         if annot is None:

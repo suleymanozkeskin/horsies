@@ -777,7 +777,7 @@ class TestNodeBuilder:
         session, broker, app = setup
 
         @app.task(task_name='node_builder_task')
-        def compute(value: int, multiplier: float = 1.0) -> TaskResult[int, TaskError]:
+        def compute(*, value: int, multiplier: float = 1.0) -> TaskResult[int, TaskError]:
             return TaskResult(ok=int(value * multiplier))
 
         # Use .node() to create TaskNode
@@ -824,11 +824,11 @@ class TestNodeBuilder:
         session, broker, app = setup
 
         @app.task(task_name='node_builder_root')
-        def root_task(x: int) -> TaskResult[int, TaskError]:
+        def root_task(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x * 2)
 
         @app.task(task_name='node_builder_child')
-        def child_task(y: int) -> TaskResult[int, TaskError]:
+        def child_task(*, y: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=y + 1)
 
         # Create nodes using .node() with dependencies
@@ -877,7 +877,7 @@ class TestNodeBuilder:
         session, broker, app = setup
 
         @app.task(task_name='node_opts_task')
-        def opts_task(val: str) -> TaskResult[str, TaskError]:
+        def opts_task(*, val: str) -> TaskResult[str, TaskError]:
             return TaskResult(ok=val.upper())
 
         # Create node with various options
@@ -915,12 +915,12 @@ class TestNodeBuilder:
         session, broker, app = setup
 
         @app.task(task_name='nb_producer')
-        def producer(value: int) -> TaskResult[int, TaskError]:
+        def producer(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
         @app.task(task_name='nb_consumer')
         def consumer(
-            upstream: TaskResult[int, TaskError],
+            *, upstream: TaskResult[int, TaskError],
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=upstream.unwrap() + 1)
 
@@ -961,7 +961,7 @@ class TestNodeBuilder:
         session, broker, app = setup
 
         @app.task(task_name='nb_ctx_src')
-        def ctx_source(value: int) -> TaskResult[int, TaskError]:
+        def ctx_source(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
         ctx_receiver = make_ctx_receiver_task(app, 'nb_ctx_recv')
@@ -1002,7 +1002,7 @@ class TestNodeBuilder:
         session, broker, app = setup
 
         @app.task(task_name='nb_good_until')
-        def timed_task(value: int) -> TaskResult[int, TaskError]:
+        def timed_task(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
         deadline = datetime(2099, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
@@ -1040,12 +1040,12 @@ class TestNodeBuilder:
         session, broker, app = setup
 
         @app.task(task_name='fn_producer')
-        def producer(value: int) -> TaskResult[int, TaskError]:
+        def producer(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
         @app.task(task_name='fn_consumer')
         def consumer(
-            upstream: TaskResult[int, TaskError],
+            *, upstream: TaskResult[int, TaskError],
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=upstream.unwrap() + 1)
 
@@ -1085,12 +1085,12 @@ class TestNodeBuilder:
         session, broker, app = setup
 
         @app.task(task_name='fn_mix_producer')
-        def producer(value: int) -> TaskResult[int, TaskError]:
+        def producer(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
         @app.task(task_name='fn_mix_consumer')
         def consumer(
-            upstream: TaskResult[int, TaskError],
+            *, upstream: TaskResult[int, TaskError],
             multiplier: int = 1,
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=upstream.unwrap() * multiplier)

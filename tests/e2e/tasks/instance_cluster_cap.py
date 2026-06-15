@@ -53,7 +53,7 @@ def healthcheck() -> TaskResult[str, TaskError]:
 
 
 @app.task(task_name='e2e_cluster_cap_slow')
-def slow_task(duration_ms: int) -> TaskResult[str, TaskError]:
+def slow_task(*, duration_ms: int) -> TaskResult[str, TaskError]:
     """Task that sleeps for specified duration."""
     import time
 

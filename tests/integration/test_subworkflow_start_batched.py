@@ -36,13 +36,13 @@ def _child_def(
     suffix = uuid.uuid4().hex[:8]
 
     @app.task(task_name=f'bulk_child_{suffix}')
-    def child_task(value: int) -> TaskResult[int, TaskError]:
+    def child_task(*, value: int) -> TaskResult[int, TaskError]:
         return TaskResult(ok=value)
 
     corrupt_fn: Any = None
     if corrupt_root:
         @app.task(task_name=f'bulk_child_corrupt_{suffix}')
-        def corrupt_task(value: int) -> TaskResult[int, TaskError]:
+        def corrupt_task(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
         corrupt_task.task_options_json = '{not-json'  # type: ignore[attr-defined]
@@ -289,7 +289,7 @@ class TestBulkChildStart:
         suffix = uuid.uuid4().hex[:8]
 
         @app.task(task_name=f'nested_pause_fast_{suffix}')
-        def fast_task(value: int) -> TaskResult[int, TaskError]:
+        def fast_task(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
         @app.task(task_name=f'nested_pause_bad_{suffix}')

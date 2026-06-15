@@ -78,7 +78,7 @@ class KwargsChildWorkflow(WorkflowDefinition[int]):
         cls.last_params = {'value': value}
 
         @app.task(task_name='kwargs_child_task')
-        def child_task(value: int) -> TaskResult[int, TaskError]:
+        def child_task(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
         raw_value = value.unwrap() if value.is_ok() else 0
@@ -108,7 +108,7 @@ class StaticKwargsChildWorkflow(WorkflowDefinition[int]):
     @classmethod
     def build_with(cls, app: Horsies, value: int) -> Any:
         @app.task(task_name='static_kwargs_child_task')
-        def child_task(value: int) -> TaskResult[int, TaskError]:
+        def child_task(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
         node = TaskNode(fn=child_task, kwargs={'value': value})

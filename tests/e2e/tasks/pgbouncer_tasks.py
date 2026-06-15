@@ -12,10 +12,10 @@ def healthcheck() -> TaskResult[str, TaskError]:
 
 
 @app.task(task_name="pgbouncer_e2e_double")
-def double(value: int) -> TaskResult[int, TaskError]:
+def double(*, value: int) -> TaskResult[int, TaskError]:
     return TaskResult(ok=value * 2)
 
 
 @app.task(task_name="pgbouncer_e2e_workflow_step")
-def workflow_step(value: int) -> TaskResult[int, TaskError]:
+def workflow_step(*, value: int) -> TaskResult[int, TaskError]:
     return TaskResult(ok=value + 1)

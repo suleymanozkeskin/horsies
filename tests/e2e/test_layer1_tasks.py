@@ -460,7 +460,7 @@ def test_default_mode_rejects_queue_name() -> None:
     with pytest.raises(ConfigurationError, match='cannot specify queue_name'):
 
         @default_instance.app.task(task_name='e2e_default_reject', queue_name='custom')
-        def default_reject_task(x: int) -> TaskResult[int, TaskError]:
+        def default_reject_task(*, x: int) -> TaskResult[int, TaskError]:
             return basic_tasks.simple_task(x)
 
 
