@@ -24,16 +24,28 @@ config = AppConfig(
 app = Horsies(config)
 
 @app.task("process_order")
-def process_order(order_id: int) -> TaskResult[str, TaskError]:
+def process_order(*, order_id: int) -> TaskResult[str, TaskError]:
     # Do work
     return TaskResult(ok=f"Order {order_id} processed")
 ```
+
+### Parameters are keyword-only
+
+Every task parameter must be keyword-only: declare them after a bare `*,`. The leading `*` forces callers to pass arguments by name.
+
+```python
+@app.task("send_email")
+def send_email(*, to: str, subject: str) -> TaskResult[None, TaskError]:
+    ...
+```
+
+The queue transmits arguments by name only — the signature is the wire contract. A positionally-bindable parameter (`def f(order_id: int)`) is rejected at registration, so the error surfaces when the app loads, not at send time. With keyword-only parameters, a positional call (`process_order.send(1)`) also fails the type checker at the call site rather than at runtime.
 
 ### Return Success
 
 ```python
 @app.task("compute")
-def compute(x: int) -> TaskResult[int, TaskError]:
+def compute(*, x: int) -> TaskResult[int, TaskError]:
     return TaskResult(ok=x * 2)
 ```
 
@@ -52,7 +64,7 @@ Domain errors (expected failures):
 
 ```python
 @app.task("validate_input")
-def validate_input(data: dict[str, JsonValue]) -> TaskResult[dict[str, JsonValue], TaskError]:
+def validate_input(*, data: dict[str, JsonValue]) -> TaskResult[dict[str, JsonValue], TaskError]:
     if not data.get("email"):
         return TaskResult(err=TaskError(
             error_code="MISSING_EMAIL",
@@ -135,7 +147,7 @@ def urgent_task() -> TaskResult[str, TaskError]:
 
 ```python
 @app.task("resize_video", timeout_ms=120_000)
-def resize_video(video_id: str) -> TaskResult[str, TaskError]:
+def resize_video(*, video_id: str) -> TaskResult[str, TaskError]:
     ...
 ```
 
@@ -147,7 +159,7 @@ On expiry, the worker kills the child process and the task fails with `TASK_TIME
     timeout_ms=120_000,
     retry_policy=RetryPolicy.fixed([60, 300], auto_retry_for=["TASK_TIMEOUT"]),
 )
-def resize_video(video_id: str) -> TaskResult[str, TaskError]:
+def resize_video(*, video_id: str) -> TaskResult[str, TaskError]:
     ...
 ```
 

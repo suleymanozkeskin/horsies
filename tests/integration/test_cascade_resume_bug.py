@@ -75,7 +75,7 @@ class PausingChildWorkflow(WorkflowDefinition[int]):
             return TaskResult(ok=1)
 
         @app.task(task_name='pausing_child_d')
-        def child_task_d(value: int) -> TaskResult[int, TaskError]:
+        def child_task_d(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value * 2)
 
         node_c: TaskNode[int] = TaskNode(fn=child_task_c)

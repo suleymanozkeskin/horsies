@@ -204,7 +204,7 @@ class TestCheckValidatesSchedules:
         app = _make_real_app(config)
 
         @app.task('my_task')
-        def my_task(x: int) -> TaskResult[int, TaskError]:
+        def my_task(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         return app

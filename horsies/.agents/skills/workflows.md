@@ -404,7 +404,7 @@ class WorkflowContext(BaseModel):
 
 ```python
 @app.task("aggregate")
-def aggregate(workflow_ctx: WorkflowContext | None = None) -> TaskResult[Report, TaskError]:
+def aggregate(*, workflow_ctx: WorkflowContext | None = None) -> TaskResult[Report, TaskError]:
     if workflow_ctx is None:
         return TaskResult(err=TaskError(error_code="NO_CTX"))
     ra = workflow_ctx.result_for(ParallelPipeline.a)  # TaskResult[int, TaskError]
@@ -495,7 +495,7 @@ no-default targets (`WORKFLOW_INVALID_JOIN`).
 
 ```python
 @app.task("process")
-def process(data: TaskResult[int, TaskError]) -> TaskResult[str, TaskError]:
+def process(*, data: TaskResult[int, TaskError]) -> TaskResult[str, TaskError]:
     if data.is_err():
         return TaskResult(err=data.err_value)
     return TaskResult(ok=str(data.ok_value))

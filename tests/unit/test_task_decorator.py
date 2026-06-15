@@ -808,7 +808,7 @@ class TestCreateTaskWrapperValidation:
     def test_wrong_type_args_count_raises(self) -> None:
         """TaskResult with wrong number of type args raises TASK_INVALID_RETURN_TYPE."""
         # Use raw TaskResult without type params (get_args returns ())
-        def bad_fn(x: int) -> TaskResult:  # type: ignore[type-arg]
+        def bad_fn(*, x: int) -> TaskResult:  # type: ignore[type-arg]
             return TaskResult(ok=x)  # pyright: ignore[reportUnknownVariableType]
 
         app = _make_app()
@@ -819,7 +819,7 @@ class TestCreateTaskWrapperValidation:
 
     def test_valid_function_creates_callable_wrapper(self) -> None:
         """Valid function produces a wrapper with correct task_name."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -834,7 +834,7 @@ class TestCreateTaskWrapperValidation:
             def helper(value: int) -> int:
                 return value + 1
 
-            def good_fn(x: int) -> TaskResult[int, TaskError]:
+            def good_fn(*, x: int) -> TaskResult[int, TaskError]:
                 return TaskResult(ok=helper(x))
 
             return good_fn
@@ -842,7 +842,7 @@ class TestCreateTaskWrapperValidation:
         app = _make_app()
         wrapper = create_task_wrapper(make_task(), app, 'test.helper_closure')
 
-        result = wrapper(41)
+        result = wrapper(x=41)
         assert result.is_ok()
         assert result.ok == 42
 
@@ -851,7 +851,7 @@ class TestCreateTaskWrapperValidation:
         def make_task():
             helper = lambda value: value + 1  # noqa: E731
 
-            def good_fn(x: int) -> TaskResult[int, TaskError]:
+            def good_fn(*, x: int) -> TaskResult[int, TaskError]:
                 return TaskResult(ok=helper(x))
 
             return good_fn
@@ -859,7 +859,7 @@ class TestCreateTaskWrapperValidation:
         app = _make_app()
         wrapper = create_task_wrapper(make_task(), app, 'test.lambda_helper_closure')
 
-        result = wrapper(41)
+        result = wrapper(x=41)
         assert result.is_ok()
         assert result.ok == 42
 
@@ -876,7 +876,7 @@ class TestCreateTaskWrapperValidation:
             def helper(values: tuple[int, ...]) -> int:
                 return sum(values)
 
-            def wrapper(values: tuple[int, int]) -> TaskResult[int, TaskError]:
+            def wrapper(*, values: tuple[int, int]) -> TaskResult[int, TaskError]:
                 return TaskResult(ok=helper(values))
 
             return wrapper
@@ -899,7 +899,7 @@ class TestCreateTaskWrapperValidation:
             return wrapper
 
         @passthrough
-        def bad_fn(x: int) -> TaskResult[int, TaskError]:
+        def bad_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -918,7 +918,7 @@ class TestCreateTaskWrapperValidation:
             return wrapper
 
         @passthrough
-        def bad_fn(x: int) -> TaskResult[int, TaskError]:
+        def bad_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -939,26 +939,26 @@ class TestCreateTaskWrapperExecution:
 
     def test_successful_execution(self) -> None:
         """Calling wrapper with valid function returns TaskResult(ok=...)."""
-        def add_one(x: int) -> TaskResult[int, TaskError]:
+        def add_one(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x + 1)
 
         app = _make_app()
         wrapper = create_task_wrapper(add_one, app, 'test.add_one')
 
-        result = wrapper(5)
+        result = wrapper(x=5)
 
         assert result.is_ok()
         assert result.ok == 6
 
     def test_returns_none_produces_task_exception(self) -> None:
         """Function returning None produces TASK_EXCEPTION error."""
-        def bad_fn(x: int) -> TaskResult[int, TaskError]:
+        def bad_fn(*, x: int) -> TaskResult[int, TaskError]:
             return None  # type: ignore[return-value]
 
         app = _make_app()
         wrapper = create_task_wrapper(bad_fn, app, 'test.bad_fn')
 
-        result = wrapper(1)
+        result = wrapper(x=1)
 
         assert result.is_err()
         assert result.err is not None
@@ -967,13 +967,13 @@ class TestCreateTaskWrapperExecution:
 
     def test_return_type_mismatch_produces_error(self) -> None:
         """Returning wrong ok type produces RETURN_TYPE_MISMATCH."""
-        def bad_fn(x: int) -> TaskResult[int, TaskError]:
+        def bad_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok='not-an-int')  # type: ignore[arg-type]
 
         app = _make_app()
         wrapper = create_task_wrapper(bad_fn, app, 'test.bad_fn')
 
-        result = wrapper(1)
+        result = wrapper(x=1)
 
         assert result.is_err()
         assert result.err is not None
@@ -986,13 +986,13 @@ class TestCreateTaskWrapperExecution:
         in-process caller must observe the same 5 a wire consumer decodes,
         not the original '5'.
         """
-        def coercible_fn(x: int) -> TaskResult[int, TaskError]:
+        def coercible_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok='5')  # type: ignore[arg-type]
 
         app = _make_app()
         wrapper = create_task_wrapper(coercible_fn, app, 'test.coercible')
 
-        result = wrapper(1)
+        result = wrapper(x=1)
 
         assert result.is_ok()
         assert result.ok == 5
@@ -1000,24 +1000,24 @@ class TestCreateTaskWrapperExecution:
 
     def test_keyboard_interrupt_propagates(self) -> None:
         """KeyboardInterrupt re-raises for graceful worker shutdown."""
-        def interrupting_fn(x: int) -> TaskResult[int, TaskError]:
+        def interrupting_fn(*, x: int) -> TaskResult[int, TaskError]:
             raise KeyboardInterrupt
 
         app = _make_app()
         wrapper = create_task_wrapper(interrupting_fn, app, 'test.interrupt')
 
         with pytest.raises(KeyboardInterrupt):
-            wrapper(1)
+            wrapper(x=1)
 
     def test_workflow_context_missing_id_error(self) -> None:
         """WorkflowContextMissingIdError produces WORKFLOW_CTX_MISSING_ID."""
-        def ctx_fn(x: int) -> TaskResult[int, TaskError]:
+        def ctx_fn(*, x: int) -> TaskResult[int, TaskError]:
             raise WorkflowContextMissingIdError('missing node id')
 
         app = _make_app()
         wrapper = create_task_wrapper(ctx_fn, app, 'test.ctx_fn')
 
-        result = wrapper(1)
+        result = wrapper(x=1)
 
         assert result.is_err()
         assert result.err is not None
@@ -1029,7 +1029,7 @@ class TestCreateTaskWrapperExecution:
         class CustomError(Exception):
             pass
 
-        def failing_fn(x: int) -> TaskResult[int, TaskError]:
+        def failing_fn(*, x: int) -> TaskResult[int, TaskError]:
             raise CustomError('kaboom')
 
         mapper: ExceptionMapper = {CustomError: 'CUSTOM_MAPPED'}
@@ -1041,7 +1041,7 @@ class TestCreateTaskWrapperExecution:
             exception_mapper=mapper,
         )
 
-        result = wrapper(1)
+        result = wrapper(x=1)
 
         assert result.is_err()
         assert result.err is not None
@@ -1049,13 +1049,13 @@ class TestCreateTaskWrapperExecution:
 
     def test_generic_exception_falls_back_to_global_default(self) -> None:
         """Without mapper match, uses global default_unhandled_error_code."""
-        def failing_fn(x: int) -> TaskResult[int, TaskError]:
+        def failing_fn(*, x: int) -> TaskResult[int, TaskError]:
             raise ValueError('oops')
 
         app = _make_app(default_unhandled_error_code='UNHANDLED_EXCEPTION')
         wrapper = create_task_wrapper(failing_fn, app, 'test.failing_fn')
 
-        result = wrapper(1)
+        result = wrapper(x=1)
 
         assert result.is_err()
         assert result.err is not None
@@ -1074,20 +1074,20 @@ class TestCreateTaskWrapperIntrospection:
 
     def test_signature_reflects_original_function(self) -> None:
         """inspect.signature resolves to the task's real params, not (*args, **kwargs)."""
-        def my_task(x: int, *, label: str = 'hi') -> TaskResult[int, TaskError]:
+        def my_task(*, x: int, label: str = 'hi') -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         wrapper = create_task_wrapper(my_task, _make_app(), 'test.my_task')
 
         sig = inspect.signature(wrapper)
         assert list(sig.parameters) == ['x', 'label']
-        assert sig.parameters['x'].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        assert sig.parameters['x'].kind is inspect.Parameter.KEYWORD_ONLY
         assert sig.parameters['label'].kind is inspect.Parameter.KEYWORD_ONLY
         assert sig.parameters['label'].default == 'hi'
 
     def test_wrapped_points_to_original_function(self) -> None:
         """__wrapped__ is set so inspect.unwrap reaches the raw function."""
-        def my_task(x: int) -> TaskResult[int, TaskError]:
+        def my_task(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         wrapper = create_task_wrapper(my_task, _make_app(), 'test.my_task')
@@ -1107,7 +1107,7 @@ class TestCreateTaskWrapperSend:
 
     def test_send_suppressed_returns_send_suppressed(self) -> None:
         """When sends are suppressed, returns Err(SEND_SUPPRESSED)."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app(suppress_sends=True)
@@ -1123,7 +1123,7 @@ class TestCreateTaskWrapperSend:
 
     def test_send_queue_validation_failure_returns_validation_error(self) -> None:
         """Queue validation error returns Err(VALIDATION_FAILED)."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1141,7 +1141,7 @@ class TestCreateTaskWrapperSend:
 
     def test_send_success_returns_ok_with_handle(self) -> None:
         """Successful send returns Ok(TaskHandle) with broker_mode=True."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1159,7 +1159,7 @@ class TestCreateTaskWrapperSend:
 
     def test_with_options_good_until_applies_to_this_send(self) -> None:
         """with_options(good_until=...) sets the expiry on the concrete send."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1183,7 +1183,7 @@ class TestCreateTaskWrapperSend:
 
     def test_with_options_naive_good_until_returns_validation_error(self) -> None:
         """Per-send good_until keeps the same timezone-aware datetime contract."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1201,7 +1201,7 @@ class TestCreateTaskWrapperSend:
 
     def test_with_options_none_clears_existing_task_options_good_until(self) -> None:
         """with_options(good_until=None) explicitly clears stale legacy defaults."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1225,7 +1225,7 @@ class TestCreateTaskWrapperSend:
 
     def test_send_broker_failure_returns_enqueue_error_with_payload(self) -> None:
         """Broker Err result during enqueue returns Err(ENQUEUE_FAILED) with payload."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1262,7 +1262,7 @@ class TestCreateTaskWrapperSendAsync:
     @pytest.mark.asyncio
     async def test_send_async_suppressed(self) -> None:
         """When sends suppressed, send_async returns Err(SEND_SUPPRESSED)."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app(suppress_sends=True)
@@ -1276,7 +1276,7 @@ class TestCreateTaskWrapperSendAsync:
     @pytest.mark.asyncio
     async def test_send_async_success(self) -> None:
         """Successful async send returns Ok(TaskHandle) with broker_mode=True."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1295,7 +1295,7 @@ class TestCreateTaskWrapperSendAsync:
     @pytest.mark.asyncio
     async def test_with_options_send_async_sets_good_until(self) -> None:
         """with_options(good_until=...) is honored by send_async()."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1320,7 +1320,7 @@ class TestCreateTaskWrapperSendAsync:
     @pytest.mark.asyncio
     async def test_send_async_broker_failure_returns_enqueue_error(self) -> None:
         """Broker Err result during async enqueue returns Err(ENQUEUE_FAILED)."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1343,7 +1343,7 @@ class TestCreateTaskWrapperSendAsync:
     @pytest.mark.asyncio
     async def test_send_async_enqueue_raises_returns_enqueue_error(self) -> None:
         """Async enqueue non-connection exception returns non-retryable Err(ENQUEUE_FAILED)."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1363,7 +1363,7 @@ class TestCreateTaskWrapperSendAsync:
     @pytest.mark.asyncio
     async def test_send_async_queue_validation_failure(self) -> None:
         """Queue validation error in send_async returns Err(VALIDATION_FAILED)."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1390,7 +1390,7 @@ class TestCreateTaskWrapperSchedule:
 
     def test_schedule_suppressed_returns_send_suppressed(self) -> None:
         """When sends suppressed, schedule() returns SEND_SUPPRESSED error."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app(suppress_sends=True)
@@ -1403,7 +1403,7 @@ class TestCreateTaskWrapperSchedule:
 
     def test_schedule_success(self) -> None:
         """Successful schedule returns broker-mode handle with delay."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1425,7 +1425,7 @@ class TestCreateTaskWrapperSchedule:
 
     def test_with_options_schedule_sets_good_until(self) -> None:
         """with_options(good_until=...) is honored by schedule()."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1450,7 +1450,7 @@ class TestCreateTaskWrapperSchedule:
 
     def test_schedule_broker_exception_returns_enqueue_failed(self) -> None:
         """Broker Err result during schedule returns ENQUEUE_FAILED."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1471,7 +1471,7 @@ class TestCreateTaskWrapperSchedule:
 
     def test_schedule_queue_validation_failure(self) -> None:
         """Queue validation error in schedule returns VALIDATION_FAILED."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1488,7 +1488,7 @@ class TestCreateTaskWrapperSchedule:
 
     def test_schedule_negative_delay_rejected(self) -> None:
         """A negative delay is rejected before reaching the broker."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1505,7 +1505,7 @@ class TestCreateTaskWrapperSchedule:
 
     def test_schedule_zero_delay_allowed(self) -> None:
         """delay=0 is valid (enqueue now) so dynamically computed delays need no branch."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1521,7 +1521,7 @@ class TestCreateTaskWrapperSchedule:
 
     def test_schedule_none_delay_rejected(self) -> None:
         """A None delay returns Err(VALIDATION_FAILED), not a raw TypeError."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1538,7 +1538,7 @@ class TestCreateTaskWrapperSchedule:
 
     def test_schedule_string_delay_rejected(self) -> None:
         """A str delay returns Err(VALIDATION_FAILED), not a raw TypeError."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1555,7 +1555,7 @@ class TestCreateTaskWrapperSchedule:
 
     def test_schedule_bool_delay_rejected(self) -> None:
         """A bool delay is rejected: schedule(False) silently meaning 0 is a footgun."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1572,7 +1572,7 @@ class TestCreateTaskWrapperSchedule:
 
     def test_schedule_float_delay_rejected(self) -> None:
         """A float delay is rejected (signature is int)."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1589,7 +1589,7 @@ class TestCreateTaskWrapperSchedule:
 
     def test_with_options_schedule_negative_delay_rejected(self) -> None:
         """The with_options(...).schedule() path validates the delay too."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1646,7 +1646,7 @@ class TestRetrySend:
 
     def test_retry_send_reuses_task_id_and_payload(self) -> None:
         """retry_send passes the same task_id, enqueue_sha, and args_json to broker."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1668,7 +1668,7 @@ class TestRetrySend:
     @pytest.mark.asyncio
     async def test_retry_send_async_reuses_task_id_and_payload(self) -> None:
         """retry_send_async passes the same task_id and payload to broker."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1687,7 +1687,7 @@ class TestRetrySend:
 
     def test_retry_send_only_accepts_enqueue_failed(self) -> None:
         """retry_send rejects non-ENQUEUE_FAILED codes with VALIDATION_FAILED."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1706,7 +1706,7 @@ class TestRetrySend:
 
     def test_retry_send_rejects_send_suppressed(self) -> None:
         """retry_send rejects SEND_SUPPRESSED errors."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1724,7 +1724,7 @@ class TestRetrySend:
 
     def test_retry_send_no_payload_returns_validation_error(self) -> None:
         """retry_send without payload on error returns VALIDATION_FAILED."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1745,7 +1745,7 @@ class TestRetrySend:
 
     def test_retry_send_no_task_id_returns_validation_error(self) -> None:
         """retry_send without task_id on error returns VALIDATION_FAILED."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1765,7 +1765,7 @@ class TestRetrySend:
 
     def test_retry_send_cross_task_returns_validation_error(self) -> None:
         """retry_send rejects errors from a different task."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1780,7 +1780,7 @@ class TestRetrySend:
 
     def test_retry_schedule_reuses_task_id_and_delay(self) -> None:
         """retry_schedule passes same task_id and enqueue_delay_seconds."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1799,7 +1799,7 @@ class TestRetrySend:
 
     def test_retry_schedule_without_delay_returns_validation_error(self) -> None:
         """retry_schedule rejects errors with no enqueue_delay_seconds."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1814,7 +1814,7 @@ class TestRetrySend:
 
     def test_retry_send_rejects_scheduled_payload(self) -> None:
         """retry_send rejects errors with enqueue_delay_seconds (use retry_schedule instead)."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1830,7 +1830,7 @@ class TestRetrySend:
     @pytest.mark.asyncio
     async def test_retry_send_async_rejects_scheduled_payload(self) -> None:
         """retry_send_async rejects errors with enqueue_delay_seconds."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -1855,7 +1855,7 @@ class TestAutoRetry:
 
     def test_send_with_resend_on_transient_err_retries_transient_failure(self) -> None:
         """Broker returns retryable Err twice then Ok on 3rd — total 3 calls."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app(resend_on_transient_err=True)
@@ -1878,7 +1878,7 @@ class TestAutoRetry:
 
     def test_send_with_resend_on_transient_err_gives_up_after_max_retries(self) -> None:
         """Broker always returns retryable Err — gives up after 4 total calls."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app(resend_on_transient_err=True)
@@ -1901,7 +1901,7 @@ class TestAutoRetry:
 
     def test_send_with_resend_on_transient_err_false_no_retry(self) -> None:
         """With flag off, broker retryable Err is returned immediately (1 call)."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app(resend_on_transient_err=False)
@@ -1922,7 +1922,7 @@ class TestAutoRetry:
 
     def test_send_with_resend_on_transient_err_non_retryable_no_retry(self) -> None:
         """Non-retryable Err is never retried, even with flag on."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app(resend_on_transient_err=True)
@@ -1945,7 +1945,7 @@ class TestAutoRetry:
         """OperationalError raised by broker is classified retryable and retried."""
         from psycopg import OperationalError
 
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app(resend_on_transient_err=True)
@@ -1964,7 +1964,7 @@ class TestAutoRetry:
 
     def test_exception_from_broker_not_retried_for_programmer_error(self) -> None:
         """TypeError raised by broker is classified non-retryable — no retry."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app(resend_on_transient_err=True)
@@ -1993,7 +1993,7 @@ class TestPayloadMismatchClassification:
     def test_mismatch_classified_by_code_not_message(self) -> None:
         """Broker PAYLOAD_MISMATCH code maps to TaskSendErrorCode.PAYLOAD_MISMATCH
         regardless of message wording."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -2016,7 +2016,7 @@ class TestPayloadMismatchClassification:
     def test_enqueue_failed_not_promoted_to_mismatch(self) -> None:
         """Broker ENQUEUE_FAILED with 'sha mismatch' in message stays ENQUEUE_FAILED
         (code governs classification, not message content)."""
-        def good_fn(x: int) -> TaskResult[int, TaskError]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app()
@@ -2135,7 +2135,7 @@ class TestFromNodeMarker:
 
 def _make_task_fn(app: MagicMock | None = None) -> Any:
     """Create a minimal wrapper via create_task_wrapper for NodeFactory tests."""
-    def sample(value: int, label: str = 'default') -> TaskResult[int, TaskError]:
+    def sample(*, value: int, label: str = 'default') -> TaskResult[int, TaskError]:
         return TaskResult(ok=value)
 
     if app is None:
@@ -2203,13 +2203,13 @@ class TestNodeFactoryFromNodeConversion:
         app = _make_app()
 
         # Producer
-        def produce(value: int) -> TaskResult[int, TaskError]:
+        def produce(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
         producer_fn = create_task_wrapper(produce, app, 'test.produce')
         producer_node = TaskNode(fn=producer_fn, kwargs={'value': 42})
 
         # Consumer
-        def consume(data: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
+        def consume(*, data: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
         consumer_fn = create_task_wrapper(consume, app, 'test.consume')
         factory = consumer_fn.node()
@@ -2225,12 +2225,12 @@ class TestNodeFactoryFromNodeConversion:
 
         app = _make_app()
 
-        def produce(value: int) -> TaskResult[int, TaskError]:
+        def produce(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
         producer_fn = create_task_wrapper(produce, app, 'test.produce')
         producer_node = TaskNode(fn=producer_fn, kwargs={'value': 42})
 
-        def consume(data: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
+        def consume(*, data: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
         consumer_fn = create_task_wrapper(consume, app, 'test.consume')
         factory = consumer_fn.node()
@@ -2245,12 +2245,12 @@ class TestNodeFactoryFromNodeConversion:
 
         app = _make_app()
 
-        def produce(value: int) -> TaskResult[int, TaskError]:
+        def produce(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
         producer_fn = create_task_wrapper(produce, app, 'test.produce')
         producer_node = TaskNode(fn=producer_fn, kwargs={'value': 42})
 
-        def consume(data: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
+        def consume(*, data: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
         consumer_fn = create_task_wrapper(consume, app, 'test.consume')
         # Explicit waits_for already includes producer
@@ -2267,18 +2267,18 @@ class TestNodeFactoryFromNodeConversion:
 
         app = _make_app()
 
-        def produce_a(value: int) -> TaskResult[int, TaskError]:
+        def produce_a(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
         fn_a = create_task_wrapper(produce_a, app, 'test.produce_a')
         node_a = TaskNode(fn=fn_a, kwargs={'value': 1})
 
-        def produce_b(value: int) -> TaskResult[int, TaskError]:
+        def produce_b(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
         fn_b = create_task_wrapper(produce_b, app, 'test.produce_b')
         node_b = TaskNode(fn=fn_b, kwargs={'value': 2})
 
         def consume(
-            first: TaskResult[int, TaskError],
+            *, first: TaskResult[int, TaskError],
             second: TaskResult[int, TaskError],
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
@@ -2298,13 +2298,13 @@ class TestNodeFactoryFromNodeConversion:
 
         app = _make_app()
 
-        def produce(value: int) -> TaskResult[int, TaskError]:
+        def produce(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
         producer_fn = create_task_wrapper(produce, app, 'test.produce')
         producer_node = TaskNode(fn=producer_fn, kwargs={'value': 42})
 
         def consume(
-            data: TaskResult[int, TaskError],
+            *, data: TaskResult[int, TaskError],
             label: str = 'default',
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
@@ -2334,12 +2334,12 @@ class TestNodeFactoryFromNodeConflicts:
 
         app = _make_app()
 
-        def produce(value: int) -> TaskResult[int, TaskError]:
+        def produce(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
         producer_fn = create_task_wrapper(produce, app, 'test.produce')
         producer_node = TaskNode(fn=producer_fn, kwargs={'value': 42})
 
-        def consume(data: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
+        def consume(*, data: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
         consumer_fn = create_task_wrapper(consume, app, 'test.consume')
         # Explicit args_from for 'data'
@@ -2358,18 +2358,18 @@ class TestNodeFactoryFromNodeConflicts:
 
         app = _make_app()
 
-        def produce_a(value: int) -> TaskResult[int, TaskError]:
+        def produce_a(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
         fn_a = create_task_wrapper(produce_a, app, 'test.produce_a')
         node_a = TaskNode(fn=fn_a, kwargs={'value': 1})
 
-        def produce_b(value: int) -> TaskResult[int, TaskError]:
+        def produce_b(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
         fn_b = create_task_wrapper(produce_b, app, 'test.produce_b')
         node_b = TaskNode(fn=fn_b, kwargs={'value': 2})
 
         def consume(
-            first: TaskResult[int, TaskError],
+            *, first: TaskResult[int, TaskError],
             second: TaskResult[int, TaskError],
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
@@ -2402,12 +2402,12 @@ class TestNodeFactoryManualArgsFrom:
 
         app = _make_app()
 
-        def produce(value: int) -> TaskResult[int, TaskError]:
+        def produce(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
         producer_fn = create_task_wrapper(produce, app, 'test.produce')
         producer_node = TaskNode(fn=producer_fn, kwargs={'value': 42})
 
-        def consume(data: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
+        def consume(*, data: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
         consumer_fn = create_task_wrapper(consume, app, 'test.consume')
         factory = consumer_fn.node(

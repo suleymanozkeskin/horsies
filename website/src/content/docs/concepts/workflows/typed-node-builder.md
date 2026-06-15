@@ -22,6 +22,7 @@ app = Horsies(AppConfig(
 
 @app.task(task_name='compute_score')
 def compute_score(
+    *,
     user_id: str,
     base_score: int,
     multiplier: float = 1.0,
@@ -93,11 +94,12 @@ Use `from_node()` to wire upstream results into downstream task arguments. It au
 from horsies import from_node
 
 @app.task(task_name='fetch_user')
-def fetch_user(user_id: str) -> TaskResult[UserData, TaskError]:
+def fetch_user(*, user_id: str) -> TaskResult[UserData, TaskError]:
     ...
 
 @app.task(task_name='process_user')
 def process_user(
+    *,
     user_data: TaskResult[UserData, TaskError],
     threshold: int = 50,
 ) -> TaskResult[ProcessedUser, TaskError]:

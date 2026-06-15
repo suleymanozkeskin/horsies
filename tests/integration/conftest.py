@@ -123,7 +123,7 @@ def make_simple_task(app: Horsies, name: str = 'simple_task') -> Any:
     """Create a simple task that doubles its input."""
 
     @app.task(task_name=name)
-    def simple_task(value: int) -> TaskResult[int, TaskError]:
+    def simple_task(*, value: int) -> TaskResult[int, TaskError]:
         return TaskResult(ok=value * 2)
 
     return simple_task
@@ -134,7 +134,7 @@ def make_simple_ctx_task(app: Horsies, name: str = 'simple_ctx_task') -> Any:
 
     @app.task(task_name=name)
     def simple_ctx_task(
-        value: int,
+        *, value: int,
         workflow_ctx: WorkflowContext | None = None,
     ) -> TaskResult[int, TaskError]:
         return TaskResult(ok=value * 2)
@@ -158,7 +158,7 @@ def make_identity_task(app: Horsies, name: str = 'identity_task') -> Any:
     """Create a task that returns its input unchanged."""
 
     @app.task(task_name=name)
-    def identity_task(value: JsonValue = None) -> TaskResult[JsonValue, TaskError]:
+    def identity_task(*, value: JsonValue = None) -> TaskResult[JsonValue, TaskError]:
         return TaskResult(ok=value)
 
     return identity_task
@@ -169,7 +169,7 @@ def make_args_receiver_task(app: Horsies, name: str = 'args_receiver') -> Any:
 
     @app.task(task_name=name)
     def args_receiver(
-        input_result: TaskResult[int, TaskError],
+        *, input_result: TaskResult[int, TaskError],
     ) -> TaskResult[int, TaskError]:
         if input_result.is_err():
             return TaskResult(
@@ -189,7 +189,7 @@ def make_recovery_task(app: Horsies, name: str = 'recovery_task') -> Any:
 
     @app.task(task_name=name)
     def recovery_task(
-        input_result: TaskResult[int, TaskError],
+        *, input_result: TaskResult[int, TaskError],
     ) -> TaskResult[int, TaskError]:
         if input_result.is_err():
             # Recover by returning a default value
@@ -204,7 +204,7 @@ def make_ctx_receiver_task(app: Horsies, name: str = 'ctx_receiver') -> Any:
 
     @app.task(task_name=name)
     def ctx_receiver(
-        workflow_ctx: WorkflowContext | None = None,
+        *, workflow_ctx: WorkflowContext | None = None,
     ) -> TaskResult[dict[str, JsonValue], TaskError]:
         if workflow_ctx is None:
             return TaskResult(ok={'ctx': None})
@@ -224,7 +224,7 @@ def make_no_ctx_task(app: Horsies, name: str = 'no_ctx_task') -> Any:
     """Create a task that does NOT declare workflow_ctx param."""
 
     @app.task(task_name=name)
-    def no_ctx_task(value: int = 0) -> TaskResult[int, TaskError]:
+    def no_ctx_task(*, value: int = 0) -> TaskResult[int, TaskError]:
         return TaskResult(ok=value + 1)
 
     return no_ctx_task
@@ -237,7 +237,7 @@ def make_multi_args_receiver_task(
 
     @app.task(task_name=name)
     def multi_args_receiver(
-        first: TaskResult[int, TaskError],
+        *, first: TaskResult[int, TaskError],
         second: TaskResult[int, TaskError],
     ) -> TaskResult[int, TaskError]:
         if first.is_err() or second.is_err():
@@ -266,7 +266,7 @@ def make_retryable_task(
         task_name=name,
         retry_policy=RetryPolicy.fixed(intervals, auto_retry_for=['TASK_EXCEPTION']),
     )
-    def retryable_task(value: int) -> TaskResult[int, TaskError]:
+    def retryable_task(*, value: int) -> TaskResult[int, TaskError]:
         return TaskResult(ok=value * 2)
 
     return retryable_task

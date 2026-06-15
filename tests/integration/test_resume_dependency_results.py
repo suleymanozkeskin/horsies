@@ -77,7 +77,7 @@ async def test_resume_injects_real_dependency_results(
         return TaskResult(ok=42)
 
     @app.task(task_name='resume_dep_consumer')
-    def consumer(value: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
+    def consumer(*, value: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
         return TaskResult(ok=1)
 
     node_a: TaskNode[int] = TaskNode(fn=producer)

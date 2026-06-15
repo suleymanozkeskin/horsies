@@ -15,6 +15,7 @@ from .config import app
 
 @app.task("validate_order", queue_name="standard")
 def validate_order(
+    *,
     order: Order,
 ) -> TaskResult[ValidatedOrder, TaskError]:
     if not order.order_id:

@@ -139,7 +139,7 @@ class ParamChildWorkflow(WorkflowDefinition[int]):
         raw_value = _extract_taskresult_value(value)
 
         @app.task(task_name='param_child_task')
-        def child_task(value: int) -> TaskResult[int, TaskError]:
+        def child_task(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
         node = TaskNode(fn=child_task, kwargs={'value': raw_value})
@@ -168,7 +168,7 @@ class MultiParamChildWorkflow(WorkflowDefinition[int]):
         second_val = _extract_taskresult_value(second)
 
         @app.task(task_name='multi_param_child_task')
-        def child_task(first: int, second: int) -> TaskResult[int, TaskError]:
+        def child_task(*, first: int, second: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=first + second)
 
         node = TaskNode(fn=child_task, kwargs={'first': first_val, 'second': second_val})
@@ -1557,7 +1557,7 @@ class TestSubworkflowIntegration:
 
         @app.task(task_name='summary_fail_post')
         def post_task(
-            workflow_ctx: WorkflowContext | None = None,
+            *, workflow_ctx: WorkflowContext | None = None,
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=0)
 

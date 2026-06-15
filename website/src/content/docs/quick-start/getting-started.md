@@ -38,11 +38,11 @@ Add task definitions to `instance.py`:
 
 ```python
 @app.task("add_numbers")
-def add_numbers(a: int, b: int) -> TaskResult[int, TaskError]:
+def add_numbers(*, a: int, b: int) -> TaskResult[int, TaskError]:
     return TaskResult(ok=a + b)
 
 @app.task("process_data")
-def process_data(data: dict[str, JsonValue]) -> TaskResult[str, TaskError]:
+def process_data(*, data: dict[str, JsonValue]) -> TaskResult[str, TaskError]:
     if not data:
         return TaskResult(err=TaskError(
             error_code="EMPTY_DATA",

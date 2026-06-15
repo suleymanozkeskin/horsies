@@ -26,7 +26,7 @@ def low_task() -> TaskResult[str, TaskError]:
 
 
 @app.task(task_name='e2e_custom_slow', queue_name='high')
-def slow_task(duration_ms: int) -> TaskResult[str, TaskError]:
+def slow_task(*, duration_ms: int) -> TaskResult[str, TaskError]:
     """Task that sleeps for specified duration (for custom queue tests)."""
     import time
 

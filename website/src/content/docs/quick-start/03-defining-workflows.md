@@ -294,6 +294,7 @@ def start_order_processing(order: Order) -> None:
 ```python
 @app.task("check_inventory", queue_name="standard")
 def check_inventory(
+    *,
     order_result: TaskResult[ValidatedOrder, TaskError],
 ) -> TaskResult[InventoryStatus, TaskError]:
     if order_result.is_err():
@@ -317,6 +318,7 @@ When multiple nodes converge into a single task (fan-in), each upstream result a
 ```python
 @app.task("reserve_inventory", queue_name="urgent")
 def reserve_inventory(
+    *,
     inventory_result: TaskResult[InventoryStatus, TaskError],
     cost_result: TaskResult[ShippingCost, TaskError],
     address_result: TaskResult[AddressValidation, TaskError],

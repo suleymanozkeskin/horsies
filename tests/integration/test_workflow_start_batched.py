@@ -33,7 +33,7 @@ def _fanout_spec(app: Horsies, n_roots: int, *, with_dependent: bool = False) ->
     one node depending on root 0."""
 
     @app.task(task_name=f'batched_root_{uuid.uuid4().hex[:8]}')
-    def root_task(value: int) -> TaskResult[int, TaskError]:
+    def root_task(*, value: int) -> TaskResult[int, TaskError]:
         return TaskResult(ok=value)
 
     nodes: list[Any] = [
@@ -214,7 +214,7 @@ class TestBatchedStartShape:
                 auto_retry_for=['TASK_EXCEPTION'],
             ),
         )
-        def retry_task(value: int) -> TaskResult[int, TaskError]:
+        def retry_task(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
         deadline = datetime.now(timezone.utc) + timedelta(hours=1)
@@ -263,7 +263,7 @@ class TestBatchedStartShape:
         whole start (VALIDATION_FAILED), rolling everything back."""
 
         @app.task(task_name=f'batched_corrupt_{uuid.uuid4().hex[:8]}')
-        def corrupt_task(value: int) -> TaskResult[int, TaskError]:
+        def corrupt_task(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
         # Force unparseable decorator-attached options.
@@ -311,7 +311,7 @@ class TestStartPauseGate:
         from horsies.core.workflows import engine as engine_mod
 
         @app.task(task_name=f'pause_gate_root_{_uuid.uuid4().hex[:8]}')
-        def fast_task(value: int) -> TaskResult[int, TaskError]:
+        def fast_task(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
         @app.task(task_name=f'pause_gate_child_{_uuid.uuid4().hex[:8]}')
@@ -412,7 +412,7 @@ class TestStartPauseGate:
         )
 
         @app.task(task_name=f'pause_prop_root_{uuid.uuid4().hex[:8]}')
-        def fast_task(value: int) -> TaskResult[int, TaskError]:
+        def fast_task(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
         @app.task(task_name=f'pause_prop_bad_child_{uuid.uuid4().hex[:8]}')

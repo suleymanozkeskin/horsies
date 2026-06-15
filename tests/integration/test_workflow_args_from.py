@@ -253,7 +253,7 @@ class TestArgsFromInjection:
         # Create a task that accepts both static and injected args
         @app.task(task_name='static_and_injected')
         def static_and_injected(
-            static_value: int,
+            *, static_value: int,
             input_result: TaskResult[int, TaskError] | None = None,
         ) -> TaskResult[int, TaskError]:
             base = input_result.unwrap() if input_result and input_result.is_ok() else 0
@@ -292,7 +292,7 @@ class TestArgsFromInjection:
 
         @app.task(task_name='dual_receiver')
         def dual_receiver(
-            first_copy: TaskResult[int, TaskError],
+            *, first_copy: TaskResult[int, TaskError],
             second_copy: TaskResult[int, TaskError],
         ) -> TaskResult[int, TaskError]:
             if first_copy.is_ok() and second_copy.is_ok():
@@ -440,7 +440,7 @@ class TestArgsFromInjection:
 
         @app.task(task_name='worker_args_from_b')
         def worker_args_from_b(
-            input_result: TaskResult[int, TaskError],
+            *, input_result: TaskResult[int, TaskError],
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=input_result.unwrap() + 5)
 
@@ -555,7 +555,7 @@ class TestArgsFromInjection:
 
         @app.task(task_name='empty_args_from_b')
         def static_only(
-            static_value: int,
+            *, static_value: int,
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=static_value + 1)
 
@@ -595,7 +595,7 @@ class TestArgsFromInjection:
 
         @app.task(task_name='worker_err_args_b')
         def worker_err_args_b(
-            input_result: TaskResult[int, TaskError],
+            *, input_result: TaskResult[int, TaskError],
         ) -> TaskResult[int, TaskError]:
             if input_result.is_err():
                 return TaskResult(ok=999)  # Recover with default
@@ -672,7 +672,7 @@ class TestArgsFromInjection:
 
         @app.task(task_name='worker_skipped_c')
         def worker_skipped_c(
-            input_result: TaskResult[int, TaskError],
+            *, input_result: TaskResult[int, TaskError],
         ) -> TaskResult[str, TaskError]:
             if input_result.is_err():
                 return TaskResult(ok=input_result.unwrap_err().error_code)
@@ -757,7 +757,7 @@ class TestArgsFromInjection:
 
         @app.task(task_name='partial_map_c')
         def partial_receiver(
-            from_a: TaskResult[int, TaskError],
+            *, from_a: TaskResult[int, TaskError],
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=from_a.unwrap() + 1)
 

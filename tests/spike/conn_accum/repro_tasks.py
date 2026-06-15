@@ -18,7 +18,7 @@ from tests.spike.conn_accum.repro_db import app_engine
 
 
 @app.task(task_name='repro_app_db_task')
-def app_db_task(sleep_ms: int) -> TaskResult[str, TaskError]:
+def app_db_task(*, sleep_ms: int) -> TaskResult[str, TaskError]:
     """Check out the app-owned engine and hold the connection across a slow query."""
     with app_engine.connect() as conn:
         conn.execute(text('SELECT pg_sleep(:s)'), {'s': sleep_ms / 1000.0})

@@ -30,6 +30,17 @@ and there is no migration contract between pre-1.0 versions.
   Previously a malformed schedule passed `check` and only failed at scheduler
   startup.
 
+### Changed
+
+- Task parameters must be keyword-only. `check_task_signature` now rejects
+  `POSITIONAL_OR_KEYWORD` params, so a task is declared `def f(*, x: T)`.
+  `ParamSpec` then carries the keyword-only-ness, turning a positional call
+  (`f.send(42)`) into a call-site type error instead of a runtime
+  `Err(VALIDATION_FAILED)` that an unchecked caller silently drops. The
+  producer-side runtime guard stays as defense-in-depth. **Breaking**: add a
+  bare `*,` before the first parameter of every task definition. Execution is
+  unaffected (the worker already passes every argument by keyword).
+
 ### Removed
 
 - `TaskSchedule.args` removed; schedules are kwargs-only (strict-serde has no

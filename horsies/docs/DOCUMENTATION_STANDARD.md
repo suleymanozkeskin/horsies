@@ -133,7 +133,7 @@ from horsies import Horsies, TaskResult, TaskError
 app = Horsies(config)
 
 @app.task("send_email")
-def send_email(to: str, subject: str) -> TaskResult[None, TaskError]:
+def send_email(*, to: str, subject: str) -> TaskResult[None, TaskError]:
     # Implementation
     return TaskResult(ok=None)
 ```

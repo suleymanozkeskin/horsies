@@ -14,7 +14,7 @@ def scheduled_simple_task() -> TaskResult[str, TaskError]:
 
 
 @app.task(task_name='e2e_scheduled_with_args')
-def scheduled_with_args_task(value: int) -> TaskResult[int, TaskError]:
+def scheduled_with_args_task(*, value: int) -> TaskResult[int, TaskError]:
     """Scheduled task that accepts arguments."""
     return TaskResult(ok=value * 2)
 

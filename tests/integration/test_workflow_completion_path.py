@@ -36,11 +36,11 @@ def _chain_spec(
     """A -> B: completion of A exercises one still-pending-dependent check."""
 
     @app.task(task_name=f'completion_root_{uuid.uuid4().hex[:8]}')
-    def root_task(value: int) -> TaskResult[int, TaskError]:
+    def root_task(*, value: int) -> TaskResult[int, TaskError]:
         return TaskResult(ok=value)
 
     @app.task(task_name=f'completion_dep_{uuid.uuid4().hex[:8]}')
-    def dep_task(value: int) -> TaskResult[int, TaskError]:
+    def dep_task(*, value: int) -> TaskResult[int, TaskError]:
         return TaskResult(ok=value)
 
     node_a = TaskNode(fn=root_task, kwargs={'value': 1})

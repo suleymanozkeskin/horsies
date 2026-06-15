@@ -31,7 +31,7 @@ pytestmark = [pytest.mark.integration]
 
 def _make_task(app: Horsies, prefix: str) -> Any:
     @app.task(task_name=f'{prefix}_{uuid.uuid4().hex[:8]}')
-    def fn(value: int) -> TaskResult[int, TaskError]:
+    def fn(*, value: int) -> TaskResult[int, TaskError]:
         return TaskResult(ok=value)
 
     return fn
@@ -266,7 +266,7 @@ class TestBatchedPromotionSemantics:
 
         @app.task(task_name=f'mixed_ctx_{uuid.uuid4().hex[:8]}')
         def ctx_fn(
-            value: int, workflow_ctx: WorkflowContext | None = None,
+            *, value: int, workflow_ctx: WorkflowContext | None = None,
         ) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
@@ -298,7 +298,7 @@ class TestBatchedPromotionSemantics:
         fn = _make_task(app, 'isolation')
 
         @app.task(task_name=f'isolation_corrupt_{uuid.uuid4().hex[:8]}')
-        def corrupt_fn(value: int) -> TaskResult[int, TaskError]:
+        def corrupt_fn(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
         corrupt_fn.task_options_json = '{not-json'  # type: ignore[attr-defined]
@@ -344,7 +344,7 @@ class TestBatchedPromotionSemantics:
         fn = _make_task(app, 'pause_corner')
 
         @app.task(task_name=f'pause_corrupt_{uuid.uuid4().hex[:8]}')
-        def corrupt_fn(value: int) -> TaskResult[int, TaskError]:
+        def corrupt_fn(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
         corrupt_fn.task_options_json = '{not-json'  # type: ignore[attr-defined]

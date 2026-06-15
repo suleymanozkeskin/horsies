@@ -63,7 +63,7 @@ def healthcheck() -> TaskResult[str, TaskError]:
 
 
 @app.task(task_name='e2e_recovery_slow', queue_name='default')
-def slow_task(duration_ms: int) -> TaskResult[str, TaskError]:
+def slow_task(*, duration_ms: int) -> TaskResult[str, TaskError]:
     """Long-running task for crash-while-RUNNING tests."""
     import time
 
@@ -72,7 +72,7 @@ def slow_task(duration_ms: int) -> TaskResult[str, TaskError]:
 
 
 @app.task(task_name='e2e_recovery_wf_step', queue_name='default')
-def recovery_wf_step(step: str, delay_ms: int) -> TaskResult[str, TaskError]:
+def recovery_wf_step(*, step: str, delay_ms: int) -> TaskResult[str, TaskError]:
     """Workflow step with configurable delay for crash-recovery tests."""
     import time
 
