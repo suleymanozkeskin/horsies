@@ -1,8 +1,8 @@
 ---
 title: Changelog
-summary: Notable changes per release. 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
+summary: Notable changes per release. 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
 related: [./monitoring/worker-health, ./migrations/migration-to-0-1-2, ./internals/serialization]
-tags: [changelog, releases, breaking-changes, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
+tags: [changelog, releases, breaking-changes, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
 ---
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
@@ -10,6 +10,16 @@ horsies is pre-1.0: breaking changes may land in minor or patch releases, and
 there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
+
+## 0.2.2 — 2026-06-15
+
+Producer-side strictness lands on both axes: task parameters must be
+keyword-only, and `encode_value` validates a value against its declared type
+before serializing — so a positional or mistyped task call fails at the type
+checker or at `app.check` instead of returning an ignorable `Err` that silently
+drops the send. Schedules become kwargs-only and `app.check()` validates them
+as a preflight. Orphaned workflow tasks self-heal instead of churning the
+requeue loop. No schema change (still v8).
 
 ### Fixed
 
@@ -20,6 +30,11 @@ there is no migration contract between pre-1.0 versions.
 - Retention no longer orphans a live task row: a terminal, expired workflow is
   retained until every backing task is terminal, instead of deleting the
   workflow/`workflow_task` rows while a backing task is still non-terminal.
+- `encode_value` validates a value against its declared type before serializing.
+  `dump_python` alone only serialized — a mistyped value (a `dict`/`int`/`list`
+  in a `str` slot) passed through with a warning. The producer now fails closed,
+  symmetric with `decode_value` on the consumer; mistyped task kwargs, results,
+  and `args_from` bindings are rejected at send / at `app.check`. (#146)
 
 ### Added
 
