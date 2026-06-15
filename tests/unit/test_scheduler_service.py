@@ -21,6 +21,10 @@ from horsies.core.models.schedule import (
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import WorkflowContext
 from horsies.core.scheduler.service import Scheduler
+from horsies.core.scheduler.validation import (
+    _serializable_error,
+    _signature_error,
+)
 from horsies.core.types.result import Err, Ok, is_err
 
 
@@ -100,19 +104,21 @@ class TestSchedulerInit:
 
 
 # =============================================================================
-# _validate_schedule_signature
+# validation._signature_error
 # =============================================================================
 
 
 @pytest.mark.unit
-class TestValidateScheduleSignature:
-    """Tests for Scheduler._validate_schedule_signature."""
+class TestSignatureError:
+    """Tests for validation._signature_error (isolated signature bind).
 
-    def _make_scheduler(
-        self,
-        tasks: dict[str, MagicMock],
-    ) -> Scheduler:
-        """Helper to build Scheduler with given tasks."""
+    Args tolerance is exercised here in isolation; the integrated
+    collect_schedule_errors path rejects positional args upstream (see
+    test_schedule_validation.py).
+    """
+
+    def _make_app_with_task(self, task: MagicMock) -> MagicMock:
+        """Build a mock app exposing the given task as 'task_a'."""
         config = ScheduleConfig(
             schedules=[
                 TaskSchedule(
@@ -122,53 +128,46 @@ class TestValidateScheduleSignature:
                 ),
             ],
         )
-        app = _make_app(schedule_config=config, tasks=tasks)
-        return Scheduler(app)
+        return _make_app(schedule_config=config, tasks={'task_a': task})
 
     def test_no_required_params_ok(self) -> None:
         """Function with no required params passes validation."""
         def no_params() -> str:
             return 'ok'
 
-        task_mock = _make_task_mock(no_params)
-        scheduler = self._make_scheduler({'task_a': task_mock})
+        app = self._make_app_with_task(_make_task_mock(no_params))
         schedule = TaskSchedule(
             name='s',
             task_name='task_a',
             pattern=IntervalSchedule(seconds=5),
         )
 
-        # Should not raise
-        scheduler._validate_schedule_signature(schedule)
+        assert _signature_error(app, schedule) is None
 
-    def test_missing_required_raises_configuration_error(self) -> None:
-        """Missing required param raises ConfigurationError HRS-205."""
+    def test_missing_required_returns_configuration_error(self) -> None:
+        """Missing required param returns ConfigurationError HRS-205."""
         def needs_value(value: int) -> str:
             return str(value)
 
-        task_mock = _make_task_mock(needs_value)
-        scheduler = self._make_scheduler({'task_a': task_mock})
+        app = self._make_app_with_task(_make_task_mock(needs_value))
         schedule = TaskSchedule(
             name='s',
             task_name='task_a',
             pattern=IntervalSchedule(seconds=5),
         )
 
-        with pytest.raises(ConfigurationError) as exc_info:
-            scheduler._validate_schedule_signature(schedule)
+        error = _signature_error(app, schedule)
+        assert error is not None
+        assert error.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert 'kwargs do not match' in error.message
 
-        exc = exc_info.value
-        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
-        assert 'args/kwargs do not match' in exc.message
-
-    def test_unexpected_kwarg_raises_configuration_error(self) -> None:
-        """Unexpected kwargs are rejected at scheduler startup."""
+    def test_unexpected_kwarg_returns_configuration_error(self) -> None:
+        """Unexpected kwargs are rejected."""
 
         def needs_value(value: int) -> str:
             return str(value)
 
-        task_mock = _make_task_mock(needs_value)
-        scheduler = self._make_scheduler({'task_a': task_mock})
+        app = self._make_app_with_task(_make_task_mock(needs_value))
         schedule = TaskSchedule(
             name='s',
             task_name='task_a',
@@ -176,37 +175,17 @@ class TestValidateScheduleSignature:
             kwargs={'unknown': 42},
         )
 
-        with pytest.raises(ConfigurationError) as exc_info:
-            scheduler._validate_schedule_signature(schedule)
-
-        exc = exc_info.value
-        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
-        assert 'args/kwargs do not match' in exc.message
-
-    def test_satisfied_by_args(self) -> None:
-        """Required param satisfied by positional args passes."""
-        def needs_value(value: int) -> str:
-            return str(value)
-
-        task_mock = _make_task_mock(needs_value)
-        scheduler = self._make_scheduler({'task_a': task_mock})
-        schedule = TaskSchedule(
-            name='s',
-            task_name='task_a',
-            pattern=IntervalSchedule(seconds=5),
-            args=(42,),
-        )
-
-        # Should not raise
-        scheduler._validate_schedule_signature(schedule)
+        error = _signature_error(app, schedule)
+        assert error is not None
+        assert error.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert 'kwargs do not match' in error.message
 
     def test_satisfied_by_kwargs(self) -> None:
         """Required param satisfied by keyword args passes."""
         def needs_value(value: int) -> str:
             return str(value)
 
-        task_mock = _make_task_mock(needs_value)
-        scheduler = self._make_scheduler({'task_a': task_mock})
+        app = self._make_app_with_task(_make_task_mock(needs_value))
         schedule = TaskSchedule(
             name='s',
             task_name='task_a',
@@ -214,39 +193,35 @@ class TestValidateScheduleSignature:
             kwargs={'value': 42},
         )
 
-        # Should not raise
-        scheduler._validate_schedule_signature(schedule)
+        assert _signature_error(app, schedule) is None
 
-    def test_mixed_args_and_kwargs(self) -> None:
-        """Multiple required params satisfied by mix of args and kwargs."""
+    def test_multiple_params_satisfied_by_kwargs(self) -> None:
+        """Multiple required params satisfied entirely by kwargs."""
         def needs_both(a: int, b: str) -> str:
             return f'{a}{b}'
 
-        task_mock = _make_task_mock(needs_both)
-        scheduler = self._make_scheduler({'task_a': task_mock})
+        app = self._make_app_with_task(_make_task_mock(needs_both))
         schedule = TaskSchedule(
             name='s',
             task_name='task_a',
             pattern=IntervalSchedule(seconds=5),
-            args=(1,),
-            kwargs={'b': 'hello'},
+            kwargs={'a': 1, 'b': 'hello'},
         )
 
-        # Should not raise
-        scheduler._validate_schedule_signature(schedule)
+        assert _signature_error(app, schedule) is None
 
 
 # =============================================================================
-# _validate_schedule_serializable
+# validation._serializable_error
 # =============================================================================
 
 
 @pytest.mark.unit
-class TestValidateScheduleSerializable:
+class TestSerializableError:
     """Schedules whose kwargs pass sig.bind but cannot be wire-encoded must be
     rejected at startup, not fail ENQUEUE_FAILED on every tick."""
 
-    def _make_scheduler(self, tasks: dict[str, MagicMock]) -> Scheduler:
+    def _make_app_with_task(self, task: MagicMock) -> MagicMock:
         config = ScheduleConfig(
             schedules=[
                 TaskSchedule(
@@ -256,8 +231,7 @@ class TestValidateScheduleSerializable:
                 ),
             ],
         )
-        app = _make_app(schedule_config=config, tasks=tasks)
-        return Scheduler(app)
+        return _make_app(schedule_config=config, tasks={'task_a': task})
 
     def _schedule(self, kwargs: dict[str, object]) -> TaskSchedule:
         return TaskSchedule(
@@ -271,39 +245,35 @@ class TestValidateScheduleSerializable:
         def f() -> str:
             return 'ok'
 
-        scheduler = self._make_scheduler({'task_a': _make_task_mock(f)})
-        scheduler._validate_schedule_serializable(self._schedule({}))
+        app = self._make_app_with_task(_make_task_mock(f))
+        assert _serializable_error(app, self._schedule({})) is None
 
     def test_plain_kwargs_ok(self) -> None:
         def f(value: int) -> str:
             return str(value)
 
-        scheduler = self._make_scheduler({'task_a': _make_task_mock(f)})
-        scheduler._validate_schedule_serializable(self._schedule({'value': 5}))
+        app = self._make_app_with_task(_make_task_mock(f))
+        assert _serializable_error(app, self._schedule({'value': 5})) is None
 
     def test_engine_injected_kwarg_rejected(self) -> None:
         def f(x: int, workflow_ctx: WorkflowContext | None = None) -> str:
             return str(x)
 
-        scheduler = self._make_scheduler({'task_a': _make_task_mock(f)})
-        with pytest.raises(ConfigurationError) as exc_info:
-            scheduler._validate_schedule_serializable(
-                self._schedule({'x': 1, 'workflow_ctx': None})
-            )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
-        assert 'not encodable' in exc_info.value.message
+        app = self._make_app_with_task(_make_task_mock(f))
+        error = _serializable_error(app, self._schedule({'x': 1, 'workflow_ctx': None}))
+        assert error is not None
+        assert error.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert 'not encodable' in error.message
 
     def test_taskresult_typed_kwarg_rejected(self) -> None:
         def f(dep: TaskResult[int, TaskError]) -> str:
             return 'ok'
 
-        scheduler = self._make_scheduler({'task_a': _make_task_mock(f)})
-        with pytest.raises(ConfigurationError) as exc_info:
-            scheduler._validate_schedule_serializable(
-                self._schedule({'dep': TaskResult(ok=1)})
-            )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
-        assert 'not encodable' in exc_info.value.message
+        app = self._make_app_with_task(_make_task_mock(f))
+        error = _serializable_error(app, self._schedule({'dep': TaskResult(ok=1)}))
+        assert error is not None
+        assert error.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert 'not encodable' in error.message
 
 
 # =============================================================================
@@ -778,41 +748,6 @@ class TestValidateSchedules:
 
         # Should not raise even though task doesn't exist
         scheduler._validate_schedules()
-
-    def test_positional_args_raise_configuration_error(self) -> None:
-        """Schedules carrying positional args fail at startup, not per tick.
-
-        Enqueue rejects args unconditionally (strict-serde, kwargs-only);
-        startup validation must mirror that instead of letting the schedule
-        boot cleanly and then fail permanently on every tick.
-        """
-        def one_param(value: int) -> str:
-            return str(value)
-
-        task_mock = _make_task_mock(one_param)
-
-        config = ScheduleConfig(
-            schedules=[
-                TaskSchedule(
-                    name='s',
-                    task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
-                    args=(1,),
-                ),
-            ],
-        )
-        app = _make_app(
-            schedule_config=config,
-            tasks={'my_task': task_mock},
-        )
-        scheduler = Scheduler(app)
-
-        with pytest.raises(ConfigurationError) as exc_info:
-            scheduler._validate_schedules()
-
-        exc = exc_info.value
-        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
-        assert 'kwargs-only' in exc.message
 
     def test_invalid_queue_raises_configuration_error(self) -> None:
         """Invalid queue configuration raises ConfigurationError HRS-205."""
@@ -1310,7 +1245,6 @@ class TestRunForever:
                     name='s',
                     task_name='my_task',
                     pattern=IntervalSchedule(seconds=5),
-                    check_interval_seconds=1,
                 ),
             ],
             check_interval_seconds=1,
@@ -2348,16 +2282,16 @@ class TestPreloadTaskModules:
 
 
 # =============================================================================
-# _validate_schedule_signature — no _original_fn
+# validation._signature_error — no _original_fn
 # =============================================================================
 
 
 @pytest.mark.unit
-class TestValidateScheduleSignatureNoOriginalFn:
-    """Test for _validate_schedule_signature when task has no _original_fn."""
+class TestSignatureErrorNoOriginalFn:
+    """Test for _signature_error when task has no _original_fn."""
 
-    def test_no_original_fn_returns_early(self) -> None:
-        """Task without _original_fn → returns without error."""
+    def test_no_original_fn_returns_none(self) -> None:
+        """Task without _original_fn → no error (cannot validate)."""
         config = ScheduleConfig(
             schedules=[
                 TaskSchedule(
@@ -2371,10 +2305,9 @@ class TestValidateScheduleSignatureNoOriginalFn:
         task_mock = MagicMock()
         task_mock._original_fn = None
         app = _make_app(schedule_config=config, tasks={'task_a': task_mock})
-        scheduler = Scheduler(app)
 
-        # Should not raise despite kwargs that wouldn't match any real function
-        scheduler._validate_schedule_signature(config.schedules[0])
+        # No error despite kwargs that wouldn't match any real function
+        assert _signature_error(app, config.schedules[0]) is None
 
 
 # =============================================================================
@@ -2450,35 +2383,6 @@ class TestEnqueueScheduledTask:
                 config.schedules[0],
                 slot_time=_utc(2025, 6, 1, 12, 0, 0),
             )
-
-    async def test_positional_args_rejected_directly(self) -> None:
-        """Strict-serde rejects positional args at the scheduler.
-
-        Previously this test patched `args_to_json` to simulate a
-        serialization failure; under strict-serde positional args have
-        no typed wire representation and are rejected with
-        ENQUEUE_FAILED before any serialization runs.
-        """
-        schedule = TaskSchedule(
-            name='s',
-            task_name='my_task',
-            pattern=IntervalSchedule(seconds=5),
-            args=(42,),
-        )
-        config = ScheduleConfig(schedules=[schedule])
-        task_mock = _make_task_mock(lambda x: x)
-        app = _make_app(schedule_config=config, tasks={'my_task': task_mock})
-        scheduler = Scheduler(app)
-        scheduler.broker = _make_broker_mock()
-
-        result = await scheduler._enqueue_scheduled_task(
-            schedule,
-            slot_time=_utc(2025, 6, 1, 12, 0, 0),
-        )
-
-        assert is_err(result)
-        assert result.err_value.code == BrokerErrorCode.ENQUEUE_FAILED
-        assert 'positional' in result.err_value.message
 
     async def test_kwargs_serialization_failure_returns_err(self) -> None:
         """dumps_json returning Err on encoded kwargs → Err(BrokerOperationError).

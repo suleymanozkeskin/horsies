@@ -2,7 +2,7 @@
 from __future__ import annotations
 from datetime import time as datetime_time
 from typing import Annotated, Generic, Literal, TypeVar, Union, Optional, Any
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 from enum import Enum
 from horsies.core.errors import (
@@ -700,20 +700,20 @@ class TaskSchedule(BaseModel):
         - name: Unique identifier for this schedule (used as DB primary key)
         - task_name: Name of the task to execute (must be registered via @app.task)
         - pattern: Schedule pattern defining when the task runs
-        - args: Positional arguments to pass to the task
-        - kwargs: Keyword arguments to pass to the task
+        - kwargs: Keyword arguments to pass to the task (schedules are kwargs-only)
         - queue_name: Target queue (None = default queue)
         - enabled: Whether this schedule is active
         - timezone: Timezone for schedule evaluation (default: UTC)
         - catch_up_missed: If scheduler was down, should missed runs be executed?
     """
 
+    model_config = ConfigDict(extra='forbid')
+
     name: str = Field(description='Unique schedule identifier')
     task_name: str = Field(description='Task to execute (must be registered)')
     pattern: SchedulePattern = Field(description='Schedule pattern')
-    args: tuple[Any, ...] = Field(default=(), description='Task positional arguments')
     kwargs: dict[str, Any] = Field(
-        default_factory=dict, description='Task keyword arguments'
+        default_factory=dict, description='Task keyword arguments (kwargs-only)'
     )
     queue_name: Optional[str] = Field(default=None, description='Target queue name')
     enabled: bool = Field(default=True, description='Whether schedule is active')
