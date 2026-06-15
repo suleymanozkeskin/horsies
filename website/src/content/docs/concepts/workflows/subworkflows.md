@@ -32,18 +32,18 @@ app = Horsies(AppConfig(
 ))
 
 @app.task(task_name="fetch_data")
-def fetch_data(url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
+def fetch_data(*, url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
     # fetch logic...
     return TaskResult(ok={"data": "..."})
 
 @app.task(task_name="transform")
-def transform(raw: TaskResult[dict[str, JsonValue], TaskError]) -> TaskResult[str, TaskError]:
+def transform(*, raw: TaskResult[dict[str, JsonValue], TaskError]) -> TaskResult[str, TaskError]:
     if raw.is_err():
         return TaskResult(err=raw.err_value)
     return TaskResult(ok=str(raw.ok_value))
 
 @app.task(task_name="store")
-def store(transformed: str) -> TaskResult[bool, TaskError]:
+def store(*, transformed: str) -> TaskResult[bool, TaskError]:
     # store logic...
     return TaskResult(ok=True)
 
@@ -155,11 +155,12 @@ Use `allow_failed_deps=True` to run anyway (see Section 6).
 
 ```python
 @app.task(task_name="add")
-def add(a: int, b: int) -> TaskResult[int, TaskError]:
+def add(*, a: int, b: int) -> TaskResult[int, TaskError]:
     return TaskResult(ok=a + b)
 
 @app.task(task_name="multiply")
 def multiply(
+    *,
     sum_result: TaskResult[int, TaskError],
     factor: int,
 ) -> TaskResult[int, TaskError]:
@@ -199,6 +200,7 @@ from horsies import WorkflowContext
 
 @app.task(task_name="aggregate")
 def aggregate(
+    *,
     workflow_ctx: WorkflowContext | None = None,
 ) -> TaskResult[Summary, TaskError]:
     if workflow_ctx is None:
@@ -356,6 +358,7 @@ from horsies import WorkflowContext, SubWorkflowSummary
 
 @app.task(task_name="report_health")
 def report_health(
+    *,
     workflow_ctx: WorkflowContext | None = None,
 ) -> TaskResult[HealthReport, TaskError]:
     if workflow_ctx is None:
@@ -410,6 +413,7 @@ SubWorkflowNode results flow like TaskNode results:
 ```python
 @app.task(task_name="process_child_result")
 def process_child_result(
+    *,
     child_result: TaskResult[ChildOutput, TaskError],
 ) -> TaskResult[ParentOutput, TaskError]:
     if child_result.is_err():
@@ -464,6 +468,7 @@ Use this for recovery tasks or aggregators that handle failures:
 ```python
 @app.task(task_name="recovery_handler")
 def recovery_handler(
+    *,
     primary_result: TaskResult[Data, TaskError],
 ) -> TaskResult[Data, TaskError]:
     if primary_result.is_ok():
@@ -527,6 +532,7 @@ When a task runs with `allow_failed_deps=True` and its dependency was SKIPPED
 ```python
 @app.task(task_name="handle_any_failure")
 def handle_any_failure(
+    *,
     upstream: TaskResult[Data, TaskError],
 ) -> TaskResult[Report, TaskError]:
     if upstream.is_ok():
@@ -766,6 +772,7 @@ workflow can continue deterministic failure propagation without leaving the node
 ```python
 @app.task(task_name="my_task")
 def my_task(
+    *,
     workflow_ctx: WorkflowContext | None = None,  # Add this
 ) -> TaskResult[Output, TaskError]:
     ...
@@ -865,12 +872,13 @@ class AggregatedReport(BaseModel):
 # --- Task Functions ---
 
 @app.task(task_name="fetch_from_api")
-def fetch_from_api(url: str) -> TaskResult[RawData, TaskError]:
+def fetch_from_api(*, url: str) -> TaskResult[RawData, TaskError]:
     # Simulate fetch
     return TaskResult(ok=RawData(source=url, content="..."))
 
 @app.task(task_name="parse_and_validate")
 def parse_and_validate(
+    *,
     raw: TaskResult[RawData, TaskError],
 ) -> TaskResult[ProcessedData, TaskError]:
     if raw.is_err():
@@ -881,6 +889,7 @@ def parse_and_validate(
 
 @app.task(task_name="aggregate_sources")
 def aggregate_sources(
+    *,
     workflow_ctx: WorkflowContext | None = None,
 ) -> TaskResult[AggregatedReport, TaskError]:
     if workflow_ctx is None:

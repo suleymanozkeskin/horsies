@@ -25,7 +25,7 @@ def bad(*args, **kwargs) -> TaskResult[int, TaskError]:
 
 # Correct
 @app.task("good")
-def good(x: int, y: int) -> TaskResult[int, TaskError]:
+def good(*, x: int, y: int) -> TaskResult[int, TaskError]:
     return TaskResult(ok=x + y)
 ```
 
@@ -53,6 +53,7 @@ from horsies import JsonValue
 
 @app.task("validate_input")
 def validate_input(
+    *,
     data: dict[str, JsonValue],
 ) -> TaskResult[dict[str, JsonValue], TaskError]:
     ...

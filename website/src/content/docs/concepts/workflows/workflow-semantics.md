@@ -202,7 +202,7 @@ def produce() -> TaskResult[int, TaskError]:
     return TaskResult(ok=1)
 
 @app.task("process")
-def process(data: TaskResult[int, TaskError]) -> TaskResult[str, TaskError]:
+def process(*, data: TaskResult[int, TaskError]) -> TaskResult[str, TaskError]:
     if data.is_err():
         return TaskResult(err=TaskError(
             error_code="UPSTREAM_FAILED",
@@ -360,7 +360,7 @@ Tasks with `allow_failed_deps=True` receive the `TaskResult` from dependencies:
 from horsies import OutcomeCode, RetrievalCode
 
 @app.task(task_name="recovery_handler")
-def recovery_handler(input_result: TaskResult[Data, TaskError]) -> TaskResult[...]:
+def recovery_handler(*, input_result: TaskResult[Data, TaskError]) -> TaskResult[...]:
     if input_result.is_err():
         err = input_result.err_value
         if err.error_code == OutcomeCode.UPSTREAM_SKIPPED:
@@ -395,6 +395,7 @@ sources. The target parameter must therefore declare a default:
 ```python
 @app.task("partial_consumer")
 def partial_consumer(
+    *,
     b_result: TaskResult[int, TaskError] | None = None,
     c_result: TaskResult[int, TaskError] | None = None,
 ) -> TaskResult[str, TaskError]:
@@ -517,7 +518,7 @@ from horsies import RetryPolicy, TaskResult, TaskError, JsonValue
         auto_retry_for=["TASK_EXCEPTION", "NETWORK_ERROR"],
     ),
 )
-def fetch_data(url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
+def fetch_data(*, url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
     ...
 
 # This task will retry up to 3 times when used in a workflow
@@ -715,7 +716,7 @@ node_c: TaskNode[Summary] = TaskNode(
 )
 
 @app.task(task_name="aggregate")
-def aggregate(workflow_ctx: WorkflowContext | None = None) -> TaskResult[Summary, TaskError]:
+def aggregate(*, workflow_ctx: WorkflowContext | None = None) -> TaskResult[Summary, TaskError]:
     if workflow_ctx is None:
         return TaskResult(err=TaskError(error_code="NO_CTX", message="Missing context"))
 
@@ -776,7 +777,7 @@ config = AppConfig(
 app = Horsies(config)
 
 @app.task("fan_in")
-def fan_in(workflow_ctx: WorkflowContext | None = None) -> TaskResult[str, TaskError]:
+def fan_in(*, workflow_ctx: WorkflowContext | None = None) -> TaskResult[str, TaskError]:
     if workflow_ctx is None:
         return TaskResult(err=TaskError(error_code="NO_CTX", message="Missing context"))
 
@@ -823,7 +824,7 @@ For tasks that only need workflow metadata without result access, use `WorkflowM
 from horsies import WorkflowMeta
 
 @app.task(task_name="my_task")
-def my_task(workflow_meta: WorkflowMeta | None = None) -> TaskResult[str, TaskError]:
+def my_task(*, workflow_meta: WorkflowMeta | None = None) -> TaskResult[str, TaskError]:
     if workflow_meta:
         print(f"Running in workflow {workflow_meta.workflow_id}")
         print(f"Task index: {workflow_meta.task_index}")
@@ -881,7 +882,7 @@ def produce_number() -> TaskResult[int, TaskError]:
 
 # transform receives TaskResult[int, TaskError], not int:
 @app.task("transform")
-def transform(data: TaskResult[int, TaskError]) -> TaskResult[str, TaskError]:
+def transform(*, data: TaskResult[int, TaskError]) -> TaskResult[str, TaskError]:
     if data.is_err():
         return TaskResult(err=data.err_value)
     value: int = data.ok_value

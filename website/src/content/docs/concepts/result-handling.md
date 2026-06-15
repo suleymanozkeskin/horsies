@@ -21,7 +21,7 @@ A `TaskResult` contains exactly one of:
 from horsies import TaskResult, TaskError
 
 @app.task("divide")
-def divide(a: int, b: int) -> TaskResult[float, TaskError]:
+def divide(*, a: int, b: int) -> TaskResult[float, TaskError]:
     if b == 0:
         return TaskResult(err=TaskError(
             error_code="DIVISION_BY_ZERO",
@@ -123,7 +123,7 @@ Returned by `handle.get()` for issues retrieving results:
 
 ```python
 @app.task("transfer_funds")
-def transfer_funds(amount: float) -> TaskResult[str, TaskError]:
+def transfer_funds(*, amount: float) -> TaskResult[str, TaskError]:
     if amount <= 0:
         # This is a domain error - expected, handled
         return TaskResult(err=TaskError(

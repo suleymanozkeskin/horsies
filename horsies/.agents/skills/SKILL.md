@@ -32,7 +32,7 @@ app = Horsies(config=AppConfig(
 ))
 
 @app.task("add_numbers")
-def add_numbers(a: int, b: int) -> TaskResult[int, TaskError]:
+def add_numbers(*, a: int, b: int) -> TaskResult[int, TaskError]:
     return TaskResult(ok=a + b)
 ```
 
@@ -70,7 +70,7 @@ Deadline: `add_numbers.with_options(good_until=deadline).send(a=5, b=3)` expires
 Only `ENQUEUE_FAILED` (transient) errors are retryable:
 
 ```python
-match my_task.send(arg1, arg2):
+match my_task.send(**kwargs):
     case Ok(handle):
         ...
     case Err(err) if err.retryable:

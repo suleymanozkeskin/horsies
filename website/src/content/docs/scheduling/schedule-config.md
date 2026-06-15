@@ -79,7 +79,7 @@ Must match a registered `@app.task()`:
 
 ```python
 @app.task("send_notification")
-def send_notification(user_id: int) -> TaskResult[None, TaskError]:
+def send_notification(*, user_id: int) -> TaskResult[None, TaskError]:
     ...
 
 TaskSchedule(
@@ -95,7 +95,7 @@ Pass arguments to the scheduled task via `kwargs`. Schedules are keyword-only: `
 
 ```python
 @app.task("process_region")
-def process_region(region: str, full_sync: bool) -> TaskResult[None, TaskError]:
+def process_region(*, region: str, full_sync: bool) -> TaskResult[None, TaskError]:
     ...
 
 TaskSchedule(

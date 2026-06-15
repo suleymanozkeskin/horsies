@@ -260,7 +260,7 @@ def call_external_api() -> TaskResult[dict[str, JsonValue], TaskError]:
     "update_inventory",
     retry_policy=RetryPolicy.fixed([1, 2, 5], auto_retry_for=["DEADLOCK"]),  # Quick retries
 )
-def update_inventory(item_id: int, delta: int) -> TaskResult[None, TaskError]:
+def update_inventory(*, item_id: int, delta: int) -> TaskResult[None, TaskError]:
     try:
         db.update_stock(item_id, delta)
         return TaskResult(ok=None)

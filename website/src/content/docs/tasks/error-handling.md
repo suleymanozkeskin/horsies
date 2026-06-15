@@ -49,7 +49,7 @@ from horsies import RetryPolicy, TaskResult, TaskError, JsonValue
         auto_retry_for=["TASK_EXCEPTION", "RATE_LIMITED"],
     ),
 )
-def fetch_api_data(url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
+def fetch_api_data(*, url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
     # If this returns a RATE_LIMITED error or raises an unhandled exception,
     # the worker automatically retries up to 3 times
     ...
@@ -76,7 +76,7 @@ To avoid try/except boilerplate for mapping exceptions to error codes, use `exce
         TimeoutError: "TIMEOUT",
     },
 )
-def fetch_api_data(url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
+def fetch_api_data(*, url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
     # Unhandled RateLimitError/TimeoutError automatically mapped and retried
     ...
 ```
@@ -118,7 +118,7 @@ class ProductRecord:
 
 
 @app.task("fetch_product_page")
-def fetch_product_page(url: str) -> TaskResult[str, TaskError]:
+def fetch_product_page(*, url: str) -> TaskResult[str, TaskError]:
     if "missing" in url:
         return TaskResult(err=TaskError(
             error_code="FETCH_FAILED",
@@ -129,6 +129,7 @@ def fetch_product_page(url: str) -> TaskResult[str, TaskError]:
 
 @app.task("parse_product_page")
 def parse_product_page(
+    *,
     page_result: TaskResult[str, TaskError],
 ) -> TaskResult[ProductRecord, TaskError]:
     if page_result.is_err():
@@ -145,6 +146,7 @@ def parse_product_page(
 
 @app.task("save_product_record")
 def save_product_record(
+    *,
     product_result: TaskResult[ProductRecord, TaskError],
 ) -> TaskResult[None, TaskError]:
     if product_result.is_err():

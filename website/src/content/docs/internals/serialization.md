@@ -129,7 +129,7 @@ class Order(BaseModel):
     items: list[str]
 
 @app.task("process_order")
-def process_order(order: Order) -> TaskResult[Order, TaskError]:
+def process_order(*, order: Order) -> TaskResult[Order, TaskError]:
     return TaskResult(ok=order)
 ```
 
@@ -140,6 +140,7 @@ For raw JSON payloads where the inner shape is genuinely dynamic:
 ```python
 @app.task("validate_input")
 def validate_input(
+    *,
     data: dict[str, JsonValue],
 ) -> TaskResult[dict[str, JsonValue], TaskError]:
     return TaskResult(ok=data)
@@ -183,6 +184,7 @@ def create_order() -> TaskResult[Order, TaskError]:
 
 @app.task("process_order")
 def process_order(
+    *,
     order_result: TaskResult[Order, TaskError],
 ) -> TaskResult[str, TaskError]:
     if order_result.is_err():
@@ -255,12 +257,12 @@ Raised by strict codec primitives and the JSON parse-constant guard for strict J
 ```python
 # Wrong — raises SignatureValidationError
 @app.task("bad")
-def bad(data: dict) -> TaskResult[dict, TaskError]:
+def bad(*, data: dict) -> TaskResult[dict, TaskError]:
     return TaskResult(ok=data)
 
 # Correct — declare the contents
 @app.task("good")
-def good(data: dict[str, JsonValue]) -> TaskResult[dict[str, JsonValue], TaskError]:
+def good(*, data: dict[str, JsonValue]) -> TaskResult[dict[str, JsonValue], TaskError]:
     return TaskResult(ok=data)
 ```
 

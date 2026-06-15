@@ -51,7 +51,7 @@ app = Horsies(AppConfig(
 ))
 
 @app.task("add_numbers")
-def add_numbers(a: int, b: int) -> TaskResult[int, TaskError]:
+def add_numbers(*, a: int, b: int) -> TaskResult[int, TaskError]:
     return TaskResult(ok=a + b)
 
 # Send and get result

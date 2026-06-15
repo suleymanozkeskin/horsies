@@ -20,7 +20,7 @@ Covers all parameters, error codes, serialization rules, retry patterns, and pit
     default_unhandled_error_code: str | None = None,
     timeout_ms: int | None = None,
 )
-def my_task(...) -> TaskResult[T, TaskError]: ...
+def my_task(*, ...) -> TaskResult[T, TaskError]: ...
 ```
 
 | Parameter | Type | Default | Description |
@@ -227,9 +227,9 @@ Returned by `task.with_options(...)`. Exposes `.send()`, `.send_async()`, and `.
 deadline = datetime.now(timezone.utc) + timedelta(minutes=5)
 opts = my_task.with_options(good_until=deadline)
 
-opts.send(arg1, arg2)              # sync
-await opts.send_async(arg1, arg2)  # async
-opts.schedule(60, arg1, arg2)      # delayed
+opts.send(**kwargs)              # sync
+await opts.send_async(**kwargs)  # async
+opts.schedule(60, **kwargs)      # delayed
 ```
 
 **`good_until`**: timezone-aware `datetime` or `None`. Naive datetimes return `Err(VALIDATION_FAILED)`. Passing `good_until=None` explicitly clears any inherited deadline.
@@ -361,7 +361,7 @@ Pre-serialized at send time. Never construct manually — created by the library
 ### Retry guard pattern
 
 ```python
-match my_task.send(arg1, arg2):
+match my_task.send(**kwargs):
     case Ok(handle):
         result = handle.get(timeout_ms=5000)
     case Err(err) if err.retryable:
@@ -514,11 +514,11 @@ caller uses:
 
 ```python
 # WRONG — runs during worker import
-result = my_task.send("test")  # Err(SEND_SUPPRESSED)
+result = my_task.send(value="test")  # Err(SEND_SUPPRESSED)
 
 # CORRECT — call from functions/endpoints
 def process():
-    match my_task.send("test"):
+    match my_task.send(value="test"):
         case Ok(handle): ...
         case Err(err): ...
 ```
@@ -551,12 +551,12 @@ my_task.send(cfg=Config(value=42))
 ```python
 # WRONG — returns raw value, causes TASK_EXCEPTION at runtime
 @app.task("bad")
-def bad(x: int) -> TaskResult[dict, TaskError]:
+def bad(*, x: int) -> TaskResult[dict, TaskError]:
     return {"x": x}
 
 # CORRECT
 @app.task("good")
-def good(x: int) -> TaskResult[dict, TaskError]:
+def good(*, x: int) -> TaskResult[dict, TaskError]:
     return TaskResult(ok={"x": x})
 ```
 
