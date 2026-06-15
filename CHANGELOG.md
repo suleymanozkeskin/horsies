@@ -8,6 +8,16 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-06-15
+
+Producer-side strictness lands on both axes: task parameters must be
+keyword-only, and `encode_value` validates a value against its declared type
+before serializing — so a positional or mistyped task call fails at the type
+checker or at `app.check` instead of returning an ignorable `Err` that silently
+drops the send. Schedules become kwargs-only and `app.check()` validates them
+as a preflight. Orphaned workflow tasks self-heal instead of churning the
+requeue loop. No schema change (still v8).
+
 ### Fixed
 
 - Orphaned workflow tasks (a `CLAIMED` workflow task whose `workflow_task`
@@ -17,6 +27,11 @@ and there is no migration contract between pre-1.0 versions.
 - Retention no longer orphans a live task row: a terminal, expired workflow is
   retained until every backing task is terminal, instead of deleting the
   workflow / `workflow_task` rows while a backing task is still non-terminal.
+- `encode_value` validates a value against its declared type before serializing.
+  `dump_python` alone only serialized — a mistyped value (a `dict`/`int`/`list`
+  in a `str` slot) passed through with a warning. The producer now fails closed,
+  symmetric with `decode_value` on the consumer; mistyped task kwargs, results,
+  and `args_from` bindings are rejected at send / at `app.check`. (#146)
 
 ### Added
 
