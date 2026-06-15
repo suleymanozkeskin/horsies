@@ -688,6 +688,48 @@ class TestScanReservedKeysDirect:
 # ---------------------------------------------------------------------------
 
 
+class TestEncodeValidation:
+    """`encode_value` validates before serializing.
+
+    `dump_python` alone only serializes — a mistyped value (dict/int/list
+    for a `str` slot) passes through with a `PydanticSerializationUnexpectedValue`
+    warning instead of raising. Validating first makes the producer fail
+    closed, symmetric with `decode_value` on the consumer.
+    """
+
+    def test_dict_for_str_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            encode_value({'not': 'a string'}, str)
+
+    def test_int_for_str_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            encode_value(123, str)
+
+    def test_list_for_str_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            encode_value(['a', 'b'], str)
+
+    def test_missing_required_model_field_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            encode_value(cast(object, {'name': 'Alice'}), _User)
+
+    def test_harmless_coercion_preserved(self) -> None:
+        # Lax validation keeps the boundary coercions the wire already
+        # round-trips: numeric-string to int, int to float.
+        assert encode_value('5', int) == 5
+        assert encode_value(5, float) == 5.0
+
+    def test_task_error_instance_unaffected(self) -> None:
+        # A model instance is not revalidated, so live TaskError encoding
+        # is unchanged.
+        from horsies.core.models.tasks import TaskError
+
+        err = TaskError(error_code='MY_CODE', message='boom')
+        encoded = cast(dict[str, object], encode_value(err, TaskError))
+        assert encoded['error_code'] == 'MY_CODE'
+        assert encoded['message'] == 'boom'
+
+
 class TestDecodeValidation:
     def test_decode_type_mismatch_raises(self) -> None:
         with pytest.raises(ValidationError):

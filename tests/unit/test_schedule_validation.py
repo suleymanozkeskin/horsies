@@ -142,6 +142,24 @@ class TestCollectScheduleErrors:
         assert len(errors) == 1
         assert 'kwargs do not match' in errors[0].message
 
+    def test_kwarg_type_mismatch_not_encodable(self) -> None:
+        """A kwarg that binds by name but violates the param type is rejected.
+
+        `encode_value` validates before serializing, so a dict for a `str`
+        param fails the wire-encode dry run instead of slipping through.
+        """
+        def fn(region: str) -> str:
+            return region
+
+        errors = self._collect(
+            [_schedule(kwargs={'region': {'not': 'a string'}})],
+            tasks={'task_a': _make_task_mock(fn)},
+        )
+        assert len(errors) == 1
+        assert isinstance(errors[0], ConfigurationError)
+        assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert 'not encodable' in errors[0].message
+
     def test_first_error_wins_per_schedule(self) -> None:
         """Within one schedule, timezone is checked before task registration."""
         # Bad timezone AND unregistered task: timezone error reported (checked first).
