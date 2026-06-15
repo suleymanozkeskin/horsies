@@ -57,7 +57,7 @@ TaskSchedule(
 | `name` | `str` | required | Unique schedule identifier |
 | `task_name` | `str` | required | Registered task name |
 | `pattern` | `SchedulePattern` | required | When to run |
-| `kwargs` | `dict` | `{}` | Keyword arguments passed to the task. Schedules carrying any positional `args` are rejected at enqueue time with `ENQUEUE_FAILED` — use `kwargs` only. |
+| `kwargs` | `dict` | `{}` | Keyword arguments passed to the task. Schedules are kwargs-only; `TaskSchedule` rejects any other field (including `args`) at construction. |
 | `queue_name` | `str` | `None` | Queue override (CUSTOM mode) |
 | `enabled` | `bool` | `True` | Enable/disable this schedule |
 | `timezone` | `str` | `"UTC"` | Timezone for schedule evaluation |
@@ -91,7 +91,7 @@ TaskSchedule(
 
 ### Arguments
 
-Pass arguments to the scheduled task via `kwargs`. Positional `args` are rejected at enqueue time with `ENQUEUE_FAILED` — the wire is keyword-only.
+Pass arguments to the scheduled task via `kwargs`. Schedules are keyword-only: `TaskSchedule` has no `args` field, and passing one raises a validation error at construction.
 
 ```python
 @app.task("process_region")

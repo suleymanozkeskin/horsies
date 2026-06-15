@@ -27,6 +27,19 @@ there is no migration contract between pre-1.0 versions.
   cancel orphaned workflow tasks at finalization and in the reaper. When
   `False` they are left `CLAIMED` for inspection (never requeued or
   retention-deleted).
+- `app.check()` validates configured schedules (timezone, task registration,
+  queue, and the kwargs wire contract) as a preflight phase, shared with
+  scheduler boot. Skipped for the worker role, which never enqueues schedules.
+  Previously a malformed schedule passed `check` and only failed at scheduler
+  startup.
+
+### Removed
+
+- `TaskSchedule.args` removed; schedules are kwargs-only (strict-serde has no
+  positional wire form). `TaskSchedule` now sets `extra='forbid'`, so `args`
+  or any unknown field raises a validation error at construction instead of
+  being silently dropped. **Breaking**: pass every scheduled argument as a
+  `kwargs` entry.
 
 ## 0.2.1 — 2026-06-14
 

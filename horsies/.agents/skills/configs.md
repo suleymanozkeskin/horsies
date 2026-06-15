@@ -289,8 +289,7 @@ All `TaskSchedule.name` values must be unique (HRS-205).
 | `name` | `str` | required | Unique schedule identifier |
 | `task_name` | `str` | required | Must match a registered task |
 | `pattern` | `SchedulePattern` | required | When to run |
-| `args` | `tuple` | `()` | Must stay empty — schedules are kwargs-only (rejected at scheduler startup) |
-| `kwargs` | `dict` | `{}` | Keyword args to task |
+| `kwargs` | `dict` | `{}` | Keyword args to task — schedules are kwargs-only (`extra='forbid'`; `args`/unknown fields rejected at construction) |
 | `queue_name` | `str \| None` | `None` | Target queue |
 | `enabled` | `bool` | `True` | Per-schedule on/off |
 | `timezone` | `str` | `"UTC"` | IANA timezone (validated at scheduler startup; invalid names fail boot) |

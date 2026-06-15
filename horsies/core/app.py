@@ -403,6 +403,9 @@ class Horsies:
         Phase 3.2: Workflow builder execution — run registered builders under send suppression.
         Phase 3.3: Undecorated builder detection — fail-closed on missing decorators.
         Phase 3.5: Policy safety checks — runtime retry/mapping validation.
+        Phase 3.6: Schedule validation — skipped for the worker role, which
+            never acts on schedules. Validates timezone, task registration,
+            queue, and the kwargs wire contract for each enabled schedule.
         Phase 4 (if live): Broker connectivity — async SELECT 1.
 
         Args:
@@ -448,11 +451,32 @@ class Horsies:
         if all_errors:
             return all_errors
 
+        # Phase 3.6: validate configured schedules (skipped for workers).
+        all_errors.extend(self._check_schedules())
+        if all_errors:
+            return all_errors
+
         # Phase 4 (optional): broker connectivity
         if live:
             all_errors.extend(self._check_broker_connectivity())
 
         return all_errors
+
+    def _check_schedules(self) -> list[HorsiesError]:
+        """Validate configured schedules, unless running as a worker.
+
+        Workers never enqueue scheduled tasks, so schedule validation would be
+        wasted compute; the scheduler boot path and the standalone ``check``
+        command (producer role) still validate. Shares
+        ``collect_schedule_errors`` with ``Scheduler._validate_schedules``.
+        """
+        if self._role == 'worker':
+            return []
+        if self.config.schedule is None:
+            return []
+        from horsies.core.scheduler.validation import collect_schedule_errors
+
+        return collect_schedule_errors(self, self.config.schedule)
 
     def _check_task_imports(self) -> list[HorsiesError]:
         """Import task modules and collect any errors."""

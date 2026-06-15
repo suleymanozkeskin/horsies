@@ -250,7 +250,6 @@ class TestTaskSchedule:
         assert schedule.catch_up_missed is False
         assert schedule.max_catch_up_runs == 100
         assert schedule.timezone == 'UTC'
-        assert schedule.args == ()
         assert schedule.kwargs == {}
         assert schedule.queue_name is None
 
@@ -260,7 +259,6 @@ class TestTaskSchedule:
             name='full',
             task_name='my_task',
             pattern=IntervalSchedule(minutes=5),
-            args=(1, 'two'),
             kwargs={'key': 'value'},
             queue_name='high',
             enabled=False,
@@ -271,13 +269,22 @@ class TestTaskSchedule:
 
         assert schedule.name == 'full'
         assert schedule.task_name == 'my_task'
-        assert schedule.args == (1, 'two')
         assert schedule.kwargs == {'key': 'value'}
         assert schedule.queue_name == 'high'
         assert schedule.enabled is False
         assert schedule.timezone == 'America/New_York'
         assert schedule.catch_up_missed is True
         assert schedule.max_catch_up_runs == 250
+
+    def test_positional_args_rejected_at_construction(self) -> None:
+        """Schedules are kwargs-only; an args field is rejected (extra='forbid')."""
+        with pytest.raises(ValidationError):
+            TaskSchedule(
+                name='s',
+                task_name='my_task',
+                pattern=IntervalSchedule(seconds=10),
+                args=(1,),  # type: ignore[call-arg]
+            )
 
     def test_name_is_required(self) -> None:
         """name field is required."""

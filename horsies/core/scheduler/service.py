@@ -7,14 +7,13 @@ import os
 import sys
 from datetime import datetime, timezone
 from typing import Optional
-from zoneinfo import ZoneInfo
-import inspect
 from sqlalchemy import text
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.schedule import ScheduleConfig, TaskSchedule
-from horsies.core.errors import ConfigurationError, RegistryError, ErrorCode
+from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.scheduler.state import ScheduleStateManager
+from horsies.core.scheduler.validation import collect_schedule_errors
 from horsies.core.scheduler.calculator import calculate_next_run, should_run_now
 from horsies.core.logging import get_logger
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError, BrokerResult
@@ -773,110 +772,15 @@ class Scheduler:
         return self.app.validate_queue_name(queue_name)
 
     def _validate_schedules(self) -> None:
-        """Fail fast on invalid schedules (missing tasks/queues/timezones)."""
-        for sched in self.schedule_config.schedules:
-            if not sched.enabled:
-                continue
-            try:
-                ZoneInfo(sched.timezone)
-            except Exception as exc:
-                # Reject here so a permanently bad timezone exits 1 at boot
-                # instead of failing calculate_next_run on every tick
-                # (the missing-row self-heal would retry it forever).
-                raise ConfigurationError(
-                    message=f"invalid timezone for schedule '{sched.name}'",
-                    code=ErrorCode.CONFIG_INVALID_SCHEDULE,
-                    notes=[f'timezone: {sched.timezone!r}', f'error: {exc}'],
-                    help_text='use an IANA timezone name, e.g. "UTC" or "Europe/Berlin"',
-                ) from exc
-            if sched.task_name not in self.app.tasks:
-                available = list(self.app.tasks.keys())
-                raise RegistryError(
-                    message=f"scheduled task '{sched.task_name}' not registered",
-                    code=ErrorCode.TASK_NOT_REGISTERED,
-                    notes=[
-                        f"schedule '{sched.name}' references task '{sched.task_name}'",
-                        f'available tasks: {available}'
-                        if available
-                        else 'no tasks registered',
-                    ],
-                    help_text='ensure the task is defined with @app.task and imported before scheduler starts',
-                )
-            try:
-                self._resolve_schedule_queue(sched)
-            except Exception as e:
-                raise ConfigurationError(
-                    message=f"invalid queue configuration for schedule '{sched.name}'",
-                    code=ErrorCode.CONFIG_INVALID_SCHEDULE,
-                    notes=[f'underlying error: {e}'],
-                    help_text='check queue_name in schedule matches app.config queue settings',
-                ) from e
-            if sched.args:
-                # Enqueue rejects positional args unconditionally
-                # (strict-serde has no typed wire representation for them);
-                # without this check the schedule passes startup and then
-                # fails permanently on every tick.
-                raise ConfigurationError(
-                    message=f"schedule '{sched.name}' carries positional args; schedules are kwargs-only",
-                    code=ErrorCode.CONFIG_INVALID_SCHEDULE,
-                    notes=[f'{len(sched.args)} positional arg(s) found'],
-                    help_text='move positional args to kwargs to satisfy the strict-serde wire contract',
-                )
-            self._validate_schedule_signature(sched)
-            self._validate_schedule_serializable(sched)
+        """Fail fast on the first invalid schedule (boot guard).
 
-    def _validate_schedule_signature(self, schedule: TaskSchedule) -> None:
-        """Ensure schedule args/kwargs bind cleanly to the task signature."""
-        task = self.app.tasks.get(schedule.task_name)
-        original_fn = getattr(task, '_original_fn', None) if task else None
-        if original_fn is None:
-            return  # Cannot validate without original function signature
-
-        sig = inspect.signature(original_fn)
-        try:
-            sig.bind(*schedule.args, **schedule.kwargs)
-        except TypeError as e:
-            raise ConfigurationError(
-                message=f"schedule '{schedule.name}' args/kwargs do not match task '{schedule.task_name}' signature",
-                code=ErrorCode.CONFIG_INVALID_SCHEDULE,
-                notes=[f'signature bind error: {e}'],
-                help_text='update TaskSchedule args/kwargs to match task function parameters',
-            ) from e
-
-    def _validate_schedule_serializable(self, schedule: TaskSchedule) -> None:
-        """Dry-run the kwargs wire encoding at startup.
-
-        ``sig.bind`` only checks parameter names/arity, not the strict-serde
-        wire contract. Without this, a schedule whose kwarg targets an
-        engine-injected parameter (``workflow_ctx``/``workflow_meta``), a
-        TaskResult-typed parameter, or a value that cannot be JSON-serialized
-        passes startup validation and then fails ``ENQUEUE_FAILED`` on every
-        tick. Mirror the enqueue-time encode/serialize so the bad schedule is
-        rejected once, at startup, instead of forever.
+        Shares :func:`collect_schedule_errors` with ``Horsies.check()``;
+        ``errors[0]`` is the first bad schedule in iteration order, preserving
+        the original raise-on-first behaviour. ``check`` collects all of them.
         """
-        if not schedule.kwargs:
-            return
-        task = self.app.tasks.get(schedule.task_name)
-        if task is None:
-            return  # missing-task case already raised above
-        task_fn = underlying_task_fn(task)
-        try:
-            encoded = encode_kwargs(task_fn, schedule.kwargs)
-        except (StrictJsonError, _PydanticValidationError) as exc:
-            raise ConfigurationError(
-                message=f"schedule '{schedule.name}' kwargs are not encodable for task '{schedule.task_name}'",
-                code=ErrorCode.CONFIG_INVALID_SCHEDULE,
-                notes=[f'encode error: {exc}'],
-                help_text='schedules are kwargs-only and must satisfy the task\'s typed signature; do not supply engine-injected (workflow_ctx/workflow_meta) or TaskResult-typed kwargs',
-            ) from exc
-        ser = dumps_json(encoded)
-        if is_err(ser):
-            raise ConfigurationError(
-                message=f"schedule '{schedule.name}' kwargs are not JSON-serializable for task '{schedule.task_name}'",
-                code=ErrorCode.CONFIG_INVALID_SCHEDULE,
-                notes=[f'serialization error: {ser.err_value}'],
-                help_text='ensure all scheduled kwargs serialize to JSON',
-            )
+        errors = collect_schedule_errors(self.app, self.schedule_config)
+        if errors:
+            raise errors[0]
 
     async def _enqueue_scheduled_task(
         self,
@@ -911,22 +815,8 @@ class Scheduler:
 
         task_id = schedule_slot_task_id(schedule.name, slot_time)
 
-        # Pre-serialize args/kwargs.
-        # Strict-serde: positional args have no typed wire representation;
-        # the scheduler rejects schedules carrying any. Schedules must
-        # use kwargs-only (the same contract `.send()` enforces).
-        args_json: str | None = None
-        if schedule.args:
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.ENQUEUE_FAILED,
-                message=(
-                    f"Schedule {schedule.name!r} carries "
-                    f"{len(schedule.args)} positional arg(s); strict-serde "
-                    f"rejects positional args. Use kwargs-only."
-                ),
-                retryable=False,
-            ))
-
+        # Schedules are kwargs-only (TaskSchedule has no args field); the wire
+        # carries no positional representation, matching the `.send()` contract.
         kwargs_json: str | None = None
         if schedule.kwargs:
             # Strict-serde phase 3 routes through encode_kwargs.
@@ -958,7 +848,7 @@ class Scheduler:
             task_name=schedule.task_name,
             queue_name=validated_queue_name,
             priority=priority,
-            args_json=args_json,
+            args_json=None,
             kwargs_json=kwargs_json,
             sent_at=sent_at,
             good_until=None,
@@ -971,7 +861,7 @@ class Scheduler:
             queue_name=validated_queue_name,
             task_id=task_id,
             enqueue_sha=enqueue_sha,
-            args_json=args_json,
+            args_json=None,
             kwargs_json=kwargs_json,
             priority=priority,
             sent_at=sent_at,
