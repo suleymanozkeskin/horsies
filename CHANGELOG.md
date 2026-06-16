@@ -8,6 +8,8 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-06-17
+
 Per-child memory recycling, complementing count-based `--max-tasks-per-child`.
 Heterogeneous workloads make a task count a poor proxy for a bytes budget: the
 correct recycle point depends on a child's RSS, not how many tasks it ran. This
