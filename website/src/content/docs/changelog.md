@@ -11,12 +11,23 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
+Per-child memory recycling complements count-based `--max-tasks-per-child`: a
+task count is a poor proxy for a bytes budget, so the correct recycle point
+depends on a child's RSS. New `--max-memory-per-child-mb N` (off by default,
+CPython-only, forces `spawn`) recycles a child once its own resident memory
+reaches N MB — the child samples RSS after each task and exits cleanly via the
+stdlib `exit_pid` marker, replacing only that child. A startup baseline guard
+fails the worker if the threshold is at or below the warmed child baseline.
+Also fixes a latent CPython gh-115634 hang in the existing count-recycle path:
+count recycling now overrides `_adjust_process_count` so a recycled child is
+always replaced, falling back to the stock pool if the internals are absent.
+
 ## 0.2.3 — 2026-06-16
 
 Worker child processes can now be recycled to bound memory. Long-lived
 executor children accumulate memory the OS never reclaims (allocator
 high-water from heap fragmentation, C-extension caches, leaks), which crashes
-memory-quota platforms (Heroku R14). `--max-tasks-per-child` (default `100`)
+memory-quota platforms (containers, PaaS dynos). `--max-tasks-per-child` (default `100`)
 recycles each child after N tasks; new `children_memory_mb` telemetry exposes
 the per-child footprint the parent-only `memory_usage_mb` metric hid. Schema
 bumped to v9 (additive). **Behavior change:** recycling is on by default and

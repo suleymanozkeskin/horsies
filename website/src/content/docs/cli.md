@@ -30,6 +30,7 @@ horsies worker <module> [OPTIONS]
 | `--max-claim-batch N` | 0 | Max claims per queue per pass (`0` auto-fills available capacity) |
 | `--max-claim-per-worker N` | 0 | Max total claimed tasks (0=auto) |
 | `--max-tasks-per-child N` | 100 | Recycle each worker process after it runs N tasks (`N >= 2`, per-child and staggered). `0` disables recycling. Forces the `spawn` start method. See [worker concurrency](workers/concurrency). |
+| `--max-memory-per-child-mb N` | _(off)_ | Recycle a child once its own RSS reaches N MB (per-child, CPython-only, forces `spawn`). Disabled by default. The worker refuses to start if N is at or below the warmed child baseline. See [worker concurrency](workers/concurrency#memory-recycling-max-memory-per-child-mb). |
 
 **Examples:**
 

@@ -50,7 +50,7 @@ horsies worker myapp.instance:app --processes=8
 Worker child processes are long-lived: created once, then reused for every task.
 Memory that a child does not return to the OS — heap high-water from allocator
 fragmentation, C-extension caches, genuine leaks — accumulates for the child's
-lifetime. On memory-quota platforms (e.g. Heroku R14) this grows until the
+lifetime. On memory-quota platforms (containers, PaaS dynos) this grows until the
 process is killed.
 
 `--max-tasks-per-child` recycles a child after it completes N tasks, returning
@@ -105,6 +105,118 @@ metric does not capture.
 - High N (e.g. 500): negligible per-task overhead, larger memory headroom needed.
 - A high N is a backstop for slow accumulation; a fast leak (large retention per
   task) needs a low N or a fix in the task code.
+
+## Memory Recycling: --max-memory-per-child-mb
+
+`--max-tasks-per-child` bounds task count, not memory. The recycle point that
+keeps RSS under quota depends on a child's RSS, not its task count, so a fixed
+count under heterogeneous tasks recycles either too early or too late.
+
+`--max-memory-per-child-mb` recycles a child by its **own resident memory**: each
+child samples its RSS after every real task and, when at or above the threshold,
+finishes the task, sends its result, and exits cleanly. The pool replaces only
+that child — siblings and their in-flight tasks are untouched. **Disabled by
+default.**
+
+```bash
+# Recycle any child once its RSS reaches 200 MB
+horsies worker myapp.instance:app --processes=6 --max-memory-per-child-mb=200
+
+# Combine with count recycling: a child recycles when either limit is reached
+horsies worker myapp.instance:app --processes=6 \
+  --max-tasks-per-child=500 --max-memory-per-child-mb=200
+```
+
+- **Disabled by default** (`None`). Any positive value enables it.
+- **CPython-only.** It is built on private `ProcessPoolExecutor` internals; the
+  worker refuses to start (loudly) on other interpreters or untested CPython
+  minor versions.
+- Forces the `spawn` start method, exactly like `--max-tasks-per-child`.
+- It is a **retention guardrail, not a hard memory sandbox.** A task whose
+  working set exceeds the threshold *while it is still running* is not
+  interrupted; the recycle happens after it returns. Per-task peak memory is
+  bounded by your task code, not by this knob.
+
+### The threshold is checked against the warmed baseline at startup
+
+There is no fixed minimum value — a constant cannot know your deployment's
+warmed child baseline, which is set by your app (imports, ORM, connection pool),
+not by Horsies. Instead, at startup each child samples its **settled** baseline
+RSS (after `gc.collect()`), and the worker:
+
+- **fails to start** if the threshold is at or below the warmed baseline — a
+  sub-baseline threshold would recycle after *every* task, and a fresh child
+  immediately re-warms to the same baseline, so this means the app does not fit
+  the chosen per-child budget. The error names both numbers.
+- **warns** if the threshold is within 80% of the baseline (little headroom for
+  per-task working set).
+
+### Sizing
+
+Measure your warmed child baseline first, then leave headroom above it. As a
+reference, a minimal app warms a child to roughly 75 MB (CPython 3.13, Linux)
+before any per-task working set; your baseline is higher with a larger app and
+connection pool. Size for the dyno/container quota:
+
+```
+(max_memory_per_child_mb + task_peak) × processes + parent RSS + DB/native/page-cache + margin
+  < quota
+```
+
+The per-child peak is **`threshold + task_peak`**, not the threshold alone: RSS
+is sampled *after* the task that crosses the threshold, so a child momentarily
+holds the threshold plus that task's working set. Children can peak at the same
+time, so multiply by `processes`. Raise headroom by lowering `--processes`, not
+by setting the threshold past the quota.
+
+Worked example — 1024 MB quota, 4 processes, ~80 MB task working set, ~90 MB
+parent + overhead:
+
+- `--max-memory-per-child-mb=300`: worst case `(300 + 80) × 4 + 90 ≈ 1610 MB`,
+  over quota; peak RSS ~1249 MB — exceeds the 1024 MB quota (OOM-killed on a
+  container, quota error on a PaaS). Each child stays bounded at ~300 MB; the
+  breach is the process-count multiple, not a recycle failure.
+- `--max-memory-per-child-mb=200`: worst case `(200 + 30) × 4 + 90 ≈ 1010 MB`;
+  peak RSS ~719 MB, mean ~657 MB — within quota.
+
+Solve for the threshold: `(quota − parent − margin) / processes − task_peak`, or
+keep a high threshold and lower `--processes`.
+
+Note that summing per-child RSS overcounts shared pages — the cgroup total is
+usually lower than `processes × child_rss` because shared libraries and mmap'd
+pages are charged once. Use the `children_memory_mb` column in
+[worker health](../monitoring/worker-health) snapshots to observe real per-tree
+footprint while tuning. For large task results, prefer returning a reference (row
+id, object key) over the payload itself, so the result does not inflate the RSS
+sampled at recycle time.
+
+### Choosing: count, memory, or both
+
+The two recycle knobs combine with **OR** semantics — a child exits when *either*
+limit is reached:
+
+```bash
+# recycle at 500 tasks OR once RSS reaches 180 MB, whichever comes first
+horsies worker myapp.instance:app --processes=6 \
+  --max-tasks-per-child=500 --max-memory-per-child-mb=180
+```
+
+- `--max-memory-per-child-mb` is the primary guard for memory-quota deployments
+  (containers, PaaS dynos): it tracks the RSS the quota charges.
+- `--max-tasks-per-child` is a secondary backstop — an age limit for slow
+  accumulation, connection churn, or state that does not surface as RSS in time.
+  Set it high (e.g. `500`) rather than `0`.
+- **Recommended default:** memory recycling on, count recycling high as a
+  backstop, then tune the memory threshold from observed `children_memory_mb`
+  under production-like load.
+
+To run **memory-only**, disable count recycling explicitly (otherwise its
+default `100` still applies):
+
+```bash
+horsies worker myapp.instance:app --processes=6 \
+  --max-tasks-per-child=0 --max-memory-per-child-mb=180
+```
 
 ## Queue-Level: max_concurrency
 

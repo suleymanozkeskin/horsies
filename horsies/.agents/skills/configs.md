@@ -120,7 +120,7 @@ info = broker.get_task_info("task-uuid", include_result=True)  # sync
 
 **Monitoring** (async only): `get_stale_tasks()`, `get_expired_tasks()`, `mark_stale_tasks_as_failed()`, `requeue_stale_claimed()`. See website docs `monitoring/broker-methods` for full signatures.
 
-**Health/liveness** (app, async + sync): `ping_database_async()` (DatabasePing latency), `ping_workers_async(target_worker_id=None, timeout_seconds=2.0, min_responses=None)` (list[WorkerPong] — active ping-pong; min_responses=1 = fast liveness gate, returns on first reply), `list_worker_states_async()` / `get_worker_state_async(worker_id)` / `get_worker_state_history_async(worker_id, limit=None)` (WorkerStateSnapshot, includes idle workers). Replaces the retired `get_worker_stats()`. `WorkerStateSnapshot.memory_usage_mb` is the parent process only; `children_memory_mb` is the summed RSS of executor children (the memory-quota driver — use it to size `max_tasks_per_child`). See website docs `monitoring/worker-health`. 
+**Health/liveness** (app, async + sync): `ping_database_async()` (DatabasePing latency), `ping_workers_async(target_worker_id=None, timeout_seconds=2.0, min_responses=None)` (list[WorkerPong] — active ping-pong; min_responses=1 = fast liveness gate, returns on first reply), `list_worker_states_async()` / `get_worker_state_async(worker_id)` / `get_worker_state_history_async(worker_id, limit=None)` (WorkerStateSnapshot, includes idle workers). Replaces the retired `get_worker_stats()`. `WorkerStateSnapshot.memory_usage_mb` is the parent process only; `children_memory_mb` is the summed RSS of executor children (the memory-quota driver — use it to size `max_tasks_per_child` / `max_memory_per_child_mb`). See website docs `monitoring/worker-health`. 
 
 ## PostgresConfig
 
@@ -171,22 +171,63 @@ method so live parent database sockets are not forked into new children.
 
 ### Child process recycling
 
-`WorkerConfig.max_tasks_per_child` (CLI `--max-tasks-per-child`, default `100`)
-recycles each child after N tasks, returning retained memory (allocator
-high-water, C-extension caches, leaks) to the OS. Per-child and staggered: each
-child has its own counter and is replaced individually, never in lockstep.
+Two knobs recycle executor children to bound memory. Both force the `spawn`
+start method (the stdlib count budget and the memory feature are incompatible
+with `fork`), so children re-import the app — higher baseline RSS and slower
+child startup on Linux. Recycling is per-child and staggered: each child has its
+own counter/threshold and is replaced individually, never in lockstep.
+
+**Count — `WorkerConfig.max_tasks_per_child`** (CLI `--max-tasks-per-child`,
+default `100`): recycle each child after N tasks, returning retained memory
+(allocator high-water, C-extension caches, leaks) to the OS.
 
 - `100` (default): recycle every 100 tasks. No universal value — raise for
   high-throughput / connection-constrained apps (each recycle rebuilds the
   child DB pool), lower for memory-heavy tasks. Size against
   `children_memory_mb` (below).
-- `0`: disabled — children live for the worker's lifetime, uses `fork` on Linux.
+- `0`: disabled — children live for the worker's lifetime, uses `fork` on Linux
+  (unless memory recycling is on).
 - `>= 2` required (`1` rejected: warmup consumes one executor call).
 
-Any non-zero value forces the `spawn` start method (the stdlib budget is
-incompatible with `fork`), at startup and per recycle, so children re-import the
-app instead of fork-cloning the parent — higher baseline RSS and slower child
-startup on Linux. This is on by default; set `0` to keep `fork`.
+**Memory — `WorkerConfig.max_memory_per_child_mb`** (CLI
+`--max-memory-per-child-mb`, default off/`None`): recycle a child once its own
+RSS is at or above N MB after a real task finishes. The child samples RSS and
+exits cleanly via the stdlib `exit_pid` marker; the pool replaces only that
+child (clean replacement path, never `BrokenProcessPool`).
+
+- **CPython-only** — built on private `ProcessPoolExecutor` internals, asserted
+  at startup; the worker refuses to start on other implementations or untested
+  CPython minors.
+- Retention guardrail, **not** a mid-task sandbox: the check is post-task, so a
+  task can still exceed the threshold (or OOM) while running.
+- Startup **baseline guard**: each child samples its settled baseline RSS (after
+  `gc.collect()`); the worker hard-fails if the threshold is at or below the
+  warmed baseline (the app does not fit the per-child budget) and warns within
+  80% of it.
+- Positive int only — no fixed floor, the baseline guard is the real floor.
+
+**Using both (OR semantics).** When both are set, a child exits when *either*
+limit is reached. Recommended default for memory-quota deployments (containers,
+PaaS dynos): memory as the primary guard, count as a high backstop for slow
+leaks / connection churn that do not surface as RSS in time, tuned from
+`children_memory_mb`:
+
+```bash
+horsies worker app.instance:app --processes=6 --max-tasks-per-child=500 --max-memory-per-child-mb=180
+```
+
+Memory-only — disable count explicitly:
+
+```bash
+horsies worker app.instance:app --processes=6 --max-tasks-per-child=0 --max-memory-per-child-mb=180
+```
+
+Sizing: the per-child peak is `threshold + task_peak` (RSS is sampled after the
+task that crosses the threshold, so the child holds the threshold plus that
+task's working set), and children peak together. Budget `(threshold + task_peak)
+× processes + parent + headroom < quota`; tune from `children_memory_mb`.
+Example — 1024 MB quota, 4 procs, ~80 MB task: threshold=300 → ~1249 MB peak
+(over quota); threshold=200 → ~719 MB peak (within quota).
 
 ## QueueMode
 
@@ -523,7 +564,7 @@ Auto-discovery: exactly one `Horsies` instance → use it. Zero or multiple → 
 ### `horsies worker`
 
 ```bash
-horsies worker <module> [--processes N] [--loglevel LEVEL] [--max-claim-batch N] [--max-claim-per-worker N]
+horsies worker <module> [--processes N] [--loglevel LEVEL] [--max-claim-batch N] [--max-claim-per-worker N] [--max-tasks-per-child N] [--max-memory-per-child-mb N]
 ```
 
 | Flag | Default | Description |
@@ -532,6 +573,8 @@ horsies worker <module> [--processes N] [--loglevel LEVEL] [--max-claim-batch N]
 | `--loglevel` | `INFO` | Log level |
 | `--max-claim-batch` | `2` | Max tasks per queue per claim pass |
 | `--max-claim-per-worker` | `0` | Max claimed per worker; 0 = auto |
+| `--max-tasks-per-child` | `100` | Recycle a child after N tasks (`>= 2`, or `0` to disable); forces `spawn`. See [Child process recycling](#child-process-recycling) |
+| `--max-memory-per-child-mb` | _(off)_ | Recycle a child once its RSS reaches N MB (CPython-only, forces `spawn`); fails startup if N is at/below the warmed baseline. See [Child process recycling](#child-process-recycling) |
 
 Startup: logging → import app → `app.check()` → schema init with retry → start processes.
 SIGTERM/SIGINT: graceful shutdown, waits for running tasks.

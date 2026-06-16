@@ -12,6 +12,10 @@ from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCod
 
 from tests.e2e.tasks.instance import app
 
+# Per-child retained allocations: appended to (never freed) so child RSS
+# ratchets up across tasks, driving the max_memory_per_child_mb recycle.
+_RETAINED_BUFFERS: list[bytearray] = []
+
 
 @app.task(task_name='e2e_healthcheck')
 def healthcheck() -> TaskResult[str, TaskError]:
@@ -130,6 +134,29 @@ def pid_task(*, sleep_ms: int = 0) -> TaskResult[int, TaskError]:
     if sleep_ms:
         time.sleep(sleep_ms / 1000)
     return TaskResult(ok=os.getpid())
+
+
+@app.task(task_name='e2e_alloc_pid')
+def alloc_pid_task(*, mb: int, sleep_ms: int = 0) -> TaskResult[int, TaskError]:
+    """Retain `mb` MB in the child, then return its PID.
+
+    Retained allocations accumulate per child, so child RSS ratchets up across
+    calls until it crosses ``max_memory_per_child_mb`` and the child recycles.
+    """
+    import os
+    import time
+
+    _RETAINED_BUFFERS.append(bytearray(mb * 1024 * 1024))
+    if sleep_ms:
+        time.sleep(sleep_ms / 1000)
+    return TaskResult(ok=os.getpid())
+
+
+@app.task(task_name='e2e_alloc_then_raise')
+def alloc_then_raise_task(*, mb: int) -> TaskResult[int, TaskError]:
+    """Retain `mb` MB then raise — exercises the recycle/exception branch."""
+    _RETAINED_BUFFERS.append(bytearray(mb * 1024 * 1024))
+    raise ValueError('deliberate exception after allocation')
 
 
 @app.task(task_name='e2e_slow')

@@ -460,6 +460,7 @@ def _make_worker_namespace(
     max_claim_batch: int = 0,
     max_claim_per_worker: int = 0,
     max_tasks_per_child: int = 100,
+    max_memory_per_child_mb: int | None = None,
 ) -> argparse.Namespace:
     """Build a valid argparse.Namespace for worker_command."""
     return argparse.Namespace(
@@ -470,6 +471,7 @@ def _make_worker_namespace(
         max_claim_batch=max_claim_batch,
         max_claim_per_worker=max_claim_per_worker,
         max_tasks_per_child=max_tasks_per_child,
+        max_memory_per_child_mb=max_memory_per_child_mb,
     )
 
 
