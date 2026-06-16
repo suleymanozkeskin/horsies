@@ -147,9 +147,23 @@ config = PostgresConfig(
 | `pool_timeout` | `int` | `30` | Seconds to wait for a connection |
 | `pool_recycle` | `int` | `1800` | Seconds before connections are recycled |
 | `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use |
+| `tcp_keepalives` | `bool` | `True` | Enable libpq TCP keepalives on broker and child-process connections |
+| `tcp_keepalives_idle` | `int` | `30` | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |
+| `tcp_keepalives_interval` | `int` | `10` | Seconds between keepalive probes (libpq `keepalives_interval`) |
+| `tcp_keepalives_count` | `int` | `3` | Unacknowledged probes before the connection is dropped (libpq `keepalives_count`) |
 | `echo` | `bool` | `False` | Echo SQL (debug only) |
 
 Driver must be psycopg3 (async). `postgresql+psycopg2://` is rejected.
+
+`tcp_keepalives` (default on) keeps idle pooled sockets warm so a server-side
+or middlebox idle-reap is detected and recycled at the socket layer instead of
+surfacing as a mid-query `OperationalError`. `pool_pre_ping` and `pool_recycle`
+are checkout-time guards and cannot catch a connection that dies in-flight. The
+keepalives apply to the broker engine pool and each child-process pool; the
+LISTEN/NOTIFY listener sets its own keepalives independently. Without them, the
+OS idle default (often 7200s) outlives a pooler's idle-reap window — e.g.
+PlanetScale's PgBouncer reaps idle connections within ~1–2h. Disabling is rarely
+needed; lower `tcp_keepalives_idle` only for poolers that reap faster than 30s.
 
 Worker processes use a separate connection profile by default. The worker
 coordinator uses `worker_pool_size + worker_max_overflow`; each child process

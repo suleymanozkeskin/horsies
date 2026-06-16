@@ -21,6 +21,10 @@ def _default_str_int_dict() -> dict[str, int]:
     return {}
 
 
+def _default_connect_kwargs() -> dict[str, object]:
+    return {}
+
+
 @dataclass
 class WorkerConfig:
     dsn: str  # SQLAlchemy async URL (e.g. postgresql+psycopg://...)
@@ -34,6 +38,12 @@ class WorkerConfig:
     child_pool_min_size: int = 0
     child_pool_max_size: int = 2
     child_pool_check: bool = True
+    # psycopg connect kwargs for each child-pool connection (TCP keepalives,
+    # plus prepare_threshold=None under PgBouncer transaction mode). Built
+    # from PostgresConfig.pooled_connect_args.
+    child_connect_kwargs: dict[str, object] = field(
+        default_factory=_default_connect_kwargs
+    )
     # Claiming knobs
     # max_claim_batch: Optional top-level fairness limiter per queue per pass.
     # 0 = auto-fill available local/global capacity. Positive values explicitly cap claims.

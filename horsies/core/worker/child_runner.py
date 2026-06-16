@@ -9,7 +9,7 @@ import signal
 import socket
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from importlib import import_module
 from typing import Any, Optional, Tuple, cast
 
@@ -273,7 +273,7 @@ def _child_initializer(
     sys_path_roots: Sequence[str],
     loglevel: int,
     database_url: str,
-    pgbouncer_transaction_mode: bool = False,
+    connect_kwargs: Mapping[str, object] | None = None,
     child_pool_min_size: int = 0,
     child_pool_max_size: int = 2,
     child_pool_check: bool = True,
@@ -346,7 +346,7 @@ def _child_initializer(
     # Initialize per-process connection pool (after all imports complete)
     _initialize_worker_pool(
         database_url,
-        pgbouncer_transaction_mode=pgbouncer_transaction_mode,
+        connect_kwargs=connect_kwargs,
         min_size=child_pool_min_size,
         max_size=child_pool_max_size,
         check_on_checkout=child_pool_check,

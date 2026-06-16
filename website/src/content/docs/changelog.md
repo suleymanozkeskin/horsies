@@ -22,6 +22,17 @@ Also fixes a latent CPython gh-115634 hang in the existing count-recycle path:
 count recycling now overrides `_adjust_process_count` so a recycled child is
 always replaced, falling back to the stock pool if the internals are absent.
 
+Idle pooled broker connections reaped server-side (e.g. PlanetScale's PgBouncer
+pooler, which drops idle connections within ~1–2h) surfaced as a mid-query
+`OperationalError` on the next claim or heartbeat — `pool_pre_ping` and
+`pool_recycle` are checkout-time guards and cannot catch a connection that dies
+in-flight. New TCP keepalive fields on `PostgresConfig` (`tcp_keepalives`,
+default on, with `tcp_keepalives_idle`/`interval`/`count`) keep idle sockets
+warm at the socket layer. libpq enables keepalives by default but leaves the
+idle interval at the OS default (often 7200s); Horsies sets it to 30s, applied
+to the broker engine pool and each child-process pool. No configuration is
+required for remote/pooled deployments.
+
 ## 0.2.3 — 2026-06-16
 
 Worker child processes can now be recycled to bound memory. Long-lived

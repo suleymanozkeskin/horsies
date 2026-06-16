@@ -228,6 +228,10 @@ class TestPostgresBrokerPgBouncerWiring:
         mock_engine.assert_called_once()
         assert mock_engine.call_args.args[0] == database_url
         assert mock_engine.call_args.kwargs['connect_args'] == {
+            'keepalives': 1,
+            'keepalives_idle': 30,
+            'keepalives_interval': 10,
+            'keepalives_count': 3,
             'prepare_threshold': None,
         }
         mock_listener_cls.assert_called_once_with('postgresql://u:p@direct:5432/db')

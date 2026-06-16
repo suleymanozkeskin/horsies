@@ -618,6 +618,10 @@ class TestLiveBrokerConnectivityCheck:
             "postgresql+psycopg://test:test@pooler/test"
         )
         assert mock_create_engine.call_args_list[0].kwargs["connect_args"] == {
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 3,
             "prepare_threshold": None,
         }
         assert mock_create_engine.call_args_list[1].args[0] == (

@@ -27,9 +27,25 @@ path.
   start method. A startup baseline guard fails the worker when the threshold is
   at or below the warmed child baseline (the app does not fit the per-child
   budget) and warns within 80% of it.
+- TCP keepalive configuration on `PostgresConfig`: `tcp_keepalives` (bool,
+  **default on**), `tcp_keepalives_idle` (30), `tcp_keepalives_interval` (10),
+  `tcp_keepalives_count` (3). These libpq params apply to the broker engine
+  pool and each child-process psycopg pool. libpq enables keepalives by default
+  but leaves the idle interval at the OS default (often 7200s); Horsies sets it
+  to 30s so a dropped socket is detected and recycled before the next query.
+  The LISTEN/NOTIFY listener keeps its own keepalives. Non-positive
+  idle/interval/count values are rejected when keepalives are enabled
+  (`HRS-215`).
 
 ### Fixed
 
+- Idle pooled broker connections reaped server-side (e.g. PlanetScale's
+  PgBouncer pooler, which drops idle connections within ~1–2h) surfaced as a
+  mid-query `OperationalError` on the next claim or heartbeat. `pool_pre_ping`
+  and `pool_recycle` are checkout-time guards and cannot catch a connection
+  that dies in-flight; the default-on TCP keepalives now keep idle sockets warm
+  at the socket layer. No configuration is required for remote/pooled
+  deployments.
 - Count-based child recycling (`--max-tasks-per-child`, including the default
   `100`) routed through the stock `ProcessPoolExecutor`, which can hang under
   queued load when a cleanly-recycled child is not replaced (CPython

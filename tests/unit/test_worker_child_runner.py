@@ -248,7 +248,7 @@ class TestChildInitializer:
         mock_import_module.assert_any_call('extra_mod')
         mock_init_pool.assert_called_once_with(
             'postgresql://localhost/test',
-            pgbouncer_transaction_mode=False,
+            connect_kwargs=None,
             min_size=0,
             max_size=2,
             check_on_checkout=True,
@@ -280,7 +280,7 @@ class TestChildInitializer:
             sys_path_roots=[],
             loglevel=20,
             database_url='postgresql://localhost/test',
-            pgbouncer_transaction_mode=True,
+            connect_kwargs={'keepalives': 1, 'prepare_threshold': None},
             child_pool_min_size=0,
             child_pool_max_size=1,
             child_pool_check=False,
@@ -288,7 +288,7 @@ class TestChildInitializer:
 
         mock_init_pool.assert_called_once_with(
             'postgresql://localhost/test',
-            pgbouncer_transaction_mode=True,
+            connect_kwargs={'keepalives': 1, 'prepare_threshold': None},
             min_size=0,
             max_size=1,
             check_on_checkout=False,
@@ -490,6 +490,61 @@ class TestChildInitializer:
         )
         # import_by_path should NOT be called because samefile returns True
         mock_import_path.assert_not_called()
+
+
+# ===================================================================
+# C2. _initialize_worker_pool connect kwargs
+# ===================================================================
+
+
+@pytest.mark.unit
+class TestInitializeWorkerPoolConnectKwargs:
+    """connect_kwargs (TCP keepalives, PgBouncer knob) reach the pool.
+
+    Regression for idle child-pool connections reaped mid-query (GH #100).
+    """
+
+    @contextmanager
+    def _reset_pool(self) -> Generator[None, None, None]:
+        import horsies.core.worker.child_pool as child_pool
+
+        child_pool._worker_pool = None
+        try:
+            yield
+        finally:
+            child_pool._worker_pool = None
+
+    def test_connect_kwargs_forwarded_to_pool(self) -> None:
+        from horsies.core.worker.child_pool import _initialize_worker_pool
+
+        connect_kwargs = {
+            'keepalives': 1,
+            'keepalives_idle': 30,
+            'prepare_threshold': None,
+        }
+        with self._reset_pool(), patch(
+            'horsies.core.worker.child_pool.ConnectionPool'
+        ) as mock_pool, patch(
+            'horsies.core.worker.child_pool.atexit.register'
+        ):
+            _initialize_worker_pool(
+                'postgresql://localhost/test',
+                connect_kwargs=connect_kwargs,
+            )
+
+        assert mock_pool.call_args.kwargs['kwargs'] == connect_kwargs
+
+    def test_no_connect_kwargs_yields_empty_pool_kwargs(self) -> None:
+        from horsies.core.worker.child_pool import _initialize_worker_pool
+
+        with self._reset_pool(), patch(
+            'horsies.core.worker.child_pool.ConnectionPool'
+        ) as mock_pool, patch(
+            'horsies.core.worker.child_pool.atexit.register'
+        ):
+            _initialize_worker_pool('postgresql://localhost/test')
+
+        assert mock_pool.call_args.kwargs['kwargs'] == {}
 
 
 # ===================================================================

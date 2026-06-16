@@ -254,7 +254,7 @@ class Worker(
             self.cfg.sys_path_roots,
             self.cfg.loglevel,
             child_database_url,
-            self.cfg.pgbouncer_transaction_mode,
+            self.cfg.child_connect_kwargs,
             self.cfg.child_pool_min_size,
             self.cfg.child_pool_max_size,
             self.cfg.child_pool_check,

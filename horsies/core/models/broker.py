@@ -14,6 +14,10 @@ class PostgresConfig(BaseModel):
         'worker_child_pool_min_size',
         'worker_child_pool_max_size',
         'worker_child_pool_check',
+        'tcp_keepalives',
+        'tcp_keepalives_idle',
+        'tcp_keepalives_interval',
+        'tcp_keepalives_count',
     }
 
     # SecretStr: repr()/model_dump() of the config must never expose
@@ -70,6 +74,29 @@ class PostgresConfig(BaseModel):
     )
     pool_recycle: int = Field(
         default=1800, description='The number of seconds to recycle connections'
+    )
+    # TCP keepalives keep idle pooled sockets warm so a server-side or
+    # middlebox idle-reap is detected and recycled at the socket layer
+    # instead of surfacing as a mid-query OperationalError. pool_pre_ping
+    # and pool_recycle are checkout-time guards and cannot catch a
+    # connection that dies in-flight. These apply to the broker engine pool
+    # and the per-child connection pool; the LISTEN/NOTIFY listener sets its
+    # own keepalives independently.
+    tcp_keepalives: bool = Field(
+        default=True,
+        description='Enable libpq TCP keepalives on broker and child-process connections',
+    )
+    tcp_keepalives_idle: int = Field(
+        default=30,
+        description='Idle seconds before the first keepalive probe (libpq keepalives_idle)',
+    )
+    tcp_keepalives_interval: int = Field(
+        default=10,
+        description='Seconds between keepalive probes (libpq keepalives_interval)',
+    )
+    tcp_keepalives_count: int = Field(
+        default=3,
+        description='Unacknowledged probes before the connection is dropped (libpq keepalives_count)',
     )
     echo: bool = Field(default=False, description='Whether to echo the SQL statements')
 
@@ -154,6 +181,19 @@ class PostgresConfig(BaseModel):
                 ],
                 help_text='worker_child_pool_min_size must be <= worker_child_pool_max_size',
             )
+        if self.tcp_keepalives:
+            for name, value in (
+                ('tcp_keepalives_idle', self.tcp_keepalives_idle),
+                ('tcp_keepalives_interval', self.tcp_keepalives_interval),
+                ('tcp_keepalives_count', self.tcp_keepalives_count),
+            ):
+                if value < 1:
+                    raise ConfigurationError(
+                        message=f'invalid {name}',
+                        code=ErrorCode.CONFIG_INVALID_KEEPALIVE,
+                        notes=[f'{name}={value}', f'{name} must be >= 1 when tcp_keepalives is True'],
+                        help_text='use positive second/count values, or set tcp_keepalives=False to disable',
+                    )
         return self
 
     @property
@@ -161,11 +201,29 @@ class PostgresConfig(BaseModel):
         url = self.session_database_url or self.database_url
         return url.get_secret_value()
 
+    def keepalive_connect_args(self) -> dict[str, int]:
+        """libpq keepalive params for psycopg connections, empty when disabled."""
+        if not self.tcp_keepalives:
+            return {}
+        return {
+            'keepalives': 1,
+            'keepalives_idle': self.tcp_keepalives_idle,
+            'keepalives_interval': self.tcp_keepalives_interval,
+            'keepalives_count': self.tcp_keepalives_count,
+        }
+
     @property
     def pooled_connect_args(self) -> dict[str, object]:
+        """psycopg connect_args for pooled broker/child connections.
+
+        Merges TCP keepalives with the PgBouncer transaction-mode knob
+        (prepared statements disabled). Both are valid psycopg connect
+        kwargs and coexist.
+        """
+        args: dict[str, object] = dict(self.keepalive_connect_args())
         if self.pgbouncer_transaction_mode:
-            return {'prepare_threshold': None}
-        return {}
+            args['prepare_threshold'] = None
+        return args
 
     def sqlalchemy_engine_kwargs(self) -> dict[str, Any]:
         """Return only kwargs accepted by SQLAlchemy's engine constructor."""

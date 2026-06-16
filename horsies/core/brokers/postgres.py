@@ -527,7 +527,9 @@ class PostgresBroker:
         engine_cfg = self._base_engine_config()
         connect_args = self.config.pooled_connect_args
         if connect_args:
-            # Internal PgBouncer compatibility knob, not a public connect_args API.
+            # TCP keepalives (keep idle pooled sockets warm) plus the
+            # PgBouncer prepared-statement knob, built from the typed
+            # keepalive fields on PostgresConfig.
             engine_cfg['connect_args'] = connect_args
         return engine_cfg
 
