@@ -8,6 +8,18 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-06-16
+
+Worker child processes can now be recycled to bound memory. Long-lived
+executor children accumulate memory the OS never reclaims (allocator
+high-water from heap fragmentation, C-extension caches, leaks), which crashes
+memory-quota platforms (Heroku R14). `--max-tasks-per-child` (default `100`)
+recycles each child after N tasks; new `children_memory_mb` telemetry exposes
+the per-child footprint the parent-only `memory_usage_mb` metric hid. Schema
+bumped to v9 (additive). **Behavior change:** recycling is on by default and
+forces the `spawn` start method (incompatible with `fork`); set
+`--max-tasks-per-child=0` to keep `fork`/no recycling.
+
 ### Added
 
 - `--max-tasks-per-child N` worker flag (`WorkerConfig.max_tasks_per_child`,
