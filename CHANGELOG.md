@@ -37,6 +37,10 @@ path.
   `_adjust_process_count` to always replace a recycled child, falling back to
   the stock pool only if the required internals are absent (no version gate;
   the override is correct wherever the surface exists).
+- Worker logs emitted raw ANSI color escapes to non-TTY sinks (log drains,
+  container logs, journald, files), breaking grep and log parsers. Color is now
+  gated by `_should_use_color` (stream `isatty()`, with `NO_COLOR` / `FORCE_COLOR`
+  overrides); non-TTY output is plain text with the same layout.
 
 ## [0.2.3] - 2026-06-16
 

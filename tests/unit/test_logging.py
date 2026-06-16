@@ -8,7 +8,13 @@ from collections.abc import Iterator
 
 import pytest
 
-from horsies.core.logging import ColoredFormatter, configure_logging, get_logger
+import horsies.core.logging as logging_mod
+from horsies.core.logging import (
+    ColoredFormatter,
+    _should_use_color,
+    configure_logging,
+    get_logger,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -146,3 +152,116 @@ class TestColoredFormatter:
         output = formatter.format(record)
         assert 'ValueError' in output
         assert 'boom' in output
+
+
+# ---------------------------------------------------------------------------
+# Color gating
+# ---------------------------------------------------------------------------
+
+
+class _FakeStream:
+    def __init__(self, isatty: bool) -> None:
+        self._isatty = isatty
+
+    def isatty(self) -> bool:
+        return self._isatty
+
+
+def _record() -> logging.LogRecord:
+    return logging.LogRecord(
+        'horsies.worker', logging.INFO, '', 0, 'hello', (), None
+    )
+
+
+class TestShouldUseColor:
+    """_should_use_color: TTY by default, NO_COLOR/FORCE_COLOR overrides."""
+
+    def _clear_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv('FORCE_COLOR', raising=False)
+        monkeypatch.delenv('NO_COLOR', raising=False)
+
+    def test_tty_enables(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_env(monkeypatch)
+        assert _should_use_color(_FakeStream(isatty=True)) is True
+
+    def test_non_tty_disables(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_env(monkeypatch)
+        assert _should_use_color(_FakeStream(isatty=False)) is False
+
+    def test_stream_without_isatty_disables(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._clear_env(monkeypatch)
+        assert _should_use_color(object()) is False
+
+    def test_no_color_overrides_tty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv('NO_COLOR', '1')
+        assert _should_use_color(_FakeStream(isatty=True)) is False
+
+    def test_no_color_empty_value_still_disables(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv('NO_COLOR', '')
+        assert _should_use_color(_FakeStream(isatty=True)) is False
+
+    def test_force_color_overrides_non_tty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv('FORCE_COLOR', '1')
+        assert _should_use_color(_FakeStream(isatty=False)) is True
+
+    def test_force_color_precedes_no_color(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv('FORCE_COLOR', '1')
+        monkeypatch.setenv('NO_COLOR', '1')
+        assert _should_use_color(_FakeStream(isatty=False)) is True
+
+    def test_force_color_zero_does_not_force(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv('FORCE_COLOR', '0')
+        assert _should_use_color(_FakeStream(isatty=False)) is False
+
+
+class TestColorToggle:
+    """ColoredFormatter emits ANSI only when use_color is True."""
+
+    def test_no_color_omits_ansi(self) -> None:
+        output = ColoredFormatter(use_color=False).format(_record())
+        assert '\033' not in output
+        assert '[worker]' in output
+        assert '[INFO]' in output
+        assert 'hello' in output
+
+    def test_color_includes_ansi(self) -> None:
+        output = ColoredFormatter(use_color=True).format(_record())
+        assert '\033[' in output
+
+    def test_configure_logging_disables_color_for_non_tty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(logging_mod, '_should_use_color', lambda stream: False)
+        configure_logging(logging.INFO)
+        root = logging.getLogger('horsies')
+        handler = next(
+            h for h in root.handlers if not isinstance(h, logging.NullHandler)
+        )
+        assert handler.formatter is not None
+        assert '\033' not in handler.formatter.format(_record())
+
+    def test_configure_logging_enables_color_for_tty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(logging_mod, '_should_use_color', lambda stream: True)
+        configure_logging(logging.INFO)
+        root = logging.getLogger('horsies')
+        handler = next(
+            h for h in root.handlers if not isinstance(h, logging.NullHandler)
+        )
+        assert handler.formatter is not None
+        assert '\033[' in handler.formatter.format(_record())

@@ -22,6 +22,11 @@ Also fixes a latent CPython gh-115634 hang in the existing count-recycle path:
 count recycling now overrides `_adjust_process_count` so a recycled child is
 always replaced, falling back to the stock pool if the internals are absent.
 
+Worker logging no longer writes raw ANSI color escapes to non-TTY sinks (log
+drains, container logs, journald, files), which broke grep and log parsers.
+Color is gated by stream `isatty()`, with `NO_COLOR` / `FORCE_COLOR` overrides;
+non-TTY output is plain text with the same layout.
+
 ## 0.2.3 — 2026-06-16
 
 Worker child processes can now be recycled to bound memory. Long-lived

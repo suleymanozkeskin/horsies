@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 from datetime import datetime
 
@@ -8,7 +9,17 @@ logging.getLogger('horsies').addHandler(logging.NullHandler())
 
 
 class ColoredFormatter(logging.Formatter):
-    """Colored log formatter used by horsies CLI."""
+    """Tabular log formatter for horsies, with optional ANSI color.
+
+    ``use_color=False`` emits the same layout and padding without escape codes,
+    so captured/non-TTY sinks (log drains, container logs, journald, files) stay
+    parseable. Color is selected by ``configure_logging`` via
+    ``_should_use_color``.
+    """
+
+    def __init__(self, use_color: bool = True) -> None:
+        super().__init__()
+        self._use_color = use_color
 
     COLORS = {
         'RESET': '\033[0m',
@@ -46,15 +57,23 @@ class ColoredFormatter(logging.Formatter):
         )  # [dispatcher] = 12 chars, so 14 for padding
         level_padded = level_section.ljust(10)  # [WARNING] = 9 chars, so 10 for padding
 
-        # Get level color
-        level_color = self.LEVEL_COLORS.get(record.levelname, self.COLORS['WHITE'])
+        # Resolve colors (empty strings when disabled, keeping the same layout)
+        def c(key: str) -> str:
+            return self.COLORS[key] if self._use_color else ''
+
+        reset = c('RESET')
+        level_color = (
+            self.LEVEL_COLORS.get(record.levelname, self.COLORS['WHITE'])
+            if self._use_color
+            else ''
+        )
 
         # Format: [time] [comp_name]   [level]     message
         formatted = (
-            f"{self.COLORS['LIGHT_BLUE']}[{time_str}]{self.COLORS['RESET']} "
-            f"{self.COLORS['WHITE']}{component_padded}{self.COLORS['RESET']}"
-            f"{level_color}{level_padded}{self.COLORS['RESET']}"
-            f"{self.COLORS['WHITE']}{record.getMessage()}{self.COLORS['RESET']}"
+            f"{c('LIGHT_BLUE')}[{time_str}]{reset} "
+            f"{c('WHITE')}{component_padded}{reset}"
+            f'{level_color}{level_padded}{reset}'
+            f"{c('WHITE')}{record.getMessage()}{reset}"
         )
 
         # Add exception info if present
@@ -64,16 +83,35 @@ class ColoredFormatter(logging.Formatter):
         return formatted
 
 
-def configure_logging(level: int = logging.INFO) -> None:
-    """Configure horsies logging with colored output on stderr.
+def _should_use_color(stream: object) -> bool:
+    """Decide whether to emit ANSI color for a log stream.
 
-    Called by the CLI entrypoint and child worker processes.
-    Library users should configure the 'horsies' logger via standard logging.
+    Precedence: ``FORCE_COLOR`` (set, non-empty, not ``"0"``) forces color on;
+    otherwise ``NO_COLOR`` (set to any value) forces it off; otherwise color
+    follows whether the stream is a TTY. This keeps ANSI escapes out of non-TTY
+    sinks (log drains, container logs, journald, files) where they would break
+    log parsing.
+    """
+    force = os.environ.get('FORCE_COLOR')
+    if force not in (None, '', '0'):
+        return True
+    if 'NO_COLOR' in os.environ:
+        return False
+    isatty = getattr(stream, 'isatty', None)
+    return bool(callable(isatty) and isatty())
+
+
+def configure_logging(level: int = logging.INFO) -> None:
+    """Configure horsies logging on stderr; color only when the sink is a TTY.
+
+    Called by the CLI entrypoint and child worker processes. Color is gated by
+    ``_should_use_color`` (TTY / ``NO_COLOR`` / ``FORCE_COLOR``). Library users
+    should configure the 'horsies' logger via standard logging.
     """
     root = logging.getLogger('horsies')
     root.handlers.clear()
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(ColoredFormatter())
+    handler.setFormatter(ColoredFormatter(use_color=_should_use_color(sys.stderr)))
     root.addHandler(handler)
     root.setLevel(level)
 
