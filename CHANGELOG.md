@@ -41,6 +41,8 @@ path.
   container logs, journald, files), breaking grep and log parsers. Color is now
   gated by `_should_use_color` (stream `isatty()`, with `NO_COLOR` / `FORCE_COLOR`
   overrides); non-TTY output is plain text with the same layout.
+- Task execution log lines no longer wrap the id/name in one-element lists. Both
+  the start and completion lines now read `task_name (task_id)`.
 
 ## [0.2.3] - 2026-06-16
 
