@@ -260,6 +260,16 @@ GET_CRASHED_WORKER_TASKS_SQL = text("""
       AND w.status = 'RUNNING'
       AND UPPER(t.status) IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
       AND (CAST(:scope_ids AS varchar[]) IS NULL OR wt.workflow_id = ANY(CAST(:scope_ids AS varchar[])))
+      -- Grace window: skip tasks that went terminal recently — their parent
+      -- finalizer's Phase 2 (workflow progression) is likely still in flight.
+      -- COALESCE picks the precise terminal stamp (completed_at/failed_at) and
+      -- falls back to updated_at (CANCELLED has no dedicated column). A
+      -- non-positive grace disables the window (legacy immediate recovery).
+      AND (
+          CAST(:finalizing_grace_ms AS bigint) <= 0
+          OR COALESCE(t.completed_at, t.failed_at, t.updated_at)
+             < NOW() - (CAST(:finalizing_grace_ms AS double precision) / 1000.0) * INTERVAL '1 second'
+      )
     LIMIT CAST(:max_rows AS bigint)
 """)
 
@@ -296,6 +306,8 @@ async def recover_stuck_workflows(
     session: 'AsyncSession',
     broker: 'PostgresBroker | None' = None,
     scope_workflow_ids: list[str] | None = None,
+    *,
+    finalizing_grace_ms: int = 0,
 ) -> int:
     """
     Find and recover workflows in inconsistent states.
@@ -314,6 +326,13 @@ async def recover_stuck_workflows(
             scans all workflows globally. Resume passes the resumed
             workflow's tree so the pause-resume race is closed without a
             full-DB sweep.
+        finalizing_grace_ms: Grace window (ms) for Case 1.7 (task terminal but
+            its workflow progression not yet applied). A task that went terminal
+            within this window is left alone, because its parent finalizer's
+            Phase 2 is likely still in flight — recovering it would race the
+            healthy finalizer and add ~one reaper interval of latency. ``0``
+            (default) disables the window (immediate recovery); the periodic
+            reaper passes ``RecoveryConfig.finalizing_stale_threshold_ms``.
 
     Returns:
         Count of recovered workflow tasks.
@@ -518,7 +537,12 @@ async def recover_stuck_workflows(
     # - workflow_tasks row stays RUNNING/ENQUEUED indefinitely
     crashed_worker_tasks = await session.execute(
         GET_CRASHED_WORKER_TASKS_SQL,
-        {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES, 'scope_ids': scope_ids, 'max_rows': max_rows},
+        {
+            'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES,
+            'scope_ids': scope_ids,
+            'max_rows': max_rows,
+            'finalizing_grace_ms': finalizing_grace_ms,
+        },
     )
 
     for row in crashed_worker_tasks.fetchall():
@@ -585,7 +609,8 @@ async def recover_stuck_workflows(
                 session, task_id, result, broker, task_name=task_name,
             )
             logger.info(
-                f'Recovered crashed worker workflow task: workflow={workflow_id}, '
+                f'Recovered stuck workflow task (task terminal, workflow '
+                f'progression was not applied): workflow={workflow_id}, '
                 f'task_index={task_index}, task_id={task_id}, '
                 f'task_status={task_status}'
             )

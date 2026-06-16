@@ -70,7 +70,13 @@ class RecoveryConfig(BaseModel):
         int, Field(ge=1_000, le=7_200_000),
     ] = Field(
         default=300_000,
-        description='Milliseconds a completed child may wait for parent finalization before recovery (1s-2hr)',
+        description=(
+            'Milliseconds a completed child may wait for parent finalization '
+            'before recovery (1s-2hr). Gates two reaper paths: failing a task '
+            'stuck mid-finalize, and recovering a terminal task whose workflow '
+            'progression (Phase 2) has not been applied — within this window '
+            "the parent's finalizer is presumed still in flight and left alone."
+        ),
     )
 
     check_interval_ms: Annotated[int, Field(ge=1_000, le=600_000)] = Field(
