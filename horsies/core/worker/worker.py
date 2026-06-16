@@ -228,8 +228,16 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
         """
         child_database_url = to_psycopg_url(self.cfg.dsn)
         kwargs: dict[str, Any] = {}
-        if avoid_parent_fd_inheritance:
+        # max_tasks_per_child is incompatible with the 'fork' start method, so
+        # recycling forces 'spawn' for every pool — including the initial one,
+        # which would otherwise default to fork on Linux. Spawn already backs
+        # the restart path (avoid_parent_fd_inheritance), so the child
+        # initializer/hook machinery is exercised either way.
+        recycle = self.cfg.max_tasks_per_child > 0
+        if avoid_parent_fd_inheritance or recycle:
             kwargs['mp_context'] = multiprocessing.get_context('spawn')
+        if recycle:
+            kwargs['max_tasks_per_child'] = self.cfg.max_tasks_per_child
         return ProcessPoolExecutor(
             max_workers=self.cfg.processes,
             initializer=_child_initializer,
@@ -248,7 +256,14 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
         )
 
     async def _warm_executor(self) -> None:
-        """Start child processes while the parent has not opened listener sockets."""
+        """Start child processes while the parent has not opened listener sockets.
+
+        When ``max_tasks_per_child`` is set, each warmup call counts against a
+        child's recycle budget: the first generation runs one warmup +
+        (max_tasks_per_child - 1) real tasks before recycling. Warmup is kept
+        as-is — its pre-socket-open invariant matters more than the one slot —
+        which is why ``max_tasks_per_child`` must be >= 2.
+        """
         if self._executor is None:
             return
         loop = asyncio.get_running_loop()

@@ -103,4 +103,5 @@ class WorkerStateSnapshot:
     memory_usage_mb: float | None
     memory_percent: float | None
     cpu_percent: float | None
+    children_memory_mb: float | None
     worker_started_at: datetime

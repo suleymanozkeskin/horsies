@@ -120,7 +120,7 @@ info = broker.get_task_info("task-uuid", include_result=True)  # sync
 
 **Monitoring** (async only): `get_stale_tasks()`, `get_expired_tasks()`, `mark_stale_tasks_as_failed()`, `requeue_stale_claimed()`. See website docs `monitoring/broker-methods` for full signatures.
 
-**Health/liveness** (app, async + sync): `ping_database_async()` (DatabasePing latency), `ping_workers_async(target_worker_id=None, timeout_seconds=2.0, min_responses=None)` (list[WorkerPong] — active ping-pong; min_responses=1 = fast liveness gate, returns on first reply), `list_worker_states_async()` / `get_worker_state_async(worker_id)` / `get_worker_state_history_async(worker_id, limit=None)` (WorkerStateSnapshot, includes idle workers). Replaces the retired `get_worker_stats()`. See website docs `monitoring/worker-health`.
+**Health/liveness** (app, async + sync): `ping_database_async()` (DatabasePing latency), `ping_workers_async(target_worker_id=None, timeout_seconds=2.0, min_responses=None)` (list[WorkerPong] — active ping-pong; min_responses=1 = fast liveness gate, returns on first reply), `list_worker_states_async()` / `get_worker_state_async(worker_id)` / `get_worker_state_history_async(worker_id, limit=None)` (WorkerStateSnapshot, includes idle workers). Replaces the retired `get_worker_stats()`. `WorkerStateSnapshot.memory_usage_mb` is the parent process only; `children_memory_mb` is the summed RSS of executor children (the memory-quota driver — use it to size `max_tasks_per_child`). See website docs `monitoring/worker-health`. 
 
 ## PostgresConfig
 
@@ -168,6 +168,25 @@ Child processes are warmed before the parent opens long-lived database sockets,
 but child DB connections are lazy by default (`worker_child_pool_min_size=0`).
 Replacement executors created after startup use a non-inheriting process start
 method so live parent database sockets are not forked into new children.
+
+### Child process recycling
+
+`WorkerConfig.max_tasks_per_child` (CLI `--max-tasks-per-child`, default `100`)
+recycles each child after N tasks, returning retained memory (allocator
+high-water, C-extension caches, leaks) to the OS. Per-child and staggered: each
+child has its own counter and is replaced individually, never in lockstep.
+
+- `100` (default): recycle every 100 tasks. No universal value — raise for
+  high-throughput / connection-constrained apps (each recycle rebuilds the
+  child DB pool), lower for memory-heavy tasks. Size against
+  `children_memory_mb` (below).
+- `0`: disabled — children live for the worker's lifetime, uses `fork` on Linux.
+- `>= 2` required (`1` rejected: warmup consumes one executor call).
+
+Any non-zero value forces the `spawn` start method (the stdlib budget is
+incompatible with `fork`), at startup and per recycle, so children re-import the
+app instead of fork-cloning the parent — higher baseline RSS and slower child
+startup on Linux. This is on by default; set `0` to keep `fork`.
 
 ## QueueMode
 

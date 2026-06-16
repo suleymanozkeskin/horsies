@@ -257,7 +257,20 @@ horsies worker myapp.config:app          # start worker
 horsies scheduler myapp.config:app       # start scheduler
 horsies check myapp.config:app [--live]  # validate before deploy
 horsies get-docs                         # download docs locally
+
+# Recycle each child after N tasks to bound memory (default 100, per-child,
+# staggered; forces spawn). Tune per deployment; 0 disables (keeps fork).
+horsies worker myapp.config:app --max-tasks-per-child=500
 ```
 
 `horsies check` runs phased validation (config, imports, DAG, builders, policies,
 optional live DB check). Worker and scheduler also run check at startup.
+
+`--max-tasks-per-child` defaults to `100`: each child process is recycled after
+100 tasks to return retained memory (allocator high-water, C-extension caches,
+leaks) to the OS. There is no universal value — raise it for high-throughput or
+connection-constrained apps, lower it for memory-heavy tasks, set `0` to
+disable. Any non-zero value forces the `spawn` start method (incompatible with
+`fork`), so children re-import the app. Size it against the
+`children_memory_mb` field on `WorkerStateSnapshot`. See `configs.md` and
+website docs `workers/concurrency`.

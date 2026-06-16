@@ -121,6 +121,17 @@ def error_code_task() -> TaskResult[str, TaskError]:
     )
 
 
+@app.task(task_name='e2e_pid')
+def pid_task(*, sleep_ms: int = 0) -> TaskResult[int, TaskError]:
+    """Return the executing child process PID (for recycle/rotation tests)."""
+    import os
+    import time
+
+    if sleep_ms:
+        time.sleep(sleep_ms / 1000)
+    return TaskResult(ok=os.getpid())
+
+
 @app.task(task_name='e2e_slow')
 def slow_task(*, duration_ms: int) -> TaskResult[str, TaskError]:
     """Task that sleeps for specified duration."""

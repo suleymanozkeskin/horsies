@@ -155,7 +155,15 @@ Snapshot timeseries for one worker, newest first.
 | `recovery_config` | `dict[str, Any] \| None` | Recovery configuration snapshot |
 | `tasks_running` | `int` | RUNNING tasks at snapshot time |
 | `tasks_claimed` | `int` | CLAIMED tasks at snapshot time |
-| `memory_usage_mb` | `float \| None` | Resident memory (psutil) |
+| `memory_usage_mb` | `float \| None` | Parent worker process resident memory (psutil) |
 | `memory_percent` | `float \| None` | Memory percent (psutil) |
 | `cpu_percent` | `float \| None` | CPU percent (psutil) |
+| `children_memory_mb` | `float \| None` | Summed resident memory of the executor child processes |
 | `worker_started_at` | `datetime` | Worker process start time |
+
+`memory_usage_mb` is the **parent** process only. Task code runs in the executor
+children, so per-child memory growth is invisible there; `children_memory_mb`
+captures it. The platform memory quota (e.g. Heroku R14) is measured against the
+whole process tree, so use `memory_usage_mb + children_memory_mb` to track the
+footprint that quota enforces. To bound it, see
+[`--max-tasks-per-child`](../workers/concurrency).

@@ -69,6 +69,29 @@ class WorkerConfig:
     max_claim_renew_age_ms: int = MAX_CLAIM_RENEW_AGE_MS
     # Log level for worker processes (default: INFO)
     loglevel: int = 20  # logging.INFO
+    # Recycle each child process after it completes this many tasks (bounds
+    # memory for workloads that retain it). Recycling is per-child and
+    # staggered: each child has its own counter, so children rotate
+    # independently, never in lockstep.
+    #   100 (default): recycle after 100 tasks.
+    #   0: disabled — children live for the worker's lifetime (uses 'fork'
+    #      on Linux).
+    #   >= 2: recycle after N tasks.
+    # Any positive value forces the 'spawn' start method (the stdlib value is
+    # incompatible with 'fork'), including at initial startup, so children
+    # re-import the app instead of fork-cloning the parent. Child warmup
+    # (_warm_executor) consumes one executor call, so a child's first
+    # generation runs one warmup + (max_tasks_per_child - 1) real tasks; 1
+    # would exhaust a child on warmup before any task, hence the >= 2 floor.
+    max_tasks_per_child: int = 100
+
+    def __post_init__(self) -> None:
+        if self.max_tasks_per_child != 0 and self.max_tasks_per_child < 2:
+            raise ValueError(
+                'max_tasks_per_child must be >= 2 (child warmup consumes one '
+                'executor call), or 0 to disable recycling; got '
+                f'{self.max_tasks_per_child}'
+            )
 
     def __repr__(self) -> str:
         """Mask credential-bearing DSNs; the dataclass auto-repr put all

@@ -45,6 +45,67 @@ horsies worker myapp.instance:app --processes=8
 - Each process handles one task at a time
 - Default: CPU count
 
+## Process Recycling: --max-tasks-per-child
+
+Worker child processes are long-lived: created once, then reused for every task.
+Memory that a child does not return to the OS — heap high-water from allocator
+fragmentation, C-extension caches, genuine leaks — accumulates for the child's
+lifetime. On memory-quota platforms (e.g. Heroku R14) this grows until the
+process is killed.
+
+`--max-tasks-per-child` recycles a child after it completes N tasks, returning
+its memory to the OS. **Default: 100.**
+
+```bash
+# Default is 100; raise it for high-throughput / connection-constrained apps
+horsies worker myapp.instance:app --processes=8 --max-tasks-per-child=500
+
+# Disable recycling entirely (uses fork on Linux)
+horsies worker myapp.instance:app --processes=8 --max-tasks-per-child=0
+```
+
+- **Default `100`.** Tune it for your deployment — there is no universal value
+  (see [Choosing N](#choosing-n)).
+- `0` disables recycling: children live for the worker's lifetime and the
+  worker uses `fork` on Linux.
+- `N` must be `>= 2`. Child warmup consumes one executor call, so `N=1` would
+  exhaust a child before it runs a task; the CLI rejects values below 2
+  (except `0`).
+
+### Per-child and staggered
+
+Recycling is **per child, not fleet-wide**. Each child has its own task counter
+and is replaced individually when it reaches N — the other children keep
+running. Children rotate independently, never in lockstep, so throughput stays
+smooth (no synchronized restart).
+
+### Start method: recycling forces spawn
+
+Any non-zero value forces the `spawn` multiprocessing start method (the stdlib
+budget is incompatible with `fork`), at initial startup **and** for every
+recycle replacement. On Linux this replaces the default `fork`:
+
+- Under `fork`, children are copy-on-write clones of the parent and share its
+  imported modules in memory.
+- Under `spawn`, each child starts fresh and **re-imports** the app. This raises
+  baseline memory (no shared pages) and slows child startup.
+
+Set `--max-tasks-per-child=0` to keep `fork` when recycling is not needed.
+
+### Choosing N
+
+Recycling cost scales as ~1/N: each recycle pays one child cold start (re-import
+app, rebuild the child connection pool). Pick the **highest N whose peak memory
+stays under the platform quota**. Use the `children_memory_mb` column in
+[worker health](../monitoring/worker-health) snapshots to size it — it reports
+the summed RSS of the executor children, which the parent-only `memory_usage_mb`
+metric does not capture.
+
+- Low N (e.g. 3): tight memory bound, high cold-start and connection churn.
+- High N (e.g. 500): negligible per-task overhead, larger memory headroom needed.
+- A high N is a backstop for slow accumulation; a fast leak (large retention per
+  task) needs a low N or a fix in the task code.
+
 ## Queue-Level: max_concurrency
 
 In CUSTOM mode, limit concurrent tasks per queue:

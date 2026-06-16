@@ -29,6 +29,7 @@ horsies worker <module> [OPTIONS]
 | `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
 | `--max-claim-batch N` | 0 | Max claims per queue per pass (`0` auto-fills available capacity) |
 | `--max-claim-per-worker N` | 0 | Max total claimed tasks (0=auto) |
+| `--max-tasks-per-child N` | 100 | Recycle each worker process after it runs N tasks (`N >= 2`, per-child and staggered). `0` disables recycling. Forces the `spawn` start method. See [worker concurrency](workers/concurrency). |
 
 **Examples:**
 
@@ -44,6 +45,13 @@ horsies worker myapp.instance:app --loglevel=DEBUG
 
 # Production settings
 horsies worker myapp.instance:app --processes=8 --loglevel=WARNING
+
+# Recycle each child after 500 tasks (raise from the default 100 for
+# high-throughput or connection-constrained deployments)
+horsies worker myapp.instance:app --processes=8 --max-tasks-per-child=500
+
+# Disable recycling (children live for the worker's lifetime, uses fork)
+horsies worker myapp.instance:app --processes=8 --max-tasks-per-child=0
 
 # Using file path (also supported)
 horsies worker app/configs/instance.py:app

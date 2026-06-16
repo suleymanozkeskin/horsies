@@ -1156,6 +1156,7 @@ def _worker_state_row(**overrides: Any) -> Any:
         'memory_usage_mb': 12.5,
         'memory_percent': 0.5,
         'cpu_percent': 3.0,
+        'children_memory_mb': 250.0,
         'worker_started_at': now,
     }
     mapping.update(overrides)

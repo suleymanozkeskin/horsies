@@ -25,8 +25,11 @@ from sqlalchemy import text
 #     (idx_horsies_workflow_tasks_wf_status_idx) — first-failed lookups ran
 #     an O(N) ordered scan per FAILED completion inside the workflow
 #     completion lock.
+# v9: add horsies_worker_states.children_memory_mb — summed RSS of executor
+#     children. The existing memory_usage_mb is parent-only, so per-child
+#     memory growth (the dyno-quota driver) was invisible in worker telemetry.
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
@@ -306,4 +309,11 @@ SET_WORKFLOW_SENT_AT_NOT_NULL_SQL = text("""
 SET_WORKFLOW_SENT_AT_DEFAULT_SQL = text("""
     ALTER TABLE horsies_workflows
     ALTER COLUMN sent_at SET DEFAULT NOW();
+""")
+
+# Migration (v9): expose executor-child memory in worker telemetry. Nullable,
+# no backfill — pre-existing snapshots predate the metric and stay NULL.
+ADD_WORKER_STATES_CHILDREN_MEMORY_COLUMN_SQL = text("""
+    ALTER TABLE horsies_worker_states
+    ADD COLUMN IF NOT EXISTS children_memory_mb DOUBLE PRECISION;
 """)
