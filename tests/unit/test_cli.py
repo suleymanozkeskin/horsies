@@ -459,6 +459,7 @@ def _make_worker_namespace(
     processes: int = 1,
     max_claim_batch: int = 0,
     max_claim_per_worker: int = 0,
+    max_tasks_per_child: int = 100,
 ) -> argparse.Namespace:
     """Build a valid argparse.Namespace for worker_command."""
     return argparse.Namespace(
@@ -468,6 +469,7 @@ def _make_worker_namespace(
         processes=processes,
         max_claim_batch=max_claim_batch,
         max_claim_per_worker=max_claim_per_worker,
+        max_tasks_per_child=max_tasks_per_child,
     )
 
 
@@ -2144,3 +2146,21 @@ class TestCliNumericValidation:
         from horsies.core.cli import _non_negative_int
 
         assert _non_negative_int('0') == 0
+
+    def test_max_tasks_per_child_one_and_negative_rejected(self) -> None:
+        from horsies.core.cli import _max_tasks_per_child
+
+        for bad in ('1', '-3'):
+            with pytest.raises(Exception, match='must be >= 2'):
+                _max_tasks_per_child(bad)
+
+    def test_max_tasks_per_child_zero_disables(self) -> None:
+        from horsies.core.cli import _max_tasks_per_child
+
+        assert _max_tasks_per_child('0') == 0
+
+    def test_max_tasks_per_child_two_or_more_accepted(self) -> None:
+        from horsies.core.cli import _max_tasks_per_child
+
+        assert _max_tasks_per_child('2') == 2
+        assert _max_tasks_per_child('50') == 50

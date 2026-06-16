@@ -166,22 +166,39 @@ def _parse_timeout_ms(task_options_json: Any, task_id: str) -> int | None:
     return raw
 
 
-def _collect_psutil_metrics() -> tuple[float, float, float]:
+def _collect_psutil_metrics() -> tuple[float, float, float, float]:
     """Collect process metrics. Blocking — must run in a thread.
 
+    Returns ``(rss_mb, mem_pct, cpu_pct, children_rss_mb)`` for the calling
+    (parent) worker process. ``children_rss_mb`` is the summed RSS of every
+    descendant process — the executor children where task code runs. The
+    parent heartbeat alone hides per-child memory growth; Heroku's R14 quota
+    is measured against the whole process tree's footprint, so the children
+    must be sampled to see what the dyno sees.
+
     Raises:
-        Exception: psutil import/OS failures propagate to the sole caller,
-            ``_update_worker_state``, whose broad containment logs and skips
-            the snapshot.
+        Exception: psutil import/OS failures for the parent process propagate
+            to the sole caller, ``_update_worker_state``, whose broad
+            containment logs and skips the snapshot. Per-child sampling errors
+            (a child that exits mid-enumeration) are caught and skipped.
     """
     import psutil
 
     process = psutil.Process()
     memory_info = process.memory_info()
+    children_rss_bytes = 0
+    for child in process.children(recursive=True):
+        try:
+            children_rss_bytes += child.memory_info().rss
+        except psutil.Error:
+            # Child exited between enumeration and sampling (or denied access);
+            # drop it from this snapshot rather than failing the whole read.
+            continue
     return (
         memory_info.rss / 1024 / 1024,
         process.memory_percent(),
         process.cpu_percent(interval=0.1),
+        children_rss_bytes / 1024 / 1024,
     )
 
 

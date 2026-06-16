@@ -128,7 +128,10 @@ class Horsies:
         self._child_process_start_hooks: list[ChildProcessStartHook] = []
 
         if os.getenv('HORSIES_CHILD_PROCESS') == '1':
-            self.logger.info(
+            # Child processes re-run this on every recycle
+            # (max_tasks_per_child); keep per-child init at DEBUG so a
+            # recycling worker does not flood logs.
+            self.logger.debug(
                 f'horsies subprocess initialized with {config.queue_mode.name} mode (pid={os.getpid()})'
             )
         else:
@@ -141,7 +144,12 @@ class Horsies:
     def set_role(self, role: str) -> None:
         """Set the role and log it. Called by CLI after discovery."""
         self._role = role
-        self.logger.info(f'horsies running as {role}')
+        # Worker children call set_role('worker') on every recycle; keep that
+        # at DEBUG. Parent/producer/scheduler set their role once -> INFO.
+        if os.getenv('HORSIES_CHILD_PROCESS') == '1':
+            self.logger.debug(f'horsies running as {role}')
+        else:
+            self.logger.info(f'horsies running as {role}')
 
     def on_child_process_start(
         self,

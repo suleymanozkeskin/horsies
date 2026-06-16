@@ -155,7 +155,13 @@ def _locate_app(app_locator: str) -> Horsies:
             boot path (parent preload fails fast at start; child-initializer
             failure kills the child).
     """
-    logger.info(f'Locating app from {app_locator}')
+    # Child initializer re-runs this on every recycle (max_tasks_per_child),
+    # having set HORSIES_CHILD_PROCESS first; keep it at DEBUG there. The
+    # parent preload path (env unset) logs once at INFO.
+    if os.getenv('HORSIES_CHILD_PROCESS') == '1':
+        logger.debug(f'Locating app from {app_locator}')
+    else:
+        logger.info(f'Locating app from {app_locator}')
     if not app_locator or ':' not in app_locator:
         raise ConfigurationError(
             message='invalid app locator format',

@@ -145,6 +145,7 @@ class TestResultModels:
             memory_usage_mb=None,
             memory_percent=None,
             cpu_percent=None,
+            children_memory_mb=None,
             worker_started_at=now,
         )
         assert snap.cluster_wide_cap is None

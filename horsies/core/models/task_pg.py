@@ -299,6 +299,11 @@ class WorkerStateModel(Base):
     memory_usage_mb: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     memory_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     cpu_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Summed RSS (MB) of all descendant processes — the executor children
+    # where task code runs. Parent RSS (memory_usage_mb) alone hides per-child
+    # growth; combined they approximate the process-tree footprint the dyno
+    # memory quota (Heroku R14) is measured against.
+    children_memory_mb: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     # Worker lifecycle metadata
     worker_started_at: Mapped[datetime] = mapped_column(

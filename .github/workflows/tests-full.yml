@@ -156,7 +156,15 @@ jobs:
       - name: E2E - Child-process hooks
         env:
           DB_PASSWORD: testpassword
-        run: uv run pytest tests/e2e/test_child_process_hooks.py -v --tb=short
+        run: |
+          uv run pytest tests/e2e/test_child_process_hooks.py -v --tb=short
+          pkill -TERM -f "horsies worker" 2>/dev/null || true
+          sleep 5
+
+      - name: E2E - Child recycling
+        env:
+          DB_PASSWORD: testpassword
+        run: uv run pytest tests/e2e/test_child_recycling.py -v --tb=short
 
   pgbouncer:
     runs-on: ubuntu-latest

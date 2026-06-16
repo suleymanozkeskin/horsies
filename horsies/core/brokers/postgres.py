@@ -1,6 +1,6 @@
 # app/core/brokers/postgres.py
 from __future__ import annotations
-import asyncio, hashlib, contextlib, random, threading, uuid
+import asyncio, hashlib, contextlib, os, random, threading, uuid
 from typing import Any, Optional, TYPE_CHECKING, cast
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import (
@@ -140,6 +140,7 @@ from horsies.core.schemas.migrations import (
     ADD_SUCCESS_POLICY_COLUMN_SQL,
     ADD_TASK_OPTIONS_COLUMN_SQL,
     ADD_WORKFLOW_SENT_AT_COLUMN_SQL,
+    ADD_WORKER_STATES_CHILDREN_MEMORY_COLUMN_SQL,
     ADD_DEFINITION_KEY_COLUMN_SQL,
     BACKFILL_TASK_IS_WORKFLOW_TASK_SQL,
     BACKFILL_ENQUEUE_SHA_SQL,
@@ -218,6 +219,7 @@ _WORKER_STATE_COLUMNS = """
         memory_usage_mb,
         memory_percent,
         cpu_percent,
+        children_memory_mb,
         worker_started_at
 """
 
@@ -511,7 +513,12 @@ class PostgresBroker:
         self._initialized = assume_initialized
         self._loop_runner = LoopRunner()  # for sync facades
 
-        self.logger.info('PostgresBroker initialized')
+        # Each worker child builds its own broker, so this fires on every
+        # recycle (max_tasks_per_child); keep it at DEBUG in child processes.
+        if os.getenv('HORSIES_CHILD_PROCESS') == '1':
+            self.logger.debug('PostgresBroker initialized')
+        else:
+            self.logger.info('PostgresBroker initialized')
 
     def _base_engine_config(self) -> dict[str, Any]:
         return self.config.sqlalchemy_engine_kwargs()
@@ -763,6 +770,9 @@ class PostgresBroker:
             # Migration (v4): widen timeseries PKs to BIGINT.
             await conn.execute(WIDEN_HEARTBEATS_ID_TO_BIGINT_SQL)
             await conn.execute(WIDEN_WORKER_STATES_ID_TO_BIGINT_SQL)
+
+            # Migration (v9): executor-child memory in worker telemetry.
+            await conn.execute(ADD_WORKER_STATES_CHILDREN_MEMORY_COLUMN_SQL)
 
             # Migration (v5): drop write-amplifying single-column indexes;
             # partial replacement for good_until.
@@ -1557,6 +1567,7 @@ class PostgresBroker:
             memory_usage_mb=m['memory_usage_mb'],
             memory_percent=m['memory_percent'],
             cpu_percent=m['cpu_percent'],
+            children_memory_mb=m['children_memory_mb'],
             worker_started_at=m['worker_started_at'],
         )
 

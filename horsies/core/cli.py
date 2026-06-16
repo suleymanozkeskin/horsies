@@ -166,6 +166,21 @@ def _non_negative_int(value: str) -> int:
     return parsed
 
 
+def _max_tasks_per_child(value: str) -> int:
+    """argparse type: max_tasks_per_child, integer >= 2 or 0 to disable.
+
+    Child warmup consumes one executor call from the budget, so 1 would
+    exhaust a child before it runs a real task; reject at the CLI boundary.
+    0 disables recycling (children live for the worker's lifetime).
+    """
+    parsed = int(value)
+    if parsed != 0 and parsed < 2:
+        raise argparse.ArgumentTypeError(
+            f'must be >= 2, or 0 to disable, got {parsed}'
+        )
+    return parsed
+
+
 def _is_file_path(path: str) -> bool:
     """Check if path looks like a file path (vs dotted module path)."""
     return path.endswith('.py') or os.path.sep in path or '/' in path
@@ -495,6 +510,7 @@ def worker_command(args: argparse.Namespace) -> None:
         max_claim_renew_age_ms=app.config.max_claim_renew_age_ms,
         max_claim_batch=args.max_claim_batch,
         max_claim_per_worker=args.max_claim_per_worker,
+        max_tasks_per_child=args.max_tasks_per_child,
         recovery_config=app.config.recovery,
         resilience_config=app.config.resilience,
         loglevel=log_level_int,
@@ -841,6 +857,16 @@ Examples:
             type=_non_negative_int,
             default=0,
             help='Max claimed tasks per worker, 0=auto (default: 0)',
+        )
+        worker_parser.add_argument(
+            '--max-tasks-per-child',
+            type=_max_tasks_per_child,
+            default=100,
+            help=(
+                'Recycle each child process after it completes N tasks '
+                '(>=2, per-child and staggered); forces the spawn start '
+                'method. 0 disables recycling. Default: 100'
+            ),
         )
 
         # Scheduler command

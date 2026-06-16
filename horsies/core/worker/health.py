@@ -165,7 +165,7 @@ class HealthMixin:
     async def _update_worker_state(self) -> None:
         """Update worker state snapshot in database for monitoring."""
         try:
-            rss_mb, mem_pct, cpu_pct = await asyncio.to_thread(
+            rss_mb, mem_pct, cpu_pct, children_rss_mb = await asyncio.to_thread(
                 _collect_psutil_metrics,
             )
 
@@ -216,6 +216,7 @@ class HealthMixin:
                         'mem_mb': rss_mb,
                         'mem_pct': mem_pct,
                         'cpu_pct': cpu_pct,
+                        'children_mem_mb': children_rss_mb,
                         'started': self._started_at,
                     },
                 )

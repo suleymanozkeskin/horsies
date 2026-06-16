@@ -11,6 +11,23 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
+### Added
+
+- `--max-tasks-per-child N` worker flag (`WorkerConfig.max_tasks_per_child`,
+  `N >= 2`, **default `100`**): recycle each worker child process after N tasks
+  (per-child and staggered) to bound memory for workloads that retain it
+  (allocator high-water, C-extension caches, leaks). `0` disables recycling.
+  **Behavior change:** because the stdlib budget is incompatible with `fork`,
+  any non-zero value (including the default) forces the `spawn` start method —
+  on Linux this replaces `fork`, so children re-import the app instead of
+  fork-cloning the parent (higher baseline RSS, slower child startup). Set
+  `--max-tasks-per-child=0` to keep `fork`/no recycling.
+- `children_memory_mb` column on `horsies_worker_states` and field on
+  `WorkerStateSnapshot`: summed RSS of the executor child processes. The
+  existing `memory_usage_mb` is the parent process only; per-child memory
+  growth (the memory-quota driver) was previously invisible. Schema bumped to
+  v9 (additive, idempotent `ADD COLUMN`).
+
 ## 0.2.2 — 2026-06-15
 
 Producer-side strictness lands on both axes: task parameters must be

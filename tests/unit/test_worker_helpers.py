@@ -3278,17 +3278,99 @@ class TestCollectPsutilMetrics:
 
     # --- U-7a ---
 
-    def test_returns_three_floats(self) -> None:
-        """Returns (rss_mb, mem_pct, cpu_pct) as floats."""
+    def test_returns_four_floats(self) -> None:
+        """Returns (rss_mb, mem_pct, cpu_pct, children_rss_mb) as floats."""
         result = _collect_psutil_metrics()
 
         assert isinstance(result, tuple)
-        assert len(result) == 3
-        rss_mb, mem_pct, cpu_pct = result
+        assert len(result) == 4
+        rss_mb, mem_pct, cpu_pct, children_rss_mb = result
         assert isinstance(rss_mb, float)
         assert isinstance(mem_pct, float)
         assert isinstance(cpu_pct, float)
+        assert isinstance(children_rss_mb, float)
         assert rss_mb > 0  # process must use some memory
+        assert children_rss_mb >= 0  # no children in-test, but never negative
+
+
+@pytest.mark.unit
+class TestWorkerConfigRecycleValidation:
+    """WorkerConfig.max_tasks_per_child validation."""
+
+    def test_default_is_100(self) -> None:
+        worker = _make_worker()
+        assert worker.cfg.max_tasks_per_child == 100
+
+    def test_one_and_negative_rejected(self) -> None:
+        from horsies.core.worker.config import WorkerConfig
+
+        for bad in (1, -1):
+            with pytest.raises(ValueError, match='must be >= 2'):
+                WorkerConfig(
+                    dsn='postgresql+psycopg://u:p@localhost/db',
+                    psycopg_dsn='postgresql://u:p@localhost/db',
+                    queues=['default'],
+                    max_tasks_per_child=bad,
+                )
+
+    def test_zero_disables_allowed(self) -> None:
+        from horsies.core.worker.config import WorkerConfig
+
+        cfg = WorkerConfig(
+            dsn='postgresql+psycopg://u:p@localhost/db',
+            psycopg_dsn='postgresql://u:p@localhost/db',
+            queues=['default'],
+            max_tasks_per_child=0,
+        )
+        assert cfg.max_tasks_per_child == 0
+
+    def test_two_or_more_accepted(self) -> None:
+        from horsies.core.worker.config import WorkerConfig
+
+        cfg = WorkerConfig(
+            dsn='postgresql+psycopg://u:p@localhost/db',
+            psycopg_dsn='postgresql://u:p@localhost/db',
+            queues=['default'],
+            max_tasks_per_child=2,
+        )
+        assert cfg.max_tasks_per_child == 2
+
+
+@pytest.mark.unit
+class TestCreateExecutorRecycle:
+    """Tests for Worker._create_executor recycle wiring."""
+
+    def test_default_recycles_and_forces_spawn(self) -> None:
+        """Default config (100): budget passed through, spawn forced."""
+        worker = _make_worker()
+        executor = worker._create_executor()
+        try:
+            assert executor._max_tasks_per_child == 100
+            assert executor._mp_context.get_start_method() == 'spawn'
+        finally:
+            executor.shutdown(wait=False)
+
+    def test_zero_disables_recycle(self) -> None:
+        """max_tasks_per_child=0: executor created without a per-child budget."""
+        worker = _make_worker()
+        worker.cfg.max_tasks_per_child = 0
+        executor = worker._create_executor()
+        try:
+            assert executor._max_tasks_per_child is None
+        finally:
+            executor.shutdown(wait=False)
+
+    def test_explicit_value_sets_budget_and_forces_spawn(self) -> None:
+        """An explicit value passes through and forces spawn even without
+        avoid_parent_fd_inheritance (fork is incompatible)."""
+        worker = _make_worker()
+        worker.cfg.max_tasks_per_child = 5
+        executor = worker._create_executor(avoid_parent_fd_inheritance=False)
+        try:
+            assert executor._max_tasks_per_child == 5
+            assert executor._mp_context.get_start_method() == 'spawn'
+        finally:
+            executor.shutdown(wait=False)
 
 
 @pytest.mark.unit
@@ -3309,7 +3391,7 @@ class TestUpdateWorkerState:
 
         monkeypatch.setattr(
             'horsies.core.worker.health._collect_psutil_metrics',
-            lambda: (100.0, 5.5, 12.3),
+            lambda: (100.0, 5.5, 12.3, 250.0),
         )
         worker._count_only_running_for_worker = AsyncMock(return_value=3)  # type: ignore[assignment]
         worker._count_claimed_for_worker = AsyncMock(return_value=7)  # type: ignore[assignment]
@@ -3342,6 +3424,7 @@ class TestUpdateWorkerState:
         assert params['mem_mb'] == 100.0
         assert params['mem_pct'] == 5.5
         assert params['cpu_pct'] == 12.3
+        assert params['children_mem_mb'] == 250.0
 
     # --- U-7c ---
 

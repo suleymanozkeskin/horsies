@@ -487,13 +487,13 @@ INSERT_WORKER_STATE_SQL = text("""
         processes, max_claim_batch, max_claim_per_worker,
         cluster_wide_cap, queues, queue_priorities, queue_max_concurrency,
         recovery_config, tasks_running, tasks_claimed,
-        memory_usage_mb, memory_percent, cpu_percent,
+        memory_usage_mb, memory_percent, cpu_percent, children_memory_mb,
         worker_started_at
     )
     VALUES (
         :wid, NOW(), :host, :pid, :procs, :mcb, :mcpw, :cwc,
         :queues, :qp, :qmc, :recovery, :running, :claimed,
-        :mem_mb, :mem_pct, :cpu_pct, :started
+        :mem_mb, :mem_pct, :cpu_pct, :children_mem_mb, :started
     )
 """)
 
