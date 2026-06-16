@@ -29,7 +29,15 @@ if TYPE_CHECKING:
 
 # --- Imports from sibling modules (extracted for maintainability) ---
 from horsies.core.worker.config import WorkerConfig as WorkerConfig  # noqa: F401
-from horsies.core.worker.child_pool import _initialize_worker_pool as _initialize_worker_pool  # noqa: F401
+from horsies.core.worker.child_pool import (
+    _initialize_worker_pool as _initialize_worker_pool,
+)  # noqa: F401
+from horsies.core.worker.mem_pool import (  # noqa: F401
+    HorsiesProcessPoolExecutor as HorsiesProcessPoolExecutor,
+    _RecycleProcessPoolExecutor as _RecycleProcessPoolExecutor,
+    recycle_replacement_supported as recycle_replacement_supported,
+    verify_cpython_internals as verify_cpython_internals,
+)
 from horsies.core.worker.child_runner import (  # noqa: F401
     CHILD_HOOK_FAILURE_EXIT_CODE as CHILD_HOOK_FAILURE_EXIT_CODE,
     _locate_app as _locate_app,
@@ -112,6 +120,7 @@ from horsies.core.worker.runtime import (  # noqa: F401,E402
     _REAPER_MAX_PERMANENT_FAILURES as _REAPER_MAX_PERMANENT_FAILURES,
     ChildHookFailedError as ChildHookFailedError,
     ExecutorRestartFailedError as ExecutorRestartFailedError,
+    MemoryBaselineExceedsThresholdError as MemoryBaselineExceedsThresholdError,
     _RetryBackoff as _RetryBackoff,
     _FinalizeError as _FinalizeError,
     _RetryError as _RetryError,
@@ -120,13 +129,13 @@ from horsies.core.worker.runtime import (  # noqa: F401,E402
     _collect_psutil_metrics as _collect_psutil_metrics,
     _parse_timeout_ms as _parse_timeout_ms,
     _warm_child_process as _warm_child_process,
+    _warm_child_process_probe as _warm_child_process_probe,
 )
 
 
-
-
-
-class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin, RetryMixin):
+class Worker(
+    ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin, RetryMixin
+):
     """
     Async master that:
       - Subscribes to queue channels
@@ -197,9 +206,7 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
                         self._fatal_background_error = exc
                         self._stop.set()
                     case _:
-                        logger.error(
-                            f'Background task {t.get_name()!r} failed: {exc}'
-                        )
+                        logger.error(f'Background task {t.get_name()!r} failed: {exc}')
                 return
             if finalizer:
                 result = t.result()
@@ -228,30 +235,57 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
         """
         child_database_url = to_psycopg_url(self.cfg.dsn)
         kwargs: dict[str, Any] = {}
-        # max_tasks_per_child is incompatible with the 'fork' start method, so
-        # recycling forces 'spawn' for every pool — including the initial one,
+        # max_tasks_per_child and max_memory_per_child_mb are both incompatible
+        # with the 'fork' start method (count recycling is a stdlib constraint;
+        # memory recycling needs children to re-import, not fork-clone), so
+        # either forces 'spawn' for every pool — including the initial one,
         # which would otherwise default to fork on Linux. Spawn already backs
         # the restart path (avoid_parent_fd_inheritance), so the child
         # initializer/hook machinery is exercised either way.
         recycle = self.cfg.max_tasks_per_child > 0
-        if avoid_parent_fd_inheritance or recycle:
+        mem_recycle = self.cfg.max_memory_per_child_mb is not None
+        if avoid_parent_fd_inheritance or recycle or mem_recycle:
             kwargs['mp_context'] = multiprocessing.get_context('spawn')
         if recycle:
             kwargs['max_tasks_per_child'] = self.cfg.max_tasks_per_child
+        initargs = (
+            self.cfg.app_locator,
+            self.cfg.imports,
+            self.cfg.sys_path_roots,
+            self.cfg.loglevel,
+            child_database_url,
+            self.cfg.pgbouncer_transaction_mode,
+            self.cfg.child_pool_min_size,
+            self.cfg.child_pool_max_size,
+            self.cfg.child_pool_check,
+        )
+        if mem_recycle:
+            # Refuse to enable on an unverified interpreter (non-CPython or an
+            # untested minor) before constructing the private-internals pool.
+            verify_cpython_internals()
+            return HorsiesProcessPoolExecutor(
+                max_workers=self.cfg.processes,
+                initializer=_child_initializer,
+                initargs=initargs,
+                max_memory_per_child_mb=self.cfg.max_memory_per_child_mb,
+                **kwargs,
+            )
+        if recycle and recycle_replacement_supported():
+            # Count recycling on the stock pool can hang (CPython gh-115634): a
+            # cleanly-recycled child may not be replaced, wedging queued work.
+            # The override carries no pinned-worker-loop dependency, so the
+            # count path uses it ungated, falling back to the stock pool only if
+            # the required internals are absent.
+            return _RecycleProcessPoolExecutor(
+                max_workers=self.cfg.processes,
+                initializer=_child_initializer,
+                initargs=initargs,
+                **kwargs,
+            )
         return ProcessPoolExecutor(
             max_workers=self.cfg.processes,
             initializer=_child_initializer,
-            initargs=(
-                self.cfg.app_locator,
-                self.cfg.imports,
-                self.cfg.sys_path_roots,
-                self.cfg.loglevel,
-                child_database_url,
-                self.cfg.pgbouncer_transaction_mode,
-                self.cfg.child_pool_min_size,
-                self.cfg.child_pool_max_size,
-                self.cfg.child_pool_check,
-            ),
+            initargs=initargs,
             **kwargs,
         )
 
@@ -263,17 +297,39 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
         (max_tasks_per_child - 1) real tasks before recycling. Warmup is kept
         as-is — its pre-socket-open invariant matters more than the one slot —
         which is why ``max_tasks_per_child`` must be >= 2.
+
+        When ``max_memory_per_child_mb`` is set, the warmup call is the
+        baseline probe (``_warm_child_process_probe``) instead of the plain
+        warmup, so the settled per-child baseline RSS is sampled on the same
+        call — no extra recycle-budget slot — and checked against the threshold
+        by the baseline guard before any real work is dispatched.
+
+        Raises:
+            MemoryBaselineExceedsThresholdError: warmed child baseline RSS is
+                at or above ``max_memory_per_child_mb`` (the app does not fit
+                this per-child budget). Process-fatal on the start path.
         """
         if self._executor is None:
             return
         loop = asyncio.get_running_loop()
+        mem_recycle = self.cfg.max_memory_per_child_mb is not None
         pids: set[int] = set()
+        baseline_by_pid: dict[int, float | None] = {}
         for _ in range(3):
-            futures = [
-                loop.run_in_executor(self._executor, _warm_child_process)
-                for _ in range(self.cfg.processes)
-            ]
-            pids.update(await asyncio.gather(*futures))
+            if mem_recycle:
+                probe_futures = [
+                    loop.run_in_executor(self._executor, _warm_child_process_probe)
+                    for _ in range(self.cfg.processes)
+                ]
+                for pid, rss_mb in await asyncio.gather(*probe_futures):
+                    pids.add(pid)
+                    self._record_child_baseline(baseline_by_pid, pid, rss_mb)
+            else:
+                warm_futures = [
+                    loop.run_in_executor(self._executor, _warm_child_process)
+                    for _ in range(self.cfg.processes)
+                ]
+                pids.update(await asyncio.gather(*warm_futures))
             if len(pids) >= self.cfg.processes:
                 break
         if len(pids) < self.cfg.processes:
@@ -286,6 +342,68 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
             len(pids),
             self.cfg.processes,
         )
+        if mem_recycle:
+            self._check_memory_baseline(baseline_by_pid)
+
+    @staticmethod
+    def _record_child_baseline(
+        baseline_by_pid: dict[int, float | None],
+        pid: int,
+        rss_mb: float | None,
+    ) -> None:
+        """Keep the highest settled RSS observed per child across probe rounds."""
+        baseline_by_pid.setdefault(pid, None)
+        if rss_mb is None:
+            return
+        previous = baseline_by_pid[pid]
+        if previous is None or rss_mb > previous:
+            baseline_by_pid[pid] = rss_mb
+
+    def _check_memory_baseline(
+        self,
+        baseline_by_pid: dict[int, float | None],
+    ) -> None:
+        """Fail or warn when the warmed child baseline crowds the threshold.
+
+        Raises:
+            MemoryBaselineExceedsThresholdError: a child's settled baseline RSS
+                is at or above ``max_memory_per_child_mb`` — the app does not
+                fit this per-child budget, so recycling would fire every task.
+        """
+        threshold = self.cfg.max_memory_per_child_mb
+        if threshold is None:
+            return
+        samples = [rss for rss in baseline_by_pid.values() if rss is not None]
+        if not samples:
+            logger.warning(
+                'max_memory_per_child_mb=%sMB is set but child baseline RSS '
+                'was unreadable; skipping the startup baseline guard. Per-child '
+                'recycle is best-effort and will not fire while the per-task RSS '
+                'reader keeps failing the same way (fail-open).',
+                threshold,
+            )
+            return
+        max_baseline = max(samples)
+        if max_baseline >= threshold:
+            raise MemoryBaselineExceedsThresholdError(
+                f'warmed child baseline {max_baseline:.0f}MB >= '
+                f'max_memory_per_child_mb {threshold}MB; the app does not fit '
+                'this per-child budget — raise the budget or the threshold'
+            )
+        if max_baseline >= 0.8 * threshold:
+            logger.warning(
+                'Warmed child baseline %.0fMB is within 80%% of '
+                'max_memory_per_child_mb %sMB; little headroom for per-task '
+                'working set, so children may recycle frequently',
+                max_baseline,
+                threshold,
+            )
+        else:
+            logger.info(
+                'Warmed child baseline %.0fMB vs max_memory_per_child_mb %sMB',
+                max_baseline,
+                threshold,
+            )
 
     async def _create_warmed_executor(
         self,
@@ -319,10 +437,7 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
                 logger.error(
                     f'Error shutting down failed executor warmup: {shutdown_exc}'
                 )
-            if any(
-                p.exitcode == CHILD_HOOK_FAILURE_EXIT_CODE
-                for p in child_processes
-            ):
+            if any(p.exitcode == CHILD_HOOK_FAILURE_EXIT_CODE for p in child_processes):
                 raise ChildHookFailedError(
                     'on_child_process_start hook failed in a worker child '
                     '(see the child log line above for the hook name); '
@@ -363,8 +478,7 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
                     return
                 except Exception as exc:
                     logger.critical(
-                        'Executor restart failed; worker cannot run tasks '
-                        '(%s): %s',
+                        'Executor restart failed; worker cannot run tasks ' '(%s): %s',
                         reason,
                         exc,
                     )
@@ -392,8 +506,7 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
                 self._stop_for_child_hook_failure(exc)
             except Exception as exc:
                 logger.critical(
-                    'Executor restart failed; worker cannot run tasks '
-                    '(%s): %s',
+                    'Executor restart failed; worker cannot run tasks ' '(%s): %s',
                     reason,
                     exc,
                 )
@@ -896,9 +1009,7 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
         """
         import contextlib
 
-        queue_tasks = [
-            asyncio.create_task(q.get()) for q in self._queues
-        ]
+        queue_tasks = [asyncio.create_task(q.get()) for q in self._queues]
         # Add only the stop event as an additional wait condition (no periodic polling)
         stop_task = asyncio.create_task(self._stop.wait())
         all_tasks = queue_tasks + [stop_task]
@@ -953,49 +1064,6 @@ class Worker(ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin,
                     break
 
     # ----- claim & dispatch -----
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 """

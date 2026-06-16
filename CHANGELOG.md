@@ -8,12 +8,42 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+Per-child memory recycling, complementing count-based `--max-tasks-per-child`.
+Heterogeneous workloads make a task count a poor proxy for a bytes budget: the
+correct recycle point depends on a child's RSS, not how many tasks it ran. This
+release also fixes a latent CPython gh-115634 hang in the existing count-recycle
+path.
+
+### Added
+
+- `--max-memory-per-child-mb N` worker flag (`WorkerConfig.max_memory_per_child_mb`,
+  positive int, **default off**): recycle a child once its own resident memory
+  reaches N MB. The child samples its RSS after each real task and, at or above
+  the threshold, finishes the task, sends its result, and exits cleanly via the
+  stdlib `exit_pid` marker — the pool replaces only that child. It is a
+  retention guardrail, not a hard sandbox: a task that exceeds the threshold
+  while still running is not interrupted. **CPython-only** (built on private
+  `ProcessPoolExecutor` internals, asserted at startup) and forces the `spawn`
+  start method. A startup baseline guard fails the worker when the threshold is
+  at or below the warmed child baseline (the app does not fit the per-child
+  budget) and warns within 80% of it.
+
+### Fixed
+
+- Count-based child recycling (`--max-tasks-per-child`, including the default
+  `100`) routed through the stock `ProcessPoolExecutor`, which can hang under
+  queued load when a cleanly-recycled child is not replaced (CPython
+  gh-115634). Count recycling now uses an executor that overrides
+  `_adjust_process_count` to always replace a recycled child, falling back to
+  the stock pool only if the required internals are absent (no version gate;
+  the override is correct wherever the surface exists).
+
 ## [0.2.3] - 2026-06-16
 
 Worker child processes can now be recycled to bound memory. Long-lived
 executor children accumulate memory the OS never reclaims (allocator
 high-water from heap fragmentation, C-extension caches, leaks), which crashes
-memory-quota platforms (Heroku R14). `--max-tasks-per-child` (default `100`)
+memory-quota platforms (containers, PaaS dynos). `--max-tasks-per-child` (default `100`)
 recycles each child after N tasks; new `children_memory_mb` telemetry exposes
 the per-child footprint the parent-only `memory_usage_mb` metric hid. Schema
 bumped to v9 (additive). **Behavior change:** recycling is on by default and

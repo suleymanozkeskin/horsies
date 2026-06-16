@@ -7,12 +7,13 @@ class can share them without importing each other.
 
 from __future__ import annotations
 
+import gc
 import os
 import random
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 from horsies.core.codec.json_io import loads_json
 from horsies.core.logging import get_logger
@@ -43,8 +44,11 @@ __all__ = [
     '_RequeueOutcome',
     '_ReaperPassState',
     '_collect_psutil_metrics',
+    '_read_current_rss_mb',
     '_parse_timeout_ms',
     '_warm_child_process',
+    '_warm_child_process_probe',
+    'MemoryBaselineExceedsThresholdError',
 ]
 
 _FINALIZE_STAGE_PHASE1 = 'phase1_persist'
@@ -160,10 +164,50 @@ def _parse_timeout_ms(task_options_json: Any, task_id: str) -> int | None:
         return None
     if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
         logger.warning(
-            'Task %s has invalid timeout_ms %r; ignoring', task_id, raw,
+            'Task %s has invalid timeout_ms %r; ignoring',
+            task_id,
+            raw,
         )
         return None
     return raw
+
+
+# Per-child latch so a broken RSS reader logs once, not once per task.
+_rss_reader_failed_logged = False
+
+
+def _read_current_rss_mb() -> Optional[float]:
+    """Return the calling process's current RSS in MB, or ``None`` if unknown.
+
+    Fail-open by contract: any measurement failure returns ``None`` (logged
+    once per process) so the child worker loop treats RSS as unknown and does
+    not recycle. An RSS read must never raise out of the worker loop, because
+    a raise there would break the pool.
+
+    Linux fast path reads ``/proc/self/statm`` (resident pages * page size);
+    the fallback is ``psutil``. The two readers agree exactly (zero delta) on
+    CPython 3.13/Linux.
+    """
+    global _rss_reader_failed_logged
+    try:
+        with open('/proc/self/statm', encoding='ascii') as statm:
+            resident_pages = int(statm.read().split()[1])
+        return resident_pages * os.sysconf('SC_PAGE_SIZE') / 1024 / 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        import psutil
+
+        return psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+    except Exception as exc:
+        if not _rss_reader_failed_logged:
+            _rss_reader_failed_logged = True
+            logger.warning(
+                'Current RSS unreadable (statm + psutil both failed); memory '
+                'recycle / baseline guard disabled for this process: %s',
+                exc,
+            )
+        return None
 
 
 def _collect_psutil_metrics() -> tuple[float, float, float, float]:
@@ -222,8 +266,38 @@ class ExecutorRestartFailedError(RuntimeError):
     """
 
 
+class MemoryBaselineExceedsThresholdError(RuntimeError):
+    """Warmed child baseline RSS is at or above max_memory_per_child_mb.
+
+    A threshold below the settled child baseline would recycle after every
+    task (the child is over the limit before running any work), so this is a
+    misconfiguration, not a tunable mode: the app does not fit the chosen
+    per-child budget. Raised by the startup baseline guard to fail the worker
+    loudly with both measured numbers rather than thrash silently.
+    """
+
+
 def _warm_child_process(delay_seconds: float = 0.1) -> int:
     """No-op child task used to force process startup before parent DB sockets open."""
     if delay_seconds > 0:
         time.sleep(delay_seconds)
     return os.getpid()
+
+
+def _warm_child_process_probe(
+    delay_seconds: float = 0.1,
+) -> tuple[int, Optional[float]]:
+    """Warmup call that also returns the child's settled baseline RSS.
+
+    Used in place of ``_warm_child_process`` when ``max_memory_per_child_mb``
+    is set: after the same startup delay it runs ``gc.collect()`` to drop
+    import-time cyclic garbage, then samples current RSS so the parent's
+    baseline guard compares a settled figure (not a transient import peak)
+    against the threshold. The memory-recycle predicate skips this call by
+    identity, exactly like ``_warm_child_process``, so it never triggers a
+    recycle of its own.
+    """
+    if delay_seconds > 0:
+        time.sleep(delay_seconds)
+    gc.collect()
+    return os.getpid(), _read_current_rss_mb()

@@ -266,11 +266,13 @@ horsies worker myapp.config:app --max-tasks-per-child=500
 `horsies check` runs phased validation (config, imports, DAG, builders, policies,
 optional live DB check). Worker and scheduler also run check at startup.
 
-`--max-tasks-per-child` defaults to `100`: each child process is recycled after
-100 tasks to return retained memory (allocator high-water, C-extension caches,
-leaks) to the OS. There is no universal value — raise it for high-throughput or
-connection-constrained apps, lower it for memory-heavy tasks, set `0` to
-disable. Any non-zero value forces the `spawn` start method (incompatible with
-`fork`), so children re-import the app. Size it against the
-`children_memory_mb` field on `WorkerStateSnapshot`. See `configs.md` and
-website docs `workers/concurrency`.
+Two knobs recycle executor children to bound memory, with **OR** semantics (a
+child exits when either limit is reached). `--max-tasks-per-child` (default
+`100`) recycles after N tasks; `--max-memory-per-child-mb` (default off,
+CPython-only) recycles once a child's own RSS reaches N MB after a task — the
+primary guard for memory-quota deployments, since it maps to the RSS the quota
+charges. A threshold at or below the warmed child baseline fails startup. Either
+knob forces the `spawn` start method (incompatible with `fork`), so children
+re-import the app. Recommended default: memory recycling on, count high as a
+backstop, tuned against the `children_memory_mb` field on `WorkerStateSnapshot`.
+See `configs.md` and website docs `workers/concurrency`.

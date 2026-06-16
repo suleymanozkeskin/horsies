@@ -181,6 +181,22 @@ def _max_tasks_per_child(value: str) -> int:
     return parsed
 
 
+def _max_memory_per_child_mb(value: str) -> int:
+    """argparse type: max_memory_per_child_mb, positive integer in MB.
+
+    No fixed lower floor is enforced here — a constant cannot know a
+    deployment's warmed child baseline. The real floor is checked at worker
+    startup by the baseline guard, which fails loudly when the threshold is
+    below the measured baseline. Reject only non-positive values.
+    """
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(
+            f'must be a positive integer (MB), got {parsed}'
+        )
+    return parsed
+
+
 def _is_file_path(path: str) -> bool:
     """Check if path looks like a file path (vs dotted module path)."""
     return path.endswith('.py') or os.path.sep in path or '/' in path
@@ -511,6 +527,7 @@ def worker_command(args: argparse.Namespace) -> None:
         max_claim_batch=args.max_claim_batch,
         max_claim_per_worker=args.max_claim_per_worker,
         max_tasks_per_child=args.max_tasks_per_child,
+        max_memory_per_child_mb=args.max_memory_per_child_mb,
         recovery_config=app.config.recovery,
         resilience_config=app.config.resilience,
         loglevel=log_level_int,
@@ -866,6 +883,17 @@ Examples:
                 'Recycle each child process after it completes N tasks '
                 '(>=2, per-child and staggered); forces the spawn start '
                 'method. 0 disables recycling. Default: 100'
+            ),
+        )
+        worker_parser.add_argument(
+            '--max-memory-per-child-mb',
+            type=_max_memory_per_child_mb,
+            default=None,
+            help=(
+                'Recycle a child after its own RSS reaches N MB (per-child, '
+                'CPython-only, forces the spawn start method). Disabled by '
+                'default. The worker refuses to start if N is below the '
+                'warmed child baseline.'
             ),
         )
 
