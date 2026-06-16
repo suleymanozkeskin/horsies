@@ -1,8 +1,8 @@
 ---
 title: Changelog
-summary: Notable changes per release. 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
+summary: Notable changes per release. 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
 related: [./monitoring/worker-health, ./migrations/migration-to-0-1-2, ./internals/serialization]
-tags: [changelog, releases, breaking-changes, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
+tags: [changelog, releases, breaking-changes, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
 ---
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
@@ -10,6 +10,18 @@ horsies is pre-1.0: breaking changes may land in minor or patch releases, and
 there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
+
+## 0.2.3 — 2026-06-16
+
+Worker child processes can now be recycled to bound memory. Long-lived
+executor children accumulate memory the OS never reclaims (allocator
+high-water from heap fragmentation, C-extension caches, leaks), which crashes
+memory-quota platforms (Heroku R14). `--max-tasks-per-child` (default `100`)
+recycles each child after N tasks; new `children_memory_mb` telemetry exposes
+the per-child footprint the parent-only `memory_usage_mb` metric hid. Schema
+bumped to v9 (additive). **Behavior change:** recycling is on by default and
+forces the `spawn` start method (incompatible with `fork`); set
+`--max-tasks-per-child=0` to keep `fork`/no recycling.
 
 ### Added
 
