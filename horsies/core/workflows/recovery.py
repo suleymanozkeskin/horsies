@@ -332,7 +332,7 @@ async def recover_stuck_workflows(
             Phase 2 is likely still in flight — recovering it would race the
             healthy finalizer and add ~one reaper interval of latency. ``0``
             (default) disables the window (immediate recovery); the periodic
-            reaper passes ``RecoveryConfig.finalizing_stale_threshold_ms``.
+            reaper passes ``RecoveryConfig.crashed_worker_recovery_grace_ms``.
 
     Returns:
         Count of recovered workflow tasks.

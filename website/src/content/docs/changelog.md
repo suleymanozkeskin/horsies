@@ -17,11 +17,12 @@ and the reaper's Case 1.7 recovery fired the instant a task went terminal — so
 under load (amplified by frequent child recycling) it "recovered" tasks whose
 Phase 2 was merely in flight, adding up to one reaper interval of latency and
 noisy `crashed worker` logs. Recovery now honours a grace window
-(`RecoveryConfig.finalizing_stale_threshold_ms`, default 5 min): a task terminal
-within the window is left for its in-flight finalizer; only genuinely-stuck
-tasks are recovered. Correctness was never at risk (recovery replays the stored
-result idempotently; the task body never re-runs) — this is a latency and
-log-noise fix.
+(`RecoveryConfig.crashed_worker_recovery_grace_ms`, new, default 10s, independent
+of the heartbeat-coupled thresholds): a task terminal within the window is left
+for its in-flight finalizer; only genuinely-stuck tasks are recovered (a genuine
+crash recovers after the grace plus one reaper sweep). Correctness was never at
+risk (recovery replays the stored result idempotently; the task body never
+re-runs) — this is a latency and log-noise fix.
 
 ## 0.2.4 — 2026-06-17
 

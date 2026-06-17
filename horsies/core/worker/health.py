@@ -178,6 +178,7 @@ class HealthMixin:
                     'auto_fail_stale_running': self.cfg.recovery_config.auto_fail_stale_running,
                     'running_stale_threshold_ms': self.cfg.recovery_config.running_stale_threshold_ms,
                     'finalizing_stale_threshold_ms': self.cfg.recovery_config.finalizing_stale_threshold_ms,
+                    'crashed_worker_recovery_grace_ms': self.cfg.recovery_config.crashed_worker_recovery_grace_ms,
                     'check_interval_ms': self.cfg.recovery_config.check_interval_ms,
                     'runner_heartbeat_interval_ms': self.cfg.recovery_config.runner_heartbeat_interval_ms,
                     'claimer_heartbeat_interval_ms': self.cfg.recovery_config.claimer_heartbeat_interval_ms,

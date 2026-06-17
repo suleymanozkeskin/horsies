@@ -231,7 +231,7 @@ class ReaperMixin:
                     s,
                     temp_broker,
                     finalizing_grace_ms=(
-                        recovery_cfg.finalizing_stale_threshold_ms
+                        recovery_cfg.crashed_worker_recovery_grace_ms
                     ),
                 )
                 if recovered > 0:

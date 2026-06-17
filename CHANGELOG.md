@@ -17,9 +17,11 @@ and there is no migration contract between pre-1.0 versions.
   terminal, Phase 2 advances the workflow), "recovering" tasks whose Phase 2 was
   merely in flight and adding up to one reaper interval of latency per affected
   task. Case 1.7 now honours a grace window
-  (`RecoveryConfig.finalizing_stale_threshold_ms`, default 5 min): a task that
-  went terminal within the window is left for its in-flight finalizer; only
-  genuinely-stuck tasks are recovered. Correctness was never at risk — recovery
+  (`RecoveryConfig.crashed_worker_recovery_grace_ms`, new, default 10s, not
+  coupled to heartbeat thresholds): a task that went terminal within the window
+  is left for its in-flight finalizer; only genuinely-stuck tasks are recovered.
+  A genuine crash in that gap recovers after the grace plus one reaper sweep.
+  Correctness was never at risk — recovery
   replays the stored result idempotently (the `FOR UPDATE` + already-terminal
   CAS in `on_workflow_task_complete`), and the task body never re-runs — this is
   a latency and log-noise fix. The recovery log line is reworded from "crashed

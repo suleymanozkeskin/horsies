@@ -41,6 +41,7 @@ config = AppConfig(
 | `auto_fail_stale_running` | `bool` | `True` | Fail tasks stuck in RUNNING |
 | `running_stale_threshold_ms` | `int` | 300,000 | Ms before RUNNING task is stale |
 | `finalizing_stale_threshold_ms` | `int` | 300,000 | Ms a completed child may remain in finalization handoff before recovery |
+| `crashed_worker_recovery_grace_ms` | `int` | 10,000 | Grace before recovering a workflow task whose underlying task is terminal but whose workflow progression was not applied; `0` disables |
 | `check_interval_ms` | `int` | 30,000 | How often to check for stale tasks |
 | `runner_heartbeat_interval_ms` | `int` | 30,000 | RUNNING task heartbeat frequency |
 | `claimer_heartbeat_interval_ms` | `int` | 30,000 | CLAIMED task heartbeat frequency |
@@ -74,7 +75,7 @@ After user code returns, the child marks the task as finalizing before the
 parent writes the terminal result. The reaper will not recover that task until
 `finalizing_stale_threshold_ms` has also elapsed.
 
-For **workflow** tasks, the recovery loop also detects when `workflow_tasks` is stuck non-terminal while the underlying task is already terminal, and triggers the normal completion path. See [Heartbeats & Recovery](../../workers/heartbeats-recovery) for details.
+For **workflow** tasks, the recovery loop also detects when `workflow_tasks` is stuck non-terminal while the underlying task is already terminal, and triggers the normal completion path. Task finalization is two transactions — the task is marked terminal first, then the workflow DAG is advanced — so a task can be terminal for a brief moment while its workflow progression is still in flight. The reaper waits `crashed_worker_recovery_grace_ms` (default 10s) before recovering such a task, so it does not race a healthy finalizer; only a genuine crash in that gap is recovered (after the grace plus one reaper sweep). This grace is independent of the heartbeat-coupled thresholds. See [Heartbeats & Recovery](../../workers/heartbeats-recovery) for details.
 
 ## Heartbeat System
 
