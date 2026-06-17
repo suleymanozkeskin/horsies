@@ -21,6 +21,10 @@ def _default_str_int_dict() -> dict[str, int]:
     return {}
 
 
+def _default_connect_kwargs() -> dict[str, object]:
+    return {}
+
+
 @dataclass
 class WorkerConfig:
     dsn: str  # SQLAlchemy async URL (e.g. postgresql+psycopg://...)
@@ -34,6 +38,12 @@ class WorkerConfig:
     child_pool_min_size: int = 0
     child_pool_max_size: int = 2
     child_pool_check: bool = True
+    # psycopg connect kwargs for each child-pool connection (TCP keepalives,
+    # plus prepare_threshold=None under PgBouncer transaction mode). Built
+    # from PostgresConfig.pooled_connect_args.
+    child_connect_kwargs: dict[str, object] = field(
+        default_factory=_default_connect_kwargs
+    )
     # Claiming knobs
     # max_claim_batch: Optional top-level fairness limiter per queue per pass.
     # 0 = auto-fill available local/global capacity. Positive values explicitly cap claims.
@@ -116,6 +126,16 @@ class WorkerConfig:
                 'floor is the warmed child baseline, enforced at startup), or '
                 f'None to disable; got {self.max_memory_per_child_mb}'
             )
+        # PgBouncer transaction pooling cannot carry prepared statements; the
+        # child pool must disable them. The CLI builds child_connect_kwargs
+        # from PostgresConfig.pooled_connect_args (which already sets this under
+        # transaction mode), but a direct WorkerConfig construction may pass
+        # only the boolean. Enforce the invariant here so the flag alone is
+        # always sufficient, without overriding an explicit value.
+        if self.pgbouncer_transaction_mode:
+            kwargs = dict(self.child_connect_kwargs)
+            kwargs.setdefault('prepare_threshold', None)
+            self.child_connect_kwargs = kwargs
 
     def __repr__(self) -> str:
         """Mask credential-bearing DSNs; the dataclass auto-repr put all

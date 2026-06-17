@@ -145,6 +145,35 @@ workers that sit idle for long stretches behind NAT or load balancers
 that kill idle connections — those are the deployments where stale
 connections actually occur.
 
+## TCP Keepalives for Idle Pooled Connections
+
+`pool_pre_ping` and `worker_child_pool_check` are checkout-time guards: they
+detect a dead connection *before* a query runs, not one that dies in-flight.
+An idle pooled connection reaped server-side between checkouts surfaces as a
+mid-query `OperationalError` on the next claim or heartbeat — absorbed by the
+worker's retry loop, but logged as noise.
+
+`tcp_keepalives` (default on) closes this gap at the socket layer. libpq
+enables keepalives by default but leaves the idle interval at the OS default
+(often 7200s), longer than a pooler's idle-reap window. Horsies sets
+`keepalives_idle=30`, so a dropped socket is detected within ~30s and recycled
+before the next query lands on it. The keepalives apply to the broker engine
+pool and each child-process pool; the LISTEN/NOTIFY listener keeps its own.
+
+PlanetScale's PgBouncer pooler (`:6432`) reaps idle connections within ~1–2h;
+the defaults keep those sockets warm with no configuration. Lower the idle
+window only for poolers that reap faster than 30s:
+
+```python
+config = AppConfig(
+    broker=PostgresConfig(
+        database_url=os.environ['DATABASE_URL'],
+        tcp_keepalives_idle=15,
+        tcp_keepalives_interval=5,
+    ),
+)
+```
+
 ## Things to Avoid
 
 **Don't run multiple direct-connection workers against a small `max_connections`.**

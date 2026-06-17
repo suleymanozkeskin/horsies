@@ -31,6 +31,10 @@ broker = PostgresConfig(
 | `worker_child_pool_check` | `bool` | `True` | Health-check child pool connections on checkout; see [Remote PostgreSQL](remote-postgres) |
 | `pool_timeout` | `int` | 30 | Seconds to wait for connection |
 | `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use; see [Remote PostgreSQL](remote-postgres) |
+| `tcp_keepalives` | `bool` | `True` | Enable libpq TCP keepalives on broker and child-process connections; see [Remote PostgreSQL](remote-postgres) |
+| `tcp_keepalives_idle` | `int` | 30 | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |
+| `tcp_keepalives_interval` | `int` | 10 | Seconds between keepalive probes (libpq `keepalives_interval`) |
+| `tcp_keepalives_count` | `int` | 3 | Unacknowledged probes before the connection is dropped (libpq `keepalives_count`) |
 | `echo` | `bool` | `False` | Echo SQL statements to logs |
 | `pool_recycle` | `int` | 1800 | Recycle connections after N seconds |
 

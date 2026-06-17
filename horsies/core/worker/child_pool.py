@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+from collections.abc import Mapping
 
 from psycopg_pool import ConnectionPool
 
@@ -35,7 +36,7 @@ def _cleanup_worker_pool() -> None:
 def _initialize_worker_pool(
     database_url: str,
     *,
-    pgbouncer_transaction_mode: bool = False,
+    connect_kwargs: Mapping[str, object] | None = None,
     min_size: int = 0,
     max_size: int = 2,
     check_on_checkout: bool = True,
@@ -45,6 +46,12 @@ def _initialize_worker_pool(
 
     In production: Called by _child_initializer in spawned worker processes.
     In tests: Can be called directly to set up the pool for direct _run_task_entry calls.
+
+    Args:
+        connect_kwargs: psycopg connect kwargs for each pooled connection
+            (TCP keepalives, plus prepare_threshold=None under PgBouncer
+            transaction mode). Built once from
+            ``PostgresConfig.pooled_connect_args``.
 
     Raises:
         ValueError: invalid pool sizing.
@@ -68,25 +75,15 @@ def _initialize_worker_pool(
     # trip (a full RTT on remote links); callers' statement-level error
     # containment then absorbs the rare stale connection instead.
     check = ConnectionPool.check_connection if check_on_checkout else None
-    if pgbouncer_transaction_mode:
-        _worker_pool = ConnectionPool(
-            database_url,
-            min_size=min_size,
-            max_size=max_size,
-            max_lifetime=300.0,
-            check=check,
-            open=True,
-            kwargs={'prepare_threshold': None},
-        )
-    else:
-        _worker_pool = ConnectionPool(
-            database_url,
-            min_size=min_size,
-            max_size=max_size,
-            max_lifetime=300.0,
-            check=check,
-            open=True,
-        )
+    _worker_pool = ConnectionPool(
+        database_url,
+        min_size=min_size,
+        max_size=max_size,
+        max_lifetime=300.0,
+        check=check,
+        open=True,
+        kwargs=dict(connect_kwargs) if connect_kwargs else {},
+    )
     atexit.register(_cleanup_worker_pool)
 
 

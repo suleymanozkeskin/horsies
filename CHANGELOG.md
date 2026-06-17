@@ -8,8 +8,27 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+### Added
+
+- TCP keepalive configuration on `PostgresConfig`: `tcp_keepalives` (bool,
+  **default on**), `tcp_keepalives_idle` (30), `tcp_keepalives_interval` (10),
+  `tcp_keepalives_count` (3). These libpq params apply to the broker engine
+  pool and each child-process psycopg pool. libpq enables keepalives by default
+  but leaves the idle interval at the OS default (often 7200s); Horsies sets it
+  to 30s so a dropped socket is detected and recycled before the next query.
+  The LISTEN/NOTIFY listener keeps its own keepalives. Non-positive
+  idle/interval/count values are rejected when keepalives are enabled
+  (`HRS-215`). (#100)
+
 ### Fixed
 
+- Idle pooled broker connections reaped server-side (e.g. PlanetScale's
+  PgBouncer pooler, which drops idle connections within ~1–2h) surfaced as a
+  mid-query `OperationalError` on the next claim or heartbeat. `pool_pre_ping`
+  and `pool_recycle` are checkout-time guards and cannot catch a connection
+  that dies in-flight; the default-on TCP keepalives now keep idle sockets warm
+  at the socket layer. No configuration is required for remote/pooled
+  deployments. (#100)
 - The reaper recovered a workflow task the instant its underlying task went
   terminal (Case 1.7: task terminal but workflow progression not yet applied),
   with no grace window. Under load — and especially with frequent child

@@ -147,7 +147,14 @@ class TestPostgresConfigPgBouncer:
         assert config.effective_session_database_url == (
             'postgresql+psycopg://user:pass@direct:5432/db'
         )
-        assert config.pooled_connect_args == {'prepare_threshold': None}
+        # Keepalives default on; PgBouncer mode also disables prepared statements.
+        assert config.pooled_connect_args == {
+            'keepalives': 1,
+            'keepalives_idle': 30,
+            'keepalives_interval': 10,
+            'keepalives_count': 3,
+            'prepare_threshold': None,
+        }
 
     def test_database_urls_never_leak_via_repr_or_dump(self) -> None:
         """Credential-bearing URLs are SecretStr: repr/str/model_dump mask.
@@ -213,6 +220,159 @@ class TestPostgresConfigPgBouncer:
                 database_url='postgresql+psycopg://user:pass@localhost/db',
                 session_database_url='postgresql+psycopg2://user:pass@localhost/db',
             )
+
+
+@pytest.mark.unit
+class TestPostgresConfigKeepalives:
+    """TCP keepalive configuration on broker/child connections.
+
+    Regression for idle pooled connections reaped mid-query: pool_pre_ping
+    and pool_recycle are checkout-time guards and cannot catch an in-flight
+    connection death (GH issue #100).
+    """
+
+    _LOCAL_URL = 'postgresql+psycopg://user:pass@localhost/db'
+
+    def test_keepalives_default_on(self) -> None:
+        config = PostgresConfig(database_url=self._LOCAL_URL)
+
+        assert config.tcp_keepalives is True
+        assert config.keepalive_connect_args() == {
+            'keepalives': 1,
+            'keepalives_idle': 30,
+            'keepalives_interval': 10,
+            'keepalives_count': 3,
+        }
+
+    def test_keepalives_present_in_pooled_connect_args_without_pgbouncer(
+        self,
+    ) -> None:
+        config = PostgresConfig(database_url=self._LOCAL_URL)
+
+        # Direct (non-PgBouncer) URLs still get keepalives, and no
+        # prepare_threshold knob.
+        assert config.pooled_connect_args == {
+            'keepalives': 1,
+            'keepalives_idle': 30,
+            'keepalives_interval': 10,
+            'keepalives_count': 3,
+        }
+
+    def test_keepalives_disabled_yields_empty_connect_args(self) -> None:
+        config = PostgresConfig(
+            database_url=self._LOCAL_URL,
+            tcp_keepalives=False,
+        )
+
+        assert config.keepalive_connect_args() == {}
+        assert config.pooled_connect_args == {}
+
+    def test_custom_keepalive_values_flow_through(self) -> None:
+        config = PostgresConfig(
+            database_url=self._LOCAL_URL,
+            tcp_keepalives_idle=15,
+            tcp_keepalives_interval=5,
+            tcp_keepalives_count=2,
+        )
+
+        assert config.pooled_connect_args == {
+            'keepalives': 1,
+            'keepalives_idle': 15,
+            'keepalives_interval': 5,
+            'keepalives_count': 2,
+        }
+
+    @pytest.mark.parametrize(
+        'field_name',
+        [
+            'tcp_keepalives_idle',
+            'tcp_keepalives_interval',
+            'tcp_keepalives_count',
+        ],
+    )
+    def test_non_positive_keepalive_values_rejected_when_enabled(
+        self, field_name: str
+    ) -> None:
+        with pytest.raises(ConfigurationError) as exc_info:
+            PostgresConfig(
+                database_url=self._LOCAL_URL,
+                **{field_name: 0},
+            )
+
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
+
+    def test_non_positive_values_allowed_when_keepalives_disabled(self) -> None:
+        # Disabled keepalives ignore the interval/idle/count values entirely.
+        config = PostgresConfig(
+            database_url=self._LOCAL_URL,
+            tcp_keepalives=False,
+            tcp_keepalives_idle=0,
+        )
+
+        assert config.pooled_connect_args == {}
+
+    def test_keepalive_fields_excluded_from_engine_kwargs(self) -> None:
+        config = PostgresConfig(database_url=self._LOCAL_URL)
+        engine_kwargs = config.sqlalchemy_engine_kwargs()
+
+        for field_name in (
+            'tcp_keepalives',
+            'tcp_keepalives_idle',
+            'tcp_keepalives_interval',
+            'tcp_keepalives_count',
+        ):
+            assert field_name not in engine_kwargs
+
+
+@pytest.mark.unit
+class TestWorkerConfigPgBouncerChildKwargs:
+    """child_connect_kwargs stays consistent with pgbouncer_transaction_mode.
+
+    Regression: decoupling the child pool from the boolean must not let a
+    direct WorkerConfig(pgbouncer_transaction_mode=True) ship a child pool
+    with prepared statements enabled against transaction-pooled PgBouncer.
+    """
+
+    def test_boolean_alone_disables_child_prepared_statements(self) -> None:
+        from horsies.core.worker.config import WorkerConfig
+
+        cfg = WorkerConfig(
+            dsn='postgresql+psycopg://u:p@pooler:6432/db',
+            psycopg_dsn='postgresql://u:p@direct/db',
+            queues=['default'],
+            pgbouncer_transaction_mode=True,
+        )
+
+        assert cfg.child_connect_kwargs == {'prepare_threshold': None}
+
+    def test_merges_with_existing_keepalive_kwargs(self) -> None:
+        from horsies.core.worker.config import WorkerConfig
+
+        cfg = WorkerConfig(
+            dsn='postgresql+psycopg://u:p@pooler:6432/db',
+            psycopg_dsn='postgresql://u:p@direct/db',
+            queues=['default'],
+            pgbouncer_transaction_mode=True,
+            child_connect_kwargs={'keepalives': 1, 'keepalives_idle': 30},
+        )
+
+        assert cfg.child_connect_kwargs == {
+            'keepalives': 1,
+            'keepalives_idle': 30,
+            'prepare_threshold': None,
+        }
+
+    def test_no_pgbouncer_leaves_child_kwargs_untouched(self) -> None:
+        from horsies.core.worker.config import WorkerConfig
+
+        cfg = WorkerConfig(
+            dsn='postgresql+psycopg://u:p@host/db',
+            psycopg_dsn='postgresql://u:p@host/db',
+            queues=['default'],
+            child_connect_kwargs={'keepalives': 1},
+        )
+
+        assert cfg.child_connect_kwargs == {'keepalives': 1}
 
 
 @pytest.mark.unit

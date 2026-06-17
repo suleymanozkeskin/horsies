@@ -24,6 +24,17 @@ crash recovers after the grace plus one reaper sweep). Correctness was never at
 risk (recovery replays the stored result idempotently; the task body never
 re-runs) — this is a latency and log-noise fix.
 
+Idle pooled broker connections reaped server-side (e.g. PlanetScale's PgBouncer
+pooler, which drops idle connections within ~1–2h) surfaced as a mid-query
+`OperationalError` on the next claim or heartbeat — `pool_pre_ping` and
+`pool_recycle` are checkout-time guards and cannot catch a connection that dies
+in-flight. New TCP keepalive fields on `PostgresConfig` (`tcp_keepalives`,
+default on, with `tcp_keepalives_idle`/`interval`/`count`) keep idle sockets
+warm at the socket layer. libpq enables keepalives by default but leaves the
+idle interval at the OS default (often 7200s); Horsies sets it to 30s, applied
+to the broker engine pool and each child-process pool. No configuration is
+required for remote/pooled deployments.
+
 ## 0.2.4 — 2026-06-17
 
 Per-child memory recycling complements count-based `--max-tasks-per-child`: a
