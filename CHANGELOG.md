@@ -8,6 +8,16 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-06-17
+
+Connection durability for remote/pooled Postgres, plus two recovery-path
+fixes. Default-on TCP keepalives keep idle broker and child-pool sockets warm
+so a server-side reap (PlanetScale's PgBouncer drops idle connections within
+~1–2h) no longer surfaces as a mid-query error. The reaper gains a grace
+window so it stops racing in-flight two-phase finalizers, and a direct
+`WorkerConfig(pgbouncer_transaction_mode=True)` now stays consistent with its
+child connect kwargs. No schema change (still v9).
+
 ### Added
 
 - TCP keepalive configuration on `PostgresConfig`: `tcp_keepalives` (bool,
@@ -45,6 +55,12 @@ and there is no migration contract between pre-1.0 versions.
   CAS in `on_workflow_task_complete`), and the task body never re-runs — this is
   a latency and log-noise fix. The recovery log line is reworded from "crashed
   worker" (a COMPLETED task is not a crash) to reflect the actual condition.
+- A direct `WorkerConfig(pgbouncer_transaction_mode=True)` built without
+  `child_connect_kwargs` left child pools with prepared statements enabled
+  against a transaction-pooled PgBouncer. `WorkerConfig.__post_init__` now
+  ensures `prepare_threshold=None` in `child_connect_kwargs` when the flag is
+  set (without overriding an explicit value), so the flag alone is sufficient.
+  The CLI path was unaffected. (#152)
 
 ## [0.2.4] - 2026-06-17
 
