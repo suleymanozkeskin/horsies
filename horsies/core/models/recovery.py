@@ -31,6 +31,7 @@ class RecoveryConfig(BaseModel):
     - auto_fail_stale_running: If True, automatically mark stale RUNNING tasks as FAILED
     - running_stale_threshold_ms: Milliseconds without heartbeat before RUNNING task is stale
     - finalizing_stale_threshold_ms: Milliseconds a task may remain finalizing before recovery
+    - crashed_worker_recovery_grace_ms: Grace before recovering a terminal task whose workflow progression was not applied
     - check_interval_ms: How often the reaper checks for stale tasks
     - runner_heartbeat_interval_ms: How often RUNNING tasks send heartbeats from inside the task process
     - claimer_heartbeat_interval_ms: How often CLAIMED tasks send heartbeats
@@ -71,6 +72,24 @@ class RecoveryConfig(BaseModel):
     ] = Field(
         default=300_000,
         description='Milliseconds a completed child may wait for parent finalization before recovery (1s-2hr)',
+    )
+    crashed_worker_recovery_grace_ms: Annotated[
+        int, Field(ge=0, le=3_600_000),
+    ] = Field(
+        default=10_000,
+        description=(
+            'Grace (ms) before the reaper recovers a workflow task whose '
+            'underlying task is terminal but whose workflow progression was '
+            'not applied (the parent finalizer committed the task terminal in '
+            'one transaction, then advances the workflow DAG in a second). '
+            'Within this window the finalizer is presumed still in flight, so '
+            'the reaper leaves the task alone instead of racing it. Set well '
+            'above the healthy task-terminal-to-progression latency (~seconds) '
+            'and below the crash-recovery SLO you can tolerate; a genuine crash '
+            'in that gap recovers after the grace plus one reaper sweep. 0 '
+            'disables the grace (immediate recovery, 0s-1hr). Not coupled to '
+            'heartbeat intervals — tune it independently.'
+        ),
     )
 
     check_interval_ms: Annotated[int, Field(ge=1_000, le=600_000)] = Field(

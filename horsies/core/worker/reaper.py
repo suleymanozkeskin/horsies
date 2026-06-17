@@ -227,7 +227,13 @@ class ReaperMixin:
             )
 
             async with temp_broker.session_factory() as s:
-                recovered = await recover_stuck_workflows(s, temp_broker)
+                recovered = await recover_stuck_workflows(
+                    s,
+                    temp_broker,
+                    finalizing_grace_ms=(
+                        recovery_cfg.crashed_worker_recovery_grace_ms
+                    ),
+                )
                 if recovered > 0:
                     logger.info(
                         f'Reaper recovered {recovered} stuck workflow task(s)'

@@ -742,6 +742,93 @@ class TestWorkflowRecovery:
         )
         assert wf_check.fetchone()[0] == 'FAILED'
 
+    async def test_finalizing_grace_skips_recent_then_recovers_aged(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """Case 1.7 grace: a just-terminal task is left for its in-flight
+        finalizer; the same task aged past the grace is recovered."""
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'grace_crash_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        spec = make_workflow_spec(
+            broker=broker, name='grace_crash', tasks=[node_a]
+        )
+        handle = await start_ok(spec, broker)
+
+        wt_result = await session.execute(
+            text(
+                'SELECT task_id FROM horsies_workflow_tasks '
+                'WHERE workflow_id = :wf_id AND task_index = 0'
+            ),
+            {'wf_id': handle.workflow_id},
+        )
+        task_id = wt_result.fetchone()[0]
+
+        async def _set_failed_aged(age_secs: float) -> None:
+            # Task FAILED with failed_at = NOW() - age_secs; workflow_task back
+            # to RUNNING so it is a Case 1.7 candidate.
+            await session.execute(
+                text(
+                    "UPDATE horsies_tasks SET status = 'FAILED', "
+                    'failed_at = NOW() - make_interval(secs => CAST(:age AS double precision)), '
+                    'result = :result WHERE id = :tid'
+                ),
+                {
+                    'tid': task_id,
+                    'age': age_secs,
+                    'result': _strict_result_json(
+                        TaskResult(
+                            err=TaskError(
+                                error_code=OperationalErrorCode.WORKER_CRASHED,
+                                message='Worker died',
+                            ),
+                        ),
+                    ),
+                },
+            )
+            await session.execute(
+                text(
+                    "UPDATE horsies_workflow_tasks SET status = 'RUNNING' "
+                    'WHERE workflow_id = :wf_id AND task_index = 0'
+                ),
+                {'wf_id': handle.workflow_id},
+            )
+            await session.commit()
+
+        async def _wt_status() -> str:
+            row = (
+                await session.execute(
+                    text(
+                        'SELECT status FROM horsies_workflow_tasks '
+                        'WHERE workflow_id = :wf_id AND task_index = 0'
+                    ),
+                    {'wf_id': handle.workflow_id},
+                )
+            ).fetchone()
+            assert row is not None
+            return row[0]
+
+        grace_ms = 60_000
+
+        # Just terminal (age 0): within grace -> not recovered, left RUNNING.
+        await _set_failed_aged(0.0)
+        recovered = await recover_stuck_workflows(
+            session, broker, finalizing_grace_ms=grace_ms
+        )
+        await session.commit()
+        assert recovered == 0
+        assert await _wt_status() == 'RUNNING'
+
+        # Aged 120s, past the 60s grace -> recovered.
+        await _set_failed_aged(120.0)
+        recovered_aged = await recover_stuck_workflows(
+            session, broker, finalizing_grace_ms=grace_ms
+        )
+        await session.commit()
+        assert recovered_aged == 1
+        assert await _wt_status() == 'FAILED'
+
     async def test_recover_crashed_worker_dependent_propagation(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],

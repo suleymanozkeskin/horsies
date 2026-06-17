@@ -8,6 +8,46 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+### Added
+
+- TCP keepalive configuration on `PostgresConfig`: `tcp_keepalives` (bool,
+  **default on**), `tcp_keepalives_idle` (30), `tcp_keepalives_interval` (10),
+  `tcp_keepalives_count` (3). These libpq params apply to the broker engine
+  pool and each child-process psycopg pool. libpq enables keepalives by default
+  but leaves the idle interval at the OS default (often 7200s); Horsies sets it
+  to 30s so a dropped socket is detected and recycled before the next query.
+  The LISTEN/NOTIFY listener keeps its own keepalives. Non-positive
+  idle/interval/count values are rejected when keepalives are enabled
+  (`HRS-215`). (#100)
+
+### Fixed
+
+- Idle pooled broker connections reaped server-side (e.g. PlanetScale's
+  PgBouncer pooler, which drops idle connections within ~1–2h) surfaced as a
+  mid-query `OperationalError` on the next claim or heartbeat. `pool_pre_ping`
+  and `pool_recycle` are checkout-time guards and cannot catch a connection
+  that dies in-flight; the default-on TCP keepalives now keep idle sockets warm
+  at the socket layer. No configuration is required for remote/pooled
+  deployments. (#100)
+- The reaper recovered a workflow task the instant its underlying task went
+  terminal (Case 1.7: task terminal but workflow progression not yet applied),
+  with no grace window. Under load — and especially with frequent child
+  recycling — this raced healthy two-phase finalizers (Phase 1 commits the task
+  terminal, Phase 2 advances the workflow), "recovering" tasks whose Phase 2 was
+  merely in flight and adding up to one reaper interval of latency per affected
+  task. Case 1.7 now honours a grace window
+  (`RecoveryConfig.crashed_worker_recovery_grace_ms`, new, default 10s, not
+  coupled to heartbeat thresholds): a task that went terminal within the window
+  is left for its in-flight finalizer; only genuinely-stuck tasks are recovered.
+  A genuine crash in that gap recovers after the grace plus one reaper sweep.
+  Correctness was never at risk — recovery
+  replays the stored result idempotently (the `FOR UPDATE` + already-terminal
+  CAS in `on_workflow_task_complete`), and the task body never re-runs — this is
+  a latency and log-noise fix. The recovery log line is reworded from "crashed
+  worker" (a COMPLETED task is not a crash) to reflect the actual condition.
+
+## [0.2.4] - 2026-06-17
+
 Per-child memory recycling, complementing count-based `--max-tasks-per-child`.
 Heterogeneous workloads make a task count a poor proxy for a bytes budget: the
 correct recycle point depends on a child's RSS, not how many tasks it ran. This
@@ -27,25 +67,9 @@ path.
   start method. A startup baseline guard fails the worker when the threshold is
   at or below the warmed child baseline (the app does not fit the per-child
   budget) and warns within 80% of it.
-- TCP keepalive configuration on `PostgresConfig`: `tcp_keepalives` (bool,
-  **default on**), `tcp_keepalives_idle` (30), `tcp_keepalives_interval` (10),
-  `tcp_keepalives_count` (3). These libpq params apply to the broker engine
-  pool and each child-process psycopg pool. libpq enables keepalives by default
-  but leaves the idle interval at the OS default (often 7200s); Horsies sets it
-  to 30s so a dropped socket is detected and recycled before the next query.
-  The LISTEN/NOTIFY listener keeps its own keepalives. Non-positive
-  idle/interval/count values are rejected when keepalives are enabled
-  (`HRS-215`).
 
 ### Fixed
 
-- Idle pooled broker connections reaped server-side (e.g. PlanetScale's
-  PgBouncer pooler, which drops idle connections within ~1–2h) surfaced as a
-  mid-query `OperationalError` on the next claim or heartbeat. `pool_pre_ping`
-  and `pool_recycle` are checkout-time guards and cannot catch a connection
-  that dies in-flight; the default-on TCP keepalives now keep idle sockets warm
-  at the socket layer. No configuration is required for remote/pooled
-  deployments.
 - Count-based child recycling (`--max-tasks-per-child`, including the default
   `100`) routed through the stock `ProcessPoolExecutor`, which can hang under
   queued load when a cleanly-recycled child is not replaced (CPython
@@ -53,6 +77,12 @@ path.
   `_adjust_process_count` to always replace a recycled child, falling back to
   the stock pool only if the required internals are absent (no version gate;
   the override is correct wherever the surface exists).
+- Worker logs emitted raw ANSI color escapes to non-TTY sinks (log drains,
+  container logs, journald, files), breaking grep and log parsers. Color is now
+  gated by `_should_use_color` (stream `isatty()`, with `NO_COLOR` / `FORCE_COLOR`
+  overrides); non-TTY output is plain text with the same layout.
+- Task execution log lines no longer wrap the id/name in one-element lists. Both
+  the start and completion lines now read `task_name (task_id)`.
 
 ## [0.2.3] - 2026-06-16
 

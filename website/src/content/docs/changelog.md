@@ -1,8 +1,8 @@
 ---
 title: Changelog
-summary: Notable changes per release. 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
+summary: Notable changes per release. 0.2.4 adds per-child memory recycling (`--max-memory-per-child-mb`, off by default), fixes a latent count-recycle hang (CPython gh-115634), and gates worker log color to TTYs; 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
 related: [./monitoring/worker-health, ./migrations/migration-to-0-1-2, ./internals/serialization]
-tags: [changelog, releases, breaking-changes, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
+tags: [changelog, releases, breaking-changes, 0.2.4, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
 ---
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
@@ -10,6 +10,32 @@ horsies is pre-1.0: breaking changes may land in minor or patch releases, and
 there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
+
+The workflow reaper no longer races healthy finalizers. Task finalization is two
+phases (Phase 1 commits the task terminal; Phase 2 advances the workflow DAG),
+and the reaper's Case 1.7 recovery fired the instant a task went terminal — so
+under load (amplified by frequent child recycling) it "recovered" tasks whose
+Phase 2 was merely in flight, adding up to one reaper interval of latency and
+noisy `crashed worker` logs. Recovery now honours a grace window
+(`RecoveryConfig.crashed_worker_recovery_grace_ms`, new, default 10s, independent
+of the heartbeat-coupled thresholds): a task terminal within the window is left
+for its in-flight finalizer; only genuinely-stuck tasks are recovered (a genuine
+crash recovers after the grace plus one reaper sweep). Correctness was never at
+risk (recovery replays the stored result idempotently; the task body never
+re-runs) — this is a latency and log-noise fix.
+
+Idle pooled broker connections reaped server-side (e.g. PlanetScale's PgBouncer
+pooler, which drops idle connections within ~1–2h) surfaced as a mid-query
+`OperationalError` on the next claim or heartbeat — `pool_pre_ping` and
+`pool_recycle` are checkout-time guards and cannot catch a connection that dies
+in-flight. New TCP keepalive fields on `PostgresConfig` (`tcp_keepalives`,
+default on, with `tcp_keepalives_idle`/`interval`/`count`) keep idle sockets
+warm at the socket layer. libpq enables keepalives by default but leaves the
+idle interval at the OS default (often 7200s); Horsies sets it to 30s, applied
+to the broker engine pool and each child-process pool. No configuration is
+required for remote/pooled deployments.
+
+## 0.2.4 — 2026-06-17
 
 Per-child memory recycling complements count-based `--max-tasks-per-child`: a
 task count is a poor proxy for a bytes budget, so the correct recycle point
@@ -22,16 +48,12 @@ Also fixes a latent CPython gh-115634 hang in the existing count-recycle path:
 count recycling now overrides `_adjust_process_count` so a recycled child is
 always replaced, falling back to the stock pool if the internals are absent.
 
-Idle pooled broker connections reaped server-side (e.g. PlanetScale's PgBouncer
-pooler, which drops idle connections within ~1–2h) surfaced as a mid-query
-`OperationalError` on the next claim or heartbeat — `pool_pre_ping` and
-`pool_recycle` are checkout-time guards and cannot catch a connection that dies
-in-flight. New TCP keepalive fields on `PostgresConfig` (`tcp_keepalives`,
-default on, with `tcp_keepalives_idle`/`interval`/`count`) keep idle sockets
-warm at the socket layer. libpq enables keepalives by default but leaves the
-idle interval at the OS default (often 7200s); Horsies sets it to 30s, applied
-to the broker engine pool and each child-process pool. No configuration is
-required for remote/pooled deployments.
+Worker logging no longer writes raw ANSI color escapes to non-TTY sinks (log
+drains, container logs, journald, files), which broke grep and log parsers.
+Color is gated by stream `isatty()`, with `NO_COLOR` / `FORCE_COLOR` overrides;
+non-TTY output is plain text with the same layout. Task execution log lines also
+stop wrapping the id/name in one-element lists; both the start and completion
+lines now read `task_name (task_id)`.
 
 ## 0.2.3 — 2026-06-16
 

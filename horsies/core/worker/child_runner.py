@@ -893,7 +893,7 @@ def _run_task_entry(
     themselves; only ``_start_heartbeat_thread`` can escape (see its
     docstring) and is recovered by the parent as a future failure.
     """
-    logger.info(f'Starting task execution: {task_name}')
+    logger.info(f'Starting task execution: {task_name} ({task_id})')
 
     # Mark as RUNNING in DB at the actual start of execution (child process).
     # CRITICAL: Include ownership check to prevent double-execution when claim
@@ -1202,7 +1202,7 @@ def _run_task_entry(
             # If task doesn't declare workflow_meta, silently skip injection.
 
         out = task(*args, **kwargs)  # __call__ returns TaskResult
-        logger.info(f'Task execution completed: {[task_id]} : {[task_name]}')
+        logger.info(f'Task execution completed: {task_name} ({task_id})')
 
         # Strict-serde phase 5: result encoding routes through
         # ``encode_task_result(result, ok_type)`` so the wire envelope
