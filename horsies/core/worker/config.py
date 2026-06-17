@@ -126,6 +126,16 @@ class WorkerConfig:
                 'floor is the warmed child baseline, enforced at startup), or '
                 f'None to disable; got {self.max_memory_per_child_mb}'
             )
+        # PgBouncer transaction pooling cannot carry prepared statements; the
+        # child pool must disable them. The CLI builds child_connect_kwargs
+        # from PostgresConfig.pooled_connect_args (which already sets this under
+        # transaction mode), but a direct WorkerConfig construction may pass
+        # only the boolean. Enforce the invariant here so the flag alone is
+        # always sufficient, without overriding an explicit value.
+        if self.pgbouncer_transaction_mode:
+            kwargs = dict(self.child_connect_kwargs)
+            kwargs.setdefault('prepare_threshold', None)
+            self.child_connect_kwargs = kwargs
 
     def __repr__(self) -> str:
         """Mask credential-bearing DSNs; the dataclass auto-repr put all
