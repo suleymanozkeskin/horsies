@@ -1,8 +1,8 @@
 ---
 title: Changelog
-summary: Notable changes per release. 0.2.4 adds per-child memory recycling (`--max-memory-per-child-mb`, off by default), fixes a latent count-recycle hang (CPython gh-115634), and gates worker log color to TTYs; 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
+summary: Notable changes per release. 0.2.5 adds default-on TCP keepalives for remote/pooled Postgres and gives the workflow reaper a grace window so it stops racing in-flight finalizers; 0.2.4 adds per-child memory recycling (`--max-memory-per-child-mb`, off by default), fixes a latent count-recycle hang (CPython gh-115634), and gates worker log color to TTYs; 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
 related: [./monitoring/worker-health, ./migrations/migration-to-0-1-2, ./internals/serialization]
-tags: [changelog, releases, breaking-changes, 0.2.4, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
+tags: [changelog, releases, breaking-changes, 0.2.5, 0.2.4, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
 ---
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
@@ -10,6 +10,8 @@ horsies is pre-1.0: breaking changes may land in minor or patch releases, and
 there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
+
+## 0.2.5 — 2026-06-17
 
 The workflow reaper no longer races healthy finalizers. Task finalization is two
 phases (Phase 1 commits the task terminal; Phase 2 advances the workflow DAG),
@@ -34,6 +36,13 @@ warm at the socket layer. libpq enables keepalives by default but leaves the
 idle interval at the OS default (often 7200s); Horsies sets it to 30s, applied
 to the broker engine pool and each child-process pool. No configuration is
 required for remote/pooled deployments.
+
+A direct `WorkerConfig(pgbouncer_transaction_mode=True)` built without
+`child_connect_kwargs` left child pools with prepared statements enabled against
+a transaction-pooled PgBouncer. `WorkerConfig.__post_init__` now ensures
+`prepare_threshold=None` in `child_connect_kwargs` when the flag is set (without
+overriding an explicit value), so the flag alone is sufficient; the CLI path was
+unaffected.
 
 ## 0.2.4 — 2026-06-17
 
