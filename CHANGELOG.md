@@ -8,6 +8,25 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+### Fixed
+
+- The reaper recovered a workflow task the instant its underlying task went
+  terminal (Case 1.7: task terminal but workflow progression not yet applied),
+  with no grace window. Under load — and especially with frequent child
+  recycling — this raced healthy two-phase finalizers (Phase 1 commits the task
+  terminal, Phase 2 advances the workflow), "recovering" tasks whose Phase 2 was
+  merely in flight and adding up to one reaper interval of latency per affected
+  task. Case 1.7 now honours a grace window
+  (`RecoveryConfig.crashed_worker_recovery_grace_ms`, new, default 10s, not
+  coupled to heartbeat thresholds): a task that went terminal within the window
+  is left for its in-flight finalizer; only genuinely-stuck tasks are recovered.
+  A genuine crash in that gap recovers after the grace plus one reaper sweep.
+  Correctness was never at risk — recovery
+  replays the stored result idempotently (the `FOR UPDATE` + already-terminal
+  CAS in `on_workflow_task_complete`), and the task body never re-runs — this is
+  a latency and log-noise fix. The recovery log line is reworded from "crashed
+  worker" (a COMPLETED task is not a crash) to reflect the actual condition.
+
 ## [0.2.4] - 2026-06-17
 
 Per-child memory recycling, complementing count-based `--max-tasks-per-child`.

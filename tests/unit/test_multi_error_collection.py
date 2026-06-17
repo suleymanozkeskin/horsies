@@ -44,6 +44,24 @@ class TestRecoveryConfigMultiError:
         assert config.running_stale_threshold_ms >= config.runner_heartbeat_interval_ms * 2
         assert config.claimed_stale_threshold_ms >= config.claimer_heartbeat_interval_ms * 2
 
+    def test_crashed_worker_recovery_grace_default(self) -> None:
+        """Case 1.7 grace defaults to 10s."""
+        assert RecoveryConfig().crashed_worker_recovery_grace_ms == 10_000
+
+    def test_crashed_worker_recovery_grace_decoupled_from_heartbeat(self) -> None:
+        """The grace is tunable below 2x runner heartbeat (unlike the
+        finalizing threshold), so operators can keep a small workflow-progression
+        grace without lowering heartbeat-coupled thresholds."""
+        config = RecoveryConfig(
+            runner_heartbeat_interval_ms=30_000,  # 2x = 60s floor for finalizing
+            crashed_worker_recovery_grace_ms=2_000,  # well below that floor
+        )
+        assert config.crashed_worker_recovery_grace_ms == 2_000
+
+    def test_crashed_worker_recovery_grace_zero_allowed(self) -> None:
+        """0 disables the grace (immediate recovery)."""
+        assert RecoveryConfig(crashed_worker_recovery_grace_ms=0).crashed_worker_recovery_grace_ms == 0
+
     # ── Multi-error collection (2 errors) ────────────────────────────────
 
     def test_both_thresholds_too_low_collected(self) -> None:

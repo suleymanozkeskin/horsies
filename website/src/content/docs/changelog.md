@@ -11,6 +11,19 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
+The workflow reaper no longer races healthy finalizers. Task finalization is two
+phases (Phase 1 commits the task terminal; Phase 2 advances the workflow DAG),
+and the reaper's Case 1.7 recovery fired the instant a task went terminal — so
+under load (amplified by frequent child recycling) it "recovered" tasks whose
+Phase 2 was merely in flight, adding up to one reaper interval of latency and
+noisy `crashed worker` logs. Recovery now honours a grace window
+(`RecoveryConfig.crashed_worker_recovery_grace_ms`, new, default 10s, independent
+of the heartbeat-coupled thresholds): a task terminal within the window is left
+for its in-flight finalizer; only genuinely-stuck tasks are recovered (a genuine
+crash recovers after the grace plus one reaper sweep). Correctness was never at
+risk (recovery replays the stored result idempotently; the task body never
+re-runs) — this is a latency and log-noise fix.
+
 ## 0.2.4 — 2026-06-17
 
 Per-child memory recycling complements count-based `--max-tasks-per-child`: a
