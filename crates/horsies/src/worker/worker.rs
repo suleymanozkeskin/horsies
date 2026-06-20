@@ -21,6 +21,52 @@ use crate::worker::execution;
 use crate::worker::heartbeat::spawn_claimer_heartbeat;
 use crate::worker::recovery::{spawn_reaper, spawn_workflow_recovery};
 
+/// Decode a liveness ping and reply when it is a broadcast or addressed to
+/// this worker.
+///
+/// A reply proves this worker's event loop is responsive and that it can reach
+/// Postgres (the pong travels through `pool`). Malformed pings and pings
+/// addressed to another worker are dropped silently. Mirrors Python's
+/// `_handle_ping`.
+async fn handle_worker_ping(
+    pool: &sqlx::PgPool,
+    worker_id: &str,
+    hostname: &str,
+    pid: i32,
+    raw_payload: &str,
+) -> Result<(), crate::broker::BrokerError> {
+    let request: crate::broker::health::WorkerPingRequest =
+        match serde_json::from_str(raw_payload) {
+            Ok(request) => request,
+            Err(e) => {
+                tracing::warn!(error = %e, "discarding invalid ping payload");
+                return Ok(());
+            }
+        };
+
+    if let Some(target) = &request.target_worker_id {
+        if target != worker_id {
+            return Ok(()); // addressed to a different worker
+        }
+    }
+
+    let pong = crate::broker::health::WorkerPongPayload {
+        correlation_id: request.correlation_id,
+        worker_id: worker_id.to_owned(),
+        hostname: hostname.to_owned(),
+        pid,
+    };
+    let payload = serde_json::to_string(&pong).map_err(crate::broker::BrokerError::Serialization)?;
+
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(&request.reply_channel)
+        .bind(&payload)
+        .execute(pool)
+        .await
+        .map_err(crate::broker::BrokerError::Database)?;
+    Ok(())
+}
+
 /// Task queue worker.
 ///
 /// Claims tasks from PostgreSQL, executes them according to their
@@ -134,6 +180,10 @@ impl Worker {
         // Notifications are coalesceable wake-up signals, so dropping overflow is safe.
         let (notify_tx, mut notify_rx) = mpsc::channel(256);
         let listener_cancel = self.cancel.clone();
+        let ping_pool = self.broker.pool().clone();
+        let ping_worker_id = self.worker_id.clone();
+        let ping_hostname = self.hostname.clone();
+        let ping_pid = std::process::id() as i32;
         let _listener_task = tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -141,8 +191,23 @@ impl Worker {
                     notification = listener.recv() => {
                         match notification {
                             Ok(notif) => {
-                                // Use try_send to avoid blocking; drop if buffer full.
-                                if notify_tx.try_send(notif).is_err() {
+                                if notif.channel() == crate::broker::health::WORKER_PING_CHANNEL {
+                                    // Serve liveness pings off the lossy wake-up
+                                    // path; spawn so recv() keeps draining.
+                                    let pool = ping_pool.clone();
+                                    let worker_id = ping_worker_id.clone();
+                                    let hostname = ping_hostname.clone();
+                                    let payload = notif.payload().to_owned();
+                                    tokio::spawn(async move {
+                                        if let Err(e) = handle_worker_ping(
+                                            &pool, &worker_id, &hostname, ping_pid, &payload,
+                                        )
+                                        .await
+                                        {
+                                            tracing::error!(error = %e, "ping responder error");
+                                        }
+                                    });
+                                } else if notify_tx.try_send(notif).is_err() {
                                     // Channel full or closed - ok to drop, worker will poll anyway.
                                 }
                             }
@@ -319,6 +384,11 @@ impl Worker {
             listener.listen(&format!("task_queue_{}", queue)).await?;
         }
         listener.listen("task_new").await?;
+        // Subscribe to the shared liveness-ping channel BEFORE any background
+        // loop is spawned, so a subscription failure cannot orphan running loops.
+        listener
+            .listen(crate::broker::health::WORKER_PING_CHANNEL)
+            .await?;
         Ok(listener)
     }
 

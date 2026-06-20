@@ -12,7 +12,10 @@ pub mod shared_listener;
 
 pub use bound_handle::TaskHandle;
 pub use error::{is_retryable_sqlx_error, BrokerError};
-pub use health::{DatabasePing, WorkerStateSnapshot};
+pub use health::{
+    DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
+    WORKER_PING_CHANNEL,
+};
 pub use listener::NotifyListener;
 pub use migrations::{run_horsies_migrations, MIGRATIONS_TABLE};
 pub use postgres::{compute_enqueue_sha, PostgresBroker, UPSERT_TASK_ATTEMPT_SQL};

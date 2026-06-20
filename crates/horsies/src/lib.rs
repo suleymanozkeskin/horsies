@@ -73,8 +73,9 @@ pub use crate::broker::{
     compute_enqueue_sha, run_horsies_migrations, BrokerError, BrokerErrorCode,
     BrokerOperationError, BrokerResult, ClaimedTaskRow, DatabasePing, ExpiredTaskRow, HeartbeatRow,
     NotifyListener, PostgresBroker, SharedNotifyListener, StaleTaskRow, TaskAttemptRow, TaskHandle,
-    TaskInfoRow, TaskResultRow, TaskRunningContextRow, WorkerStateRow, WorkerStateSnapshot,
-    WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE,
+    TaskInfoRow, TaskResultRow, TaskRunningContextRow, WorkerPingRequest, WorkerPong,
+    WorkerPongPayload, WorkerStateRow, WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow,
+    MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
 /// Alias for [`PostgresBroker`].
 pub type Broker = PostgresBroker;

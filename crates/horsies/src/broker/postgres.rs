@@ -17,7 +17,10 @@ use crate::core::{
 
 use crate::broker::bound_handle::TaskHandle;
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
-use crate::broker::health::{DatabasePing, WorkerStateSnapshot};
+use crate::broker::health::{
+    DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
+    WORKER_PING_CHANNEL,
+};
 use crate::broker::result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult};
 use crate::broker::row::task::{
     ClaimedId, ClaimedTaskRow, ExpiredTaskRow, SetRunningRow, StaleTaskRow, TaskAttemptRow,
@@ -1923,6 +1926,90 @@ impl PostgresBroker {
         }
     }
 
+    /// Active worker liveness probe: broadcast a ping and collect pongs.
+    ///
+    /// Subscribes to a unique reply channel, broadcasts a [`WorkerPingRequest`]
+    /// on [`WORKER_PING_CHANNEL`], then collects [`WorkerPong`] replies until the
+    /// `timeout` window elapses (broadcast) or the targeted worker replies
+    /// (single target). A pong proves the replying worker's event loop is
+    /// responsive *and* that it can reach Postgres. Workers present in
+    /// [`list_worker_states`](Self::list_worker_states) but absent here are
+    /// non-responsive. Mirrors Python's `ping_workers_async`.
+    ///
+    /// The reply channel uses a dedicated `PgListener` (auto-unsubscribed on
+    /// drop) rather than the broker's shared listener.
+    pub async fn ping_workers(
+        &self,
+        target_worker_id: Option<&str>,
+        timeout: std::time::Duration,
+    ) -> BrokerResult<Vec<WorkerPong>> {
+        if timeout.is_zero() {
+            return Err(BrokerOperationError {
+                code: BrokerErrorCode::WorkerPingFailed,
+                message: "ping_workers timeout must be positive".to_owned(),
+                retryable: false,
+            });
+        }
+
+        let correlation_id = Uuid::new_v4().simple().to_string();
+        let reply_channel = format!("horsies_worker_pong_{}", correlation_id);
+
+        let mut listener = sqlx::postgres::PgListener::connect_with(self.session_pool())
+            .await
+            .map_err(|e| worker_ping_error("reply listener connect", e))?;
+        listener
+            .listen(&reply_channel)
+            .await
+            .map_err(|e| worker_ping_error("reply subscribe", e))?;
+
+        let request = WorkerPingRequest {
+            correlation_id: correlation_id.clone(),
+            reply_channel,
+            target_worker_id: target_worker_id.map(str::to_owned),
+        };
+        let payload = serde_json::to_string(&request).map_err(|e| BrokerOperationError {
+            code: BrokerErrorCode::WorkerPingFailed,
+            message: format!("ping_workers payload encode failed: {}", e),
+            retryable: false,
+        })?;
+
+        let start = std::time::Instant::now();
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(WORKER_PING_CHANNEL)
+            .bind(&payload)
+            .execute(self.pool())
+            .await
+            .map_err(|e| worker_ping_error("ping notify", e))?;
+
+        let mut pongs: Vec<WorkerPong> = Vec::new();
+        loop {
+            let Some(remaining) = timeout.checked_sub(start.elapsed()) else {
+                break;
+            };
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, listener.recv()).await {
+                Err(_elapsed) => break, // window closed
+                Ok(Err(e)) => return Err(worker_ping_error("reply recv", e)),
+                Ok(Ok(notification)) => {
+                    let Some(pong) =
+                        decode_pong(notification.payload(), &correlation_id, start.elapsed())
+                    else {
+                        continue;
+                    };
+                    let is_target = target_worker_id == Some(pong.worker_id.as_str());
+                    pongs.push(pong);
+                    if is_target {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(pongs)
+    }
+
     /// Verify LISTEN/NOTIFY delivery once per broker in PgBouncer mode.
     ///
     /// Reconnect loops may call this repeatedly; successful probes are cached so
@@ -2120,6 +2207,36 @@ fn monitoring_query_error(operation: &str, err: sqlx::Error) -> BrokerOperationE
         message: format!("{} failed: {}", operation, err),
         retryable: true,
     }
+}
+
+/// Build a `WORKER_PING_FAILED` broker error for a failed ping-pong step.
+fn worker_ping_error(operation: &str, err: sqlx::Error) -> BrokerOperationError {
+    BrokerOperationError {
+        code: BrokerErrorCode::WorkerPingFailed,
+        message: format!("ping_workers {} failed: {}", operation, err),
+        retryable: true,
+    }
+}
+
+/// Decode a pong notification, discarding malformed or mismatched replies.
+///
+/// Returns `None` when the payload is unparseable or its `correlation_id` does
+/// not match this ping round, so stray replies never pollute the result.
+fn decode_pong(
+    raw_payload: &str,
+    correlation_id: &str,
+    elapsed: std::time::Duration,
+) -> Option<WorkerPong> {
+    let payload: WorkerPongPayload = serde_json::from_str(raw_payload).ok()?;
+    if payload.correlation_id != correlation_id {
+        return None;
+    }
+    Some(WorkerPong {
+        worker_id: payload.worker_id,
+        hostname: payload.hostname,
+        pid: payload.pid,
+        round_trip_ms: elapsed.as_secs_f64() * 1000.0,
+    })
 }
 
 /// Parse the result row into a `TaskResult<T>`.
