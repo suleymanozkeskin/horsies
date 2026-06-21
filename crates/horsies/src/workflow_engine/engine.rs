@@ -18,18 +18,39 @@ use crate::workflow_engine::error::WorkflowError;
 // SQL constants
 // ---------------------------------------------------------------------------
 
-const FIND_WORKFLOW_TASK_BY_TASK_ID_SQL: &str = "\
-SELECT wt.workflow_id, wt.task_index, w.on_error, w.status as workflow_status
-FROM horsies_workflow_tasks wt
-JOIN horsies_workflows w ON w.id = wt.workflow_id
-WHERE wt.task_id = $1";
-
-const UPDATE_WORKFLOW_TASK_COMPLETED_SQL: &str = "\
-UPDATE horsies_workflow_tasks
-SET status = 'COMPLETED', result = $1, completed_at = NOW()
-WHERE workflow_id = $2 AND task_index = $3
-  AND status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
-RETURNING id";
+/// Single statement replacing the old locate -> CAS-update pair. One round
+/// trip does both: `found` locates the workflow task by its backing task id
+/// (JOIN to the workflow row, taking its FOR UPDATE lock for the duration of
+/// this statement), `upd` CAS-updates the node to its terminal status, and the
+/// outer SELECT returns the progression context (`wf_status`, `on_error`) plus
+/// `cas_won`. The `upd` predicate also gates on the workflow not being terminal,
+/// subsuming the old pre-update early-return (a late task completion must not
+/// mutate a node of an already-terminal workflow). PAUSED is intentionally NOT
+/// gated here — it flows through and is caught by the fresh PAUSED guard after
+/// failure handling, matching the prior control flow. Zero rows = not a
+/// workflow task, or its workflow row is missing; the caller treats both as a
+/// no-op. The data-modifying CTE always executes exactly once even though the
+/// outer query only reads `found`.
+const COMPLETE_WORKFLOW_TASK_SQL: &str = "\
+WITH found AS (
+    SELECT wt.workflow_id, wt.task_index, w.status AS wf_status, w.on_error
+    FROM horsies_workflow_tasks wt
+    JOIN horsies_workflows w ON w.id = wt.workflow_id
+    WHERE wt.task_id = $1
+    FOR UPDATE OF w
+),
+upd AS (
+    UPDATE horsies_workflow_tasks wt
+    SET status = $2, result = $3, error = COALESCE($4::text, wt.error), completed_at = NOW()
+    FROM found
+    WHERE wt.workflow_id = found.workflow_id AND wt.task_index = found.task_index
+      AND wt.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
+      AND found.wf_status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
+    RETURNING wt.task_index
+)
+SELECT found.workflow_id, found.task_index, found.wf_status, found.on_error,
+       EXISTS (SELECT 1 FROM upd) AS cas_won
+FROM found";
 
 const UPDATE_WORKFLOW_TASK_FAILED_SQL: &str = "\
 UPDATE horsies_workflow_tasks
@@ -232,11 +253,12 @@ ORDER BY task_index ASC LIMIT 1";
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, sqlx::FromRow)]
-struct WorkflowTaskLookup {
+struct CompleteTaskRow {
     workflow_id: String,
     task_index: i32,
+    wf_status: String,
     on_error: String,
-    workflow_status: String,
+    cas_won: bool,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -365,54 +387,15 @@ pub async fn on_workflow_task_complete(
     is_success: bool,
     registry: &WorkflowSpecRegistry,
 ) -> Result<(), WorkflowError> {
-    // Find the workflow_task for this horsies_tasks row.
-    let lookup: Option<WorkflowTaskLookup> = sqlx::query_as(FIND_WORKFLOW_TASK_BY_TASK_ID_SQL)
-        .bind(task_id)
-        .fetch_optional(pool)
-        .await?;
-
-    let Some(lookup) = lookup else {
-        tracing::debug!(task_id, "task is not part of a workflow");
-        return Ok(());
-    };
-
-    let workflow_id = &lookup.workflow_id;
-    let task_index = lookup.task_index;
-
-    // If workflow is already terminal, skip.
-    if is_terminal_workflow_status(&lookup.workflow_status) {
-        tracing::debug!(
-            workflow_id,
-            task_index,
-            status = %lookup.workflow_status,
-            "workflow already terminal, ignoring task completion",
-        );
-        return Ok(());
-    }
-
-    if is_success {
-        // Mark workflow_task as COMPLETED.
-        let updated: Option<IdRow> = sqlx::query_as(UPDATE_WORKFLOW_TASK_COMPLETED_SQL)
-            .bind(result_json)
-            .bind(workflow_id)
-            .bind(task_index)
-            .fetch_optional(pool)
-            .await?;
-
-        if updated.is_none() {
-            // Already processed by another worker — skip further processing.
-            tracing::debug!(
-                workflow_id,
-                task_index,
-                "workflow task already terminal, skipping",
-            );
-            return Ok(());
-        }
-
-        tracing::debug!(workflow_id, task_index, "workflow task completed");
+    // Decide terminal status and (on failure) extract the TaskError for the
+    // workflow_task error column before the statement. On success no error
+    // column write is made (NULL -> COALESCE keeps the existing value).
+    let new_status = if is_success { "COMPLETED" } else { "FAILED" };
+    let error_json: Option<String> = if is_success {
+        None
     } else {
         // Extract TaskError for error column (best-effort).
-        let error_json = match serde_json::from_str::<TaskResult<serde_json::Value>>(result_json) {
+        let extracted = match serde_json::from_str::<TaskResult<serde_json::Value>>(result_json) {
             Ok(TaskResult::Err(task_error)) => {
                 serde_json::to_string(&task_error).unwrap_or_else(|_| "{}".to_owned())
             }
@@ -431,34 +414,52 @@ pub async fn on_workflow_task_complete(
                 serde_json::to_string(&err).unwrap_or_else(|_| "{}".to_owned())
             }
         };
+        Some(extracted)
+    };
 
-        // Mark workflow_task as FAILED.
-        let updated: Option<IdRow> = sqlx::query_as(UPDATE_WORKFLOW_TASK_FAILED_SQL)
-            .bind(result_json) // $1 = result (TaskResult JSON)
-            .bind(&error_json) // $2 = error
-            .bind(workflow_id) // $3 = workflow_id
-            .bind(task_index) // $4 = task_index
-            .fetch_optional(pool)
-            .await?;
+    // One statement: locate the workflow task, lock the workflow row, CAS-update
+    // the node to its terminal status, and return the progression context.
+    let row: Option<CompleteTaskRow> = sqlx::query_as(COMPLETE_WORKFLOW_TASK_SQL)
+        .bind(task_id) // $1
+        .bind(new_status) // $2
+        .bind(result_json) // $3
+        .bind(error_json.as_deref()) // $4 (NULL on success)
+        .fetch_optional(pool)
+        .await?;
 
-        if updated.is_none() {
-            tracing::debug!(
-                workflow_id,
-                task_index,
-                "workflow task already terminal, skipping",
-            );
-            return Ok(());
-        }
+    let Some(row) = row else {
+        tracing::debug!(task_id, "task is not part of a workflow (or workflow row missing)");
+        return Ok(());
+    };
 
+    let workflow_id = &row.workflow_id;
+    let task_index = row.task_index;
+
+    if !row.cas_won {
+        // Node already terminal, or the workflow is already terminal — a late
+        // completion must not progress it.
+        tracing::debug!(
+            workflow_id,
+            task_index,
+            wf_status = %row.wf_status,
+            "workflow task already terminal (or workflow terminal), skipping",
+        );
+        return Ok(());
+    }
+
+    if is_success {
+        tracing::debug!(workflow_id, task_index, "workflow task completed");
+    } else {
         tracing::debug!(workflow_id, task_index, "workflow task failed");
 
-        // Handle failure policy (pass error_json for immediate storage).
+        // Handle failure policy. on_error comes from the locked workflow row
+        // returned by the statement above. error_json is Some on this branch.
         let should_continue = handle_workflow_task_failure(
             pool,
             workflow_id,
             task_index,
-            &lookup.on_error,
-            &error_json,
+            &row.on_error,
+            error_json.as_deref().unwrap_or("{}"),
         )
         .await?;
 
@@ -2184,5 +2185,280 @@ WHERE wt.workflow_id = $1
             .execute(&pool)
             .await
             .expect("cleanup workflow");
+    }
+}
+
+#[cfg(test)]
+mod complete_task_merge_tests {
+    //! Behavior pins for the merged `COMPLETE_WORKFLOW_TASK_SQL` (parity with
+    //! horsies PR #128). The merge collapses locate + CAS-update into one
+    //! statement; these tests fix the CAS predicate, the workflow-terminal gate
+    //! that subsumes the old pre-update early-return, idempotence, the
+    //! failure-path error-column write, and the no-row case.
+    use super::*;
+    use crate::broker::PostgresBroker;
+    use serial_test::serial;
+    use uuid::Uuid;
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|p| p.join(".env").exists());
+        let pw = root
+            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
+            .and_then(|c| {
+                c.lines()
+                    .filter_map(|l| l.trim().split_once('='))
+                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
+                    .map(|(_, v)| v.trim().to_owned())
+            })
+            .unwrap_or_else(|| "W0rklane".to_owned());
+        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    }
+
+    async fn insert_workflow(pool: &PgPool, id: &str, status: &str) {
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index,
+                definition_key, depth, root_workflow_id,
+                sent_at, created_at, started_at, updated_at
+            ) VALUES (
+                $1, 'merge_test_wf', $2, 'pause', NULL,
+                'test.merge.v1', 0, $1,
+                NOW(), NOW(), NOW(), NOW()
+            )",
+        )
+        .bind(id)
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("insert workflow");
+    }
+
+    /// Insert a workflow_task in the given status with a backing `task_id`.
+    async fn insert_task(pool: &PgPool, wf_id: &str, task_id: &str, status: &str) {
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                queue_name, priority, dependencies, allow_failed_deps, join_type,
+                status, is_subworkflow, task_id, created_at
+            ) VALUES (
+                $1, $2, 0, 'node_0', 'merge_task', '[]', '{}',
+                'default', 100, '{}', FALSE, 'all',
+                $3, FALSE, $4, NOW()
+            )",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(wf_id)
+        .bind(status)
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .expect("insert task");
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct TaskRow {
+        status: String,
+        result: Option<String>,
+        error: Option<String>,
+    }
+
+    async fn read_task(pool: &PgPool, wf_id: &str) -> TaskRow {
+        sqlx::query_as(
+            "SELECT status, result, error FROM horsies_workflow_tasks
+             WHERE workflow_id = $1 AND task_index = 0",
+        )
+        .bind(wf_id)
+        .fetch_one(pool)
+        .await
+        .expect("read task")
+    }
+
+    async fn run_complete(
+        pool: &PgPool,
+        task_id: &str,
+        status: &str,
+        result: &str,
+        error: Option<&str>,
+    ) -> Option<CompleteTaskRow> {
+        sqlx::query_as(COMPLETE_WORKFLOW_TASK_SQL)
+            .bind(task_id)
+            .bind(status)
+            .bind(result)
+            .bind(error)
+            .fetch_optional(pool)
+            .await
+            .expect("run COMPLETE_WORKFLOW_TASK_SQL")
+    }
+
+    async fn cleanup(pool: &PgPool, wf_id: &str) {
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+            .bind(wf_id)
+            .execute(pool)
+            .await
+            .expect("cleanup tasks");
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(wf_id)
+            .execute(pool)
+            .await
+            .expect("cleanup workflow");
+    }
+
+    /// Success CAS on a RUNNING workflow: wins, writes status+result, leaves the
+    /// error column untouched (COALESCE(NULL, error)), and returns context.
+    #[tokio::test]
+    #[serial]
+    async fn success_cas_wins_and_returns_context() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let wf_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &wf_id, "RUNNING").await;
+        insert_task(&pool, &wf_id, &task_id, "RUNNING").await;
+
+        let row = run_complete(&pool, &task_id, "COMPLETED", "{\"Ok\":1}", None)
+            .await
+            .expect("row present");
+        assert!(row.cas_won, "CAS must win on a fresh RUNNING node");
+        assert_eq!(row.workflow_id, wf_id);
+        assert_eq!(row.task_index, 0);
+        assert_eq!(row.wf_status, "RUNNING");
+        assert_eq!(row.on_error, "pause");
+
+        let t = read_task(&pool, &wf_id).await;
+        assert_eq!(t.status, "COMPLETED");
+        assert_eq!(t.result.as_deref(), Some("{\"Ok\":1}"));
+        assert!(t.error.is_none(), "success must not write the error column");
+
+        cleanup(&pool, &wf_id).await;
+    }
+
+    /// Second completion of an already-terminal node is a no-op: cas_won=false,
+    /// stored result unchanged. Mirrors the old `updated.is_none()` skip.
+    #[tokio::test]
+    #[serial]
+    async fn idempotent_on_already_terminal_node() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let wf_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &wf_id, "RUNNING").await;
+        insert_task(&pool, &wf_id, &task_id, "RUNNING").await;
+
+        let first = run_complete(&pool, &task_id, "COMPLETED", "{\"Ok\":1}", None)
+            .await
+            .expect("first row");
+        assert!(first.cas_won);
+
+        let second = run_complete(&pool, &task_id, "COMPLETED", "{\"Ok\":2}", None)
+            .await
+            .expect("second row still located via found");
+        assert!(!second.cas_won, "already-terminal node must not re-win the CAS");
+
+        let t = read_task(&pool, &wf_id).await;
+        assert_eq!(
+            t.result.as_deref(),
+            Some("{\"Ok\":1}"),
+            "stored result must be the first write, not overwritten",
+        );
+
+        cleanup(&pool, &wf_id).await;
+    }
+
+    /// Workflow already terminal: the gate makes cas_won=false and the node is
+    /// NOT mutated — this subsumes the old pre-update early-return.
+    #[tokio::test]
+    #[serial]
+    async fn terminal_workflow_blocks_node_mutation() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let wf_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &wf_id, "COMPLETED").await;
+        insert_task(&pool, &wf_id, &task_id, "PENDING").await;
+
+        let row = run_complete(&pool, &task_id, "COMPLETED", "{\"Ok\":1}", None)
+            .await
+            .expect("found still locates the node");
+        assert!(!row.cas_won, "terminal workflow must block the CAS");
+        assert_eq!(row.wf_status, "COMPLETED");
+
+        let t = read_task(&pool, &wf_id).await;
+        assert_eq!(t.status, "PENDING", "node must be untouched");
+        assert!(t.result.is_none());
+
+        cleanup(&pool, &wf_id).await;
+    }
+
+    /// PAUSED is NOT terminal: the node CAS still wins (the fresh PAUSED guard in
+    /// the caller is what stops propagation, not this gate).
+    #[tokio::test]
+    #[serial]
+    async fn paused_workflow_does_not_block_node_cas() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let wf_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &wf_id, "PAUSED").await;
+        insert_task(&pool, &wf_id, &task_id, "RUNNING").await;
+
+        let row = run_complete(&pool, &task_id, "COMPLETED", "{\"Ok\":1}", None)
+            .await
+            .expect("row present");
+        assert!(row.cas_won, "PAUSED must not block the node CAS");
+        assert_eq!(row.wf_status, "PAUSED");
+
+        cleanup(&pool, &wf_id).await;
+    }
+
+    /// Failure path writes the error column via COALESCE($4, error).
+    #[tokio::test]
+    #[serial]
+    async fn failure_writes_error_column() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let wf_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &wf_id, "RUNNING").await;
+        insert_task(&pool, &wf_id, &task_id, "RUNNING").await;
+
+        let row = run_complete(
+            &pool,
+            &task_id,
+            "FAILED",
+            "{\"Err\":{}}",
+            Some("{\"error_code\":\"task_error\"}"),
+        )
+        .await
+        .expect("row present");
+        assert!(row.cas_won);
+
+        let t = read_task(&pool, &wf_id).await;
+        assert_eq!(t.status, "FAILED");
+        assert_eq!(t.error.as_deref(), Some("{\"error_code\":\"task_error\"}"));
+
+        cleanup(&pool, &wf_id).await;
+    }
+
+    /// Unknown task_id (or missing workflow row) yields no row → caller no-ops.
+    #[tokio::test]
+    #[serial]
+    async fn unknown_task_id_returns_no_row() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let row = run_complete(
+            &pool,
+            &Uuid::new_v4().to_string(),
+            "COMPLETED",
+            "{\"Ok\":1}",
+            None,
+        )
+        .await;
+        assert!(row.is_none(), "no workflow task → no row");
     }
 }
