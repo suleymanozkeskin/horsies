@@ -534,12 +534,23 @@ impl Worker {
             let mut total_remaining = if hard_cap_mode {
                 self.semaphore.available_permits() as u32
             } else {
+                // Soft cap: the local prefetch budget must subtract already-CLAIMED
+                // rows too, so a worker cannot hoard beyond concurrency + prefetch.
                 let running = self
                     .broker
                     .count_running_for_worker_tx(&mut tx, &self.worker_id)
                     .await? as u32;
-                (self.worker_config.concurrency + prefetch).saturating_sub(running)
+                (self.worker_config.concurrency + prefetch)
+                    .saturating_sub(running)
+                    .saturating_sub(claimed_count)
             };
+
+            // Bound by the remaining per-worker claim allowance. With
+            // max_claim_batch = 0 (auto-fill), a single pass can fill the whole
+            // per-queue budget, so this cap is what keeps total CLAIMED within
+            // max_claim_per_worker.
+            let remaining_claim_allowance = max_claimed.saturating_sub(claimed_count);
+            total_remaining = total_remaining.min(remaining_claim_allowance);
 
             // Cluster-wide cap (hard cap mode only).
             if hard_cap_mode {
@@ -561,11 +572,12 @@ impl Worker {
                     break;
                 }
 
-                let mut per_queue_cap = if self.worker_config.queue_priorities.is_empty() {
-                    // Round-robin fairness.
+                // A positive max_claim_batch is an explicit per-queue fairness cap;
+                // the default 0 fills the remaining worker/queue budget (in both
+                // round-robin and priority modes).
+                let mut per_queue_cap = if self.worker_config.max_claim_batch > 0 {
                     self.worker_config.max_claim_batch
                 } else {
-                    // Priority mode: fill greedily.
                     total_remaining
                 };
 
@@ -1145,7 +1157,7 @@ mod tests {
         assert!(config.validate().is_ok());
         assert!(!config.queues.is_empty());
         assert!(config.concurrency >= 1);
-        assert!(config.max_claim_batch >= 1);
+        assert_eq!(config.max_claim_batch, 0, "default is auto-fill");
     }
 
     #[test]

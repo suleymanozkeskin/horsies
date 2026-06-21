@@ -339,17 +339,6 @@ SET status = 'CANCELLED', \
     updated_at = NOW() \
 WHERE id = ANY($1) AND status = 'CLAIMED'";
 
-/// Unclaim tasks: reset from CLAIMED back to PENDING.
-const UNCLAIM_TASKS_SQL: &str = "\
-UPDATE horsies_tasks \
-SET status = 'PENDING', \
-    claimed = FALSE, \
-    claimed_at = NULL, \
-    claimed_by_worker_id = NULL, \
-    claim_expires_at = NULL, \
-    updated_at = NOW() \
-WHERE id = ANY($1)";
-
 /// Unclaim a single task, guarded by worker identity to prevent races.
 const UNCLAIM_TASK_SQL: &str = "\
 UPDATE horsies_tasks \

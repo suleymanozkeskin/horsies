@@ -16,7 +16,9 @@ pub struct WorkerConfig {
     /// Maximum number of tasks executing concurrently.
     pub concurrency: u32,
 
-    /// Per-queue claim limit per pass (fairness across queues).
+    /// Per-queue claim limit per pass. `0` (the default) auto-fills the
+    /// available local/global budget; a positive value is an explicit per-queue
+    /// fairness cap. Mirrors Python's `WorkerConfig.max_claim_batch`.
     pub max_claim_batch: u32,
 
     /// Per-worker limit on total CLAIMED tasks to prevent over-claiming.
@@ -52,7 +54,7 @@ impl Default for WorkerConfig {
         Self {
             queues: vec!["default".to_owned()],
             concurrency,
-            max_claim_batch: 2,
+            max_claim_batch: 0,
             max_claim_per_worker: 0,
             queue_priorities: HashMap::new(),
             queue_max_concurrency: HashMap::new(),
@@ -71,9 +73,7 @@ impl WorkerConfig {
         if self.concurrency == 0 {
             return Err("concurrency must be at least 1".to_owned());
         }
-        if self.max_claim_batch == 0 {
-            return Err("max_claim_batch must be at least 1".to_owned());
-        }
+        // max_claim_batch == 0 is valid: it means auto-fill the available budget.
         Ok(())
     }
 
@@ -106,7 +106,25 @@ mod tests {
         assert!(config.validate().is_ok());
         assert_eq!(config.queues, vec!["default"]);
         assert!(config.concurrency >= 1);
-        assert_eq!(config.max_claim_batch, 2);
+        assert_eq!(config.max_claim_batch, 0, "default is auto-fill");
+    }
+
+    #[test]
+    fn max_claim_batch_zero_is_valid() {
+        let config = WorkerConfig {
+            max_claim_batch: 0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok(), "0 = auto-fill, must be valid");
+    }
+
+    #[test]
+    fn max_claim_batch_positive_is_valid() {
+        let config = WorkerConfig {
+            max_claim_batch: 5,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
     }
 
     #[test]
