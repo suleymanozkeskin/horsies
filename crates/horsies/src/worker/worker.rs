@@ -523,12 +523,16 @@ impl Worker {
             Vec::with_capacity(estimated_capacity as usize);
 
         {
-            // Serialize claim rounds with a global advisory transaction lock.
             let mut tx = self.broker.pool().begin().await?;
-            let advisory_key = self.advisory_key_global();
-            self.broker
-                .advisory_xact_lock(&mut tx, advisory_key)
-                .await?;
+            // Serialize claim rounds with a global advisory transaction lock only
+            // when cap accounting requires it; otherwise SKIP LOCKED alone is
+            // sufficient and the lock is pure contention.
+            if self.claim_pass_needs_serialization() {
+                let advisory_key = self.advisory_key_global();
+                self.broker
+                    .advisory_xact_lock(&mut tx, advisory_key)
+                    .await?;
+            }
 
             let hard_cap_mode = !soft_cap_mode;
             let mut total_remaining = if hard_cap_mode {
@@ -673,20 +677,40 @@ impl Worker {
         queues
     }
 
-    /// Compute a stable advisory lock key for claim serialization.
+    /// Compute the fixed advisory lock key for claim serialization.
+    ///
+    /// A constant key (not derived from the DSN) so every worker on the same
+    /// database contends on the same lock regardless of DSN spelling (host vs
+    /// IP, pooler frontend vs direct). Parity with horsies PR #101 c1c9e2d8.
     fn advisory_key_global(&self) -> i64 {
-        let basis = if self.app_config.broker.database_url.is_empty() {
-            "horsies"
-        } else {
-            self.app_config.broker.database_url.as_str()
-        };
         let mut hasher = Sha256::new();
-        hasher.update(b"horsies-global:");
-        hasher.update(basis.as_bytes());
+        hasher.update(b"horsies:claim:v1");
         let digest = hasher.finalize();
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(&digest[..8]);
         i64::from_be_bytes(bytes)
+    }
+
+    /// Whether this claim pass must serialize on the advisory lock.
+    ///
+    /// The lock exists only to make cap accounting (cluster-wide or per-queue
+    /// max-concurrency) consistent across workers. When no cap applies,
+    /// `FOR UPDATE SKIP LOCKED` alone prevents double-claims, so the lock is
+    /// pure contention and is skipped. Parity with horsies PR #101 3c036ade.
+    fn claim_pass_needs_serialization(&self) -> bool {
+        if self.app_config.cluster_wide_cap.is_some() {
+            return true;
+        }
+        // Per-queue max-concurrency is enforced only in priority mode
+        // (queue_priorities non-empty); mirror that gate exactly.
+        if !self.worker_config.queue_priorities.is_empty() {
+            return self
+                .worker_config
+                .queues
+                .iter()
+                .any(|q| self.worker_config.queue_max_concurrency.contains_key(q));
+        }
+        false
     }
 
     /// Dispatch a single claimed task for execution.

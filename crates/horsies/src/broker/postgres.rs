@@ -42,20 +42,47 @@ VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7, COALESCE($8, NOW()), $9, $10, $11
 ON CONFLICT (id) DO NOTHING
 RETURNING id";
 
+// Eligibility split into two CTE arms — PENDING and expired-CLAIMED — each with
+// its own ORDER BY + FOR UPDATE SKIP LOCKED + LIMIT, merged and re-limited. The
+// selected set is provably identical to a single OR-predicate scan: any row in
+// the global top-N is within the top-N of its own arm, so merging both arms'
+// top-N and re-limiting yields the same N rows. The arms let the planner use a
+// dedicated partial index per status instead of a filtered scan over both. The
+// one behavioral delta (matching Python) is that up to $2 extra candidate rows
+// of the losing arm stay row-locked for the short claim transaction.
 const CLAIM_SQL: &str = "\
-WITH next AS (
-    SELECT id
+WITH pending AS (
+    SELECT id, priority, enqueued_at
     FROM horsies_tasks
     WHERE queue_name = $1
-      AND (
-        status = 'PENDING'
-        OR (status = 'CLAIMED' AND claim_expires_at IS NOT NULL AND claim_expires_at < now())
-      )
+      AND status = 'PENDING'
       AND enqueued_at <= now()
       AND (next_retry_at IS NULL OR next_retry_at <= now())
       AND (good_until IS NULL OR good_until > now())
     ORDER BY priority ASC, enqueued_at ASC, id ASC
     FOR UPDATE SKIP LOCKED
+    LIMIT $2
+),
+expired AS (
+    SELECT id, priority, enqueued_at
+    FROM horsies_tasks
+    WHERE queue_name = $1
+      AND status = 'CLAIMED' AND claim_expires_at IS NOT NULL AND claim_expires_at < now()
+      AND enqueued_at <= now()
+      AND (next_retry_at IS NULL OR next_retry_at <= now())
+      AND (good_until IS NULL OR good_until > now())
+    ORDER BY priority ASC, enqueued_at ASC, id ASC
+    FOR UPDATE SKIP LOCKED
+    LIMIT $2
+),
+next AS (
+    SELECT id
+    FROM (
+        SELECT id, priority, enqueued_at FROM pending
+        UNION ALL
+        SELECT id, priority, enqueued_at FROM expired
+    ) candidates
+    ORDER BY priority ASC, enqueued_at ASC, id ASC
     LIMIT $2
 )
 UPDATE horsies_tasks t
