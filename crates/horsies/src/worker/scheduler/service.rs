@@ -165,6 +165,63 @@ async fn initialize_schedules(
     Ok(())
 }
 
+/// Recreate state rows for enabled schedules that have none.
+///
+/// Diffs enabled schedule names against existing state-row names (one PK-column
+/// SELECT, no locks) and inserts the missing ones with `next_run_at` computed
+/// from `now`. Per-schedule isolated (a failure logs and is retried next tick),
+/// idempotent, and race-safe via `insert_state_if_absent` (a concurrent winner's
+/// row is preserved). Parity with horsies PR #123.
+async fn ensure_states_exist(pool: &sqlx::PgPool, schedules: &[TaskSchedule], now: DateTime<Utc>) {
+    let enabled: Vec<&TaskSchedule> = schedules.iter().filter(|s| s.enabled).collect();
+    if enabled.is_empty() {
+        return;
+    }
+
+    let existing: std::collections::HashSet<String> = match state::get_existing_names(pool).await {
+        Ok(names) => names.into_iter().collect(),
+        Err(e) => {
+            // A failed existence read this tick is not a regression: the due
+            // query would fail the same way. Skip the heal until the next tick.
+            tracing::warn!(error = %e, "schedule self-heal: existence read failed, skipping tick");
+            return;
+        }
+    };
+
+    for schedule in enabled {
+        if existing.contains(&schedule.name) {
+            continue;
+        }
+
+        let config_hash = compute_config_hash(schedule);
+        let next = next_run_at(&schedule.pattern, now, &schedule.timezone);
+
+        match state::insert_state_if_absent(
+            pool,
+            &schedule.name,
+            None,
+            next,
+            None,
+            0,
+            Some(&config_hash),
+        )
+        .await
+        {
+            Ok(true) => tracing::info!(
+                schedule = %schedule.name,
+                next_run_at = ?next,
+                "self-healed missing schedule state",
+            ),
+            Ok(false) => {} // lost the check-then-insert race; winner's row stands
+            Err(e) => tracing::error!(
+                schedule = %schedule.name,
+                error = %e,
+                "schedule self-heal insert failed, will retry next tick",
+            ),
+        }
+    }
+}
+
 /// Check for due schedules and enqueue their tasks.
 ///
 /// Acquires a transaction-scoped advisory lock at the start of each tick
@@ -193,6 +250,12 @@ async fn check_and_enqueue(
     if enabled_names.is_empty() {
         return Ok(());
     }
+
+    // Self-heal: recreate state rows for enabled schedules missing one (init
+    // failure or external delete) so they are not silently dormant until the
+    // next restart. Runs before the due query — recreated rows have a strictly
+    // future next_run_at and so are not due this tick.
+    ensure_states_exist(broker.pool(), schedules, now).await;
 
     let due = state::get_due_schedules_filtered(broker.pool(), &enabled_names, now).await?;
 
@@ -835,6 +898,47 @@ mod tests {
             .await
             .unwrap();
         sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'my_task'")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// The self-heal creates a state row for an enabled schedule that has none
+    /// (with a strictly-future next_run), leaves an existing row's next_run
+    /// untouched, and skips disabled schedules. Parity with horsies PR #123.
+    #[tokio::test]
+    async fn ensure_states_exist_heals_missing_and_preserves_existing() {
+        let pool = test_pool().await;
+        let missing = format!("qw123_missing_{}", uuid::Uuid::new_v4());
+        let disabled = format!("qw123_disabled_{}", uuid::Uuid::new_v4());
+
+        let mut disabled_schedule = interval_schedule_secs(&disabled, 60);
+        disabled_schedule.enabled = false;
+        let schedules = vec![interval_schedule_secs(&missing, 60), disabled_schedule];
+
+        let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
+        ensure_states_exist(&pool, &schedules, now).await;
+
+        // Missing enabled schedule was healed with a strictly-future next_run.
+        let healed = state::get_state(&pool, &missing).await.unwrap().unwrap();
+        let next = healed.next_run_at.expect("next_run set");
+        assert!(next > now, "healed next_run must be strictly future");
+
+        // Disabled schedule is not created.
+        assert!(state::get_state(&pool, &disabled).await.unwrap().is_none());
+
+        // A later tick leaves the existing row's next_run untouched (no overwrite).
+        let later = now + chrono::Duration::seconds(30);
+        ensure_states_exist(&pool, &schedules, later).await;
+        let after = state::get_state(&pool, &missing).await.unwrap().unwrap();
+        assert_eq!(
+            after.next_run_at, healed.next_run_at,
+            "existing next_run must be preserved across ticks",
+        );
+
+        // Cleanup.
+        sqlx::query("DELETE FROM horsies_schedule_state WHERE schedule_name = ANY($1)")
+            .bind(vec![missing, disabled])
             .execute(&pool)
             .await
             .unwrap();
