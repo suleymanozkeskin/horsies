@@ -1016,6 +1016,24 @@ pub async fn on_subworkflow_complete(
     child_result_json: Option<&str>,
     registry: &WorkflowSpecRegistry,
 ) -> Result<(), WorkflowError> {
+    // Fail closed on a non-terminal/unknown child status. A valid-but-non-terminal
+    // status (e.g. RUNNING on a corrupt row) would otherwise be treated as a failure
+    // and fail the parent node of a still-live child. Both call sites gate on
+    // terminal children (engine emits COMPLETED/FAILED; recovery CASE1_6 filters
+    // cw.status IN (COMPLETED,FAILED,CANCELLED)), so this only fires on corrupt rows.
+    // `is_terminal_workflow_status` mirrors WORKFLOW_TERMINAL_STATES. Parity with
+    // horsies PR #116.
+    if !is_terminal_workflow_status(child_status) {
+        tracing::error!(
+            child_workflow_id,
+            parent_workflow_id,
+            child_status,
+            "subworkflow completion called with non-terminal/unknown status; \
+             refusing to propagate to parent",
+        );
+        return Ok(());
+    }
+
     let is_success = child_status == "COMPLETED";
 
     // Count child task statuses for summary.
@@ -1804,4 +1822,155 @@ fn parse_workflow_task_status(s: &str) -> WorkflowTaskStatus {
 
 fn is_terminal_workflow_status(s: &str) -> bool {
     matches!(s, "COMPLETED" | "FAILED" | "CANCELLED")
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+    use crate::broker::PostgresBroker;
+    use serial_test::serial;
+    use uuid::Uuid;
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|p| p.join(".env").exists());
+        let pw = root
+            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
+            .and_then(|c| {
+                c.lines()
+                    .filter_map(|l| l.trim().split_once('='))
+                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
+                    .map(|(_, v)| v.trim().to_owned())
+            })
+            .unwrap_or_else(|| "W0rklane".to_owned());
+        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    }
+
+    async fn insert_parent_workflow(pool: &PgPool, id: &str) {
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index,
+                definition_key, depth, root_workflow_id,
+                sent_at, created_at, started_at, updated_at
+            ) VALUES (
+                $1, 'guard_test_wf', 'RUNNING', 'fail', NULL,
+                'test.guard.v1', 0, $1,
+                NOW(), NOW(), NOW(), NOW()
+            )",
+        )
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("insert parent workflow");
+    }
+
+    async fn insert_subworkflow_task(pool: &PgPool, wf_id: &str, child_id: &str) {
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                queue_name, priority, dependencies, allow_failed_deps, join_type,
+                status, is_subworkflow, sub_workflow_id, created_at
+            ) VALUES (
+                $1, $2, 0, 'node_0', 'subwf_node', '[]', '{}',
+                'default', 100, '{}', FALSE, 'all',
+                'RUNNING', TRUE, $3, NOW()
+            )",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(wf_id)
+        .bind(child_id)
+        .execute(pool)
+        .await
+        .expect("insert subworkflow task");
+    }
+
+    async fn task_status(pool: &PgPool, wf_id: &str) -> String {
+        sqlx::query_scalar(
+            "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",
+        )
+        .bind(wf_id)
+        .fetch_one(pool)
+        .await
+        .expect("fetch wf_task status")
+    }
+
+    /// A non-terminal child status must not fail the parent node of a still-live
+    /// child: the guard logs and returns without propagating. Parity with #116.
+    #[tokio::test]
+    #[serial]
+    async fn non_terminal_child_status_does_not_fail_parent() {
+        let broker = PostgresBroker::connect(&test_db_url())
+            .await
+            .expect("connect broker");
+        let pool = broker.pool().clone();
+
+        let parent_id = Uuid::new_v4().to_string();
+        let child_id = Uuid::new_v4().to_string();
+        insert_parent_workflow(&pool, &parent_id).await;
+        // The child workflow must exist (sub_workflow_id FK), even though the
+        // guard returns before reading it.
+        insert_parent_workflow(&pool, &child_id).await;
+        insert_subworkflow_task(&pool, &parent_id, &child_id).await;
+
+        let registry = WorkflowSpecRegistry::new();
+        let result =
+            on_subworkflow_complete(&pool, &parent_id, 0, &child_id, "RUNNING", None, &registry)
+                .await;
+        assert!(result.is_ok(), "guard must return Ok, got {:?}", result);
+        assert_eq!(
+            task_status(&pool, &parent_id).await,
+            "RUNNING",
+            "parent node must stay RUNNING (guard refused to propagate)",
+        );
+
+        cleanup(&pool, &parent_id, &child_id).await;
+    }
+
+    /// An unknown status string must also fail closed (no poison loop, no
+    /// silent parent failure). Parity with #116.
+    #[tokio::test]
+    #[serial]
+    async fn unknown_child_status_does_not_fail_parent() {
+        let broker = PostgresBroker::connect(&test_db_url())
+            .await
+            .expect("connect broker");
+        let pool = broker.pool().clone();
+
+        let parent_id = Uuid::new_v4().to_string();
+        let child_id = Uuid::new_v4().to_string();
+        insert_parent_workflow(&pool, &parent_id).await;
+        insert_parent_workflow(&pool, &child_id).await;
+        insert_subworkflow_task(&pool, &parent_id, &child_id).await;
+
+        let registry = WorkflowSpecRegistry::new();
+        let result =
+            on_subworkflow_complete(&pool, &parent_id, 0, &child_id, "GARBAGE", None, &registry)
+                .await;
+        assert!(result.is_ok(), "guard must return Ok, got {:?}", result);
+        assert_eq!(
+            task_status(&pool, &parent_id).await,
+            "RUNNING",
+            "parent node must stay RUNNING (guard refused to propagate)",
+        );
+
+        cleanup(&pool, &parent_id, &child_id).await;
+    }
+
+    async fn cleanup(pool: &PgPool, parent_id: &str, child_id: &str) {
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+            .bind(parent_id)
+            .execute(pool)
+            .await
+            .expect("cleanup wf_tasks");
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = ANY($1)")
+            .bind(vec![parent_id.to_owned(), child_id.to_owned()])
+            .execute(pool)
+            .await
+            .expect("cleanup workflows");
+    }
 }
