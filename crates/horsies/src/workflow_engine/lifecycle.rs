@@ -122,9 +122,9 @@ const ENQUEUE_TASK_SQL: &str = "\
 INSERT INTO horsies_tasks (
     id, task_name, queue_name, priority, args, kwargs,
     status, sent_at, enqueued_at, good_until, max_retries, task_options,
-    enqueue_sha, created_at, updated_at
+    enqueue_sha, is_workflow_task, created_at, updated_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', NOW(), NOW(), $7, $8, $9, $10, NOW(), NOW())";
+VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', NOW(), NOW(), $7, $8, $9, $10, TRUE, NOW(), NOW())";
 
 const LINK_ENQUEUED_TASK_SQL: &str = "\
 UPDATE horsies_workflow_tasks wt

@@ -33,6 +33,7 @@ pub struct ClaimedTaskRow {
     pub task_options: Option<String>,
     pub queue_name: String,
     pub good_until: Option<DateTime<Utc>>,
+    pub is_workflow_task: bool,
 }
 
 /// Columns fetched for result retrieval.

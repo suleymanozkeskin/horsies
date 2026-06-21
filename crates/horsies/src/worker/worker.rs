@@ -943,6 +943,22 @@ mod tests {
             task_options,
             queue_name: queue_name.to_owned(),
             good_until: None,
+            is_workflow_task: false,
+        }
+    }
+
+    /// Like `claimed_task_row` but marked as a workflow task, mirroring a row
+    /// claimed for a task that `link_task_to_workflow` attached to a workflow.
+    fn claimed_workflow_task_row(
+        task_id: &str,
+        queue_name: &str,
+        retry_count: i32,
+        max_retries: i32,
+        task_options: Option<String>,
+    ) -> ClaimedTaskRow {
+        ClaimedTaskRow {
+            is_workflow_task: true,
+            ..claimed_task_row(task_id, queue_name, retry_count, max_retries, task_options)
         }
     }
 
@@ -988,6 +1004,15 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+
+        // A task linked into a workflow is a workflow task; mirror production
+        // (workflow inserts set is_workflow_task = TRUE) so phase-2 routing,
+        // which now reads the carried column, advances the workflow.
+        sqlx::query("UPDATE horsies_tasks SET is_workflow_task = TRUE WHERE id = $1")
+            .bind(task_id)
+            .execute(pool)
+            .await
+            .unwrap();
 
         workflow_id
     }
@@ -1358,7 +1383,7 @@ mod tests {
         run_finalize(
             &broker,
             async_task_fn!(callback_success_task, ()),
-            claimed_task_row(&task_id, "default", 0, 0, None),
+            claimed_workflow_task_row(&task_id, "default", 0, 0, None),
         )
         .await;
 
@@ -1393,7 +1418,7 @@ mod tests {
         let phase2_work = execute_and_finalize(
             Arc::clone(&broker),
             async_task_fn!(callback_success_task, ()),
-            claimed_task_row(&task_id, "default", 0, 0, None),
+            claimed_workflow_task_row(&task_id, "default", 0, 0, None),
             "worker-1".to_owned(),
             "localhost".to_owned(),
             RecoveryConfig::default(),
@@ -1444,7 +1469,7 @@ mod tests {
         let phase2_work = execute_and_finalize(
             Arc::clone(&broker),
             async_task_fn!(callback_success_task, ()),
-            claimed_task_row(&task_id, "default", 0, 0, None),
+            claimed_workflow_task_row(&task_id, "default", 0, 0, None),
             "worker-1".to_owned(),
             "localhost".to_owned(),
             RecoveryConfig::default(),

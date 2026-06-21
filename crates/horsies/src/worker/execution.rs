@@ -73,6 +73,7 @@ pub(crate) struct Phase2Work {
     pub result_json: String,
     pub is_success: bool,
     pub queue_name: String,
+    pub is_workflow_task: bool,
 }
 
 /// Outcome of retry scheduling (mirrors Python's `_schedule_retry` return).
@@ -964,17 +965,11 @@ pub(crate) async fn finalize_workflow_phase(
     result_json: &str,
     is_success: bool,
     queue_name: &str,
+    is_workflow_task: bool,
 ) -> Result<(), FinalizeError> {
-    // Check if task is part of a workflow.
-    let is_wf_task: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM horsies_workflow_tasks WHERE task_id = $1)",
-    )
-    .bind(task_id)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(false);
-
-    if is_wf_task {
+    // Workflow membership is carried on the task row (is_workflow_task), set at
+    // insert time — no per-task JOIN to horsies_workflow_tasks needed here.
+    if is_workflow_task {
         crate::workflow_engine::on_workflow_task_complete(
             pool,
             task_id,
@@ -1076,6 +1071,7 @@ pub(crate) async fn finalize_pre_execution_failure(
 ) -> Option<Phase2Work> {
     let task_id = row.id.clone();
     let queue_name = row.queue_name.clone();
+    let is_workflow_task = row.is_workflow_task;
     let pid = std::process::id() as i32;
 
     let task_started_at = match confirm_ownership_and_set_running(
@@ -1107,6 +1103,7 @@ pub(crate) async fn finalize_pre_execution_failure(
                     result_json,
                     is_success,
                     queue_name,
+                    is_workflow_task,
                 }),
                 Some(FinalizeOutcome::Retried) | None => None,
             };
@@ -1117,6 +1114,7 @@ pub(crate) async fn finalize_pre_execution_failure(
                 result_json,
                 is_success: false,
                 queue_name,
+                is_workflow_task,
             });
         }
         OwnershipOutcome::Aborted => return None,
@@ -1141,6 +1139,7 @@ pub(crate) async fn finalize_pre_execution_failure(
             result_json,
             is_success,
             queue_name,
+            is_workflow_task,
         }),
         Some(FinalizeOutcome::Retried) | None => None,
     }
@@ -1172,6 +1171,7 @@ pub(crate) async fn execute_and_finalize(
 ) -> Option<Phase2Work> {
     let task_id = row.id.clone();
     let queue_name = row.queue_name.clone();
+    let is_workflow_task = row.is_workflow_task;
     let pid = std::process::id() as i32;
     let accepts_workflow_ctx = task_fn.accepts_workflow_ctx();
 
@@ -1205,6 +1205,7 @@ pub(crate) async fn execute_and_finalize(
                     result_json,
                     is_success,
                     queue_name,
+                    is_workflow_task,
                 }),
                 Some(FinalizeOutcome::Retried) | None => None,
             };
@@ -1215,6 +1216,7 @@ pub(crate) async fn execute_and_finalize(
                 result_json,
                 is_success: false,
                 queue_name,
+                is_workflow_task,
             });
         }
         OwnershipOutcome::Aborted => return None,
@@ -1263,6 +1265,7 @@ pub(crate) async fn execute_and_finalize(
             result_json,
             is_success,
             queue_name,
+            is_workflow_task,
         }),
         Some(FinalizeOutcome::Retried) | None => None,
     }
@@ -1284,6 +1287,7 @@ pub(crate) async fn run_phase2(
         &work.result_json,
         work.is_success,
         &work.queue_name,
+        work.is_workflow_task,
     )
     .await;
 }
@@ -1393,6 +1397,7 @@ async fn retry_phase2(
     result_json: &str,
     is_success: bool,
     queue_name: &str,
+    is_workflow_task: bool,
 ) {
     // First attempt with the in-memory result.
     match finalize_workflow_phase(
@@ -1402,6 +1407,7 @@ async fn retry_phase2(
         result_json,
         is_success,
         queue_name,
+        is_workflow_task,
     )
     .await
     {
@@ -1460,6 +1466,7 @@ async fn retry_phase2(
             &reloaded_json,
             reloaded_success,
             queue_name,
+            is_workflow_task,
         )
         .await
         {

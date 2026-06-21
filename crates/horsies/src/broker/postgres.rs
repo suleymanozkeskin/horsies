@@ -36,9 +36,9 @@ const ENQUEUE_SQL: &str = "\
 INSERT INTO horsies_tasks (
     id, task_name, queue_name, priority, args, kwargs,
     status, sent_at, enqueued_at, good_until, max_retries, task_options,
-    enqueue_sha, created_at, updated_at
+    enqueue_sha, is_workflow_task, created_at, updated_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7, COALESCE($8, NOW()), $9, $10, $11, $12, NOW(), NOW())
+VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7, COALESCE($8, NOW()), $9, $10, $11, $12, FALSE, NOW(), NOW())
 ON CONFLICT (id) DO NOTHING
 RETURNING id";
 
@@ -67,7 +67,7 @@ SET status = 'CLAIMED',
     updated_at = now()
 FROM next
 WHERE t.id = next.id
-RETURNING t.id, t.task_name, t.args, t.kwargs, t.retry_count, t.max_retries, t.task_options, t.queue_name, t.good_until";
+RETURNING t.id, t.task_name, t.args, t.kwargs, t.retry_count, t.max_retries, t.task_options, t.queue_name, t.good_until, t.is_workflow_task";
 
 const SET_RUNNING_SQL: &str = "\
 UPDATE horsies_tasks
@@ -232,7 +232,7 @@ WHERE queue_name = $1 AND status = 'RUNNING'";
 
 /// Load CLAIMED tasks owned by a specific worker (for prefetch buffer dispatch).
 const LOAD_BUFFERED_CLAIMED_SQL: &str = "\
-SELECT id, task_name, args, kwargs, retry_count, max_retries, task_options, queue_name, good_until \
+SELECT id, task_name, args, kwargs, retry_count, max_retries, task_options, queue_name, good_until, is_workflow_task \
 FROM horsies_tasks \
 WHERE claimed_by_worker_id = $1 AND status = 'CLAIMED' \
 ORDER BY priority ASC, enqueued_at ASC, id ASC";
