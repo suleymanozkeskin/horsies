@@ -28,6 +28,69 @@ use crate::worker::recovery::{spawn_reaper, spawn_workflow_recovery};
 /// Postgres (the pong travels through `pool`). Malformed pings and pings
 /// addressed to another worker are dropped silently. Mirrors Python's
 /// `_handle_ping`.
+/// Derive a stable 64-bit advisory key from a label (first 8 bytes of SHA-256).
+fn advisory_key_from(label: &str) -> i64 {
+    let mut hasher = Sha256::new();
+    hasher.update(label.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    i64::from_be_bytes(bytes)
+}
+
+/// The global claim-serialization key.
+///
+/// A constant key (not derived from the DSN) so every worker on the same database
+/// contends on the same lock regardless of DSN spelling (host vs IP, pooler
+/// frontend vs direct). Parity with horsies PR #101 c1c9e2d8.
+fn advisory_key_global() -> i64 {
+    advisory_key_from("horsies:claim:v1")
+}
+
+/// A per-queue claim-serialization key (separate hash namespace from the global
+/// key so the two families never collide). Parity with horsies PR #125.
+fn advisory_key_queue(queue: &str) -> i64 {
+    advisory_key_from(&format!("horsies:claim:queue:v1:{}", queue))
+}
+
+/// Advisory lock keys a claim pass must hold for consistent cap accounting.
+///
+/// The lock exists only to make cap accounting consistent across workers; when no
+/// cap applies, `FOR UPDATE SKIP LOCKED` alone prevents double-claims (empty result).
+///
+/// - `cluster_wide_cap` set → the single global key (the global in-flight count is
+///   a cluster invariant that subsumes per-queue caps).
+/// - else, priority mode → one key per **capped queue in the actual claim list**,
+///   sorted ascending so multi-key acquisition is deadlock-free, and deduped.
+///   Workers claiming disjoint capped queues no longer serialize against each other.
+/// - else → no keys.
+///
+/// Per-queue caps are enforced only in priority mode (non-empty `queue_priorities`),
+/// matching the claim loop's gate. Rolling-deploy skew: old workers (global key)
+/// and new workers (per-queue keys) don't contend, so a per-queue cap can briefly
+/// overshoot by up to one pass's batch during a rollout.
+fn compute_claim_lock_keys(
+    cluster_wide_cap: Option<u32>,
+    queue_priorities_empty: bool,
+    ordered_queues: &[String],
+    queue_max_concurrency: &std::collections::HashMap<String, u32>,
+) -> Vec<i64> {
+    if cluster_wide_cap.is_some() {
+        return vec![advisory_key_global()];
+    }
+    if queue_priorities_empty {
+        return Vec::new();
+    }
+    let mut keys: Vec<i64> = ordered_queues
+        .iter()
+        .filter(|q| queue_max_concurrency.contains_key(*q))
+        .map(|q| advisory_key_queue(q))
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    keys
+}
+
 async fn handle_worker_ping(
     pool: &sqlx::PgPool,
     worker_id: &str,
@@ -526,16 +589,18 @@ impl Worker {
         let mut claimed_rows: Vec<crate::broker::ClaimedTaskRow> =
             Vec::with_capacity(estimated_capacity as usize);
 
+        // The exact list the claim loop iterates; also drives the lock keys, so
+        // the locks held and the queues claimed are provably the same set.
+        let ordered = self.ordered_queues();
+
         {
             let mut tx = self.broker.pool().begin().await?;
-            // Serialize claim rounds with a global advisory transaction lock only
-            // when cap accounting requires it; otherwise SKIP LOCKED alone is
-            // sufficient and the lock is pure contention.
-            if self.claim_pass_needs_serialization() {
-                let advisory_key = self.advisory_key_global();
-                self.broker
-                    .advisory_xact_lock(&mut tx, advisory_key)
-                    .await?;
+            // Serialize claim rounds with advisory transaction locks only when cap
+            // accounting requires it (one global key for a cluster cap, else one key
+            // per capped queue in this pass); otherwise SKIP LOCKED alone suffices.
+            // Keys are sorted, so concurrent multi-key acquisition can't deadlock.
+            for key in self.claim_lock_keys(&ordered) {
+                self.broker.advisory_xact_lock(&mut tx, key).await?;
             }
 
             let hard_cap_mode = !soft_cap_mode;
@@ -575,7 +640,7 @@ impl Worker {
                 return Ok(dispatched_buffered > 0);
             }
 
-            for queue in self.ordered_queues() {
+            for queue in &ordered {
                 if total_remaining == 0 {
                     break;
                 }
@@ -590,14 +655,14 @@ impl Worker {
                 };
 
                 if !self.worker_config.queue_priorities.is_empty() {
-                    if let Some(&max_q) = self.worker_config.queue_max_concurrency.get(&queue) {
+                    if let Some(&max_q) = self.worker_config.queue_max_concurrency.get(queue) {
                         let in_flight_q = if hard_cap_mode {
                             self.broker
-                                .count_in_flight_for_queue_tx(&mut tx, &queue)
+                                .count_in_flight_for_queue_tx(&mut tx, queue)
                                 .await? as u32
                         } else {
                             self.broker
-                                .count_running_for_queue_tx(&mut tx, &queue)
+                                .count_running_for_queue_tx(&mut tx, queue)
                                 .await? as u32
                         };
                         let q_remaining = max_q.saturating_sub(in_flight_q);
@@ -614,7 +679,7 @@ impl Worker {
                     .broker
                     .claim_in_tx(
                         &mut tx,
-                        &queue,
+                        queue,
                         to_claim as i32,
                         &self.worker_id,
                         claim_expires_at,
@@ -681,40 +746,17 @@ impl Worker {
         queues
     }
 
-    /// Compute the fixed advisory lock key for claim serialization.
+    /// Advisory lock keys this claim pass must hold for consistent cap accounting.
     ///
-    /// A constant key (not derived from the DSN) so every worker on the same
-    /// database contends on the same lock regardless of DSN spelling (host vs
-    /// IP, pooler frontend vs direct). Parity with horsies PR #101 c1c9e2d8.
-    fn advisory_key_global(&self) -> i64 {
-        let mut hasher = Sha256::new();
-        hasher.update(b"horsies:claim:v1");
-        let digest = hasher.finalize();
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(&digest[..8]);
-        i64::from_be_bytes(bytes)
-    }
-
-    /// Whether this claim pass must serialize on the advisory lock.
-    ///
-    /// The lock exists only to make cap accounting (cluster-wide or per-queue
-    /// max-concurrency) consistent across workers. When no cap applies,
-    /// `FOR UPDATE SKIP LOCKED` alone prevents double-claims, so the lock is
-    /// pure contention and is skipped. Parity with horsies PR #101 3c036ade.
-    fn claim_pass_needs_serialization(&self) -> bool {
-        if self.app_config.cluster_wide_cap.is_some() {
-            return true;
-        }
-        // Per-queue max-concurrency is enforced only in priority mode
-        // (queue_priorities non-empty); mirror that gate exactly.
-        if !self.worker_config.queue_priorities.is_empty() {
-            return self
-                .worker_config
-                .queues
-                .iter()
-                .any(|q| self.worker_config.queue_max_concurrency.contains_key(q));
-        }
-        false
+    /// See [`compute_claim_lock_keys`] for the policy. An empty result means
+    /// `FOR UPDATE SKIP LOCKED` alone is sufficient and no lock is taken.
+    fn claim_lock_keys(&self, ordered_queues: &[String]) -> Vec<i64> {
+        compute_claim_lock_keys(
+            self.app_config.cluster_wide_cap,
+            self.worker_config.queue_priorities.is_empty(),
+            ordered_queues,
+            &self.worker_config.queue_max_concurrency,
+        )
     }
 
     /// Dispatch a single claimed task for execution.
@@ -1229,6 +1271,64 @@ mod tests {
         };
         assert!(config.validate().is_ok());
         assert_eq!(config.queue_max_concurrency["default"], 2);
+    }
+
+    // -- compute_claim_lock_keys unit tests (parity with horsies PR #125) --
+
+    #[test]
+    fn claim_lock_keys_cluster_cap_uses_single_global_key() {
+        let mut max_conc = std::collections::HashMap::new();
+        max_conc.insert("a".to_owned(), 5);
+        max_conc.insert("b".to_owned(), 5);
+        let ordered = vec!["a".to_owned(), "b".to_owned()];
+        // Cluster cap set → exactly the global key, regardless of per-queue caps.
+        let keys = compute_claim_lock_keys(Some(10), false, &ordered, &max_conc);
+        assert_eq!(keys, vec![advisory_key_global()]);
+    }
+
+    #[test]
+    fn claim_lock_keys_per_capped_queue_sorted() {
+        let mut max_conc = std::collections::HashMap::new();
+        max_conc.insert("a".to_owned(), 5);
+        max_conc.insert("b".to_owned(), 5);
+        let ordered = vec!["a".to_owned(), "b".to_owned()];
+        let keys = compute_claim_lock_keys(None, false, &ordered, &max_conc);
+
+        let mut expected = vec![advisory_key_queue("a"), advisory_key_queue("b")];
+        expected.sort_unstable();
+        assert_eq!(keys, expected, "one sorted key per capped queue");
+        assert!(
+            !keys.contains(&advisory_key_global()),
+            "queue keys are a separate namespace from the global key",
+        );
+    }
+
+    #[test]
+    fn claim_lock_keys_excludes_uncapped_queue() {
+        let mut max_conc = std::collections::HashMap::new();
+        max_conc.insert("capped".to_owned(), 5);
+        // "uncapped" is served but absent from the concurrency map.
+        let ordered = vec!["capped".to_owned(), "uncapped".to_owned()];
+        let keys = compute_claim_lock_keys(None, false, &ordered, &max_conc);
+        assert_eq!(keys, vec![advisory_key_queue("capped")]);
+    }
+
+    #[test]
+    fn claim_lock_keys_empty_when_no_caps() {
+        let max_conc = std::collections::HashMap::new();
+        let ordered = vec!["a".to_owned()];
+        // No cluster cap, priority mode, no per-queue caps → no locks.
+        assert!(compute_claim_lock_keys(None, false, &ordered, &max_conc).is_empty());
+    }
+
+    #[test]
+    fn claim_lock_keys_empty_in_round_robin_mode() {
+        let mut max_conc = std::collections::HashMap::new();
+        max_conc.insert("a".to_owned(), 5);
+        let ordered = vec!["a".to_owned()];
+        // queue_priorities empty (round-robin): per-queue caps are not enforced,
+        // so no lock is taken even though a cap is configured.
+        assert!(compute_claim_lock_keys(None, true, &ordered, &max_conc).is_empty());
     }
 
     // -- finalize_with_retry unit tests --
