@@ -42,26 +42,6 @@ INSERT INTO horsies_workflows (
 )
 VALUES ($1, $2, 'RUNNING', $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW(), NOW(), NOW())";
 
-const INSERT_WORKFLOW_TASK_SQL: &str = "\
-INSERT INTO horsies_workflow_tasks (
-    id, workflow_id, task_index, node_id, task_name,
-    task_args, task_kwargs, queue_name, priority,
-    dependencies, args_from, workflow_ctx_from,
-    allow_failed_deps, join_type, min_success,
-    task_options, status, is_subworkflow,
-    sub_workflow_name, sub_definition_key,
-    created_at
-)
-VALUES (
-    $1, $2, $3, $4, $5,
-    $6, $7, $8, $9,
-    $10, $11, $12,
-    $13, $14, $15,
-    $16, $17, $18,
-    $19, $20,
-    NOW()
-)";
-
 const ENQUEUE_ROOT_TASK_SQL: &str = "\
 INSERT INTO horsies_tasks (
     id, task_name, queue_name, priority, args, kwargs,
@@ -121,6 +101,28 @@ struct AncestorWorkflowRow {
     id: String,
     name: String,
     definition_key: Option<String>,
+}
+
+/// A workflow_task row prepared in memory for batched insertion.
+///
+/// Holds the new identifiers and the per-node values derived once during the
+/// prepare phase, so the bulk inserts and the per-row slow path read them without
+/// recomputing. Parity with horsies PR #126.
+struct PreparedNode<'a> {
+    node: &'a AnyNode,
+    wt_id: String,
+    queue: String,
+    priority: i32,
+    args_from_json: Option<serde_json::Value>,
+    join_str: String,
+    merged_task_options: Option<String>,
+    sub_workflow_name: Option<String>,
+    status: &'static str,
+    /// `Some` only for fast-path roots — the `horsies_tasks` id, also written to
+    /// the workflow_task's `task_id` so the two link without a follow-up UPDATE.
+    task_id: Option<String>,
+    is_root: bool,
+    fast_path: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -336,17 +338,14 @@ fn insert_workflow_tasks<'a>(
     registry: &'a WorkflowSpecRegistry,
 ) -> Pin<Box<dyn Future<Output = Result<(), WorkflowError>> + Send + 'a>> {
     Box::pin(async move {
+        if tasks.is_empty() {
+            return Ok(());
+        }
+
+        // ── Phase 1: prepare every row in memory ──
+        let mut prepared: Vec<PreparedNode> = Vec::with_capacity(tasks.len());
         for task in tasks {
             let is_root = task.dependencies.is_empty();
-            let status = if is_root { "READY" } else { "PENDING" };
-            let wt_id = Uuid::new_v4().to_string();
-
-            let join_str = task.join.to_string();
-            let args_from_json = if task.args_from.is_empty() {
-                None
-            } else {
-                Some(serde_json::to_value(&task.args_from)?)
-            };
             let queue = task.queue.as_deref().ok_or_else(|| {
                 WorkflowError::Validation(format!(
                     "node '{}' (task '{}') has no resolved queue; \
@@ -363,6 +362,12 @@ fn insert_workflow_tasks<'a>(
                 task.task_options_json.as_deref(),
             );
 
+            let args_from_json = if task.args_from.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_value(&task.args_from)?)
+            };
+
             // Extract sub_workflow_name from task_name for sub-workflow nodes.
             let sub_workflow_name: Option<String> = if task.is_subworkflow {
                 Some(
@@ -375,65 +380,151 @@ fn insert_workflow_tasks<'a>(
                 None
             };
 
-            sqlx::query(INSERT_WORKFLOW_TASK_SQL)
-                .bind(&wt_id)
-                .bind(workflow_id)
-                .bind(task.index as i32)
-                .bind(&task.node_id)
-                .bind(&task.task_name)
-                .bind(&task.args_json)
-                .bind(&task.kwargs_json)
-                .bind(queue)
-                .bind(priority)
-                .bind(
-                    task.dependencies
-                        .iter()
-                        .map(|&d| d as i32)
-                        .collect::<Vec<i32>>(),
+            // Fast-path roots: plain TaskNodes with no inbound args/ctx. They are
+            // inserted directly as ENQUEUED with a task_id (no follow-up LINK) and
+            // their horsies_tasks rows are bulk-inserted. Skipping the per-row CAS
+            // is sound: the node rows are created in this same uncommitted tx, so no
+            // concurrent transaction can observe or race them.
+            let has_ctx_from = task.workflow_ctx_from.as_ref().is_some_and(|v| !v.is_empty());
+            let fast_path =
+                is_root && !task.is_subworkflow && task.args_from.is_empty() && !has_ctx_from;
+            let task_id = if fast_path {
+                Some(Uuid::new_v4().to_string())
+            } else {
+                None
+            };
+            let status = if fast_path {
+                "ENQUEUED"
+            } else if is_root {
+                "READY"
+            } else {
+                "PENDING"
+            };
+
+            prepared.push(PreparedNode {
+                node: task,
+                wt_id: Uuid::new_v4().to_string(),
+                queue: queue.to_owned(),
+                priority,
+                args_from_json,
+                join_str: task.join.to_string(),
+                merged_task_options,
+                sub_workflow_name,
+                status,
+                task_id,
+                is_root,
+                fast_path,
+            });
+        }
+
+        // ── Phase 2: bulk-insert all workflow_task rows ──
+        let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
+            "INSERT INTO horsies_workflow_tasks (\
+             id, workflow_id, task_index, node_id, task_name, \
+             task_args, task_kwargs, queue_name, priority, \
+             dependencies, args_from, workflow_ctx_from, \
+             allow_failed_deps, join_type, min_success, \
+             task_options, status, is_subworkflow, \
+             sub_workflow_name, sub_definition_key, \
+             task_id, started_at, created_at) ",
+        );
+        qb.push_values(prepared.iter(), |mut b, p| {
+            let deps: Vec<i32> = p.node.dependencies.iter().map(|&d| d as i32).collect();
+            b.push_bind(p.wt_id.clone())
+                .push_bind(workflow_id.to_owned())
+                .push_bind(p.node.index as i32)
+                .push_bind(p.node.node_id.clone())
+                .push_bind(p.node.task_name.clone())
+                .push_bind(p.node.args_json.clone())
+                .push_bind(p.node.kwargs_json.clone())
+                .push_bind(p.queue.clone())
+                .push_bind(p.priority)
+                .push_bind(deps)
+                .push_bind(p.args_from_json.clone())
+                .push_bind(p.node.workflow_ctx_from.clone())
+                .push_bind(p.node.allow_failed_deps)
+                .push_bind(p.join_str.clone())
+                .push_bind(p.node.min_success)
+                .push_bind(p.merged_task_options.clone())
+                .push_bind(p.status)
+                .push_bind(p.node.is_subworkflow)
+                .push_bind(p.sub_workflow_name.clone())
+                .push_bind(p.node.sub_definition_key.clone())
+                .push_bind(p.task_id.clone());
+            // started_at: NOW() for the ENQUEUED fast path, NULL otherwise.
+            if p.fast_path {
+                b.push("NOW()");
+            } else {
+                b.push("NULL");
+            }
+            b.push("NOW()"); // created_at
+        });
+        qb.build().execute(&mut **tx).await?;
+
+        // ── Phase 3: bulk-insert fast-path roots' horsies_tasks rows ──
+        if prepared.iter().any(|p| p.fast_path) {
+            let mut tq: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
+                "INSERT INTO horsies_tasks (\
+                 id, task_name, queue_name, priority, args, kwargs, \
+                 status, sent_at, enqueued_at, good_until, max_retries, task_options, \
+                 enqueue_sha, is_workflow_task, created_at, updated_at) ",
+            );
+            tq.push_values(prepared.iter().filter(|p| p.fast_path), |mut b, p| {
+                let task_id = p
+                    .task_id
+                    .clone()
+                    .expect("fast-path root always has a task_id");
+                let max_retries = parse_max_retries(p.merged_task_options.as_deref());
+                let good_until = parse_good_until_from_options(p.merged_task_options.as_deref());
+                let enqueue_sha = format!("wf-{}", task_id);
+                b.push_bind(task_id)
+                    .push_bind(p.node.task_name.clone())
+                    .push_bind(p.queue.clone())
+                    .push_bind(p.priority)
+                    .push_bind(p.node.args_json.clone())
+                    .push_bind(p.node.kwargs_json.clone());
+                // status, sent_at, enqueued_at as literals — NOW() is transaction-
+                // stable, so claim ordering matches the per-row shape.
+                b.push("'PENDING'").push("NOW()").push("NOW()");
+                b.push_bind(good_until)
+                    .push_bind(max_retries)
+                    .push_bind(p.merged_task_options.clone())
+                    .push_bind(enqueue_sha);
+                b.push("TRUE").push("NOW()").push("NOW()"); // is_workflow_task, created_at, updated_at
+            });
+            tq.build().execute(&mut **tx).await?;
+        }
+
+        // ── Phase 4: per-row slow path (subworkflow roots, args_from/ctx_from roots) ──
+        // Node rows already exist (Phase 2, status READY); these promote them.
+        for p in &prepared {
+            if !p.is_root || p.fast_path {
+                continue;
+            }
+            if p.node.is_subworkflow {
+                launch_root_subworkflow(tx, workflow_id, p.node, registry).await?;
+            } else {
+                let task_id = enqueue_root_task(
+                    &mut **tx,
+                    p.node,
+                    &p.queue,
+                    p.priority,
+                    p.merged_task_options.as_deref(),
                 )
-                .bind(&args_from_json)
-                .bind(&task.workflow_ctx_from)
-                .bind(task.allow_failed_deps)
-                .bind(&join_str)
-                .bind(task.min_success)
-                .bind(&merged_task_options)
-                .bind(status)
-                .bind(task.is_subworkflow) // $18
-                .bind(&sub_workflow_name) // $19
-                .bind(&task.sub_definition_key) // $20
-                .execute(&mut **tx)
                 .await?;
-
-            // Enqueue root nodes immediately.
-            if is_root {
-                if task.is_subworkflow {
-                    // Root sub-workflow: launch child workflow inline.
-                    launch_root_subworkflow(tx, workflow_id, task, registry).await?;
-                } else {
-                    // Regular root task: enqueue into horsies_tasks.
-                    let task_id = enqueue_root_task(
-                        &mut **tx,
-                        task,
-                        queue,
-                        priority,
-                        merged_task_options.as_deref(),
-                    )
+                sqlx::query(LINK_WORKFLOW_TASK_SQL)
+                    .bind(&task_id)
+                    .bind(workflow_id)
+                    .bind(p.node.index as i32)
+                    .execute(&mut **tx)
                     .await?;
-                    // Link workflow_task to the created horsies_tasks row.
-                    sqlx::query(LINK_WORKFLOW_TASK_SQL)
-                        .bind(&task_id)
-                        .bind(workflow_id)
-                        .bind(task.index as i32)
-                        .execute(&mut **tx)
-                        .await?;
 
-                    tracing::debug!(
-                        workflow_id,
-                        task_index = task.index,
-                        task_id = %task_id,
-                        "root task enqueued",
-                    );
-                }
+                tracing::debug!(
+                    workflow_id,
+                    task_index = p.node.index,
+                    task_id = %task_id,
+                    "root task enqueued (slow path)",
+                );
             }
         }
 
