@@ -491,9 +491,13 @@ async fn resume_workflow_inner(
     // Recovery completion pass: a child workflow may have COMPLETED while the
     // parent was paused, leaving the parent's sub-workflow node stale. Run the
     // recovery sweep immediately so the parent picks it up now rather than
-    // waiting for the periodic reaper (parity with horsies PR #66).
-    if let Err(e) =
-        crate::workflow_engine::recovery::recover_stuck_workflows(pool, registry).await
+    // waiting for the periodic reaper (parity with horsies PR #66). Uncapped
+    // (max_rows = None): a resumed tree must recover completely in one pass,
+    // not be left partial until the next periodic cycle (parity with PR #103).
+    if let Err(e) = crate::workflow_engine::recovery::recover_stuck_workflows_with_cap(
+        pool, registry, None,
+    )
+    .await
     {
         tracing::warn!(workflow_id, error = %e, "resume recovery pass failed (non-fatal)");
     }

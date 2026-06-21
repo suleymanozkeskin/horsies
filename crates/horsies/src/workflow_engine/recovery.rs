@@ -64,7 +64,8 @@ WHERE wt.status = 'PENDING'
     WHERE dep.workflow_id = wt.workflow_id
       AND wt.dependencies @> ARRAY[dep.task_index]
       AND dep.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
-  )";
+  )
+LIMIT CAST($1 AS bigint)";
 
 /// Case 1: READY regular wf_tasks with no linked horsies_task.
 const CASE1_READY_NO_TASK_SQL: &str = "\
@@ -76,7 +77,8 @@ JOIN horsies_workflows w ON w.id = wt.workflow_id
 WHERE wt.status = 'READY'
   AND wt.task_id IS NULL
   AND wt.is_subworkflow = FALSE
-  AND w.status = 'RUNNING'";
+  AND w.status = 'RUNNING'
+LIMIT CAST($1 AS bigint)";
 
 /// Case 1.5: READY sub-workflow wf_tasks with no child workflow started.
 const CASE1_5_READY_SUBWORKFLOW_SQL: &str = "\
@@ -88,7 +90,8 @@ JOIN horsies_workflows w ON w.id = wt.workflow_id
 WHERE wt.status = 'READY'
   AND wt.sub_workflow_id IS NULL
   AND wt.is_subworkflow = TRUE
-  AND w.status = 'RUNNING'";
+  AND w.status = 'RUNNING'
+LIMIT CAST($1 AS bigint)";
 
 /// Case 1.6: Non-terminal sub-workflow wf_tasks where child workflow is terminal.
 const CASE1_6_STALE_SUBWORKFLOW_SQL: &str = "\
@@ -101,7 +104,8 @@ WHERE wt.is_subworkflow = TRUE
   AND wt.sub_workflow_id IS NOT NULL
   AND wt.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
   AND cw.status IN ('COMPLETED', 'FAILED', 'CANCELLED')
-  AND w.status = 'RUNNING'";
+  AND w.status = 'RUNNING'
+LIMIT CAST($1 AS bigint)";
 
 /// Case 1.7: Non-terminal wf_tasks where linked horsies_task is terminal.
 ///
@@ -118,7 +122,8 @@ WHERE wt.task_id IS NOT NULL
   AND wt.is_subworkflow = FALSE
   AND wt.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
   AND t.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-  AND w.status = 'RUNNING'";
+  AND w.status = 'RUNNING'
+LIMIT CAST($1 AS bigint)";
 
 /// Case 2+3: RUNNING workflows where all wf_tasks are terminal.
 ///
@@ -137,7 +142,8 @@ WHERE w.status = 'RUNNING'
     SELECT 1 FROM horsies_workflow_tasks wt
     WHERE wt.workflow_id = w.id
       AND wt.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
-  )";
+  )
+LIMIT CAST($1 AS bigint)";
 
 /// Case 4: Orphaned RUNNING workflows with zero workflow_tasks.
 ///
@@ -150,7 +156,8 @@ WHERE w.status = 'RUNNING'
   AND NOT EXISTS (
     SELECT 1 FROM horsies_workflow_tasks wt
     WHERE wt.workflow_id = w.id
-  )";
+  )
+LIMIT CAST($1 AS bigint)";
 
 /// Mark an orphaned workflow as FAILED.
 const FAIL_ORPHANED_WORKFLOW_SQL: &str = "\
@@ -280,19 +287,40 @@ struct DepthRow {
 ///
 /// Scans for 7 classes of stuck workflow tasks and applies the
 /// appropriate fix for each. Returns a report with counts per case.
+/// Rows a single global recovery pass processes per candidate query, so one
+/// pass cannot hold its transaction across an unbounded backlog (every
+/// recovered row does engine work — enqueues, completion callbacks). Parity
+/// with horsies PR #103 (GLOBAL_SCAN_ROW_CAP).
+pub(crate) const GLOBAL_SCAN_ROW_CAP: i64 = 200;
+
+/// Global recovery pass, capped at [`GLOBAL_SCAN_ROW_CAP`] rows per candidate
+/// query. The remainder (if any) is recovered by the next periodic pass.
 pub async fn recover_stuck_workflows(
     pool: &PgPool,
     registry: &WorkflowSpecRegistry,
 ) -> Result<RecoveryReport, WorkflowError> {
+    recover_stuck_workflows_with_cap(pool, registry, Some(GLOBAL_SCAN_ROW_CAP)).await
+}
+
+/// Recovery pass with an explicit per-candidate-query row cap.
+///
+/// `max_rows = None` binds `LIMIT NULL` (uncapped) — used by the resume path so
+/// a resumed tree is recovered completely in one pass, not left partial until
+/// the next periodic cycle.
+pub(crate) async fn recover_stuck_workflows_with_cap(
+    pool: &PgPool,
+    registry: &WorkflowSpecRegistry,
+    max_rows: Option<i64>,
+) -> Result<RecoveryReport, WorkflowError> {
     let mut report = RecoveryReport::default();
 
-    recover_case0(pool, registry, &mut report).await;
-    recover_case1(pool, &mut report).await;
-    recover_case1_5(pool, registry, &mut report).await;
-    recover_case1_6(pool, registry, &mut report).await;
-    recover_case1_7(pool, registry, &mut report).await;
-    recover_case2_3(pool, registry, &mut report).await;
-    recover_case4(pool, &mut report).await;
+    recover_case0(pool, registry, max_rows, &mut report).await;
+    recover_case1(pool, max_rows, &mut report).await;
+    recover_case1_5(pool, registry, max_rows, &mut report).await;
+    recover_case1_6(pool, registry, max_rows, &mut report).await;
+    recover_case1_7(pool, registry, max_rows, &mut report).await;
+    recover_case2_3(pool, registry, max_rows, &mut report).await;
+    recover_case4(pool, max_rows, &mut report).await;
 
     if report.total() > 0 {
         tracing::info!(
@@ -319,9 +347,11 @@ pub async fn recover_stuck_workflows(
 async fn recover_case0(
     pool: &PgPool,
     registry: &WorkflowSpecRegistry,
+    max_rows: Option<i64>,
     report: &mut RecoveryReport,
 ) {
     let rows = match sqlx::query_as::<_, StuckPendingRow>(CASE0_STUCK_PENDING_SQL)
+        .bind(max_rows)
         .fetch_all(pool)
         .await
     {
@@ -361,8 +391,9 @@ async fn recover_case0(
 }
 
 /// Case 1: Re-enqueue READY regular tasks with no horsies_tasks row.
-async fn recover_case1(pool: &PgPool, report: &mut RecoveryReport) {
+async fn recover_case1(pool: &PgPool, max_rows: Option<i64>, report: &mut RecoveryReport) {
     let rows = match sqlx::query_as::<_, ReadyTaskRow>(CASE1_READY_NO_TASK_SQL)
+        .bind(max_rows)
         .fetch_all(pool)
         .await
     {
@@ -401,9 +432,11 @@ async fn recover_case1(pool: &PgPool, report: &mut RecoveryReport) {
 async fn recover_case1_5(
     pool: &PgPool,
     registry: &WorkflowSpecRegistry,
+    max_rows: Option<i64>,
     report: &mut RecoveryReport,
 ) {
     let rows = match sqlx::query_as::<_, ReadySubworkflowRow>(CASE1_5_READY_SUBWORKFLOW_SQL)
+        .bind(max_rows)
         .fetch_all(pool)
         .await
     {
@@ -442,9 +475,11 @@ async fn recover_case1_5(
 async fn recover_case1_6(
     pool: &PgPool,
     registry: &WorkflowSpecRegistry,
+    max_rows: Option<i64>,
     report: &mut RecoveryReport,
 ) {
     let rows = match sqlx::query_as::<_, StaleSubworkflowRow>(CASE1_6_STALE_SUBWORKFLOW_SQL)
+        .bind(max_rows)
         .fetch_all(pool)
         .await
     {
@@ -494,9 +529,11 @@ async fn recover_case1_6(
 async fn recover_case1_7(
     pool: &PgPool,
     registry: &WorkflowSpecRegistry,
+    max_rows: Option<i64>,
     report: &mut RecoveryReport,
 ) {
     let rows = match sqlx::query_as::<_, StaleLinkedTaskRow>(CASE1_7_STALE_LINKED_TASK_SQL)
+        .bind(max_rows)
         .fetch_all(pool)
         .await
     {
@@ -596,9 +633,11 @@ async fn recover_case1_7(
 async fn recover_case2_3(
     pool: &PgPool,
     registry: &WorkflowSpecRegistry,
+    max_rows: Option<i64>,
     report: &mut RecoveryReport,
 ) {
     let rows = match sqlx::query_as::<_, StuckWorkflowRow>(CASE2_3_STUCK_WORKFLOW_SQL)
+        .bind(max_rows)
         .fetch_all(pool)
         .await
     {
@@ -632,8 +671,9 @@ async fn recover_case2_3(
 }
 
 /// Case 4: Fail orphaned RUNNING workflows with zero workflow_tasks.
-async fn recover_case4(pool: &PgPool, report: &mut RecoveryReport) {
+async fn recover_case4(pool: &PgPool, max_rows: Option<i64>, report: &mut RecoveryReport) {
     let rows = match sqlx::query_as::<_, OrphanedWorkflowRow>(CASE4_ORPHANED_WORKFLOW_SQL)
+        .bind(max_rows)
         .fetch_all(pool)
         .await
     {
@@ -810,3 +850,99 @@ async fn start_stuck_subworkflow(
 }
 
 use crate::workflow_engine::args_merge::merge_args_from_async as merge_args_from_for_ready;
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+    use crate::broker::PostgresBroker;
+    use serial_test::serial;
+    use uuid::Uuid;
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|p| p.join(".env").exists());
+        let pw = root
+            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
+            .and_then(|c| {
+                c.lines()
+                    .filter_map(|l| l.trim().split_once('='))
+                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
+                    .map(|(_, v)| v.trim().to_owned())
+            })
+            .unwrap_or_else(|| "W0rklane".to_owned());
+        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    }
+
+    async fn insert_orphaned_workflow(pool: &PgPool, id: &str) {
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index,
+                definition_key, depth, root_workflow_id,
+                sent_at, created_at, started_at, updated_at
+            ) VALUES (
+                $1, 'cap_test_wf', 'RUNNING', 'fail', NULL,
+                'test.cap.v1', 0, $1,
+                NOW(), NOW(), NOW(), NOW()
+            )",
+        )
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn failed_count(pool: &PgPool, ids: &[String]) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM horsies_workflows WHERE id = ANY($1) AND status = 'FAILED'",
+        )
+        .bind(ids)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The per-query cap bounds how many candidates one global pass processes;
+    /// an uncapped (None) pass processes the rest. Parity with horsies PR #103.
+    #[tokio::test]
+    #[serial]
+    async fn recovery_cap_limits_rows_then_uncapped_processes_rest() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.unwrap();
+        let pool = broker.pool().clone();
+
+        // Isolate: remove any pre-existing orphaned workflows.
+        sqlx::query("DELETE FROM horsies_workflow_tasks")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM horsies_workflows")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let ids: Vec<String> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
+        for id in &ids {
+            insert_orphaned_workflow(&pool, id).await;
+        }
+
+        let registry = WorkflowSpecRegistry::new();
+
+        // Capped at 2: exactly 2 of the 3 orphans are failed this pass.
+        let report = recover_stuck_workflows_with_cap(&pool, &registry, Some(2))
+            .await
+            .unwrap();
+        assert_eq!(report.case4_orphaned_failed, 2);
+        assert_eq!(failed_count(&pool, &ids).await, 2);
+
+        // Uncapped: the remaining orphan is failed.
+        let report = recover_stuck_workflows_with_cap(&pool, &registry, None)
+            .await
+            .unwrap();
+        assert_eq!(report.case4_orphaned_failed, 1);
+        assert_eq!(failed_count(&pool, &ids).await, 3);
+    }
+}
