@@ -1929,10 +1929,18 @@ impl PostgresBroker {
     /// Active worker liveness probe: broadcast a ping and collect pongs.
     ///
     /// Subscribes to a unique reply channel, broadcasts a [`WorkerPingRequest`]
-    /// on [`WORKER_PING_CHANNEL`], then collects [`WorkerPong`] replies until the
-    /// `timeout` window elapses (broadcast) or the targeted worker replies
-    /// (single target). A pong proves the replying worker's event loop is
-    /// responsive *and* that it can reach Postgres. Workers present in
+    /// on [`WORKER_PING_CHANNEL`], then collects distinct [`WorkerPong`] replies
+    /// (de-duplicated by `worker_id`) until a stop condition:
+    ///
+    /// - `target_worker_id` set: returns as soon as that worker replies.
+    /// - `min_responses` set: returns as soon as that many distinct workers
+    ///   reply (fast fail-open liveness, e.g. `Some(1)` for a `/health` gate — a
+    ///   healthy fleet answers in milliseconds; only a degraded fleet pays the
+    ///   full `timeout`).
+    /// - neither set: waits the full window and enumerates every responder.
+    ///
+    /// A pong proves the replying worker's event loop is responsive *and* that
+    /// it can reach Postgres. Workers present in
     /// [`list_worker_states`](Self::list_worker_states) but absent here are
     /// non-responsive. Mirrors Python's `ping_workers_async`.
     ///
@@ -1942,11 +1950,19 @@ impl PostgresBroker {
         &self,
         target_worker_id: Option<&str>,
         timeout: std::time::Duration,
+        min_responses: Option<usize>,
     ) -> BrokerResult<Vec<WorkerPong>> {
         if timeout.is_zero() {
             return Err(BrokerOperationError {
                 code: BrokerErrorCode::WorkerPingFailed,
                 message: "ping_workers timeout must be positive".to_owned(),
+                retryable: false,
+            });
+        }
+        if min_responses == Some(0) {
+            return Err(BrokerOperationError {
+                code: BrokerErrorCode::WorkerPingFailed,
+                message: "ping_workers min_responses must be >= 1 when set".to_owned(),
                 retryable: false,
             });
         }
@@ -1982,6 +1998,7 @@ impl PostgresBroker {
             .map_err(|e| worker_ping_error("ping notify", e))?;
 
         let mut pongs: Vec<WorkerPong> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         loop {
             let Some(remaining) = timeout.checked_sub(start.elapsed()) else {
                 break;
@@ -1996,11 +2013,17 @@ impl PostgresBroker {
                     let Some(pong) =
                         decode_pong(notification.payload(), &correlation_id, start.elapsed())
                     else {
-                        continue;
+                        continue; // malformed or correlation-id mismatch
                     };
+                    if !seen.insert(pong.worker_id.clone()) {
+                        continue; // duplicate worker
+                    }
                     let is_target = target_worker_id == Some(pong.worker_id.as_str());
                     pongs.push(pong);
                     if is_target {
+                        break;
+                    }
+                    if min_responses.is_some_and(|n| pongs.len() >= n) {
                         break;
                     }
                 }

@@ -181,11 +181,24 @@ fn write_worker_config() -> tempfile::NamedTempFile {
 async fn test_ping_workers_rejects_zero_timeout() {
     let broker = broker().await;
     let err = broker
-        .ping_workers(None, std::time::Duration::from_secs(0))
+        .ping_workers(None, std::time::Duration::from_secs(0), None)
         .await
         .unwrap_err();
     assert_eq!(err.code, horsies::BrokerErrorCode::WorkerPingFailed);
     assert!(!err.retryable, "a bad-argument error is not retryable");
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_ping_workers_rejects_zero_min_responses() {
+    let broker = broker().await;
+    let err = broker
+        .ping_workers(None, std::time::Duration::from_secs(2), Some(0))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, horsies::BrokerErrorCode::WorkerPingFailed);
+    assert!(!err.retryable, "min_responses validation is not retryable");
+    assert!(err.message.contains("min_responses"));
 }
 
 #[tokio::test]
@@ -213,7 +226,7 @@ async fn test_ping_workers_collects_pong_and_targets_worker() {
     let mut pongs = Vec::new();
     while std::time::Instant::now() < deadline {
         pongs = broker
-            .ping_workers(None, std::time::Duration::from_secs(2))
+            .ping_workers(None, std::time::Duration::from_secs(2), None)
             .await
             .unwrap();
         if !pongs.is_empty() {
@@ -232,7 +245,7 @@ async fn test_ping_workers_collects_pong_and_targets_worker() {
 
     // Targeted: only the addressed worker replies.
     let targeted = broker
-        .ping_workers(Some(&pong.worker_id), std::time::Duration::from_secs(2))
+        .ping_workers(Some(&pong.worker_id), std::time::Duration::from_secs(2), None)
         .await
         .unwrap();
     assert_eq!(targeted.len(), 1, "exactly the targeted worker replies");
@@ -240,8 +253,36 @@ async fn test_ping_workers_collects_pong_and_targets_worker() {
 
     // A non-existent target yields no pongs within the window.
     let none = broker
-        .ping_workers(Some("worker-that-does-not-exist"), std::time::Duration::from_millis(800))
+        .ping_workers(
+            Some("worker-that-does-not-exist"),
+            std::time::Duration::from_millis(800),
+            None,
+        )
         .await
         .unwrap();
     assert!(none.is_empty(), "no worker matches a bogus target id");
+
+    // min_responses=Some(1): fast fail-open gate returns well before the window.
+    let window = std::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    let gated = broker.ping_workers(None, window, Some(1)).await.unwrap();
+    let elapsed = start.elapsed();
+    assert!(!gated.is_empty(), "fast gate should collect at least one pong");
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "min_responses=1 must return well before the {}s window, took {:?}",
+        window.as_secs(),
+        elapsed,
+    );
+
+    // Pongs are de-duplicated by worker_id even across the full window.
+    let all = broker
+        .ping_workers(None, std::time::Duration::from_secs(2), None)
+        .await
+        .unwrap();
+    let mut ids: Vec<&str> = all.iter().map(|p| p.worker_id.as_str()).collect();
+    let count = ids.len();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), count, "each worker_id appears at most once");
 }
