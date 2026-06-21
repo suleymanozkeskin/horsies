@@ -212,62 +212,140 @@ pub fn spawn_reaper(
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 _ = tokio::time::sleep(check_interval) => {
-                    if config.auto_fail_stale_running {
-                        let threshold_secs =
-                            config.running_stale_threshold_ms as f64 / 1000.0;
-                        let finalizing_threshold_secs =
-                            config.finalizing_stale_threshold_ms as f64 / 1000.0;
-                        match mark_stale_running_as_failed(
-                            &pool,
-                            threshold_secs,
-                            finalizing_threshold_secs,
-                        )
-                        .await
-                        {
-                            Ok(count) if count > 0 => {
-                                tracing::warn!(count, "reaper marked stale RUNNING tasks as FAILED");
-                            }
-                            Err(e) => {
-                                tracing::error!(error = %e, "reaper: failed to mark stale running tasks");
-                            }
-                            _ => {}
+                    // Cluster-wide gate: only one worker runs a pass per interval.
+                    // The passes are safe to run concurrently (SKIP LOCKED), but
+                    // redundant across a cluster; the gate elides the duplicate work.
+                    match acquire_reaper_gate(&pool).await {
+                        ReaperGate::Skip => {
+                            tracing::debug!("reaper pass skipped: another worker holds the gate");
                         }
-                    }
-
-                    // Expire unclaimed PENDING tasks whose good_until has passed.
-                    match expire_pending_tasks(&pool).await {
-                        Ok(count) if count > 0 => {
-                            tracing::info!(count, "reaper expired unclaimed PENDING tasks");
+                        ReaperGate::Ungated => {
+                            run_reaper_pass(&pool, &config, &mut next_retention_cleanup).await;
                         }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "reaper: failed to expire pending tasks");
+                        ReaperGate::Held(mut conn) => {
+                            run_reaper_pass(&pool, &config, &mut next_retention_cleanup).await;
+                            release_reaper_gate(&mut conn).await;
                         }
-                        _ => {}
-                    }
-
-                    if config.auto_requeue_stale_claimed {
-                        let threshold_secs =
-                            config.claimed_stale_threshold_ms as f64 / 1000.0;
-                        match requeue_stale_claimed(&pool, threshold_secs).await {
-                            Ok(count) if count > 0 => {
-                                tracing::info!(count, "reaper requeued stale CLAIMED tasks");
-                            }
-                            Err(e) => {
-                                tracing::error!(error = %e, "reaper: failed to requeue stale claimed tasks");
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    // Retention cleanup (runs every RETENTION_CLEANUP_INTERVAL).
-                    if tokio::time::Instant::now() >= next_retention_cleanup {
-                        run_retention_cleanup(&pool, &config).await;
-                        next_retention_cleanup = tokio::time::Instant::now() + RETENTION_CLEANUP_INTERVAL;
                     }
                 }
             }
         }
     })
+}
+
+/// Outcome of trying to acquire the cluster-wide reaper gate.
+enum ReaperGate {
+    /// Gate held on a dedicated connection; release after the pass.
+    Held(sqlx::pool::PoolConnection<sqlx::Postgres>),
+    /// Another worker holds the gate this interval; skip the pass.
+    Skip,
+    /// Gating disabled (single-connection pool): run the pass ungated.
+    Ungated,
+}
+
+/// Fixed advisory key for the cluster-wide reaper gate (distinct from the claim
+/// key). Parity with horsies PR #101 7a3eb0d6.
+fn advisory_key_reaper() -> i64 {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"horsies:reaper:v1");
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    i64::from_be_bytes(bytes)
+}
+
+/// Try to acquire the reaper gate as a session-level advisory lock held on a
+/// dedicated connection for the duration of the pass.
+async fn acquire_reaper_gate(pool: &PgPool) -> ReaperGate {
+    // The gate holds one connection while the pass body needs another; on a
+    // single-connection pool that would deadlock, so run ungated. SKIP LOCKED
+    // keeps an ungated pass correct (just possibly duplicated). Parity with
+    // horsies PR #101 4a7344ec.
+    if pool.options().get_max_connections() < 2 {
+        return ReaperGate::Ungated;
+    }
+    let mut conn = match pool.acquire().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::warn!(error = %e, "reaper gate connection unavailable; running ungated");
+            return ReaperGate::Ungated;
+        }
+    };
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(advisory_key_reaper())
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap_or(false);
+    if acquired {
+        ReaperGate::Held(conn)
+    } else {
+        ReaperGate::Skip
+    }
+}
+
+/// Release the reaper gate. Session advisory locks are not freed by returning a
+/// connection to the pool, so unlock explicitly before the connection drops.
+async fn release_reaper_gate(conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>) {
+    if let Err(e) = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(advisory_key_reaper())
+        .execute(&mut **conn)
+        .await
+    {
+        tracing::warn!(error = %e, "reaper gate unlock failed; lock frees when the connection closes");
+    }
+}
+
+/// Run one reaper pass: stale-RUNNING recovery, PENDING expiry, stale-CLAIMED
+/// requeue, and periodic retention cleanup.
+async fn run_reaper_pass(
+    pool: &PgPool,
+    config: &RecoveryConfig,
+    next_retention_cleanup: &mut tokio::time::Instant,
+) {
+    if config.auto_fail_stale_running {
+        let threshold_secs = config.running_stale_threshold_ms as f64 / 1000.0;
+        let finalizing_threshold_secs = config.finalizing_stale_threshold_ms as f64 / 1000.0;
+        match mark_stale_running_as_failed(pool, threshold_secs, finalizing_threshold_secs).await {
+            Ok(count) if count > 0 => {
+                tracing::warn!(count, "reaper marked stale RUNNING tasks as FAILED");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "reaper: failed to mark stale running tasks");
+            }
+            _ => {}
+        }
+    }
+
+    // Expire unclaimed PENDING tasks whose good_until has passed.
+    match expire_pending_tasks(pool).await {
+        Ok(count) if count > 0 => {
+            tracing::info!(count, "reaper expired unclaimed PENDING tasks");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "reaper: failed to expire pending tasks");
+        }
+        _ => {}
+    }
+
+    if config.auto_requeue_stale_claimed {
+        let threshold_secs = config.claimed_stale_threshold_ms as f64 / 1000.0;
+        match requeue_stale_claimed(pool, threshold_secs).await {
+            Ok(count) if count > 0 => {
+                tracing::info!(count, "reaper requeued stale CLAIMED tasks");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "reaper: failed to requeue stale claimed tasks");
+            }
+            _ => {}
+        }
+    }
+
+    // Retention cleanup (runs every RETENTION_CLEANUP_INTERVAL).
+    if tokio::time::Instant::now() >= *next_retention_cleanup {
+        run_retention_cleanup(pool, config).await;
+        *next_retention_cleanup = tokio::time::Instant::now() + RETENTION_CLEANUP_INTERVAL;
+    }
 }
 
 /// Recover stale RUNNING tasks: retry if eligible, otherwise mark FAILED.
@@ -496,6 +574,34 @@ async fn process_single_stale_task(
 ///
 /// Transitions matching tasks to EXPIRED with a TASK_EXPIRED result.
 /// No attempt rows are written (the task was never executed).
+/// Batch size per expiry statement.
+const EXPIRE_BATCH_SIZE: i64 = 500;
+/// Max batches per reaper pass, bounding work and trigger-NOTIFY volume.
+const EXPIRE_MAX_BATCHES_PER_PASS: u32 = 200;
+
+/// SQL: expire one batch of unclaimed PENDING tasks past good_until.
+///
+/// The candidate set is bounded by `LIMIT $2 FOR UPDATE SKIP LOCKED` so a mass
+/// expiry is spread across several committed statements instead of one
+/// transaction that row-locks every match and flushes two trigger NOTIFYs per
+/// row in a single commit (which can overflow listener queues).
+const EXPIRE_PENDING_BATCH_SQL: &str = "\
+UPDATE horsies_tasks t
+SET status = 'EXPIRED',
+    failed_at = NOW(),
+    result = $1,
+    error_code = 'TASK_EXPIRED',
+    updated_at = NOW()
+FROM (
+    SELECT id FROM horsies_tasks
+    WHERE status = 'PENDING'
+      AND good_until IS NOT NULL
+      AND good_until <= NOW()
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+) s
+WHERE t.id = s.id";
+
 pub async fn expire_pending_tasks(pool: &PgPool) -> Result<u64, sqlx::Error> {
     let task_error = TaskError::builtin(
         crate::core::OutcomeCode::TaskExpired,
@@ -505,22 +611,20 @@ pub async fn expire_pending_tasks(pool: &PgPool) -> Result<u64, sqlx::Error> {
     let result_json = serde_json::to_string(&task_result)
         .unwrap_or_else(|_| r#"{"__type":"err","value":{"message":"expired"}}"#.to_owned());
 
-    let result = sqlx::query(
-        "UPDATE horsies_tasks \
-         SET status = 'EXPIRED', \
-             failed_at = NOW(), \
-             result = $1, \
-             error_code = 'TASK_EXPIRED', \
-             updated_at = NOW() \
-         WHERE status = 'PENDING' \
-           AND good_until IS NOT NULL \
-           AND good_until <= NOW()",
-    )
-    .bind(&result_json)
-    .execute(pool)
-    .await?;
-
-    Ok(result.rows_affected())
+    let mut total: u64 = 0;
+    for _ in 0..EXPIRE_MAX_BATCHES_PER_PASS {
+        let result = sqlx::query(EXPIRE_PENDING_BATCH_SQL)
+            .bind(&result_json)
+            .bind(EXPIRE_BATCH_SIZE)
+            .execute(pool)
+            .await?;
+        let affected = result.rows_affected();
+        total += affected;
+        if affected < EXPIRE_BATCH_SIZE as u64 {
+            break;
+        }
+    }
+    Ok(total)
 }
 
 /// Requeue stale CLAIMED tasks back to PENDING. Returns the number of affected rows.

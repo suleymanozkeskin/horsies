@@ -383,7 +383,11 @@ impl Worker {
         for queue in &self.worker_config.queues {
             listener.listen(&format!("task_queue_{}", queue)).await?;
         }
-        listener.listen("task_new").await?;
+        // The global task_new channel is deliberately NOT subscribed: the
+        // per-queue channels cover every insert and capacity signal this worker
+        // can act on, while task_new wakes every worker for every insert
+        // cluster-wide (thundering herd). The trigger still emits task_new for
+        // external observers. Parity with horsies PR #101 cafc9200.
         // Subscribe to the shared liveness-ping channel BEFORE any background
         // loop is spawned, so a subscription failure cannot orphan running loops.
         listener
@@ -1985,9 +1989,11 @@ mod tests {
         assert_eq!(attempt_error_code.as_deref(), Some(ser_error_code.as_str()));
     }
 
+    /// Capacity signals go only to the per-queue channel; workers no longer
+    /// listen on task_new (parity with horsies PR #101 cafc9200).
     #[tokio::test]
     #[serial]
-    async fn notify_worker_capacity_emits_global_and_queue_specific_signals() {
+    async fn notify_worker_capacity_emits_queue_specific_signal_only() {
         let pool = test_pool().await;
         clean(&pool).await;
 
@@ -2001,26 +2007,19 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let second = tokio::time::timeout(Duration::from_secs(2), listener.recv())
-            .await
-            .unwrap()
-            .unwrap();
-
-        let mut seen = vec![
-            (first.channel().to_owned(), first.payload().to_owned()),
-            (second.channel().to_owned(), second.payload().to_owned()),
-        ];
-        seen.sort();
-
         assert_eq!(
-            seen,
-            vec![
-                ("task_new".to_owned(), "capacity:task-123".to_owned(),),
-                (
-                    "task_queue_high-priority".to_owned(),
-                    "capacity:task-123".to_owned(),
-                ),
-            ]
+            (first.channel().to_owned(), first.payload().to_owned()),
+            (
+                "task_queue_high-priority".to_owned(),
+                "capacity:task-123".to_owned(),
+            ),
+        );
+
+        // No second signal: task_new must not be emitted.
+        let second = tokio::time::timeout(Duration::from_millis(500), listener.recv()).await;
+        assert!(
+            second.is_err(),
+            "capacity signal must not be emitted on task_new"
         );
     }
 

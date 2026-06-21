@@ -1032,21 +1032,10 @@ async fn load_persisted_task_result(
 }
 
 pub(crate) async fn notify_worker_capacity(pool: &sqlx::PgPool, queue_name: &str, task_id: &str) {
+    // Wake workers of this queue to re-check capacity/backlog. The capacity
+    // signal is sent only on the per-queue channel; workers no longer listen on
+    // task_new. Parity with horsies PR #101 cafc9200.
     let payload = format!("capacity:{}", task_id);
-    if let Err(e) = sqlx::query("SELECT pg_notify($1, $2)")
-        .bind("task_new")
-        .bind(&payload)
-        .execute(pool)
-        .await
-    {
-        tracing::warn!(
-            task_id = %task_id,
-            channel = "task_new",
-            error = %e,
-            "capacity NOTIFY failed; worker polling fallback will recover",
-        );
-    }
-
     let channel = format!("task_queue_{}", queue_name);
     if let Err(e) = sqlx::query("SELECT pg_notify($1, $2)")
         .bind(&channel)
