@@ -125,15 +125,21 @@ SELECT result
 FROM horsies_workflow_tasks
 WHERE workflow_id = $1 AND task_index = $2";
 
-const TERMINAL_OUTPUT_RESULTS_SQL: &str = "\
-SELECT wt.node_id, wt.task_index, wt.result
-FROM horsies_workflow_tasks wt
-WHERE wt.workflow_id = $1
-  AND NOT EXISTS (
-      SELECT 1 FROM horsies_workflow_tasks other
-      WHERE other.workflow_id = wt.workflow_id
-        AND other.dependencies @> ARRAY[wt.task_index]
-  )";
+/// Payload-free edge read for terminal-set resolution. The per-row correlated
+/// `NOT EXISTS (other.dependencies @> ARRAY[wt.task_index])` ran one GIN probe
+/// per row inside the completion lock; the terminal set is instead computed in
+/// app code (`compute_terminal_indexes`, O(N+E)) from these edges, then the
+/// terminal rows are fetched by index. Parity with horsies PR #117.
+const ALL_EDGES_SQL: &str = "\
+SELECT task_index, dependencies
+FROM horsies_workflow_tasks
+WHERE workflow_id = $1";
+
+/// Fetch the terminal tasks' results by index (companion to `ALL_EDGES_SQL`).
+const TERMINAL_RESULTS_BY_INDEX_SQL: &str = "\
+SELECT node_id, result
+FROM horsies_workflow_tasks
+WHERE workflow_id = $1 AND task_index = ANY($2)";
 
 const UPDATE_WORKFLOW_COMPLETED_SQL: &str = "\
 UPDATE horsies_workflows
@@ -291,6 +297,12 @@ struct TaskResultOnly {
 struct NodeResult {
     node_id: Option<String>,
     result: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct EdgeRow {
+    task_index: i32,
+    dependencies: Vec<i32>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1546,9 +1558,19 @@ async fn get_workflow_final_result(
         return Ok(result_json);
     }
 
-    // Collect results for terminal output tasks (no dependents) keyed by node_id.
-    let rows: Vec<NodeResult> = sqlx::query_as(TERMINAL_OUTPUT_RESULTS_SQL)
+    // Terminal output tasks = those no other task depends on. Read edges
+    // payload-free, compute the terminal set in app code, then fetch exactly
+    // those rows — avoiding a per-row GIN probe under the completion lock.
+    let edges: Vec<EdgeRow> = sqlx::query_as(ALL_EDGES_SQL)
         .bind(workflow_id)
+        .fetch_all(&mut *conn)
+        .await?;
+
+    let terminal_indexes = compute_terminal_indexes(&edges);
+
+    let rows: Vec<NodeResult> = sqlx::query_as(TERMINAL_RESULTS_BY_INDEX_SQL)
+        .bind(workflow_id)
+        .bind(&terminal_indexes)
         .fetch_all(&mut *conn)
         .await?;
 
@@ -1824,6 +1846,20 @@ fn is_terminal_workflow_status(s: &str) -> bool {
     matches!(s, "COMPLETED" | "FAILED" | "CANCELLED")
 }
 
+/// Terminal task indexes = those no other task depends on:
+/// `{all task_index} − ⋃(dependencies)`. Exactly equivalent to the old
+/// `NOT EXISTS (other.dependencies @> ARRAY[wt.task_index])` query (a task in
+/// its own `dependencies` is non-terminal under both forms). Parity with #117.
+fn compute_terminal_indexes(edges: &[EdgeRow]) -> Vec<i32> {
+    let depended_on: std::collections::HashSet<i32> =
+        edges.iter().flat_map(|e| e.dependencies.iter().copied()).collect();
+    edges
+        .iter()
+        .map(|e| e.task_index)
+        .filter(|idx| !depended_on.contains(idx))
+        .collect()
+}
+
 #[cfg(test)]
 mod guard_tests {
     use super::*;
@@ -1972,5 +2008,181 @@ mod guard_tests {
             .execute(pool)
             .await
             .expect("cleanup workflows");
+    }
+}
+
+#[cfg(test)]
+mod completion_qw_tests {
+    use super::*;
+    use crate::broker::PostgresBroker;
+    use serial_test::serial;
+    use uuid::Uuid;
+
+    fn edge(task_index: i32, dependencies: Vec<i32>) -> EdgeRow {
+        EdgeRow {
+            task_index,
+            dependencies,
+        }
+    }
+
+    fn sorted(mut v: Vec<i32>) -> Vec<i32> {
+        v.sort_unstable();
+        v
+    }
+
+    #[test]
+    fn terminal_all_empty_deps_are_all_terminal() {
+        let edges = vec![edge(0, vec![]), edge(1, vec![]), edge(2, vec![])];
+        assert_eq!(sorted(compute_terminal_indexes(&edges)), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn terminal_chain_only_last_is_terminal() {
+        // 0 <- 1 <- 2 <- 3 (each depends on the previous).
+        let edges = vec![
+            edge(0, vec![]),
+            edge(1, vec![0]),
+            edge(2, vec![1]),
+            edge(3, vec![2]),
+        ];
+        assert_eq!(sorted(compute_terminal_indexes(&edges)), vec![3]);
+    }
+
+    #[test]
+    fn terminal_fan_in_join_is_terminal() {
+        // 0 -> {1,2} -> 3 (3 is the join, nothing depends on it).
+        let edges = vec![
+            edge(0, vec![]),
+            edge(1, vec![0]),
+            edge(2, vec![0]),
+            edge(3, vec![1, 2]),
+        ];
+        assert_eq!(sorted(compute_terminal_indexes(&edges)), vec![3]);
+    }
+
+    #[test]
+    fn terminal_single_task_is_terminal() {
+        assert_eq!(compute_terminal_indexes(&[edge(0, vec![])]), vec![0]);
+    }
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|p| p.join(".env").exists());
+        let pw = root
+            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
+            .and_then(|c| {
+                c.lines()
+                    .filter_map(|l| l.trim().split_once('='))
+                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
+                    .map(|(_, v)| v.trim().to_owned())
+            })
+            .unwrap_or_else(|| "W0rklane".to_owned());
+        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    }
+
+    /// Old correlated form, kept as the equivalence oracle.
+    const OLD_TERMINAL_SQL: &str = "\
+SELECT wt.task_index
+FROM horsies_workflow_tasks wt
+WHERE wt.workflow_id = $1
+  AND NOT EXISTS (
+      SELECT 1 FROM horsies_workflow_tasks other
+      WHERE other.workflow_id = wt.workflow_id
+        AND other.dependencies @> ARRAY[wt.task_index]
+  )";
+
+    async fn insert_workflow(pool: &PgPool, id: &str) {
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index,
+                definition_key, depth, root_workflow_id,
+                sent_at, created_at, started_at, updated_at
+            ) VALUES (
+                $1, 'qw_test_wf', 'RUNNING', 'fail', NULL,
+                'test.qw.v1', 0, $1,
+                NOW(), NOW(), NOW(), NOW()
+            )",
+        )
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("insert workflow");
+    }
+
+    async fn insert_task(pool: &PgPool, wf_id: &str, idx: i32, deps: Vec<i32>) {
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                queue_name, priority, dependencies, allow_failed_deps, join_type,
+                status, is_subworkflow, created_at
+            ) VALUES (
+                $1, $2, $3, $4, 'qw_task', '[]', '{}',
+                'default', 100, $5, FALSE, 'all',
+                'COMPLETED', FALSE, NOW()
+            )",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(wf_id)
+        .bind(idx)
+        .bind(format!("node_{idx}"))
+        .bind(deps)
+        .execute(pool)
+        .await
+        .expect("insert task");
+    }
+
+    /// The app-side terminal set equals the old correlated `NOT EXISTS` query
+    /// for a representative DAG (fan-out → fan-in). Parity with horsies PR #117.
+    #[tokio::test]
+    #[serial]
+    async fn terminal_set_matches_old_sql_oracle() {
+        let broker = PostgresBroker::connect(&test_db_url())
+            .await
+            .expect("connect broker");
+        let pool = broker.pool().clone();
+
+        let wf_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &wf_id).await;
+        // 0 -> {1,2} -> 3 ; plus an independent leaf 4 (no deps, no dependents).
+        insert_task(&pool, &wf_id, 0, vec![]).await;
+        insert_task(&pool, &wf_id, 1, vec![0]).await;
+        insert_task(&pool, &wf_id, 2, vec![0]).await;
+        insert_task(&pool, &wf_id, 3, vec![1, 2]).await;
+        insert_task(&pool, &wf_id, 4, vec![]).await;
+
+        let oracle: Vec<i32> = sqlx::query_scalar(OLD_TERMINAL_SQL)
+            .bind(&wf_id)
+            .fetch_all(&pool)
+            .await
+            .expect("oracle query");
+
+        let edges: Vec<EdgeRow> = sqlx::query_as(ALL_EDGES_SQL)
+            .bind(&wf_id)
+            .fetch_all(&pool)
+            .await
+            .expect("edge read");
+        let computed = compute_terminal_indexes(&edges);
+
+        assert_eq!(
+            sorted(computed),
+            sorted(oracle),
+            "app-side terminal set must equal the old NOT EXISTS query",
+        );
+
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+            .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup tasks");
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup workflow");
     }
 }
