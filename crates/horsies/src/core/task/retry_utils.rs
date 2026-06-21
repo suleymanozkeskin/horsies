@@ -65,11 +65,27 @@ pub fn parse_max_retries(task_options: Option<&str>) -> i32 {
     let Some(retry_policy) = value.get("retry_policy") else {
         return 0;
     };
-    retry_policy
-        .get("max_retries")
-        .and_then(|v| v.as_i64())
-        .map(|n| n as i32)
-        .unwrap_or(3)
+    // max_retries is written from a typed u32 (RetryPolicy), so it is always a
+    // JSON integer. A present-but-non-integer value can only arise from external
+    // DB tampering or an unmigrated field-type change; surface it loudly rather
+    // than silently defaulting. Absent max_retries legitimately defaults to 3.
+    // Parity with horsies PR #101 be5cc2f8 (Rust types make the hard-fail Python
+    // added unnecessary; we log instead).
+    match retry_policy.get("max_retries") {
+        None => 3,
+        Some(value) => match value.as_i64() {
+            Some(n) => n as i32,
+            None => {
+                tracing::error!(
+                    value = %value,
+                    "max_retries in task_options is not an integer; defaulting to 3 \
+                     (the library writes a typed u32 — this indicates tampering or an \
+                     unmigrated schema change)"
+                );
+                3
+            }
+        },
+    }
 }
 
 #[cfg(test)]
@@ -101,6 +117,19 @@ mod tests {
     fn policy_with_explicit_max_retries() {
         let opts = r#"{"retry_policy": {"max_retries": 5}}"#;
         assert_eq!(parse_max_retries(Some(opts)), 5);
+    }
+
+    #[test]
+    fn non_integer_max_retries_defaults_to_three() {
+        // String, float, and bool are not integers; each falls back to 3
+        // (and logs). The library never writes these — they imply tampering.
+        for opts in [
+            r#"{"retry_policy": {"max_retries": "5"}}"#,
+            r#"{"retry_policy": {"max_retries": 3.5}}"#,
+            r#"{"retry_policy": {"max_retries": true}}"#,
+        ] {
+            assert_eq!(parse_max_retries(Some(opts)), 3);
+        }
     }
 
     #[test]
