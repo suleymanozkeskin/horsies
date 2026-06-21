@@ -102,8 +102,11 @@ async fn initialize_schedules(
 ) -> Result<(), sqlx::Error> {
     let now = Utc::now();
 
-    // Prune stale schedule states (schedules removed from config).
-    // Errors are swallowed so one bad row doesn't block initialization.
+    // Schedule-state rows whose name is absent from this process's config are
+    // left intact, not deleted: another scheduler (rolling deploy, shared DB)
+    // may own them, and deleting would silently stop its schedule. Such rows are
+    // inert here — get_due_schedules only considers configured, enabled names.
+    // Warn for visibility. Parity with horsies PR #101 e26a0f55.
     let configured_names: std::collections::HashSet<&str> =
         schedules.iter().map(|s| s.name.as_str()).collect();
 
@@ -111,26 +114,16 @@ async fn initialize_schedules(
         Ok(all_states) => {
             for row in all_states {
                 if !configured_names.contains(row.schedule_name.as_str()) {
-                    match state::delete_state(pool, &row.schedule_name).await {
-                        Ok(_) => {
-                            tracing::info!(
-                                schedule = %row.schedule_name,
-                                "pruned stale schedule state",
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                schedule = %row.schedule_name,
-                                error = %e,
-                                "failed to prune stale schedule state",
-                            );
-                        }
-                    }
+                    tracing::warn!(
+                        schedule = %row.schedule_name,
+                        "schedule state present in DB but not in this config; \
+                         leaving intact (may belong to another scheduler)",
+                    );
                 }
             }
         }
         Err(e) => {
-            tracing::warn!(error = %e, "failed to fetch schedule states for pruning");
+            tracing::warn!(error = %e, "failed to fetch schedule states for inspection");
         }
     }
 

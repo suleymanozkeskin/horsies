@@ -46,6 +46,7 @@ WHERE schedule_name = ANY($2)
   AND next_run_at <= $1
 ORDER BY next_run_at ASC";
 
+#[allow(dead_code)] // backs delete_state, retained as a state primitive (see e26a0f55).
 const DELETE_STATE_SQL: &str = "\
 DELETE FROM horsies_schedule_state WHERE schedule_name = $1";
 
@@ -121,7 +122,13 @@ pub async fn get_due_schedules_filtered(
         .await
 }
 
-/// Delete the state entry for a schedule (used when a schedule is removed from config).
+/// Delete the state entry for a schedule.
+///
+/// Retained as a state primitive but no longer called at startup: foreign
+/// schedule-state rows are now kept, not pruned (parity with horsies PR #101
+/// e26a0f55), so a rolling deploy / shared DB does not lose another scheduler's
+/// rows.
+#[allow(dead_code)]
 pub async fn delete_state(pool: &PgPool, schedule_name: &str) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(DELETE_STATE_SQL)
         .bind(schedule_name)
