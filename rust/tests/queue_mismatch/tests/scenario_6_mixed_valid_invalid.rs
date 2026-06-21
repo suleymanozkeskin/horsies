@@ -73,6 +73,7 @@ async fn check_fails_if_bad_task_bypassed_register() {
             good_until: None,
             auto_retry_for: None,
             retry_policy: None,
+            timeout_ms: None,
         }),
     );
 

@@ -49,6 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             good_until: None,
             auto_retry_for: Some(vec![TaskErrorCode::User("UNHANDLED_EXCEPTION".to_string())]),
             retry_policy: Some(RetryPolicy::fixed(vec![1, 2, 3], false)?),
+            timeout_ms: None,
         };
 
         let handle = broker
@@ -75,6 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             good_until: None,
             auto_retry_for: Some(vec![TaskErrorCode::User("VALUE_ERROR".to_string())]),
             retry_policy: Some(RetryPolicy::fixed(vec![1, 2], false)?),
+            timeout_ms: None,
         };
 
         let handle = broker
@@ -101,6 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             good_until: None,
             auto_retry_for: Some(vec![TaskErrorCode::User("UNHANDLED_EXCEPTION".to_string())]),
             retry_policy: Some(RetryPolicy::exponential(1, 2, false)?),
+            timeout_ms: None,
         };
 
         let handle = broker
@@ -127,6 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             good_until: None,
             auto_retry_for: Some(vec![TaskErrorCode::User("UNHANDLED_EXCEPTION".to_string())]),
             retry_policy: Some(RetryPolicy::fixed(vec![1, 2, 3], false)?),
+            timeout_ms: None,
         };
 
         let handle = broker

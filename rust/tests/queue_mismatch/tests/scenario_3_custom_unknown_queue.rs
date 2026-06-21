@@ -69,6 +69,7 @@ async fn check_also_catches_unknown_queue_via_raw_register() {
             good_until: None,
             auto_retry_for: None,
             retry_policy: None,
+            timeout_ms: None,
         }),
     );
 

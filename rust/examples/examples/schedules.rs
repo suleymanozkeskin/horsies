@@ -99,6 +99,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             SchedulePattern::Monthly(m) => {
                 format!("monthly day {} at {}", m.day, m.time)
             }
+            SchedulePattern::Cron(cron) => {
+                format!(
+                    "cron ({} min / {} hour terms)",
+                    cron.minute.len(),
+                    cron.hour.len()
+                )
+            }
         };
         eprintln!(
             "  {:20} -> {:25} | {}",
