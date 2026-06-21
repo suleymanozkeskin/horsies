@@ -5,8 +5,8 @@
 use serde::{Deserialize, Serialize};
 
 use horsies::{
-    task, Horsies, HorsiesError, NodeKey, SubWorkflowNode, TaskError, TaskFunction, TaskResult,
-    WorkflowInput, WorkflowSpec, WorkflowSpecBuilder,
+    task, Horsies, HorsiesError, NodeKey, RetryPolicy, SubWorkflowNode, TaskError, TaskFunction,
+    TaskResult, WorkflowInput, WorkflowSpec, WorkflowSpecBuilder,
 };
 
 // =============================================================================
@@ -33,7 +33,7 @@ fn default_one() -> i64 {
     1
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SlowInput {
     pub duration_ms: u64,
 }
@@ -89,6 +89,28 @@ pub async fn slow_task(input: SlowInput) -> Result<String, TaskError> {
 
 pub async fn no_retry_task(_input: ()) -> Result<String, TaskError> {
     Err(TaskError::new("PERMANENT", "not retryable"))
+}
+
+/// Sleeps past its 1s `timeout_ms` so the worker-side deadline fires and the
+/// task fails with `TASK_TIMEOUT` (no retry opt-in). Parity with horsies PR #102.
+#[task("e2e_timeout_sleeper", timeout_ms = 1000)]
+pub async fn timeout_sleeper(input: SlowInput) -> Result<String, TaskError> {
+    tokio::time::sleep(std::time::Duration::from_millis(input.duration_ms)).await;
+    Ok(format!("slept_{}", input.duration_ms))
+}
+
+/// Same deadline, but opts into retry on `TASK_TIMEOUT` (one retry, 1s delay).
+/// It sleeps past the deadline every attempt, so it retries once then exhausts
+/// to FAILED.
+#[task(
+    "e2e_timeout_retry",
+    timeout_ms = 1000,
+    auto_retry_for = ["TASK_TIMEOUT"],
+    retry_policy = RetryPolicy::fixed(vec![1], false).unwrap()
+)]
+pub async fn timeout_retry_sleeper(input: SlowInput) -> Result<String, TaskError> {
+    tokio::time::sleep(std::time::Duration::from_millis(input.duration_ms)).await;
+    Ok(format!("slept_{}", input.duration_ms))
 }
 
 // =============================================================================

@@ -93,6 +93,46 @@ async fn get_retry_count(pool: &PgPool, task_id: &str) -> i32 {
         .unwrap()
 }
 
+/// Enqueue with an explicit task_options JSON string. The low-level broker
+/// enqueue does not apply registry-declared options, so options the worker must
+/// read (timeout_ms, retry_policy) are supplied here — same as `enqueue_with_retry`.
+async fn enqueue_with_options(
+    broker: &PostgresBroker,
+    task_name: &str,
+    kwargs: &str,
+    task_options_json: &str,
+) -> String {
+    broker
+        .enqueue(
+            task_name,
+            None,
+            Some(kwargs),
+            "default",
+            100,
+            None,
+            None,
+            None,
+            Some(task_options_json),
+            &format!("test-{}", uuid::Uuid::new_v4()),
+            None,
+        )
+        .await
+        .unwrap()
+}
+
+/// Get the latest recorded attempt's error_code for a task.
+async fn get_latest_attempt_error_code(pool: &PgPool, task_id: &str) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT error_code FROM horsies_task_attempts \
+         WHERE task_id = $1 ORDER BY attempt DESC LIMIT 1",
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+    .flatten()
+}
+
 fn db_url() -> String {
     db::db_url()
 }
@@ -296,6 +336,85 @@ async fn test_no_retry_for_non_matching() {
     assert_eq!(
         retry_count, 0,
         "no retry should happen for non-matching error code"
+    );
+}
+
+// Parity with horsies PR #102: per-task execution timeout (timeout_ms).
+
+#[tokio::test]
+#[serial]
+async fn test_task_timeout_fails_with_task_timeout() {
+    let pool = pool().await;
+    let broker = broker().await;
+    db::clean_tables(&pool).await;
+
+    let _worker = start_worker(
+        &db_url(),
+        &["--concurrency", "2"],
+        "worker started",
+        Duration::from_secs(10),
+    );
+
+    // timeout_ms 1000 supplied via task_options; body sleeps 5000 ms.
+    let task_id = enqueue_with_options(
+        &broker,
+        "e2e_timeout_sleeper",
+        r#"{"duration_ms": 5000}"#,
+        r#"{"timeout_ms": 1000}"#,
+    )
+    .await;
+    wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(10)).await;
+
+    let result_json = get_result_json(&pool, &task_id).await.unwrap();
+    let result: TaskResult<serde_json::Value> = serde_json::from_str(&result_json).unwrap();
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.error_code.as_ref().map(|c| c.to_string()).as_deref(),
+        Some("TASK_TIMEOUT"),
+    );
+
+    // Attempt row recorded with TASK_TIMEOUT; no retry (not opted in).
+    assert_eq!(
+        get_latest_attempt_error_code(&pool, &task_id).await.as_deref(),
+        Some("TASK_TIMEOUT"),
+    );
+    assert_eq!(get_retry_count(&pool, &task_id).await, 0);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_task_timeout_retry_opt_in() {
+    let pool = pool().await;
+    let broker = broker().await;
+    db::clean_tables(&pool).await;
+
+    let _worker = start_worker(
+        &db_url(),
+        &["--concurrency", "2"],
+        "worker started",
+        Duration::from_secs(10),
+    );
+
+    // Opted into retry on TASK_TIMEOUT (one retry, 1s delay); times out every
+    // attempt, so it retries once then exhausts to FAILED.
+    let task_id = enqueue_with_options(
+        &broker,
+        "e2e_timeout_retry",
+        r#"{"duration_ms": 5000}"#,
+        r#"{"timeout_ms": 1000, "retry_policy": {"max_retries": 1, "intervals": [1], "backoff_strategy": "fixed", "jitter": false, "auto_retry_for": ["TASK_TIMEOUT"]}}"#,
+    )
+    .await;
+    wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(30)).await;
+
+    assert!(
+        get_retry_count(&pool, &task_id).await >= 1,
+        "timeout should have been retried before exhausting",
+    );
+    let result_json = get_result_json(&pool, &task_id).await.unwrap();
+    let result: TaskResult<serde_json::Value> = serde_json::from_str(&result_json).unwrap();
+    assert_eq!(
+        result.unwrap_err().error_code.as_ref().map(|c| c.to_string()).as_deref(),
+        Some("TASK_TIMEOUT"),
     );
 }
 

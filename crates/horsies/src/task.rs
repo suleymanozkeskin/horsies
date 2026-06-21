@@ -510,6 +510,7 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
             good_until: None,
             auto_retry_for: None,
             retry_policy: None,
+            timeout_ms: None,
         });
 
         opts.task_name = self.task_name.clone();
@@ -799,6 +800,7 @@ mod tests {
                 good_until: Some(deadline),
                 auto_retry_for: None,
                 retry_policy: None,
+                timeout_ms: None,
             })
             .register()
             .unwrap_err();
@@ -837,6 +839,7 @@ mod tests {
             good_until: Some(stale),
             auto_retry_for: None,
             retry_policy: None,
+            timeout_ms: None,
         }));
 
         let (good_until, json) = task
@@ -855,6 +858,7 @@ mod tests {
             good_until: None,
             auto_retry_for: Some(vec![TaskErrorCode::User("TRANSIENT".to_owned())]),
             retry_policy: None,
+            timeout_ms: None,
         }));
         let deadline = chrono::Utc::now() + chrono::Duration::minutes(5);
 

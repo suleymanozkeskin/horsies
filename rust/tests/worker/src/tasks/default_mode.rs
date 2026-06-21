@@ -37,6 +37,8 @@ pub fn register(app: &mut Horsies) -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // #[task]-macro tasks (populate global handle for ::node()/::send()).
+    timeout_sleeper::register(app)?;
+    timeout_retry_sleeper::register(app)?;
     wf_step::register(app)?;
     wf_slow_step::register(app)?;
     wf_final_result::register(app)?;

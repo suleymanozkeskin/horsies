@@ -212,10 +212,55 @@ fn parse_auto_retry_for(task_options_json: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Extract `timeout_ms` from a stored task_options JSON string.
+///
+/// Total: any malformed payload, missing field, or out-of-range value yields
+/// `None` (no timeout) with a warning — a timeout must never block a task from
+/// running. A value below the 1000 ms floor is rejected (mirrors the macro's
+/// compile-time minimum). Parity with horsies PR #102 `_parse_timeout_ms`.
+pub fn parse_timeout_ms(task_options_json: Option<&str>) -> Option<u32> {
+    let json_str = task_options_json?;
+    let value = match serde_json::from_str::<serde_json::Value>(json_str) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!(error = %e, "corrupt task_options JSON; ignoring timeout_ms");
+            return None;
+        }
+    };
+    let raw = value.get("timeout_ms")?;
+    match raw.as_u64() {
+        Some(ms) if (1000..=u64::from(u32::MAX)).contains(&ms) => Some(ms as u32),
+        _ => {
+            tracing::warn!(value = %raw, "invalid timeout_ms in task_options; ignoring");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::task::error::{OperationalErrorCode, RetrievalCode};
+
+    #[test]
+    fn parse_timeout_ms_totality() {
+        // Valid.
+        assert_eq!(
+            parse_timeout_ms(Some(r#"{"timeout_ms": 2000}"#)),
+            Some(2000)
+        );
+        // None input / missing field / no options.
+        assert_eq!(parse_timeout_ms(None), None);
+        assert_eq!(parse_timeout_ms(Some(r#"{"retry_policy": {}}"#)), None);
+        // Malformed JSON.
+        assert_eq!(parse_timeout_ms(Some("{not json")), None);
+        // Below the 1000 ms floor.
+        assert_eq!(parse_timeout_ms(Some(r#"{"timeout_ms": 500}"#)), None);
+        // Non-integer / wrong type.
+        assert_eq!(parse_timeout_ms(Some(r#"{"timeout_ms": "2000"}"#)), None);
+        assert_eq!(parse_timeout_ms(Some(r#"{"timeout_ms": 2000.5}"#)), None);
+        assert_eq!(parse_timeout_ms(Some(r#"{"timeout_ms": -1}"#)), None);
+    }
 
     #[test]
     fn fixed_delay_first_attempt() {

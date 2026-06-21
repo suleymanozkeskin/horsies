@@ -798,6 +798,7 @@ mod tests {
                 good_until: None,
                 auto_retry_for: None,
                 retry_policy: Some(RetryPolicy::fixed(vec![60], true).unwrap()),
+                timeout_ms: None,
             }),
         )
         .unwrap();

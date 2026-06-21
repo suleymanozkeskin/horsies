@@ -816,8 +816,9 @@ fn extract_result_ok_type(ty: &Type) -> syn::Result<Type> {
 fn build_task_options_body(attrs: &TaskAttrs) -> TokenStream {
     let has_retry = attrs.retry_policy.is_some();
     let has_auto_retry = attrs.auto_retry_for.is_some();
+    let has_timeout = attrs.timeout_ms.is_some();
 
-    if !has_retry && !has_auto_retry {
+    if !has_retry && !has_auto_retry && !has_timeout {
         return quote! { None };
     }
 
@@ -836,6 +837,19 @@ fn build_task_options_body(attrs: &TaskAttrs) -> TokenStream {
         None => quote! { None },
     };
 
+    let timeout_ms_expr = match &attrs.timeout_ms {
+        // Validated as u32 >= 1000 at parse time; re-emit as a u32-suffixed
+        // literal so TaskOptions.timeout_ms (Option<u32>) types without a cast.
+        Some(lit) => {
+            let value = lit
+                .base10_parse::<u32>()
+                .expect("timeout_ms validated as u32 at parse time");
+            let suffixed = proc_macro2::Literal::u32_suffixed(value);
+            quote! { Some(#suffixed) }
+        }
+        None => quote! { None },
+    };
+
     // task_name and queue_name are normalized by register(), so we use
     // placeholder values here — the builder overwrites them.
     quote! {
@@ -845,6 +859,7 @@ fn build_task_options_body(attrs: &TaskAttrs) -> TokenStream {
             retry_policy: #retry_policy_expr,
             good_until: None,
             auto_retry_for: #auto_retry_for_expr,
+            timeout_ms: #timeout_ms_expr,
         })
     }
 }

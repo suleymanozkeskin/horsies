@@ -68,6 +68,7 @@ pub enum RetrievalCode {
 pub enum OutcomeCode {
     TaskCancelled,
     TaskExpired,
+    TaskTimeout,
     WorkflowPaused,
     WorkflowFailed,
     WorkflowCancelled,
@@ -510,6 +511,8 @@ mod tests {
     fn all_outcome_codes_round_trip() {
         let codes = [
             OutcomeCode::TaskCancelled,
+            OutcomeCode::TaskExpired,
+            OutcomeCode::TaskTimeout,
             OutcomeCode::WorkflowPaused,
             OutcomeCode::WorkflowFailed,
             OutcomeCode::WorkflowCancelled,
@@ -525,6 +528,18 @@ mod tests {
             let back: BuiltInTaskCode = serde_json::from_str(&json).unwrap();
             assert_eq!(back, builtin);
         }
+    }
+
+    #[test]
+    fn task_timeout_code_string_value() {
+        assert_eq!(
+            BuiltInTaskCode::Outcome(OutcomeCode::TaskTimeout).value(),
+            "TASK_TIMEOUT"
+        );
+        assert_eq!(
+            BuiltInTaskCode::parse("TASK_TIMEOUT"),
+            Some(BuiltInTaskCode::Outcome(OutcomeCode::TaskTimeout))
+        );
     }
 
     #[test]

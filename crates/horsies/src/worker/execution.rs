@@ -21,13 +21,13 @@ use tokio_util::sync::CancellationToken;
 use crate::broker::{ClaimedTaskRow, PostgresBroker};
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
-use crate::core::task::error::{OperationalErrorCode, TaskError};
+use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::fn_trait::RegisteredTask;
 use crate::core::task::result::TaskResult;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 
 use crate::worker::heartbeat::spawn_runner_heartbeat;
-use crate::worker::retry::{calculate_retry_delay, should_retry};
+use crate::worker::retry::{calculate_retry_delay, parse_timeout_ms, should_retry};
 
 // Re-export for worker.rs orchestrator.
 pub(crate) use self::parse::parse_workflow_ctx;
@@ -455,15 +455,39 @@ pub(crate) fn build_task_envelope(
 ///
 /// Async tasks are spawned into a new tokio task for cancellation safety.
 /// Blocking tasks use `spawn_blocking` with `catch_unwind` for panic safety.
+///
+/// `timeout` is the per-task `timeout_ms` deadline (if any), measured around
+/// user-code execution. On expiry the task resolves to `OutcomeCode::TaskTimeout`
+/// and the normal finalize path decides fail-vs-retry (via `auto_retry_for`).
+/// Async tasks are aborted on timeout; blocking threads cannot be aborted and
+/// run to completion with their result discarded (see `TaskOptions::timeout_ms`).
 pub(crate) async fn execute_task(
     task_fn: RegisteredTask,
     envelope: Vec<u8>,
+    timeout: Option<Duration>,
 ) -> TaskResult<Vec<u8>> {
     match task_fn {
         RegisteredTask::Async { task: f, .. } => {
-            let handle = tokio::spawn(async move { f.execute(&envelope).await });
-            match handle.await {
+            let mut handle = tokio::spawn(async move { f.execute(&envelope).await });
+            let join = match timeout {
+                Some(dur) => {
+                    tokio::select! {
+                        joined = &mut handle => joined,
+                        _ = tokio::time::sleep(dur) => {
+                            // Cancel the running future at its next await point;
+                            // unlike a blocking thread, an async task is abortable.
+                            handle.abort();
+                            return task_timeout_error(dur);
+                        }
+                    }
+                }
+                None => handle.await,
+            };
+            match join {
                 Ok(r) => r,
+                Err(join_err) if join_err.is_cancelled() => {
+                    task_timeout_error(timeout.unwrap_or_default())
+                }
                 Err(join_err) => TaskResult::Err(TaskError::builtin(
                     OperationalErrorCode::TaskError,
                     format!("async task panicked: {}", join_err),
@@ -474,7 +498,21 @@ pub(crate) async fn execute_task(
             let handle = tokio::task::spawn_blocking(move || {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f.execute(&envelope)))
             });
-            match handle.await {
+            let join = match timeout {
+                Some(dur) => {
+                    tokio::select! {
+                        joined = handle => joined,
+                        _ = tokio::time::sleep(dur) => {
+                            // A blocking thread cannot be aborted in-process: it
+                            // runs to completion and its result is discarded. We
+                            // only stop awaiting it and finalize as TASK_TIMEOUT.
+                            return task_timeout_error(dur);
+                        }
+                    }
+                }
+                None => handle.await,
+            };
+            match join {
                 Ok(Ok(r)) => r,
                 Ok(Err(_panic)) => TaskResult::Err(TaskError::builtin(
                     OperationalErrorCode::TaskError,
@@ -487,6 +525,14 @@ pub(crate) async fn execute_task(
             }
         }
     }
+}
+
+/// Build the `TASK_TIMEOUT` error for a task that exceeded its `timeout_ms`.
+fn task_timeout_error(timeout: Duration) -> TaskResult<Vec<u8>> {
+    TaskResult::Err(TaskError::builtin(
+        OutcomeCode::TaskTimeout,
+        format!("task exceeded timeout_ms={}", timeout.as_millis()),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1224,9 +1270,13 @@ pub(crate) async fn execute_and_finalize(
         hb_cancel.clone(),
     );
 
-    // Phase 1: Build envelope + execute task.
+    // Phase 1: Build envelope + execute task. The deadline (if any) is measured
+    // around user-code execution; on expiry the result is TASK_TIMEOUT and the
+    // finalize path below decides fail-vs-retry via auto_retry_for.
+    let timeout = parse_timeout_ms(row.task_options.as_deref())
+        .map(|ms| Duration::from_millis(u64::from(ms)));
     let result = match build_task_envelope(&row, accepts_workflow_ctx) {
-        Ok(envelope) => execute_task(task_fn, envelope).await,
+        Ok(envelope) => execute_task(task_fn, envelope, timeout).await,
         Err(err) => TaskResult::Err(err),
     };
 

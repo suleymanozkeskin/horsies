@@ -2798,6 +2798,7 @@ mod tests {
                 good_until: None,
                 auto_retry_for: None,
                 retry_policy: None,
+                timeout_ms: None,
             };
             let _handle: TaskHandle<()> = broker
                 .send_task(&resolved, Some("{}"), None, Some(&opts))

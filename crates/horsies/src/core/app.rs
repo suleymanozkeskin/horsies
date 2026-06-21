@@ -1801,6 +1801,7 @@ mod tests {
             good_until: None,
             auto_retry_for: Some(vec![TaskErrorCode::User("STORAGE_ERROR".to_owned())]),
             retry_policy: Some(RetryPolicy::fixed(vec![60, 300, 900], true).unwrap()),
+            timeout_ms: None,
         };
         app.register("retryable_task", registered_with_options(opts))
             .unwrap();
@@ -1861,6 +1862,7 @@ mod tests {
             good_until: None,
             auto_retry_for: Some(vec![TaskErrorCode::User("STORAGE_ERROR".to_owned())]),
             retry_policy: Some(RetryPolicy::fixed(vec![60, 300, 900], true).unwrap()),
+            timeout_ms: None,
         };
         app.register("retryable_task", registered_with_options(opts))
             .unwrap();
@@ -2448,6 +2450,7 @@ mod tests {
             good_until: None,
             auto_retry_for: None,
             retry_policy: Some(RetryPolicy::fixed(vec![60, 300], true).unwrap()),
+            timeout_ms: None,
         };
 
         app.register("retry_me", registered_with_options(opts))
@@ -2469,6 +2472,7 @@ mod tests {
             good_until: None,
             auto_retry_for: Some(Vec::new()),
             retry_policy: None,
+            timeout_ms: None,
         };
 
         app.register("empty_retry_codes", registered_with_options(opts))
@@ -2490,6 +2494,7 @@ mod tests {
                 OperationalErrorCode::BrokerError.to_string(),
             )]),
             retry_policy: Some(RetryPolicy::fixed(vec![60], true).unwrap()),
+            timeout_ms: None,
         };
 
         app.register("collision_task", registered_with_options(opts))
@@ -2512,6 +2517,7 @@ mod tests {
             good_until: None,
             auto_retry_for: None,
             retry_policy: None,
+            timeout_ms: None,
         };
 
         let err = app
@@ -2533,6 +2539,7 @@ mod tests {
             good_until: None,
             auto_retry_for: None,
             retry_policy: None,
+            timeout_ms: None,
         };
 
         let err = app
@@ -2552,6 +2559,7 @@ mod tests {
             good_until: None,
             auto_retry_for: None,
             retry_policy: None,
+            timeout_ms: None,
         };
 
         let err = app
@@ -2571,6 +2579,7 @@ mod tests {
             good_until: None,
             auto_retry_for: None,
             retry_policy: None,
+            timeout_ms: None,
         };
 
         app.register("good_task", registered_with_options(opts))
@@ -2587,6 +2596,7 @@ mod tests {
             good_until: None,
             auto_retry_for: None,
             retry_policy: None,
+            timeout_ms: None,
         };
 
         app.register("no_queue", registered_with_options(opts))
@@ -2607,6 +2617,7 @@ mod tests {
                     good_until: None,
                     auto_retry_for: None,
                     retry_policy: None,
+                    timeout_ms: None,
                 }),
             )
             .unwrap();
@@ -2629,6 +2640,7 @@ mod tests {
             good_until: None,
             auto_retry_for: None,
             retry_policy: None,
+            timeout_ms: None,
         };
         app.register("good_task", registered_with_options(good_opts))
             .unwrap();
@@ -2640,6 +2652,7 @@ mod tests {
             good_until: None,
             auto_retry_for: None,
             retry_policy: None,
+            timeout_ms: None,
         };
         let err = app
             .register("bad_task", registered_with_options(bad_opts))
@@ -2658,6 +2671,7 @@ mod tests {
             good_until: None,
             auto_retry_for: None,
             retry_policy: None,
+            timeout_ms: None,
         };
 
         let err = app
@@ -2677,6 +2691,7 @@ mod tests {
             good_until: None,
             auto_retry_for: Some(vec![TaskErrorCode::User("FETCH_ERROR".to_owned())]),
             retry_policy: Some(RetryPolicy::fixed(vec![60, 300], true).unwrap()),
+            timeout_ms: None,
         };
 
         app.register("valid_retry_task", registered_with_options(opts))

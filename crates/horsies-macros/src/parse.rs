@@ -1,5 +1,8 @@
 use syn::parse::{Parse, ParseStream};
-use syn::{Expr, ExprArray, Ident, LitStr, Token};
+use syn::{Expr, ExprArray, Ident, LitInt, LitStr, Token};
+
+/// Minimum accepted `timeout_ms` (mirrors Python's `Field(ge=1000)`).
+const MIN_TIMEOUT_MS: u32 = 1000;
 
 /// Parsed attributes from `#[horsies::task("name", queue = "...", ...)]`.
 pub struct TaskAttrs {
@@ -11,6 +14,8 @@ pub struct TaskAttrs {
     pub retry_policy: Option<Expr>,
     /// Optional: auto_retry_for list of string codes.
     pub auto_retry_for: Option<ExprArray>,
+    /// Optional: per-task execution timeout in ms (validated >= 1000 here).
+    pub timeout_ms: Option<LitInt>,
     /// Optional: mark this task as accepting workflow context injection.
     pub workflow_ctx: bool,
 }
@@ -23,6 +28,7 @@ impl Parse for TaskAttrs {
         let mut queue = None;
         let mut retry_policy = None;
         let mut auto_retry_for = None;
+        let mut timeout_ms = None;
         let mut workflow_ctx = false;
 
         // Parse optional keyword arguments.
@@ -85,11 +91,28 @@ impl Parse for TaskAttrs {
                     }
                     auto_retry_for = Some(input.parse::<ExprArray>()?);
                 }
+                "timeout_ms" => {
+                    if timeout_ms.is_some() {
+                        return Err(syn::Error::new(
+                            key.span(),
+                            "duplicate `timeout_ms` attribute",
+                        ));
+                    }
+                    let lit = input.parse::<LitInt>()?;
+                    let value = lit.base10_parse::<u32>()?;
+                    if value < MIN_TIMEOUT_MS {
+                        return Err(syn::Error::new(
+                            lit.span(),
+                            format!("`timeout_ms` must be >= {MIN_TIMEOUT_MS} (got {value})"),
+                        ));
+                    }
+                    timeout_ms = Some(lit);
+                }
                 _ => {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
-                            "unknown attribute `{}`; expected one of: queue, retry_policy, auto_retry_for, workflow_ctx",
+                            "unknown attribute `{}`; expected one of: queue, retry_policy, auto_retry_for, timeout_ms, workflow_ctx",
                             key,
                         ),
                     ));
@@ -106,6 +129,7 @@ impl Parse for TaskAttrs {
             queue,
             retry_policy,
             auto_retry_for,
+            timeout_ms,
             workflow_ctx,
         })
     }

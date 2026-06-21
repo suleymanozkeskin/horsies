@@ -173,18 +173,41 @@ pub struct TaskOptions {
     /// Retry timing and backoff configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_policy: Option<RetryPolicy>,
+
+    /// Per-task execution time limit in milliseconds (minimum 1000), measured
+    /// around user-code execution. On expiry the task fails with
+    /// `OutcomeCode::TaskTimeout`; retry is opt-in by listing `"TASK_TIMEOUT"`
+    /// in `auto_retry_for`.
+    ///
+    /// Cancellation semantics differ by task kind:
+    /// - **Async tasks** are aborted at their next `.await` point (cleanly
+    ///   cancelled).
+    /// - **Blocking tasks** (`spawn_blocking`) CANNOT be aborted in-process: the
+    ///   worker stops awaiting the thread and finalizes as `TASK_TIMEOUT`, but
+    ///   the thread runs to completion and its result is discarded. There is no
+    ///   way to forcibly stop synchronous, CPU-bound user code mid-execution
+    ///   inside the process. Use `timeout_ms` on blocking tasks as a
+    ///   finalize-deadline, not a guaranteed-stop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u32>,
 }
 
 impl TaskOptions {
-    /// Serialize only the retry-relevant fields (auto_retry_for, retry_policy)
-    /// into a JSON string suitable for `AnyNode::task_options_json`.
+    /// Serialize the execution-relevant options (auto_retry_for, retry_policy,
+    /// timeout_ms) into a JSON string suitable for `AnyNode::task_options_json`.
     ///
     /// Excludes `task_name`, `queue_name`, and `good_until` to avoid conflicts
     /// with the corresponding `AnyNode` fields that are authoritative for those.
     ///
-    /// Returns `None` if neither `auto_retry_for` nor `retry_policy` is set.
+    /// Returns `None` if none of the carried fields is set. Every carried field
+    /// must be emitted here — a field on `TaskOptions` that is not added to this
+    /// map silently never reaches the DB (the bug horsies PR #102 fixed for
+    /// timeout_ms).
     pub fn serialize_retry_options(&self) -> Option<String> {
-        if self.auto_retry_for.is_none() && self.retry_policy.is_none() {
+        if self.auto_retry_for.is_none()
+            && self.retry_policy.is_none()
+            && self.timeout_ms.is_none()
+        {
             return None;
         }
 
@@ -205,6 +228,13 @@ impl TaskOptions {
             if let Ok(policy_val) = serde_json::to_value(policy) {
                 map.insert("retry_policy".to_owned(), policy_val);
             }
+        }
+
+        if let Some(timeout_ms) = self.timeout_ms {
+            map.insert(
+                "timeout_ms".to_owned(),
+                serde_json::Value::Number(timeout_ms.into()),
+            );
         }
 
         serde_json::to_string(&map).ok()
@@ -283,6 +313,7 @@ mod tests {
             good_until: None,
             auto_retry_for: Some(vec![TaskErrorCode::User("STORAGE_ERROR".to_owned())]),
             retry_policy: Some(RetryPolicy::fixed(vec![60, 300, 900], true).unwrap()),
+            timeout_ms: None,
         };
 
         let json = opts.serialize_retry_options().expect("should produce JSON");
@@ -308,8 +339,26 @@ mod tests {
             good_until: None,
             auto_retry_for: None,
             retry_policy: None,
+            timeout_ms: None,
         };
         assert!(opts.serialize_retry_options().is_none());
+    }
+
+    #[test]
+    fn serialize_retry_options_emits_timeout_ms_alone() {
+        // timeout_ms must reach the wire even with no retry options set — the
+        // bug horsies PR #102 fixed (serializer dropped non-retry fields).
+        let opts = TaskOptions {
+            task_name: "my_task".to_owned(),
+            queue_name: None,
+            good_until: None,
+            auto_retry_for: None,
+            retry_policy: None,
+            timeout_ms: Some(2000),
+        };
+        let json = opts.serialize_retry_options().expect("should produce JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["timeout_ms"], 2000);
     }
 
     // Parity with horsies PR #44: opt-in max retry delay cap.
@@ -357,6 +406,7 @@ mod tests {
             good_until: None,
             auto_retry_for: None,
             retry_policy: Some(policy),
+            timeout_ms: None,
         };
         let json = opts.serialize_retry_options().expect("should produce JSON");
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
