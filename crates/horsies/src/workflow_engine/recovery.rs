@@ -62,7 +62,7 @@ WHERE wt.status = 'PENDING'
   AND NOT EXISTS (
     SELECT 1 FROM horsies_workflow_tasks dep
     WHERE dep.workflow_id = wt.workflow_id
-      AND dep.task_index = ANY(wt.dependencies)
+      AND wt.dependencies @> ARRAY[dep.task_index]
       AND dep.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
   )";
 

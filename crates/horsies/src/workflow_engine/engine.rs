@@ -46,7 +46,7 @@ SELECT task_index, dependencies, args_from, workflow_ctx_from,
        is_subworkflow, sub_workflow_name, sub_definition_key
 FROM horsies_workflow_tasks
 WHERE workflow_id = $1
-  AND $2 = ANY(dependencies)
+  AND dependencies @> ARRAY[$2::INTEGER]
   AND status = 'PENDING'";
 
 const DEP_STATUS_COUNTS_SQL: &str = "\
@@ -132,7 +132,7 @@ WHERE wt.workflow_id = $1
   AND NOT EXISTS (
       SELECT 1 FROM horsies_workflow_tasks other
       WHERE other.workflow_id = wt.workflow_id
-        AND wt.task_index = ANY(other.dependencies)
+        AND other.dependencies @> ARRAY[wt.task_index]
   )";
 
 const UPDATE_WORKFLOW_COMPLETED_SQL: &str = "\
