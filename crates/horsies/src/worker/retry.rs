@@ -139,8 +139,12 @@ fn parse_retry_policy_fields(
     let Some(json_str) = task_options_json else {
         return defaults;
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) else {
-        return defaults;
+    let value = match serde_json::from_str::<serde_json::Value>(json_str) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!(error = %e, "corrupt task_options JSON; using default retry policy");
+            return defaults;
+        }
     };
     let Some(policy) = value.get("retry_policy") else {
         return defaults;
@@ -183,8 +187,12 @@ fn parse_auto_retry_for(task_options_json: Option<&str>) -> Vec<String> {
     let Some(json_str) = task_options_json else {
         return Vec::new();
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) else {
-        return Vec::new();
+    let value = match serde_json::from_str::<serde_json::Value>(json_str) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!(error = %e, "corrupt task_options JSON; using empty auto_retry_for");
+            return Vec::new();
+        }
     };
 
     // Check top-level first, then nested under retry_policy.

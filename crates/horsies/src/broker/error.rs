@@ -82,10 +82,15 @@ pub fn is_retryable_sqlx_error(err: &sqlx::Error) -> bool {
             if let Some(code) = db_err.code() {
                 let code = code.as_ref();
                 // 08xxx = connection exception class
+                // 40P01 = deadlock_detected (one txn is rolled back; safe to retry)
                 // 57P01 = admin_shutdown
                 // 57P02 = crash_shutdown
                 // 57P03 = cannot_connect_now
-                code.starts_with("08") || code == "57P01" || code == "57P02" || code == "57P03"
+                code.starts_with("08")
+                    || code == "40P01"
+                    || code == "57P01"
+                    || code == "57P02"
+                    || code == "57P03"
             } else {
                 false
             }

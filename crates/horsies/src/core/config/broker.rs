@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 /// PostgreSQL broker configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is implemented manually to redact the password in the connection
+/// URLs so structured logs / panics never leak credentials. Parity with
+/// horsies PR #101 f368965c.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PostgresConfig {
     /// PostgreSQL runtime connection URL.
     ///
@@ -52,6 +56,40 @@ pub struct PostgresConfig {
     /// Whether to log SQL statements.
     #[serde(default)]
     pub echo: bool,
+}
+
+/// Redact the password in a `scheme://user:PASS@host/db` URL, leaving the rest
+/// intact for diagnostics. URLs without embedded credentials are returned as-is.
+fn mask_url(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => match rest.split_once('@') {
+            Some((userinfo, host)) => match userinfo.split_once(':') {
+                Some((user, _pass)) => format!("{}://{}:****@{}", scheme, user, host),
+                None => url.to_owned(),
+            },
+            None => url.to_owned(),
+        },
+        None => url.to_owned(),
+    }
+}
+
+impl std::fmt::Debug for PostgresConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PostgresConfig")
+            .field("database_url", &mask_url(&self.database_url))
+            .field(
+                "session_database_url",
+                &self.session_database_url.as_deref().map(mask_url),
+            )
+            .field("pgbouncer_transaction_mode", &self.pgbouncer_transaction_mode)
+            .field("pool_pre_ping", &self.pool_pre_ping)
+            .field("pool_size", &self.pool_size)
+            .field("max_overflow", &self.max_overflow)
+            .field("pool_timeout", &self.pool_timeout)
+            .field("pool_recycle", &self.pool_recycle)
+            .field("echo", &self.echo)
+            .finish()
+    }
 }
 
 fn default_true() -> bool {
@@ -160,6 +198,41 @@ fn is_postgres_url(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mask_url_redacts_password() {
+        assert_eq!(
+            mask_url("postgresql://user:secret@localhost:5432/db"),
+            "postgresql://user:****@localhost:5432/db"
+        );
+    }
+
+    #[test]
+    fn mask_url_leaves_credential_free_urls() {
+        assert_eq!(
+            mask_url("postgresql://localhost:5432/db"),
+            "postgresql://localhost:5432/db"
+        );
+        assert_eq!(mask_url("not a url"), "not a url");
+    }
+
+    #[test]
+    fn debug_does_not_leak_password() {
+        let config = PostgresConfig {
+            database_url: "postgresql://user:topsecret@localhost/db".to_owned(),
+            session_database_url: Some("postgresql://user:topsecret@localhost/db".to_owned()),
+            pgbouncer_transaction_mode: false,
+            pool_pre_ping: true,
+            pool_size: 30,
+            max_overflow: 10,
+            pool_timeout: 30,
+            pool_recycle: 1800,
+            echo: false,
+        };
+        let rendered = format!("{:?}", config);
+        assert!(!rendered.contains("topsecret"), "Debug leaked the password");
+        assert!(rendered.contains("user:****@localhost"));
+    }
 
     #[test]
     fn valid_url() {
