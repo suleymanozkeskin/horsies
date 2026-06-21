@@ -523,7 +523,7 @@ pub(crate) async fn schedule_retry_for_task(
             .await
             .map_err(crate::broker::BrokerError::Database)?;
         let applied = broker
-            .requeue_in_tx(&mut tx, task_id, new_count, Some(next_retry_at))
+            .requeue_in_tx(&mut tx, task_id, new_count, Some(next_retry_at), worker.worker_id)
             .await?;
         if applied {
             broker
@@ -744,7 +744,7 @@ async fn persist_ok_result(
                 .await
                 .map_err(crate::broker::BrokerError::Database)?;
             let applied = broker
-                .complete_in_tx(&mut tx, task_id, Some(&wrapped_json))
+                .complete_in_tx(&mut tx, task_id, Some(&wrapped_json), worker_id)
                 .await?;
             if applied {
                 broker
@@ -803,7 +803,7 @@ async fn persist_ok_result(
                 .await
                 .map_err(crate::broker::BrokerError::Database)?;
             let applied = broker
-                .fail_in_tx(&mut tx, task_id, Some(&wrapped_json), Some(&ser_error_code))
+                .fail_in_tx(&mut tx, task_id, Some(&wrapped_json), Some(&ser_error_code), worker_id)
                 .await?;
             if applied {
                 broker
@@ -883,6 +883,7 @@ async fn persist_err_terminal(
                 task_id,
                 Some(&wrapped_json),
                 error_code_str.as_deref(),
+                worker_id,
             )
             .await?;
         if applied {

@@ -106,6 +106,7 @@ SET status = 'COMPLETED',
     updated_at = NOW()
 WHERE id = $1
   AND status = 'RUNNING'
+  AND claimed_by_worker_id = $3
 RETURNING id";
 
 /// Task failure: sets result and error_code (user/task error path).
@@ -120,6 +121,7 @@ SET status = 'FAILED',
     updated_at = NOW()
 WHERE id = $1
   AND status = 'RUNNING'
+  AND claimed_by_worker_id = $4
 RETURNING id";
 
 /// Worker failure: sets failed_reason, clears error_code (worker crash path).
@@ -134,6 +136,7 @@ SET status = 'FAILED',
     updated_at = NOW()
 WHERE id = $1
   AND status = 'RUNNING'
+  AND claimed_by_worker_id = $3
 RETURNING id";
 
 const CANCEL_SQL: &str = "\
@@ -156,6 +159,7 @@ SET status = 'PENDING',
     updated_at = NOW()
 WHERE id = $1
   AND status = 'RUNNING'
+  AND claimed_by_worker_id = $4
   AND (good_until IS NULL OR $3 < good_until)
 RETURNING id";
 
@@ -1165,10 +1169,12 @@ impl PostgresBroker {
         tx: &mut Transaction<'_, Postgres>,
         task_id: &str,
         result_json: Option<&str>,
+        worker_id: &str,
     ) -> Result<bool, BrokerError> {
         let row: Option<ClaimedId> = sqlx::query_as(COMPLETE_SQL)
             .bind(task_id)
             .bind(result_json)
+            .bind(worker_id)
             .fetch_optional(tx.as_mut())
             .await
             .map_err(BrokerError::Database)?;
@@ -1176,7 +1182,10 @@ impl PostgresBroker {
         if row.is_some() {
             tracing::debug!(task_id, "task completed");
         } else {
-            tracing::warn!(task_id, "task completion skipped: task no longer RUNNING");
+            tracing::warn!(
+                task_id,
+                "task completion skipped: task no longer RUNNING or not owned by this worker"
+            );
         }
         Ok(row.is_some())
     }
@@ -1190,10 +1199,12 @@ impl PostgresBroker {
         &self,
         task_id: &str,
         result_json: Option<&str>,
+        worker_id: &str,
     ) -> Result<bool, BrokerError> {
         let row: Option<ClaimedId> = sqlx::query_as(COMPLETE_SQL)
             .bind(task_id)
             .bind(result_json)
+            .bind(worker_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(BrokerError::Database)?;
@@ -1201,7 +1212,10 @@ impl PostgresBroker {
         if row.is_some() {
             tracing::debug!(task_id, "task completed");
         } else {
-            tracing::warn!(task_id, "task completion skipped: task no longer RUNNING");
+            tracing::warn!(
+                task_id,
+                "task completion skipped: task no longer RUNNING or not owned by this worker"
+            );
         }
         Ok(row.is_some())
     }
@@ -1213,11 +1227,13 @@ impl PostgresBroker {
         task_id: &str,
         result_json: Option<&str>,
         error_code: Option<&str>,
+        worker_id: &str,
     ) -> Result<bool, BrokerError> {
         let row: Option<ClaimedId> = sqlx::query_as(FAIL_TASK_SQL)
             .bind(task_id)
             .bind(result_json)
             .bind(error_code)
+            .bind(worker_id)
             .fetch_optional(tx.as_mut())
             .await
             .map_err(BrokerError::Database)?;
@@ -1225,7 +1241,10 @@ impl PostgresBroker {
         if row.is_some() {
             tracing::debug!(task_id, "task failed");
         } else {
-            tracing::warn!(task_id, "task failure skipped: task no longer RUNNING");
+            tracing::warn!(
+                task_id,
+                "task failure skipped: task no longer RUNNING or not owned by this worker"
+            );
         }
         Ok(row.is_some())
     }
@@ -1239,11 +1258,13 @@ impl PostgresBroker {
         task_id: &str,
         result_json: Option<&str>,
         error_code: Option<&str>,
+        worker_id: &str,
     ) -> Result<bool, BrokerError> {
         let row: Option<ClaimedId> = sqlx::query_as(FAIL_TASK_SQL)
             .bind(task_id)
             .bind(result_json)
             .bind(error_code)
+            .bind(worker_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(BrokerError::Database)?;
@@ -1251,7 +1272,10 @@ impl PostgresBroker {
         if row.is_some() {
             tracing::debug!(task_id, "task failed");
         } else {
-            tracing::warn!(task_id, "task failure skipped: task no longer RUNNING");
+            tracing::warn!(
+                task_id,
+                "task failure skipped: task no longer RUNNING or not owned by this worker"
+            );
         }
         Ok(row.is_some())
     }
@@ -1264,10 +1288,12 @@ impl PostgresBroker {
         &self,
         task_id: &str,
         failed_reason: &str,
+        worker_id: &str,
     ) -> Result<bool, BrokerError> {
         let row: Option<ClaimedId> = sqlx::query_as(FAIL_WORKER_SQL)
             .bind(task_id)
             .bind(failed_reason)
+            .bind(worker_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(BrokerError::Database)?;
@@ -1275,7 +1301,10 @@ impl PostgresBroker {
         if row.is_some() {
             tracing::debug!(task_id, "task failed (worker crash)");
         } else {
-            tracing::warn!(task_id, "worker failure skipped: task no longer RUNNING");
+            tracing::warn!(
+                task_id,
+                "worker failure skipped: task no longer RUNNING or not owned by this worker"
+            );
         }
         Ok(row.is_some())
     }
@@ -1302,11 +1331,13 @@ impl PostgresBroker {
         task_id: &str,
         retry_count: i32,
         next_retry_at: Option<DateTime<Utc>>,
+        worker_id: &str,
     ) -> Result<bool, BrokerError> {
         let row: Option<ClaimedId> = sqlx::query_as(REQUEUE_SQL)
             .bind(task_id)
             .bind(retry_count)
             .bind(next_retry_at)
+            .bind(worker_id)
             .fetch_optional(tx.as_mut())
             .await
             .map_err(BrokerError::Database)?;
@@ -1314,7 +1345,10 @@ impl PostgresBroker {
         if row.is_some() {
             tracing::debug!(task_id, retry_count, "task requeued");
         } else {
-            tracing::warn!(task_id, "task requeue skipped: task no longer RUNNING");
+            tracing::warn!(
+                task_id,
+                "task requeue skipped: task no longer RUNNING or not owned by this worker"
+            );
         }
         Ok(row.is_some())
     }
@@ -1329,11 +1363,13 @@ impl PostgresBroker {
         task_id: &str,
         retry_count: i32,
         next_retry_at: Option<DateTime<Utc>>,
+        worker_id: &str,
     ) -> Result<bool, BrokerError> {
         let row: Option<ClaimedId> = sqlx::query_as(REQUEUE_SQL)
             .bind(task_id)
             .bind(retry_count)
             .bind(next_retry_at)
+            .bind(worker_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(BrokerError::Database)?;
@@ -1341,7 +1377,10 @@ impl PostgresBroker {
         if row.is_some() {
             tracing::debug!(task_id, retry_count, "task requeued");
         } else {
-            tracing::warn!(task_id, "task requeue skipped: task no longer RUNNING");
+            tracing::warn!(
+                task_id,
+                "task requeue skipped: task no longer RUNNING or not owned by this worker"
+            );
         }
         Ok(row.is_some())
     }

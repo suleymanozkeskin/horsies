@@ -138,13 +138,13 @@ WHERE wt.workflow_id = $1
 const UPDATE_WORKFLOW_COMPLETED_SQL: &str = "\
 UPDATE horsies_workflows
 SET status = 'COMPLETED', result = $2, completed_at = NOW(), updated_at = NOW()
-WHERE id = $1 AND completed_at IS NULL
+WHERE id = $1 AND status = 'RUNNING' AND completed_at IS NULL
 RETURNING id";
 
 const UPDATE_WORKFLOW_FAILED_SQL: &str = "\
 UPDATE horsies_workflows
 SET status = 'FAILED', result = $2, error = COALESCE($3, error), completed_at = NOW(), updated_at = NOW()
-WHERE id = $1 AND completed_at IS NULL
+WHERE id = $1 AND status = 'RUNNING' AND completed_at IS NULL
 RETURNING id";
 
 const GET_PARENT_WORKFLOW_SQL: &str = "\
@@ -1366,14 +1366,19 @@ fn check_workflow_completion_inner<'a>(
             return Ok(()); // Still has non-terminal tasks.
         }
 
-        // PAUSED guard: don't finalize if workflow is paused (waiting for manual
-        // intervention). Matches Python's check in _check_workflow_completion.
+        // Only a RUNNING workflow may be finalized. PAUSED waits for manual
+        // intervention; CANCELLED/COMPLETED/FAILED are terminal — a late task
+        // completion must not resurrect them. (Rust sets completed_at on cancel,
+        // so the completed_at guard on the mark SQL already blocks resurrection;
+        // this short-circuit additionally avoids wasted finalize work on a
+        // terminal workflow. Matches Python PR #101 ed61c3a2.)
         let status_row: Option<WorkflowStatusRow> = sqlx::query_as(GET_WORKFLOW_STATUS_SQL)
             .bind(workflow_id)
             .fetch_optional(&mut *tx)
             .await?;
-        if let Some(ref row) = status_row {
-            if row.status == "PAUSED" {
+        match status_row {
+            Some(ref row) if row.status == "RUNNING" => {}
+            _ => {
                 tx.commit().await?;
                 return Ok(());
             }

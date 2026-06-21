@@ -1381,6 +1381,135 @@ mod tests {
         assert_eq!(attempt_error_code, None);
     }
 
+    /// Insert a RUNNING task owned by a specific worker, simulating a task that
+    /// was reaper-requeued and re-claimed (then set RUNNING) by another worker.
+    async fn insert_running_task_owned_by(pool: &PgPool, task_id: &str, owner: &str) {
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, args, kwargs, status,
+                sent_at, started_at, created_at, updated_at, claimed,
+                claimed_by_worker_id, retry_count, max_retries, enqueue_sha
+            ) VALUES (
+                $1, 'finalize_test', 'default', 100, '[]', '{}', 'RUNNING',
+                NOW(), NOW(), NOW(), NOW(), FALSE,
+                $2, 0, 3,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+            )",
+        )
+        .bind(task_id)
+        .bind(owner)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// A stale finalizer (its task was reclaimed and re-run by another worker)
+    /// must not clobber the new owner's in-flight RUNNING attempt. The
+    /// `status='RUNNING'` guard alone is insufficient — the re-claimed task is
+    /// RUNNING again — so the ownership guard (`claimed_by_worker_id = $wid`) is
+    /// load-bearing. Parity with horsies PR #101 dc2cbbd6.
+    #[tokio::test]
+    #[serial]
+    async fn finalize_primitives_reject_stale_owner_and_accept_current_owner() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+
+        // complete: stale owner rejected, current owner applies.
+        let t_complete = Uuid::new_v4().to_string();
+        insert_running_task_owned_by(&pool, &t_complete, "worker-2").await;
+        assert!(
+            !broker.complete(&t_complete, Some("{}"), "worker-1").await.unwrap(),
+            "stale owner must not complete the re-claimed task"
+        );
+        assert_eq!(fetch_task_state(&pool, &t_complete).await.0, "RUNNING");
+        assert!(
+            broker.complete(&t_complete, Some("{}"), "worker-2").await.unwrap(),
+            "current owner must complete its own task"
+        );
+        assert_eq!(fetch_task_state(&pool, &t_complete).await.0, "COMPLETED");
+
+        // fail: stale owner rejected, current owner applies.
+        let t_fail = Uuid::new_v4().to_string();
+        insert_running_task_owned_by(&pool, &t_fail, "worker-2").await;
+        assert!(
+            !broker.fail(&t_fail, Some("{}"), Some("X"), "worker-1").await.unwrap(),
+            "stale owner must not fail the re-claimed task"
+        );
+        assert_eq!(fetch_task_state(&pool, &t_fail).await.0, "RUNNING");
+        assert!(broker.fail(&t_fail, Some("{}"), Some("X"), "worker-2").await.unwrap());
+        assert_eq!(fetch_task_state(&pool, &t_fail).await.0, "FAILED");
+
+        // requeue: stale owner rejected, current owner applies.
+        let t_requeue = Uuid::new_v4().to_string();
+        insert_running_task_owned_by(&pool, &t_requeue, "worker-2").await;
+        assert!(
+            !broker.requeue(&t_requeue, 1, Some(Utc::now()), "worker-1").await.unwrap(),
+            "stale owner must not requeue the re-claimed task"
+        );
+        assert_eq!(fetch_task_state(&pool, &t_requeue).await.0, "RUNNING");
+        assert!(broker.requeue(&t_requeue, 1, Some(Utc::now()), "worker-2").await.unwrap());
+        assert_eq!(fetch_task_state(&pool, &t_requeue).await.0, "PENDING");
+
+        // fail_worker: stale owner rejected, current owner applies.
+        let t_worker = Uuid::new_v4().to_string();
+        insert_running_task_owned_by(&pool, &t_worker, "worker-2").await;
+        assert!(
+            !broker.fail_worker(&t_worker, "crash", "worker-1").await.unwrap(),
+            "stale owner must not worker-fail the re-claimed task"
+        );
+        assert_eq!(fetch_task_state(&pool, &t_worker).await.0, "RUNNING");
+        assert!(broker.fail_worker(&t_worker, "crash", "worker-2").await.unwrap());
+        assert_eq!(fetch_task_state(&pool, &t_worker).await.0, "FAILED");
+    }
+
+    /// A late task completion must not resurrect a terminal (CANCELLED) workflow.
+    /// Rust sets `completed_at` on cancel, so the `completed_at IS NULL` guard
+    /// already blocks resurrection; this test forces `completed_at = NULL` to
+    /// exercise the `status='RUNNING'` short-circuit independently. Parity with
+    /// horsies PR #101 ed61c3a2.
+    #[tokio::test]
+    #[serial]
+    async fn check_completion_does_not_resurrect_cancelled_workflow() {
+        let pool = test_pool().await;
+        clean(&pool).await;
+
+        let task_id = Uuid::new_v4().to_string();
+        insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
+        let workflow_id = link_task_to_workflow(&pool, &task_id, Some(0)).await;
+
+        // Drive the single node terminal so the non-terminal count is zero.
+        sqlx::query("UPDATE horsies_workflow_tasks SET status = 'COMPLETED', result = '{}', completed_at = NOW() WHERE workflow_id = $1")
+            .bind(&workflow_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE horsies_tasks SET status = 'COMPLETED', result = '{}' WHERE id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Terminal workflow with completed_at deliberately NULL: only the
+        // status guard can prevent resurrection here.
+        sqlx::query("UPDATE horsies_workflows SET status = 'CANCELLED', completed_at = NULL WHERE id = $1")
+            .bind(&workflow_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let registry = WorkflowSpecRegistry::new();
+        crate::workflow_engine::engine::check_workflow_completion(&pool, &workflow_id, &registry)
+            .await
+            .unwrap();
+
+        let (workflow_status, _) = fetch_workflow_state(&pool, &workflow_id).await;
+        assert_eq!(
+            workflow_status, "CANCELLED",
+            "a late completion must not resurrect a CANCELLED workflow"
+        );
+    }
+
     #[tokio::test]
     #[serial]
     async fn finalize_success_advances_workflow_end_to_end() {
