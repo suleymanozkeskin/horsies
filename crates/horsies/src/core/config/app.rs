@@ -115,7 +115,7 @@ impl AppConfig {
     ///     custom_queues: Some(vec![CustomQueueConfig {
     ///         name: "critical".into(),
     ///         priority: 1,
-    ///         max_concurrency: 10,
+    ///         max_concurrency: Some(10),
     ///     }]),
     ///     ..AppConfig::for_database_url("postgresql://localhost/mydb")
     /// };
@@ -152,9 +152,13 @@ impl AppConfig {
         if let (QueueMode::Custom, Some(ref queues)) = (self.queue_mode, &self.custom_queues) {
             lines.push("  custom_queues:".to_owned());
             for queue in queues {
+                let concurrency_label = match queue.max_concurrency {
+                    Some(n) => n.to_string(),
+                    None => "uncapped".to_owned(),
+                };
                 lines.push(format!(
                     "    - {} (priority={}, max_concurrency={})",
-                    queue.name, queue.priority, queue.max_concurrency,
+                    queue.name, queue.priority, concurrency_label,
                 ));
             }
         }
@@ -460,7 +464,7 @@ mod tests {
             custom_queues: Some(vec![CustomQueueConfig {
                 name: "high".to_owned(),
                 priority: 1,
-                max_concurrency: 5,
+                max_concurrency: Some(5),
             }]),
             broker: valid_broker(),
             cluster_wide_cap: None,
@@ -571,7 +575,7 @@ mod tests {
             custom_queues: Some(vec![CustomQueueConfig {
                 name: "bad".to_owned(),
                 priority: 0,
-                max_concurrency: 5,
+                max_concurrency: Some(5),
             }]),
             broker: valid_broker(),
             cluster_wide_cap: None,
@@ -598,7 +602,7 @@ mod tests {
             custom_queues: Some(vec![CustomQueueConfig {
                 name: "over".to_owned(),
                 priority: 101,
-                max_concurrency: 5,
+                max_concurrency: Some(5),
             }]),
             broker: valid_broker(),
             cluster_wide_cap: None,
@@ -826,12 +830,12 @@ mod tests {
             CustomQueueConfig {
                 name: "q1".to_owned(),
                 priority: 1,
-                max_concurrency: 5,
+                max_concurrency: Some(5),
             },
             CustomQueueConfig {
                 name: "q1".to_owned(),
                 priority: 2,
-                max_concurrency: 10,
+                max_concurrency: Some(10),
             },
         ]);
         let errors = config.validate();
@@ -846,12 +850,12 @@ mod tests {
             CustomQueueConfig {
                 name: "high".to_owned(),
                 priority: 1,
-                max_concurrency: 5,
+                max_concurrency: Some(5),
             },
             CustomQueueConfig {
                 name: "low".to_owned(),
                 priority: 50,
-                max_concurrency: 10,
+                max_concurrency: Some(10),
             },
         ]);
         assert!(config.validate().is_empty());
@@ -923,11 +927,25 @@ mod tests {
         config.custom_queues = Some(vec![CustomQueueConfig {
             name: "high".to_owned(),
             priority: 1,
-            max_concurrency: 5,
+            max_concurrency: Some(5),
         }]);
         let output = config.format_for_logging();
         assert!(output.contains("queue_mode: CUSTOM"));
         assert!(output.contains("high"));
+    }
+
+    #[test]
+    fn format_for_logging_uncapped_queue_labelled() {
+        let mut config = default_config();
+        config.queue_mode = QueueMode::Custom;
+        config.custom_queues = Some(vec![CustomQueueConfig {
+            name: "bulk".to_owned(),
+            priority: 1,
+            max_concurrency: None,
+        }]);
+        let output = config.format_for_logging();
+        assert!(output.contains("max_concurrency=uncapped"));
+        assert!(!output.contains("max_concurrency=None"));
     }
 
     #[test]

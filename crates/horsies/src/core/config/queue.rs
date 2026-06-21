@@ -21,9 +21,15 @@ pub struct CustomQueueConfig {
     /// Queue priority (1 = first executed, 100 = last).
     #[serde(default = "default_priority")]
     pub priority: u32,
-    /// Max concurrent tasks for this queue.
+    /// Max concurrent tasks for this queue (app- and cluster-level caps still apply).
+    ///
+    /// `None` is the explicit uncapped sentinel (mirrors `cluster_wide_cap=None`):
+    /// the queue is omitted from the worker's per-queue concurrency map, so the
+    /// claim pass enforces no per-queue limit and skips that queue's in-flight
+    /// count query entirely. `Some(0)` is valid and pauses claiming from the
+    /// queue. Defaults to `Some(5)`.
     #[serde(default = "default_max_concurrency")]
-    pub max_concurrency: u32,
+    pub max_concurrency: Option<u32>,
 }
 
 /// Validation error for CustomQueueConfig.
@@ -63,8 +69,8 @@ fn default_priority() -> u32 {
     1
 }
 
-fn default_max_concurrency() -> u32 {
-    5
+fn default_max_concurrency() -> Option<u32> {
+    Some(5)
 }
 
 #[cfg(test)]
@@ -86,7 +92,22 @@ mod tests {
         let config: CustomQueueConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.name, "high");
         assert_eq!(config.priority, 1);
-        assert_eq!(config.max_concurrency, 5);
+        assert_eq!(config.max_concurrency, Some(5));
+    }
+
+    #[test]
+    fn max_concurrency_none_deserializes() {
+        let json = r#"{"name": "bulk", "max_concurrency": null}"#;
+        let config: CustomQueueConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.max_concurrency, None);
+    }
+
+    #[test]
+    fn max_concurrency_zero_accepted() {
+        let json = r#"{"name": "drained", "max_concurrency": 0}"#;
+        let config: CustomQueueConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.max_concurrency, Some(0));
+        assert!(config.validate().is_empty());
     }
 
     #[test]
@@ -94,7 +115,7 @@ mod tests {
         let config = CustomQueueConfig {
             name: "fast".to_owned(),
             priority: 1,
-            max_concurrency: 10,
+            max_concurrency: Some(10),
         };
         assert!(config.validate().is_empty());
     }
@@ -104,7 +125,7 @@ mod tests {
         let config = CustomQueueConfig {
             name: "slow".to_owned(),
             priority: 100,
-            max_concurrency: 5,
+            max_concurrency: Some(5),
         };
         assert!(config.validate().is_empty());
     }
@@ -114,7 +135,7 @@ mod tests {
         let config = CustomQueueConfig {
             name: "bad".to_owned(),
             priority: 0,
-            max_concurrency: 5,
+            max_concurrency: Some(5),
         };
         let errors = config.validate();
         assert_eq!(errors.len(), 1);
@@ -129,7 +150,7 @@ mod tests {
         let config = CustomQueueConfig {
             name: "bad".to_owned(),
             priority: 101,
-            max_concurrency: 5,
+            max_concurrency: Some(5),
         };
         let errors = config.validate();
         assert_eq!(errors.len(), 1);
@@ -144,7 +165,7 @@ mod tests {
         let config = CustomQueueConfig {
             name: "".to_owned(),
             priority: 1,
-            max_concurrency: 5,
+            max_concurrency: Some(5),
         };
         let errors = config.validate();
         assert_eq!(errors.len(), 1);

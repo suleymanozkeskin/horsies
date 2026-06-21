@@ -863,7 +863,7 @@ mod tests {
             custom_queues: Some(vec![crate::core::CustomQueueConfig {
                 name: "critical".into(),
                 priority: 1,
-                max_concurrency: 10,
+                max_concurrency: Some(10),
             }]),
             ..valid_config()
         };
@@ -1204,7 +1204,7 @@ mod tests {
             custom_queues: Some(vec![crate::core::CustomQueueConfig {
                 name: "critical".into(),
                 priority: 1,
-                max_concurrency: 10,
+                max_concurrency: Some(10),
             }]),
             ..valid_config()
         };
@@ -1223,7 +1223,7 @@ mod tests {
             custom_queues: Some(vec![crate::core::CustomQueueConfig {
                 name: "critical".into(),
                 priority: 1,
-                max_concurrency: 10,
+                max_concurrency: Some(10),
             }]),
             ..valid_config()
         };

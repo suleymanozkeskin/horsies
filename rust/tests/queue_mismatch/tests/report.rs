@@ -47,12 +47,12 @@ fn custom_config() -> AppConfig {
             CustomQueueConfig {
                 name: "fast".to_owned(),
                 priority: 1,
-                max_concurrency: 10,
+                max_concurrency: Some(10),
             },
             CustomQueueConfig {
                 name: "slow".to_owned(),
                 priority: 50,
-                max_concurrency: 5,
+                max_concurrency: Some(5),
             },
         ]),
         broker: broker(),
@@ -222,6 +222,7 @@ async fn print_report() {
                 good_until: None,
                 auto_retry_for: None,
                 retry_policy: None,
+                timeout_ms: None,
             }),
         );
         match raw {

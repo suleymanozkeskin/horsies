@@ -36,17 +36,17 @@ fn config() -> AppConfig {
             CustomQueueConfig {
                 name: "urgent".into(),
                 priority: 1,
-                max_concurrency: 10,
+                max_concurrency: Some(10),
             },
             CustomQueueConfig {
                 name: "standard".into(),
                 priority: 50,
-                max_concurrency: 20,
+                max_concurrency: Some(20),
             },
             CustomQueueConfig {
                 name: "low".into(),
                 priority: 100,
-                max_concurrency: 5,
+                max_concurrency: Some(5),
             },
         ]),
         ..common::app_config(&common::db_url())

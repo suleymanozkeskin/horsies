@@ -1841,12 +1841,12 @@ async fn test_workflow_recovers_after_worker_crash() {
         horsies::CustomQueueConfig {
             name: "default".to_owned(),
             priority: 1,
-            max_concurrency: 5,
+            max_concurrency: Some(5),
         },
         horsies::CustomQueueConfig {
             name: "recovery".to_owned(),
             priority: 1,
-            max_concurrency: 1,
+            max_concurrency: Some(1),
         },
     ]);
     let wf_id = start_wf_with_config(&pool, &spec, app_config).await;

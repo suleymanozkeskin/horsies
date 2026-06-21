@@ -82,12 +82,19 @@ impl WorkerConfig {
     /// For each custom queue defined in `app_config.custom_queues`, inserts
     /// `max_concurrency` and `priority` into this worker's maps if not already
     /// set (i.e. does not override explicit worker-level overrides).
+    ///
+    /// An uncapped queue (`max_concurrency = None`) is omitted from the
+    /// concurrency map: the claim pass only counts and limits queues present in
+    /// it, so an absent key is genuinely uncapped (no per-queue limit, no
+    /// in-flight count query). Priority is still recorded.
     pub fn apply_queue_config(&mut self, app_config: &AppConfig) {
         if let Some(ref queues) = app_config.custom_queues {
             for q in queues {
-                self.queue_max_concurrency
-                    .entry(q.name.clone())
-                    .or_insert(q.max_concurrency);
+                if let Some(cap) = q.max_concurrency {
+                    self.queue_max_concurrency
+                        .entry(q.name.clone())
+                        .or_insert(cap);
+                }
                 self.queue_priorities
                     .entry(q.name.clone())
                     .or_insert(q.priority as i32);
@@ -158,12 +165,12 @@ mod tests {
                 CustomQueueConfig {
                     name: "fast".to_owned(),
                     priority: 1,
-                    max_concurrency: 10,
+                    max_concurrency: Some(10),
                 },
                 CustomQueueConfig {
                     name: "slow".to_owned(),
                     priority: 50,
-                    max_concurrency: 5,
+                    max_concurrency: Some(5),
                 },
             ]),
             broker: PostgresConfig {
@@ -199,6 +206,35 @@ mod tests {
         assert_eq!(worker.queue_priorities.get("slow"), Some(&50));
         assert_eq!(worker.queue_max_concurrency.get("fast"), Some(&10));
         assert_eq!(worker.queue_max_concurrency.get("slow"), Some(&5));
+    }
+
+    #[test]
+    fn apply_queue_config_omits_uncapped_queue() {
+        use crate::core::CustomQueueConfig;
+
+        let mut app_config = app_config_with_custom_queues();
+        // A capped queue plus an uncapped one (max_concurrency = None).
+        app_config.custom_queues = Some(vec![
+            CustomQueueConfig {
+                name: "fast".to_owned(),
+                priority: 1,
+                max_concurrency: Some(10),
+            },
+            CustomQueueConfig {
+                name: "bulk".to_owned(),
+                priority: 2,
+                max_concurrency: None,
+            },
+        ]);
+
+        let mut worker = WorkerConfig::default();
+        worker.apply_queue_config(&app_config);
+
+        // Uncapped queue keeps its priority but is absent from the concurrency map.
+        assert_eq!(worker.queue_priorities.get("bulk"), Some(&2));
+        assert!(!worker.queue_max_concurrency.contains_key("bulk"));
+        // Capped sibling is still mapped.
+        assert_eq!(worker.queue_max_concurrency.get("fast"), Some(&10));
     }
 
     #[test]

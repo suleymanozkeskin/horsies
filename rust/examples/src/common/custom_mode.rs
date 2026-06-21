@@ -22,17 +22,17 @@ pub fn app_config(db_url: &str) -> AppConfig {
             CustomQueueConfig {
                 name: HIGH.to_string(),
                 priority: 1,
-                max_concurrency: 32,
+                max_concurrency: Some(32),
             },
             CustomQueueConfig {
                 name: NORMAL.to_string(),
                 priority: 50,
-                max_concurrency: 40,
+                max_concurrency: Some(40),
             },
             CustomQueueConfig {
                 name: LOW.to_string(),
                 priority: 90,
-                max_concurrency: 48,
+                max_concurrency: Some(48),
             },
         ]),
         cluster_wide_cap: Some(50),
