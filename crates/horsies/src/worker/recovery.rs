@@ -27,6 +27,10 @@ LEFT JOIN LATERAL (
 ) hb ON TRUE
 WHERE t.status = 'RUNNING'
   AND t.started_at IS NOT NULL
+  AND (
+      t.finalizing_at IS NULL
+      OR t.finalizing_at < NOW() - $2 * INTERVAL '1 second'
+  )
   AND COALESCE(hb.last_heartbeat, t.started_at) < NOW() - $1 * INTERVAL '1 second'";
 
 /// SQL: Phase 2 per-task — re-acquire row with full context for retry eligibility.
@@ -46,6 +50,10 @@ SELECT
     clock_timestamp() AS db_now
 FROM horsies_tasks t
 WHERE t.id = $1 AND t.status = 'RUNNING'
+  AND (
+      t.finalizing_at IS NULL
+      OR t.finalizing_at < NOW() - $3 * INTERVAL '1 second'
+  )
   AND NOT EXISTS (
     SELECT 1 FROM horsies_heartbeats
     WHERE task_id = t.id AND role = 'runner'
@@ -67,6 +75,8 @@ SET status = 'PENDING',
     claimed_at = NULL,
     claimed_by_worker_id = NULL,
     claim_expires_at = NULL,
+    finalizing_at = NULL,
+    finalizing_by_worker_id = NULL,
     updated_at = NOW()
 WHERE id = $1
   AND status = 'RUNNING'
@@ -80,6 +90,8 @@ SET status = 'FAILED',
     failed_reason = $2,
     result = $3,
     error_code = $4,
+    finalizing_at = NULL,
+    finalizing_by_worker_id = NULL,
     updated_at = NOW()
 WHERE id = $1
 AND status = 'RUNNING'";
@@ -203,7 +215,15 @@ pub fn spawn_reaper(
                     if config.auto_fail_stale_running {
                         let threshold_secs =
                             config.running_stale_threshold_ms as f64 / 1000.0;
-                        match mark_stale_running_as_failed(&pool, threshold_secs).await {
+                        let finalizing_threshold_secs =
+                            config.finalizing_stale_threshold_ms as f64 / 1000.0;
+                        match mark_stale_running_as_failed(
+                            &pool,
+                            threshold_secs,
+                            finalizing_threshold_secs,
+                        )
+                        .await
+                        {
                             Ok(count) if count > 0 => {
                                 tracing::warn!(count, "reaper marked stale RUNNING tasks as FAILED");
                             }
@@ -264,10 +284,13 @@ pub fn spawn_reaper(
 pub async fn mark_stale_running_as_failed(
     pool: &PgPool,
     threshold_secs: f64,
+    finalizing_threshold_secs: f64,
 ) -> Result<u64, sqlx::Error> {
-    // Phase 1: Scan for stale task IDs (no row locks).
+    // Phase 1: Scan for stale task IDs (no row locks). A task that is actively
+    // finalizing (finalizing_at set within finalizing_threshold_secs) is skipped.
     let stale_ids: Vec<StaleTaskId> = sqlx::query_as(FIND_STALE_RUNNING_IDS_SQL)
         .bind(threshold_secs)
+        .bind(finalizing_threshold_secs)
         .fetch_all(pool)
         .await?;
 
@@ -285,6 +308,7 @@ pub async fn mark_stale_running_as_failed(
             pool,
             &stale.id,
             threshold_secs,
+            finalizing_threshold_secs,
             threshold_ms,
             &error_code_str,
         )
@@ -311,16 +335,19 @@ async fn process_single_stale_task(
     pool: &PgPool,
     task_id: &str,
     threshold_secs: f64,
+    finalizing_threshold_secs: f64,
     threshold_ms: u64,
     error_code_str: &str,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
     // Re-acquire row with full context. Returns None if the task is no longer
-    // RUNNING or if a fresh heartbeat arrived after the Phase 1 scan.
+    // RUNNING, if a fresh heartbeat arrived after the Phase 1 scan, or if the
+    // task is actively finalizing within finalizing_threshold_secs.
     let ctx: Option<StaleTaskContext> = sqlx::query_as(SELECT_STALE_TASK_FOR_UPDATE_SQL)
         .bind(task_id)
         .bind(threshold_secs)
+        .bind(finalizing_threshold_secs)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -630,4 +657,133 @@ pub fn spawn_workflow_recovery(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use uuid::Uuid;
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|p| p.join(".env").exists());
+        if let Some(root) = root {
+            if let Ok(contents) = std::fs::read_to_string(root.join(".env")) {
+                for line in contents.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    if let Some((key, value)) = line.split_once('=') {
+                        if key.trim() == "DB_PASSWORD" {
+                            return format!(
+                                "postgresql://postgres:{}@localhost:5432/horsies-rust-port",
+                                value.trim(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        panic!("database URL not found: set DATABASE_URL or add DB_PASSWORD to .env");
+    }
+
+    async fn test_pool() -> PgPool {
+        let pool = PgPool::connect(&test_db_url()).await.expect("connect");
+        crate::broker::migrations::run_horsies_migrations(&pool)
+            .await
+            .expect("migrations");
+        pool
+    }
+
+    /// Insert a RUNNING task whose runner heartbeat is already stale, with the
+    /// given `finalizing_at` (NULL or a timestamp).
+    async fn insert_stale_running_task(pool: &PgPool, task_id: &str, finalizing_at_sql: &str) {
+        let sql = format!(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, args, kwargs, status,
+                sent_at, started_at, created_at, updated_at, claimed,
+                claimed_by_worker_id, retry_count, max_retries, enqueue_sha,
+                finalizing_at
+            ) VALUES (
+                $1, 'reaper_test', 'default', 100, '[]', '{{}}', 'RUNNING',
+                NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour', NOW(), NOW(), TRUE,
+                'worker-1', 0, 0,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                {finalizing_at_sql}
+            )"
+        );
+        sqlx::query(&sql).bind(task_id).execute(pool).await.unwrap();
+    }
+
+    async fn task_status(pool: &PgPool, task_id: &str) -> String {
+        sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+            .bind(task_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// A task actively finalizing (recent finalizing_at) must NOT be reclaimed
+    /// by the stale-RUNNING reaper even though its runner heartbeat has stopped.
+    #[tokio::test]
+    #[serial]
+    async fn reaper_skips_actively_finalizing_task() {
+        let pool = test_pool().await;
+        let task_id = Uuid::new_v4().to_string();
+        // finalizing_at = NOW(): within the finalizing threshold → skip.
+        insert_stale_running_task(&pool, &task_id, "NOW()").await;
+
+        // running stale threshold 1s (heartbeat is 1h old → stale), finalizing
+        // threshold 300s (finalizing_at is fresh → protected). The reaper scan is
+        // global (shared test DB), so assert on this task's status, not the count.
+        mark_stale_running_as_failed(&pool, 1.0, 300.0)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            task_status(&pool, &task_id).await,
+            "RUNNING",
+            "actively-finalizing task must be skipped by the reaper"
+        );
+
+        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// A task whose finalizing stamp is older than the finalizing threshold is
+    /// treated as genuinely stuck and IS reclaimed (marked FAILED).
+    #[tokio::test]
+    #[serial]
+    async fn reaper_reclaims_task_finalizing_past_threshold() {
+        let pool = test_pool().await;
+        let task_id = Uuid::new_v4().to_string();
+        // finalizing_at well in the past → past the finalizing threshold.
+        insert_stale_running_task(&pool, &task_id, "NOW() - INTERVAL '1 hour'").await;
+
+        mark_stale_running_as_failed(&pool, 1.0, 300.0)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            task_status(&pool, &task_id).await,
+            "FAILED",
+            "task finalizing past the threshold must be reclaimed"
+        );
+
+        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
 }

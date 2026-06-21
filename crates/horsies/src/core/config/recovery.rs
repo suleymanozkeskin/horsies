@@ -24,6 +24,13 @@ pub struct RecoveryConfig {
     #[serde(default = "default_running_stale_threshold")]
     pub running_stale_threshold_ms: u64,
 
+    /// Milliseconds a task may remain in finalization before the stale-RUNNING
+    /// reaper may reclaim it. A worker stamps `finalizing_at` when it begins the
+    /// two-phase finalize; until this threshold elapses the reaper skips the row
+    /// even though its runner heartbeat has stopped (1s–2hr).
+    #[serde(default = "default_finalizing_stale_threshold")]
+    pub finalizing_stale_threshold_ms: u64,
+
     /// How often the reaper checks for stale tasks (1s–10min).
     #[serde(default = "default_check_interval")]
     pub check_interval_ms: u64,
@@ -58,6 +65,9 @@ fn default_claimed_stale_threshold() -> u64 {
 fn default_running_stale_threshold() -> u64 {
     300_000
 }
+fn default_finalizing_stale_threshold() -> u64 {
+    300_000
+}
 fn default_check_interval() -> u64 {
     30_000
 }
@@ -81,6 +91,7 @@ impl Default for RecoveryConfig {
             claimed_stale_threshold_ms: 120_000,
             auto_fail_stale_running: true,
             running_stale_threshold_ms: 300_000,
+            finalizing_stale_threshold_ms: 300_000,
             check_interval_ms: 30_000,
             runner_heartbeat_interval_ms: 30_000,
             claimer_heartbeat_interval_ms: 30_000,
@@ -107,6 +118,15 @@ pub enum RecoveryConfigError {
         "claimed_stale_threshold_ms ({threshold}ms) must be at least 2x claimer_heartbeat_interval_ms ({heartbeat}ms), minimum: {minimum}ms"
     )]
     ClaimedThresholdTooLow {
+        threshold: u64,
+        heartbeat: u64,
+        minimum: u64,
+    },
+
+    #[error(
+        "finalizing_stale_threshold_ms ({threshold}ms) must be at least 2x runner_heartbeat_interval_ms ({heartbeat}ms), minimum: {minimum}ms"
+    )]
+    FinalizingThresholdTooLow {
         threshold: u64,
         heartbeat: u64,
         minimum: u64,
@@ -150,6 +170,10 @@ impl RecoveryConfig {
             (
                 "running_stale_threshold_ms",
                 self.running_stale_threshold_ms,
+            ),
+            (
+                "finalizing_stale_threshold_ms",
+                self.finalizing_stale_threshold_ms,
             ),
             ("check_interval_ms", self.check_interval_ms),
             (
@@ -201,6 +225,13 @@ impl RecoveryConfig {
                 max: 7_200_000,
             });
         }
+        if self.finalizing_stale_threshold_ms > 7_200_000 {
+            errors.push(RecoveryConfigError::AboveMaximum {
+                field: "finalizing_stale_threshold_ms",
+                value: self.finalizing_stale_threshold_ms,
+                max: 7_200_000,
+            });
+        }
         if self.claimed_stale_threshold_ms > 3_600_000 {
             errors.push(RecoveryConfigError::AboveMaximum {
                 field: "claimed_stale_threshold_ms",
@@ -225,6 +256,14 @@ impl RecoveryConfig {
                 threshold: self.claimed_stale_threshold_ms,
                 heartbeat: self.claimer_heartbeat_interval_ms,
                 minimum: min_claimed,
+            });
+        }
+
+        if self.finalizing_stale_threshold_ms < min_running {
+            errors.push(RecoveryConfigError::FinalizingThresholdTooLow {
+                threshold: self.finalizing_stale_threshold_ms,
+                heartbeat: self.runner_heartbeat_interval_ms,
+                minimum: min_running,
             });
         }
 
@@ -268,6 +307,31 @@ mod tests {
         };
         let errors = config.validate();
         assert_eq!(errors.len(), 2);
+    }
+
+    #[test]
+    fn finalizing_threshold_too_low() {
+        let config = RecoveryConfig {
+            finalizing_stale_threshold_ms: 10_000,
+            runner_heartbeat_interval_ms: 30_000,
+            ..Default::default()
+        };
+        let errors = config.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            RecoveryConfigError::FinalizingThresholdTooLow { .. }
+        ));
+    }
+
+    #[test]
+    fn finalizing_threshold_default_validates() {
+        // Default finalizing threshold (300_000) >= 2x default runner heartbeat.
+        let config = RecoveryConfig::default();
+        assert!(!config
+            .validate()
+            .iter()
+            .any(|e| matches!(e, RecoveryConfigError::FinalizingThresholdTooLow { .. })));
     }
 
     // --- BelowMinimum tests ---

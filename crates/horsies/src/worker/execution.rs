@@ -1244,6 +1244,22 @@ pub(crate) async fn execute_and_finalize(
     hb_cancel.cancel();
     let _ = hb_handle.await;
 
+    // Stamp finalization handoff so the stale-RUNNING reaper skips this row
+    // while finalize runs (the runner heartbeat has now stopped). Best-effort:
+    // a failed stamp does not abort finalize — phase-1 CAS still protects
+    // correctness. Mirrors Python's finalizing_at / finalizing_by_worker_id.
+    if let Err(e) = sqlx::query(
+        "UPDATE horsies_tasks SET finalizing_at = NOW(), finalizing_by_worker_id = $2 \
+         WHERE id = $1 AND status = 'RUNNING'",
+    )
+    .bind(&task_id)
+    .bind(&worker_id)
+    .execute(broker.pool())
+    .await
+    {
+        tracing::warn!(task_id = %task_id, error = %e, "failed to stamp finalizing handoff");
+    }
+
     // Finalize Phase 1: Persist terminal state (with phase-aware retry).
     let phase1_outcome = retry_phase1(
         &broker,
