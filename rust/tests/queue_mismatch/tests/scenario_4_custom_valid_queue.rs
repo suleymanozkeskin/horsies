@@ -79,7 +79,10 @@ async fn worker_config_is_valid() {
 
     // run_worker_with would fail at broker.get() (no real DB), but the queue
     // validation is already past. We verify by checking the error type.
-    let err = app.run_worker_with(worker_config).await.unwrap_err();
+    let err = app
+        .run_worker_with(worker_config)
+        .await
+        .expect_err("worker must fail to start without a real DB");
     let err_str = format!("{}", err);
     // The error must be a broker/connection error, NOT a queue validation error.
     assert!(

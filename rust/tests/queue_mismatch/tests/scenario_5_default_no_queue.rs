@@ -62,7 +62,10 @@ async fn worker_startup_reaches_broker() {
 
     // run_worker_with fails at broker.get() — no real DB. But queue validation
     // is long past. The error must be a broker error, not a config error.
-    let err = app.run_worker_with(worker_config).await.unwrap_err();
+    let err = app
+        .run_worker_with(worker_config)
+        .await
+        .expect_err("worker must fail to start without a real DB");
     let err_str = format!("{}", err);
     assert!(
         !err_str.contains("queue mode") && !err_str.contains("TaskInvalidOptions"),

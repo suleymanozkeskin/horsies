@@ -125,7 +125,10 @@ async fn worker_never_starts_due_to_poisoned_registration() {
 
     // If we DID start the worker, it would fail at DB, not at queue validation.
     // The guard did its job: Task B never made it in.
-    let err = app.run_worker_with(worker_config).await.unwrap_err();
+    let err = app
+        .run_worker_with(worker_config)
+        .await
+        .expect_err("worker must fail to start without a real DB");
     let err_str = format!("{}", err);
     assert!(
         !err_str.contains("TaskInvalidOptions"),

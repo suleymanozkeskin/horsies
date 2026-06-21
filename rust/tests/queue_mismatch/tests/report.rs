@@ -104,10 +104,10 @@ async fn print_report() {
     // Scenario 1: DEFAULT + queue="fast"
     {
         println!("--- Scenario 1: DEFAULT mode + task declares queue=\"fast\" ---");
-        let mut app = Horsies::new(default_config()).unwrap();
+        let mut app = Horsies::new(default_config()).expect("app construction must succeed");
         let reg = app
             .task::<Input, Output>("fast_compute", async_task_fn!(compute, Input))
-            .unwrap()
+            .expect("task builder must accept the task")
             .queue("fast")
             .register();
         match reg {
@@ -152,10 +152,10 @@ async fn print_report() {
     // Scenario 2: CUSTOM + no queue
     {
         println!("--- Scenario 2: CUSTOM mode + task omits queue ---");
-        let mut app = Horsies::new(custom_config()).unwrap();
+        let mut app = Horsies::new(custom_config()).expect("app construction must succeed");
         let reg = app
             .task::<(), String>("bare_ping", async_task_fn!(ping, ()))
-            .unwrap()
+            .expect("task builder must accept the task")
             .register();
         match reg {
             Err(ref e) => {
@@ -199,10 +199,10 @@ async fn print_report() {
         println!(
             "--- Scenario 3: CUSTOM mode + queue=\"analytics\" (not in [\"fast\",\"slow\"]) ---"
         );
-        let mut app = Horsies::new(custom_config()).unwrap();
+        let mut app = Horsies::new(custom_config()).expect("app construction must succeed");
         let reg = app
             .task::<Input, Output>("analytics_compute", async_task_fn!(compute, Input))
-            .unwrap()
+            .expect("task builder must accept the task")
             .queue("analytics")
             .register();
         match reg {
@@ -239,10 +239,10 @@ async fn print_report() {
     // Scenario 4: CUSTOM + valid queue
     {
         println!("--- Scenario 4: CUSTOM mode + queue=\"fast\" (valid) ---");
-        let mut app = Horsies::new(custom_config()).unwrap();
+        let mut app = Horsies::new(custom_config()).expect("app construction must succeed");
         let reg = app
             .task::<Input, Output>("fast_compute", async_task_fn!(compute, Input))
-            .unwrap()
+            .expect("task builder must accept the task")
             .queue("fast")
             .register();
         match reg {
@@ -282,10 +282,10 @@ async fn print_report() {
     // Scenario 5: DEFAULT + no queue
     {
         println!("--- Scenario 5: DEFAULT mode + no queue (happy path) ---");
-        let mut app = Horsies::new(default_config()).unwrap();
+        let mut app = Horsies::new(default_config()).expect("app construction must succeed");
         let reg = app
             .task::<(), String>("ping", async_task_fn!(ping, ()))
-            .unwrap()
+            .expect("task builder must accept the task")
             .register();
         match reg {
             Ok(ref t) => println!(
@@ -323,10 +323,10 @@ async fn print_report() {
     // Scenario 6: CUSTOM + 1 valid + 1 invalid
     {
         println!("--- Scenario 6: CUSTOM + valid \"fast\" + invalid \"analytics\" ---");
-        let mut app = Horsies::new(custom_config()).unwrap();
+        let mut app = Horsies::new(custom_config()).expect("app construction must succeed");
         let r1 = app
             .task::<Input, Output>("fast_compute", async_task_fn!(compute, Input))
-            .unwrap()
+            .expect("task builder must accept the task")
             .queue("fast")
             .register();
         println!(
@@ -339,7 +339,7 @@ async fn print_report() {
         );
         let r2 = app
             .task::<Input, Output>("analytics_compute", async_task_fn!(multiply, Input))
-            .unwrap()
+            .expect("task builder must accept the task")
             .queue("analytics")
             .register();
         match r2 {
