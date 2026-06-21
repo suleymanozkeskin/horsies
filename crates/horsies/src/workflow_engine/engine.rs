@@ -59,16 +59,70 @@ WHERE workflow_id = $3 AND task_index = $4
   AND status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
 RETURNING id";
 
-const FIND_DEPENDENTS_SQL: &str = "\
-SELECT task_index, dependencies, args_from, workflow_ctx_from,
-       allow_failed_deps, join_type, min_success, task_name,
-       task_args, task_kwargs, queue_name, priority,
-       node_id, task_options, status,
-       is_subworkflow, sub_workflow_name, sub_definition_key
-FROM horsies_workflow_tasks
-WHERE workflow_id = $1
-  AND dependencies @> ARRAY[$2::INTEGER]
-  AND status = 'PENDING'";
+/// Batched dependent evaluation: one row per PENDING dependent of ANY source
+/// index (the just-terminal nodes of this cascade level), carrying the full node
+/// config plus its dependency-status counts as jsonb. Replaces the per-dependent
+/// FIND + DEP_STATUS_COUNTS pair so a fan-out promotion is O(1) round trips
+/// instead of O(F). The `w.status = 'RUNNING'` join folds in the workflow guard:
+/// zero rows when paused/cancelled, same outcome as the per-node path.
+const GET_DEPENDENTS_EVAL_SQL: &str = "\
+SELECT d.task_index, d.dependencies, d.args_from, d.workflow_ctx_from,
+       d.allow_failed_deps, d.join_type, d.min_success, d.task_name,
+       d.task_args, d.task_kwargs, d.queue_name, d.priority,
+       d.node_id, d.task_options, d.status,
+       d.is_subworkflow, d.sub_workflow_name, d.sub_definition_key,
+       COALESCE((
+           SELECT jsonb_object_agg(s.status, s.cnt)
+           FROM (SELECT src.status, COUNT(*) AS cnt
+                 FROM horsies_workflow_tasks src
+                 WHERE src.workflow_id = d.workflow_id
+                   AND src.task_index = ANY(d.dependencies)
+                 GROUP BY src.status) s
+       ), '{}'::jsonb) AS dep_status_counts
+FROM horsies_workflow_tasks d
+JOIN horsies_workflows w ON w.id = d.workflow_id
+WHERE d.workflow_id = $1
+  AND d.dependencies && $2::INTEGER[]
+  AND d.status = 'PENDING'
+  AND w.status = 'RUNNING'
+ORDER BY d.task_index";
+
+/// Batched PENDING -> SKIPPED CAS (per-row predicate preserved; losers drop via
+/// RETURNING).
+const SKIP_PENDING_TASKS_BATCH_SQL: &str = "\
+UPDATE horsies_workflow_tasks
+SET status = 'SKIPPED', completed_at = NOW()
+WHERE workflow_id = $1 AND task_index = ANY($2) AND status = 'PENDING'
+RETURNING task_index";
+
+/// Batched PENDING -> READY CAS (RETURNING the won set).
+const MARK_TASKS_READY_BATCH_SQL: &str = "\
+UPDATE horsies_workflow_tasks
+SET status = 'READY'
+WHERE workflow_id = $1 AND task_index = ANY($2) AND status = 'PENDING'
+RETURNING task_index";
+
+/// Batched READY -> ENQUEUED CAS, guarded on the workflow still RUNNING (the same
+/// re-check the single-node LINK does). RETURNING the won set drives the bulk
+/// INSERT + LINK; a paused workflow returns zero rows so no task row is inserted.
+const ENQUEUE_WORKFLOW_TASKS_BATCH_SQL: &str = "\
+UPDATE horsies_workflow_tasks wt
+SET status = 'ENQUEUED', started_at = NOW()
+FROM horsies_workflows w
+WHERE wt.workflow_id = $1 AND wt.task_index = ANY($2)
+  AND wt.status = 'READY'
+  AND w.id = wt.workflow_id
+  AND w.status = 'RUNNING'
+RETURNING wt.task_index";
+
+/// Batched link: set task_id on the CAS-won (already ENQUEUED) nodes via parallel
+/// arrays. Status is already ENQUEUED from the CAS above.
+const LINK_ENQUEUED_TASKS_BATCH_SQL: &str = "\
+UPDATE horsies_workflow_tasks wt
+SET task_id = data.tid
+FROM (SELECT UNNEST($1::text[]) AS tid, UNNEST($2::int[]) AS idx) data
+WHERE wt.workflow_id = $3 AND wt.task_index = data.idx
+  AND wt.status = 'ENQUEUED'";
 
 const DEP_STATUS_COUNTS_SQL: &str = "\
 SELECT status, COUNT(*)::int as cnt
@@ -289,6 +343,15 @@ struct DependentRow {
     sub_definition_key: Option<String>,
 }
 
+/// One batched-eval row: a PENDING dependent's full node config plus its
+/// dependency-status counts (jsonb `{status: count}`), from `GET_DEPENDENTS_EVAL_SQL`.
+#[derive(Debug, sqlx::FromRow)]
+struct DependentEvalRow {
+    #[sqlx(flatten)]
+    node: DependentRow,
+    dep_status_counts: serde_json::Value,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct StatusCount {
     status: String,
@@ -500,11 +563,19 @@ pub async fn on_workflow_task_complete(
 // Dependency resolution
 // ---------------------------------------------------------------------------
 
-/// Find all PENDING tasks that depend on the completed task index
-/// and attempt to make them ready.
+/// Promote/skip the dependents of a completed task, one batched pipeline per
+/// skip-cascade level.
+///
+/// Level 0's source is the completed task; each level's newly SKIPPED nodes
+/// become the next level's sources (their dependents must be re-evaluated).
+/// Statuses advance monotonically PENDING -> terminal, so the level count is
+/// bounded by the longest skip chain. A dependent is re-evaluated at every level
+/// one of its deps skipped (no cross-level dedupe — a quorum verdict may only be
+/// satisfiable after a later skip).
 ///
 /// Uses `Box::pin` because of the recursive call chain:
-/// process_dependents -> try_make_ready_and_enqueue -> skip_task -> process_dependents
+/// process_dependents -> promote_dependents_level -> try_make_ready_and_enqueue
+/// (slow path) -> skip_task -> process_dependents.
 pub(crate) fn process_dependents<'a>(
     pool: &'a PgPool,
     workflow_id: &'a str,
@@ -512,25 +583,260 @@ pub(crate) fn process_dependents<'a>(
     registry: &'a WorkflowSpecRegistry,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WorkflowError>> + Send + 'a>> {
     Box::pin(async move {
-        let dependents: Vec<DependentRow> = sqlx::query_as(FIND_DEPENDENTS_SQL)
-            .bind(workflow_id)
-            .bind(completed_index)
-            .fetch_all(pool)
-            .await?;
+        let mut sources = vec![completed_index];
+        while !sources.is_empty() {
+            sources = promote_dependents_level(pool, workflow_id, &sources, registry).await?;
+        }
+        Ok(())
+    })
+}
 
-        for dep in dependents {
-            if let Err(e) = try_make_ready_and_enqueue(pool, workflow_id, &dep, registry).await {
-                tracing::error!(
-                    workflow_id,
-                    task_index = dep.task_index,
-                    error = %e,
-                    "failed to process dependent task",
-                );
+/// Read a status's count for a dependent's deps from the jsonb `{status: count}`
+/// aggregate produced by `GET_DEPENDENTS_EVAL_SQL`.
+fn dep_status_count(counts: &serde_json::Value, status: &str) -> i32 {
+    counts
+        .get(status)
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0) as i32
+}
+
+/// Evaluate and promote/skip every PENDING dependent of the source indexes in one
+/// batched pipeline. Returns the indexes this level transitioned to SKIPPED (the
+/// next level's sources).
+///
+/// Plain TaskNode dependents take the batched fast path (zero per-node
+/// statements): one grouped eval, in-memory join classification, batched
+/// SKIP/READY CAS, one grouped dependency-results read, payload build, one batched
+/// READY->ENQUEUED CAS, one bulk task INSERT + one bulk LINK — all writes in a
+/// single transaction so a crash rolls back atomically (no orphan task row, no
+/// stranded ENQUEUED). SubWorkflowNode and `workflow_ctx_from` dependents take the
+/// per-node `try_make_ready_and_enqueue` path unchanged.
+async fn promote_dependents_level(
+    pool: &PgPool,
+    workflow_id: &str,
+    source_indexes: &[i32],
+    registry: &WorkflowSpecRegistry,
+) -> Result<Vec<i32>, WorkflowError> {
+    let eval_rows: Vec<DependentEvalRow> = sqlx::query_as(GET_DEPENDENTS_EVAL_SQL)
+        .bind(workflow_id)
+        .bind(source_indexes)
+        .fetch_all(pool)
+        .await?;
+    if eval_rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut skip_pending: Vec<i32> = Vec::new();
+    let mut ready_plain: Vec<DependentRow> = Vec::new();
+    let mut slow_nodes: Vec<DependentRow> = Vec::new();
+
+    for eval in eval_rows {
+        let node = eval.node;
+        let total_deps = node.dependencies.len() as i32;
+        if total_deps == 0 {
+            continue; // roots are never re-promoted here
+        }
+
+        let completed = dep_status_count(&eval.dep_status_counts, "COMPLETED");
+        let failed = dep_status_count(&eval.dep_status_counts, "FAILED");
+        let skipped = dep_status_count(&eval.dep_status_counts, "SKIPPED");
+        let terminal = completed + failed + skipped;
+
+        let join_type = parse_join_type(&node.join_type);
+        let min_success = node.min_success.unwrap_or(1);
+
+        // Same join evaluation as try_make_ready_and_enqueue.
+        let (should_skip, should_ready) = match join_type {
+            JoinType::All => {
+                if terminal < total_deps {
+                    (false, false) // not all deps done yet
+                } else if failed + skipped > 0 && !node.allow_failed_deps {
+                    (true, false) // cannot run — skip (PENDING -> SKIPPED directly)
+                } else {
+                    (false, true)
+                }
+            }
+            JoinType::Any => {
+                if completed > 0 {
+                    (false, true)
+                } else if terminal == total_deps {
+                    (true, false) // all terminal, none completed — impossible
+                } else {
+                    (false, false)
+                }
+            }
+            JoinType::Quorum => {
+                if completed >= min_success {
+                    (false, true)
+                } else if completed + (total_deps - terminal) < min_success {
+                    (true, false) // quorum unreachable
+                } else {
+                    (false, false)
+                }
+            }
+        };
+
+        if should_skip {
+            skip_pending.push(node.task_index);
+        } else if should_ready {
+            let has_ctx = node
+                .workflow_ctx_from
+                .as_ref()
+                .is_some_and(|ids| !ids.is_empty());
+            if node.is_subworkflow || has_ctx {
+                slow_nodes.push(node); // per-node path (child start / ctx gating)
+            } else {
+                ready_plain.push(node);
+            }
+        }
+        // else: stay PENDING (also covers unknown join types via parse_join_type)
+    }
+
+    // Dependency results for the union of args_from deps of the ready plain nodes.
+    // Deps of a ready node are all terminal (immutable), so reading before the
+    // write transaction is race-free.
+    let dep_union: Vec<i32> = {
+        let mut set: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
+        for node in &ready_plain {
+            if node.args_from.is_some() {
+                set.extend(node.dependencies.iter().copied());
+            }
+        }
+        set.into_iter().collect()
+    };
+    let dep_results = if dep_union.is_empty() {
+        HashMap::new()
+    } else {
+        get_dependency_results(pool, workflow_id, &dep_union).await?
+    };
+
+    let mut newly_skipped: Vec<i32> = Vec::new();
+    let mut tx = pool.begin().await?;
+
+    // 1. Batched PENDING -> SKIPPED.
+    if !skip_pending.is_empty() {
+        let rows: Vec<(i32,)> = sqlx::query_as(SKIP_PENDING_TASKS_BATCH_SQL)
+            .bind(workflow_id)
+            .bind(&skip_pending)
+            .fetch_all(&mut *tx)
+            .await?;
+        newly_skipped.extend(rows.into_iter().map(|r| r.0));
+    }
+
+    // 2. Batched PENDING -> READY (CAS losers drop out of the won set).
+    if !ready_plain.is_empty() {
+        let ready_indexes: Vec<i32> = ready_plain.iter().map(|n| n.task_index).collect();
+        let won_rows: Vec<(i32,)> = sqlx::query_as(MARK_TASKS_READY_BATCH_SQL)
+            .bind(workflow_id)
+            .bind(&ready_indexes)
+            .fetch_all(&mut *tx)
+            .await?;
+        let ready_won: std::collections::HashSet<i32> =
+            won_rows.into_iter().map(|r| r.0).collect();
+
+        // 3. Build INSERT payloads for the won nodes. A build failure leaves the
+        // node READY (recovery/resume re-enqueue it) — same as the per-node path.
+        let mut built: Vec<EnqueueInsertParams> = Vec::new();
+        let mut built_indexes: Vec<i32> = Vec::new();
+        for node in &ready_plain {
+            if !ready_won.contains(&node.task_index) {
+                continue;
+            }
+            match build_enqueued_task_params(pool, workflow_id, node, &dep_results).await {
+                Ok(params) => {
+                    built_indexes.push(node.task_index);
+                    built.push(params);
+                }
+                Err(e) => {
+                    tracing::error!(
+                        workflow_id,
+                        task_index = node.task_index,
+                        error = %e,
+                        "failed to build enqueued task params; node stays READY",
+                    );
+                }
             }
         }
 
-        Ok(())
-    })
+        // 4. Batched READY -> ENQUEUED CAS (guarded on workflow RUNNING).
+        if !built_indexes.is_empty() {
+            let enqueued_rows: Vec<(i32,)> = sqlx::query_as(ENQUEUE_WORKFLOW_TASKS_BATCH_SQL)
+                .bind(workflow_id)
+                .bind(&built_indexes)
+                .fetch_all(&mut *tx)
+                .await?;
+            let enqueue_won: std::collections::HashSet<i32> =
+                enqueued_rows.into_iter().map(|r| r.0).collect();
+
+            // 5. Bulk INSERT task rows + bulk LINK for the CAS-won set.
+            let winners: Vec<(i32, &EnqueueInsertParams)> = built_indexes
+                .iter()
+                .zip(built.iter())
+                .filter(|(idx, _)| enqueue_won.contains(idx))
+                .map(|(idx, p)| (*idx, p))
+                .collect();
+
+            if !winners.is_empty() {
+                let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
+                    "INSERT INTO horsies_tasks (\
+                     id, task_name, queue_name, priority, args, kwargs, \
+                     status, sent_at, enqueued_at, good_until, max_retries, task_options, \
+                     enqueue_sha, is_workflow_task, created_at, updated_at) ",
+                );
+                qb.push_values(winners.iter(), |mut b, (_, p)| {
+                    b.push_bind(p.task_id.clone())
+                        .push_bind(p.task_name.clone())
+                        .push_bind(p.queue_name.clone())
+                        .push_bind(p.priority)
+                        .push_bind(p.task_args.clone())
+                        .push_bind(p.merged_kwargs.clone())
+                        .push("'PENDING'")
+                        .push("NOW()")
+                        .push("NOW()")
+                        .push_bind(p.good_until)
+                        .push_bind(p.max_retries)
+                        .push_bind(p.task_options.clone())
+                        .push_bind(p.enqueue_sha.clone())
+                        .push("TRUE")
+                        .push("NOW()")
+                        .push("NOW()");
+                });
+                qb.build().execute(&mut *tx).await?;
+
+                let tids: Vec<String> = winners.iter().map(|(_, p)| p.task_id.clone()).collect();
+                let idxs: Vec<i32> = winners.iter().map(|(idx, _)| *idx).collect();
+                sqlx::query(LINK_ENQUEUED_TASKS_BATCH_SQL)
+                    .bind(&tids)
+                    .bind(&idxs)
+                    .bind(workflow_id)
+                    .execute(&mut *tx)
+                    .await?;
+
+                tracing::debug!(
+                    workflow_id,
+                    count = winners.len(),
+                    "batch-enqueued workflow tasks",
+                );
+            }
+        }
+    }
+
+    tx.commit().await?;
+
+    // 6. Slow path: per-node enqueue for subworkflow / ctx_from dependents (own
+    // transactions, unchanged). Errors are logged and the level continues.
+    for node in &slow_nodes {
+        if let Err(e) = try_make_ready_and_enqueue(pool, workflow_id, node, registry).await {
+            tracing::error!(
+                workflow_id,
+                task_index = node.task_index,
+                error = %e,
+                "failed to process dependent task",
+            );
+        }
+    }
+
+    Ok(newly_skipped)
 }
 
 /// Core resolver: evaluate whether a dependent task can transition to READY.
@@ -2505,5 +2811,244 @@ mod complete_task_merge_tests {
         )
         .await;
         assert!(row.is_none(), "no workflow task → no row");
+    }
+}
+
+#[cfg(test)]
+mod promotion_batch_tests {
+    //! Behavior pins for the batched skip-cascade promotion (parity with horsies
+    //! PR #129): fan-out promotes every dependent in one level with task rows
+    //! linked, and a skip chain cascades across levels to the same fixpoint as the
+    //! per-node path.
+    use super::*;
+    use crate::broker::PostgresBroker;
+    use serial_test::serial;
+    use uuid::Uuid;
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|p| p.join(".env").exists());
+        let pw = root
+            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
+            .and_then(|c| {
+                c.lines()
+                    .filter_map(|l| l.trim().split_once('='))
+                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
+                    .map(|(_, v)| v.trim().to_owned())
+            })
+            .unwrap_or_else(|| "W0rklane".to_owned());
+        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    }
+
+    async fn insert_workflow(pool: &PgPool, id: &str) {
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index,
+                definition_key, depth, root_workflow_id,
+                sent_at, created_at, started_at, updated_at
+            ) VALUES (
+                $1, 'promo_test_wf', 'RUNNING', 'fail', NULL,
+                'test.promo.v1', 0, $1,
+                NOW(), NOW(), NOW(), NOW()
+            )",
+        )
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("insert workflow");
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_node(
+        pool: &PgPool,
+        wf_id: &str,
+        idx: i32,
+        deps: Vec<i32>,
+        status: &str,
+        join_type: &str,
+        allow_failed_deps: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                queue_name, priority, dependencies, allow_failed_deps, join_type,
+                status, is_subworkflow, created_at
+            ) VALUES (
+                $1, $2, $3, $4, 'promo_task', '[]', '{}',
+                'default', 100, $5, $6, $7,
+                $8, FALSE, NOW()
+            )",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(wf_id)
+        .bind(idx)
+        .bind(format!("node_{idx}"))
+        .bind(deps)
+        .bind(allow_failed_deps)
+        .bind(join_type)
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("insert node");
+    }
+
+    async fn node_status(pool: &PgPool, wf_id: &str, idx: i32) -> String {
+        sqlx::query_scalar(
+            "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = $2",
+        )
+        .bind(wf_id)
+        .bind(idx)
+        .fetch_one(pool)
+        .await
+        .expect("node status")
+    }
+
+    async fn task_id_of(pool: &PgPool, wf_id: &str, idx: i32) -> Option<String> {
+        sqlx::query_scalar(
+            "SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = $2",
+        )
+        .bind(wf_id)
+        .bind(idx)
+        .fetch_one(pool)
+        .await
+        .expect("task_id")
+    }
+
+    async fn cleanup(pool: &PgPool, wf_id: &str) {
+        sqlx::query("DELETE FROM horsies_tasks WHERE enqueue_sha LIKE 'wf-%' AND id IN (SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1)")
+            .bind(wf_id)
+            .execute(pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+            .bind(wf_id)
+            .execute(pool)
+            .await
+            .expect("cleanup tasks");
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(wf_id)
+            .execute(pool)
+            .await
+            .expect("cleanup workflow");
+    }
+
+    /// Fan-out: one completed root unblocks F dependents; all are promoted to
+    /// ENQUEUED with a linked horsies_tasks row in a single level.
+    #[tokio::test]
+    #[serial]
+    async fn fan_out_promotes_all_dependents() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let registry = WorkflowSpecRegistry::new();
+        let wf_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &wf_id).await;
+        insert_node(&pool, &wf_id, 0, vec![], "COMPLETED", "all", false).await;
+        let fan = 6;
+        for idx in 1..=fan {
+            insert_node(&pool, &wf_id, idx, vec![0], "PENDING", "all", false).await;
+        }
+
+        process_dependents(&pool, &wf_id, 0, &registry)
+            .await
+            .expect("process dependents");
+
+        for idx in 1..=fan {
+            assert_eq!(node_status(&pool, &wf_id, idx).await, "ENQUEUED", "node {idx}");
+            assert!(
+                task_id_of(&pool, &wf_id, idx).await.is_some(),
+                "node {idx} must be linked to a task row",
+            );
+        }
+        let task_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM horsies_tasks WHERE id IN \
+             (SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1)",
+        )
+        .bind(&wf_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(task_count, fan as i64, "one task row per promoted node");
+
+        cleanup(&pool, &wf_id).await;
+    }
+
+    /// Multi-level skip cascade: a failed root skips a chain of join='all'
+    /// dependents across levels (1 -> 2 -> 3), driven by the level loop.
+    #[tokio::test]
+    #[serial]
+    async fn skip_cascade_resolves_chain() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let registry = WorkflowSpecRegistry::new();
+        let wf_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &wf_id).await;
+        insert_node(&pool, &wf_id, 0, vec![], "FAILED", "all", false).await;
+        insert_node(&pool, &wf_id, 1, vec![0], "PENDING", "all", false).await;
+        insert_node(&pool, &wf_id, 2, vec![1], "PENDING", "all", false).await;
+        insert_node(&pool, &wf_id, 3, vec![2], "PENDING", "all", false).await;
+
+        process_dependents(&pool, &wf_id, 0, &registry)
+            .await
+            .expect("process dependents");
+
+        for idx in 1..=3 {
+            assert_eq!(node_status(&pool, &wf_id, idx).await, "SKIPPED", "node {idx}");
+        }
+
+        cleanup(&pool, &wf_id).await;
+    }
+
+    /// allow_failed_deps: a failed dep still promotes the dependent (not skipped).
+    #[tokio::test]
+    #[serial]
+    async fn allow_failed_deps_promotes() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let registry = WorkflowSpecRegistry::new();
+        let wf_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &wf_id).await;
+        insert_node(&pool, &wf_id, 0, vec![], "FAILED", "all", false).await;
+        insert_node(&pool, &wf_id, 1, vec![0], "PENDING", "all", true).await;
+
+        process_dependents(&pool, &wf_id, 0, &registry)
+            .await
+            .expect("process dependents");
+
+        assert_eq!(node_status(&pool, &wf_id, 1).await, "ENQUEUED");
+        assert!(task_id_of(&pool, &wf_id, 1).await.is_some());
+
+        cleanup(&pool, &wf_id).await;
+    }
+
+    /// A paused workflow promotes nothing: the eval's RUNNING guard returns no
+    /// dependents.
+    #[tokio::test]
+    #[serial]
+    async fn paused_workflow_promotes_nothing() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let registry = WorkflowSpecRegistry::new();
+        let wf_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &wf_id).await;
+        sqlx::query("UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = $1")
+            .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .expect("pause");
+        insert_node(&pool, &wf_id, 0, vec![], "COMPLETED", "all", false).await;
+        insert_node(&pool, &wf_id, 1, vec![0], "PENDING", "all", false).await;
+
+        process_dependents(&pool, &wf_id, 0, &registry)
+            .await
+            .expect("process dependents");
+
+        assert_eq!(node_status(&pool, &wf_id, 1).await, "PENDING", "stays pending under pause");
+
+        cleanup(&pool, &wf_id).await;
     }
 }
