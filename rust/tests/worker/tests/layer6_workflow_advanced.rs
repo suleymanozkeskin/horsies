@@ -2124,6 +2124,37 @@ async fn filter_nonrunnable_does_not_touch_other_workers_paused_task() {
 
 #[tokio::test]
 #[serial]
+async fn pause_workflow_cancels_claimed_not_started_task() {
+    // Engine-side proactive cancel (parity with horsies PR #96): a task already
+    // CLAIMED at pause time (e.g. sitting in a worker prefetch buffer, or claimed
+    // by a since-dead worker) — for which the post-claim worker filter will not
+    // run — is cancelled by pause_workflow itself, and its node reset to READY.
+    let pool = pool().await;
+    db::clean_tables(&pool).await;
+
+    let (wf_id, task_id) = setup_single_task_workflow(&pool).await;
+    claim_task_as(&pool, &task_id, "worker-buffered").await;
+
+    let paused = pause_workflow(&pool, &wf_id).await.unwrap();
+    assert!(paused, "workflow should pause");
+
+    assert_eq!(
+        task_claim_row(&pool, &task_id).await,
+        ("CANCELLED".to_owned(), false, None),
+        "claimed-but-not-started task must be cancelled at pause time",
+    );
+    let wt_status: String = sqlx::query_scalar(
+        "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",
+    )
+    .bind(&wf_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(wt_status, "READY", "node reset to READY for resume");
+}
+
+#[tokio::test]
+#[serial]
 async fn filter_nonrunnable_does_not_touch_other_workers_cancelled_task() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
@@ -2155,7 +2186,7 @@ async fn filter_nonrunnable_does_not_touch_other_workers_cancelled_task() {
 
 #[tokio::test]
 #[serial]
-async fn filter_nonrunnable_unclaims_own_paused_task() {
+async fn filter_nonrunnable_cancels_own_paused_task() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
     let broker = PostgresBroker::from_pool(pool.clone());
@@ -2169,11 +2200,12 @@ async fn filter_nonrunnable_unclaims_own_paused_task() {
         .await
         .unwrap();
 
-    // This worker owns the claim: it is unclaimed and the workflow_task reset.
+    // This worker owns the claim: the row is cancelled (terminal, not re-claimable)
+    // and the workflow_task reset to READY so resume enqueues a fresh row.
     assert!(filtered.contains(&task_id));
     assert_eq!(
         task_claim_row(&pool, &task_id).await,
-        ("PENDING".to_owned(), false, None),
+        ("CANCELLED".to_owned(), false, None),
     );
     let wt_status: String = sqlx::query_scalar(
         "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",

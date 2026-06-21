@@ -151,6 +151,37 @@ UPDATE horsies_workflows
 SET status = 'PAUSED', updated_at = NOW()
 WHERE id = $1 AND status = 'RUNNING'";
 
+/// Cancel any CLAIMED-but-not-started backing task rows of the given (paused)
+/// workflows, and reset their workflow_task nodes to READY so resume enqueues a
+/// fresh row. Proactively closes the window where a task already CLAIMED at pause
+/// time (e.g. sitting in a worker prefetch buffer, or claimed by a since-dead
+/// worker) could later run outside the paused workflow. Parity with horsies PR
+/// #96 (`CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL`).
+const CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL: &str = "\
+WITH cancelled AS (
+    UPDATE horsies_tasks t
+    SET status = 'CANCELLED',
+        claimed = FALSE,
+        claimed_at = NULL,
+        claimed_by_worker_id = NULL,
+        claim_expires_at = NULL,
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
+        error_code = 'TASK_CANCELLED',
+        failed_reason = 'Workflow paused before task start',
+        updated_at = NOW()
+    FROM horsies_workflow_tasks wt
+    WHERE wt.task_id = t.id
+      AND wt.workflow_id = ANY($1)
+      AND wt.status IN ('ENQUEUED', 'RUNNING')
+      AND t.status = 'CLAIMED'
+    RETURNING t.id
+)
+UPDATE horsies_workflow_tasks wt
+SET status = 'READY', task_id = NULL, started_at = NULL
+WHERE wt.task_id IN (SELECT id FROM cancelled)
+  AND wt.status IN ('ENQUEUED', 'RUNNING')";
+
 /// Find PAUSED child workflows of a given parent.
 const FIND_PAUSED_CHILDREN_SQL: &str = "\
 SELECT id, depth, root_workflow_id FROM horsies_workflows
@@ -397,7 +428,16 @@ async fn pause_workflow_inner(pool: &PgPool, workflow_id: &str) -> Result<bool, 
     tracing::info!(workflow_id, "workflow paused");
 
     // Cascade pause to running child workflows (iterative BFS).
-    cascade_pause_to_children(pool, workflow_id).await?;
+    let mut paused_ids = vec![workflow_id.to_owned()];
+    paused_ids.extend(cascade_pause_to_children(pool, workflow_id).await?);
+
+    // Claimed-but-not-started backing task rows cannot safely remain claimable
+    // after their workflow_task is reset to READY for resume. Cancel the
+    // abandoned rows and let resume enqueue fresh ones (parity with horsies #96).
+    sqlx::query(CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL)
+        .bind(&paused_ids)
+        .execute(pool)
+        .await?;
 
     Ok(true)
 }
@@ -475,9 +515,10 @@ async fn resume_workflow_inner(
 pub(crate) async fn cascade_pause_to_children(
     pool: &PgPool,
     workflow_id: &str,
-) -> Result<(), WorkflowError> {
+) -> Result<Vec<String>, WorkflowError> {
     let mut queue: VecDeque<String> = VecDeque::new();
     queue.push_back(workflow_id.to_owned());
+    let mut paused_child_ids: Vec<String> = Vec::new();
 
     while let Some(current_id) = queue.pop_front() {
         // Find running child workflows.
@@ -499,12 +540,13 @@ pub(crate) async fn cascade_pause_to_children(
                 "cascade: child workflow paused",
             );
 
+            paused_child_ids.push(child.id.clone());
             // Add to queue to pause its children.
             queue.push_back(child.id);
         }
     }
 
-    Ok(())
+    Ok(paused_child_ids)
 }
 
 // ---------------------------------------------------------------------------

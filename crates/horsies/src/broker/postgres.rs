@@ -280,16 +280,24 @@ SET status = 'SKIPPED', \
     completed_at = NOW() \
 WHERE task_id = ANY($1) AND status IN ('PENDING', 'READY', 'ENQUEUED')";
 
-/// Unclaim this worker's CLAIMED tasks in PAUSED workflows (post-claim batch
-/// filter). Ownership-scoped so a worker cannot reset another worker's claim;
-/// returns the affected ids so only those workflow_task rows are reset.
-const UNCLAIM_PAUSED_OWNED_TASKS_SQL: &str = "\
+/// Cancel this worker's CLAIMED-but-not-started tasks in PAUSED workflows
+/// (post-claim batch filter). The row is moved to terminal CANCELLED — not back
+/// to PENDING — so it cannot be re-claimed and run as a duplicate after the
+/// workflow resumes (resume enqueues a fresh row for the node, whose
+/// workflow_task is reset to READY with task_id=NULL). Ownership-scoped so a
+/// worker cannot touch another worker's claim; returns the affected ids so only
+/// those workflow_task rows are reset.
+const CANCEL_PAUSED_OWNED_TASKS_SQL: &str = "\
 UPDATE horsies_tasks \
-SET status = 'PENDING', \
+SET status = 'CANCELLED', \
     claimed = FALSE, \
     claimed_at = NULL, \
     claimed_by_worker_id = NULL, \
     claim_expires_at = NULL, \
+    finalizing_at = NULL, \
+    finalizing_by_worker_id = NULL, \
+    error_code = 'TASK_CANCELLED', \
+    failed_reason = 'Workflow paused before task start', \
     updated_at = NOW() \
 WHERE id = ANY($1) \
   AND status = 'CLAIMED' \
@@ -311,6 +319,25 @@ WHERE id = ANY($1) \
   AND status = 'CLAIMED' \
   AND claimed_by_worker_id = $2 \
 RETURNING id";
+
+/// Cancel claimed-but-not-started tasks of a PAUSED workflow (pre-start handler).
+/// Moves CLAIMED rows to terminal CANCELLED so they cannot run as duplicates of
+/// the node after resume; the node is reset to READY separately. Not
+/// ownership-scoped: the caller reached this only after `set_running` declined to
+/// start the task because its workflow is PAUSED.
+const CANCEL_PAUSED_TASKS_SQL: &str = "\
+UPDATE horsies_tasks \
+SET status = 'CANCELLED', \
+    claimed = FALSE, \
+    claimed_at = NULL, \
+    claimed_by_worker_id = NULL, \
+    claim_expires_at = NULL, \
+    finalizing_at = NULL, \
+    finalizing_by_worker_id = NULL, \
+    error_code = 'TASK_CANCELLED', \
+    failed_reason = 'Workflow paused before task start', \
+    updated_at = NOW() \
+WHERE id = ANY($1) AND status = 'CLAIMED'";
 
 /// Unclaim tasks: reset from CLAIMED back to PENDING.
 const UNCLAIM_TASKS_SQL: &str = "\
@@ -1677,7 +1704,11 @@ impl PostgresBroker {
 
         match workflow_status {
             "PAUSED" => {
-                sqlx::query(UNCLAIM_TASKS_SQL)
+                // Cancel the claimed-but-not-started row (terminal) instead of
+                // returning it to PENDING, then reset the node to READY so resume
+                // enqueues a fresh row. Prevents the abandoned row from running as
+                // a duplicate after resume (parity with horsies PR #96).
+                sqlx::query(CANCEL_PAUSED_TASKS_SQL)
                     .bind(&task_ids)
                     .execute(tx.as_mut())
                     .await
@@ -1752,16 +1783,18 @@ impl PostgresBroker {
             }
         }
 
-        // PAUSED: unclaim this worker's own claimed rows back to PENDING so they
-        // can be picked up on resume. Reset only the workflow_task rows we owned.
+        // PAUSED: cancel this worker's own claimed-but-not-started rows (terminal),
+        // then reset the workflow_task rows we owned to READY so resume enqueues a
+        // fresh row. The cancelled row is never re-claimable, so it can't run as a
+        // duplicate of the node after resume.
         if !paused_ids.is_empty() {
-            let unclaimed: Vec<(String,)> = sqlx::query_as(UNCLAIM_PAUSED_OWNED_TASKS_SQL)
+            let cancelled: Vec<(String,)> = sqlx::query_as(CANCEL_PAUSED_OWNED_TASKS_SQL)
                 .bind(&paused_ids)
                 .bind(worker_id)
                 .fetch_all(&self.pool)
                 .await
                 .map_err(BrokerError::Database)?;
-            let owned: Vec<String> = unclaimed.into_iter().map(|(id,)| id).collect();
+            let owned: Vec<String> = cancelled.into_iter().map(|(id,)| id).collect();
 
             if !owned.is_empty() {
                 sqlx::query(RESET_WORKFLOW_TASKS_SQL)
@@ -1773,7 +1806,7 @@ impl PostgresBroker {
 
             tracing::debug!(
                 count = owned.len(),
-                "unclaimed own tasks belonging to PAUSED workflows",
+                "cancelled own claimed-but-not-started tasks belonging to PAUSED workflows",
             );
         }
 

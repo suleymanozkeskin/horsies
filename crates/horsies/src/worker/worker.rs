@@ -615,7 +615,7 @@ impl Worker {
         }
 
         // Post-claim non-runnable workflow filter.
-        // PAUSED: unclaim task → PENDING, reset workflow_task → READY
+        // PAUSED: cancel task → CANCELLED (terminal), reset workflow_task → READY
         // CANCELLED: cancel task → CANCELLED, skip workflow_task → SKIPPED
         if !claimed_rows.is_empty() {
             let all_ids: Vec<String> = claimed_rows.iter().map(|r| r.id.clone()).collect();
@@ -1558,7 +1558,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn finalize_paused_workflow_requeues_without_running_user_code() {
+    async fn finalize_paused_workflow_cancels_without_running_user_code() {
         let pool = test_pool().await;
         let broker = test_broker().await;
         clean(&pool).await;
@@ -1582,10 +1582,13 @@ mod tests {
 
         assert_eq!(EXECUTION_COUNT.load(Ordering::SeqCst), 0);
 
+        // Paused-workflow claimed-but-not-started task is moved to terminal
+        // CANCELLED (not back to PENDING), so it cannot run as a duplicate of the
+        // node after resume. The node is reset to READY for resume to re-enqueue.
         let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
-        assert_eq!(status, "PENDING");
+        assert_eq!(status, "CANCELLED");
         assert_eq!(result, None);
-        assert_eq!(error_code, None);
+        assert_eq!(error_code.as_deref(), Some("TASK_CANCELLED"));
         let (workflow_task_status, workflow_task_id) =
             fetch_only_workflow_task_state(&pool, &workflow_id).await;
         assert_eq!(workflow_task_status, "READY");
