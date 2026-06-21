@@ -699,15 +699,37 @@ async fn skip_task(
 // Task enqueue
 // ---------------------------------------------------------------------------
 
-/// Create a horsies_tasks row for a workflow task and link it.
+/// Computed `horsies_tasks` INSERT values for an enqueued workflow node.
 ///
-/// Merges `args_from` results into the task's kwargs/args.
-async fn enqueue_workflow_task(
+/// Built by [`build_enqueued_task_params`] (kwargs/args_from merge, ctx
+/// injection, options parse, fingerprint), then bound by the single-node and
+/// batched enqueue paths so the two cannot diverge.
+struct EnqueueInsertParams {
+    task_id: String,
+    task_name: String,
+    queue_name: String,
+    priority: i32,
+    task_args: Option<String>,
+    merged_kwargs: Option<String>,
+    good_until: Option<chrono::DateTime<chrono::Utc>>,
+    max_retries: i32,
+    task_options: Option<String>,
+    enqueue_sha: String,
+}
+
+/// Build the `horsies_tasks` INSERT params for a workflow node ready to enqueue.
+///
+/// Shared by `enqueue_workflow_task` (single-node) and the batched promotion
+/// pipeline. Merges `args_from` dependency results into kwargs, injects
+/// `workflow_ctx` when configured (the only DB read here), parses retry/good_until
+/// from task_options, and generates the task id + enqueue fingerprint. Errors are
+/// per-node and propagate to the caller exactly as the inline code did.
+async fn build_enqueued_task_params(
     pool: &PgPool,
     workflow_id: &str,
     task: &DependentRow,
     dep_results: &HashMap<i32, DepResultValue>,
-) -> Result<(), WorkflowError> {
+) -> Result<EnqueueInsertParams, WorkflowError> {
     let task_id = Uuid::new_v4().to_string();
 
     // Merge args_from into kwargs.
@@ -738,28 +760,51 @@ async fn enqueue_workflow_task(
     }
 
     let max_retries = parse_max_retries(task.task_options.as_deref());
-
     let enqueue_sha = format!("wf-{}", task_id);
+    let good_until =
+        crate::workflow_engine::parse_good_until_from_options(task.task_options.as_deref());
+
+    Ok(EnqueueInsertParams {
+        task_id,
+        task_name: task.task_name.clone(),
+        queue_name: task.queue_name.clone(),
+        priority: task.priority,
+        task_args: task.task_args.clone(),
+        merged_kwargs,
+        good_until,
+        max_retries,
+        task_options: task.task_options.clone(),
+        enqueue_sha,
+    })
+}
+
+/// Create a horsies_tasks row for a workflow task and link it.
+///
+/// Merges `args_from` results into the task's kwargs/args.
+async fn enqueue_workflow_task(
+    pool: &PgPool,
+    workflow_id: &str,
+    task: &DependentRow,
+    dep_results: &HashMap<i32, DepResultValue>,
+) -> Result<(), WorkflowError> {
+    let params = build_enqueued_task_params(pool, workflow_id, task, dep_results).await?;
 
     // INSERT + LINK in a single transaction to prevent orphaned horsies_task rows
     // if the workflow is paused/cancelled between INSERT and LINK.
     // Matches Python's atomic ENQUEUE_WORKFLOW_TASK_SQL pattern.
     let mut tx = pool.begin().await?;
 
-    let good_until =
-        crate::workflow_engine::parse_good_until_from_options(task.task_options.as_deref());
-
     sqlx::query(ENQUEUE_TASK_SQL)
-        .bind(&task_id)
-        .bind(&task.task_name)
-        .bind(&task.queue_name)
-        .bind(task.priority)
-        .bind(&task.task_args)
-        .bind(&merged_kwargs)
-        .bind(good_until)
-        .bind(max_retries)
-        .bind(&task.task_options)
-        .bind(&enqueue_sha)
+        .bind(&params.task_id)
+        .bind(&params.task_name)
+        .bind(&params.queue_name)
+        .bind(params.priority)
+        .bind(&params.task_args)
+        .bind(&params.merged_kwargs)
+        .bind(params.good_until)
+        .bind(params.max_retries)
+        .bind(&params.task_options)
+        .bind(&params.enqueue_sha)
         .execute(&mut *tx)
         .await?;
 
@@ -768,7 +813,7 @@ async fn enqueue_workflow_task(
     // If the workflow was paused/cancelled, this updates 0 rows and the
     // transaction rolls back (no orphaned horsies_task).
     let link_result = sqlx::query(LINK_ENQUEUED_TASK_SQL)
-        .bind(&task_id)
+        .bind(&params.task_id)
         .bind(workflow_id)
         .bind(task.task_index)
         .execute(&mut *tx)
@@ -790,7 +835,7 @@ async fn enqueue_workflow_task(
     tracing::debug!(
         workflow_id,
         task_index = task.task_index,
-        task_id = %task_id,
+        task_id = %params.task_id,
         "workflow task enqueued",
     );
 
