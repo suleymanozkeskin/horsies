@@ -761,7 +761,9 @@ pub fn spawn_workflow_recovery(
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 _ = tokio::time::sleep(check_interval) => {
-                    match crate::workflow_engine::recover_stuck_workflows(&pool, &registry).await {
+                    match crate::workflow_engine::recover_stuck_workflows(
+                        &pool, &registry, config.crashed_worker_recovery_grace_ms,
+                    ).await {
                         Ok(report) if report.total() > 0 => {
                             tracing::info!(
                                 total = report.total(),

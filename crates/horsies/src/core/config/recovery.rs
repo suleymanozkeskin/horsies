@@ -31,6 +31,17 @@ pub struct RecoveryConfig {
     #[serde(default = "default_finalizing_stale_threshold")]
     pub finalizing_stale_threshold_ms: u64,
 
+    /// Grace before the workflow reaper (Case 1.7) recovers a task that is
+    /// terminal but whose workflow_task is not yet advanced. Finalize is two
+    /// transactions (Phase 1 marks the task terminal; Phase 2 advances the DAG);
+    /// without a grace the reaper recovers a task whose Phase 2 is merely in
+    /// flight, adding latency and "recovered" log noise (recovery is idempotent,
+    /// so this is not a correctness issue). Decoupled from the heartbeat-validated
+    /// thresholds so it can be tuned independently. `0` disables (immediate
+    /// recovery, legacy behavior); range 0–3_600_000.
+    #[serde(default = "default_crashed_worker_recovery_grace")]
+    pub crashed_worker_recovery_grace_ms: u64,
+
     /// How often the reaper checks for stale tasks (1s–10min).
     #[serde(default = "default_check_interval")]
     pub check_interval_ms: u64,
@@ -68,6 +79,9 @@ fn default_running_stale_threshold() -> u64 {
 fn default_finalizing_stale_threshold() -> u64 {
     300_000
 }
+fn default_crashed_worker_recovery_grace() -> u64 {
+    10_000
+}
 fn default_check_interval() -> u64 {
     30_000
 }
@@ -92,6 +106,7 @@ impl Default for RecoveryConfig {
             auto_fail_stale_running: true,
             running_stale_threshold_ms: 300_000,
             finalizing_stale_threshold_ms: 300_000,
+            crashed_worker_recovery_grace_ms: 10_000,
             check_interval_ms: 30_000,
             runner_heartbeat_interval_ms: 30_000,
             claimer_heartbeat_interval_ms: 30_000,
@@ -194,6 +209,15 @@ impl RecoveryConfig {
                     min: MIN_MS,
                 });
             }
+        }
+
+        // crashed_worker_recovery_grace_ms: 0 disables (no MIN check); max 1hr.
+        if self.crashed_worker_recovery_grace_ms > 3_600_000 {
+            errors.push(RecoveryConfigError::AboveMaximum {
+                field: "crashed_worker_recovery_grace_ms",
+                value: self.crashed_worker_recovery_grace_ms,
+                max: 3_600_000,
+            });
         }
 
         // Maximum bounds per doc-comment ranges.

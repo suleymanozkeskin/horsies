@@ -112,6 +112,12 @@ LIMIT CAST($1 AS bigint)";
 /// Includes CANCELLED in the terminal task status check (matching Python).
 /// Filters to non-subworkflow rows to avoid matching subworkflow entries
 /// that happen to have a task_id set.
+// $2 = grace milliseconds: skip a task whose terminal stamp is within the grace,
+// so the reaper does not "recover" a task whose Phase 2 (workflow advancement) is
+// merely in flight (parity with horsies PR #154). The terminal stamp is the precise
+// completed_at/failed_at, falling back to updated_at for CANCELLED (no dedicated
+// column; all terminal transitions set updated_at = NOW()). grace = 0 → the
+// predicate is `< NOW()`, i.e. immediate recovery (legacy behavior).
 const CASE1_7_STALE_LINKED_TASK_SQL: &str = "\
 SELECT wt.workflow_id, wt.task_index, wt.task_id,
        t.status as task_status, t.result as task_result
@@ -123,6 +129,8 @@ WHERE wt.task_id IS NOT NULL
   AND wt.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
   AND t.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
   AND w.status = 'RUNNING'
+  AND COALESCE(t.completed_at, t.failed_at, t.updated_at)
+        < NOW() - CAST($2 AS bigint) * INTERVAL '1 millisecond'
 LIMIT CAST($1 AS bigint)";
 
 /// Case 2+3: RUNNING workflows where all wf_tasks are terminal.
@@ -298,8 +306,15 @@ pub(crate) const GLOBAL_SCAN_ROW_CAP: i64 = 200;
 pub async fn recover_stuck_workflows(
     pool: &PgPool,
     registry: &WorkflowSpecRegistry,
+    finalizing_grace_ms: u64,
 ) -> Result<RecoveryReport, WorkflowError> {
-    recover_stuck_workflows_with_cap(pool, registry, Some(GLOBAL_SCAN_ROW_CAP)).await
+    recover_stuck_workflows_with_cap(
+        pool,
+        registry,
+        Some(GLOBAL_SCAN_ROW_CAP),
+        finalizing_grace_ms,
+    )
+    .await
 }
 
 /// Recovery pass with an explicit per-candidate-query row cap.
@@ -307,10 +322,15 @@ pub async fn recover_stuck_workflows(
 /// `max_rows = None` binds `LIMIT NULL` (uncapped) — used by the resume path so
 /// a resumed tree is recovered completely in one pass, not left partial until
 /// the next periodic cycle.
+///
+/// `finalizing_grace_ms` defers Case 1.7 recovery of a just-terminal task by that
+/// many ms (parity with horsies PR #154); `0` = immediate. Only the periodic
+/// reaper passes a non-zero value; resume and ad-hoc callers pass `0`.
 pub(crate) async fn recover_stuck_workflows_with_cap(
     pool: &PgPool,
     registry: &WorkflowSpecRegistry,
     max_rows: Option<i64>,
+    finalizing_grace_ms: u64,
 ) -> Result<RecoveryReport, WorkflowError> {
     let mut report = RecoveryReport::default();
 
@@ -318,7 +338,7 @@ pub(crate) async fn recover_stuck_workflows_with_cap(
     recover_case1(pool, max_rows, &mut report).await;
     recover_case1_5(pool, registry, max_rows, &mut report).await;
     recover_case1_6(pool, registry, max_rows, &mut report).await;
-    recover_case1_7(pool, registry, max_rows, &mut report).await;
+    recover_case1_7(pool, registry, max_rows, finalizing_grace_ms, &mut report).await;
     recover_case2_3(pool, registry, max_rows, &mut report).await;
     recover_case4(pool, max_rows, &mut report).await;
 
@@ -530,10 +550,12 @@ async fn recover_case1_7(
     pool: &PgPool,
     registry: &WorkflowSpecRegistry,
     max_rows: Option<i64>,
+    finalizing_grace_ms: u64,
     report: &mut RecoveryReport,
 ) {
     let rows = match sqlx::query_as::<_, StaleLinkedTaskRow>(CASE1_7_STALE_LINKED_TASK_SQL)
         .bind(max_rows)
+        .bind(finalizing_grace_ms as i64)
         .fetch_all(pool)
         .await
     {
@@ -932,17 +954,112 @@ mod cap_tests {
         let registry = WorkflowSpecRegistry::new();
 
         // Capped at 2: exactly 2 of the 3 orphans are failed this pass.
-        let report = recover_stuck_workflows_with_cap(&pool, &registry, Some(2))
+        let report = recover_stuck_workflows_with_cap(&pool, &registry, Some(2), 0)
             .await
             .unwrap();
         assert_eq!(report.case4_orphaned_failed, 2);
         assert_eq!(failed_count(&pool, &ids).await, 2);
 
         // Uncapped: the remaining orphan is failed.
-        let report = recover_stuck_workflows_with_cap(&pool, &registry, None)
+        let report = recover_stuck_workflows_with_cap(&pool, &registry, None, 0)
             .await
             .unwrap();
         assert_eq!(report.case4_orphaned_failed, 1);
         assert_eq!(failed_count(&pool, &ids).await, 3);
+    }
+
+    /// Case 1.7 must not recover a just-terminal task within the grace, but must
+    /// recover it once its terminal stamp ages past the grace. Parity with horsies
+    /// PR #154.
+    #[tokio::test]
+    #[serial]
+    async fn case1_7_grace_defers_then_recovers() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let registry = WorkflowSpecRegistry::new();
+
+        let wf_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+
+        sqlx::query(
+            "INSERT INTO horsies_workflows (id, name, status, on_error, output_task_index,
+                definition_key, depth, root_workflow_id, sent_at, created_at, started_at, updated_at)
+             VALUES ($1, 'grace_wf', 'RUNNING', 'fail', NULL, 'test.grace.v1', 0, $1,
+                NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(&wf_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Terminal task row whose Phase 2 has "not yet run": completed_at = NOW().
+        sqlx::query(
+            "INSERT INTO horsies_tasks (id, task_name, queue_name, priority, args, kwargs, status,
+                sent_at, enqueued_at, completed_at, result, max_retries, retry_count, enqueue_sha,
+                is_workflow_task, created_at, updated_at)
+             VALUES ($1, 'grace_task', 'default', 0, '[]', '{}', 'COMPLETED',
+                NOW(), NOW(), NOW(), '{\"Ok\":1}', 0, 0, $1, TRUE, NOW(), NOW())",
+        )
+        .bind(&task_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (id, workflow_id, task_index, node_id, task_name,
+                task_args, task_kwargs, queue_name, priority, dependencies, allow_failed_deps,
+                join_type, status, is_subworkflow, task_id, created_at)
+             VALUES ($1, $2, 0, 'node_0', 'grace_task', '[]', '{}', 'default', 100, '{}', FALSE,
+                'all', 'ENQUEUED', FALSE, $3, NOW())",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&wf_id)
+        .bind(&task_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let wt_status = |pool: PgPool, wf: String| async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",
+            )
+            .bind(&wf)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+
+        // Within the 10s grace: Case 1.7 defers.
+        let report = recover_stuck_workflows_with_cap(&pool, &registry, None, 10_000)
+            .await
+            .unwrap();
+        assert_eq!(report.case1_7_task_completed, 0, "within grace: not recovered");
+        assert_eq!(wt_status(pool.clone(), wf_id.clone()).await, "ENQUEUED");
+
+        // Age the terminal stamp past the grace.
+        sqlx::query("UPDATE horsies_tasks SET completed_at = NOW() - INTERVAL '20 seconds' WHERE id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let report = recover_stuck_workflows_with_cap(&pool, &registry, None, 10_000)
+            .await
+            .unwrap();
+        assert_eq!(report.case1_7_task_completed, 1, "past grace: recovered");
+        assert_eq!(wt_status(pool.clone(), wf_id.clone()).await, "COMPLETED");
+
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+            .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await
+            .ok();
     }
 }

@@ -494,8 +494,10 @@ async fn resume_workflow_inner(
     // waiting for the periodic reaper (parity with horsies PR #66). Uncapped
     // (max_rows = None): a resumed tree must recover completely in one pass,
     // not be left partial until the next periodic cycle (parity with PR #103).
+    // finalizing_grace_ms = 0: resume recovers immediately (the grace only applies
+    // to the periodic reaper smoothing the Phase 1→Phase 2 finalize window).
     if let Err(e) = crate::workflow_engine::recovery::recover_stuck_workflows_with_cap(
-        pool, registry, None,
+        pool, registry, None, 0,
     )
     .await
     {

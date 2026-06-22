@@ -41,6 +41,7 @@ pub fn fast_recovery_app_config() -> AppConfig {
         auto_fail_stale_running: true,
         running_stale_threshold_ms: 2_000,
         finalizing_stale_threshold_ms: 2_000,
+        crashed_worker_recovery_grace_ms: 2_000,
         check_interval_ms: 1_000,
         runner_heartbeat_interval_ms: 1_000,
         claimer_heartbeat_interval_ms: 1_000,
