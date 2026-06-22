@@ -1421,12 +1421,31 @@ pub async fn on_subworkflow_complete(
         }
     }
 
-    let output = match child_result_json {
-        Some(json) => match serde_json::from_str::<TaskResult<serde_json::Value>>(json) {
-            Ok(TaskResult::Ok(value)) => Some(value),
-            _ => None,
-        },
-        None => None,
+    // An outputless child workflow (no output_index) finalizes with its
+    // terminal-results map as the result. That map is the child's own
+    // handle.get() shape, not a value the parent node should expose: a parent
+    // node over an outputless child has no output. Detect it and propagate None
+    // (summary.output = None; parent node result = TaskResult(ok=None)) instead of
+    // lifting the nested map. Parity with horsies PR #141.
+    let child_is_outputless = sqlx::query_scalar::<_, Option<i32>>(
+        "SELECT output_task_index FROM horsies_workflows WHERE id = $1",
+    )
+    .bind(child_workflow_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten()
+    .is_none();
+
+    let output = if child_is_outputless {
+        None
+    } else {
+        match child_result_json {
+            Some(json) => match serde_json::from_str::<TaskResult<serde_json::Value>>(json) {
+                Ok(TaskResult::Ok(value)) => Some(value),
+                _ => None,
+            },
+            None => None,
+        }
     };
 
     // Determine which success case was satisfied (if any).
@@ -1481,11 +1500,18 @@ pub async fn on_subworkflow_complete(
 
     let summary_json = serde_json::to_string(&summary)?;
     let result_json = if is_success {
-        match child_result_json {
-            Some(json) => json.to_owned(),
-            None => {
-                let wrapped = TaskResult::Ok(serde_json::Value::Null);
-                serde_json::to_string(&wrapped)?
+        if child_is_outputless {
+            // Outputless child: parent node result is TaskResult(ok=None), not the
+            // child's terminal-results map. Parity with horsies PR #141.
+            let wrapped = TaskResult::Ok(serde_json::Value::Null);
+            serde_json::to_string(&wrapped)?
+        } else {
+            match child_result_json {
+                Some(json) => json.to_owned(),
+                None => {
+                    let wrapped = TaskResult::Ok(serde_json::Value::Null);
+                    serde_json::to_string(&wrapped)?
+                }
             }
         }
     } else {
@@ -2344,6 +2370,67 @@ mod guard_tests {
             task_status(&pool, &parent_id).await,
             "RUNNING",
             "parent node must stay RUNNING (guard refused to propagate)",
+        );
+
+        cleanup(&pool, &parent_id, &child_id).await;
+    }
+
+    /// An outputless child (no output_index) must propagate `None` to the parent
+    /// node, not its terminal-results map. Parity with horsies PR #141.
+    #[tokio::test]
+    #[serial]
+    async fn outputless_subworkflow_propagates_none() {
+        let broker = PostgresBroker::connect(&test_db_url())
+            .await
+            .expect("connect broker");
+        let pool = broker.pool().clone();
+
+        let parent_id = Uuid::new_v4().to_string();
+        let child_id = Uuid::new_v4().to_string();
+        // insert_parent_workflow sets output_task_index NULL → outputless child.
+        insert_parent_workflow(&pool, &parent_id).await;
+        insert_parent_workflow(&pool, &child_id).await;
+        insert_subworkflow_task(&pool, &parent_id, &child_id).await;
+
+        let registry = WorkflowSpecRegistry::new();
+        // Child finalized with the terminal-results map (the outputless shape).
+        let child_result = "{\"Ok\":{\"node_0\":{\"Ok\":42}}}";
+        on_subworkflow_complete(
+            &pool,
+            &parent_id,
+            0,
+            &child_id,
+            "COMPLETED",
+            Some(child_result),
+            &registry,
+        )
+        .await
+        .expect("on_subworkflow_complete");
+
+        let (result, summary_str): (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT result, sub_workflow_summary FROM horsies_workflow_tasks \
+             WHERE workflow_id = $1 AND task_index = 0",
+        )
+        .bind(&parent_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read parent node");
+
+        let parsed: TaskResult<serde_json::Value> =
+            serde_json::from_str(result.as_deref().expect("result")).expect("parse result");
+        match parsed {
+            TaskResult::Ok(v) => assert!(
+                v.is_null(),
+                "parent node result must be Ok(None), not the child terminal map; got {v}",
+            ),
+            TaskResult::Err(e) => panic!("expected Ok(null), got Err: {:?}", e),
+        }
+
+        let summary: SubWorkflowSummary =
+            serde_json::from_str(&summary_str.expect("summary")).expect("parse summary");
+        assert!(
+            summary.output.is_none(),
+            "summary.output must be None for an outputless child",
         );
 
         cleanup(&pool, &parent_id, &child_id).await;
