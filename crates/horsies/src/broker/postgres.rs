@@ -98,29 +98,41 @@ FROM next
 WHERE t.id = next.id
 RETURNING t.id, t.task_name, t.args, t.kwargs, t.retry_count, t.max_retries, t.task_options, t.queue_name, t.good_until, t.is_workflow_task";
 
+// CLAIMED -> RUNNING transition with the first runner heartbeat fused in (parity
+// with horsies PR #134): the heartbeat row is inserted in the same statement as the
+// transition, so a task is never observable RUNNING without heartbeat coverage, and
+// a transition that does not apply (expiry / PAUSED / CANCELLED / ownership change)
+// inserts no orphan beat. The heartbeat thread no longer sends an immediate beat.
 const SET_RUNNING_SQL: &str = "\
-UPDATE horsies_tasks
-SET status = 'RUNNING',
-    claimed = FALSE,
-    claim_expires_at = NULL,
-    started_at = NOW(),
-    worker_pid = $2,
-    worker_hostname = $3,
-    worker_process_name = $4,
-    updated_at = NOW()
-WHERE id = $1
-  AND status = 'CLAIMED'
-  AND claimed_by_worker_id = $5
-  AND (claim_expires_at IS NULL OR claim_expires_at > now())
-  AND (good_until IS NULL OR good_until > now())
-  AND NOT EXISTS (
-      SELECT 1
-      FROM horsies_workflow_tasks wt
-      JOIN horsies_workflows w ON w.id = wt.workflow_id
-      WHERE wt.task_id = $1
-        AND w.status IN ('PAUSED', 'CANCELLED')
-  )
-RETURNING id, started_at";
+WITH upd AS (
+    UPDATE horsies_tasks
+    SET status = 'RUNNING',
+        claimed = FALSE,
+        claim_expires_at = NULL,
+        started_at = NOW(),
+        worker_pid = $2,
+        worker_hostname = $3,
+        worker_process_name = $4,
+        updated_at = NOW()
+    WHERE id = $1
+      AND status = 'CLAIMED'
+      AND claimed_by_worker_id = $5
+      AND (claim_expires_at IS NULL OR claim_expires_at > now())
+      AND (good_until IS NULL OR good_until > now())
+      AND NOT EXISTS (
+          SELECT 1
+          FROM horsies_workflow_tasks wt
+          JOIN horsies_workflows w ON w.id = wt.workflow_id
+          WHERE wt.task_id = $1
+            AND w.status IN ('PAUSED', 'CANCELLED')
+      )
+    RETURNING id, started_at
+),
+hb AS (
+    INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid)
+    SELECT id, $5, 'runner', NOW(), $3, $2 FROM upd
+)
+SELECT id, started_at FROM upd";
 
 const COMPLETE_SQL: &str = "\
 UPDATE horsies_tasks
@@ -3378,6 +3390,115 @@ mod fused_finalize_tests {
             .await
             .expect("status");
         assert_eq!(status, "RUNNING", "row untouched");
+
+        cleanup(&pool, &id).await;
+    }
+}
+
+#[cfg(test)]
+mod set_running_heartbeat_tests {
+    //! Pin that the CLAIMED -> RUNNING transition writes the first runner
+    //! heartbeat atomically (parity with horsies PR #134): an applied transition
+    //! leaves a 'runner' heartbeat row; a non-applied one writes none.
+    use super::*;
+    use serial_test::serial;
+    use uuid::Uuid;
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|p| p.join(".env").exists());
+        let pw = root
+            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
+            .and_then(|c| {
+                c.lines()
+                    .filter_map(|l| l.trim().split_once('='))
+                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
+                    .map(|(_, v)| v.trim().to_owned())
+            })
+            .unwrap_or_else(|| "W0rklane".to_owned());
+        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    }
+
+    async fn seed_claimed(pool: &sqlx::PgPool, id: &str, worker: &str) {
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, args, kwargs,
+                status, sent_at, enqueued_at, claimed, claimed_at, claimed_by_worker_id,
+                max_retries, enqueue_sha, is_workflow_task, created_at, updated_at
+            ) VALUES (
+                $1, 'hb_task', 'default', 0, '[]', '{}',
+                'CLAIMED', NOW(), NOW(), TRUE, NOW(), $2,
+                3, $1, FALSE, NOW(), NOW()
+            )",
+        )
+        .bind(id)
+        .bind(worker)
+        .execute(pool)
+        .await
+        .expect("seed claimed");
+    }
+
+    async fn runner_beats(pool: &sqlx::PgPool, id: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM horsies_heartbeats WHERE task_id = $1 AND role = 'runner'",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("count beats")
+    }
+
+    async fn cleanup(pool: &sqlx::PgPool, id: &str) {
+        sqlx::query("DELETE FROM horsies_heartbeats WHERE task_id = $1")
+            .bind(id)
+            .execute(pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+            .bind(id)
+            .execute(pool)
+            .await
+            .expect("cleanup");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn running_transition_writes_first_heartbeat() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let id = Uuid::new_v4().to_string();
+        seed_claimed(&pool, &id, "w1").await;
+
+        let started = broker
+            .set_running(&id, "w1", 321, "host1", "worker")
+            .await
+            .expect("set_running");
+        assert!(started.is_some(), "transition must apply");
+        assert_eq!(runner_beats(&pool, &id).await, 1, "exactly one fused first beat");
+
+        cleanup(&pool, &id).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn non_applied_transition_writes_no_heartbeat() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let id = Uuid::new_v4().to_string();
+        seed_claimed(&pool, &id, "w1").await;
+
+        // Ownership mismatch → transition does not apply.
+        let started = broker
+            .set_running(&id, "w2", 321, "host1", "worker")
+            .await
+            .expect("set_running");
+        assert!(started.is_none(), "transition must not apply for wrong worker");
+        assert_eq!(runner_beats(&pool, &id).await, 0, "no orphan beat on non-applied transition");
 
         cleanup(&pool, &id).await;
     }

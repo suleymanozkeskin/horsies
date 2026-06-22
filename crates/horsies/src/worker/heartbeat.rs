@@ -39,10 +39,14 @@ const MAX_CONSECUTIVE_HEARTBEAT_FAILURES: u32 = 5;
 
 /// Spawn a runner heartbeat loop for a single task.
 ///
-/// Sends an immediate best-effort heartbeat, then repeats at `interval`
-/// until the cancellation token fires or consecutive failures exceed the
-/// internal threshold. Transient DB errors are logged and retried —
-/// a single failure does not kill heartbeating.
+/// Repeats heartbeats at `interval` until the cancellation token fires or
+/// consecutive failures exceed the internal threshold. Transient DB errors are
+/// logged and retried — a single failure does not kill heartbeating.
+///
+/// The first beat is NOT sent here: it is written atomically with the CLAIMED →
+/// RUNNING transition (`SET_RUNNING_SQL`), so a task is never observable RUNNING
+/// without heartbeat coverage. This loop provides the ongoing beats. Parity with
+/// horsies PR #134.
 pub fn spawn_runner_heartbeat(
     pool: PgPool,
     task_id: String,
@@ -54,18 +58,6 @@ pub fn spawn_runner_heartbeat(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut consecutive_failures: u32 = 0;
-
-        // Immediate best-effort heartbeat so a freshly-RUNNING task is not stale.
-        // If it fails, the loop still starts — the next attempt in `interval` can
-        // succeed, and the stale threshold provides headroom.
-        if let Err(e) = send_runner_heartbeat(&pool, &task_id, &worker_id, &hostname, pid).await {
-            tracing::warn!(
-                task_id = %task_id,
-                error = %e,
-                "initial runner heartbeat failed, will retry in loop",
-            );
-            consecutive_failures = 1;
-        }
 
         loop {
             tokio::select! {
