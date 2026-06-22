@@ -62,6 +62,9 @@ pub(crate) enum FinalizeOutcome {
     },
     /// Task was requeued for retry. No workflow callback needed.
     Retried,
+    /// Plain (non-workflow) ok task fully finalized in one statement (CAS +
+    /// attempt + capacity notify). No Phase 2 needed. Parity with horsies PR #134.
+    Finalized,
 }
 
 /// Data needed to run Phase 2 after the semaphore permit is released.
@@ -692,6 +695,8 @@ pub(crate) async fn persist_terminal_state(
                 hostname,
                 pid,
                 &process_name,
+                row.is_workflow_task,
+                &row.queue_name,
             )
             .await
         }
@@ -768,6 +773,8 @@ async fn persist_ok_result(
     hostname: &str,
     pid: i32,
     process_name: &str,
+    is_workflow_task: bool,
+    queue_name: &str,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let (wrapped, is_success) = match serde_json::from_slice::<serde_json::Value>(result_bytes) {
         Ok(v) => (TaskResult::Ok(v), true),
@@ -781,6 +788,37 @@ async fn persist_ok_result(
     };
 
     let wrapped_json = serde_json::to_string(&wrapped).unwrap_or_else(|_| "{}".to_owned());
+
+    // Plain (non-workflow) ok result: one fused statement (lock + attempt + CAS +
+    // capacity notify) finalizes it with no Phase 2. Workflow tasks keep the
+    // multi-statement path so Phase 2 can run the workflow callback. Parity with
+    // horsies PR #134.
+    if is_success && !is_workflow_task {
+        let channel = format!("task_queue_{}", queue_name);
+        let payload = format!("capacity:{}", task_id);
+        let tx_result = finalize_with_retry(task_id, "complete-fused", || async {
+            broker
+                .finalize_completed_fused(task_id, Some(&wrapped_json), worker_id, &channel, &payload)
+                .await
+        })
+        .await;
+
+        return match tx_result {
+            Ok(true) => Ok(FinalizeOutcome::Finalized),
+            Ok(false) => Err(FinalizeError {
+                stage: FinalizeStage::Phase1Persist,
+                task_id: task_id.to_owned(),
+                message: "finalize (complete-fused) aborted: task no longer RUNNING".to_owned(),
+                retryable: false,
+            }),
+            Err(e) => Err(FinalizeError {
+                stage: FinalizeStage::Phase1Persist,
+                task_id: task_id.to_owned(),
+                message: format!("finalize (complete-fused) failed after retries: {}", e),
+                retryable: e.is_retryable(),
+            }),
+        };
+    }
 
     if is_success {
         let tx_result = finalize_with_retry(task_id, "complete", || async {
@@ -1141,7 +1179,7 @@ pub(crate) async fn finalize_pre_execution_failure(
                     queue_name,
                     is_workflow_task,
                 }),
-                Some(FinalizeOutcome::Retried) | None => None,
+                Some(FinalizeOutcome::Retried) | Some(FinalizeOutcome::Finalized) | None => None,
             };
         }
         OwnershipOutcome::ExpiredBeforeStart { result_json } => {
@@ -1177,7 +1215,7 @@ pub(crate) async fn finalize_pre_execution_failure(
             queue_name,
             is_workflow_task,
         }),
-        Some(FinalizeOutcome::Retried) | None => None,
+        Some(FinalizeOutcome::Retried) | Some(FinalizeOutcome::Finalized) | None => None,
     }
 }
 
@@ -1243,7 +1281,7 @@ pub(crate) async fn execute_and_finalize(
                     queue_name,
                     is_workflow_task,
                 }),
-                Some(FinalizeOutcome::Retried) | None => None,
+                Some(FinalizeOutcome::Retried) | Some(FinalizeOutcome::Finalized) | None => None,
             };
         }
         OwnershipOutcome::ExpiredBeforeStart { result_json } => {
@@ -1323,7 +1361,7 @@ pub(crate) async fn execute_and_finalize(
             queue_name,
             is_workflow_task,
         }),
-        Some(FinalizeOutcome::Retried) | None => None,
+        Some(FinalizeOutcome::Retried) | Some(FinalizeOutcome::Finalized) | None => None,
     }
 }
 
