@@ -243,9 +243,72 @@ pub fn init_tracing(level: LogLevel) {
 
     subscriber_fmt()
         .with_env_filter(env_filter)
+        .with_ansi(should_use_color())
         .with_target(true)
         .with_thread_ids(false)
         .with_file(false)
         .with_line_number(false)
         .init();
+}
+
+/// Decide whether to emit ANSI color in worker/CLI logs.
+///
+/// tracing-subscriber's fmt layer defaults `ansi` on and does no terminal
+/// detection, so on a non-TTY sink (files, journald, container log drains) the
+/// escape codes are emitted literally and break grep / parsers / alert regexes.
+/// Resolve it explicitly (parity with horsies PR #151):
+/// `FORCE_COLOR` (set, non-empty, not `0`) forces on and wins over `NO_COLOR`;
+/// else `NO_COLOR` (present, any value) forces off; else follow stderr's TTY-ness.
+fn should_use_color() -> bool {
+    use std::io::IsTerminal;
+    resolve_color(
+        std::env::var("FORCE_COLOR").ok().as_deref(),
+        std::env::var_os("NO_COLOR").is_some(),
+        std::io::stderr().is_terminal(),
+    )
+}
+
+/// Pure color decision: `FORCE_COLOR` (non-empty, not `0`) wins over `NO_COLOR`;
+/// else `NO_COLOR` present forces off; else follow the TTY-ness of the sink.
+fn resolve_color(force_color: Option<&str>, no_color: bool, is_tty: bool) -> bool {
+    if let Some(force) = force_color {
+        if !force.is_empty() && force != "0" {
+            return true;
+        }
+    }
+    if no_color {
+        return false;
+    }
+    is_tty
+}
+
+#[cfg(test)]
+mod color_tests {
+    use super::resolve_color;
+
+    #[test]
+    fn force_color_on_wins_regardless_of_tty_or_no_color() {
+        assert!(resolve_color(Some("1"), false, false));
+        assert!(resolve_color(Some("1"), true, false), "FORCE_COLOR wins over NO_COLOR");
+        assert!(resolve_color(Some("yes"), true, false));
+    }
+
+    #[test]
+    fn force_color_zero_or_empty_does_not_force() {
+        // Falls through to NO_COLOR / TTY.
+        assert!(!resolve_color(Some("0"), false, false));
+        assert!(!resolve_color(Some(""), false, false));
+        assert!(resolve_color(Some("0"), false, true), "falls through to TTY");
+    }
+
+    #[test]
+    fn no_color_forces_off_even_on_tty() {
+        assert!(!resolve_color(None, true, true));
+    }
+
+    #[test]
+    fn defaults_to_tty_ness() {
+        assert!(resolve_color(None, false, true));
+        assert!(!resolve_color(None, false, false));
+    }
 }
