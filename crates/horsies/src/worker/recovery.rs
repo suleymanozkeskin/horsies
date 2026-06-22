@@ -160,17 +160,37 @@ const DELETE_EXPIRED_WORKER_STATES_SQL: &str = "\
 DELETE FROM horsies_worker_states
 WHERE snapshot_at < NOW() - CAST($1 || ' hours' AS INTERVAL)";
 
+// Retain a terminal+expired workflow's linkage until EVERY backing horsies_tasks
+// row is terminal. Defense-in-depth (parity with horsies PR #143): the invariant
+// "terminal workflow ⇒ all backing tasks terminal" holds today (cancel cancels all
+// linked task rows; complete/fail require all workflow_tasks terminal, which trails
+// their task rows), so this guard never fires now — but it ensures a future change
+// can never strand a live task row by deleting its workflow_task linkage.
 const DELETE_EXPIRED_WORKFLOW_TASKS_SQL: &str = "\
 DELETE FROM horsies_workflow_tasks wt
 USING horsies_workflows w
 WHERE wt.workflow_id = w.id
   AND w.status IN ('COMPLETED', 'FAILED', 'CANCELLED')
-  AND COALESCE(w.completed_at, w.updated_at, w.created_at) < NOW() - CAST($1 || ' hours' AS INTERVAL)";
+  AND COALESCE(w.completed_at, w.updated_at, w.created_at) < NOW() - CAST($1 || ' hours' AS INTERVAL)
+  AND NOT EXISTS (
+      SELECT 1
+      FROM horsies_workflow_tasks live
+      JOIN horsies_tasks t ON t.id = live.task_id
+      WHERE live.workflow_id = w.id
+        AND t.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
+  )";
 
 const DELETE_EXPIRED_WORKFLOWS_SQL: &str = "\
 DELETE FROM horsies_workflows
 WHERE status IN ('COMPLETED', 'FAILED', 'CANCELLED')
-  AND COALESCE(completed_at, updated_at, created_at) < NOW() - CAST($1 || ' hours' AS INTERVAL)";
+  AND COALESCE(completed_at, updated_at, created_at) < NOW() - CAST($1 || ' hours' AS INTERVAL)
+  AND NOT EXISTS (
+      SELECT 1
+      FROM horsies_workflow_tasks live
+      JOIN horsies_tasks t ON t.id = live.task_id
+      WHERE live.workflow_id = horsies_workflows.id
+        AND t.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
+  )";
 
 const DELETE_EXPIRED_TASKS_SQL: &str = "\
 DELETE FROM horsies_tasks t
@@ -883,6 +903,126 @@ mod tests {
             "FAILED",
             "task finalizing past the threshold must be reclaimed"
         );
+
+        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// Retention must NOT delete a terminal+expired workflow's linkage while a
+    /// backing task row is still live; once that task is terminal, it sweeps.
+    /// Parity with horsies PR #143 (defensive prevent lever).
+    #[tokio::test]
+    #[serial]
+    async fn retention_retains_workflow_with_live_backing_task() {
+        let pool = test_pool().await;
+        let wf_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+
+        // Terminal + expired workflow.
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, definition_key, depth, root_workflow_id,
+                sent_at, created_at, started_at, updated_at, completed_at
+            ) VALUES (
+                $1, 'ret_wf', 'CANCELLED', 'fail', 'test.ret.v1', 0, $1,
+                NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours',
+                NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours',
+                NOW() - INTERVAL '2 hours'
+            )",
+        )
+        .bind(&wf_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // A still-live (RUNNING) backing task row + its workflow_task linkage.
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, args, kwargs, status,
+                sent_at, started_at, created_at, updated_at, retry_count, max_retries, enqueue_sha
+            ) VALUES (
+                $1, 'ret_task', 'default', 100, '[]', '{}', 'RUNNING',
+                NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours',
+                NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours', 0, 0, $1
+            )",
+        )
+        .bind(&task_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                queue_name, priority, dependencies, allow_failed_deps, join_type,
+                status, is_subworkflow, task_id, created_at
+            ) VALUES (
+                $1, $2, 0, 'node_0', 'ret_task', '[]', '{}',
+                'default', 100, '{}', FALSE, 'all',
+                'RUNNING', FALSE, $3, NOW() - INTERVAL '2 hours'
+            )",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&wf_id)
+        .bind(&task_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let wt_count = |pool: PgPool, wf: String| async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = $1",
+            )
+            .bind(&wf)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+
+        // hours = 0 → everything terminal+expired qualifies by age; only the
+        // live-backing-task guard should hold the linkage back.
+        sqlx::query(DELETE_EXPIRED_WORKFLOW_TASKS_SQL)
+            .bind("0")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            wt_count(pool.clone(), wf_id.clone()).await,
+            1,
+            "linkage must be retained while a backing task is live",
+        );
+
+        // Backing task becomes terminal → linkage now sweepable.
+        sqlx::query("UPDATE horsies_tasks SET status = 'COMPLETED', completed_at = NOW() - INTERVAL '2 hours' WHERE id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(DELETE_EXPIRED_WORKFLOW_TASKS_SQL)
+            .bind("0")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            wt_count(pool.clone(), wf_id.clone()).await,
+            0,
+            "linkage must be deleted once the backing task is terminal",
+        );
+
+        sqlx::query(DELETE_EXPIRED_WORKFLOWS_SQL)
+            .bind("0")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let wf_remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM horsies_workflows WHERE id = $1")
+                .bind(&wf_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(wf_remaining, 0, "workflow swept once all backing tasks terminal");
 
         sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
             .bind(&task_id)
