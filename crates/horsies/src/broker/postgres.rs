@@ -258,18 +258,20 @@ const COUNT_RUNNING_FOR_WORKER_SQL: &str = "\
 SELECT COUNT(*) FROM horsies_tasks \
 WHERE claimed_by_worker_id = $1 AND status = 'RUNNING'";
 
-/// Count RUNNING + active CLAIMED tasks for a specific queue (hard cap mode).
-const COUNT_IN_FLIGHT_FOR_QUEUE_SQL: &str = "\
-SELECT COUNT(*) FROM horsies_tasks \
-WHERE queue_name = $1 \
-  AND (status = 'RUNNING' \
-       OR (status = 'CLAIMED' \
-           AND (claim_expires_at IS NULL OR claim_expires_at > now())))";
-
-/// Count only RUNNING tasks for a specific queue (global).
-const COUNT_RUNNING_FOR_QUEUE_SQL: &str = "\
-SELECT COUNT(*) FROM horsies_tasks \
-WHERE queue_name = $1 AND status = 'RUNNING'";
+/// Per-queue cap counts for the claim pass in one statement: for each requested
+/// queue, `hard_cnt` = RUNNING + active CLAIMED (hard-cap mode) and `soft_cnt` =
+/// RUNNING only (soft-cap mode). One grouped scan replaces the former
+/// per-capped-queue count round trips (parity with horsies PR #132). Queues with
+/// no in-flight rows are absent from the result and treated as zero by the caller.
+const COUNT_INFLIGHT_BY_QUEUE_SQL: &str = "\
+SELECT queue_name, \
+       COUNT(*) FILTER (WHERE status = 'RUNNING' \
+           OR (status = 'CLAIMED' \
+               AND (claim_expires_at IS NULL OR claim_expires_at > now())))::bigint AS hard_cnt, \
+       COUNT(*) FILTER (WHERE status = 'RUNNING')::bigint AS soft_cnt \
+FROM horsies_tasks \
+WHERE queue_name = ANY($1) AND status IN ('RUNNING', 'CLAIMED') \
+GROUP BY queue_name";
 
 /// Load CLAIMED tasks owned by a specific worker (for prefetch buffer dispatch).
 const LOAD_BUFFERED_CLAIMED_SQL: &str = "\
@@ -1670,32 +1672,26 @@ impl PostgresBroker {
         Ok(count.0)
     }
 
-    /// Count RUNNING + CLAIMED tasks for a queue inside a transaction.
-    pub async fn count_in_flight_for_queue_tx(
+    /// Per-queue cap counts for the requested queues in one statement.
+    ///
+    /// Returns `queue -> (hard_in_flight, soft_running)`: `hard` = RUNNING +
+    /// active CLAIMED (hard-cap mode), `soft` = RUNNING only (soft-cap mode).
+    /// Queues with no in-flight rows are absent from the map; the caller treats a
+    /// missing queue as zero.
+    pub async fn count_inflight_by_queue_tx(
         &self,
         tx: &mut Transaction<'_, Postgres>,
-        queue_name: &str,
-    ) -> Result<i64, BrokerError> {
-        let count: (i64,) = sqlx::query_as(COUNT_IN_FLIGHT_FOR_QUEUE_SQL)
-            .bind(queue_name)
-            .fetch_one(tx.as_mut())
+        queues: &[String],
+    ) -> Result<std::collections::HashMap<String, (i64, i64)>, BrokerError> {
+        let rows: Vec<(String, i64, i64)> = sqlx::query_as(COUNT_INFLIGHT_BY_QUEUE_SQL)
+            .bind(queues)
+            .fetch_all(tx.as_mut())
             .await
             .map_err(BrokerError::Database)?;
-        Ok(count.0)
-    }
-
-    /// Count RUNNING tasks for a queue inside a transaction.
-    pub async fn count_running_for_queue_tx(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        queue_name: &str,
-    ) -> Result<i64, BrokerError> {
-        let count: (i64,) = sqlx::query_as(COUNT_RUNNING_FOR_QUEUE_SQL)
-            .bind(queue_name)
-            .fetch_one(tx.as_mut())
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(count.0)
+        Ok(rows
+            .into_iter()
+            .map(|(queue, hard, soft)| (queue, (hard, soft)))
+            .collect())
     }
 
     /// Count only RUNNING tasks for a specific worker.
@@ -3044,4 +3040,106 @@ pub fn compute_enqueue_sha(
     .expect("JSON serialization of fingerprint fields cannot fail");
     let digest = Sha256::digest(canonical.as_bytes());
     format!("{:x}", digest)
+}
+
+#[cfg(test)]
+mod claim_pass_counts_tests {
+    //! Equivalence pin for the collapsed per-queue claim-pass counts (parity with
+    //! horsies PR #132): `count_inflight_by_queue_tx` must return, per queue,
+    //! hard = RUNNING + active-CLAIMED and soft = RUNNING, matching the former
+    //! per-queue count statements (incl. the CLAIMED-expired-lease edge).
+    use super::*;
+    use serial_test::serial;
+    use uuid::Uuid;
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|p| p.join(".env").exists());
+        let pw = root
+            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
+            .and_then(|c| {
+                c.lines()
+                    .filter_map(|l| l.trim().split_once('='))
+                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
+                    .map(|(_, v)| v.trim().to_owned())
+            })
+            .unwrap_or_else(|| "W0rklane".to_owned());
+        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    }
+
+    /// Insert a task in `queue` with `status` and an optional lease offset (seconds
+    /// from now; negative = expired). `lease` only matters for CLAIMED rows.
+    async fn seed(
+        pool: &sqlx::PgPool,
+        queue: &str,
+        status: &str,
+        lease_offset_secs: Option<i64>,
+    ) {
+        let id = Uuid::new_v4().to_string();
+        let expires = lease_offset_secs.map(|s| Utc::now() + chrono::Duration::seconds(s));
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, args, kwargs,
+                status, sent_at, enqueued_at, max_retries,
+                enqueue_sha, claimed_by_worker_id, claim_expires_at,
+                is_workflow_task, created_at, updated_at
+            ) VALUES (
+                $1, 'pr132_task', $2, 0, '[]', '{}',
+                $3, NOW(), NOW(), 0,
+                $1, 'w1', $4,
+                FALSE, NOW(), NOW()
+            )",
+        )
+        .bind(&id)
+        .bind(queue)
+        .bind(status)
+        .bind(expires)
+        .execute(pool)
+        .await
+        .expect("seed task");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn per_queue_hard_soft_counts_match_predicates() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let suffix = Uuid::new_v4().to_string();
+        let qa = format!("pr132_a_{suffix}");
+        let qb = format!("pr132_b_{suffix}");
+
+        // q_a: RUNNING + CLAIMED(unexpired) + CLAIMED(expired) + PENDING
+        seed(&pool, &qa, "RUNNING", None).await;
+        seed(&pool, &qa, "CLAIMED", Some(600)).await;
+        seed(&pool, &qa, "CLAIMED", Some(-600)).await;
+        seed(&pool, &qa, "PENDING", None).await;
+        // q_b: a single RUNNING
+        seed(&pool, &qb, "RUNNING", None).await;
+
+        let qc = format!("pr132_c_{suffix}"); // no rows
+        let queues = vec![qa.clone(), qb.clone(), qc.clone()];
+
+        let mut tx = pool.begin().await.expect("begin");
+        let counts = broker
+            .count_inflight_by_queue_tx(&mut tx, &queues)
+            .await
+            .expect("counts");
+        tx.commit().await.expect("commit");
+
+        // hard = RUNNING + CLAIMED-unexpired (expired CLAIMED counts nowhere).
+        assert_eq!(counts.get(&qa).copied(), Some((2, 1)), "q_a hard=2 soft=1");
+        assert_eq!(counts.get(&qb).copied(), Some((1, 1)), "q_b hard=1 soft=1");
+        assert!(counts.get(&qc).is_none(), "empty queue absent (treated as 0)");
+
+        sqlx::query("DELETE FROM horsies_tasks WHERE queue_name = ANY($1)")
+            .bind(&queues)
+            .execute(&pool)
+            .await
+            .expect("cleanup");
+    }
 }

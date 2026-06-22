@@ -640,6 +640,27 @@ impl Worker {
                 return Ok(dispatched_buffered > 0);
             }
 
+            // Per-queue cap counts in one statement (priority mode only — the
+            // per-queue cap is consulted only there). Claims are per-queue and each
+            // queue appears once in `ordered`, so a queue's count is unaffected by
+            // claiming any other queue this pass: reading them all up front equals
+            // the former per-queue-in-loop reads (parity with horsies PR #132).
+            let queue_counts: std::collections::HashMap<String, (i64, i64)> =
+                if self.worker_config.queue_priorities.is_empty() {
+                    std::collections::HashMap::new()
+                } else {
+                    let capped: Vec<String> = ordered
+                        .iter()
+                        .filter(|q| self.worker_config.queue_max_concurrency.contains_key(*q))
+                        .cloned()
+                        .collect();
+                    if capped.is_empty() {
+                        std::collections::HashMap::new()
+                    } else {
+                        self.broker.count_inflight_by_queue_tx(&mut tx, &capped).await?
+                    }
+                };
+
             for queue in &ordered {
                 if total_remaining == 0 {
                     break;
@@ -656,15 +677,8 @@ impl Worker {
 
                 if !self.worker_config.queue_priorities.is_empty() {
                     if let Some(&max_q) = self.worker_config.queue_max_concurrency.get(queue) {
-                        let in_flight_q = if hard_cap_mode {
-                            self.broker
-                                .count_in_flight_for_queue_tx(&mut tx, queue)
-                                .await? as u32
-                        } else {
-                            self.broker
-                                .count_running_for_queue_tx(&mut tx, queue)
-                                .await? as u32
-                        };
+                        let (hard, soft) = queue_counts.get(queue).copied().unwrap_or((0, 0));
+                        let in_flight_q = if hard_cap_mode { hard } else { soft } as u32;
                         let q_remaining = max_q.saturating_sub(in_flight_q);
                         per_queue_cap = per_queue_cap.min(q_remaining);
                     }
