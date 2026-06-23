@@ -18,7 +18,11 @@ from horsies.core.models.tasks import (
     RetryPolicy,
     OperationalErrorCode,
 )
-from horsies.core.task_decorator import create_task_wrapper, effective_priority
+from horsies.core.task_decorator import (
+    FromNodeMarker,
+    create_task_wrapper,
+    resolve_node_queue_and_priority,
+)
 from horsies.core.models.workflow import (
     TaskNode,
     SubWorkflowNode,
@@ -80,6 +84,10 @@ ChildProcessStartHook = Callable[[], None]
 
 # Sentinel attribute name stamped on functions decorated with @app.workflow_builder
 _BUILDER_ATTR = '__horsies_workflow_builder__'
+
+# Recursion backstop for check-time static subworkflow expansion (cycles are
+# guarded by definition_key; this caps pathological nesting depth).
+_CHECK_MAX_SUBWORKFLOW_DEPTH = 32
 
 # Attribute name for opt-out of undecorated builder detection
 _NO_CHECK_ATTR = '__horsies_no_check__'
@@ -1799,55 +1807,30 @@ class Horsies:
             # TaskNode: resolve queue and priority
             task = node
 
-            # Resolve queue: explicit override > task decorator > "default"
-            resolved_queue = (
-                task.queue or getattr(task.fn, 'task_queue_name', None) or 'default'
-            )
-
-            # Validate queue against app config
-            # In DEFAULT mode, queue must be "default" (or None which resolves to "default")
-            # In CUSTOM mode, queue must be in custom_queues list
-            queue_valid = True
-            if self.config.queue_mode == QueueMode.CUSTOM:
-                valid_queues = self.get_valid_queue_names()
-                if resolved_queue not in valid_queues:
-                    report.add(
-                        ConfigurationError(
-                            message='TaskNode queue not in app config',
-                            code=ErrorCode.TASK_INVALID_QUEUE,
-                            notes=[
-                                f"TaskNode '{task.name}' has queue '{resolved_queue}'",
-                                f'valid queues: {valid_queues}',
-                            ],
-                            help_text='use one of the configured queue names or add this queue to app config',
-                        )
-                    )
-                    queue_valid = False
-            elif resolved_queue != 'default':
-                report.add(
-                    ConfigurationError(
-                        message='TaskNode has non-default queue in DEFAULT mode',
-                        code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
-                        notes=[
-                            f"TaskNode '{task.name}' has queue '{resolved_queue}'",
-                            "app is in DEFAULT mode (only 'default' queue allowed)",
-                        ],
-                        help_text='either remove queue override or switch to QueueMode.CUSTOM',
-                    )
+            # Bind queue/priority through the shared resolver (same path the
+            # subworkflow enqueue and check use). Run this for EVERY node —
+            # including frozen nodes reused from a prior spec — so an invalid
+            # concrete queue is still rejected (the resolver raises on a queue
+            # not in this app's config). Collect rather than raise so
+            # app.workflow() reports every offending node.
+            try:
+                resolved_queue, resolved_priority = resolve_node_queue_and_priority(
+                    self, task,
                 )
-                queue_valid = False
+            except ConfigurationError as exc:
+                report.add(exc)
+                continue
 
-            # Frozen nodes (reused from a prior spec) already carry resolved
-            # queue/priority and cannot be reassigned; skip mutation for them.
-            if queue_valid and not getattr(task, '_frozen', False):
-                # Stash the caller's values so we can restore them after the
-                # spec has copied the node.
-                saved_node_config.append((task, task.queue, task.priority))
-                task.queue = resolved_queue
+            # Frozen nodes are immutable and already carry concrete
+            # queue/priority; validated above, but not re-bound.
+            if getattr(task, '_frozen', False):
+                continue
 
-                # Resolve priority if not explicitly set
-                if task.priority is None:
-                    task.priority = effective_priority(self, resolved_queue)
+            # Stash the caller's values so we can restore them after the spec
+            # has copied the node.
+            saved_node_config.append((task, task.queue, task.priority))
+            task.queue = resolved_queue
+            task.priority = resolved_priority
 
         try:
             raise_collected(report)
@@ -2065,6 +2048,7 @@ class Horsies:
                 )
             else:
                 result._require_definition_key()
+                self._validate_spec_bindings(result, errors, frozenset(), 0)
         except MultipleValidationErrors as exc:
             errors.extend(exc.report.errors)
         except HorsiesError as exc:
@@ -2083,6 +2067,88 @@ class Horsies:
                 ),
             )
         return errors
+
+    def _validate_spec_bindings(
+        self,
+        spec: Any,
+        errors: list[HorsiesError],
+        seen: frozenset[tuple[str, str | None]],
+        depth: int,
+    ) -> None:
+        """Validate a spec's TaskNodes (queue binding) and recurse into
+        statically-parameterized SubWorkflowNodes (full child validation).
+
+        TaskNodes are bound through the same resolver the runtime persist paths
+        use, so an invalid queue fails check instead of surfacing at enqueue
+        time. A SubWorkflowNode is expanded only when its build_with inputs are
+        fully static — no ``args_from`` mapping — so the child spec is
+        deterministic at check time; runtime-parameterized subworkflows are
+        skipped (register their build_with as a builder for coverage). Building
+        the child runs its full validation (queue/mode AND structural — empty
+        tasks, cycles, node ids); any resulting ``HorsiesError`` is surfaced, so
+        single- and multi-error failures are treated alike. Non-horsies
+        exceptions from build_with are out of scope (user-code/environmental).
+        ``seen`` (by definition_key + kwargs signature) guards cycles; ``depth``
+        is a backstop.
+        """
+        for node in getattr(spec, 'tasks', ()):
+            if not isinstance(node, SubWorkflowNode):
+                try:
+                    resolve_node_queue_and_priority(self, node)
+                except ConfigurationError as exc:
+                    errors.append(exc)
+                continue
+
+            if depth >= _CHECK_MAX_SUBWORKFLOW_DEPTH:
+                continue
+            # Only expand when build_with's inputs are fully static. args_from
+            # and from_node() markers are runtime injections (dependency
+            # results) the engine merges in at enqueue, absent at check.
+            if node.args_from or any(
+                isinstance(value, FromNodeMarker)
+                for value in node.kwargs.values()
+            ):
+                continue
+            try:
+                def_key = node.workflow_def._require_definition_key()
+            except HorsiesError:
+                continue  # missing definition_key reported elsewhere
+            # Key the cycle guard on (definition_key, kwargs signature), not
+            # definition_key alone: a definition that self-references with
+            # DIFFERENT kwargs produces a different child spec whose queue
+            # binding must still be validated. Deduping by key alone would skip
+            # the parameter-varying instance (a false negative). The kwargs
+            # signature is a stable repr (workflow kwargs are serializable);
+            # the depth cap still bounds genuinely-unbounded parameterizations.
+            try:
+                kwargs_sig = repr(sorted(
+                    (str(k), repr(v)) for k, v in node.kwargs.items()
+                ))
+            except Exception:
+                kwargs_sig = None  # unrepr-able: fall back to def-key dedup
+            node_key = (def_key, kwargs_sig)
+            if node_key in seen:
+                continue  # cycle (same definition AND same kwargs)
+            try:
+                child_spec = node.workflow_def.build_with(self, **dict(node.kwargs))
+            except MultipleValidationErrors as exc:
+                errors.extend(exc.report.errors)
+                continue
+            except HorsiesError as exc:
+                # Any horsies validation error building the child — invalid
+                # queue/mode AND structural (empty tasks, cycle, bad node_id) —
+                # is a real check finding for this static subworkflow. Surface
+                # it so single- and multi-error failures are treated alike.
+                errors.append(exc)
+                continue
+            except Exception:
+                # A non-horsies exception from build_with is out of scope (a
+                # user-code or environmental failure, not workflow validation);
+                # it surfaces via the registered-builder path or at runtime.
+                continue
+            self._validate_spec_bindings(
+                child_spec, errors, seen | {node_key}, depth + 1,
+            )
 
     def _check_undecorated_builders(self) -> list[HorsiesError]:
         """Detect top-level functions returning WorkflowSpec without decorator.

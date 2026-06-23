@@ -25,11 +25,14 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.models.workflow import WorkflowContextMissingIdError
 from horsies.core.task_decorator import (
+    BoundTaskNode,
     FromNodeMarker,
     TaskHandle,
+    bind_task_node,
     create_task_wrapper,
     effective_priority,
     from_node,
+    resolve_node_queue_and_priority,
 )
 from horsies.core.models.task_send_types import (
     TaskSendError,
@@ -115,6 +118,117 @@ class TestEffectivePriority:
 
         with pytest.raises(ConfigurationError) as exc_info:
             effective_priority(app, 'anything')
+
+        assert exc_info.value.code == ErrorCode.TASK_INVALID_QUEUE
+
+
+# =============================================================================
+# resolve_node_queue_and_priority / bind_task_node
+# =============================================================================
+
+
+def _make_node(
+    *,
+    queue: str | None = None,
+    priority: int | None = None,
+    fn_queue: str | None = None,
+    name: str = 'task',
+) -> MagicMock:
+    """Build a mock workflow TaskNode for binding tests."""
+    node = MagicMock()
+    node.queue = queue
+    node.priority = priority
+    node.name = name
+    node.fn = MagicMock()
+    node.fn.task_queue_name = fn_queue
+    return node
+
+
+def _custom_app(*queues: tuple[str, int]) -> MagicMock:
+    """Build a CUSTOM-mode mock app with the given (name, priority) queues."""
+    cfgs = [_make_queue_config(n, p) for n, p in queues]
+    app = _make_app(queue_mode_name='CUSTOM', custom_queues=cfgs)
+    app.get_valid_queue_names.return_value = [n for n, _ in queues]
+    return app
+
+
+@pytest.mark.unit
+class TestResolveNodeQueueAndPriority:
+    """Tests for resolve_node_queue_and_priority — the single bind boundary."""
+
+    def test_inherits_queue_priority_when_priority_unset(self) -> None:
+        """Unbound priority inherits the queue's configured priority (the bug)."""
+        app = _custom_app(('scraping', 30), ('normal', 50))
+        node = _make_node(fn_queue='scraping')  # queue=None, priority=None
+
+        queue, priority = resolve_node_queue_and_priority(app, node)
+
+        assert (queue, priority) == ('scraping', 30)
+
+    def test_explicit_priority_is_preserved(self) -> None:
+        """An explicit node priority is never overridden by the queue config."""
+        app = _custom_app(('scraping', 30))
+        node = _make_node(fn_queue='scraping', priority=5)
+
+        assert resolve_node_queue_and_priority(app, node) == ('scraping', 5)
+
+    def test_queue_override_beats_fn_queue(self) -> None:
+        """node.queue takes precedence over fn.task_queue_name."""
+        app = _custom_app(('scraping', 30), ('normal', 50))
+        node = _make_node(queue='normal', fn_queue='scraping')
+
+        assert resolve_node_queue_and_priority(app, node) == ('normal', 50)
+
+    def test_default_queue_when_nothing_set(self) -> None:
+        """No queue anywhere resolves to 'default' (DEFAULT mode → priority 100)."""
+        app = _make_app(queue_mode_name='DEFAULT')
+        node = _make_node()
+
+        assert resolve_node_queue_and_priority(app, node) == ('default', 100)
+
+    def test_custom_mode_unknown_queue_raises(self) -> None:
+        """CUSTOM mode + queue not in custom_queues → TASK_INVALID_QUEUE."""
+        app = _custom_app(('scraping', 30))
+        node = _make_node(queue='ghost')
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            resolve_node_queue_and_priority(app, node)
+
+        assert exc_info.value.code == ErrorCode.TASK_INVALID_QUEUE
+
+    def test_default_mode_non_default_queue_raises(self) -> None:
+        """DEFAULT mode + non-'default' queue → CONFIG_INVALID_QUEUE_MODE."""
+        app = _make_app(queue_mode_name='DEFAULT')
+        node = _make_node(queue='scraping')
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            resolve_node_queue_and_priority(app, node)
+
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+
+
+@pytest.mark.unit
+class TestBindTaskNode:
+    """Tests for bind_task_node — produces a BoundTaskNode."""
+
+    def test_returns_bound_node_with_concrete_values(self) -> None:
+        """bind_task_node binds an unresolved node to concrete queue/priority."""
+        app = _custom_app(('scraping', 30))
+        node = _make_node(fn_queue='scraping')
+
+        bound = bind_task_node(app, node)
+
+        assert isinstance(bound, BoundTaskNode)
+        assert (bound.queue, bound.priority) == ('scraping', 30)
+        assert bound.node is node
+
+    def test_propagates_configuration_error(self) -> None:
+        """An invalid queue surfaces as ConfigurationError, not a guessed value."""
+        app = _custom_app(('scraping', 30))
+        node = _make_node(queue='ghost')
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            bind_task_node(app, node)
 
         assert exc_info.value.code == ErrorCode.TASK_INVALID_QUEUE
 

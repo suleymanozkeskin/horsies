@@ -43,7 +43,7 @@ from horsies.core.models.workflow import (
     WF_TASK_TERMINAL_VALUES,
     validate_workflow_generic_output_match,
 )
-from horsies.core.errors import WorkflowValidationError, ErrorCode
+from horsies.core.errors import WorkflowValidationError, ErrorCode, ConfigurationError
 from horsies.core.workflows.sql import (
     COUNT_CTX_TERMINAL_DEPS_SQL,
     ENQUEUE_SUBWORKFLOW_TASK_SQL,
@@ -1144,6 +1144,11 @@ async def enqueue_subworkflow_task(
                 'args': _ser(dumps_json([]), 'positional args', fallback='[]'),
                 'kwargs': child_kwargs_json,
                 'queue': 'default',
+                # Bookkeeping row for a SubWorkflowNode (is_subworkflow=True):
+                # not a claimable task. Worker claim SQL reads only
+                # horsies_tasks, and ENQUEUE_SUBWORKFLOW_TASK_SQL copies no
+                # priority, so this value never reaches claim ordering. Left as
+                # a constant deliberately — do not "fix" it to a queue priority.
                 'priority': 100,
                 'deps': child_dep_indices,
                 'args_from': _ser(dumps_json(child_args_from_indices), 'child args_from')
@@ -1247,14 +1252,28 @@ async def enqueue_subworkflow_task(
                     error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
                 )
                 return None
-            child_queue = (
-                child_task.queue
-                or getattr(child_task.fn, 'task_queue_name', None)
-                or 'default'
-            )
-            child_priority = (
-                child_task.priority if child_task.priority is not None else 100
-            )
+            # Bind queue/priority through the shared resolver. Subworkflow
+            # specs built directly in build_with() (the documented parameterized
+            # pattern) never pass through app.workflow(), so their nodes arrive
+            # unresolved; without this they would persist at a guessed priority
+            # 100 instead of the queue's configured priority. broker.app is
+            # already guaranteed non-None above (build_with guard). Contain a
+            # bad queue the same way the sibling child-prep failures do — fail
+            # the parent node, don't let it escape the seam.
+            from horsies.core.task_decorator import bind_task_node
+
+            try:
+                bound_child = bind_task_node(broker.app, child_task)
+            except ConfigurationError as exc:
+                await _fail_enqueued_task(
+                    session, workflow_id, task_index,
+                    f'Invalid queue/priority for child task {child_task.name}: {exc}',
+                    broker,
+                    error_code=OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
+                )
+                return None
+            child_queue = bound_child.queue
+            child_priority = bound_child.priority
             child_args_json = _ser(dumps_json([]), 'positional args', fallback='[]')
 
             is_fast_root = (

@@ -510,9 +510,19 @@ async def start_workflow_async(
                         or getattr(task.fn, 'task_queue_name', None)
                         or 'default'
                     )
-                    resolved_priority = (
-                        task.priority if task.priority is not None else 100
-                    )
+                    # Priority is bound before persist: app.workflow() binds it,
+                    # and start validation rejects unbound top-level specs (the
+                    # WORKFLOW_UNRESOLVED_PRIORITY guard earlier in this
+                    # function). Treat a residual None as an invariant violation
+                    # — fail closed, never guess a literal default.
+                    if task.priority is None:
+                        raise WorkflowValidationError(
+                            message='TaskNode reached enqueue with unresolved priority',
+                            code=ErrorCode.WORKFLOW_UNRESOLVED_PRIORITY,
+                            notes=[f"TaskNode '{task.name}' has priority=None"],
+                            help_text='build the workflow via app.workflow() so queue/priority bind before start',
+                        )
+                    resolved_priority = task.priority
                     args_json = _ser_or_raise(dumps_json([]), 'positional args')  # kwargs-only: positional args not persisted
 
                     is_fast_root = (
