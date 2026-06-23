@@ -325,6 +325,33 @@ pub async fn retry_start_with_listener_pool<T>(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// Resolve the claimable priority for a node about to be persisted.
+///
+/// A real task node must already have a resolved priority by insert time —
+/// `resolve_node_queue_priority` runs at workflow registration, child-spec
+/// materialization, and `check()`, filling it from the queue config. A `None`
+/// here means a resolution step was skipped, so it is surfaced (fail-closed)
+/// rather than silently persisting a wrong literal — mirroring the queue check
+/// in `insert_workflow_tasks` and Python's `WORKFLOW_UNRESOLVED_PRIORITY`.
+///
+/// Sub-workflow nodes are exempt: their `horsies_workflow_tasks` row is inert
+/// bookkeeping (never claimed as a task; `ENQUEUE_SUBWORKFLOW_TASK` copies no
+/// priority), and `resolve_node_queue_priority` intentionally skips them, so
+/// they keep the historical `100` default.
+fn resolve_insert_priority(node: &AnyNode) -> Result<i32, WorkflowError> {
+    if node.is_subworkflow {
+        return Ok(node.priority.unwrap_or(100));
+    }
+    node.priority.ok_or_else(|| {
+        WorkflowError::Validation(format!(
+            "node '{}' (task '{}') has no resolved priority; \
+             this indicates a missing resolution step before workflow start",
+            node.node_id.as_deref().unwrap_or("?"),
+            node.task_name,
+        ))
+    })
+}
+
 /// Insert all workflow_task rows. Root tasks (no deps) are marked READY
 /// and immediately enqueued into horsies_tasks. Root sub-workflow nodes
 /// are detected and launched as child workflows.
@@ -354,7 +381,7 @@ fn insert_workflow_tasks<'a>(
                     task.task_name,
                 ))
             })?;
-            let priority = task.priority.unwrap_or(100);
+            let priority = resolve_insert_priority(task)?;
 
             // Merge good_until into task_options_json (mirrors Python's lifecycle.py).
             let merged_task_options = crate::workflow_engine::merge_good_until_into_options(
@@ -839,6 +866,64 @@ mod tests {
             name: name.to_owned(),
             definition_key: key.map(str::to_owned),
         }
+    }
+
+    fn node_with(is_subworkflow: bool, priority: Option<i32>) -> AnyNode {
+        AnyNode {
+            task_name: "t".to_owned(),
+            args_json: None,
+            kwargs_json: None,
+            dependencies: vec![],
+            args_from: std::collections::HashMap::new(),
+            workflow_ctx_from: None,
+            workflow_ctx_from_refs: None,
+            queue: Some("default".to_owned()),
+            priority,
+            allow_failed_deps: false,
+            join: crate::core::workflow::node::JoinType::All,
+            min_success: None,
+            good_until: None,
+            index: 0,
+            node_id: Some("n".to_owned()),
+            task_options_json: None,
+            is_subworkflow,
+            sub_definition_key: None,
+        }
+    }
+
+    #[test]
+    fn resolve_insert_priority_returns_resolved_task_priority() {
+        assert_eq!(
+            resolve_insert_priority(&node_with(false, Some(30))).unwrap(),
+            30
+        );
+    }
+
+    #[test]
+    fn resolve_insert_priority_fails_closed_for_unresolved_task() {
+        let err = resolve_insert_priority(&node_with(false, None)).unwrap_err();
+        assert!(
+            matches!(err, WorkflowError::Validation(ref m) if m.contains("no resolved priority")),
+            "expected fail-closed unresolved-priority error, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn resolve_insert_priority_defaults_subworkflow_bookkeeping() {
+        // Subworkflow node with no priority keeps the inert 100 default.
+        assert_eq!(
+            resolve_insert_priority(&node_with(true, None)).unwrap(),
+            100
+        );
+    }
+
+    #[test]
+    fn resolve_insert_priority_preserves_explicit_subworkflow_priority() {
+        assert_eq!(
+            resolve_insert_priority(&node_with(true, Some(50))).unwrap(),
+            50
+        );
     }
 
     #[test]
