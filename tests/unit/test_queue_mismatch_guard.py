@@ -20,6 +20,8 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
 from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.workflow import TaskNode, WorkflowSpec
+from horsies.core.errors import MultipleValidationErrors
 
 BROKER = PostgresConfig(
     database_url='postgresql+psycopg://user:pass@localhost/db',
@@ -267,3 +269,69 @@ class TestErrorMessageQuality:
         assert 'fast' in notes_str
         assert 'slow' in notes_str
         assert 'batch' in notes_str
+
+
+# ---------------------------------------------------------------------------
+# 8. app.workflow() validates frozen (reused) nodes' queues, not just new ones
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestWorkflowValidatesFrozenNodes:
+    """A frozen node carrying a concrete invalid queue must still be rejected.
+
+    Frozen nodes (reused from a prior spec) are immutable, so app.workflow()
+    does not re-bind them — but it must still validate their concrete queue
+    against this app's config. Skipping validation would let an explicit
+    invalid queue reach persistence (start_workflow_async only guards
+    queue=None / priority=None, not membership).
+    """
+
+    def test_frozen_node_with_invalid_queue_is_rejected(self) -> None:
+        """A frozen node with queue='ghost' fails app.workflow() in CUSTOM mode."""
+        app = _custom_app('scraping')
+
+        @app.task('scrape', queue_name='scraping')
+        def scrape() -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)  # pragma: no cover
+
+        # Freeze a node carrying a concrete invalid queue by building a spec.
+        node: TaskNode[int] = TaskNode(
+            fn=scrape, node_id='n', queue='ghost', priority=7,
+        )
+        frozen = list(
+            WorkflowSpec(
+                name='d', tasks=[node], output=node, definition_key='d.v1',
+            ).tasks
+        )
+        assert getattr(frozen[0], '_frozen', False) is True
+
+        with pytest.raises((ConfigurationError, MultipleValidationErrors)) as exc_info:
+            app.workflow(name='w', tasks=frozen, definition_key='w.v1')
+
+        err = exc_info.value
+        codes = (
+            [e.code for e in err.report.errors]
+            if isinstance(err, MultipleValidationErrors)
+            else [err.code]
+        )
+        assert ErrorCode.TASK_INVALID_QUEUE in codes
+
+    def test_frozen_node_with_valid_queue_is_accepted(self) -> None:
+        """A frozen node on a valid queue passes (no false rejection)."""
+        app = _custom_app('scraping')
+
+        @app.task('scrape_ok', queue_name='scraping')
+        def scrape_ok() -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)  # pragma: no cover
+
+        node: TaskNode[int] = TaskNode(
+            fn=scrape_ok, node_id='n', queue='scraping', priority=30,
+        )
+        frozen = list(
+            WorkflowSpec(
+                name='d2', tasks=[node], output=node, definition_key='d2.v1',
+            ).tasks
+        )
+
+        spec = app.workflow(name='w2', tasks=frozen, definition_key='w2.v1')
+        bound = [t for t in spec.tasks if isinstance(t, TaskNode)]
+        assert [(t.queue, t.priority) for t in bound] == [('scraping', 30)]

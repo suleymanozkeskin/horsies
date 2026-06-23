@@ -825,6 +825,10 @@ class TestEnqueueSubworkflowTask:
         session.execute = AsyncMock(side_effect=_dispatch)
         broker = MagicMock()
         broker.app = MagicMock()
+        # The child-task branch now binds queue/priority via the app config
+        # (resolve_node_queue_and_priority). DEFAULT mode resolves the 'default'
+        # queue to priority 100 without consulting custom_queues.
+        broker.app.config.queue_mode.name = 'DEFAULT'
 
         # Regular TaskNode with good_until set
         child_task = MagicMock()
@@ -960,6 +964,153 @@ class TestEnqueueSubworkflowTask:
                 parent_depth=0, root_workflow_id='root-wf',
             )
         assert result is None
+
+    @staticmethod
+    def _custom_child_task() -> MagicMock:
+        """A no-deps subworkflow child TaskNode on the 'scraping' queue."""
+        child_task = MagicMock()
+        child_task.name = 'scrape_child'
+        child_task.args = ()
+        child_task.kwargs = {}
+        child_task.waits_for = []
+        child_task.args_from = {}
+        child_task.workflow_ctx_from = None
+        child_task.index = 0
+        child_task.node_id = 'scrape'
+        child_task.good_until = None
+        child_task.fn = MagicMock()
+        child_task.fn.task_options_json = None
+        child_task.fn.task_queue_name = 'scraping'
+        child_task.allow_failed_deps = False
+        child_task.join = 'all'
+        child_task.min_success = None
+        child_task.queue = None
+        child_task.priority = None  # must inherit the queue's priority (30)
+        child_task.__class__ = type('TaskNode', (), {})
+        return child_task
+
+    @staticmethod
+    def _custom_broker() -> MagicMock:
+        """Broker whose app is CUSTOM mode with scraping=30."""
+        broker = MagicMock()
+        broker.app = MagicMock()
+        broker.app.config.queue_mode.name = 'CUSTOM'
+        broker.app.config.custom_queues = [
+            SimpleNamespace(name='scraping', priority=30),
+        ]
+        broker.app.get_valid_queue_names.return_value = ['scraping']
+        return broker
+
+    def _spec_for(self, child_task: MagicMock) -> MagicMock:
+        mock_spec = MagicMock()
+        mock_spec.tasks = [child_task]
+        mock_spec.success_policy = None
+        mock_spec.output = None
+        mock_spec.on_error = MagicMock(value='fail')
+        mock_spec.definition_key = 'test.child.v1'
+        mock_spec.name = 'child_wf'
+        mock_wf_def = MagicMock()
+        mock_wf_def.build_with.return_value = mock_spec
+        mock_wf_def.name = 'TestWF'
+        mock_wf_def._original_build_with = mock_wf_def.build_with
+        return mock_wf_def
+
+    @pytest.mark.asyncio
+    async def test_custom_mode_child_binds_queue_priority(self) -> None:
+        """REGRESSION: a CUSTOM-queue subworkflow child persists at the queue's
+        priority (30), not the old hardcoded 100. Pins the engine bind on the
+        unit lane (the integration test is the live-DB end-to-end pin)."""
+        row = self._base_row(queue_name='scraping', priority=30)
+        captured: list[Any] = []
+
+        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
+            captured.append(params)
+            if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
+                return _one_result(row)
+            if stmt is GET_WORKFLOW_NAME_SQL:
+                return _one_result(SimpleNamespace(name='test_wf'))
+            return _one_result(SimpleNamespace())
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=_dispatch)
+        broker = self._custom_broker()
+        mock_wf_def = self._spec_for(self._custom_child_task())
+
+        with patch(
+            'horsies.core.workflows.registry.get_subworkflow_node',
+            return_value=None,
+        ), patch(
+            'horsies.core.workflows.engine._load_workflow_def_from_key',
+            return_value=mock_wf_def,
+        ), patch(
+            'horsies.core.workflows.engine.validate_workflow_generic_output_match',
+        ), patch(
+            'horsies.core.workflows.engine.guard_no_positional_args',
+        ):
+            result = await enqueue_subworkflow_task(
+                session, broker, 'wf-1', 0, {},
+                parent_depth=0, root_workflow_id='root-wf',
+            )
+        assert result is not None
+
+        # Collect every persisted priority for the 'scrape' child node across
+        # the bulk inserts (horsies_tasks root params + horsies_workflow_tasks).
+        scrape_priorities: list[int] = []
+        for params in captured:
+            rows = params if isinstance(params, list) else [params]
+            for r in rows:
+                if isinstance(r, dict) and r.get('priority') is not None:
+                    name = r.get('name') or r.get('node_id')
+                    if name in ('scrape_child', 'scrape'):
+                        scrape_priorities.append(r['priority'])
+        assert scrape_priorities, 'no persisted priority captured for the child'
+        assert all(p == 30 for p in scrape_priorities), scrape_priorities
+        assert 100 not in scrape_priorities
+
+    @pytest.mark.asyncio
+    async def test_custom_mode_invalid_child_queue_fails_closed(self) -> None:
+        """A subworkflow child whose queue is invalid in CUSTOM mode is
+        contained via _fail_enqueued_task(WORKFLOW_ENQUEUE_FAILED), not persisted
+        or raised. Pins the safety net that bounds the check() false-negative."""
+        row = self._base_row(queue_name='scraping', priority=30)
+
+        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
+            if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
+                return _one_result(row)
+            if stmt is GET_WORKFLOW_NAME_SQL:
+                return _one_result(SimpleNamespace(name='test_wf'))
+            return _one_result(SimpleNamespace())
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=_dispatch)
+        broker = self._custom_broker()
+        child_task = self._custom_child_task()
+        child_task.fn.task_queue_name = 'ghost'  # not in custom_queues
+        mock_wf_def = self._spec_for(child_task)
+        fail_mock = AsyncMock()
+
+        with patch(
+            'horsies.core.workflows.registry.get_subworkflow_node',
+            return_value=None,
+        ), patch(
+            'horsies.core.workflows.engine._load_workflow_def_from_key',
+            return_value=mock_wf_def,
+        ), patch(
+            'horsies.core.workflows.engine.validate_workflow_generic_output_match',
+        ), patch(
+            'horsies.core.workflows.engine.guard_no_positional_args',
+        ), patch(
+            'horsies.core.workflows.engine._fail_enqueued_task',
+            new=fail_mock,
+        ):
+            result = await enqueue_subworkflow_task(
+                session, broker, 'wf-1', 0, {},
+                parent_depth=0, root_workflow_id='root-wf',
+            )
+        assert result is None
+        fail_mock.assert_awaited()
+        call = fail_mock.await_args
+        assert call.kwargs.get('error_code') == OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED
 
 
 # ── 5. on_workflow_task_complete ─────────────────────────────────────

@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import time
 import uuid
+from dataclasses import dataclass
 from typing import (
     Callable,
     Final,
@@ -178,6 +179,86 @@ def effective_priority(
             help_text='use one of the configured queue names',
         )
     return config.priority
+
+
+def resolve_node_queue_and_priority(
+    app: 'Horsies',
+    node: 'TaskNode[Any]',
+) -> tuple[str, int]:
+    """Bind a workflow ``TaskNode``'s queue and priority against app config.
+
+    Single source of truth for resolving an authored ``TaskNode`` (whose
+    ``queue``/``priority`` may be ``None``, meaning "inherit from the queue
+    config") to concrete values before persistence. ``app.workflow()``, the
+    subworkflow enqueue path, and ``app.check()`` all route through this so the
+    three cannot diverge — the divergence that let subworkflow tasks persist at
+    a hardcoded ``100`` instead of their queue priority.
+
+    Resolution:
+        queue    = node.queue or fn.task_queue_name or 'default'
+        priority = node.priority if set, else effective_priority(app, queue)
+
+    Raises:
+        ConfigurationError: queue invalid for the app's queue mode — CUSTOM
+            mode and queue not in custom_queues (TASK_INVALID_QUEUE), or
+            DEFAULT mode and queue is not 'default' (CONFIG_INVALID_QUEUE_MODE).
+    """
+    queue = node.queue or getattr(node.fn, 'task_queue_name', None) or 'default'
+    if app.config.queue_mode.name == 'CUSTOM':
+        valid_queues = app.get_valid_queue_names()
+        if queue not in valid_queues:
+            raise ConfigurationError(
+                message='TaskNode queue not in app config',
+                code=ErrorCode.TASK_INVALID_QUEUE,
+                notes=[
+                    f"TaskNode '{node.name}' has queue '{queue}'",
+                    f'valid queues: {valid_queues}',
+                ],
+                help_text='use one of the configured queue names or add this queue to app config',
+            )
+    elif queue != 'default':
+        raise ConfigurationError(
+            message='TaskNode has non-default queue in DEFAULT mode',
+            code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+            notes=[
+                f"TaskNode '{node.name}' has queue '{queue}'",
+                "app is in DEFAULT mode (only 'default' queue allowed)",
+            ],
+            help_text='either remove queue override or switch to QueueMode.CUSTOM',
+        )
+    priority = (
+        node.priority if node.priority is not None
+        else effective_priority(app, queue)
+    )
+    return queue, priority
+
+
+@dataclass(frozen=True)
+class BoundTaskNode:
+    """A workflow ``TaskNode`` with queue/priority resolved against app config.
+
+    Produced only by ``bind_task_node``. Persistence reads ``queue``/``priority``
+    from here — both non-optional — so no enqueue path can fall back to a
+    guessed default. ``node`` carries the remaining authored fields unchanged.
+    """
+
+    node: 'TaskNode[Any]'
+    queue: str
+    priority: int
+
+
+def bind_task_node(
+    app: 'Horsies',
+    node: 'TaskNode[Any]',
+) -> BoundTaskNode:
+    """Resolve a ``TaskNode`` to a ``BoundTaskNode`` (queue/priority concrete).
+
+    Raises:
+        ConfigurationError: from ``resolve_node_queue_and_priority`` when the
+            node's queue is invalid for the app's queue mode.
+    """
+    queue, priority = resolve_node_queue_and_priority(app, node)
+    return BoundTaskNode(node=node, queue=queue, priority=priority)
 
 
 class TaskHandle(Generic[T]):

@@ -324,8 +324,31 @@ class DataProcessor(WorkflowDefinition[ProcessedData]):
 
     class Meta:
         output = None  # Set dynamically in build_with
+```
 
+:::note[Queue and priority binding]
+A `build_with()` that returns a `WorkflowSpec(...)` directly does not run the
+queue/priority binding that `app.workflow()` applies. A `TaskNode` left without
+an explicit `priority` inherits its queue's configured priority, and one
+without an explicit `queue` inherits `fn.task_queue_name` — but that resolution
+happens when the subworkflow is enqueued, not at construction time. So a node
+built this way carries `queue=None, priority=None` until enqueue.
 
+`horsies check` validates the queues of nodes in any spec a registered builder
+returns, and **recursively expands statically-parameterized `SubWorkflowNode`s**
+to validate their nodes too. A subworkflow is static when it has no `args_from`
+mapping — its `build_with` kwargs are fully literal — so the child spec is
+deterministic at check time. An invalid queue (unknown in CUSTOM mode,
+non-`default` in DEFAULT mode) anywhere in that tree fails check instead of
+surfacing at runtime.
+
+A **runtime-parameterized** subworkflow — one that injects dependency results
+into `build_with` via `args_from` — cannot be built at check time, so it is not
+expanded. To get check coverage for one, register its `build_with` as a
+workflow builder (`@app.workflow_builder`, with `cases` for required params).
+:::
+
+```python
 # Use in parent with kwargs
 class MultiSourceAggregation(WorkflowDefinition[Report]):
     name = "multi_source"

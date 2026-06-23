@@ -18,7 +18,13 @@ from horsies.core.errors import (
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.workflow import TaskNode, WorkflowDefinition, WorkflowSpec
+from horsies.core.models.queues import CustomQueueConfig, QueueMode
+from horsies.core.models.workflow import (
+    SubWorkflowNode,
+    TaskNode,
+    WorkflowDefinition,
+    WorkflowSpec,
+)
 from horsies.core.models.workflow.definition import WorkflowDefinitionMeta
 
 pytestmark = pytest.mark.unit
@@ -715,3 +721,288 @@ class TestCheckIntegration:
         errors = app.check(live=False)
         assert len(errors) == 1
         assert errors[0].code == ErrorCode.WORKFLOW_NO_DEFINITION_KEY
+
+
+def _make_custom_app(*queues: tuple[str, int]) -> Horsies:
+    """CUSTOM-mode app with the given (name, priority) queues."""
+    return Horsies(
+        config=AppConfig(
+            broker=PostgresConfig(
+                database_url='postgresql+psycopg://user:pass@localhost/db',
+            ),
+            queue_mode=QueueMode.CUSTOM,
+            custom_queues=[
+                CustomQueueConfig(name=n, priority=p) for n, p in queues
+            ],
+        ),
+    )
+
+
+class TestNodeBindingInCheck:
+    """check() binds builder-returned spec nodes — the same resolver runtime uses.
+
+    Builders returning a direct WorkflowSpec(...) (the parameterized-subworkflow
+    pattern) bypass app.workflow()'s binding. check() must exercise that binding
+    so invalid queues surface at check time, not at enqueue time.
+    """
+
+    def test_valid_queue_binds_and_passes(self) -> None:
+        """A node on a valid CUSTOM queue binds cleanly — check reports nothing."""
+        app = _make_custom_app(('scraping', 30))
+
+        @app.workflow_builder()
+        def valid_builder() -> WorkflowSpec[Any]:
+            return WorkflowSpec(
+                name='valid_builder',
+                tasks=[
+                    TaskNode(
+                        fn=mock.MagicMock(
+                            task_name='scrape', task_queue_name='scraping',
+                        ),
+                    ),
+                ],
+                definition_key='valid_builder.v1',
+            )
+
+        assert app.check(live=False) == []
+
+    def test_invalid_queue_caught_at_check(self) -> None:
+        """A node on an unknown queue fails check with TASK_INVALID_QUEUE."""
+        app = _make_custom_app(('scraping', 30))
+
+        @app.workflow_builder()
+        def invalid_builder() -> WorkflowSpec[Any]:
+            return WorkflowSpec(
+                name='invalid_builder',
+                tasks=[
+                    TaskNode(
+                        fn=mock.MagicMock(
+                            task_name='scrape', task_queue_name='nonexistent',
+                        ),
+                    ),
+                ],
+                definition_key='invalid_builder.v1',
+            )
+
+        errors = app.check(live=False)
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.TASK_INVALID_QUEUE
+
+
+def _mock_fn(queue: str) -> Any:
+    """A mock task fn carrying a queue name, for TaskNode binding tests."""
+    return mock.MagicMock(task_name=f'task_{queue}', task_queue_name=queue)
+
+
+class TestRecursiveSubworkflowBindingInCheck:
+    """check() expands statically-parameterized SubWorkflowNodes and validates
+    their nodes — catching invalid queues nested in unregistered children.
+
+    Only static subworkflows (no args_from, no from_node markers) are expanded;
+    runtime-parameterized ones are skipped (their build_with needs dependency
+    results absent at check). Cycles are guarded by definition_key.
+    """
+
+    def test_nested_unregistered_subworkflow_invalid_queue_caught(self) -> None:
+        """An invalid queue in a nested, unregistered child fails check."""
+        app = _make_custom_app(('scraping', 30))
+
+        class Child(WorkflowDefinition[Any]):
+            name = 'child'
+            definition_key = 'child.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
+                bad = TaskNode(fn=_mock_fn('ghost'), node_id='bad')
+                return WorkflowSpec(name=cls.name, tasks=[bad], output=bad)
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            return app.workflow(
+                'parent',
+                [SubWorkflowNode(workflow_def=Child)],
+                definition_key='parent.v1',
+            )
+
+        errors = app.check(live=False)
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.TASK_INVALID_QUEUE
+
+    def test_nested_valid_subworkflow_passes(self) -> None:
+        """A nested child whose nodes bind cleanly reports nothing."""
+        app = _make_custom_app(('scraping', 30))
+
+        class Child(WorkflowDefinition[Any]):
+            name = 'child_ok'
+            definition_key = 'child_ok.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
+                ok = TaskNode(fn=_mock_fn('scraping'), node_id='ok')
+                return WorkflowSpec(name=cls.name, tasks=[ok], output=ok)
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            return app.workflow(
+                'parent_ok',
+                [SubWorkflowNode(workflow_def=Child)],
+                definition_key='parent_ok.v1',
+            )
+
+        assert app.check(live=False) == []
+
+    def test_runtime_parameterized_subworkflow_skipped(self) -> None:
+        """A runtime-parameterized (args_from) subworkflow is not expanded.
+
+        Even though its child has an invalid queue, check cannot statically
+        build it, so it reports nothing rather than a false positive.
+        """
+        app = _make_custom_app(('scraping', 30))
+
+        class ChildRuntime(WorkflowDefinition[Any]):
+            name = 'child_rt'
+            definition_key = 'child_rt.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
+                bad = TaskNode(fn=_mock_fn('ghost'), node_id='bad')
+                return WorkflowSpec(name=cls.name, tasks=[bad], output=bad)
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            src = TaskNode(fn=_mock_fn('scraping'), node_id='src')
+            sub = SubWorkflowNode(
+                workflow_def=ChildRuntime, args_from={'v': src}, waits_for=[src],
+            )
+            return app.workflow(
+                'parent_rt', [src, sub], definition_key='parent_rt.v1',
+            )
+
+        assert app.check(live=False) == []
+
+    def test_self_referential_subworkflow_terminates(self) -> None:
+        """A subworkflow that references itself does not recurse infinitely."""
+        app = _make_custom_app(('scraping', 30))
+
+        class Recur(WorkflowDefinition[Any]):
+            name = 'recur'
+            definition_key = 'recur.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
+                t = TaskNode(fn=_mock_fn('scraping'), node_id='t')
+                child = SubWorkflowNode(workflow_def=Recur, node_id='self')
+                return app.workflow(
+                    cls.name, [t, child], definition_key=cls.definition_key,
+                )
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            return app.workflow(
+                'parent_recur',
+                [SubWorkflowNode(workflow_def=Recur)],
+                definition_key='parent_recur.v1',
+            )
+
+        # Cycle guard: returns without hanging or RecursionError.
+        assert app.check(live=False) == []
+
+    def test_param_varying_self_reference_invalid_queue_caught(self) -> None:
+        """A definition self-referencing with DIFFERENT kwargs is not deduped away.
+
+        Regression: keying the cycle guard on definition_key alone skipped the
+        parameter-varying recursion, so an invalid queue nested at depth>0
+        escaped check. The guard is keyed on (definition_key, kwargs) so the
+        depth-1 instance is still validated.
+        """
+        app = _make_custom_app(('scraping', 30))
+
+        class Recur(WorkflowDefinition[Any]):
+            name = 'recur_pv'
+            definition_key = 'recur_pv.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, *, depth: int = 0) -> WorkflowSpec[Any]:
+                if depth == 0:
+                    # Valid at depth 0; recurse into the SAME definition with
+                    # different kwargs that bind an invalid queue at depth 1.
+                    t = TaskNode(fn=_mock_fn('scraping'), node_id='t0')
+                    deeper = SubWorkflowNode(
+                        workflow_def=Recur, kwargs={'depth': 1}, node_id='deeper',
+                    )
+                    return app.workflow(
+                        cls.name, [t, deeper], definition_key=cls.definition_key,
+                    )
+                bad = TaskNode(fn=_mock_fn('ghost'), node_id='bad')
+                return WorkflowSpec(
+                    name=f'{cls.name}_d{depth}', tasks=[bad], output=bad,
+                )
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            return app.workflow(
+                'parent_pv',
+                [SubWorkflowNode(workflow_def=Recur, kwargs={'depth': 0})],
+                definition_key='parent_pv.v1',
+            )
+
+        codes = [e.code for e in app.check(live=False)]
+        assert ErrorCode.TASK_INVALID_QUEUE in codes
+
+    def test_nested_child_single_structural_error_surfaces(self) -> None:
+        """A nested static child that fails with ONE structural error surfaces it.
+
+        Regression: catching only ConfigurationError let a single
+        WorkflowValidationError (e.g. empty tasks) from a child build_with be
+        swallowed, while multi-error failures surfaced — an inconsistent
+        contract. Static recursion now validates the whole child spec.
+        """
+        app = _make_custom_app(('scraping', 30))
+
+        class EmptyChild(WorkflowDefinition[Any]):
+            name = 'empty_child'
+            definition_key = 'empty_child.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
+                return WorkflowSpec(name=cls.name, tasks=[])  # WORKFLOW_NO_NODES
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            return app.workflow(
+                'parent_empty',
+                [SubWorkflowNode(workflow_def=EmptyChild)],
+                definition_key='parent_empty.v1',
+            )
+
+        codes = [e.code for e in app.check(live=False)]
+        assert ErrorCode.WORKFLOW_NO_NODES in codes
+
+    def test_nested_child_multi_error_surfaces_all(self) -> None:
+        """A nested static child failing with MULTIPLE errors surfaces them all."""
+        app = _make_custom_app(('scraping', 30))
+
+        class MultiBadChild(WorkflowDefinition[Any]):
+            name = 'multi_bad'
+            definition_key = 'multi_bad.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
+                # Two distinct invalid-queue nodes → collected together.
+                a = TaskNode(fn=_mock_fn('ghost1'), node_id='a')
+                b = TaskNode(fn=_mock_fn('ghost2'), node_id='b')
+                return app.workflow(
+                    cls.name, [a, b], definition_key=cls.definition_key,
+                )
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            return app.workflow(
+                'parent_multi',
+                [SubWorkflowNode(workflow_def=MultiBadChild)],
+                definition_key='parent_multi.v1',
+            )
+
+        codes = [e.code for e in app.check(live=False)]
+        # Both invalid-queue nodes reported (not just the first).
+        assert codes.count(ErrorCode.TASK_INVALID_QUEUE) == 2
