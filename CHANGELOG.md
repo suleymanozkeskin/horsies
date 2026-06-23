@@ -8,6 +8,32 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-06-23
+
+A workflow scheduling correctness fix. A parameterized sub-workflow whose
+`build_with()` returns a direct `WorkflowSpec(...)` bypassed `app.workflow()`
+binding, so its `TaskNode`s reached the engine with `priority=None` and the
+engine defaulted them to a literal `100`. On a CUSTOM queue (e.g. `scraping` at
+priority 30) the child task persisted at priority 100 — correct queue, wrong
+intra-queue claim order (`ORDER BY priority ASC, enqueued_at ASC`). No schema
+change (still v9).
+
+### Fixed
+
+- Subworkflow tasks now persist at their queue's configured priority. Queue and
+  priority resolution is centralized in a single bind boundary
+  (`resolve_node_queue_and_priority`) that `app.workflow()`, the engine
+  subworkflow child branch, and `check()` all route through, replacing three
+  divergent `else 100` fallbacks. An explicit `node.priority` is preserved;
+  `None` inherits the queue priority via `effective_priority`. DEFAULT-mode
+  queues are unchanged (`effective_priority` returns 100). An invalid child
+  queue is now contained with `WORKFLOW_ENQUEUE_FAILED` rather than guessing a
+  default. (#158)
+
+### Dependencies
+
+- Dev and website dependency bumps via Dependabot. (#157, #156)
+
 ## [0.2.5] - 2026-06-17
 
 Connection durability for remote/pooled Postgres, plus two recovery-path
