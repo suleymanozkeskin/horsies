@@ -387,7 +387,23 @@ pub(crate) fn build_task_envelope(
     row: &ClaimedTaskRow,
     accepts_workflow_ctx: bool,
 ) -> Result<Vec<u8>, TaskError> {
-    let args_value: serde_json::Value = match row.args.as_deref() {
+    build_envelope_from_parts(row.args.as_deref(), row.kwargs.as_deref(), accepts_workflow_ctx)
+}
+
+/// Build the worker args/kwargs envelope from raw args/kwargs JSON strings.
+///
+/// Shared by [`build_task_envelope`] (execution) and `app.check()`'s
+/// payload validation (schedules and workflow nodes) so check-time dry-runs
+/// use the exact same args-coercion and kwargs-object rejection as execution.
+///
+/// `accepts_workflow_ctx` controls the `__horsies_workflow_ctx__` →
+/// `workflow_ctx` rename; check-time callers pass `false` (no runtime context).
+pub(crate) fn build_envelope_from_parts(
+    args: Option<&str>,
+    kwargs: Option<&str>,
+    accepts_workflow_ctx: bool,
+) -> Result<Vec<u8>, TaskError> {
+    let args_value: serde_json::Value = match args {
         Some(json) => serde_json::from_str(json).map_err(|e| {
             TaskError::builtin(
                 OperationalErrorCode::WorkerSerializationError,
@@ -403,7 +419,7 @@ pub(crate) fn build_task_envelope(
         other => vec![other],
     };
 
-    let kwargs_value: serde_json::Value = match row.kwargs.as_deref() {
+    let kwargs_value: serde_json::Value = match kwargs {
         Some(json) => serde_json::from_str(json).map_err(|e| {
             TaskError::builtin(
                 OperationalErrorCode::WorkerSerializationError,
@@ -1669,5 +1685,53 @@ mod parse {
             results_by_id,
             summaries_by_id,
         ))
+    }
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::build_envelope_from_parts;
+
+    /// Parse the envelope bytes back into a Value for shape assertions.
+    fn envelope(args: Option<&str>, kwargs: Option<&str>) -> serde_json::Value {
+        let bytes = build_envelope_from_parts(args, kwargs, false).expect("envelope built");
+        serde_json::from_slice(&bytes).expect("envelope is JSON")
+    }
+
+    #[test]
+    fn null_args_and_kwargs_yield_empty_envelope() {
+        assert_eq!(
+            envelope(None, None),
+            serde_json::json!({"args": [], "kwargs": {}}),
+        );
+    }
+
+    #[test]
+    fn array_args_passed_through_object_kwargs_passed_through() {
+        assert_eq!(
+            envelope(Some("[1, 2]"), Some(r#"{"a": 1}"#)),
+            serde_json::json!({"args": [1, 2], "kwargs": {"a": 1}}),
+        );
+    }
+
+    #[test]
+    fn scalar_args_coerced_to_single_element_array() {
+        assert_eq!(
+            envelope(Some("5"), None),
+            serde_json::json!({"args": [5], "kwargs": {}}),
+        );
+    }
+
+    /// The reviewer-flagged divergence: a non-object kwargs is rejected here,
+    /// where `decode_task_input` alone would silently fall through to the args
+    /// branch. Routing check-time validation through this helper makes the
+    /// dry-run reject the same malformed payloads execution rejects.
+    #[test]
+    fn non_object_kwargs_rejected() {
+        let err = build_envelope_from_parts(None, Some(r#""bad""#), false).unwrap_err();
+        assert!(err
+            .message
+            .unwrap_or_default()
+            .contains("kwargs payload is not a JSON object"));
     }
 }
