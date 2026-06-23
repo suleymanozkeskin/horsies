@@ -602,6 +602,91 @@ impl Horsies {
         Ok(())
     }
 
+    /// Dry-run a task's typed input deserialization for raw args/kwargs JSON,
+    /// using the same envelope path as execution, without running the task.
+    ///
+    /// Returns the structured deserialize error on mismatch. Shared by
+    /// schedule validation and workflow-node validation.
+    fn dry_run_task_input(
+        task: &crate::core::task::fn_trait::RegisteredTask,
+        args: Option<&str>,
+        kwargs: Option<&str>,
+    ) -> Result<(), crate::core::task::error::TaskError> {
+        let envelope = crate::worker::execution::build_envelope_from_parts(args, kwargs, false)?;
+        task.validate_input(&envelope)
+    }
+
+    /// Compact JSON string for a schedule's args/kwargs `Value`, mapping
+    /// `Null` to `None` so it follows the same "no payload" path as a
+    /// `ClaimedTaskRow` with a NULL column. Shape-preserving: a non-object
+    /// kwargs `Value` serializes to JSON and is rejected by the shared
+    /// envelope builder exactly as at execution.
+    fn payload_value_to_json(value: &serde_json::Value) -> Option<String> {
+        match value {
+            serde_json::Value::Null => None,
+            other => Some(other.to_string()),
+        }
+    }
+
+    /// Extract a human-readable detail from a typed-input deserialize error.
+    fn input_error_detail(error: &crate::core::task::error::TaskError) -> String {
+        error
+            .data
+            .as_ref()
+            .and_then(|d| d.get("validation_error"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .or_else(|| error.message.clone())
+            .unwrap_or_else(|| "input type mismatch".to_owned())
+    }
+
+    /// Validate a workflow node's static input against the task's declared
+    /// input type. Returns `Some(error)` only for a fully-static payload that
+    /// fails to deserialize.
+    ///
+    /// Skipped (returns `None`): subworkflow nodes, unregistered tasks
+    /// (reported by registration checks), tasks with runtime-injected fields
+    /// (`args_from` or workflow-context injection — their static payload is
+    /// intentionally partial and would false-positive on the injected fields),
+    /// and nodes with no static payload. A mixed node (static kwargs plus
+    /// `args_from`) is therefore skipped entirely; its static portion is not
+    /// validated at check-time, and any mismatch still surfaces at execution.
+    fn validate_node_static_input(
+        &self,
+        workflow_name: &str,
+        node: &crate::core::workflow::node::AnyNode,
+    ) -> Option<HorsiesError> {
+        if node.is_subworkflow {
+            return None;
+        }
+        let task = self.registry.get(&node.task_name).ok()?;
+        if !node.args_from.is_empty() || task.accepts_workflow_ctx() {
+            return None;
+        }
+        if node.args_json.is_none() && node.kwargs_json.is_none() {
+            return None;
+        }
+        match Self::dry_run_task_input(task, node.args_json.as_deref(), node.kwargs_json.as_deref())
+        {
+            Ok(()) => None,
+            Err(task_error) => Some(
+                HorsiesError::new(format!(
+                    "workflow '{}' node '{}' (task '{}') static input does not match \
+                     the task's declared input type",
+                    workflow_name,
+                    node.node_id.as_deref().unwrap_or("?"),
+                    node.task_name,
+                ))
+                .with_code(ErrorCode::WorkflowInvalidKwargKey)
+                .with_note(format!("input mismatch: {}", Self::input_error_detail(&task_error)))
+                .with_help(
+                    "ensure the node's kwargs match the task's declared input fields \
+                     (names and types)",
+                ),
+            ),
+        }
+    }
+
     /// Validate that all scheduled tasks reference registered task names
     /// and valid queue names.
     ///
@@ -664,6 +749,32 @@ impl Horsies {
                          or omit queue_name to use the default queue",
                     ),
                 );
+            }
+
+            // 3. Validate args/kwargs against the task's declared input type.
+            // Only when the task is registered (existence reported above).
+            if let Ok(task) = self.registry.get(&task_schedule.task_name) {
+                let args = Self::payload_value_to_json(&task_schedule.args);
+                let kwargs = Self::payload_value_to_json(&task_schedule.kwargs);
+                if let Err(task_error) =
+                    Self::dry_run_task_input(task, args.as_deref(), kwargs.as_deref())
+                {
+                    report.add(
+                        HorsiesError::new(format!(
+                            "schedule '{}' input does not match task '{}' declared input type",
+                            task_schedule.name, task_schedule.task_name,
+                        ))
+                        .with_code(ErrorCode::ConfigInvalidSchedule)
+                        .with_note(format!(
+                            "input mismatch: {}",
+                            Self::input_error_detail(&task_error),
+                        ))
+                        .with_help(
+                            "ensure the schedule's args/kwargs match the task's declared \
+                             input fields (names and types)",
+                        ),
+                    );
+                }
             }
         }
 
@@ -828,6 +939,19 @@ impl Horsies {
                              or use typed .set(...) / .arg_from(...) on the node",
                         ),
                     );
+                }
+            }
+        }
+
+        // Phase 2.11: Workflow node typed-input validation.
+        // Dry-run each fully-static node payload against the task's declared
+        // input type. Nodes with runtime-injected fields (args_from /
+        // workflow context) are skipped. Surfaces at check what would
+        // otherwise only fail at execution.
+        for registered in self.workflow_registry.iter() {
+            for node in &registered.spec.tasks {
+                if let Some(err) = self.validate_node_static_input(&registered.spec.name, node) {
+                    report.add(err);
                 }
             }
         }
@@ -1321,6 +1445,13 @@ where
                     }
                 }
 
+                // Typed-input validation: same as Phase 2.11 for registered specs.
+                for node in &spec.tasks {
+                    if let Some(err) = app.validate_node_static_input(&self.name, node) {
+                        errors.push(err);
+                    }
+                }
+
                 errors
             }
             Ok(Err(err)) if err.code.is_some() => vec![err],
@@ -1600,6 +1731,34 @@ mod tests {
                 ..TaskMeta::default()
             },
         }
+    }
+
+    // -- Real typed tasks for input-validation tests. Unlike DummyTask (which
+    // uses the default no-op validate_input), these go through the macro's
+    // decode_task_input::<T> dry-run, so their validate_input is the real one.
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct CountInput {
+        count: i64,
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn count_task(_input: CountInput) -> Result<i64, crate::core::task::error::TaskError> {
+        Ok(0)
+    }
+
+    fn unit_task(_input: ()) -> Result<i64, crate::core::task::error::TaskError> {
+        Ok(0)
+    }
+
+    /// A task whose declared input is the typed `CountInput`.
+    fn typed_count_task() -> RegisteredTask {
+        crate::blocking_task_fn!(count_task, CountInput)
+    }
+
+    /// A task whose declared input is unit `()`.
+    fn typed_unit_task() -> RegisteredTask {
+        crate::blocking_task_fn!(unit_task, ())
     }
 
     #[test]
@@ -2820,5 +2979,149 @@ mod tests {
             "should include input type name, got: {}",
             msg
         );
+    }
+
+    // -- Schedule typed-input validation --
+
+    fn schedule_with_kwargs(task_name: &str, kwargs: serde_json::Value) -> AppConfig {
+        use crate::core::config::schedule::{
+            IntervalSchedule, ScheduleConfig, SchedulePattern, TaskSchedule,
+        };
+        let mut config = valid_config();
+        config.schedule = Some(ScheduleConfig {
+            enabled: true,
+            schedules: vec![TaskSchedule {
+                name: "s1".to_owned(),
+                task_name: task_name.to_owned(),
+                pattern: SchedulePattern::Interval(IntervalSchedule {
+                    seconds: Some(3600),
+                    minutes: None,
+                    hours: None,
+                    days: None,
+                }),
+                args: serde_json::Value::Null,
+                kwargs,
+                queue_name: None,
+                enabled: true,
+                timezone: "UTC".to_owned(),
+                catch_up_missed: false,
+                max_catch_up_runs: 100,
+            }],
+            check_interval_seconds: 1,
+        });
+        config
+    }
+
+    #[test]
+    fn validate_schedules_ok_when_kwargs_match_typed_input() {
+        let mut app =
+            Horsies::new(schedule_with_kwargs("counter", serde_json::json!({"count": 5}))).unwrap();
+        app.register("counter", typed_count_task()).unwrap();
+        assert!(app.validate_schedules().is_ok());
+    }
+
+    #[test]
+    fn validate_schedules_err_when_kwargs_mismatch_typed_input() {
+        let mut app = Horsies::new(schedule_with_kwargs(
+            "counter",
+            serde_json::json!({"count": "not-an-int"}),
+        ))
+        .unwrap();
+        app.register("counter", typed_count_task()).unwrap();
+        let err = app.validate_schedules().unwrap_err();
+        assert!(
+            err.to_string().contains("does not match"),
+            "expected input-mismatch error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_schedules_ok_for_unit_task_without_payload() {
+        let mut app = Horsies::new(schedule_with_kwargs("ping", serde_json::Value::Null)).unwrap();
+        app.register("ping", typed_unit_task()).unwrap();
+        assert!(app.validate_schedules().is_ok());
+    }
+
+    #[test]
+    fn validate_schedules_err_for_unit_task_with_kwargs() {
+        let mut app =
+            Horsies::new(schedule_with_kwargs("ping", serde_json::json!({"x": 1}))).unwrap();
+        app.register("ping", typed_unit_task()).unwrap();
+        assert!(app.validate_schedules().is_err());
+    }
+
+    // -- Workflow node typed-input validation --
+
+    #[test]
+    fn check_catches_node_static_kwargs_type_mismatch() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+        app.register("counter", typed_count_task()).unwrap();
+
+        let mut builder = WorkflowSpecBuilder::new("node_mismatch_wf");
+        builder.definition_key("tests.node_mismatch.v1");
+        builder.task(
+            TaskNode::<()>::raw("counter")
+                .node_id("c")
+                .queue("default")
+                .kwargs(r#"{"count": "not-an-int"}"#.to_owned()),
+        );
+        let spec = builder.build().unwrap();
+        app.register_workflow_spec(spec).unwrap();
+
+        let err = app.check().unwrap_err();
+        assert!(
+            err.to_string().contains("does not match"),
+            "expected node input-mismatch error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn check_ok_when_node_static_kwargs_match() {
+        let mut app = Horsies::new(valid_config()).unwrap();
+        app.register("counter", typed_count_task()).unwrap();
+
+        let mut builder = WorkflowSpecBuilder::new("node_ok_wf");
+        builder.definition_key("tests.node_ok.v1");
+        builder.task(
+            TaskNode::<()>::raw("counter")
+                .node_id("c")
+                .queue("default")
+                .kwargs(r#"{"count": 7}"#.to_owned()),
+        );
+        let spec = builder.build().unwrap();
+        app.register_workflow_spec(spec).unwrap();
+
+        assert!(app.check().is_ok());
+    }
+
+    #[test]
+    fn check_skips_node_typed_validation_when_args_from_present() {
+        // A node fed by a dependency carries only a partial static payload;
+        // typed validation must skip it (no false positive on the injected
+        // field). Here the static kwargs alone would mismatch CountInput.
+        let mut app = Horsies::new(valid_config()).unwrap();
+        app.register("counter", typed_count_task()).unwrap();
+        app.register("producer", dummy_registered()).unwrap();
+
+        let mut builder = WorkflowSpecBuilder::new("node_args_from_wf");
+        builder.definition_key("tests.node_args_from.v1");
+        let producer = builder.task(
+            TaskNode::<()>::raw("producer")
+                .node_id("p")
+                .queue("default"),
+        );
+        builder.task(
+            TaskNode::<()>::raw("counter")
+                .node_id("c")
+                .queue("default")
+                .waits_for(producer)
+                .raw_arg_from("count", producer.into()),
+        );
+        let spec = builder.build().unwrap();
+        app.register_workflow_spec(spec).unwrap();
+
+        assert!(app.check().is_ok());
     }
 }
