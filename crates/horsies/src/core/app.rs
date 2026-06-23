@@ -645,12 +645,19 @@ impl Horsies {
     /// fails to deserialize.
     ///
     /// Skipped (returns `None`): subworkflow nodes, unregistered tasks
-    /// (reported by registration checks), tasks with runtime-injected fields
-    /// (`args_from` or workflow-context injection — their static payload is
-    /// intentionally partial and would false-positive on the injected fields),
-    /// and nodes with no static payload. A mixed node (static kwargs plus
-    /// `args_from`) is therefore skipped entirely; its static portion is not
-    /// validated at check-time, and any mismatch still surfaces at execution.
+    /// (reported by registration checks), nodes with runtime-injected fields
+    /// (`args_from`, or `workflow_ctx_from` which makes the engine inject the
+    /// reserved context kwarg — their static payload is intentionally partial
+    /// and would false-positive on the injected fields), and nodes with no
+    /// static payload. A mixed node (static kwargs plus `args_from`) is
+    /// therefore skipped entirely; its static portion is not validated at
+    /// check-time, and any mismatch still surfaces at execution.
+    ///
+    /// The context skip is gated on the node-level `workflow_ctx_from`, not the
+    /// task-level `accepts_workflow_ctx`: the engine injects context only when
+    /// `workflow_ctx_from` is non-empty (`engine.rs`), so a context-capable
+    /// task whose node sets no `workflow_ctx_from` has a complete static
+    /// payload that should be validated.
     fn validate_node_static_input(
         &self,
         workflow_name: &str,
@@ -660,7 +667,11 @@ impl Horsies {
             return None;
         }
         let task = self.registry.get(&node.task_name).ok()?;
-        if !node.args_from.is_empty() || task.accepts_workflow_ctx() {
+        let injects_ctx = node
+            .workflow_ctx_from
+            .as_ref()
+            .is_some_and(|ids| !ids.is_empty());
+        if !node.args_from.is_empty() || injects_ctx {
             return None;
         }
         if node.args_json.is_none() && node.kwargs_json.is_none() {
@@ -3123,5 +3134,33 @@ mod tests {
         app.register_workflow_spec(spec).unwrap();
 
         assert!(app.check().is_ok());
+    }
+
+    #[test]
+    fn check_validates_ctx_capable_task_node_without_ctx_from() {
+        // A context-capable task whose node sets no workflow_ctx_from receives
+        // no runtime injection, so its static payload is complete and must be
+        // validated (gate is node-level workflow_ctx_from, not task capability).
+        let mut app = Horsies::new(valid_config()).unwrap();
+        app.register("counter_ctx", typed_count_task().with_workflow_ctx())
+            .unwrap();
+
+        let mut builder = WorkflowSpecBuilder::new("ctx_node_no_ctx_from_wf");
+        builder.definition_key("tests.ctx_node_no_ctx_from.v1");
+        builder.task(
+            TaskNode::<()>::raw("counter_ctx")
+                .node_id("c")
+                .queue("default")
+                .kwargs(r#"{"count": "not-an-int"}"#.to_owned()),
+        );
+        let spec = builder.build().unwrap();
+        app.register_workflow_spec(spec).unwrap();
+
+        let err = app.check().unwrap_err();
+        assert!(
+            err.to_string().contains("does not match"),
+            "ctx-capable node without workflow_ctx_from should still be validated, got: {}",
+            err
+        );
     }
 }
