@@ -742,6 +742,27 @@ pub async fn wf_sum_two(input: SumTwoInput) -> Result<i64, TaskError> {
     Ok(a + b)
 }
 
+// Multi-parameter task: exercises the macro-generated `Input` struct (the
+// "Wrapped" shape), which carries `#[serde(deny_unknown_fields)]`. Used to
+// prove (a) `args_from` injection of declared fields still deserializes, and
+// (b) an extra/undeclared kwarg is rejected at execution.
+#[task("e2e_wf_combine_wrapped")]
+pub async fn wf_combine_wrapped(
+    first: TaskResult<i64>,
+    second: TaskResult<i64>,
+) -> Result<i64, TaskError> {
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let a = match first {
+        TaskResult::Ok(v) => v,
+        TaskResult::Err(e) => return Err(e),
+    };
+    let b = match second {
+        TaskResult::Ok(v) => v,
+        TaskResult::Err(e) => return Err(e),
+    };
+    Ok(a + b)
+}
+
 // =============================================================================
 // Child-label workflow (sub-workflow tests)
 // =============================================================================

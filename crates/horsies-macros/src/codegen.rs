@@ -461,6 +461,10 @@ fn build_registered_task(
 
                     #call_expr
                 }
+
+                fn validate_input(&self, args: &[u8]) -> Result<(), horsies::TaskError> {
+                    horsies::core::task::macros::decode_task_input::<#args_type>(args).map(|_| ())
+                }
             }
 
             horsies::core::task::fn_trait::RegisteredTask::Blocking {
@@ -515,6 +519,10 @@ fn build_registered_task(
 
                         #call_expr
                     })
+                }
+
+                fn validate_input(&self, args: &[u8]) -> Result<(), horsies::TaskError> {
+                    horsies::core::task::macros::decode_task_input::<#args_type>(args).map(|_| ())
                 }
             }
 
@@ -605,6 +613,7 @@ fn generate_module_input_items(signature: &SignatureShape, _args_type: &Type) ->
             });
             quote! {
                 #[derive(serde::Serialize, serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
                 pub struct Input {
                     #(#fields)*
                 }

@@ -192,6 +192,13 @@ macro_rules! async_task_fn {
                     }
                 })
             }
+
+            fn validate_input(
+                &self,
+                args: &[u8],
+            ) -> ::std::result::Result<(), $crate::core::task::TaskError> {
+                $crate::core::task::macros::decode_task_input::<$args_type>(args).map(|_| ())
+            }
         }
 
         $crate::core::task::fn_trait::RegisteredTask::Async {
@@ -239,6 +246,13 @@ macro_rules! blocking_task_fn {
                     Ok(value) => $crate::core::task::macros::encode_validated_task_output(&value),
                     Err(task_error) => $crate::core::task::result::TaskResult::Err(task_error),
                 }
+            }
+
+            fn validate_input(
+                &self,
+                args: &[u8],
+            ) -> ::std::result::Result<(), $crate::core::task::TaskError> {
+                $crate::core::task::macros::decode_task_input::<$args_type>(args).map(|_| ())
             }
         }
 
@@ -518,6 +532,49 @@ mod tests {
             }
             _ => panic!("expected blocking task"),
         }
+    }
+
+    // -- validate_input dry-run tests --
+
+    #[test]
+    fn validate_input_accepts_well_typed_kwargs() {
+        let task = blocking_task_fn!(multiply, AddArgs);
+        let envelope = serde_json::json!({"args": [], "kwargs": {"a": 2, "b": 3}});
+        let args = serde_json::to_vec(&envelope).unwrap();
+        match &task {
+            RegisteredTask::Blocking { task: f, .. } => {
+                assert!(f.validate_input(&args).is_ok());
+            }
+            _ => panic!("expected blocking task"),
+        }
+    }
+
+    #[test]
+    fn validate_input_rejects_type_mismatch_without_executing() {
+        let task = blocking_task_fn!(multiply, AddArgs);
+        let envelope = serde_json::json!({"args": [], "kwargs": {"a": "oops", "b": 3}});
+        let args = serde_json::to_vec(&envelope).unwrap();
+        match &task {
+            RegisteredTask::Blocking { task: f, .. } => {
+                let err = f.validate_input(&args).unwrap_err();
+                assert_eq!(
+                    err.error_code,
+                    Some(crate::core::task::TaskErrorCode::from(
+                        crate::core::task::ContractCode::ArgumentTypeMismatch,
+                    )),
+                );
+            }
+            _ => panic!("expected blocking task"),
+        }
+    }
+
+    #[tokio::test]
+    async fn validate_input_via_registered_task_delegates() {
+        let task = async_task_fn!(add, AddArgs);
+        let ok = serde_json::to_vec(&serde_json::json!({"kwargs": {"a": 1, "b": 2}})).unwrap();
+        let bad = serde_json::to_vec(&serde_json::json!({"kwargs": {"a": 1}})).unwrap();
+        assert!(task.validate_input(&ok).is_ok());
+        assert!(task.validate_input(&bad).is_err());
     }
 
     #[test]

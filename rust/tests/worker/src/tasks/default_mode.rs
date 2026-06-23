@@ -56,6 +56,7 @@ pub fn register(app: &mut Horsies) -> Result<(), Box<dyn std::error::Error>> {
     wf_produce_int::register(app)?;
     wf_double::register(app)?;
     wf_sum_two::register(app)?;
+    wf_combine_wrapped::register(app)?;
     wf_produce_dict::register(app)?;
     wf_read_dict::register(app)?;
     wf_retry_then_ok::register(app)?;

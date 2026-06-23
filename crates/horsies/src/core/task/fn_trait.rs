@@ -2,6 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::core::task::error::TaskError;
 use crate::core::task::options::TaskOptions;
 use crate::core::task::result::TaskResult;
 
@@ -16,6 +17,22 @@ pub type RawTaskResult = TaskResult<Vec<u8>>;
 pub trait AsyncTaskFn: Send + Sync + 'static {
     /// Execute the task with serialized arguments, returning serialized result.
     fn execute(&self, args: &[u8]) -> Pin<Box<dyn Future<Output = RawTaskResult> + Send + '_>>;
+
+    /// Dry-run the typed input deserialization without executing the task.
+    ///
+    /// `envelope` is the worker args/kwargs envelope (`{"args": [...],
+    /// "kwargs": {...}}`). Returns `Ok(())` if the payload deserializes into the
+    /// task's declared input type via the same path `execute` uses, otherwise
+    /// the structured deserialize error.
+    ///
+    /// The default returns `Ok(())` for implementations that cannot introspect
+    /// their input type (e.g. hand-written trait impls). Macro-generated tasks
+    /// override this to perform the real typed check, enabling `app.check()` to
+    /// validate schedule and workflow-node payloads at startup.
+    fn validate_input(&self, envelope: &[u8]) -> Result<(), TaskError> {
+        let _ = envelope;
+        Ok(())
+    }
 }
 
 /// Blocking task function trait.
@@ -25,6 +42,15 @@ pub trait AsyncTaskFn: Send + Sync + 'static {
 pub trait BlockingTaskFn: Send + Sync + 'static {
     /// Execute the task with serialized arguments, returning serialized result.
     fn execute(&self, args: &[u8]) -> RawTaskResult;
+
+    /// Dry-run the typed input deserialization without executing the task.
+    ///
+    /// See [`AsyncTaskFn::validate_input`] for semantics. The default returns
+    /// `Ok(())`; macro-generated tasks override it.
+    fn validate_input(&self, envelope: &[u8]) -> Result<(), TaskError> {
+        let _ = envelope;
+        Ok(())
+    }
 }
 
 /// Metadata describing a registered task.
@@ -112,6 +138,17 @@ impl RegisteredTask {
     pub fn accepts_workflow_ctx(&self) -> bool {
         match self {
             Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.accepts_workflow_ctx,
+        }
+    }
+
+    /// Dry-run the typed input deserialization for `envelope` without executing.
+    ///
+    /// Delegates to the inner task fn. Returns `Ok(())` for tasks that cannot
+    /// introspect their input type. See [`AsyncTaskFn::validate_input`].
+    pub fn validate_input(&self, envelope: &[u8]) -> Result<(), TaskError> {
+        match self {
+            Self::Async { task, .. } => task.validate_input(envelope),
+            Self::Blocking { task, .. } => task.validate_input(envelope),
         }
     }
 
