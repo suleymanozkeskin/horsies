@@ -92,12 +92,16 @@ impl WorkflowDefinition for ETLPipeline {
     type Params = ();
 
     fn name() -> &'static str { "etl_pipeline" }
+    fn definition_key() -> &'static str { "myapp.etl_pipeline.v1" }
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         // build fixed DAG with generated task_module::node()? helpers
     }
 }
 ```
+
+`definition_key()` is a **required** trait method (no default) — it is the
+stable identity used for registration, cycle detection, and `check()`.
 
 #### 2. Register once at startup
 
@@ -146,6 +150,7 @@ impl WorkflowDefinition for ChildPipeline {
     type Params = String;
 
     fn name() -> &'static str { "child_pipeline" }
+    fn definition_key() -> &'static str { "myapp.child_pipeline.v1" }
 
     fn build_with(source_url: Self::Params) -> Result<WorkflowSpec, HorsiesError> {
         // build DAG using source_url
@@ -279,3 +284,9 @@ app.check()?;
 | Zero-param workflows | `impl WorkflowDefinition<Params = ()>` | `app.register_workflow_definition::<D>()?` | `horsies::start_workflow::<D>().await` |
 | Parameterized workflows | `impl WorkflowDefinition<Params = P>` | `app.workflow_template::<D>()` | `horsies::start_workflow_with::<D>(params).await` |
 | Dynamic workflows | build `WorkflowSpec` | no pre-registration; `app.start` registers and starts | `app.start(spec)` or `rt.start(spec)` |
+
+## See Also
+
+- **Scheduling** (recurring tasks: `ScheduleConfig`/`TaskSchedule`, interval/daily/weekly/monthly and `CronSchedule` patterns) and the full config/recovery/queue surface live in `configs.md`.
+- **Task attributes** (`queue`, `retry_policy`, `auto_retry_for`, `timeout_ms`, `workflow_ctx`) and error types live in `tasks.md`.
+- **Workflow node wiring** (`args_from`, `workflow_ctx`, sub-workflows, queue/priority resolution, `check()` validation) lives in `workflows.md`.

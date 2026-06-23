@@ -28,7 +28,7 @@ let app = Horsies::new(config)?;
 | `cluster_wide_cap` | `Option<u32>` | `None` | Max RUNNING tasks across cluster |
 | `prefetch_buffer` | `u32` | `0` | 0 = hard cap; >0 = soft cap with lease |
 | `claim_lease_ms` | `Option<u32>` | `None` | Claim lease duration; None = default 60s |
-| `max_claim_renew_age_ms` | `u64` | `180_000` | Max age of CLAIMED task for heartbeat renewal |
+| `max_claim_renew_age_ms` | `u32` | `180_000` | Max age of CLAIMED task for heartbeat renewal |
 | `recovery` | `RecoveryConfig` | `RecoveryConfig::default()` | Stale task detection and retention |
 | `resilience` | `WorkerResilienceConfig` | default | Worker retry behavior |
 | `schedule` | `Option<ScheduleConfig>` | `None` | Recurring task schedules |
@@ -39,8 +39,10 @@ let app = Horsies::new(config)?;
 - `Default` mode: `custom_queues` must be `None`.
 - `Custom` mode: `custom_queues` must be non-empty with unique names.
 - `cluster_wide_cap` must be > 0 when set.
+- `cluster_wide_cap` is incompatible with `prefetch_buffer > 0` (cluster cap requires hard-cap mode).
 - `prefetch_buffer > 0` requires explicit `claim_lease_ms > 0`.
 - Effective lease must be >= 2x `recovery.claimer_heartbeat_interval_ms`.
+- `max_claim_renew_age_ms` must be >= the effective claim lease.
 
 ## `PostgresConfig`
 
@@ -133,8 +135,10 @@ app.task::<A, T>("my_task", task)?.queue("critical").register()?;
 let config = AppConfig {
     queue_mode: QueueMode::Custom,
     custom_queues: Some(vec![
-        CustomQueueConfig { name: "critical".into(), priority: 1, max_concurrency: 10 },
-        CustomQueueConfig { name: "background".into(), priority: 50, max_concurrency: 3 },
+        CustomQueueConfig { name: "critical".into(), priority: 1, max_concurrency: Some(10) },
+        CustomQueueConfig { name: "background".into(), priority: 50, max_concurrency: Some(3) },
+        // Uncapped: this queue is omitted from the per-queue concurrency cap.
+        CustomQueueConfig { name: "bulk".into(), priority: 90, max_concurrency: None },
     ]),
     ..AppConfig::for_database_url("postgresql://localhost/mydb")
 };
@@ -144,7 +148,7 @@ let config = AppConfig {
 |---|---|---|---|
 | `name` | `String` | required | Unique queue name |
 | `priority` | `u32` | `1` | 1 = highest, 100 = lowest |
-| `max_concurrency` | `u32` | `5` | Max simultaneous RUNNING tasks |
+| `max_concurrency` | `Option<u32>` | `Some(5)` | Max simultaneous RUNNING tasks. `None` = explicit uncapped sentinel (queue excluded from the per-queue cap map); `Some(0)` is valid and pauses claiming for the queue |
 
 Lower priority number = claimed first.
 
@@ -158,6 +162,8 @@ Controls stale task detection and retention.
 | `claimed_stale_threshold_ms` | `u64` | `120_000` | Ms before CLAIMED is stale |
 | `auto_fail_stale_running` | `bool` | `true` | Fail tasks stuck in RUNNING |
 | `running_stale_threshold_ms` | `u64` | `300_000` | Ms before RUNNING is stale |
+| `finalizing_stale_threshold_ms` | `u64` | `300_000` | Ms before a task whose two-phase finalize stalled is recovered |
+| `crashed_worker_recovery_grace_ms` | `u64` | `10_000` | Grace before the reaper recovers a just-terminal workflow task whose Phase 2 may still be in flight; `0` disables, max `3_600_000` |
 | `check_interval_ms` | `u64` | `30_000` | Reaper poll cadence |
 | `runner_heartbeat_interval_ms` | `u64` | `30_000` | Heartbeat from running task |
 | `claimer_heartbeat_interval_ms` | `u64` | `30_000` | Heartbeat for CLAIMED tasks |
@@ -169,6 +175,9 @@ Controls stale task detection and retention.
 
 - `running_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
 - `claimed_stale_threshold_ms >= claimer_heartbeat_interval_ms * 2`
+- `finalizing_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
+- All `*_ms` fields must be `>= 1000`.
+- `crashed_worker_recovery_grace_ms <= 3_600_000` (`0` disables it; no minimum).
 
 The 2x factor ensures a task can miss one heartbeat cycle without being incorrectly marked stale.
 
@@ -222,7 +231,21 @@ TaskSchedule::new(
     "sync_inventory",
     SchedulePattern::Interval(IntervalSchedule { seconds: Some(30), ..Default::default() }),
 )
+.kwargs(serde_json::json!({ "region": "eu" }))
+.queue("background")
 ```
+
+`TaskSchedule` fields (builder methods in parentheses): `name`, `task_name`,
+`pattern`, `args` (`.args()`), `kwargs` (`.kwargs()`), `queue_name` (`.queue()`),
+`enabled` (`.enabled()`, default `true`), `timezone` (default `"UTC"`),
+`catch_up_missed`, `max_catch_up_runs`. Both `args` and `kwargs` are
+`serde_json::Value` (default `Null`). Unlike Python (which removed positional
+`args` in #144), `TaskSchedule.args` remains functional in Rust — the scheduler
+serializes both `args` and `kwargs` into the enqueue envelope.
+
+`check()` dry-runs each enabled schedule's `args`/`kwargs` against the task's
+declared input type (see Phase 2 below); a type mismatch is reported at
+check-time, not just at execution.
 
 ### Schedule Patterns
 
@@ -231,18 +254,24 @@ TaskSchedule::new(
 - `DailySchedule` — `{ time: NaiveTime }`
 - `WeeklySchedule` — `{ days: Vec<Weekday>, time: NaiveTime }`
 - `MonthlySchedule` — `{ day, time: NaiveTime }`
+- `CronSchedule` — `{ minute: Vec<CronNumericTerm>, hour: Vec<CronNumericTerm>, month: Vec<CronEnumTerm<Month>>, day: DaySelector }`. Cron-style fields built from `CronNumericTerm` (`Every`/`Step`/`Values`/`Range`), `CronEnumTerm<Month>`, and `DaySelector` (`EveryDay`/`ByMonthDay`/`ByWeekday`/`EitherDay`/`BothDays`). Wire-format byte-identical to Python's cron schedule.
 
 ## `Horsies::check()`
 
-Phased validation. Fail-fast — each phase short-circuits on errors.
+Phased validation. Each phase appends to a single `ValidationReport`; all
+phases run and their failures are aggregated into one combined `Err` (offline
+phases do not short-circuit), so a single `check()` surfaces every problem.
+
+`check()` aggregates all phase failures into a single `ValidationReport` and
+returns one combined `Err`, or `Ok(())` when clean:
 
 ```rust
-let errors = app.check();
-if !errors.is_empty() {
-    for err in &errors {
-        eprintln!("ERROR: {}", err);
-    }
+match app.check() {
+    Ok(()) => println!("config OK"),
+    Err(err) => eprintln!("check failed:\n{}", err),
 }
+// or, to abort on failure:
+app.check()?;
 ```
 
 ### Phases
@@ -250,13 +279,15 @@ if !errors.is_empty() {
 | Phase | What | Rust status |
 |---|---|---|
 | 1 | Config — validated at `Horsies::new()` | Done (implicit) |
-| 2 | Schedule validation — task names, queue names | Done |
+| 2 | Schedule validation — task names, queue names, and each enabled schedule's `args`/`kwargs` dry-run against the task's declared input type | Done |
 | 2.5 | Runtime policy safety — registered task `task_options`, `retry_policy`, `auto_retry_for`, reserved code collisions | Done |
 | 2.6 | Custom-mode task queue metadata validation | Done |
 | 2.8 | Registered workflow nodes reference registered tasks | Done |
 | 2.9 | Workflow node queues are resolved and valid | Done |
 | 2.10 | Workflow nodes that require input have args, kwargs, or `args_from` | Done |
+| 2.11 | Workflow node static kwargs dry-run against the task's declared input type (skips nodes with `args_from` or node-level `workflow_ctx_from`); runs for registered specs and builder `run_case` specs | Done |
 | 3 | Workflow `definition_key` presence (HRS-016) | Done |
+| 3.1 | Declared child workflow keys resolve to a registered child | Done |
 | 3.2 | Checked workflow builder representative cases | Done |
 | 3.5 | Duplicate `definition_key` detection (HRS-017) | Done |
 
@@ -275,6 +306,9 @@ Validates registered workflow specs and checked builder output specs:
 - node queues resolve from explicit node overrides or registered task defaults
 - resolved queues are valid for the configured queue mode
 - non-unit tasks have an input source: `args_json`, `kwargs_json`, or `args_from`
+- a node's fully-static kwargs deserialize into the task's declared input type
+  (Phase 2.11; nodes with `args_from` or node-level `workflow_ctx_from` are
+  skipped because their static payload is intentionally partial)
 
 The same queue/input validation also runs at workflow start through the shared
 workflow registry resolver, so invalid dynamic specs fail before worker
@@ -290,7 +324,8 @@ app.check_live().await?;
 ```
 
 Uses `PostgresBroker::health_check()` through the lazy broker owned by the
-top-level app.
+top-level app. `check_with(live: bool)` runs the offline checks and, when
+`live = true`, the connectivity check in one call.
 
 ### Error codes
 
@@ -300,13 +335,15 @@ top-level app.
 | `HRS-014` | Workflow queue unresolved or invalid | 2.9, builder validation, start-time validation |
 | `HRS-016` | Missing `definition_key` | 3, 3.2 |
 | `HRS-017` | Duplicate `definition_key` | 3.5 |
+| `HRS-019` | Workflow node static kwargs do not match the task's declared input type | 2.11, builder validation |
 | `HRS-020` | Workflow node missing required input | 2.10, builder validation, start-time validation |
+| `HRS-205` | Schedule invalid — incl. `args`/`kwargs` not matching the task's declared input type | 2 |
 | `HRS-027` | Parameterized builder without cases | 3.2 |
 | `HRS-029` | Builder exception / wrong return type | 3.2 |
 | `HRS-100–HRS-103` | Task definition errors | 2.5 |
 | `HRS-102` | Invalid task_options / retry policy | 2.5 |
 | `HRS-200–HRS-211` | Configuration errors | 1 |
-| `HRS-203` | Broker connectivity failure (live only) | 4 |
+| `HRS-203` | Broker connectivity failure | live check (`check_live` / `check_with(true)`) |
 | `HRS-212` | Reserved code collision in `auto_retry_for` | 2.5 |
 | `HRS-301` | Registry duplicate name | Registration |
 | `HRS-302` | Workflow references unregistered task | 2.8, builder validation |
@@ -358,6 +395,7 @@ use horsies::{
     ScheduleConfig, TaskSchedule, SchedulePattern,
     IntervalSchedule, HourlySchedule, DailySchedule,
     WeeklySchedule, MonthlySchedule, Weekday,
+    CronSchedule, CronNumericTerm, CronEnumTerm, DaySelector, CronOrdinal, Month,
     ResolvedEnqueue, ErrorCode, HorsiesError, ValidationReport,
 };
 ```

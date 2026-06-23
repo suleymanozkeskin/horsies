@@ -45,6 +45,8 @@ Requirements:
     queue = "queue_name",                                 // optional
     retry_policy = RetryPolicy::fixed(vec![60, 300], true).unwrap(),  // optional
     auto_retry_for = ["RATE_LIMITED", "TIMEOUT"],          // optional
+    timeout_ms = 30000,                                    // optional, must be >= 1000
+    workflow_ctx,                                          // optional flag
 )]
 async fn my_task(args: MyArgs) -> Result<MyOutput, TaskError> { ... }
 ```
@@ -55,6 +57,8 @@ async fn my_task(args: MyArgs) -> Result<MyOutput, TaskError> { ... }
 | `queue` | string literal | Target queue (validated at registration) |
 | `retry_policy` | Rust expression | Retry timing/backoff configuration |
 | `auto_retry_for` | string array | Error codes that trigger automatic retries |
+| `timeout_ms` | integer literal | Per-task execution timeout in milliseconds; must be `>= 1000` |
+| `workflow_ctx` | bare flag (no `=`) | Opt into workflow-context injection; the function must take a `workflow_ctx: Option<WorkflowContext>` parameter (see `workflows.md`) |
 
 `good_until` is intentionally rejected on `#[task]` because it would be
 evaluated at registration time, not per send. Use
@@ -97,6 +101,17 @@ let process_data_task = process_data::register(&mut app)?;
 Each `#[task]` generates a companion module with a `register()` function.
 That function calls the builder API internally and returns a `TaskFunction<A, T>`.
 For multi-parameter tasks, the macro generates the internal input type for you.
+
+#### Strict input for multi-parameter tasks
+
+The generated multi-parameter input struct carries `#[serde(deny_unknown_fields)]`.
+An unknown or misspelled kwarg is therefore **rejected at execution** with an
+`ARGUMENT_TYPE_MISMATCH` `TaskError`, rather than being silently dropped. This
+applies only to multi-parameter (macro-generated "Wrapped") tasks; a
+single-parameter task deserializes into your own struct, which keeps whatever
+serde behavior that struct declares (lenient unless you add `deny_unknown_fields`
+yourself). The same typed deserialize is dry-run at `check()` time for schedule
+and workflow-node payloads — see "Check-time input validation" below.
 
 ### Registrar module pattern
 
@@ -313,7 +328,25 @@ This differs from `WorkflowHandle<T>` only partly:
 
 ### Output validation (at execution time)
 
-The `async_task_fn!` macro validates the return value round-trips through the declared `T`. If `serde_json::from_slice::<T>(&serialized_bytes)` fails → `RETURN_TYPE_MISMATCH`.
+The macro validates the return value round-trips through the declared `T`: the
+serialized bytes are deserialized back via the codec (`from_json_bytes::<T>`),
+and if that fails → `RETURN_TYPE_MISMATCH`.
+
+### Check-time input validation
+
+Macro-generated tasks expose a `validate_input` hook (default `Ok(())` for
+hand-rolled task fns). `app.check()` uses it to dry-run a payload against the
+task's declared input type **without executing the task**:
+
+- `validate_schedules()` (check Phase 2) dry-runs each enabled schedule's
+  `args`/`kwargs`.
+- `check()` Phase 2.11 dry-runs each fully-static workflow node's kwargs (nodes
+  with `args_from` or node-level `workflow_ctx_from` are skipped — their static
+  payload is intentionally partial).
+
+A mismatch (wrong type, missing required field, or — for multi-parameter tasks —
+an unknown field) is reported at check-time instead of only failing at
+execution. See `configs.md` (schedules) and `workflows.md` (nodes).
 
 ## `TaskResult<T>`
 
@@ -382,9 +415,13 @@ pub struct TaskSendError {
 ```rust
 RetryPolicy::fixed(vec![60, 300, 900], true)?   // 3 retries, jitter on
 RetryPolicy::exponential(30, 5, false)?          // 5 retries, base 30s, no jitter
+RetryPolicy::exponential(30, 5, true)?.with_max_delay_seconds(600)  // cap delay at 600s
 ```
 
 Validation: max_retries 1–20, intervals 1–86400s, fixed requires `len == max_retries`, exponential requires exactly 1 interval.
+
+`with_max_delay_seconds(secs)` caps the computed retry delay (applied **after**
+jitter); `secs` must be `> 0`.
 
 ## Error Code Families
 

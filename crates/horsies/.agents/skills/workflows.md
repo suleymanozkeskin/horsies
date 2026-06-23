@@ -183,10 +183,18 @@ let child = app.register_parameterized_workflow::<ChildParams, ChildOut, _>(
 let child_ref = builder.sub_workflow(
     child
         .node()
+        .queue("default") // required: sub-workflow nodes are not queue-resolved
         .set(ChildParams::field_limit(), 25)?
         .arg_from(ChildParams::field_input_result(), upstream),
 );
 ```
+
+> **Sub-workflow nodes require an explicit `.queue(...)`.** Unlike task nodes,
+> a `SubWorkflowNode` is skipped by queue/priority resolution
+> (`resolve_node_queue_priority`) and by the node queue validation in the spec
+> resolver, but the start path still needs a resolved queue for its bookkeeping
+> row — omitting `.queue(...)` fails at workflow start with "no resolved queue".
+> Priority defaults to `100` if unset (these rows are never claimed as tasks).
 
 Use `register_parameterized_workflow(...)` for leaf child workflows. If the
 builder may itself emit nested child workflows, use
@@ -287,6 +295,23 @@ builder.output(save_ref);
 let spec = builder.build()?;
 ```
 
+### Queue and priority resolution
+
+`resolve_node_queue_priority` resolves each non-subworkflow node's queue and
+priority — at workflow registration, at child-spec materialization, and during
+`check()`:
+
+- **Queue:** node override (`.queue(...)`) > the registered task's default queue.
+- **Priority:** node override (`.priority(...)`) if set; otherwise the
+  **resolved queue's** configured priority (`effective_priority`).
+
+Consequence: overriding a node's `queue` while leaving `priority` unset adopts
+the **new** queue's configured priority, not the task's original one. A real task
+node that somehow reaches start with an unresolved priority fails closed
+(`WorkflowError::Validation`, "no resolved priority") rather than silently
+defaulting. (Sub-workflow nodes are exempt from this resolution — see
+`SubWorkflowNode` below — and keep the `100` bookkeeping default.)
+
 ## `WorkflowSpec`
 
 Immutable, validated workflow definition.
@@ -370,12 +395,16 @@ Child workflow node. Resolved at execution time via `WorkflowDefinition` or regi
 
 ```rust
 SubWorkflowNode::<(), ChildOutput>::typed("child_workflow_name")
+    .queue("default") // required: sub-workflow nodes are not queue-resolved
     .set_input(child_params)?
     // or mix static + injected params:
     .set(ChildParams::field_limit(), 100)?
     .waits_for(dep_ref)
     .arg_from(ChildParams::field_input(), dep_ref)
 ```
+
+A `SubWorkflowNode` must set `.queue(...)` explicitly (and may set `.priority(...)`);
+see the note under the parameterized sub-workflow example above.
 
 ## Starting a Workflow
 
@@ -636,6 +665,7 @@ async fn status(&self) -> HandleResult<WorkflowStatus>
 async fn get(&self, timeout: Option<Duration>) -> TaskResult<T>
 async fn results(&self) -> HandleResult<HashMap<String, TaskResult<serde_json::Value>>>
 async fn result_for<V: DeserializeOwned>(&self, node_id: &str) -> TaskResult<V>
+async fn result_for_key<V: DeserializeOwned>(&self, key: &NodeKey<V>) -> TaskResult<V>  // typed-key variant
 async fn tasks(&self) -> HandleResult<Vec<WorkflowTaskInfo>>
 
 // Lifecycle
@@ -671,11 +701,10 @@ pub struct WorkflowStartError {
 
 | Code | Retryable | When |
 |---|---|---|
+| `BrokerNotConfigured` | No | No broker attached to the app/runtime starting the workflow |
 | `ValidationFailed` | No | DAG validation, serialization, or retry validation failure |
 | `EnqueueFailed` | Maybe | Schema init or DB transaction failed |
 | `InternalFailed` | No | Unexpected error |
-
-Note: Rust has no `BrokerNotConfigured` — the bound approach ensures broker is always present.
 
 ## `HandleOperationError` / `HandleErrorCode`
 
@@ -797,6 +826,14 @@ default.
 
 ## Validation Errors
 
+`app.check()` validates registered specs and checked-builder (`run_case`) specs.
+Beyond structural DAG checks, Phase 2.11 **dry-runs each node's fully-static
+kwargs against the referenced task's declared input type** (the same typed
+deserialize the worker uses), reporting a mismatch as `HRS-019` at check-time
+instead of at execution. Nodes with `args_from` or a node-level
+`workflow_ctx_from` are skipped, since their static payload is intentionally
+partial (the missing fields are injected at runtime).
+
 | Code | Name | When |
 |---|---|---|
 | HRS-001 | `WorkflowNoName` | Missing name |
@@ -808,11 +845,23 @@ default.
 | HRS-007 | `WorkflowCycleDetected` | Cycle in DAG |
 | HRS-008 | `WorkflowInvalidArgsFrom` | args_from node not in waits_for |
 | HRS-009 | `WorkflowInvalidCtxFrom` | workflow_ctx_from node not in waits_for |
+| HRS-010 | `WorkflowCtxParamMissing` | ctx-capable task node missing required ctx param |
 | HRS-011 | `WorkflowInvalidOutput` | output node not in task list |
 | HRS-012 | `WorkflowInvalidSuccessPolicy` | Policy references unknown nodes |
 | HRS-013 | `WorkflowInvalidJoin` | quorum without valid min_success |
+| HRS-014 | `WorkflowUnresolvedQueue` | Node queue unresolved or invalid for the queue mode |
+| HRS-015 | `WorkflowUnresolvedPriority` | Node priority unresolved at start |
 | HRS-016 | `WorkflowNoDefinitionKey` | Missing definition_key |
 | HRS-017 | `WorkflowDuplicateDefinitionKey` | Two specs share same key |
+| HRS-018 | `WorkflowSubworkflowAppMissing` | Sub-workflow start without an app/runtime broker |
+| HRS-019 | `WorkflowInvalidKwargKey` | Reserved/colliding kwarg key, or static node kwargs that don't match the task's declared input type (check Phase 2.11) |
+| HRS-020 | `WorkflowMissingRequiredParams` | Node requires input but has none (args/kwargs/args_from) |
+| HRS-025 | `WorkflowOutputTypeMismatch` | Declared output type mismatch |
+| HRS-027 | `WorkflowCheckCasesRequired` | Parameterized builder checked without cases |
+| HRS-028 | `WorkflowCheckCaseInvalid` | A checked builder case is invalid |
+| HRS-029 | `WorkflowCheckBuilderException` | Builder panicked / returned wrong type during check |
+| HRS-030 | `WorkflowCheckUndecoratedBuilder` | Checked builder not registered as a workflow builder |
+| HRS-032 | `WorkflowArgsWithInjection` | Positional args combined with a runtime-injection source |
 
 ## All Key Imports
 

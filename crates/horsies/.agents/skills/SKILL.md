@@ -258,6 +258,10 @@ registration.register()?;
 app.check()?;
 ```
 
+`app.check()` also dry-runs schedule and workflow-node static input against each
+task's declared input type, surfacing type mismatches at check-time rather than
+at execution (details in `configs.md` and `workflows.md`).
+
 For workflow data flow, prefer multi-parameter receiving tasks plus
 `task_name::params::*` tokens. Use `#[derive(WorkflowInput)]` only when you
 intentionally want a named receiving struct.
