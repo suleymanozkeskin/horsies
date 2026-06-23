@@ -23,6 +23,7 @@ from tests.e2e.tasks import instance_softcap
 from tests.e2e.tasks import instance_requeue_guard
 from tests.e2e.tasks import instance_scheduler
 from tests.e2e.tasks import instance_retry_precedence
+from tests.e2e.tasks import instance_priority_binding
 
 
 DB_URL = os.environ.get(
@@ -55,6 +56,18 @@ async def custom_broker() -> AsyncGenerator[PostgresBroker, None]:
         await brk.close_async()
     except RuntimeError:
         # May fail if broker was used from sync context (LoopRunner)
+        pass
+
+
+@pytest_asyncio.fixture(scope='session', loop_scope='session')
+async def priority_binding_broker() -> AsyncGenerator[PostgresBroker, None]:
+    """Broker for the subworkflow priority-binding claim-order e2e."""
+    brk = instance_priority_binding.broker
+    await brk.ensure_schema_initialized()
+    yield brk
+    try:
+        await brk.close_async()
+    except RuntimeError:
         pass
 
 
