@@ -697,6 +697,16 @@ fn serialize_args<A: Serialize>(
     match value {
         serde_json::Value::Null => Ok((None, None)),
         serde_json::Value::Object(_) => Ok((None, Some(value.to_string()))),
+        // A single argument whose own serialized form is a JSON array (Vec,
+        // tuple, fixed array) must be carried as ONE positional element. Wrap
+        // it so the worker rebuilds args=[[..]] and decode's single-positional
+        // branch yields the inner array. Without the wrap, decode treats the
+        // array's elements as multiple positional args and the task becomes
+        // undeliverable.
+        serde_json::Value::Array(_) => {
+            let wrapped = serde_json::Value::Array(vec![value]);
+            Ok((Some(wrapped.to_string()), None))
+        }
         other => Ok((Some(other.to_string()), None)),
     }
 }
@@ -911,9 +921,90 @@ mod tests {
 
     #[test]
     fn serialize_vec_as_args() {
+        // A single array-serializing argument is wrapped as one positional
+        // element so it round-trips through decode (C3); without the wrap the
+        // elements would be read as separate positional args.
         let (args, kwargs) = serialize_args::<Vec<i32>>("scalar", &vec![1, 2, 3]).unwrap();
-        assert_eq!(args.as_deref(), Some("[1,2,3]"));
+        assert_eq!(args.as_deref(), Some("[[1,2,3]]"));
         assert!(kwargs.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // send-encode -> envelope -> decode round-trip (C3 / C14)
+    // ------------------------------------------------------------------
+
+    /// Rebuild the worker envelope from serialized (args, kwargs) parts exactly
+    /// as `worker::execution::build_envelope_from_parts` does (sans workflow
+    /// context), so the round-trip tests exercise the real decode path.
+    fn rebuild_envelope(args: Option<String>, kwargs: Option<String>) -> Vec<u8> {
+        let args_value = match args {
+            Some(json) => serde_json::from_str(&json).unwrap(),
+            None => serde_json::Value::Null,
+        };
+        let args_array = match args_value {
+            serde_json::Value::Null => Vec::new(),
+            serde_json::Value::Array(arr) => arr,
+            other => vec![other],
+        };
+        let kwargs_object = match kwargs {
+            Some(json) => match serde_json::from_str(&json).unwrap() {
+                serde_json::Value::Object(map) => map,
+                _ => panic!("kwargs is not an object"),
+            },
+            None => serde_json::Map::new(),
+        };
+        let envelope = serde_json::json!({ "args": args_array, "kwargs": kwargs_object });
+        serde_json::to_vec(&envelope).unwrap()
+    }
+
+    fn round_trip<T>(value: T)
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug + PartialEq,
+    {
+        let (args, kwargs) = serialize_args::<T>("roundtrip", &value).unwrap();
+        let bytes = rebuild_envelope(args, kwargs);
+        let decoded: T = crate::core::task::macros::decode_task_input(&bytes).unwrap();
+        assert_eq!(decoded, value);
+    }
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct RoundTripStruct {
+        a: i32,
+        b: String,
+    }
+
+    #[test]
+    fn round_trip_struct_via_kwargs() {
+        round_trip(RoundTripStruct {
+            a: 7,
+            b: "hi".to_owned(),
+        });
+    }
+
+    #[test]
+    fn round_trip_scalar() {
+        round_trip(42_i32);
+    }
+
+    #[test]
+    fn round_trip_option_some_and_none() {
+        round_trip(Some(7_i32));
+        round_trip(Option::<i32>::None);
+    }
+
+    #[test]
+    fn round_trip_vec() {
+        round_trip(vec![1_i32, 2, 3]);
+    }
+
+    #[test]
+    fn round_trip_empty_vec() {
+        round_trip(Vec::<i32>::new());
+    }
+
+    #[test]
+    fn round_trip_tuple() {
+        round_trip((1_i32, "x".to_owned()));
     }
 
     #[test]

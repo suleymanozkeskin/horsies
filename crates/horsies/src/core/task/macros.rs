@@ -35,28 +35,35 @@ where
         other => vec![other],
     };
 
-    let candidate = if let serde_json::Value::Object(map) = &kwargs_value {
-        if !map.is_empty() {
-            kwargs_value
-        } else if args_array.len() == 1 {
-            args_array[0].clone()
-        } else if args_array.is_empty() {
-            serde_json::Value::Null
-        } else {
+    // Non-object kwargs (or an empty object) is treated as "no kwargs", so the
+    // input comes from the positional args slot.
+    let kwargs_nonempty = match &kwargs_value {
+        serde_json::Value::Object(map) => !map.is_empty(),
+        _ => false,
+    };
+
+    let candidate = match (kwargs_nonempty, args_array.len()) {
+        // Kwargs object IS the input value.
+        (true, 0) => kwargs_value,
+        // Both positional args and kwargs present is an ambiguous, malformed
+        // envelope. Fail loudly instead of silently dropping the positional
+        // args (which the kwargs-first selection used to do).
+        (true, _) => {
+            return Err(crate::core::task::TaskError::builtin(
+                crate::core::task::OperationalErrorCode::WorkerSerializationError,
+                "args payload must be empty when kwargs is set; envelope carries both positional args and kwargs",
+            ));
+        }
+        // Exactly one positional arg is the input value.
+        (false, 1) => args_array[0].clone(),
+        // No args and no kwargs decodes as the unit/null input.
+        (false, 0) => serde_json::Value::Null,
+        (false, _) => {
             return Err(crate::core::task::TaskError::builtin(
                 crate::core::task::OperationalErrorCode::WorkerSerializationError,
                 "args payload must contain exactly one item when kwargs is empty",
             ));
         }
-    } else if args_array.len() == 1 {
-        args_array[0].clone()
-    } else if args_array.is_empty() {
-        serde_json::Value::Null
-    } else {
-        return Err(crate::core::task::TaskError::builtin(
-            crate::core::task::OperationalErrorCode::WorkerSerializationError,
-            "args payload must contain exactly one item when kwargs is empty",
-        ));
     };
 
     serde_json::from_value(candidate.clone()).map_err(|e| crate::core::task::TaskError {
@@ -305,7 +312,7 @@ mod tests {
     use crate::core::task::TaskError;
     use serde::{Deserialize, Serialize};
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
     struct AddArgs {
         a: i32,
         b: i32,
@@ -365,6 +372,32 @@ mod tests {
         let parsed: AddArgs = decode_task_input(&args).unwrap();
         assert_eq!(parsed.a, 4);
         assert_eq!(parsed.b, 7);
+    }
+
+    #[test]
+    fn decode_task_input_reads_single_positional_array(/* C3 */) {
+        // A single array-valued argument is carried as one positional element
+        // (args=[[1,2,3]]) and must decode back to the array, not be read as
+        // three separate positional args.
+        let envelope = serde_json::json!({"args": [[1, 2, 3]], "kwargs": {}});
+        let args = serde_json::to_vec(&envelope).unwrap();
+        let parsed: Vec<i32> = decode_task_input(&args).unwrap();
+        assert_eq!(parsed, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn decode_task_input_rejects_both_args_and_kwargs(/* C14 */) {
+        // An envelope carrying both positional args and kwargs is ambiguous;
+        // decode must fail loudly rather than silently drop the positional args.
+        let envelope = serde_json::json!({"args": [1], "kwargs": {"a": 1, "b": 2}});
+        let args = serde_json::to_vec(&envelope).unwrap();
+        let err: TaskError = decode_task_input::<AddArgs>(&args).unwrap_err();
+        assert_eq!(
+            err.error_code,
+            Some(crate::core::task::TaskErrorCode::from(
+                crate::core::task::OperationalErrorCode::WorkerSerializationError,
+            )),
+        );
     }
 
     #[test]
