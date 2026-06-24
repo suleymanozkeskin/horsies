@@ -283,17 +283,32 @@ impl WorkflowSpecBuilder {
                     .clone()
             })
             .collect();
+        let node_count = node_ids.len();
         for task in &mut self.tasks {
             if let Some(refs) = task.workflow_ctx_from_refs.take() {
-                let ids = refs
-                    .into_iter()
-                    .map(|idx| {
-                        node_ids.get(idx).cloned().expect(
-                            "workflow_ctx_from ref index out of bounds during builder finalization",
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                task.workflow_ctx_from = Some(ids);
+                let mut ids = Vec::with_capacity(refs.len());
+                let mut out_of_range = false;
+                for idx in refs {
+                    match node_ids.get(idx) {
+                        Some(id) => ids.push(id.clone()),
+                        None => {
+                            out_of_range = true;
+                            report.add(
+                                HorsiesError::new(format!(
+                                    "task at index {} workflow_ctx_from references index {} which is out of range (0..{})",
+                                    task.index, idx, node_count,
+                                ))
+                                .with_code(ErrorCode::WorkflowInvalidCtxFrom),
+                            );
+                        }
+                    }
+                }
+                // Only lower when every ref resolved; on an out-of-range ref the
+                // reported error aborts build() after this phase, so leaving
+                // workflow_ctx_from unset avoids a panic without losing the error.
+                if !out_of_range {
+                    task.workflow_ctx_from = Some(ids);
+                }
             }
         }
 
@@ -644,14 +659,18 @@ impl WorkflowSpecBuilder {
                             .with_code(ErrorCode::WorkflowInvalidJoin),
                         );
                     }
-                    Some(min) if dep_count > 0 && min > dep_count => {
+                    // Enforce min_success <= dep_count unconditionally. With
+                    // min >= 1 already required above, a quorum node with zero
+                    // dependencies (dep_count == 0) is rejected here rather than
+                    // silently running as a root with its quorum dropped.
+                    Some(min) if min > dep_count => {
                         report.add(
                             HorsiesError::new(format!(
                                 "task at index {} has min_success={} but only {} dependencies",
                                 task.index, min, dep_count,
                             ))
                             .with_code(ErrorCode::WorkflowInvalidJoin)
-                            .with_help("min_success must be <= dependency count"),
+                            .with_help("min_success must be <= dependency count (quorum requires at least one dependency)"),
                         );
                     }
                     _ => {}
@@ -944,6 +963,17 @@ mod tests {
     }
 
     #[test]
+    fn e009_ctx_from_out_of_range() {
+        // An out-of-range workflow_ctx_from index must return a validation error,
+        // not panic during phase-1 builder finalization (C12).
+        let mut b = WorkflowSpecBuilder::new("wf");
+        b.task(simple_node("a"));
+        b.task(TaskNode::<()>::raw("b").workflow_ctx_from([NodeRef { index: 99 }]));
+        let err = b.build().unwrap_err();
+        assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidCtxFrom));
+    }
+
+    #[test]
     fn e016_args_with_args_from_rejected() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
@@ -1116,6 +1146,17 @@ mod tests {
         let spec = b.build().unwrap();
         assert_eq!(spec.tasks[3].join, JoinType::Quorum);
         assert_eq!(spec.tasks[3].min_success, Some(2));
+    }
+
+    #[test]
+    fn e013_quorum_zero_dependencies_rejected() {
+        // A quorum node with no dependencies is an unsatisfiable quorum and must
+        // be rejected, not silently run as a root with its quorum dropped (C13).
+        let mut b = WorkflowSpecBuilder::new("wf");
+        b.task(simple_node("a"));
+        b.task(TaskNode::<()>::raw("b").join_quorum(5));
+        let err = b.build().unwrap_err();
+        assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidJoin));
     }
 
     // -----------------------------------------------------------------------
