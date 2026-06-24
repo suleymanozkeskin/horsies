@@ -12,21 +12,21 @@ workflow tasks, and hand rows to dispatch. Worker-internal mixin: the
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional
 
 from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 from horsies.core.logging import get_logger
 from horsies.core.worker.runtime import _parse_timeout_ms
 from horsies.core.worker.sql import (
     CANCEL_CANCELLED_WORKFLOW_TASKS_SQL,
-    CLAIM_ADVISORY_LOCK_SQL,
-    CLAIM_PASS_COUNTS_SQL,
     CLAIM_SQL,
     COUNT_CLAIMED_FOR_WORKER_SQL,
     COUNT_IN_FLIGHT_FOR_WORKER_SQL,
     COUNT_RUNNING_FOR_WORKER_SQL,
     GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL,
+    HORSIES_CLAIM_SQL,
     RESET_PAUSED_WORKFLOW_TASKS_SQL,
     SKIP_CANCELLED_WORKFLOW_TASKS_SQL,
     UNCLAIM_PAUSED_TASKS_SQL,
@@ -80,163 +80,53 @@ class ClaimMixin:
                 waits out renewal-cap + lease (the reaper's stale-claimed
                 path needs a dead claimer heartbeat and does not apply).
         """
-        # Guard: Check if we've already claimed too many tasks
-        # Default depends on mode:
-        # - Hard cap (prefetch_buffer=0): default to processes
-        # - Soft cap (prefetch_buffer>0): default to processes + prefetch_buffer
-        if self.cfg.max_claim_per_worker > 0:
-            # User explicitly set a limit - use it
-            max_claimed = self.cfg.max_claim_per_worker
-        elif self.cfg.prefetch_buffer > 0:
-            # Soft cap mode: allow claiming up to processes + prefetch_buffer
-            max_claimed = self.cfg.processes + self.cfg.prefetch_buffer
-        else:
-            # Hard cap mode: limit to processes
-            max_claimed = self.cfg.processes
-        # Lock-guarded claim to avoid cap races. One short transaction.
-        # CLAIM_SQL RETURNING provides dispatch payload directly (no separate load query).
-        claimed_rows: list[dict[str, Any]] = []
-
+        # TIER 1: the per-pass critical section (advisory-lock acquisition + cap
+        # counts + budget math + windowed claim) is one server-side statement
+        # (horsies_claim). The xact-scoped advisory lock is held only across that
+        # statement plus this transaction's COMMIT — never across a client round
+        # trip, so a stalled worker cannot freeze the cluster mid-pass. Budget
+        # and cap semantics are computed in-function and mirror the prior Python
+        # path; see schemas/migrations.py::horsies_claim.
         ordered_queues = self._ordered_claim_queues()
+        lock_keys = self._claim_lock_keys(ordered_queues)
+        # Per-queue caps are enforced only for queues the prior path treated as
+        # capped (queue_priorities configured AND a max_concurrency entry). Pass
+        # exactly those into the function so its cap filter matches 1:1.
+        capped_queues = [
+            qname
+            for qname in ordered_queues
+            if self.cfg.queue_priorities
+            and qname in self.cfg.queue_max_concurrency
+        ]
+        params: dict[str, Any] = {
+            'p_worker_id': self.worker_instance_id,
+            'p_queues': json.dumps(ordered_queues),
+            'p_queue_priority': json.dumps(
+                {q: self.cfg.queue_priorities.get(q, 100) for q in ordered_queues}
+            ),
+            'p_queue_max_concurrency': json.dumps(
+                {q: int(self.cfg.queue_max_concurrency[q]) for q in capped_queues}
+            ),
+            'p_hard_cap_mode': self.cfg.prefetch_buffer == 0,
+            'p_processes': int(self.cfg.processes),
+            'p_prefetch_buffer': int(self.cfg.prefetch_buffer),
+            'p_max_claim_per_worker': int(self.cfg.max_claim_per_worker),
+            'p_max_claim_batch': int(self.cfg.max_claim_batch),
+            'p_cluster_wide_cap': (
+                int(self.cfg.cluster_wide_cap)
+                if self.cfg.cluster_wide_cap is not None
+                else None
+            ),
+            'p_lease_ms': int(self._claim_lease_ms()),
+            'p_lock_keys': json.dumps(lock_keys),
+        }
 
-        # Open one transaction; serialize claim passes only when a
-        # multi-worker read-then-act invariant exists (cluster/queue caps).
-        # Without caps, CLAIM_SQL's FOR UPDATE SKIP LOCKED already makes
-        # concurrent claiming safe, and the lock would only cap cluster
-        # claim throughput at 1/claim-pass-latency.
-        #
-        # Lock scope: cluster_wide_cap takes the single global key (the
-        # invariant is global); otherwise one key per CAPPED queue in this
-        # pass, acquired in sorted order (deadlock prevention). Keys are
-        # transaction-scoped (PgBouncer transaction mode forbids session
-        # locks), so a mixed capped/uncapped pass holds the capped queues'
-        # locks while claiming its uncapped queues too — only passes with
-        # no capped queues are lock-free.
         async with self.sf() as s:
-            for lock_key in self._claim_lock_keys(ordered_queues):
-                await s.execute(
-                    CLAIM_ADVISORY_LOCK_SQL,
-                    {'key': lock_key},
-                )
-
-            # Compute local budget and optional global remaining.
-            # Hard cap mode (prefetch_buffer=0): count RUNNING + CLAIMED for strict enforcement
-            # Soft cap mode (prefetch_buffer>0): count only RUNNING, allow prefetch with lease
-            # ALL cap-accounting counts (worker-local, global, per capped
-            # queue) arrive in ONE statement — under the advisory locks
-            # every count was a sequential round trip (2 + Q of them).
-            hard_cap_mode = self.cfg.prefetch_buffer == 0
-            capped_queues = [
-                qname for qname in ordered_queues
-                if self.cfg.queue_priorities
-                and qname in self.cfg.queue_max_concurrency
+            res = await s.execute(HORSIES_CLAIM_SQL, params)
+            cols = res.keys()
+            claimed_rows: list[dict[str, Any]] = [
+                dict(zip(cols, row)) for row in res.fetchall()
             ]
-            counts_row = (
-                await s.execute(
-                    CLAIM_PASS_COUNTS_SQL,
-                    {
-                        'wid': self.worker_instance_id,
-                        'capped_queues': capped_queues,
-                    },
-                )
-            ).one()
-            raw_hard = counts_row.queue_hard_counts
-            raw_soft = counts_row.queue_soft_counts
-            queue_hard_counts: dict[str, int] = (
-                cast('dict[str, int]', raw_hard)
-                if isinstance(raw_hard, dict)
-                else {}
-            )
-            queue_soft_counts: dict[str, int] = (
-                cast('dict[str, int]', raw_soft)
-                if isinstance(raw_soft, dict)
-                else {}
-            )
-
-            claimed_count = int(counts_row.my_claimed)
-            if claimed_count >= max_claimed:
-                await s.commit()
-                return False
-            remaining_claim_allowance = max(0, int(max_claimed) - int(claimed_count))
-
-            if hard_cap_mode:
-                # Hard cap: count both RUNNING and CLAIMED for this worker
-                local_in_flight = int(counts_row.my_in_flight)
-                max_local_capacity = self.cfg.processes
-            else:
-                # Soft cap: queue/global caps count only RUNNING, but local
-                # prefetch budget must include already CLAIMED rows so a worker
-                # cannot hoard beyond processes + prefetch_buffer.
-                local_in_flight = int(counts_row.my_running)
-                max_local_capacity = self.cfg.processes + self.cfg.prefetch_buffer
-            local_available = max(
-                0,
-                int(max_local_capacity)
-                - int(local_in_flight)
-                - (0 if hard_cap_mode else int(claimed_count)),
-            )
-            budget_remaining = local_available
-
-            global_remaining: Optional[int] = None
-            if self.cfg.cluster_wide_cap is not None:
-                # Hard cap mode: count RUNNING + CLAIMED globally
-                # (Note: prefetch_buffer must be 0 when cluster_wide_cap is set, enforced by config validation)
-                global_remaining = max(
-                    0,
-                    int(self.cfg.cluster_wide_cap)
-                    - int(counts_row.global_in_flight),
-                )
-
-            # Total claim budget for this pass: local budget capped by global remaining (if any)
-            total_remaining = min(budget_remaining, remaining_claim_allowance)
-            if global_remaining is not None:
-                total_remaining = min(total_remaining, global_remaining)
-            if total_remaining <= 0:
-                # Nothing to claim globally or locally
-                await s.commit()
-                return False
-
-            for qname in ordered_queues:
-                if total_remaining <= 0:
-                    break
-
-                # Compute queue remaining in cluster (only if custom-configured)
-                q_remaining: Optional[int] = None
-                if qname in capped_queues:
-                    # Hard cap mode: count RUNNING + CLAIMED for this queue
-                    # Soft cap mode: count only RUNNING. Both were fetched
-                    # by the merged counts statement above.
-                    if hard_cap_mode:
-                        in_flight_q = int(queue_hard_counts.get(qname, 0))
-                    else:
-                        in_flight_q = int(queue_soft_counts.get(qname, 0))
-                    max_q = int(self.cfg.queue_max_concurrency.get(qname, 0))
-                    q_remaining = max(0, max_q - in_flight_q)
-
-                # Determine how many we may claim from this queue.
-                # A positive max_claim_batch is an explicit fairness cap. The
-                # default 0 means fill the remaining worker/queue budget.
-
-                if self.cfg.max_claim_batch > 0:
-                    per_queue_cap = self.cfg.max_claim_batch
-                elif self.cfg.queue_priorities:
-                    # Strict priority mode: try to fill remaining budget from this queue
-                    per_queue_cap = total_remaining
-                else:
-                    per_queue_cap = total_remaining
-
-                if q_remaining is not None:
-                    per_queue_cap = min(per_queue_cap, q_remaining)
-                to_claim = min(total_remaining, per_queue_cap)
-                if to_claim <= 0:
-                    continue
-
-                batch_rows = await self._claim_batch_locked(s, qname, to_claim)
-                if not batch_rows:
-                    continue
-                claimed_rows.extend(batch_rows)
-                total_remaining -= len(batch_rows)
-
             await s.commit()
 
         if not claimed_rows:

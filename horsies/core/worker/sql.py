@@ -74,6 +74,29 @@ RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name, t.is_workflow_task,
 
 # ---------- Worker SQL constants ----------
 
+# TIER 1: one server-side call performs lock acquisition + cap counts + the
+# windowed claim (see horsies_claim, schemas/migrations.py). The advisory lock
+# is held only across this one statement plus the caller's COMMIT — never across
+# a client round trip. Replaces the per-pass lock loop + counts + per-queue
+# CLAIM_SQL loop.
+HORSIES_CLAIM_SQL = text("""
+    SELECT id, task_name, args, kwargs, queue_name, is_workflow_task, task_options
+    FROM horsies_claim(
+        :p_worker_id,
+        CAST(:p_queues AS jsonb),
+        CAST(:p_queue_priority AS jsonb),
+        CAST(:p_queue_max_concurrency AS jsonb),
+        :p_hard_cap_mode,
+        :p_processes,
+        :p_prefetch_buffer,
+        :p_max_claim_per_worker,
+        :p_max_claim_batch,
+        :p_cluster_wide_cap,
+        :p_lease_ms,
+        CAST(:p_lock_keys AS jsonb)
+    )
+""")
+
 CLAIM_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
 """)
