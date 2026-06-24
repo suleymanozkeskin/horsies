@@ -40,13 +40,6 @@ pub(crate) use self::parse::parse_workflow_ctx;
 pub(crate) enum OwnershipOutcome {
     /// Task transitioned to RUNNING at the given timestamp.
     Running(chrono::DateTime<Utc>),
-    /// Task transitioned to RUNNING, but pre-execution bookkeeping failed.
-    ///
-    /// The task should fail closed without executing user code.
-    PreExecutionFailure {
-        started_at: chrono::DateTime<Utc>,
-        task_error: TaskError,
-    },
     /// Task expired while CLAIMED but before user code started.
     ExpiredBeforeStart { result_json: String },
     /// Ownership lost or workflow stopped — skip execution.
@@ -206,6 +199,11 @@ pub(crate) async fn confirm_ownership_and_set_running(
         .await
     {
         Ok(Some(started_at)) => {
+            // `set_running` has already durably committed the CLAIMED → RUNNING
+            // flip on horsies_tasks. The workflow_task RUNNING status is purely
+            // informational (COMPLETE_WORKFLOW_TASK_SQL accepts an ENQUEUED
+            // workflow_task), so a transient failure of this update must NOT
+            // fail the task closed before it ever runs. Log and proceed.
             if let Err(e) = sqlx::query(
                 "UPDATE horsies_workflow_tasks \
                  SET status = 'RUNNING' \
@@ -215,15 +213,12 @@ pub(crate) async fn confirm_ownership_and_set_running(
             .execute(broker.pool())
             .await
             {
-                let task_error = TaskError::builtin(
-                    OperationalErrorCode::BrokerError,
-                    format!("failed to update workflow task to RUNNING: {}", e),
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %e,
+                    "failed to update workflow task to RUNNING; proceeding with execution \
+                     (workflow_task left ENQUEUED, which completion tolerates)",
                 );
-                tracing::error!(task_id = %task_id, error = %e, "failed to update workflow task to RUNNING");
-                return OwnershipOutcome::PreExecutionFailure {
-                    started_at,
-                    task_error,
-                };
             }
             OwnershipOutcome::Running(started_at)
         }
@@ -1104,8 +1099,15 @@ async fn load_persisted_task_result(
     pool: &sqlx::PgPool,
     task_id: &str,
 ) -> Result<(String, bool), FinalizeError> {
+    // EXPIRED is included: an expired-before-start workflow task produces
+    // Phase 2 work (is_success = false) and must be reloadable for in-process
+    // replay, matching the terminal statuses recovery Case 1.7 treats as
+    // terminal. CANCELLED is intentionally omitted: a cancelled task is not
+    // finalized through the Phase 1 → Phase 2 path, so it never reaches this
+    // reload (the Ok(None) ownership branch handles PAUSED/CANCELLED workflows
+    // without producing a replayable result).
     let row: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT status, result FROM horsies_tasks WHERE id = $1 AND status IN ('COMPLETED', 'FAILED')",
+        "SELECT status, result FROM horsies_tasks WHERE id = $1 AND status IN ('COMPLETED', 'FAILED', 'EXPIRED')",
     )
     .bind(task_id)
     .fetch_optional(pool)
@@ -1170,34 +1172,6 @@ pub(crate) async fn finalize_pre_execution_failure(
     .await
     {
         OwnershipOutcome::Running(started_at) => started_at,
-        OwnershipOutcome::PreExecutionFailure {
-            started_at,
-            task_error,
-        } => {
-            return match retry_phase1(
-                &broker,
-                &task_id,
-                TaskResult::Err(task_error),
-                &row,
-                started_at,
-                &worker_id,
-                &hostname,
-            )
-            .await
-            {
-                Some(FinalizeOutcome::Terminal {
-                    result_json,
-                    is_success,
-                }) => Some(Phase2Work {
-                    task_id,
-                    result_json,
-                    is_success,
-                    queue_name,
-                    is_workflow_task,
-                }),
-                Some(FinalizeOutcome::Retried) | Some(FinalizeOutcome::Finalized) | None => None,
-            };
-        }
         OwnershipOutcome::ExpiredBeforeStart { result_json } => {
             return Some(Phase2Work {
                 task_id,
@@ -1272,34 +1246,6 @@ pub(crate) async fn execute_and_finalize(
     .await
     {
         OwnershipOutcome::Running(started_at) => started_at,
-        OwnershipOutcome::PreExecutionFailure {
-            started_at,
-            task_error,
-        } => {
-            return match retry_phase1(
-                &broker,
-                &task_id,
-                TaskResult::Err(task_error),
-                &row,
-                started_at,
-                &worker_id,
-                &hostname,
-            )
-            .await
-            {
-                Some(FinalizeOutcome::Terminal {
-                    result_json,
-                    is_success,
-                }) => Some(Phase2Work {
-                    task_id,
-                    result_json,
-                    is_success,
-                    queue_name,
-                    is_workflow_task,
-                }),
-                Some(FinalizeOutcome::Retried) | Some(FinalizeOutcome::Finalized) | None => None,
-            };
-        }
         OwnershipOutcome::ExpiredBeforeStart { result_json } => {
             return Some(Phase2Work {
                 task_id,
