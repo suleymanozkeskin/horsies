@@ -149,9 +149,11 @@ class TestClaimPassCounts:
         clean_workflow_tables: None,
         broker: PostgresBroker,
     ) -> None:
-        """Regression for the per-count claim pass: an empty pass over
-        Q=3 capped queues ran 11 statements (3 locks + 2 worker counts +
-        3 queue counts + 3 claims); the merged accounting runs 7."""
+        """Regression for the claim-pass round-trip count. History: the
+        per-count pass over Q=3 capped queues ran 11 statements (3 locks +
+        2 worker counts + 3 queue counts + 3 claims); the merged accounting cut
+        it to 7; TIER 1 (horsies_claim) collapses lock acquisition, counts and
+        the windowed claim into ONE statement."""
         queues = [f'cnt_q_{i}' for i in range(3)]
         cfg = WorkerConfig(
             dsn='unused', psycopg_dsn='unused', queues=queues,
@@ -182,4 +184,4 @@ class TestClaimPassCounts:
             event.remove(broker.async_engine.sync_engine, 'before_cursor_execute', _count)
 
         assert claimed is False
-        assert counter['n'] == 7, f'empty capped pass ran {counter["n"]} statements'
+        assert counter['n'] == 1, f'empty capped pass ran {counter["n"]} statements'

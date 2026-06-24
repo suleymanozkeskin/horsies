@@ -47,6 +47,16 @@ SCHEMA_ADVISORY_LOCK_SQL = text("""
 # read with predictable ordering — a raw CTE cannot guarantee this. Held until
 # the caller COMMITs (xact-scoped); the only remaining client gap while held is
 # the commit round trip.
+#
+# Claim ordering (global rank: qprio, priority, enqueued_at, id):
+#   - Distinct queue priorities: queue priority dominates — identical to the
+#     prior per-queue loop.
+#   - EQUAL queue priorities: an intentional semantic change. The prior loop
+#     broke ties by configured queue order (arbitrary, can starve a queue);
+#     this pools the equal-priority band and orders by task priority then FIFO.
+#     So equal-importance tasks across such queues are FIFO, while an explicit
+#     task/workflow-node priority still preempts within the band. Pinned by
+#     tests/integration/test_claim_function.py.
 CREATE_CLAIM_FUNCTION_SQL = text("""
 CREATE OR REPLACE FUNCTION horsies_claim(
     p_worker_id text,
