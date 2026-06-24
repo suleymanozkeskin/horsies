@@ -71,7 +71,7 @@ LIMIT CAST($1 AS bigint)";
 const CASE1_READY_NO_TASK_SQL: &str = "\
 SELECT wt.workflow_id, wt.task_index, wt.task_name,
        wt.task_args, wt.task_kwargs, wt.queue_name, wt.priority,
-       wt.task_options, wt.args_from, wt.dependencies
+       wt.task_options, wt.args_from, wt.workflow_ctx_from, wt.dependencies
 FROM horsies_workflow_tasks wt
 JOIN horsies_workflows w ON w.id = wt.workflow_id
 WHERE wt.status = 'READY'
@@ -232,6 +232,7 @@ struct ReadyTaskRow {
     priority: i32,
     task_options: Option<String>,
     args_from: Option<serde_json::Value>,
+    workflow_ctx_from: Option<Vec<String>>,
     dependencies: Vec<i32>,
 }
 
@@ -427,13 +428,17 @@ async fn recover_case1(pool: &PgPool, max_rows: Option<i64>, report: &mut Recove
 
     for row in rows {
         match enqueue_ready_task(pool, &row).await {
-            Ok(()) => {
+            Ok(true) => {
                 report.case1_ready_enqueued += 1;
                 tracing::debug!(
                     workflow_id = %row.workflow_id,
                     task_index = row.task_index,
                     "recovery case 1: re-enqueued ready task",
                 );
+            }
+            Ok(false) => {
+                // LINK matched 0 rows; the inserted row was rolled back, so this
+                // node was not recovered and must not be counted.
             }
             Err(e) => {
                 tracing::error!(
@@ -750,7 +755,10 @@ async fn recover_case4(pool: &PgPool, max_rows: Option<i64>, report: &mut Recove
 // ---------------------------------------------------------------------------
 
 /// Enqueue a READY task into horsies_tasks and link it.
-async fn enqueue_ready_task(pool: &PgPool, row: &ReadyTaskRow) -> Result<(), WorkflowError> {
+///
+/// Returns `true` when the workflow_task was linked (recovered), `false` when
+/// the LINK matched 0 rows and the inserted row was rolled back.
+async fn enqueue_ready_task(pool: &PgPool, row: &ReadyTaskRow) -> Result<bool, WorkflowError> {
     let task_id = Uuid::new_v4().to_string();
     let max_retries = parse_max_retries(row.task_options.as_deref());
 
@@ -763,7 +771,27 @@ async fn enqueue_ready_task(pool: &PgPool, row: &ReadyTaskRow) -> Result<(), Wor
     )
     .await?;
 
+    // Inject workflow_ctx for ctx-capable nodes, matching the runtime promotion
+    // path. Without this, a READY `workflow_ctx_from` task recovered here would
+    // run with no upstream context and fail or produce a wrong result.
+    let merged_kwargs = engine::inject_workflow_ctx_into_kwargs(
+        pool,
+        &row.workflow_id,
+        row.task_index,
+        &row.task_name,
+        row.workflow_ctx_from.as_deref(),
+        merged_kwargs,
+    )
+    .await?;
+
     let enqueue_sha = format!("wf-{}", task_id);
+
+    // INSERT + LINK in a single transaction so a row whose LINK matches 0 rows
+    // (workflow no longer RUNNING / task no longer READY, or a concurrent
+    // recovery already linked it) is rolled back rather than left as an
+    // orphaned, claimable PENDING row that would run a duplicate side effect.
+    // Mirrors `enqueue_workflow_task` in engine.rs.
+    let mut tx = pool.begin().await?;
 
     sqlx::query(ENQUEUE_TASK_SQL)
         .bind(&task_id)
@@ -776,17 +804,29 @@ async fn enqueue_ready_task(pool: &PgPool, row: &ReadyTaskRow) -> Result<(), Wor
         .bind(max_retries)
         .bind(&row.task_options)
         .bind(&enqueue_sha)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
-    sqlx::query(LINK_ENQUEUED_TASK_SQL)
+    let link_result = sqlx::query(LINK_ENQUEUED_TASK_SQL)
         .bind(&task_id)
         .bind(&row.workflow_id)
         .bind(row.task_index)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
-    Ok(())
+    if link_result.rows_affected() == 0 {
+        tx.rollback().await?;
+        tracing::debug!(
+            workflow_id = %row.workflow_id,
+            task_index = row.task_index,
+            "recovery case 1: ready-task link matched 0 rows (workflow not RUNNING or task not READY), rolled back",
+        );
+        return Ok(false);
+    }
+
+    tx.commit().await?;
+
+    Ok(true)
 }
 
 /// Start a child workflow for a stuck READY sub-workflow task.

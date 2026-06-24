@@ -107,7 +107,8 @@ WHERE workflow_id = $1 AND status = 'PENDING'";
 const FIND_READY_TASKS_SQL: &str = "\
 SELECT task_index, task_name, task_args, task_kwargs,
        queue_name, priority, task_options, node_id,
-       args_from, dependencies, is_subworkflow, sub_workflow_name, sub_definition_key
+       args_from, workflow_ctx_from, dependencies, is_subworkflow,
+       sub_workflow_name, sub_definition_key
 FROM horsies_workflow_tasks
 WHERE workflow_id = $1 AND status = 'READY'";
 
@@ -252,6 +253,7 @@ struct ReadyTaskRow {
     task_options: Option<String>,
     node_id: Option<String>,
     args_from: Option<serde_json::Value>,
+    workflow_ctx_from: Option<Vec<String>>,
     dependencies: Vec<i32>,
     is_subworkflow: bool,
     sub_workflow_name: Option<String>,
@@ -742,7 +744,27 @@ async fn reevaluate_and_enqueue(
             )
             .await?;
 
+            // Inject workflow_ctx for ctx-capable nodes, matching the runtime
+            // promotion path. Without this, a READY `workflow_ctx_from` task
+            // (e.g. reset to READY at pause time) would be enqueued on resume
+            // with no upstream context and fail or produce a wrong result.
+            let merged_kwargs = engine::inject_workflow_ctx_into_kwargs(
+                pool,
+                workflow_id,
+                task.task_index,
+                &task.task_name,
+                task.workflow_ctx_from.as_deref(),
+                merged_kwargs,
+            )
+            .await?;
+
             let enqueue_sha = format!("wf-{}", task_id);
+
+            // INSERT + LINK in a single transaction so a row whose LINK matches
+            // 0 rows (workflow no longer RUNNING / task no longer READY) is
+            // rolled back rather than left as an orphaned, claimable PENDING
+            // row. Mirrors `enqueue_workflow_task` in engine.rs.
+            let mut tx = pool.begin().await?;
 
             sqlx::query(ENQUEUE_TASK_SQL)
                 .bind(&task_id)
@@ -755,15 +777,27 @@ async fn reevaluate_and_enqueue(
                 .bind(max_retries)
                 .bind(&task.task_options)
                 .bind(&enqueue_sha)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
 
-            sqlx::query(LINK_ENQUEUED_TASK_SQL)
+            let link_result = sqlx::query(LINK_ENQUEUED_TASK_SQL)
                 .bind(&task_id)
                 .bind(workflow_id)
                 .bind(task.task_index)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
+
+            if link_result.rows_affected() == 0 {
+                tx.rollback().await?;
+                tracing::debug!(
+                    workflow_id,
+                    task_index = task.task_index,
+                    "resume ready-task link matched 0 rows (workflow not RUNNING or task not READY), rolled back",
+                );
+                continue;
+            }
+
+            tx.commit().await?;
 
             tracing::debug!(
                 workflow_id,

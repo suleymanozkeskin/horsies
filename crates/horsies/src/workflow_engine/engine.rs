@@ -1039,31 +1039,21 @@ async fn build_enqueued_task_params(
     let task_id = Uuid::new_v4().to_string();
 
     // Merge args_from into kwargs.
-    let mut merged_kwargs =
+    let merged_kwargs =
         merge_args_from(task.task_kwargs.as_deref(), &task.args_from, dep_results)?;
 
-    // Inject workflow_ctx if configured.
-    if let Some(ctx_from_ids) = task.workflow_ctx_from.as_ref() {
-        if !ctx_from_ids.is_empty() {
-            let ctx_data = build_workflow_context_data(
-                pool,
-                workflow_id,
-                task.task_index,
-                &task.task_name,
-                ctx_from_ids,
-            )
-            .await?;
-            let ctx_payload = ctx_data.to_payload()?;
-
-            let mut kwargs_map: serde_json::Map<String, serde_json::Value> =
-                match merged_kwargs.as_deref() {
-                    Some(json) => serde_json::from_str(json)?,
-                    None => serde_json::Map::new(),
-                };
-            kwargs_map.insert(WORKFLOW_CTX_KWARG.to_owned(), ctx_payload);
-            merged_kwargs = Some(serde_json::to_string(&kwargs_map)?);
-        }
-    }
+    // Inject workflow_ctx if configured (shared with the resume/recovery
+    // re-enqueue paths via inject_workflow_ctx_into_kwargs, so all three paths
+    // produce identical context under WORKFLOW_CTX_KWARG).
+    let merged_kwargs = inject_workflow_ctx_into_kwargs(
+        pool,
+        workflow_id,
+        task.task_index,
+        &task.task_name,
+        task.workflow_ctx_from.as_deref(),
+        merged_kwargs,
+    )
+    .await?;
 
     let max_retries = parse_max_retries(task.task_options.as_deref());
     let enqueue_sha = format!("wf-{}", task_id);
@@ -1082,6 +1072,40 @@ async fn build_enqueued_task_params(
         task_options: task.task_options.clone(),
         enqueue_sha,
     })
+}
+
+/// Inject the `workflow_ctx` payload into a node's kwargs when `workflow_ctx_from`
+/// is non-empty, returning the (possibly updated) kwargs JSON.
+///
+/// Shared by the runtime promotion path (`build_enqueued_task_params`) and the
+/// resume/recovery re-enqueue paths (`lifecycle::reevaluate_and_enqueue`,
+/// `recovery::enqueue_ready_task`) so all three inject identical context under
+/// `WORKFLOW_CTX_KWARG`. A node with no `workflow_ctx_from` returns its kwargs
+/// unchanged; the DB read only happens when context is actually required.
+pub(crate) async fn inject_workflow_ctx_into_kwargs(
+    pool: &PgPool,
+    workflow_id: &str,
+    task_index: i32,
+    task_name: &str,
+    ctx_from_ids: Option<&[String]>,
+    merged_kwargs: Option<String>,
+) -> Result<Option<String>, WorkflowError> {
+    let ctx_from_ids = match ctx_from_ids {
+        Some(ids) if !ids.is_empty() => ids,
+        _ => return Ok(merged_kwargs),
+    };
+
+    let ctx_data =
+        build_workflow_context_data(pool, workflow_id, task_index, task_name, ctx_from_ids).await?;
+    let ctx_payload = ctx_data.to_payload()?;
+
+    let mut kwargs_map: serde_json::Map<String, serde_json::Value> = match merged_kwargs.as_deref()
+    {
+        Some(json) => serde_json::from_str(json)?,
+        None => serde_json::Map::new(),
+    };
+    kwargs_map.insert(WORKFLOW_CTX_KWARG.to_owned(), ctx_payload);
+    Ok(Some(serde_json::to_string(&kwargs_map)?))
 }
 
 /// Create a horsies_tasks row for a workflow task and link it.
