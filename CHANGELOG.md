@@ -8,6 +8,41 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-06-24
+
+Collapses the worker claim critical section into a single server-side statement.
+Each claim pass previously held the cap-serialization advisory lock across many
+client round trips (one `pg_advisory_xact_lock` per capped queue, the cap-counts
+query, per-queue claims, then `COMMIT`); at pooled-connection RTT a client-side
+stall while holding the lock froze every claimer cluster-wide. A new
+`horsies_claim(...)` SQL function acquires the locks, computes the cap/budget
+accounting, and runs the windowed claim in one statement, so the lock is held
+only across that statement plus the commit — never across a client round trip.
+Cap enforcement is unchanged: the function never over-claims.
+
+### Performance
+
+- The claim pass issues one statement under the lock instead of 7–9. At ~33 ms
+  RTT with 16 concurrent claimers the worst single advisory-lock wait drops from
+  ~5 s to ~0.5 s, and claim throughput scales with worker count instead of
+  flat-lining at the lock's serialization ceiling.
+
+### Changed
+
+- Equal-queue-priority tie-break. When two queues share the same priority, the
+  prior per-queue loop broke ties by configured queue order; the claim now pools
+  the equal-priority band and orders by task priority, then enqueue time (FIFO).
+  Equal-importance tasks across such queues are claimed FIFO, while an explicit
+  task/workflow-node priority still preempts within the band. Distinct queue
+  priorities are unaffected. Under `FOR UPDATE SKIP LOCKED` contention the single
+  windowed pass may claim fewer rows than the prior greedy loop; the deferred
+  rows are picked up on the next pass.
+
+### Database
+
+- Schema v10: adds the `horsies_claim` function, applied automatically by the
+  broker's advisory-locked schema init on next startup. No manual migration.
+
 ## [0.2.6] - 2026-06-23
 
 A workflow scheduling correctness fix. A parameterized sub-workflow whose
