@@ -194,7 +194,7 @@ WHERE status IN ('COMPLETED', 'FAILED', 'CANCELLED')
 
 const DELETE_EXPIRED_TASKS_SQL: &str = "\
 DELETE FROM horsies_tasks t
-WHERE t.status IN ('COMPLETED', 'FAILED', 'CANCELLED')
+WHERE t.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
   AND COALESCE(t.completed_at, t.failed_at, t.updated_at, t.created_at) < NOW() - CAST($1 || ' hours' AS INTERVAL)
   AND NOT EXISTS (
       SELECT 1
