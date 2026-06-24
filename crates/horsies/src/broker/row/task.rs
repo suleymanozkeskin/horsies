@@ -74,6 +74,13 @@ impl TaskInfoRow {
     /// Convert into the core `TaskInfo` type.
     pub fn into_task_info(self) -> Result<TaskInfo, BrokerError> {
         let status = parse_task_status(&self.status)?;
+        // Propagate (not swallow) a present-but-unparseable stored result so it
+        // is not reported identically to a genuinely null result. Matches the
+        // retrieval path in `parse_task_result_row`.
+        let result = match self.result {
+            Some(raw) => Some(serde_json::from_str(&raw).map_err(BrokerError::Serialization)?),
+            None => None,
+        };
         Ok(TaskInfo {
             task_id: self.id,
             task_name: self.task_name,
@@ -94,7 +101,7 @@ impl TaskInfoRow {
             worker_process_name: self.worker_process_name,
             error_code: self.error_code,
             failed_reason: self.failed_reason,
-            result: self.result.and_then(|s| serde_json::from_str(&s).ok()),
+            result,
             attempts: None,
         })
     }
