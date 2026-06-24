@@ -12,6 +12,13 @@ use crate::core::config::{
 /// resolves within this many forward steps.
 const MAX_CRON_SCAN_DAYS: i64 = 146097;
 
+/// Forward-scan bounds for the calendar patterns. Each is far larger than the
+/// worst case (a DST gap removes at most one candidate), so a satisfiable
+/// pattern always resolves while a genuinely unsatisfiable one still terminates.
+const HOURLY_SCAN_HOURS: i64 = 48;
+const DAILY_SCAN_DAYS: i64 = 8;
+const MONTHLY_SCAN_MONTHS: u32 = 24;
+
 /// Calculate the next run time for a schedule pattern after a given reference time.
 ///
 /// Panics if `timezone` is not a valid IANA timezone name. Callers must
@@ -46,41 +53,41 @@ fn next_hourly(hourly: &HourlySchedule, local: DateTime<Tz>, tz: Tz) -> Option<D
     let target_minute = hourly.minute;
     let target_second = hourly.second;
 
-    // Try this hour first.
-    let candidate = local
+    // Scan forward hour by hour in WALL-CLOCK terms (HH:mm:ss -> next HH:mm:ss),
+    // skipping any candidate that lands in a DST gap (`earliest()` is `None`).
+    // Incrementing the naive wall-clock time keeps the target minute aligned,
+    // unlike advancing the instant, which would distort it across a transition.
+    let mut naive = local
         .date_naive()
         .and_hms_opt(local.hour(), target_minute, target_second)?;
-    let candidate = tz.from_local_datetime(&candidate).earliest()?;
-
-    if candidate > local {
-        return Some(candidate.with_timezone(&Utc));
+    for _ in 0..HOURLY_SCAN_HOURS {
+        if let Some(candidate) = tz.from_local_datetime(&naive).earliest() {
+            if candidate > local {
+                return Some(candidate.with_timezone(&Utc));
+            }
+        }
+        naive += chrono::Duration::hours(1);
     }
-
-    // Next hour.
-    let next = local + chrono::Duration::hours(1);
-    let candidate = next
-        .date_naive()
-        .and_hms_opt(next.hour(), target_minute, target_second)?;
-    let candidate = tz.from_local_datetime(&candidate).earliest()?;
-    Some(candidate.with_timezone(&Utc))
+    None
 }
 
 fn next_daily(daily: &DailySchedule, local: DateTime<Tz>, tz: Tz) -> Option<DateTime<Utc>> {
     let target = daily.time;
 
-    // Try today.
-    let candidate = local.date_naive().and_time(target);
-    let candidate = tz.from_local_datetime(&candidate).earliest()?;
-
-    if candidate > local {
-        return Some(candidate.with_timezone(&Utc));
+    // Scan forward day by day, skipping days whose target wall-clock time falls
+    // in a DST gap (`earliest()` is `None`), until a candidate strictly after
+    // `local` resolves. A satisfiable daily pattern resolves within a day or two.
+    for day_offset in 0..DAILY_SCAN_DAYS {
+        let day = local.date_naive() + chrono::Duration::days(day_offset);
+        let naive = day.and_time(target);
+        let Some(candidate) = tz.from_local_datetime(&naive).earliest() else {
+            continue;
+        };
+        if candidate > local {
+            return Some(candidate.with_timezone(&Utc));
+        }
     }
-
-    // Tomorrow.
-    let tomorrow = local.date_naive() + chrono::Duration::days(1);
-    let candidate = tomorrow.and_time(target);
-    let candidate = tz.from_local_datetime(&candidate).earliest()?;
-    Some(candidate.with_timezone(&Utc))
+    None
 }
 
 fn next_weekly(weekly: &WeeklySchedule, local: DateTime<Tz>, tz: Tz) -> Option<DateTime<Utc>> {
@@ -116,23 +123,25 @@ fn next_monthly(monthly: &MonthlySchedule, local: DateTime<Tz>, tz: Tz) -> Optio
     let target_day = monthly.day;
     let target_time = monthly.time;
 
-    // Try this month.
-    if let Some(candidate) =
-        try_monthly_candidate(local.year(), local.month(), target_day, target_time, tz)
-    {
-        if candidate > local {
-            return Some(candidate.with_timezone(&Utc));
+    // Scan forward month by month, skipping a month whose target wall-clock time
+    // falls in a DST gap (`try_monthly_candidate` is `None`), until a candidate
+    // strictly after `local` resolves. A satisfiable monthly pattern resolves
+    // within a month or two.
+    let mut year = local.year();
+    let mut month = local.month();
+    for _ in 0..MONTHLY_SCAN_MONTHS {
+        if let Some(candidate) = try_monthly_candidate(year, month, target_day, target_time, tz) {
+            if candidate > local {
+                return Some(candidate.with_timezone(&Utc));
+            }
         }
+        (year, month) = if month == 12 {
+            (year + 1, 1)
+        } else {
+            (year, month + 1)
+        };
     }
-
-    // Next month.
-    let (year, month) = if local.month() == 12 {
-        (local.year() + 1, 1)
-    } else {
-        (local.year(), local.month() + 1)
-    };
-
-    try_monthly_candidate(year, month, target_day, target_time, tz).map(|c| c.with_timezone(&Utc))
+    None
 }
 
 fn try_monthly_candidate(
@@ -562,24 +571,68 @@ mod tests {
     fn cron_dst_spring_forward_gap_skipped() {
         // A 02:30 cron in America/New_York: 2026-03-08 02:30 is the nonexistent
         // spring-forward instant, so the matcher skips it and fires on 03-09 at
-        // 02:30 EDT (== 06:30 UTC).
-        //
-        // NOTE: Python asserts cron_run == daily_run here. In this port the
-        // equivalence does NOT hold, because Rust's existing `next_daily` only
-        // probes today/tomorrow and returns `None` when tomorrow lands in a DST
-        // gap, rather than scanning forward. The cron matcher (this code) does
-        // skip the gap correctly; we assert that concrete result. The
-        // `next_daily` DST-gap shortfall is a pre-existing issue tracked
-        // separately from PR #92.
+        // 02:30 EDT (== 06:30 UTC). `next_daily` now scans forward and skips the
+        // gap identically (C5), so the Python equivalence cron_run == daily_run
+        // holds in this port too.
         let cron = SchedulePattern::Cron(CronSchedule {
             minute: vec![num_values(vec![30])],
             hour: vec![num_values(vec![2])],
             month: vec![CronEnumTerm::Every],
             day: DaySelector::EveryDay,
         });
+        let daily = SchedulePattern::Daily(DailySchedule {
+            time: NaiveTime::from_hms_opt(2, 30, 0).unwrap(),
+        });
         let base = utc(2026, 3, 7, 12, 0, 0);
         let cron_run = next_run_at(&cron, base, "America/New_York").unwrap();
+        let daily_run = next_run_at(&daily, base, "America/New_York").unwrap();
         assert_eq!(cron_run, utc(2026, 3, 9, 6, 30, 0));
+        assert_eq!(daily_run, cron_run);
+    }
+
+    #[test]
+    fn daily_dst_spring_forward_gap_not_disabled() {
+        // C5: a daily 02:30 schedule in America/New_York whose target lands in
+        // the 2026-03-08 spring-forward gap must not return `None`; it fires the
+        // next day at 02:30 EDT (== 06:30 UTC) instead of permanently stopping.
+        let pattern = SchedulePattern::Daily(DailySchedule {
+            time: NaiveTime::from_hms_opt(2, 30, 0).unwrap(),
+        });
+        // Reference just before the gap day's target time.
+        let after = utc(2026, 3, 8, 6, 0, 0); // 01:00 EST
+        let next = next_run_at(&pattern, after, "America/New_York").unwrap();
+        assert_eq!(next, utc(2026, 3, 9, 6, 30, 0));
+    }
+
+    #[test]
+    fn monthly_dst_spring_forward_gap_not_disabled() {
+        // C6: a monthly schedule whose target day/time lands in a DST gap must
+        // not return `None`. day=8 02:30 America/New_York: 2026-03-08 02:30 is
+        // the gap, so it skips March and fires 2026-04-08 02:30 EDT (06:30 UTC).
+        let pattern = SchedulePattern::Monthly(MonthlySchedule {
+            day: 8,
+            time: NaiveTime::from_hms_opt(2, 30, 0).unwrap(),
+        });
+        // Reference after Feb 8 so "this month" (Feb) is past.
+        let after = utc(2026, 2, 9, 0, 0, 0);
+        let next = next_run_at(&pattern, after, "America/New_York").unwrap();
+        assert_eq!(next, utc(2026, 4, 8, 6, 30, 0));
+    }
+
+    #[test]
+    fn hourly_dst_spring_forward_gap_not_disabled() {
+        // C11: a sub-hour DST zone (Australia/Lord_Howe, +30min spring-forward on
+        // 2025-10-05, local 02:00:00-02:29:59 nonexistent). An hourly schedule at
+        // minute 15 must skip the nonexistent 02:15 and fire at 03:15, not stop.
+        let pattern = SchedulePattern::Hourly(HourlySchedule {
+            minute: 15,
+            second: 0,
+        });
+        // 01:20 Lord Howe (pre-transition, +10:30) == 2025-10-04 14:50 UTC.
+        let after = utc(2025, 10, 4, 14, 50, 0);
+        let next = next_run_at(&pattern, after, "Australia/Lord_Howe").unwrap();
+        // 03:15 Lord Howe (post-transition, +11:00) == 2025-10-04 16:15 UTC.
+        assert_eq!(next, utc(2025, 10, 4, 16, 15, 0));
     }
 
     // --- equivalence with calendar patterns at second=0 ---
