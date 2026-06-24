@@ -118,6 +118,7 @@ from horsies.core.schemas.indexes import (
     CREATE_WORKFLOW_TASKS_WF_STATUS_IDX_INDEX_SQL,
 )
 from horsies.core.schemas.migrations import (
+    CREATE_CLAIM_FUNCTION_SQL,
     CREATE_TASK_ATTEMPTS_TABLE_SQL,
     CREATE_SCHEMA_VERSION_TABLE_SQL,
     ADD_DEPTH_COLUMN_SQL,
@@ -797,6 +798,10 @@ class PostgresBroker:
 
             await self._create_triggers(conn)
             await self._create_workflow_schema(conn)
+
+            # Migration (v10): single-statement claim function.
+            await conn.execute(CREATE_CLAIM_FUNCTION_SQL)
+
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
                 {'version': SCHEMA_VERSION},
