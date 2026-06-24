@@ -60,26 +60,24 @@ fn advisory_key_queue(queue: &str) -> i64 {
 ///
 /// - `cluster_wide_cap` set → the single global key (the global in-flight count is
 ///   a cluster invariant that subsumes per-queue caps).
-/// - else, priority mode → one key per **capped queue in the actual claim list**,
-///   sorted ascending so multi-key acquisition is deadlock-free, and deduped.
-///   Workers claiming disjoint capped queues no longer serialize against each other.
-/// - else → no keys.
+/// - else → one key per **capped queue in the actual claim list** (a queue present
+///   in `queue_max_concurrency`), sorted ascending so multi-key acquisition is
+///   deadlock-free, and deduped. Workers claiming disjoint capped queues do not
+///   serialize against each other.
+/// - else (no caps configured) → no keys.
 ///
-/// Per-queue caps are enforced only in priority mode (non-empty `queue_priorities`),
-/// matching the claim loop's gate. Rolling-deploy skew: old workers (global key)
-/// and new workers (per-queue keys) don't contend, so a per-queue cap can briefly
-/// overshoot by up to one pass's batch during a rollout.
+/// Per-queue caps are keyed on `queue_max_concurrency` membership, independent of
+/// `queue_priorities`, so a cap is enforced in both round-robin and priority modes.
+/// Rolling-deploy skew: old workers (global key) and new workers (per-queue keys)
+/// don't contend, so a per-queue cap can briefly overshoot by up to one pass's
+/// batch during a rollout.
 fn compute_claim_lock_keys(
     cluster_wide_cap: Option<u32>,
-    queue_priorities_empty: bool,
     ordered_queues: &[String],
     queue_max_concurrency: &std::collections::HashMap<String, u32>,
 ) -> Vec<i64> {
     if cluster_wide_cap.is_some() {
         return vec![advisory_key_global()];
-    }
-    if queue_priorities_empty {
-        return Vec::new();
     }
     let mut keys: Vec<i64> = ordered_queues
         .iter()
@@ -640,26 +638,24 @@ impl Worker {
                 return Ok(dispatched_buffered > 0);
             }
 
-            // Per-queue cap counts in one statement (priority mode only — the
-            // per-queue cap is consulted only there). Claims are per-queue and each
-            // queue appears once in `ordered`, so a queue's count is unaffected by
-            // claiming any other queue this pass: reading them all up front equals
+            // Per-queue cap counts in one statement, for every queue carrying a
+            // `queue_max_concurrency` entry (independent of `queue_priorities`, so
+            // the cap is enforced in round-robin mode too). Claims are per-queue and
+            // each queue appears once in `ordered`, so a queue's count is unaffected
+            // by claiming any other queue this pass: reading them all up front equals
             // the former per-queue-in-loop reads (parity with horsies PR #132).
-            let queue_counts: std::collections::HashMap<String, (i64, i64)> =
-                if self.worker_config.queue_priorities.is_empty() {
+            let queue_counts: std::collections::HashMap<String, (i64, i64)> = {
+                let capped: Vec<String> = ordered
+                    .iter()
+                    .filter(|q| self.worker_config.queue_max_concurrency.contains_key(*q))
+                    .cloned()
+                    .collect();
+                if capped.is_empty() {
                     std::collections::HashMap::new()
                 } else {
-                    let capped: Vec<String> = ordered
-                        .iter()
-                        .filter(|q| self.worker_config.queue_max_concurrency.contains_key(*q))
-                        .cloned()
-                        .collect();
-                    if capped.is_empty() {
-                        std::collections::HashMap::new()
-                    } else {
-                        self.broker.count_inflight_by_queue_tx(&mut tx, &capped).await?
-                    }
-                };
+                    self.broker.count_inflight_by_queue_tx(&mut tx, &capped).await?
+                }
+            };
 
             for queue in &ordered {
                 if total_remaining == 0 {
@@ -675,13 +671,11 @@ impl Worker {
                     total_remaining
                 };
 
-                if !self.worker_config.queue_priorities.is_empty() {
-                    if let Some(&max_q) = self.worker_config.queue_max_concurrency.get(queue) {
-                        let (hard, soft) = queue_counts.get(queue).copied().unwrap_or((0, 0));
-                        let in_flight_q = if hard_cap_mode { hard } else { soft } as u32;
-                        let q_remaining = max_q.saturating_sub(in_flight_q);
-                        per_queue_cap = per_queue_cap.min(q_remaining);
-                    }
+                if let Some(&max_q) = self.worker_config.queue_max_concurrency.get(queue) {
+                    let (hard, soft) = queue_counts.get(queue).copied().unwrap_or((0, 0));
+                    let in_flight_q = if hard_cap_mode { hard } else { soft } as u32;
+                    let q_remaining = max_q.saturating_sub(in_flight_q);
+                    per_queue_cap = per_queue_cap.min(q_remaining);
                 }
 
                 let to_claim = total_remaining.min(per_queue_cap);
@@ -767,7 +761,6 @@ impl Worker {
     fn claim_lock_keys(&self, ordered_queues: &[String]) -> Vec<i64> {
         compute_claim_lock_keys(
             self.app_config.cluster_wide_cap,
-            self.worker_config.queue_priorities.is_empty(),
             ordered_queues,
             &self.worker_config.queue_max_concurrency,
         )
@@ -1296,7 +1289,7 @@ mod tests {
         max_conc.insert("b".to_owned(), 5);
         let ordered = vec!["a".to_owned(), "b".to_owned()];
         // Cluster cap set → exactly the global key, regardless of per-queue caps.
-        let keys = compute_claim_lock_keys(Some(10), false, &ordered, &max_conc);
+        let keys = compute_claim_lock_keys(Some(10), &ordered, &max_conc);
         assert_eq!(keys, vec![advisory_key_global()]);
     }
 
@@ -1306,7 +1299,7 @@ mod tests {
         max_conc.insert("a".to_owned(), 5);
         max_conc.insert("b".to_owned(), 5);
         let ordered = vec!["a".to_owned(), "b".to_owned()];
-        let keys = compute_claim_lock_keys(None, false, &ordered, &max_conc);
+        let keys = compute_claim_lock_keys(None, &ordered, &max_conc);
 
         let mut expected = vec![advisory_key_queue("a"), advisory_key_queue("b")];
         expected.sort_unstable();
@@ -1323,7 +1316,7 @@ mod tests {
         max_conc.insert("capped".to_owned(), 5);
         // "uncapped" is served but absent from the concurrency map.
         let ordered = vec!["capped".to_owned(), "uncapped".to_owned()];
-        let keys = compute_claim_lock_keys(None, false, &ordered, &max_conc);
+        let keys = compute_claim_lock_keys(None, &ordered, &max_conc);
         assert_eq!(keys, vec![advisory_key_queue("capped")]);
     }
 
@@ -1331,18 +1324,22 @@ mod tests {
     fn claim_lock_keys_empty_when_no_caps() {
         let max_conc = std::collections::HashMap::new();
         let ordered = vec!["a".to_owned()];
-        // No cluster cap, priority mode, no per-queue caps → no locks.
-        assert!(compute_claim_lock_keys(None, false, &ordered, &max_conc).is_empty());
+        // No cluster cap, no per-queue caps → no locks.
+        assert!(compute_claim_lock_keys(None, &ordered, &max_conc).is_empty());
     }
 
     #[test]
-    fn claim_lock_keys_empty_in_round_robin_mode() {
+    fn claim_lock_keys_enforced_for_capped_queue_without_priorities() {
+        // C7: a per-queue cap is keyed on `queue_max_concurrency`, not on
+        // `queue_priorities`. A capped queue served in round-robin mode (no
+        // priorities) must still take its advisory lock so the cap is enforced.
         let mut max_conc = std::collections::HashMap::new();
         max_conc.insert("a".to_owned(), 5);
         let ordered = vec!["a".to_owned()];
-        // queue_priorities empty (round-robin): per-queue caps are not enforced,
-        // so no lock is taken even though a cap is configured.
-        assert!(compute_claim_lock_keys(None, true, &ordered, &max_conc).is_empty());
+        assert_eq!(
+            compute_claim_lock_keys(None, &ordered, &max_conc),
+            vec![advisory_key_queue("a")],
+        );
     }
 
     // -- finalize_with_retry unit tests --
@@ -1785,7 +1782,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn finalize_prestart_workflow_update_failure_aborts_before_user_code() {
+    async fn finalize_prestart_workflow_update_failure_is_nonfatal_and_runs_user_code() {
         let pool = test_pool().await;
         let broker = test_broker().await;
         clean(&pool).await;
@@ -1804,27 +1801,27 @@ mod tests {
             )
             .await;
 
+            // C4: the workflow_task RUNNING update is purely informational
+            // (set_running already committed the CLAIMED->RUNNING flip durably,
+            // and completion tolerates an ENQUEUED workflow_task). A transient
+            // failure of it must NOT fail the task closed — user code runs and
+            // the task completes normally.
             assert_eq!(
                 EXECUTION_COUNT.load(Ordering::SeqCst),
-                0,
-                "user code must not run when workflow_task RUNNING sync fails",
+                1,
+                "user code must still run when the informational workflow_task RUNNING update fails",
             );
 
-            let broker_error_code = OperationalErrorCode::BrokerError.to_string();
             let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
-            assert_eq!(status, "FAILED");
-            assert_eq!(error_code.as_deref(), Some(broker_error_code.as_str()));
+            assert_eq!(status, "COMPLETED");
+            assert_eq!(error_code, None);
 
             let persisted: TaskResult<serde_json::Value> =
                 serde_json::from_str(result.as_deref().unwrap()).unwrap();
-            let persisted_error = persisted.unwrap_err();
             assert_eq!(
-                persisted_error.error_code,
-                Some(OperationalErrorCode::BrokerError.into())
+                persisted.unwrap(),
+                serde_json::Value::String("counted".to_owned()),
             );
-            assert!(persisted_error.message.as_deref().is_some_and(|message| {
-                message.contains("failed to update workflow task to RUNNING")
-            }));
 
             let attempt_count = fetch_attempt_count(&pool, &task_id).await;
             assert_eq!(attempt_count, 1);
