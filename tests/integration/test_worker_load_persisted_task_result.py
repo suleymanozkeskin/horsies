@@ -20,7 +20,12 @@ from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import OperationalErrorCode, TaskError, TaskResult
+from horsies.core.models.tasks import (
+    OperationalErrorCode,
+    OutcomeCode,
+    TaskError,
+    TaskResult,
+)
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker, _FINALIZE_STAGE_PHASE2
@@ -361,3 +366,42 @@ async def test_unknown_task_err_result_uses_fast_path(
     assert loaded_task_name == 'unknown_task_xyz'
     assert task_error.error_code == OperationalErrorCode.WORKER_RESOLUTION_ERROR
     assert task_error.message == 'task not found in registry'
+
+
+# ---------------------------------------------------------------------------
+# Test 9: EXPIRED with err result → Ok(TaskResult) with is_err()
+#         (C9 regression: expired-before-start tasks write a TASK_EXPIRED err
+#         result and a terminal EXPIRED status. The in-process phase-2 replay
+#         reload must accept EXPIRED alongside COMPLETED/FAILED; before the fix
+#         it rejected the row as 'terminal task result unavailable', leaving
+#         in-process replay dead for the expired case.)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_expired_err_result_returns_task_result(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """EXPIRED task with valid err result → Ok(TaskResult(err=TaskError(...)))."""
+    result_json = _serialize_err(
+        OutcomeCode.TASK_EXPIRED,
+        'Task expired: good_until deadline passed before execution started',
+    )
+    task_id = await _insert_task(
+        session, status='EXPIRED', result=result_json,
+    )
+    worker = _make_worker(engine)
+
+    result = await worker._load_persisted_task_result(task_id)
+
+    assert is_ok(result), (
+        f'expected Ok(TaskResult(err)) for EXPIRED row, got Err: '
+        f'{result.err_value if not is_ok(result) else None}'
+    )
+    tr, loaded_task_name = result.ok_value
+    assert tr.is_err()
+    task_error = tr.unwrap_err()
+    assert task_error.error_code == OutcomeCode.TASK_EXPIRED
+    assert loaded_task_name == 'load_result_test'
