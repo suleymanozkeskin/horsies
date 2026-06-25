@@ -225,3 +225,63 @@ async def test_cluster_cap_never_over_claims(
         "SELECT count(*) FROM horsies_tasks WHERE status='CLAIMED'"
     ))).scalar_one()
     assert total <= 7, total
+
+
+@pytest.mark.asyncio
+async def test_cap_only_queue_is_serviced_and_capped(
+    clean_workflow_tables: None, broker: PostgresBroker, session: AsyncSession
+) -> None:
+    """C7: a queue with max_concurrency but NO queue_priorities is serviced
+    (not silently dropped) and claimed only up to its cap. Before the fix,
+    cap enforcement keyed on queue_priorities, so an empty priority map left
+    the cap unenforced."""
+    await _seed_n(session, queue='capped', priority=50, n=20)
+    await session.commit()
+
+    probe = _probe(
+        broker, queues=['capped'], processes=100, prefetch_buffer=0,
+        queue_max_concurrency={'capped': 4},
+    )
+    for _ in range(5):
+        await probe._claim_and_dispatch_all()
+
+    claimed = await _claimed(session)
+    # Serviced: the queue is claimed at all (not dropped from the pass).
+    assert len(claimed) > 0, 'cap-only queue was never serviced'
+    # Capped: never exceeds max_concurrency despite 20 eligible tasks.
+    assert len(claimed) == 4, claimed
+
+
+@pytest.mark.asyncio
+async def test_cap_without_priorities_never_over_claims(
+    clean_workflow_tables: None, broker: PostgresBroker, session: AsyncSession
+) -> None:
+    """C7: concurrent claimers honor per-queue caps even with NO
+    queue_priorities configured. Before the fix, a cap-only config took no
+    advisory lock, so concurrent claimers over-claimed past the cap."""
+    await _seed_n(session, queue='a', priority=50, n=300)
+    await _seed_n(session, queue='b', priority=50, n=300)
+    await session.commit()
+
+    def mk() -> ClaimMixin:
+        return _probe(
+            broker, queues=['a', 'b'], processes=100, prefetch_buffer=0,
+            queue_max_concurrency={'a': 3, 'b': 5},
+        )
+
+    probes = [mk() for _ in range(6)]
+
+    async def loop(p: ClaimMixin) -> None:
+        for _ in range(20):
+            await p._claim_and_dispatch_all()
+            await asyncio.sleep(0.005)
+
+    await asyncio.gather(*[loop(p) for p in probes])
+
+    rows = (await session.execute(text(
+        "SELECT queue_name, count(*) FROM horsies_tasks "
+        "WHERE status='CLAIMED' GROUP BY queue_name"
+    ))).all()
+    got = {r[0]: r[1] for r in rows}
+    assert got.get('a', 0) <= 3, got
+    assert got.get('b', 0) <= 5, got

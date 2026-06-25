@@ -89,14 +89,13 @@ class ClaimMixin:
         # path; see schemas/migrations.py::horsies_claim.
         ordered_queues = self._ordered_claim_queues()
         lock_keys = self._claim_lock_keys(ordered_queues)
-        # Per-queue caps are enforced only for queues the prior path treated as
-        # capped (queue_priorities configured AND a max_concurrency entry). Pass
+        # Per-queue caps are enforced for every queue in this pass that carries
+        # a max_concurrency entry — independent of queue_priorities. Pass
         # exactly those into the function so its cap filter matches 1:1.
         capped_queues = [
             qname
             for qname in ordered_queues
-            if self.cfg.queue_priorities
-            and qname in self.cfg.queue_max_concurrency
+            if qname in self.cfg.queue_max_concurrency
         ]
         params: dict[str, Any] = {
             'p_worker_id': self.worker_instance_id,
@@ -232,14 +231,22 @@ class ClaimMixin:
     def _ordered_claim_queues(self) -> list[str]:
         """Queues this pass claims from, in claim order.
 
-        CUSTOM mode sorts by priority and drops queues absent from
-        queue_priorities; DEFAULT mode keeps the configured order. The
-        claim loop and `_claim_lock_keys` must consume the SAME list so
-        the pass never locks a queue it will not claim from.
+        CUSTOM mode (any priority OR cap configured) sorts by priority and
+        keeps queues that carry a priority OR a max_concurrency cap; a
+        cap-only queue sorts into the lowest priority bucket (100) so its
+        cap is enforced rather than the queue being silently starved.
+        DEFAULT mode keeps the configured order. The claim loop and
+        `_claim_lock_keys` must consume the SAME list so the pass never
+        locks a queue it will not claim from.
         """
-        if self.cfg.queue_priorities:
+        if self.cfg.queue_priorities or self.cfg.queue_max_concurrency:
             return sorted(
-                [q for q in self.cfg.queues if q in self.cfg.queue_priorities],
+                [
+                    q
+                    for q in self.cfg.queues
+                    if q in self.cfg.queue_priorities
+                    or q in self.cfg.queue_max_concurrency
+                ],
                 key=lambda q: self.cfg.queue_priorities.get(q, 100),
             )
         return list(self.cfg.queues)
@@ -265,7 +272,7 @@ class ClaimMixin:
         """
         if self.cfg.cluster_wide_cap is not None:
             return [self._advisory_key_global()]
-        if not self.cfg.queue_priorities:
+        if not self.cfg.queue_max_concurrency:
             return []
         return sorted(
             self._advisory_key_for_queue(queue_name)
