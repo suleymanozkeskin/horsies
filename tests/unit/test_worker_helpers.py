@@ -316,16 +316,36 @@ class TestClaimLockKeys:
         )
         assert self._keys(w) == []
 
-    def test_keys_derive_from_the_claimed_list_not_raw_config(self) -> None:
-        """A capped queue dropped by the priority filter (absent from
-        queue_priorities) is not claimed, so it must not be locked."""
+    def test_cap_without_any_priorities_is_enforced(self) -> None:
+        """C7: a queue carrying max_concurrency but NO priority entry must
+        still have its cap enforced (its advisory lock taken). Before the
+        fix, an empty queue_priorities map disabled cap enforcement and the
+        lock entirely, so concurrent workers over-claimed the queue."""
+        w = _make_worker(
+            queues=["fast"],
+            queue_priorities={},
+            queue_max_concurrency={"fast": 5},
+        )
+        assert w._ordered_claim_queues() == ["fast"]
+        assert self._keys(w) == [w._advisory_key_for_queue("fast")]
+
+    def test_cap_only_queue_in_mixed_config_is_claimed_and_locked(self) -> None:
+        """C7: the lock list mirrors the claimed list. A capped queue absent
+        from queue_priorities is claimed at the default (lowest) priority
+        bucket and must therefore also be locked — cap enforcement keys on
+        queue_max_concurrency, not queue_priorities. Before the fix this
+        queue was silently dropped from the claim pass and never serviced."""
         w = _make_worker(
             queues=["q1", "unprioritized"],
             queue_priorities={"q1": 1},
             queue_max_concurrency={"q1": 5, "unprioritized": 5},
         )
-        assert w._ordered_claim_queues() == ["q1"]
-        assert self._keys(w) == [w._advisory_key_for_queue("q1")]
+        # q1 (priority 1) sorts ahead of unprioritized (default bucket 100).
+        assert w._ordered_claim_queues() == ["q1", "unprioritized"]
+        assert self._keys(w) == sorted([
+            w._advisory_key_for_queue("q1"),
+            w._advisory_key_for_queue("unprioritized"),
+        ])
 
     def test_queue_keys_stable_and_distinct(self) -> None:
         w = _make_worker()
