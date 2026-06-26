@@ -890,7 +890,7 @@ class FinalizeMixin:
                     )
                 status = str(row.status) if row.status is not None else ''
                 raw_result = row.result
-                if status not in ('COMPLETED', 'FAILED') or raw_result is None:
+                if status not in ('COMPLETED', 'FAILED', 'EXPIRED') or raw_result is None:
                     return Err(
                         self._make_finalize_error(
                             task_id=task_id,
