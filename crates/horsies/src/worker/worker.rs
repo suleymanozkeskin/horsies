@@ -71,6 +71,39 @@ fn advisory_key_queue(queue: &str) -> i64 {
 /// Rolling-deploy skew: old workers (global key) and new workers (per-queue keys)
 /// don't contend, so a per-queue cap can briefly overshoot by up to one pass's
 /// batch during a rollout.
+/// Queues a claim pass services, in claim order.
+///
+/// Round-robin mode (no `queue_priorities`) keeps the configured order and
+/// services every listed queue; per-queue caps are enforced downstream via
+/// `queue_max_concurrency` membership, so no filtering is needed. Priority
+/// mode keeps queues carrying a priority OR a max_concurrency cap and sorts
+/// by priority — a cap-only queue sorts into the default priority bucket
+/// (100) so its cap is enforced rather than the queue being silently starved
+/// (parity with horsies PR #166; sort is stable, ties keep configured order).
+///
+/// Divergence from Python #166: a cap-only config (caps set, no priorities)
+/// stays in round-robin mode here and still services uncapped queues; Python
+/// switches to custom mode and drops them. Rust's cap accounting is keyed on
+/// `queue_max_concurrency` alone, so caps are enforced in both modes.
+fn compute_ordered_queues(
+    queues: &[String],
+    queue_priorities: &std::collections::HashMap<String, i32>,
+    queue_max_concurrency: &std::collections::HashMap<String, u32>,
+) -> Vec<String> {
+    if queue_priorities.is_empty() {
+        return queues.to_vec();
+    }
+    let mut kept: Vec<String> = queues
+        .iter()
+        .filter(|q| {
+            queue_priorities.contains_key(*q) || queue_max_concurrency.contains_key(*q)
+        })
+        .cloned()
+        .collect();
+    kept.sort_by_key(|q| queue_priorities.get(q).copied().unwrap_or(100));
+    kept
+}
+
 fn compute_claim_lock_keys(
     cluster_wide_cap: Option<u32>,
     ordered_queues: &[String],
@@ -732,26 +765,14 @@ impl Worker {
     }
 
     /// Order queues by priority (if configured) or return as-is.
+    ///
+    /// See [`compute_ordered_queues`] for the policy.
     fn ordered_queues(&self) -> Vec<String> {
-        if self.worker_config.queue_priorities.is_empty() {
-            return self.worker_config.queues.clone();
-        }
-
-        let mut queues: Vec<String> = self
-            .worker_config
-            .queues
-            .iter()
-            .filter(|q| self.worker_config.queue_priorities.contains_key(*q))
-            .cloned()
-            .collect();
-        queues.sort_by_key(|q| {
-            self.worker_config
-                .queue_priorities
-                .get(q)
-                .copied()
-                .unwrap_or(i32::MAX)
-        });
-        queues
+        compute_ordered_queues(
+            &self.worker_config.queues,
+            &self.worker_config.queue_priorities,
+            &self.worker_config.queue_max_concurrency,
+        )
     }
 
     /// Advisory lock keys this claim pass must hold for consistent cap accounting.
@@ -1278,6 +1299,51 @@ mod tests {
         };
         assert!(config.validate().is_ok());
         assert_eq!(config.queue_max_concurrency["default"], 2);
+    }
+
+    // -- compute_ordered_queues unit tests (parity with horsies PR #166) --
+
+    #[test]
+    fn ordered_queues_cap_only_queue_serviced_under_partial_priority_map() {
+        // Priority mode with a partial map: a cap-only queue must be kept and
+        // sort into the default bucket (100), not be dropped.
+        let queues = vec!["capped".to_owned(), "prio".to_owned(), "neither".to_owned()];
+        let mut priorities = std::collections::HashMap::new();
+        priorities.insert("prio".to_owned(), 10);
+        let mut caps = std::collections::HashMap::new();
+        caps.insert("capped".to_owned(), 3);
+
+        let ordered = compute_ordered_queues(&queues, &priorities, &caps);
+        assert_eq!(
+            ordered,
+            vec!["prio".to_owned(), "capped".to_owned()],
+            "cap-only queue serviced in bucket 100; unconfigured queue dropped",
+        );
+    }
+
+    #[test]
+    fn ordered_queues_cap_only_config_stays_round_robin() {
+        // No priorities configured: all listed queues are serviced in the
+        // configured order, capped or not (caps are enforced downstream).
+        let queues = vec!["a".to_owned(), "b".to_owned()];
+        let priorities = std::collections::HashMap::new();
+        let mut caps = std::collections::HashMap::new();
+        caps.insert("b".to_owned(), 3);
+
+        let ordered = compute_ordered_queues(&queues, &priorities, &caps);
+        assert_eq!(ordered, queues);
+    }
+
+    #[test]
+    fn ordered_queues_priority_ties_keep_configured_order() {
+        let queues = vec!["z".to_owned(), "a".to_owned()];
+        let mut priorities = std::collections::HashMap::new();
+        priorities.insert("z".to_owned(), 100);
+        priorities.insert("a".to_owned(), 100);
+        let caps = std::collections::HashMap::new();
+
+        let ordered = compute_ordered_queues(&queues, &priorities, &caps);
+        assert_eq!(ordered, queues, "stable sort preserves configured order on ties");
     }
 
     // -- compute_claim_lock_keys unit tests (parity with horsies PR #125) --
