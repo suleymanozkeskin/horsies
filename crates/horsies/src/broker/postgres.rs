@@ -256,20 +256,24 @@ WHERE id = $1
   AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
 RETURNING id";
 
+// retry_count is derived from the row being CAS-updated (same idiom as
+// FINALIZE_TASK_COMPLETED_SQL's ctx CTE), not passed by the caller: the
+// ownership CAS makes the claim-time snapshot provably equal to the row, so
+// self-incrementing removes the snapshot from the written value entirely.
 const REQUEUE_SQL: &str = "\
 UPDATE horsies_tasks
 SET status = 'PENDING',
-    retry_count = $2,
-    next_retry_at = $3,
-    enqueued_at = $3,
+    retry_count = COALESCE(retry_count, 0) + 1,
+    next_retry_at = $2,
+    enqueued_at = $2,
     error_code = NULL,
     finalizing_at = NULL,
     finalizing_by_worker_id = NULL,
     updated_at = NOW()
 WHERE id = $1
   AND status = 'RUNNING'
-  AND claimed_by_worker_id = $4
-  AND (good_until IS NULL OR $3 < good_until)
+  AND claimed_by_worker_id = $3
+  AND (good_until IS NULL OR $2 < good_until)
 RETURNING id";
 
 const GET_RESULT_SQL: &str = "\
@@ -1475,17 +1479,18 @@ impl PostgresBroker {
     }
 
     /// Requeue a task for retry (transactional variant).
+    ///
+    /// `retry_count` is incremented from the CAS-locked row itself, so the
+    /// caller supplies no count.
     pub async fn requeue_in_tx(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         task_id: &str,
-        retry_count: i32,
         next_retry_at: Option<DateTime<Utc>>,
         worker_id: &str,
     ) -> Result<bool, BrokerError> {
         let row: Option<ClaimedId> = sqlx::query_as(REQUEUE_SQL)
             .bind(task_id)
-            .bind(retry_count)
             .bind(next_retry_at)
             .bind(worker_id)
             .fetch_optional(tx.as_mut())
@@ -1493,7 +1498,7 @@ impl PostgresBroker {
             .map_err(BrokerError::Database)?;
 
         if row.is_some() {
-            tracing::debug!(task_id, retry_count, "task requeued");
+            tracing::debug!(task_id, "task requeued");
         } else {
             tracing::warn!(
                 task_id,
@@ -1503,21 +1508,20 @@ impl PostgresBroker {
         Ok(row.is_some())
     }
 
-    /// Requeue a task for retry with updated retry count and optional delay.
+    /// Requeue a task for retry with an optional delay.
     ///
+    /// `retry_count` is incremented from the CAS-locked row itself.
     /// Returns `true` if the update was applied (task was RUNNING).
     /// Returns `false` if the task was no longer RUNNING (e.g., already
     /// marked FAILED by the stale-task reaper).
     pub async fn requeue(
         &self,
         task_id: &str,
-        retry_count: i32,
         next_retry_at: Option<DateTime<Utc>>,
         worker_id: &str,
     ) -> Result<bool, BrokerError> {
         let row: Option<ClaimedId> = sqlx::query_as(REQUEUE_SQL)
             .bind(task_id)
-            .bind(retry_count)
             .bind(next_retry_at)
             .bind(worker_id)
             .fetch_optional(&self.pool)
@@ -1525,7 +1529,7 @@ impl PostgresBroker {
             .map_err(BrokerError::Database)?;
 
         if row.is_some() {
-            tracing::debug!(task_id, retry_count, "task requeued");
+            tracing::debug!(task_id, "task requeued");
         } else {
             tracing::warn!(
                 task_id,

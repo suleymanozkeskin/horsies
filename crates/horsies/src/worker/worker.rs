@@ -1567,11 +1567,11 @@ mod tests {
         let t_requeue = Uuid::new_v4().to_string();
         insert_running_task_owned_by(&pool, &t_requeue, "worker-2").await;
         assert!(
-            !broker.requeue(&t_requeue, 1, Some(Utc::now()), "worker-1").await.unwrap(),
+            !broker.requeue(&t_requeue, Some(Utc::now()), "worker-1").await.unwrap(),
             "stale owner must not requeue the re-claimed task"
         );
         assert_eq!(fetch_task_state(&pool, &t_requeue).await.0, "RUNNING");
-        assert!(broker.requeue(&t_requeue, 1, Some(Utc::now()), "worker-2").await.unwrap());
+        assert!(broker.requeue(&t_requeue, Some(Utc::now()), "worker-2").await.unwrap());
         assert_eq!(fetch_task_state(&pool, &t_requeue).await.0, "PENDING");
 
         // fail_worker: stale owner rejected, current owner applies.

@@ -22,6 +22,25 @@ pub struct SetRunningRow {
 }
 
 /// Task columns loaded after claiming.
+///
+/// This row is a claim-time snapshot threaded through dispatch into finalize
+/// with NO re-read: `should_retry`, the retry-delay math, and the
+/// expired-vs-reclaimed postcheck all consume it directly. That is sound
+/// under three invariants the schema and statements maintain:
+///
+/// 1. `max_retries`, `good_until`, `task_options`, `is_workflow_task`, and
+///    `queue_name` are frozen at enqueue — no statement mutates them.
+/// 2. `retry_count` changes only in statements that simultaneously move the
+///    row out of RUNNING-owned (the owner's `REQUEUE_SQL`) or clear
+///    ownership (reaper requeue).
+/// 3. Every terminal/requeue write CASes on
+///    `status = 'RUNNING' AND claimed_by_worker_id = <me>`; a CAS miss
+///    aborts the finalize.
+///
+/// Together these make the snapshot provably equal to the row whenever a
+/// write lands. A feature that mutates `retry_count` (or any column above)
+/// on a live RUNNING-owned row breaks invariant 2 and must revisit the
+/// finalize/retry flow, not just its own write.
 #[derive(Debug, Clone, FromRow)]
 pub struct ClaimedTaskRow {
     pub id: String,

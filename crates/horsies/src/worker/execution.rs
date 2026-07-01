@@ -583,7 +583,7 @@ pub(crate) async fn schedule_retry_for_task(
             .await
             .map_err(crate::broker::BrokerError::Database)?;
         let applied = broker
-            .requeue_in_tx(&mut tx, task_id, new_count, Some(next_retry_at), worker.worker_id)
+            .requeue_in_tx(&mut tx, task_id, Some(next_retry_at), worker.worker_id)
             .await?;
         if applied {
             broker
