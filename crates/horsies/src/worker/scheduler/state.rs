@@ -1,7 +1,6 @@
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
-use sqlx::pool::PoolConnection;
-use sqlx::{PgPool, Postgres};
+use sqlx::{PgPool, Postgres, Transaction};
 
 /// A row from `horsies_schedule_state`.
 #[derive(Debug, sqlx::FromRow)]
@@ -70,20 +69,13 @@ INSERT INTO horsies_schedule_state (
 ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
 ON CONFLICT (schedule_name) DO NOTHING";
 
-/// Transaction-scoped blocking advisory lock for the scheduler tick.
-/// Automatically released when the transaction commits/rolls back.
-/// Matches Python's `SCHEDULE_ADVISORY_LOCK_SQL`.
-const SCHEDULER_XACT_LOCK_SQL: &str = "\
-SELECT pg_advisory_xact_lock($1)";
-
+/// Transaction-scoped per-schedule advisory lock. Auto-released on
+/// commit/rollback, so no explicit unlock round-trip exists — under PgBouncer
+/// transaction pooling the lock stays on one server backend for its whole
+/// lifetime. Matches Python's `SCHEDULE_ADVISORY_LOCK_SQL` scoping (xact),
+/// with try-lock skip semantics instead of blocking.
 const TRY_ACQUIRE_LOCK_SQL: &str = "\
-SELECT pg_try_advisory_lock($1)";
-
-const RELEASE_LOCK_SQL: &str = "\
-SELECT pg_advisory_unlock($1)";
-
-/// Advisory lock key for the scheduler (constant hash).
-pub const SCHEDULER_LOCK_KEY: i64 = 0x0068_6F72_7369_6573; // "horsies" in hex, truncated
+SELECT pg_try_advisory_xact_lock($1)";
 
 /// Upsert a schedule state row.
 pub async fn upsert_state(
@@ -188,50 +180,34 @@ pub async fn insert_state_if_absent(
     Ok(result.rows_affected() > 0)
 }
 
-/// Acquire the scheduler advisory lock within a transaction (blocking).
+/// Try to acquire a per-schedule advisory lock.
 ///
-/// Matches Python's `pg_advisory_xact_lock` pattern: the lock is held for
-/// the duration of the transaction and automatically released on commit/rollback.
-/// Multiple schedulers block (instead of exiting) until the lock is available.
-pub async fn acquire_scheduler_xact_lock(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(SCHEDULER_XACT_LOCK_SQL)
-        .bind(SCHEDULER_LOCK_KEY)
-        .execute(tx.as_mut())
-        .await?;
-    Ok(())
-}
-
-/// Try to acquire a per-schedule advisory lock. Returns Some(conn) if acquired.
+/// Returns `Some(tx)` if acquired: an otherwise-idle transaction whose only
+/// job is to hold the xact-scoped lock while the caller processes the
+/// schedule on other connections. Dropping or committing the transaction
+/// releases the lock.
 pub async fn try_acquire_schedule_lock(
     pool: &PgPool,
     schedule_name: &str,
-) -> Result<Option<PoolConnection<Postgres>>, sqlx::Error> {
+) -> Result<Option<Transaction<'static, Postgres>>, sqlx::Error> {
     let key = schedule_lock_key(schedule_name);
-    let mut conn = pool.acquire().await?;
+    let mut tx = pool.begin().await?;
     let result: (bool,) = sqlx::query_as(TRY_ACQUIRE_LOCK_SQL)
         .bind(key)
-        .fetch_one(&mut *conn)
+        .fetch_one(tx.as_mut())
         .await?;
     if result.0 {
-        Ok(Some(conn))
+        Ok(Some(tx))
     } else {
         Ok(None)
     }
 }
 
-/// Release a per-schedule advisory lock.
+/// Release a per-schedule advisory lock by committing its holder transaction.
 pub async fn release_schedule_lock(
-    mut conn: PoolConnection<Postgres>,
-    schedule_name: &str,
+    tx: Transaction<'static, Postgres>,
 ) -> Result<(), sqlx::Error> {
-    let key = schedule_lock_key(schedule_name);
-    sqlx::query(RELEASE_LOCK_SQL)
-        .bind(key)
-        .execute(&mut *conn)
-        .await?;
-    Ok(())
+    tx.commit().await
 }
 
 fn schedule_lock_key(schedule_name: &str) -> i64 {
@@ -262,8 +238,8 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_lock_key_is_constant() {
-        assert_ne!(SCHEDULER_LOCK_KEY, 0);
+    fn schedule_lock_sql_is_xact_scoped() {
+        assert!(TRY_ACQUIRE_LOCK_SQL.contains("pg_try_advisory_xact_lock($1)"));
     }
 
     #[test]

@@ -242,9 +242,9 @@ pub fn spawn_reaper(
                         ReaperGate::Ungated => {
                             run_reaper_pass(&pool, &config, &mut next_retention_cleanup).await;
                         }
-                        ReaperGate::Held(mut conn) => {
+                        ReaperGate::Held(tx) => {
                             run_reaper_pass(&pool, &config, &mut next_retention_cleanup).await;
-                            release_reaper_gate(&mut conn).await;
+                            release_reaper_gate(tx).await;
                         }
                     }
                 }
@@ -255,8 +255,9 @@ pub fn spawn_reaper(
 
 /// Outcome of trying to acquire the cluster-wide reaper gate.
 enum ReaperGate {
-    /// Gate held on a dedicated connection; release after the pass.
-    Held(sqlx::pool::PoolConnection<sqlx::Postgres>),
+    /// Gate held by an otherwise-idle transaction; commit after the pass to
+    /// release the xact-scoped lock.
+    Held(sqlx::Transaction<'static, sqlx::Postgres>),
     /// Another worker holds the gate this interval; skip the pass.
     Skip,
     /// Gating disabled (single-connection pool): run the pass ungated.
@@ -275,8 +276,13 @@ fn advisory_key_reaper() -> i64 {
     i64::from_be_bytes(bytes)
 }
 
-/// Try to acquire the reaper gate as a session-level advisory lock held on a
-/// dedicated connection for the duration of the pass.
+/// Try to acquire the reaper gate as a transaction-scoped advisory lock held
+/// by an otherwise-idle transaction for the duration of the pass.
+///
+/// Xact scoping keeps acquire and release on one server backend under
+/// PgBouncer transaction pooling (a session-level lock would not survive
+/// between round-trips there), and rollback-on-drop releases the lock on any
+/// error path.
 async fn acquire_reaper_gate(pool: &PgPool) -> ReaperGate {
     // The gate holds one connection while the pass body needs another; on a
     // single-connection pool that would deadlock, so run ungated. SKIP LOCKED
@@ -285,34 +291,30 @@ async fn acquire_reaper_gate(pool: &PgPool) -> ReaperGate {
     if pool.options().get_max_connections() < 2 {
         return ReaperGate::Ungated;
     }
-    let mut conn = match pool.acquire().await {
-        Ok(conn) => conn,
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
         Err(e) => {
             tracing::warn!(error = %e, "reaper gate connection unavailable; running ungated");
             return ReaperGate::Ungated;
         }
     };
-    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(advisory_key_reaper())
-        .fetch_one(&mut *conn)
+        .fetch_one(tx.as_mut())
         .await
         .unwrap_or(false);
     if acquired {
-        ReaperGate::Held(conn)
+        ReaperGate::Held(tx)
     } else {
         ReaperGate::Skip
     }
 }
 
-/// Release the reaper gate. Session advisory locks are not freed by returning a
-/// connection to the pool, so unlock explicitly before the connection drops.
-async fn release_reaper_gate(conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>) {
-    if let Err(e) = sqlx::query("SELECT pg_advisory_unlock($1)")
-        .bind(advisory_key_reaper())
-        .execute(&mut **conn)
-        .await
-    {
-        tracing::warn!(error = %e, "reaper gate unlock failed; lock frees when the connection closes");
+/// Release the reaper gate by committing its holder transaction (the
+/// xact-scoped lock frees on commit; on error it frees via rollback-on-drop).
+async fn release_reaper_gate(tx: sqlx::Transaction<'static, sqlx::Postgres>) {
+    if let Err(e) = tx.commit().await {
+        tracing::warn!(error = %e, "reaper gate commit failed; lock frees when the connection closes");
     }
 }
 

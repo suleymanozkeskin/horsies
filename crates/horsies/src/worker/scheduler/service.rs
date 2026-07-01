@@ -36,11 +36,12 @@ fn resolve_queue_priority(app_config: &AppConfig, queue_name: &str) -> i32 {
 ///
 /// The scheduler:
 /// 1. Initializes schedule state for all configured schedules
-/// 2. On each tick, acquires a transaction-scoped advisory lock (blocking),
-///    checks for due schedules, enqueues tasks, and commits (releasing the lock).
+/// 2. On each tick, checks for due schedules and enqueues their tasks.
 ///
-/// Multiple scheduler instances can coexist — they block on the advisory lock
-/// and take turns, matching Python's `pg_advisory_xact_lock` pattern.
+/// Multiple scheduler instances can coexist — each due schedule is guarded by
+/// a per-schedule transaction-scoped advisory try-lock (matching Python's
+/// `pg_advisory_xact_lock` key derivation), and enqueues are idempotent via
+/// slot-based task ids.
 ///
 /// The `app_config` is used to resolve queue priorities when enqueueing
 /// scheduled tasks, matching Python's `effective_priority()` behaviour.
@@ -224,20 +225,16 @@ async fn ensure_states_exist(pool: &sqlx::PgPool, schedules: &[TaskSchedule], no
 
 /// Check for due schedules and enqueue their tasks.
 ///
-/// Acquires a transaction-scoped advisory lock at the start of each tick
-/// so concurrent schedulers serialize instead of conflicting.
+/// No tick-level lock (parity with Python's `_check_and_run_schedules`):
+/// concurrent schedulers coordinate per schedule via
+/// `try_acquire_schedule_lock`, and `process_schedule` re-reads state under
+/// that lock before enqueueing.
 async fn check_and_enqueue(
     broker: &Arc<PostgresBroker>,
     schedules: &[TaskSchedule],
     check_interval_seconds: u32,
     app_config: &AppConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Acquire transaction-scoped advisory lock (blocking).
-    // Released automatically when the transaction commits at the end of this tick.
-    let mut tx = broker.pool().begin().await?;
-    state::acquire_scheduler_xact_lock(&mut tx).await?;
-    tx.commit().await?;
-
     let now = Utc::now();
 
     // Only query for enabled schedules — filter at the DB level.
@@ -266,9 +263,8 @@ async fn check_and_enqueue(
             continue;
         };
 
-        let lock_conn = match state::try_acquire_schedule_lock(broker.pool(), &schedule.name).await
-        {
-            Ok(Some(conn)) => conn,
+        let lock_tx = match state::try_acquire_schedule_lock(broker.pool(), &schedule.name).await {
+            Ok(Some(tx)) => tx,
             Ok(None) => {
                 tracing::debug!(schedule = %schedule.name, "schedule lock busy, skipping");
                 continue;
@@ -282,7 +278,7 @@ async fn check_and_enqueue(
         let schedule_result =
             process_schedule(broker, schedule, now, check_interval_seconds, app_config).await;
 
-        if let Err(e) = state::release_schedule_lock(lock_conn, &schedule.name).await {
+        if let Err(e) = state::release_schedule_lock(lock_tx).await {
             tracing::error!(schedule = %schedule.name, error = %e, "failed to release schedule lock");
         }
 
