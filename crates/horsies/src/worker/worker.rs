@@ -550,12 +550,13 @@ impl Worker {
     /// Claim tasks from all queues and dispatch them.
     /// Returns `true` if any tasks were claimed (or buffered tasks dispatched).
     ///
-    /// Supports two modes:
+    /// Budget semantics, computed server-side by `horsies_claim` under the
+    /// pass's advisory locks (parity with horsies PR #160):
     /// - **Hard cap** (`prefetch_buffer == 0`): budget =
-    ///   `concurrency - (RUNNING + CLAIMED)` for this worker.
+    ///   `concurrency - (RUNNING + active CLAIMED)` for this worker.
     /// - **Soft cap / prefetch** (`prefetch_buffer > 0`): budget =
-    ///   `concurrency + prefetch_buffer - running_count`. Claims extra tasks
-    ///   with a lease; they sit CLAIMED until a semaphore permit opens up.
+    ///   `concurrency + prefetch_buffer - RUNNING - CLAIMED`. Claims extra
+    ///   tasks with a lease; they sit CLAIMED until a permit opens up.
     ///
     /// When `cluster_wide_cap` is set (hard cap mode only), the budget is
     /// further reduced so the total RUNNING + CLAIMED tasks across ALL
@@ -606,135 +607,52 @@ impl Worker {
         }
 
         // ── Claim new tasks ──
-        let claim_expires_at = self
-            .app_config
-            .claim_lease_ms
-            .map(|ms| Utc::now() + chrono::Duration::milliseconds(ms as i64));
-
-        // Pre-allocate with estimated capacity based on concurrency settings.
-        let estimated_capacity = if soft_cap_mode {
-            self.worker_config.concurrency + prefetch
-        } else {
-            self.semaphore.available_permits() as u32
-        };
-        let mut claimed_rows: Vec<crate::broker::ClaimedTaskRow> =
-            Vec::with_capacity(estimated_capacity as usize);
-
-        // The exact list the claim loop iterates; also drives the lock keys, so
-        // the locks held and the queues claimed are provably the same set.
+        // The critical section (advisory-lock acquisition, cap accounting,
+        // budget math, windowed claim) is one server-side statement —
+        // `horsies_claim`, parity with horsies PR #160 — so the xact-scoped
+        // locks are never held across a client round trip and a stalled
+        // worker cannot freeze other claimers mid-pass. The checks above are
+        // cheap local early-exits; the function recomputes the budget
+        // authoritatively under the locks. The queue list drives the lock
+        // keys, so the locks held and the queues claimed are provably the
+        // same set.
         let ordered = self.ordered_queues();
-
-        {
-            let mut tx = self.broker.pool().begin().await?;
-            // Serialize claim rounds with advisory transaction locks only when cap
-            // accounting requires it (one global key for a cluster cap, else one key
-            // per capped queue in this pass); otherwise SKIP LOCKED alone suffices.
-            // Keys are sorted, so concurrent multi-key acquisition can't deadlock.
-            for key in self.claim_lock_keys(&ordered) {
-                self.broker.advisory_xact_lock(&mut tx, key).await?;
-            }
-
-            let hard_cap_mode = !soft_cap_mode;
-            let mut total_remaining = if hard_cap_mode {
-                self.semaphore.available_permits() as u32
-            } else {
-                // Soft cap: the local prefetch budget must subtract already-CLAIMED
-                // rows too, so a worker cannot hoard beyond concurrency + prefetch.
-                let running = self
-                    .broker
-                    .count_running_for_worker_tx(&mut tx, &self.worker_id)
-                    .await? as u32;
-                (self.worker_config.concurrency + prefetch)
-                    .saturating_sub(running)
-                    .saturating_sub(claimed_count)
-            };
-
-            // Bound by the remaining per-worker claim allowance. With
-            // max_claim_batch = 0 (auto-fill), a single pass can fill the whole
-            // per-queue budget, so this cap is what keeps total CLAIMED within
-            // max_claim_per_worker.
-            let remaining_claim_allowance = max_claimed.saturating_sub(claimed_count);
-            total_remaining = total_remaining.min(remaining_claim_allowance);
-
-            // Cluster-wide cap (hard cap mode only).
-            if hard_cap_mode {
-                if let Some(cap) = self.app_config.cluster_wide_cap {
-                    let global_in_flight =
-                        self.broker.count_global_in_flight_tx(&mut tx).await? as u32;
-                    let global_remaining = cap.saturating_sub(global_in_flight);
-                    total_remaining = total_remaining.min(global_remaining);
-                }
-            }
-
-            if total_remaining == 0 {
-                tx.commit().await?;
-                return Ok(dispatched_buffered > 0);
-            }
-
-            // Per-queue cap counts in one statement, for every queue carrying a
-            // `queue_max_concurrency` entry (independent of `queue_priorities`, so
-            // the cap is enforced in round-robin mode too). Claims are per-queue and
-            // each queue appears once in `ordered`, so a queue's count is unaffected
-            // by claiming any other queue this pass: reading them all up front equals
-            // the former per-queue-in-loop reads (parity with horsies PR #132).
-            let queue_counts: std::collections::HashMap<String, (i64, i64)> = {
-                let capped: Vec<String> = ordered
-                    .iter()
-                    .filter(|q| self.worker_config.queue_max_concurrency.contains_key(*q))
-                    .cloned()
-                    .collect();
-                if capped.is_empty() {
-                    std::collections::HashMap::new()
-                } else {
-                    self.broker.count_inflight_by_queue_tx(&mut tx, &capped).await?
-                }
-            };
-
-            for queue in &ordered {
-                if total_remaining == 0 {
-                    break;
-                }
-
-                // A positive max_claim_batch is an explicit per-queue fairness cap;
-                // the default 0 fills the remaining worker/queue budget (in both
-                // round-robin and priority modes).
-                let mut per_queue_cap = if self.worker_config.max_claim_batch > 0 {
-                    self.worker_config.max_claim_batch
-                } else {
-                    total_remaining
-                };
-
-                if let Some(&max_q) = self.worker_config.queue_max_concurrency.get(queue) {
-                    let (hard, soft) = queue_counts.get(queue).copied().unwrap_or((0, 0));
-                    let in_flight_q = if hard_cap_mode { hard } else { soft } as u32;
-                    let q_remaining = max_q.saturating_sub(in_flight_q);
-                    per_queue_cap = per_queue_cap.min(q_remaining);
-                }
-
-                let to_claim = total_remaining.min(per_queue_cap);
-                if to_claim == 0 {
-                    continue;
-                }
-
-                let rows = self
-                    .broker
-                    .claim_in_tx(
-                        &mut tx,
-                        queue,
-                        to_claim as i32,
-                        &self.worker_id,
-                        claim_expires_at,
-                    )
-                    .await?;
-
-                if !rows.is_empty() {
-                    total_remaining = total_remaining.saturating_sub(rows.len() as u32);
-                    claimed_rows.extend(rows);
-                }
-            }
-
-            tx.commit().await?;
-        }
+        let queue_priority: std::collections::HashMap<String, i32> = ordered
+            .iter()
+            .map(|q| {
+                let priority = self
+                    .worker_config
+                    .queue_priorities
+                    .get(q)
+                    .copied()
+                    .unwrap_or(100);
+                (q.clone(), priority)
+            })
+            .collect();
+        let queue_max_concurrency: std::collections::HashMap<String, u32> = ordered
+            .iter()
+            .filter_map(|q| {
+                self.worker_config
+                    .queue_max_concurrency
+                    .get(q)
+                    .map(|&cap| (q.clone(), cap))
+            })
+            .collect();
+        let params = crate::broker::ClaimPassParams {
+            worker_id: self.worker_id.clone(),
+            lock_keys: self.claim_lock_keys(&ordered),
+            queues: ordered,
+            queue_priority,
+            queue_max_concurrency,
+            hard_cap_mode: !soft_cap_mode,
+            processes: self.worker_config.concurrency,
+            prefetch_buffer: prefetch,
+            max_claim_per_worker: self.worker_config.max_claim_per_worker,
+            max_claim_batch: self.worker_config.max_claim_batch,
+            cluster_wide_cap: self.app_config.cluster_wide_cap,
+            claim_lease_ms: self.app_config.claim_lease_ms,
+        };
+        let mut claimed_rows = self.broker.claim_batch(&params).await?;
 
         if claimed_rows.is_empty() {
             return Ok(dispatched_buffered > 0);

@@ -18,7 +18,7 @@ pub use health::{
 };
 pub use listener::NotifyListener;
 pub use migrations::{run_horsies_migrations, MIGRATIONS_TABLE};
-pub use postgres::{compute_enqueue_sha, PostgresBroker, UPSERT_TASK_ATTEMPT_SQL};
+pub use postgres::{compute_enqueue_sha, ClaimPassParams, PostgresBroker, UPSERT_TASK_ATTEMPT_SQL};
 pub use result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult};
 pub use row::heartbeat::HeartbeatRow;
 pub use row::task::{

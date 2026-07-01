@@ -98,6 +98,16 @@ FROM next
 WHERE t.id = next.id
 RETURNING t.id, t.task_name, t.args, t.kwargs, t.retry_count, t.max_retries, t.task_options, t.queue_name, t.good_until, t.is_workflow_task";
 
+// One server-side call performs advisory-lock acquisition + cap counts + the
+// windowed claim (see horsies_claim, migrations/0024_claim_function.sql;
+// parity with horsies PR #160). The xact-scoped locks live only for the
+// statement's own transaction — never across a client round trip. Replaces
+// the per-pass lock loop + count statements + per-queue CLAIM_SQL loop.
+const HORSIES_CLAIM_SQL: &str = "\
+SELECT id, task_name, args, kwargs, retry_count, max_retries, task_options, \
+       queue_name, good_until, is_workflow_task \
+FROM horsies_claim($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
+
 // CLAIMED -> RUNNING transition with the first runner heartbeat fused in (parity
 // with horsies PR #134): the heartbeat row is inserted in the same statement as the
 // transition, so a task is never observable RUNNING without heartbeat coverage, and
@@ -305,10 +315,6 @@ SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
 FROM horsies_tasks
 WHERE id = $1";
 
-/// Transaction-scoped advisory lock to serialize claims across workers.
-const ADVISORY_XACT_LOCK_SQL: &str = "\
-SELECT pg_advisory_xact_lock($1)";
-
 /// Count all RUNNING + active CLAIMED tasks across every worker in the cluster.
 /// Excludes expired claims (reclaimable, must not consume cap budget).
 const COUNT_GLOBAL_IN_FLIGHT_SQL: &str = "\
@@ -317,33 +323,10 @@ WHERE status = 'RUNNING' \
    OR (status = 'CLAIMED' \
        AND (claim_expires_at IS NULL OR claim_expires_at > now()))";
 
-/// Count RUNNING + active CLAIMED tasks for a specific worker.
-const COUNT_IN_FLIGHT_FOR_WORKER_SQL: &str = "\
-SELECT COUNT(*) FROM horsies_tasks \
-WHERE claimed_by_worker_id = $1 \
-  AND (status = 'RUNNING' \
-       OR (status = 'CLAIMED' \
-           AND (claim_expires_at IS NULL OR claim_expires_at > now())))";
-
 /// Count only RUNNING tasks for a specific worker.
 const COUNT_RUNNING_FOR_WORKER_SQL: &str = "\
 SELECT COUNT(*) FROM horsies_tasks \
 WHERE claimed_by_worker_id = $1 AND status = 'RUNNING'";
-
-/// Per-queue cap counts for the claim pass in one statement: for each requested
-/// queue, `hard_cnt` = RUNNING + active CLAIMED (hard-cap mode) and `soft_cnt` =
-/// RUNNING only (soft-cap mode). One grouped scan replaces the former
-/// per-capped-queue count round trips (parity with horsies PR #132). Queues with
-/// no in-flight rows are absent from the result and treated as zero by the caller.
-const COUNT_INFLIGHT_BY_QUEUE_SQL: &str = "\
-SELECT queue_name, \
-       COUNT(*) FILTER (WHERE status = 'RUNNING' \
-           OR (status = 'CLAIMED' \
-               AND (claim_expires_at IS NULL OR claim_expires_at > now())))::bigint AS hard_cnt, \
-       COUNT(*) FILTER (WHERE status = 'RUNNING')::bigint AS soft_cnt \
-FROM horsies_tasks \
-WHERE queue_name = ANY($1) AND status IN ('RUNNING', 'CLAIMED') \
-GROUP BY queue_name";
 
 /// Load CLAIMED tasks owned by a specific worker (for prefetch buffer dispatch).
 const LOAD_BUFFERED_CLAIMED_SQL: &str = "\
@@ -668,6 +651,32 @@ fn prepared_statement_tracking_error(err: sqlx::Error) -> BrokerError {
          statement support, or use a direct/session-capable database_url for Rust \
          SQLx clients: {err}",
     ))
+}
+
+/// Inputs to one `horsies_claim` pass (parity with horsies PR #160): the
+/// serviced queue set with its priority/cap config, the budget knobs, and the
+/// advisory lock keys the pass must hold.
+#[derive(Debug, Clone)]
+pub struct ClaimPassParams {
+    pub worker_id: String,
+    /// Queues this pass claims from, in claim order.
+    pub queues: Vec<String>,
+    /// Queue priority per serviced queue (absent entries default to 100
+    /// server-side; callers pass the resolved map for parity with Python).
+    pub queue_priority: std::collections::HashMap<String, i32>,
+    /// `max_concurrency` for the capped queues in `queues` only.
+    pub queue_max_concurrency: std::collections::HashMap<String, u32>,
+    /// `prefetch_buffer == 0`: budget counts RUNNING + active CLAIMED.
+    pub hard_cap_mode: bool,
+    pub processes: u32,
+    pub prefetch_buffer: u32,
+    pub max_claim_per_worker: u32,
+    pub max_claim_batch: u32,
+    pub cluster_wide_cap: Option<u32>,
+    /// `None` claims with `claim_expires_at = NULL` (no lease expiry).
+    pub claim_lease_ms: Option<u32>,
+    /// Advisory keys for consistent cap accounting; acquired ascending.
+    pub lock_keys: Vec<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1169,26 +1178,40 @@ impl PostgresBroker {
         Ok(rows)
     }
 
-    /// Claim up to `limit` tasks from the given queue within an open transaction.
+    /// Run one collapsed claim pass via `horsies_claim` (parity with horsies
+    /// PR #160).
     ///
-    /// Returns full task rows atomically — no separate load step needed.
-    pub async fn claim_in_tx(
+    /// One server-side statement acquires the advisory locks (ascending key
+    /// order), computes all cap accounting under that lock snapshot, and runs
+    /// the two-arm windowed claim. The statement executes in its own implicit
+    /// transaction, so the xact-scoped locks are released at statement end —
+    /// never held across a client round trip.
+    pub async fn claim_batch(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
-        queue_name: &str,
-        limit: i32,
-        worker_id: &str,
-        claim_expires_at: Option<DateTime<Utc>>,
+        params: &ClaimPassParams,
     ) -> Result<Vec<ClaimedTaskRow>, BrokerError> {
-        let rows: Vec<ClaimedTaskRow> = sqlx::query_as(CLAIM_SQL)
-            .bind(queue_name)
-            .bind(limit)
-            .bind(worker_id)
-            .bind(claim_expires_at)
-            .fetch_all(tx.as_mut())
+        let rows: Vec<ClaimedTaskRow> = sqlx::query_as(HORSIES_CLAIM_SQL)
+            .bind(&params.worker_id)
+            .bind(sqlx::types::Json(&params.queues))
+            .bind(sqlx::types::Json(&params.queue_priority))
+            .bind(sqlx::types::Json(&params.queue_max_concurrency))
+            .bind(params.hard_cap_mode)
+            .bind(i32::try_from(params.processes).unwrap_or(i32::MAX))
+            .bind(i32::try_from(params.prefetch_buffer).unwrap_or(i32::MAX))
+            .bind(i32::try_from(params.max_claim_per_worker).unwrap_or(i32::MAX))
+            .bind(i32::try_from(params.max_claim_batch).unwrap_or(i32::MAX))
+            .bind(
+                params
+                    .cluster_wide_cap
+                    .map(|cap| i32::try_from(cap).unwrap_or(i32::MAX)),
+            )
+            .bind(params.claim_lease_ms.map(i64::from))
+            .bind(sqlx::types::Json(&params.lock_keys))
+            .fetch_all(&self.pool)
             .await
             .map_err(BrokerError::Database)?;
 
+        tracing::debug!(count = rows.len(), "claim pass claimed tasks");
         Ok(rows)
     }
 
@@ -1714,82 +1737,6 @@ impl PostgresBroker {
             .await
             .map_err(BrokerError::Database)?;
         Ok(count.0)
-    }
-
-    /// Acquire the global claim advisory lock within an existing transaction.
-    pub async fn advisory_xact_lock(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        key: i64,
-    ) -> Result<(), BrokerError> {
-        sqlx::query(ADVISORY_XACT_LOCK_SQL)
-            .bind(key)
-            .execute(tx.as_mut())
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(())
-    }
-
-    /// Count all RUNNING + CLAIMED tasks across the cluster inside a transaction.
-    pub async fn count_global_in_flight_tx(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-    ) -> Result<i64, BrokerError> {
-        let count: (i64,) = sqlx::query_as(COUNT_GLOBAL_IN_FLIGHT_SQL)
-            .fetch_one(tx.as_mut())
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(count.0)
-    }
-
-    /// Count RUNNING + CLAIMED tasks for a specific worker inside a transaction.
-    pub async fn count_in_flight_for_worker_tx(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        worker_id: &str,
-    ) -> Result<i64, BrokerError> {
-        let count: (i64,) = sqlx::query_as(COUNT_IN_FLIGHT_FOR_WORKER_SQL)
-            .bind(worker_id)
-            .fetch_one(tx.as_mut())
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(count.0)
-    }
-
-    /// Count RUNNING tasks for a specific worker inside a transaction.
-    pub async fn count_running_for_worker_tx(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        worker_id: &str,
-    ) -> Result<i64, BrokerError> {
-        let count: (i64,) = sqlx::query_as(COUNT_RUNNING_FOR_WORKER_SQL)
-            .bind(worker_id)
-            .fetch_one(tx.as_mut())
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(count.0)
-    }
-
-    /// Per-queue cap counts for the requested queues in one statement.
-    ///
-    /// Returns `queue -> (hard_in_flight, soft_running)`: `hard` = RUNNING +
-    /// active CLAIMED (hard-cap mode), `soft` = RUNNING only (soft-cap mode).
-    /// Queues with no in-flight rows are absent from the map; the caller treats a
-    /// missing queue as zero.
-    pub async fn count_inflight_by_queue_tx(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        queues: &[String],
-    ) -> Result<std::collections::HashMap<String, (i64, i64)>, BrokerError> {
-        let rows: Vec<(String, i64, i64)> = sqlx::query_as(COUNT_INFLIGHT_BY_QUEUE_SQL)
-            .bind(queues)
-            .fetch_all(tx.as_mut())
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(rows
-            .into_iter()
-            .map(|(queue, hard, soft)| (queue, (hard, soft)))
-            .collect())
     }
 
     /// Count only RUNNING tasks for a specific worker.
@@ -3141,11 +3088,11 @@ pub fn compute_enqueue_sha(
 }
 
 #[cfg(test)]
-mod claim_pass_counts_tests {
-    //! Equivalence pin for the collapsed per-queue claim-pass counts (parity with
-    //! horsies PR #132): `count_inflight_by_queue_tx` must return, per queue,
-    //! hard = RUNNING + active-CLAIMED and soft = RUNNING, matching the former
-    //! per-queue count statements (incl. the CLAIMED-expired-lease edge).
+mod horsies_claim_tests {
+    //! Contract pins for the collapsed server-side claim (parity with horsies
+    //! PR #160 tests `463e665`): selection order, per-queue/cluster caps,
+    //! max_claim_batch, max_claim_per_worker guard, expired-CLAIMED reclaim,
+    //! nullable lease.
     use super::*;
     use serial_test::serial;
     use uuid::Uuid;
@@ -3170,14 +3117,25 @@ mod claim_pass_counts_tests {
         format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
     }
 
-    /// Insert a task in `queue` with `status` and an optional lease offset (seconds
-    /// from now; negative = expired). `lease` only matters for CLAIMED rows.
+    /// Connect and ensure migrations (incl. `horsies_claim`) are applied.
+    async fn connect_migrated() -> PostgresBroker {
+        let broker = PostgresBroker::connect(&test_db_url())
+            .await
+            .expect("connect");
+        broker.migrate().await.expect("migrate");
+        broker
+    }
+
+    /// Insert a task; `lease_offset_secs` (negative = expired) and `owner`
+    /// only matter for CLAIMED/RUNNING rows.
     async fn seed(
         pool: &sqlx::PgPool,
         queue: &str,
         status: &str,
+        priority: i32,
+        owner: Option<&str>,
         lease_offset_secs: Option<i64>,
-    ) {
+    ) -> String {
         let id = Uuid::new_v4().to_string();
         let expires = lease_offset_secs.map(|s| Utc::now() + chrono::Duration::seconds(s));
         sqlx::query(
@@ -3187,58 +3145,300 @@ mod claim_pass_counts_tests {
                 enqueue_sha, claimed_by_worker_id, claim_expires_at,
                 is_workflow_task, created_at, updated_at
             ) VALUES (
-                $1, 'pr132_task', $2, 0, '[]', '{}',
-                $3, NOW(), NOW(), 0,
-                $1, 'w1', $4,
+                $1, 'pr160_task', $2, $3, '[]', '{}',
+                $4, NOW(), NOW(), 0,
+                $1, $5, $6,
                 FALSE, NOW(), NOW()
             )",
         )
         .bind(&id)
         .bind(queue)
+        .bind(priority)
         .bind(status)
+        .bind(owner)
         .bind(expires)
         .execute(pool)
         .await
         .expect("seed task");
+        id
+    }
+
+    fn base_params(worker_id: &str, queues: &[String]) -> ClaimPassParams {
+        ClaimPassParams {
+            worker_id: worker_id.to_owned(),
+            queues: queues.to_vec(),
+            queue_priority: queues.iter().map(|q| (q.clone(), 100)).collect(),
+            queue_max_concurrency: std::collections::HashMap::new(),
+            hard_cap_mode: true,
+            processes: 10,
+            prefetch_buffer: 0,
+            max_claim_per_worker: 0,
+            max_claim_batch: 0,
+            cluster_wide_cap: None,
+            claim_lease_ms: Some(60_000),
+            lock_keys: Vec::new(),
+        }
+    }
+
+    async fn cleanup(pool: &sqlx::PgPool, queues: &[String]) {
+        sqlx::query("DELETE FROM horsies_tasks WHERE queue_name = ANY($1)")
+            .bind(queues)
+            .execute(pool)
+            .await
+            .expect("cleanup");
     }
 
     #[tokio::test]
     #[serial]
-    async fn per_queue_hard_soft_counts_match_predicates() {
-        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+    async fn budget_one_picks_higher_priority_queue_then_task_priority() {
+        let broker = connect_migrated().await;
         let pool = broker.pool().clone();
-        let suffix = Uuid::new_v4().to_string();
-        let qa = format!("pr132_a_{suffix}");
-        let qb = format!("pr132_b_{suffix}");
+        let suffix = Uuid::new_v4().simple().to_string();
+        let wid = format!("w-{suffix}");
+        let qa = format!("pr160_a_{suffix}");
+        let qb = format!("pr160_b_{suffix}");
+        let queues = vec![qa.clone(), qb.clone()];
 
-        // q_a: RUNNING + CLAIMED(unexpired) + CLAIMED(expired) + PENDING
-        seed(&pool, &qa, "RUNNING", None).await;
-        seed(&pool, &qa, "CLAIMED", Some(600)).await;
-        seed(&pool, &qa, "CLAIMED", Some(-600)).await;
-        seed(&pool, &qa, "PENDING", None).await;
-        // q_b: a single RUNNING
-        seed(&pool, &qb, "RUNNING", None).await;
+        // qb carries the better task priority (0 vs 5), but qa has the better
+        // QUEUE priority — queue rank must win the global ordering.
+        seed(&pool, &qa, "PENDING", 5, None, None).await;
+        let qb_id = seed(&pool, &qb, "PENDING", 0, None, None).await;
 
-        let qc = format!("pr132_c_{suffix}"); // no rows
-        let queues = vec![qa.clone(), qb.clone(), qc.clone()];
+        let mut params = base_params(&wid, &queues);
+        params.processes = 1; // budget of exactly 1
+        params.queue_priority.insert(qa.clone(), 10);
+        params.queue_priority.insert(qb.clone(), 20);
 
-        let mut tx = pool.begin().await.expect("begin");
-        let counts = broker
-            .count_inflight_by_queue_tx(&mut tx, &queues)
-            .await
-            .expect("counts");
-        tx.commit().await.expect("commit");
+        let rows = broker.claim_batch(&params).await.expect("claim");
+        assert_eq!(rows.len(), 1, "budget of 1 claims exactly one row");
+        assert_eq!(rows[0].queue_name, qa, "queue priority outranks task priority");
 
-        // hard = RUNNING + CLAIMED-unexpired (expired CLAIMED counts nowhere).
-        assert_eq!(counts.get(&qa).copied(), Some((2, 1)), "q_a hard=2 soft=1");
-        assert_eq!(counts.get(&qb).copied(), Some((1, 1)), "q_b hard=1 soft=1");
-        assert!(counts.get(&qc).is_none(), "empty queue absent (treated as 0)");
+        // Same budget, equal queue priorities: task priority decides.
+        cleanup(&pool, &queues).await;
+        seed(&pool, &qa, "PENDING", 5, None, None).await;
+        let qb_id2 = seed(&pool, &qb, "PENDING", 0, None, None).await;
+        let params_flat = {
+            let mut p = base_params(&wid, &queues);
+            p.processes = 1;
+            p.worker_id = format!("w2-{suffix}");
+            p
+        };
+        let rows = broker.claim_batch(&params_flat).await.expect("claim");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, qb_id2, "equal queue rank falls back to task priority");
 
-        sqlx::query("DELETE FROM horsies_tasks WHERE queue_name = ANY($1)")
-            .bind(&queues)
-            .execute(&pool)
-            .await
-            .expect("cleanup");
+        let _ = qb_id;
+        cleanup(&pool, &queues).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn per_queue_cap_subtracts_in_flight_and_never_over_claims() {
+        let broker = connect_migrated().await;
+        let pool = broker.pool().clone();
+        let suffix = Uuid::new_v4().simple().to_string();
+        let wid = format!("w-{suffix}");
+        let qa = format!("pr160_cap_{suffix}");
+        let queues = vec![qa.clone()];
+
+        // Cap 2 with one RUNNING (other worker) -> exactly 1 claimable.
+        seed(&pool, &qa, "RUNNING", 0, Some("other-worker"), None).await;
+        for _ in 0..5 {
+            seed(&pool, &qa, "PENDING", 0, None, None).await;
+        }
+
+        let mut params = base_params(&wid, &queues);
+        params.queue_max_concurrency.insert(qa.clone(), 2);
+
+        let rows = broker.claim_batch(&params).await.expect("claim");
+        assert_eq!(rows.len(), 1, "cap 2 minus 1 in-flight = 1 claim");
+
+        // A second pass sees cap exhausted (1 RUNNING + 1 CLAIMED) -> 0.
+        let rows = broker.claim_batch(&params).await.expect("claim");
+        assert!(rows.is_empty(), "cap exhausted, nothing claimed");
+
+        cleanup(&pool, &queues).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn cluster_cap_limits_total_claims() {
+        let broker = connect_migrated().await;
+        let pool = broker.pool().clone();
+        let suffix = Uuid::new_v4().simple().to_string();
+        let wid = format!("w-{suffix}");
+        let qa = format!("pr160_cluster_{suffix}");
+        let queues = vec![qa.clone()];
+
+        for _ in 0..5 {
+            seed(&pool, &qa, "PENDING", 0, None, None).await;
+        }
+
+        // The global in-flight count spans the whole table; anchor the cap on
+        // the current value so leftover rows from other suites don't skew it.
+        let global_now = broker.count_global_in_flight().await.expect("count") as u32;
+        let mut params = base_params(&wid, &queues);
+        params.cluster_wide_cap = Some(global_now + 2);
+
+        let rows = broker.claim_batch(&params).await.expect("claim");
+        assert_eq!(rows.len(), 2, "cluster cap leaves room for exactly 2");
+
+        cleanup(&pool, &queues).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn max_claim_batch_caps_each_queue() {
+        let broker = connect_migrated().await;
+        let pool = broker.pool().clone();
+        let suffix = Uuid::new_v4().simple().to_string();
+        let wid = format!("w-{suffix}");
+        let qa = format!("pr160_batch_{suffix}");
+        let queues = vec![qa.clone()];
+
+        for _ in 0..5 {
+            seed(&pool, &qa, "PENDING", 0, None, None).await;
+        }
+
+        let mut params = base_params(&wid, &queues);
+        params.max_claim_batch = 2;
+
+        let rows = broker.claim_batch(&params).await.expect("claim");
+        assert_eq!(rows.len(), 2, "max_claim_batch bounds the per-queue window");
+
+        cleanup(&pool, &queues).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn expired_claimed_row_is_reclaimed() {
+        let broker = connect_migrated().await;
+        let pool = broker.pool().clone();
+        let suffix = Uuid::new_v4().simple().to_string();
+        let wid = format!("w-{suffix}");
+        let qa = format!("pr160_exp_{suffix}");
+        let queues = vec![qa.clone()];
+
+        let expired_id =
+            seed(&pool, &qa, "CLAIMED", 0, Some("dead-worker"), Some(-600)).await;
+        // Active claim by another worker must NOT be reclaimed.
+        seed(&pool, &qa, "CLAIMED", 0, Some("live-worker"), Some(600)).await;
+
+        let params = base_params(&wid, &queues);
+        let rows = broker.claim_batch(&params).await.expect("claim");
+        assert_eq!(rows.len(), 1, "only the expired claim is eligible");
+        assert_eq!(rows[0].id, expired_id);
+
+        let owner: (Option<String>,) =
+            sqlx::query_as("SELECT claimed_by_worker_id FROM horsies_tasks WHERE id = $1")
+                .bind(&expired_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read owner");
+        assert_eq!(owner.0.as_deref(), Some(wid.as_str()));
+
+        cleanup(&pool, &queues).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn null_lease_claims_without_expiry_and_lease_sets_it() {
+        let broker = connect_migrated().await;
+        let pool = broker.pool().clone();
+        let suffix = Uuid::new_v4().simple().to_string();
+        let wid = format!("w-{suffix}");
+        let qa = format!("pr160_lease_{suffix}");
+        let queues = vec![qa.clone()];
+
+        let a = seed(&pool, &qa, "PENDING", 0, None, None).await;
+        let b = seed(&pool, &qa, "PENDING", 0, None, None).await;
+
+        let mut params = base_params(&wid, &queues);
+        params.claim_lease_ms = None;
+        params.max_claim_batch = 1;
+        let rows = broker.claim_batch(&params).await.expect("claim");
+        assert_eq!(rows.len(), 1);
+
+        params.claim_lease_ms = Some(60_000);
+        let rows2 = broker.claim_batch(&params).await.expect("claim");
+        assert_eq!(rows2.len(), 1);
+
+        let leases: Vec<(String, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT id, claim_expires_at FROM horsies_tasks WHERE id = ANY($1)",
+        )
+        .bind(vec![a.clone(), b.clone()])
+        .fetch_all(&pool)
+        .await
+        .expect("read leases");
+        let lease_of = |id: &str| {
+            leases
+                .iter()
+                .find(|(row_id, _)| row_id == id)
+                .map(|(_, lease)| *lease)
+                .expect("row present")
+        };
+        assert!(
+            lease_of(&rows[0].id).is_none(),
+            "NULL p_lease_ms claims with claim_expires_at NULL",
+        );
+        assert!(
+            lease_of(&rows2[0].id).is_some(),
+            "explicit lease sets claim_expires_at",
+        );
+
+        cleanup(&pool, &queues).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn max_claim_per_worker_guard_returns_empty() {
+        let broker = connect_migrated().await;
+        let pool = broker.pool().clone();
+        let suffix = Uuid::new_v4().simple().to_string();
+        let wid = format!("w-{suffix}");
+        let qa = format!("pr160_guard_{suffix}");
+        let queues = vec![qa.clone()];
+
+        // Worker already holds 2 active claims; guard is 2 -> nothing claimed.
+        seed(&pool, &qa, "CLAIMED", 0, Some(&wid), Some(600)).await;
+        seed(&pool, &qa, "CLAIMED", 0, Some(&wid), Some(600)).await;
+        seed(&pool, &qa, "PENDING", 0, None, None).await;
+
+        let mut params = base_params(&wid, &queues);
+        params.max_claim_per_worker = 2;
+
+        let rows = broker.claim_batch(&params).await.expect("claim");
+        assert!(rows.is_empty(), "max_claim_per_worker guard short-circuits");
+
+        cleanup(&pool, &queues).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn soft_cap_budget_subtracts_running_and_claimed() {
+        let broker = connect_migrated().await;
+        let pool = broker.pool().clone();
+        let suffix = Uuid::new_v4().simple().to_string();
+        let wid = format!("w-{suffix}");
+        let qa = format!("pr160_soft_{suffix}");
+        let queues = vec![qa.clone()];
+
+        // budget = (processes 1 + prefetch 2) - RUNNING 1 - CLAIMED 1 = 1.
+        seed(&pool, &qa, "RUNNING", 0, Some(&wid), None).await;
+        seed(&pool, &qa, "CLAIMED", 0, Some(&wid), Some(600)).await;
+        for _ in 0..3 {
+            seed(&pool, &qa, "PENDING", 0, None, None).await;
+        }
+
+        let mut params = base_params(&wid, &queues);
+        params.hard_cap_mode = false;
+        params.processes = 1;
+        params.prefetch_buffer = 2;
+
+        let rows = broker.claim_batch(&params).await.expect("claim");
+        assert_eq!(rows.len(), 1, "soft budget = concurrency + prefetch - running - claimed");
+
+        cleanup(&pool, &queues).await;
     }
 }
 
