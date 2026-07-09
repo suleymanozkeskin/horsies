@@ -573,6 +573,7 @@ pub async fn on_workflow_task_complete(
             task_index,
             &row.on_error,
             error_json.as_deref().unwrap_or("{}"),
+            row.wf_paused,
         )
         .await?;
 
@@ -1286,8 +1287,12 @@ async fn fail_subworkflow_load(
         .fetch_one(pool)
         .await?;
 
+    // This path marks FAILED via UPDATE_WORKFLOW_TASK_FAILED_SQL (no atomic
+    // pause_wf), so the pause below still wins the RUNNING -> PAUSED transition:
+    // wf_paused = false.
     let should_continue =
-        handle_workflow_task_failure(pool, workflow_id, task_index, &on_error, &error_json).await?;
+        handle_workflow_task_failure(pool, workflow_id, task_index, &on_error, &error_json, false)
+            .await?;
     if !should_continue {
         // on_error=pause — workflow paused, no further processing.
         return Ok(());
@@ -1657,12 +1662,15 @@ pub async fn on_subworkflow_complete(
 
         let error_json = serde_json::to_string(&subworkflow_failed_error(&summary))?;
 
+        // Sub-workflow failures mark the node via UPDATE_SUBWORKFLOW_FAILED_SQL
+        // (no atomic pause_wf), so the pause still wins here: wf_paused = false.
         let should_continue = handle_workflow_task_failure(
             pool,
             parent_workflow_id,
             parent_task_index,
             &on_error,
             &error_json,
+            false,
         )
         .await?;
 
@@ -1720,6 +1728,10 @@ async fn handle_workflow_task_failure(
     task_index: i32,
     on_error: &str,
     error_json: &str,
+    // True when COMPLETE_WORKFLOW_TASK_SQL's `pause_wf` CTE already won the
+    // RUNNING -> PAUSED transition atomically. The separate pause below then
+    // no-ops, so this flag is what tells the pause arm it still owns the cascade.
+    wf_paused: bool,
 ) -> Result<bool, WorkflowError> {
     // Lock the workflow row for the duration of failure handling so concurrent
     // failure handlers are serialized. This makes the stored running error the
@@ -1767,10 +1779,13 @@ async fn handle_workflow_task_failure(
 
             tx.commit().await?;
 
-            if paused.is_none() {
-                // Another worker already paused/finalized this workflow; the
-                // RUNNING -> PAUSED transition was a no-op, so there is nothing
-                // to cascade. Stop processing dependents.
+            // This handler owns the cascade if it won the RUNNING -> PAUSED
+            // transition — via this statement OR the atomic `pause_wf` CTE in
+            // COMPLETE_WORKFLOW_TASK_SQL (`wf_paused`), which now typically wins
+            // it first and leaves the statement above a no-op. Only a genuine
+            // lost race (another actor paused/finalized the workflow before both)
+            // skips the cascade.
+            if paused.is_none() && !wf_paused {
                 return Ok(false);
             }
 
@@ -1781,8 +1796,7 @@ async fn handle_workflow_task_failure(
             );
 
             // Cascade the implicit pause to running child workflows, matching
-            // explicit pause behavior (mirrors Python PR #28). Only the handler
-            // that won the RUNNING -> PAUSED transition reaches this point.
+            // explicit pause behavior (mirrors Python PR #28).
             crate::workflow_engine::lifecycle::cascade_pause_to_children(pool, workflow_id).await?;
 
             Ok(false)
@@ -2939,6 +2953,97 @@ WHERE wt.workflow_id = $1
             .ok();
         sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    /// C16 (child cascade): an on_error=pause node failure must still pause the
+    /// workflow's RUNNING child workflows. The atomic `pause_wf` CTE wins the
+    /// parent RUNNING->PAUSED flip, so `handle_workflow_task_failure` must be told
+    /// it owns the cascade (via wf_paused) rather than skip it as a lost race.
+    #[tokio::test]
+    #[serial]
+    async fn on_error_pause_node_failure_cascades_pause_to_running_child() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let registry = WorkflowSpecRegistry::new();
+        let parent = Uuid::new_v4().to_string();
+        let child = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+
+        // Parent RUNNING (on_error=pause) with a RUNNING child workflow.
+        for (id, status, parent_of) in [
+            (&parent, "RUNNING", None),
+            (&child, "RUNNING", Some(&parent)),
+        ] {
+            sqlx::query(
+                "INSERT INTO horsies_workflows (
+                    id, name, status, on_error, output_task_index,
+                    definition_key, depth, root_workflow_id, parent_workflow_id,
+                    sent_at, created_at, started_at, updated_at
+                ) VALUES ($1, 'c16c_wf', $2, 'pause', NULL, 'test.c16c.v1', 0, $1, $3,
+                          NOW(), NOW(), NOW(), NOW())",
+            )
+            .bind(id)
+            .bind(status)
+            .bind(parent_of)
+            .execute(&pool)
+            .await
+            .expect("insert workflow");
+        }
+
+        // A RUNNING node on the parent, linked to the backing task id.
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                queue_name, priority, dependencies, allow_failed_deps, join_type,
+                status, is_subworkflow, task_id, created_at
+            ) VALUES ($1, $2, 0, 'node_0', 'c16c_task', '[]', '{}',
+                      'default', 100, '{}', FALSE, 'all',
+                      'RUNNING', FALSE, $3, NOW())",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&parent)
+        .bind(&task_id)
+        .execute(&pool)
+        .await
+        .expect("insert node");
+
+        let err = TaskError::builtin(OperationalErrorCode::TaskError, "boom");
+        let result_json =
+            serde_json::to_string(&TaskResult::<serde_json::Value>::Err(err)).unwrap();
+
+        on_workflow_task_complete(&pool, &task_id, &result_json, false, &registry)
+            .await
+            .expect("complete (fail) workflow task");
+
+        let parent_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+                .bind(&parent)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(parent_status, "PAUSED", "parent must pause on_error=pause");
+
+        let child_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+                .bind(&child)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            child_status, "PAUSED",
+            "the running child must be paused by the cascade (C16 regression)",
+        );
+
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+            .bind(&parent)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = ANY($1)")
+            .bind(vec![child.clone(), parent.clone()])
             .execute(&pool)
             .await
             .ok();
