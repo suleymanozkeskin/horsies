@@ -224,11 +224,32 @@ _WORKER_STATE_COLUMNS = """
         worker_started_at
 """
 
+# Recursive skip-scan: one (worker_id, snapshot_at DESC) index probe per
+# worker instead of a DISTINCT ON pass over the whole snapshot timeseries.
+# The timeseries holds days of per-worker rows (5s-30s cadence), so the
+# DISTINCT ON form reads every retained row to return one per worker —
+# measured at 10s on a 118k-row production table.
 LIST_WORKER_STATES_SQL = text(f"""
-    SELECT DISTINCT ON (worker_id)
+    WITH RECURSIVE latest AS (
+        (
+            SELECT
 {_WORKER_STATE_COLUMNS}
-    FROM horsies_worker_states
-    ORDER BY worker_id, snapshot_at DESC
+            FROM horsies_worker_states
+            ORDER BY worker_id, snapshot_at DESC
+            LIMIT 1
+        )
+        UNION ALL
+        SELECT nxt.* FROM latest l
+        CROSS JOIN LATERAL (
+            SELECT
+{_WORKER_STATE_COLUMNS}
+            FROM horsies_worker_states w
+            WHERE w.worker_id > l.worker_id
+            ORDER BY w.worker_id, w.snapshot_at DESC
+            LIMIT 1
+        ) nxt
+    )
+    SELECT * FROM latest
 """)
 
 GET_WORKER_STATE_LATEST_SQL = text(f"""

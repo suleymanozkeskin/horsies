@@ -102,9 +102,77 @@ async def test_list_worker_states_returns_latest_per_worker(
 
     assert is_ok(result)
     seeded = [s for s in result.ok_value if s.worker_id == worker_state_seed]
-    assert len(seeded) == 1, 'DISTINCT ON should collapse to one row per worker'
+    assert len(seeded) == 1, 'expected exactly one row per worker'
     assert seeded[0].tasks_running == 3  # newest snapshot
     assert seeded[0].queues == ['default', 'priority']
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_list_worker_states_covers_all_workers_including_stale(
+    broker: PostgresBroker,
+    session: AsyncSession,
+) -> None:
+    """Every distinct worker appears exactly once with its newest snapshot.
+
+    Regression for the recursive skip-scan form of ``LIST_WORKER_STATES_SQL``:
+    the walk must visit all worker_ids (not stop after the first), and a
+    worker whose snapshots are all old must still be listed.
+    """
+    prefix = f'itest-{uuid.uuid4().hex}'
+    now = datetime.now(timezone.utc)
+    base = {
+        'hostname': 'itest-host',
+        'pid': 4242,
+        'processes': 4,
+        'max_claim_batch': 8,
+        'max_claim_per_worker': 4,
+        'queues': ['default'],
+        'tasks_claimed': 0,
+        'worker_started_at': now - timedelta(days=3),
+    }
+    # (worker suffix, [(snapshot age, tasks_running), ...]) — newest last.
+    seeds: dict[str, list[tuple[timedelta, int]]] = {
+        f'{prefix}-fresh': [
+            (timedelta(seconds=30), 1),
+            (timedelta(seconds=10), 5),
+        ],
+        f'{prefix}-stale': [
+            (timedelta(days=2), 4),
+            (timedelta(days=1), 7),
+        ],
+        f'{prefix}-single': [(timedelta(seconds=20), 2)],
+    }
+    for worker_id, snapshots in seeds.items():
+        for age, running in snapshots:
+            await session.execute(
+                _INSERT_WORKER_STATE,
+                {
+                    **base,
+                    'worker_id': worker_id,
+                    'snapshot_at': now - age,
+                    'tasks_running': running,
+                },
+            )
+    await session.commit()
+
+    try:
+        result = await broker.list_worker_states_async()
+
+        assert is_ok(result)
+        seeded = {
+            s.worker_id: s for s in result.ok_value if s.worker_id in seeds
+        }
+        assert set(seeded) == set(seeds), 'every seeded worker must be listed'
+        assert seeded[f'{prefix}-fresh'].tasks_running == 5
+        assert seeded[f'{prefix}-stale'].tasks_running == 7
+        assert seeded[f'{prefix}-single'].tasks_running == 2
+    finally:
+        await session.execute(
+            text('DELETE FROM horsies_worker_states WHERE worker_id LIKE :p'),
+            {'p': f'{prefix}%'},
+        )
+        await session.commit()
 
 
 @pytest.mark.integration
