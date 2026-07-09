@@ -1972,10 +1972,14 @@ impl PostgresBroker {
         // fresh row. The cancelled row is never re-claimable, so it can't run as a
         // duplicate of the node after resume.
         if !paused_ids.is_empty() {
+            // One transaction: a crash between the task-cancel and the node-reset
+            // would otherwise leave a terminal CANCELLED task linked to a live
+            // node, which recovery Case 1.7 then completes as a node failure (C15).
+            let mut tx = self.pool.begin().await.map_err(BrokerError::Database)?;
             let cancelled: Vec<(String,)> = sqlx::query_as(CANCEL_PAUSED_OWNED_TASKS_SQL)
                 .bind(&paused_ids)
                 .bind(worker_id)
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *tx)
                 .await
                 .map_err(BrokerError::Database)?;
             let owned: Vec<String> = cancelled.into_iter().map(|(id,)| id).collect();
@@ -1983,10 +1987,11 @@ impl PostgresBroker {
             if !owned.is_empty() {
                 sqlx::query(RESET_WORKFLOW_TASKS_SQL)
                     .bind(&owned)
-                    .execute(&self.pool)
+                    .execute(&mut *tx)
                     .await
                     .map_err(BrokerError::Database)?;
             }
+            tx.commit().await.map_err(BrokerError::Database)?;
 
             tracing::debug!(
                 count = owned.len(),
@@ -1997,10 +2002,13 @@ impl PostgresBroker {
         // CANCELLED: hard-cancel this worker's own claimed rows and skip only the
         // workflow_task rows we owned.
         if !cancelled_ids.is_empty() {
+            // Same atomicity requirement as the PAUSED branch: task-cancel and
+            // node-skip must commit together (C15).
+            let mut tx = self.pool.begin().await.map_err(BrokerError::Database)?;
             let cancelled: Vec<(String,)> = sqlx::query_as(CANCEL_CANCELLED_OWNED_TASKS_SQL)
                 .bind(&cancelled_ids)
                 .bind(worker_id)
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *tx)
                 .await
                 .map_err(BrokerError::Database)?;
             let owned: Vec<String> = cancelled.into_iter().map(|(id,)| id).collect();
@@ -2008,10 +2016,11 @@ impl PostgresBroker {
             if !owned.is_empty() {
                 sqlx::query(SKIP_CANCELLED_WORKFLOW_TASKS_SQL)
                     .bind(&owned)
-                    .execute(&self.pool)
+                    .execute(&mut *tx)
                     .await
                     .map_err(BrokerError::Database)?;
             }
+            tx.commit().await.map_err(BrokerError::Database)?;
 
             tracing::debug!(
                 count = owned.len(),
@@ -4064,5 +4073,130 @@ mod get_result_wait_tests {
         let err = outcome.unwrap_err();
         let expected = TaskError::builtin(RetrievalCode::TaskNotFound, "").error_code;
         assert_eq!(err.error_code, expected, "expected a TaskNotFound outcome");
+    }
+}
+
+#[cfg(test)]
+mod filter_non_runnable_tests {
+    //! C15: `filter_non_runnable_workflow_tasks` must, for a PAUSED workflow,
+    //! both cancel the worker's claimed task and reset its node to READY — in one
+    //! transaction, so a crash cannot leave a terminal task linked to a live node.
+    //! The atomicity itself is not crash-testable in a unit test; this pins the
+    //! functional outcome (both mutations applied, id returned as filtered).
+    use super::*;
+    use serial_test::serial;
+    use uuid::Uuid;
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|p| p.join(".env").exists());
+        let pw = root
+            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
+            .and_then(|c| {
+                c.lines()
+                    .filter_map(|l| l.trim().split_once('='))
+                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
+                    .map(|(_, v)| v.trim().to_owned())
+            })
+            .unwrap_or_else(|| "W0rklane".to_owned());
+        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn paused_workflow_cancels_task_and_resets_node() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let wf_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index,
+                definition_key, depth, root_workflow_id,
+                sent_at, created_at, started_at, updated_at
+            ) VALUES ($1, 'c15_wf', 'PAUSED', 'fail', NULL, 'test.c15.v1', 0, $1,
+                      NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(&wf_id)
+        .execute(&pool)
+        .await
+        .expect("insert workflow");
+
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                queue_name, priority, dependencies, allow_failed_deps, join_type,
+                status, is_subworkflow, task_id, created_at
+            ) VALUES ($1, $2, 0, 'node_0', 'c15_task', '[]', '{}',
+                      'default', 100, '{}', FALSE, 'all',
+                      'ENQUEUED', FALSE, $3, NOW())",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&wf_id)
+        .bind(&task_id)
+        .execute(&pool)
+        .await
+        .expect("insert workflow_task");
+
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, args, kwargs, status,
+                sent_at, claimed_at, created_at, updated_at, claimed,
+                claimed_by_worker_id, retry_count, max_retries, is_workflow_task, enqueue_sha
+            ) VALUES ($1, 'c15_task', 'default', 100, '[]', '{}', 'CLAIMED',
+                      NOW(), NOW(), NOW(), NOW(), TRUE,
+                      'w1', 0, 3, TRUE,
+                      '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef')",
+        )
+        .bind(&task_id)
+        .execute(&pool)
+        .await
+        .expect("insert task");
+
+        let filtered = broker
+            .filter_non_runnable_workflow_tasks(&[task_id.clone()], "w1")
+            .await
+            .expect("filter");
+        assert_eq!(filtered, vec![task_id.clone()], "paused task must be filtered");
+
+        let task_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+                .bind(&task_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(task_status, "CANCELLED", "task must be cancelled");
+
+        let (node_status, linked): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, task_id FROM horsies_workflow_tasks WHERE workflow_id = $1",
+        )
+        .bind(&wf_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(node_status, "READY", "node must be reset to READY");
+        assert!(linked.is_none(), "node's task_id must be cleared on reset");
+
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+            .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .ok();
     }
 }
