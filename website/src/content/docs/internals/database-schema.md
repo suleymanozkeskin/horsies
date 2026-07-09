@@ -197,6 +197,8 @@ The worker's reaper loop prunes old rows automatically every hour based on [Reco
 
 Terminal statuses: COMPLETED, FAILED, CANCELLED, EXPIRED. Set any retention field to `None` to disable cleanup for that category. See [Recovery Config](../../configuration/recovery-config#retention-cleanup) for configuration details.
 
+Deletes run in batches of 5,000 rows, one transaction per batch, under a 60-second budget per pass. A backlog larger than the budget allows — for example the first pass after enabling retention on a long-running database — drains across consecutive hourly passes instead of running as one unbounded DELETE.
+
 ## File Location
 
 `horsies/core/models/task_pg.py`

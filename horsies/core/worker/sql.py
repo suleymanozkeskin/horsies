@@ -5,10 +5,15 @@ from __future__ import annotations
 from sqlalchemy import text
 
 from horsies.core.models.workflow import WORKFLOW_TERMINAL_STATES
+from horsies.core.schemas.indexes import TASK_TERMINAL_STATUS_SQL_LITERALS
 from horsies.core.types.status import TASK_TERMINAL_STATES
 
 WORKFLOW_TERMINAL_VALUES: list[str] = [s.value for s in WORKFLOW_TERMINAL_STATES]
 TASK_TERMINAL_VALUES: list[str] = [s.value for s in TASK_TERMINAL_STATES]
+
+WORKFLOW_TERMINAL_STATUS_SQL_LITERALS: str = ', '.join(
+    sorted(f"'{v}'" for v in WORKFLOW_TERMINAL_VALUES),
+)
 
 
 # ---------- Claim SQL (priority + enqueued_at) ----------
@@ -520,61 +525,102 @@ INSERT_WORKER_STATE_SQL = text("""
     )
 """)
 
+# Retention deletes run in bounded batches: each statement deletes at most
+# :batch_size rows selected by an id-subselect, and the reaper commits per
+# batch. An unbounded DELETE turns the first pass over a large eligible
+# backlog (retention newly enabled, or the window lowered) into one
+# multi-minute transaction — WAL burst, task_attempts cascades, and a
+# mid-pass failure rolling back everything. FOR UPDATE SKIP LOCKED lets
+# concurrent ungated reaper passes drain disjoint batches instead of
+# blocking. Terminal statuses are inlined as literals rather than bound
+# arrays: the partial retention index is only usable while the planner can
+# prove the status predicate implies the index predicate, which a bound
+# array under a generic plan cannot.
+
 DELETE_EXPIRED_HEARTBEATS_SQL = text("""
     DELETE FROM horsies_heartbeats
-    WHERE sent_at < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
+    WHERE id IN (
+        SELECT id FROM horsies_heartbeats
+        WHERE sent_at < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
+        LIMIT :batch_size
+        FOR UPDATE SKIP LOCKED
+    )
 """)
 
 DELETE_EXPIRED_WORKER_STATES_SQL = text("""
     DELETE FROM horsies_worker_states
-    WHERE snapshot_at < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
+    WHERE id IN (
+        SELECT id FROM horsies_worker_states
+        WHERE snapshot_at < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
+        LIMIT :batch_size
+        FOR UPDATE SKIP LOCKED
+    )
 """)
 
-DELETE_EXPIRED_WORKFLOW_TASKS_SQL = text("""
-    DELETE FROM horsies_workflow_tasks wt
-    USING horsies_workflows w
-    WHERE wt.workflow_id = w.id
-      AND w.status = ANY(:wf_terminal_states)
-      AND COALESCE(w.completed_at, w.updated_at, w.created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
-      -- Do not delete linkage while any backing task is still non-terminal,
-      -- which would orphan that horsies_tasks row (no workflow_task ref). All
-      -- backing tasks become terminal via orphan self-heal, so this only
-      -- defers cleanup, it does not block it.
-      AND NOT EXISTS (
-          SELECT 1
-          FROM horsies_workflow_tasks wt2
-          JOIN horsies_tasks t ON t.id = wt2.task_id
-          WHERE wt2.workflow_id = w.id
-            AND NOT (t.status = ANY(:task_terminal_states))
-      )
+DELETE_EXPIRED_WORKFLOW_TASKS_SQL = text(f"""
+    DELETE FROM horsies_workflow_tasks
+    WHERE id IN (
+        SELECT wt.id
+        FROM horsies_workflow_tasks wt
+        JOIN horsies_workflows w ON w.id = wt.workflow_id
+        WHERE w.status IN ({WORKFLOW_TERMINAL_STATUS_SQL_LITERALS})
+          AND COALESCE(w.completed_at, w.updated_at, w.created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
+          -- Do not delete linkage while any backing task is still non-terminal,
+          -- which would orphan that horsies_tasks row (no workflow_task ref). All
+          -- backing tasks become terminal via orphan self-heal, so this only
+          -- defers cleanup, it does not block it.
+          AND NOT EXISTS (
+              SELECT 1
+              FROM horsies_workflow_tasks wt2
+              JOIN horsies_tasks t ON t.id = wt2.task_id
+              WHERE wt2.workflow_id = w.id
+                AND t.status NOT IN ({TASK_TERMINAL_STATUS_SQL_LITERALS})
+          )
+        LIMIT :batch_size
+        FOR UPDATE OF wt SKIP LOCKED
+    )
 """)
 
-DELETE_EXPIRED_WORKFLOWS_SQL = text("""
-    DELETE FROM horsies_workflows w
-    WHERE w.status = ANY(:wf_terminal_states)
-      AND COALESCE(w.completed_at, w.updated_at, w.created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
-      -- Same guard as the workflow_tasks delete: keep the workflow until every
-      -- backing task is terminal so retention never strands a live task row.
-      AND NOT EXISTS (
-          SELECT 1
-          FROM horsies_workflow_tasks wt
-          JOIN horsies_tasks t ON t.id = wt.task_id
-          WHERE wt.workflow_id = w.id
-            AND NOT (t.status = ANY(:task_terminal_states))
-      )
+DELETE_EXPIRED_WORKFLOWS_SQL = text(f"""
+    DELETE FROM horsies_workflows
+    WHERE id IN (
+        SELECT w.id
+        FROM horsies_workflows w
+        WHERE w.status IN ({WORKFLOW_TERMINAL_STATUS_SQL_LITERALS})
+          AND COALESCE(w.completed_at, w.updated_at, w.created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
+          -- Same guard as the workflow_tasks delete: keep the workflow until every
+          -- backing task is terminal so retention never strands a live task row.
+          AND NOT EXISTS (
+              SELECT 1
+              FROM horsies_workflow_tasks wt
+              JOIN horsies_tasks t ON t.id = wt.task_id
+              WHERE wt.workflow_id = w.id
+                AND t.status NOT IN ({TASK_TERMINAL_STATUS_SQL_LITERALS})
+          )
+        LIMIT :batch_size
+        FOR UPDATE SKIP LOCKED
+    )
 """)
 
-DELETE_EXPIRED_TASKS_SQL = text("""
-    DELETE FROM horsies_tasks t
-    WHERE t.status = ANY(:task_terminal_states)
-      AND COALESCE(t.completed_at, t.failed_at, t.updated_at, t.created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
-      AND NOT EXISTS (
-          SELECT 1
-          FROM horsies_workflow_tasks wt
-          JOIN horsies_workflows w ON w.id = wt.workflow_id
-          WHERE wt.task_id = t.id
-            AND NOT (w.status = ANY(:wf_terminal_states))
-      )
+# The status + COALESCE predicates must stay textually aligned with
+# idx_horsies_tasks_retention (schemas/indexes.py).
+DELETE_EXPIRED_TASKS_SQL = text(f"""
+    DELETE FROM horsies_tasks
+    WHERE id IN (
+        SELECT t.id
+        FROM horsies_tasks t
+        WHERE t.status IN ({TASK_TERMINAL_STATUS_SQL_LITERALS})
+          AND COALESCE(t.completed_at, t.failed_at, t.updated_at, t.created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
+          AND NOT EXISTS (
+              SELECT 1
+              FROM horsies_workflow_tasks wt
+              JOIN horsies_workflows w ON w.id = wt.workflow_id
+              WHERE wt.task_id = t.id
+                AND w.status NOT IN ({WORKFLOW_TERMINAL_STATUS_SQL_LITERALS})
+          )
+        LIMIT :batch_size
+        FOR UPDATE SKIP LOCKED
+    )
 """)
 
 # Terminate a single orphaned workflow task this worker still holds CLAIMED.
@@ -648,6 +694,16 @@ UPSERT_TASK_ATTEMPT_SQL = text("""
 """)
 
 _RETENTION_CLEANUP_INTERVAL_S = 3600.0
+
+# Rows per retention DELETE batch. Bounds per-transaction WAL, row locks,
+# and task_attempts cascade volume.
+_RETENTION_DELETE_BATCH_SIZE = 5_000
+
+# Wall-clock budget for one retention pass across all five statements. A
+# backlog that does not drain within the budget resumes on the next pass;
+# every statement still runs at least one batch per pass so a deep backlog
+# in an earlier table cannot starve the later ones indefinitely.
+_RETENTION_PASS_TIME_BUDGET_S = 60.0
 
 
 _FINALIZER_DRAIN_TIMEOUT_S: float = 30.0

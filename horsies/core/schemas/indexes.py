@@ -4,6 +4,18 @@ from __future__ import annotations
 
 from sqlalchemy import text
 
+from horsies.core.types.status import TASK_TERMINAL_STATES
+
+# Terminal task statuses rendered as SQL literals, sorted for deterministic
+# statement text. Shared by the retention index below and the retention
+# DELETE in worker/sql.py: the partial index serves the delete only while
+# the planner can prove the delete's status predicate implies the index
+# predicate, which requires literals (a bound array under a generic plan
+# cannot be proven) rendered from the same set on both sides.
+TASK_TERMINAL_STATUS_SQL_LITERALS: str = ', '.join(
+    sorted(f"'{s.value}'" for s in TASK_TERMINAL_STATES),
+)
+
 
 # GIN index on workflow_tasks.dependencies for efficient dependency array lookups.
 # Cannot use ORM __table_args__ because SQLAlchemy does not support GIN indexes directly.
@@ -99,4 +111,29 @@ CREATE_TASKS_WORKER_STATUS_INDEX_SQL = text("""
 CREATE_WORKER_STATES_WORKER_SNAPSHOT_INDEX_SQL = text("""
     CREATE INDEX IF NOT EXISTS idx_horsies_worker_states_worker_snapshot
     ON horsies_worker_states (worker_id, snapshot_at DESC);
+""")
+
+# v11: retention eligibility for DELETE_EXPIRED_TASKS_SQL, which filters
+# terminal rows by COALESCE(completed_at, failed_at, updated_at,
+# created_at) < cutoff. Without it every hourly retention pass scans the
+# whole heap (593 MB / ~1.1s at 554k retained rows) even when zero rows
+# are eligible. Partial on terminal statuses: a row enters the index once,
+# on its finalize transition, so claim/lease-renewal updates (whose new
+# row versions are non-terminal) never maintain it. The expression must
+# stay textually identical to the delete's COALESCE.
+CREATE_TASKS_RETENTION_INDEX_SQL = text(f"""
+    CREATE INDEX IF NOT EXISTS idx_horsies_tasks_retention
+    ON horsies_tasks (COALESCE(completed_at, failed_at, updated_at, created_at))
+    WHERE status IN ({TASK_TERMINAL_STATUS_SQL_LITERALS});
+""")
+
+# v11: serves DELETE_EXPIRED_WORKER_STATES_SQL (snapshot_at < cutoff). The
+# composite (worker_id, snapshot_at DESC) index leads with worker_id, so a
+# bare snapshot_at range fell back to a seq scan of the timeseries heap
+# (157 MB at a 6-worker week of snapshots). Insert-only table with
+# monotonically increasing snapshot_at: maintenance is rightmost-leaf
+# appends.
+CREATE_WORKER_STATES_SNAPSHOT_AT_INDEX_SQL = text("""
+    CREATE INDEX IF NOT EXISTS idx_horsies_worker_states_snapshot_at
+    ON horsies_worker_states (snapshot_at);
 """)

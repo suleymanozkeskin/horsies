@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from horsies.core.logging import get_logger
 from horsies.core.types.result import Err, Ok, is_err
@@ -28,12 +28,13 @@ from horsies.core.worker.sql import (
     DELETE_EXPIRED_WORKFLOWS_SQL,
     DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
     REAPER_GATE_TRY_LOCK_SQL,
-    TASK_TERMINAL_VALUES,
-    WORKFLOW_TERMINAL_VALUES,
     _RETENTION_CLEANUP_INTERVAL_S,
+    _RETENTION_DELETE_BATCH_SIZE,
+    _RETENTION_PASS_TIME_BUDGET_S,
 )
 
 if TYPE_CHECKING:
+    from sqlalchemy import TextClause
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from horsies.core.app import Horsies
@@ -251,72 +252,55 @@ class ReaperMixin:
                 deleted_workflows = 0
                 deleted_tasks = 0
 
-                async with temp_broker.session_factory() as s:
-                    if recovery_cfg.heartbeat_retention_hours is not None:
-                        hb_result = await s.execute(
-                            DELETE_EXPIRED_HEARTBEATS_SQL,
-                            {
-                                'retention_hours': recovery_cfg.heartbeat_retention_hours,
-                            },
-                        )
-                        deleted_heartbeats = int(
-                            getattr(hb_result, 'rowcount', 0) or 0
-                        )
+                # Shared wall-clock budget across the five statements. A
+                # backlog that outlives the budget resumes next pass.
+                deadline = now_monotonic + _RETENTION_PASS_TIME_BUDGET_S
 
-                    if (
-                        recovery_cfg.worker_state_retention_hours
-                        is not None
-                    ):
-                        ws_result = await s.execute(
-                            DELETE_EXPIRED_WORKER_STATES_SQL,
-                            {
-                                'retention_hours': recovery_cfg.worker_state_retention_hours,
-                            },
-                        )
-                        deleted_worker_states = int(
-                            getattr(ws_result, 'rowcount', 0) or 0
-                        )
+                if recovery_cfg.heartbeat_retention_hours is not None:
+                    deleted_heartbeats = await self._delete_expired_in_batches(
+                        temp_broker,
+                        DELETE_EXPIRED_HEARTBEATS_SQL,
+                        {
+                            'retention_hours': recovery_cfg.heartbeat_retention_hours,
+                        },
+                        deadline,
+                    )
 
-                    if (
-                        recovery_cfg.terminal_record_retention_hours
-                        is not None
-                    ):
-                        wf_params = {
-                            'retention_hours': recovery_cfg.terminal_record_retention_hours,
-                            'wf_terminal_states': WORKFLOW_TERMINAL_VALUES,
-                            # The workflow / workflow_task deletes now guard on
-                            # all backing tasks being terminal, to avoid
-                            # orphaning a live task row.
-                            'task_terminal_states': TASK_TERMINAL_VALUES,
-                        }
-                        task_params = {
-                            'retention_hours': recovery_cfg.terminal_record_retention_hours,
-                            'wf_terminal_states': WORKFLOW_TERMINAL_VALUES,
-                            'task_terminal_states': TASK_TERMINAL_VALUES,
-                        }
-                        wt_result = await s.execute(
-                            DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
-                            wf_params,
-                        )
-                        wf_result = await s.execute(
-                            DELETE_EXPIRED_WORKFLOWS_SQL,
-                            wf_params,
-                        )
-                        task_result = await s.execute(
-                            DELETE_EXPIRED_TASKS_SQL,
-                            task_params,
-                        )
-                        deleted_workflow_tasks = int(
-                            getattr(wt_result, 'rowcount', 0) or 0
-                        )
-                        deleted_workflows = int(
-                            getattr(wf_result, 'rowcount', 0) or 0
-                        )
-                        deleted_tasks = int(
-                            getattr(task_result, 'rowcount', 0) or 0
-                        )
+                if recovery_cfg.worker_state_retention_hours is not None:
+                    deleted_worker_states = await self._delete_expired_in_batches(
+                        temp_broker,
+                        DELETE_EXPIRED_WORKER_STATES_SQL,
+                        {
+                            'retention_hours': recovery_cfg.worker_state_retention_hours,
+                        },
+                        deadline,
+                    )
 
-                    await s.commit()
+                if recovery_cfg.terminal_record_retention_hours is not None:
+                    terminal_params = {
+                        'retention_hours': recovery_cfg.terminal_record_retention_hours,
+                    }
+                    # Order preserved: workflow_tasks -> workflows -> tasks.
+                    # The all-backing-tasks-terminal guards inside each
+                    # statement make partial progress between tables safe.
+                    deleted_workflow_tasks = await self._delete_expired_in_batches(
+                        temp_broker,
+                        DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
+                        terminal_params,
+                        deadline,
+                    )
+                    deleted_workflows = await self._delete_expired_in_batches(
+                        temp_broker,
+                        DELETE_EXPIRED_WORKFLOWS_SQL,
+                        terminal_params,
+                        deadline,
+                    )
+                    deleted_tasks = await self._delete_expired_in_batches(
+                        temp_broker,
+                        DELETE_EXPIRED_TASKS_SQL,
+                        terminal_params,
+                        deadline,
+                    )
 
                 if (
                     deleted_heartbeats > 0
@@ -339,6 +323,40 @@ class ReaperMixin:
                 state.next_retention_cleanup_at = (
                     now_monotonic + _RETENTION_CLEANUP_INTERVAL_S
                 )
+
+    async def _delete_expired_in_batches(
+        self,
+        temp_broker: 'PostgresBroker',
+        statement: 'TextClause',
+        params: dict[str, Any],
+        deadline_monotonic: float,
+    ) -> int:
+        """Run one retention DELETE in bounded batches, committing per batch.
+
+        Always runs at least one batch; stops when a batch comes back short
+        (backlog drained) or the pass deadline is reached (backlog resumes
+        next pass). Per-batch commits bound transaction size so a large
+        backlog never becomes one unbounded DELETE.
+        """
+        total_deleted = 0
+        while True:
+            async with temp_broker.session_factory() as s:
+                result = await s.execute(
+                    statement,
+                    {**params, 'batch_size': _RETENTION_DELETE_BATCH_SIZE},
+                )
+                deleted = int(getattr(result, 'rowcount', 0) or 0)
+                await s.commit()
+            total_deleted += deleted
+            if deleted < _RETENTION_DELETE_BATCH_SIZE:
+                return total_deleted
+            if time.monotonic() >= deadline_monotonic:
+                logger.info(
+                    'Retention pass time budget reached; %s rows deleted, '
+                    'remaining backlog resumes next pass',
+                    total_deleted,
+                )
+                return total_deleted
 
     async def _reaper_loop(self) -> None:
         """Automatic stale task handling loop.

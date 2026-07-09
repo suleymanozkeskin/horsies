@@ -35,8 +35,14 @@ from sqlalchemy import text
 #      across a client round trip. Removes the client-stall-while-holding-lock
 #      freeze. Cap semantics preserved (never over-claims; may under-claim under
 #      SKIP-LOCKED contention, deferring work to the next pass).
+#
+# v11: retention eligibility indexes. idx_horsies_tasks_retention — partial
+#      expression index on COALESCE(completed_at, failed_at, updated_at,
+#      created_at) over terminal statuses; idx_horsies_worker_states_snapshot_at.
+#      The hourly retention deletes seq-scanned both heaps on every pass,
+#      including passes with zero eligible rows.
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))

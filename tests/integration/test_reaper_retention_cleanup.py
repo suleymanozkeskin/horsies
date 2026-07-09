@@ -17,20 +17,25 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from tests.integration.conftest import compute_test_enqueue_sha
 
+from horsies.core.brokers.postgres import PostgresBroker
+
+from horsies.core.schemas.indexes import TASK_TERMINAL_STATUS_SQL_LITERALS
 from horsies.core.worker.sql import (
     DELETE_EXPIRED_HEARTBEATS_SQL,
     DELETE_EXPIRED_WORKER_STATES_SQL,
     DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
     DELETE_EXPIRED_WORKFLOWS_SQL,
     DELETE_EXPIRED_TASKS_SQL,
-    WORKFLOW_TERMINAL_VALUES,
-    TASK_TERMINAL_VALUES,
 )
 
 pytestmark = [pytest.mark.integration]
 
 # Retention window used in all tests — 24 hours.
 _RETENTION_HOURS = 24
+
+# Large enough that every test below drains in a single batch unless it
+# exercises batching explicitly.
+_BATCH_SIZE = 10_000
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +85,7 @@ async def test_expired_heartbeats_deleted(
 
     result = await session.execute(
         DELETE_EXPIRED_HEARTBEATS_SQL,
-        {'retention_hours': _RETENTION_HOURS},
+        {'retention_hours': _RETENTION_HOURS, 'batch_size': _BATCH_SIZE},
     )
     await session.commit()
 
@@ -125,7 +130,7 @@ async def test_expired_worker_states_deleted(
 
     result = await session.execute(
         DELETE_EXPIRED_WORKER_STATES_SQL,
-        {'retention_hours': _RETENTION_HOURS},
+        {'retention_hours': _RETENTION_HOURS, 'batch_size': _BATCH_SIZE},
     )
     await session.commit()
 
@@ -204,8 +209,7 @@ async def test_expired_terminal_workflows_deleted(
 
     wf_params = {
         'retention_hours': _RETENTION_HOURS,
-        'wf_terminal_states': WORKFLOW_TERMINAL_VALUES,
-        'task_terminal_states': TASK_TERMINAL_VALUES,
+        'batch_size': _BATCH_SIZE,
     }
 
     # Delete workflow_tasks first (FK dependency), then workflows
@@ -292,8 +296,7 @@ async def test_retention_keeps_terminal_workflow_with_live_task(
 
     params = {
         'retention_hours': _RETENTION_HOURS,
-        'wf_terminal_states': WORKFLOW_TERMINAL_VALUES,
-        'task_terminal_states': TASK_TERMINAL_VALUES,
+        'batch_size': _BATCH_SIZE,
     }
     await session.execute(DELETE_EXPIRED_WORKFLOW_TASKS_SQL, params)
     await session.execute(DELETE_EXPIRED_WORKFLOWS_SQL, params)
@@ -438,8 +441,7 @@ async def test_expired_terminal_tasks_deleted_but_protected_by_workflow(
 
     task_params = {
         'retention_hours': _RETENTION_HOURS,
-        'wf_terminal_states': WORKFLOW_TERMINAL_VALUES,
-        'task_terminal_states': TASK_TERMINAL_VALUES,
+        'batch_size': _BATCH_SIZE,
     }
 
     result = await session.execute(DELETE_EXPIRED_TASKS_SQL, task_params)
@@ -460,3 +462,118 @@ async def test_expired_terminal_tasks_deleted_but_protected_by_workflow(
     assert old_running_task in surviving_ids
     assert recent_completed_task in surviving_ids
     assert old_completed_protected in surviving_ids
+
+
+# ---------------------------------------------------------------------------
+# Batched deletes: LIMIT bounds each statement, repeated runs drain backlog
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_expired_tasks_delete_is_bounded_by_batch_size(
+    engine: AsyncEngine,
+    session: AsyncSession,
+) -> None:
+    """Each execution deletes at most batch_size rows; repeated executions
+    drain the backlog; ineligible rows survive every batch."""
+    _ = engine
+    await _truncate_retention_tables(session)
+
+    # Five old terminal tasks (eligible) + one recent (ineligible).
+    for hours_ago, count in ((48, 5), (1, 1)):
+        for _i in range(count):
+            sent_at, sha = compute_test_enqueue_sha(
+                task_name='ret_batch_test',
+                sent_at=datetime.now(timezone.utc) - timedelta(hours=hours_ago),
+            )
+            await session.execute(text("""
+                INSERT INTO horsies_tasks
+                    (id, task_name, queue_name, priority, args, kwargs,
+                     status, sent_at, created_at, updated_at, claimed, retry_count,
+                     max_retries, completed_at, enqueue_sha)
+                VALUES
+                    (:id, 'ret_batch_test', 'default', 100, '[]', '{}',
+                     'COMPLETED', :sent_at, NOW() - (:h || ' hours')::interval,
+                     NOW() - (:h || ' hours')::interval, FALSE, 0,
+                     0, NOW() - (:h || ' hours')::interval, :enqueue_sha)
+            """), {
+                'id': str(uuid.uuid4()),
+                'sent_at': sent_at,
+                'h': hours_ago,
+                'enqueue_sha': sha,
+            })
+    await session.commit()
+
+    params = {'retention_hours': _RETENTION_HOURS, 'batch_size': 2}
+    rowcounts: list[int] = []
+    for _round in range(4):
+        result = await session.execute(DELETE_EXPIRED_TASKS_SQL, params)
+        await session.commit()
+        rowcounts.append(int(result.rowcount or 0))
+
+    assert rowcounts == [2, 2, 1, 0], 'batches bounded, backlog drained'
+    assert await _count(session, 'horsies_tasks') == 1  # recent task survives
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_expired_tasks_delete_uses_retention_index(
+    broker: PostgresBroker,  # noqa: ARG001 - ensures schema migrations are applied
+    session: AsyncSession,
+) -> None:
+    """The eligibility predicate is planned via idx_horsies_tasks_retention.
+
+    Pins the literal-statuses contract: the partial index only serves the
+    delete while the statement's status literals imply the index predicate.
+    A bound-array regression (status = ANY(:param)) or a drifted COALESCE
+    expression would drop back to a seq scan and fail here.
+    """
+    await _truncate_retention_tables(session)
+
+    # Production shape: many terminal rows inside the retention window (the
+    # low-selectivity case that poisons the plain status index) and one
+    # eligible row. With fresh statistics the planner picks the retention
+    # index only if its predicate is provably implied by the statement.
+    await session.execute(text("""
+        INSERT INTO horsies_tasks
+            (id, task_name, queue_name, priority, args, kwargs,
+             status, sent_at, created_at, updated_at, claimed, retry_count,
+             max_retries, completed_at, enqueue_sha)
+        SELECT gen_random_uuid()::text, 'ret_idx_test', 'default', 100, '[]', '{}',
+               'COMPLETED', NOW(), NOW(), NOW(), FALSE, 0,
+               0, NOW(), 'ret-idx-test-sha'
+        FROM generate_series(1, 500)
+    """))
+    await session.execute(text("""
+        INSERT INTO horsies_tasks
+            (id, task_name, queue_name, priority, args, kwargs,
+             status, sent_at, created_at, updated_at, claimed, retry_count,
+             max_retries, completed_at, enqueue_sha)
+        VALUES
+            (gen_random_uuid()::text, 'ret_idx_test', 'default', 100, '[]', '{}',
+             'COMPLETED', NOW(), NOW() - INTERVAL '48 hours',
+             NOW() - INTERVAL '48 hours', FALSE, 0,
+             0, NOW() - INTERVAL '48 hours', 'ret-idx-test-sha')
+    """))
+    await session.commit()
+    await session.execute(text('ANALYZE horsies_tasks'))
+
+    explain_sql = text(f"""
+        EXPLAIN SELECT t.id
+        FROM horsies_tasks t
+        WHERE t.status IN ({TASK_TERMINAL_STATUS_SQL_LITERALS})
+          AND COALESCE(t.completed_at, t.failed_at, t.updated_at, t.created_at)
+              < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
+    """)
+    # A 500-row test table fits in a few pages, so the planner still
+    # prefers a seq scan; disable it to force the index-vs-index choice
+    # that a production-sized heap produces on its own.
+    await session.execute(text('SET enable_seqscan = off'))
+    plan = '\n'.join(
+        str(row[0]) for row in
+        (await session.execute(
+            explain_sql, {'retention_hours': _RETENTION_HOURS},
+        )).fetchall()
+    )
+    await session.execute(text('SET enable_seqscan = on'))
+
+    assert 'idx_horsies_tasks_retention' in plan, plan

@@ -112,7 +112,9 @@ from horsies.core.schemas.indexes import (
     CREATE_TASKS_CLAIM_PENDING_INDEX_SQL,
     CREATE_TASKS_CLAIM_EXPIRED_ORDERED_INDEX_SQL,
     CREATE_TASKS_ERROR_CODE_INDEX_SQL,
+    CREATE_TASKS_RETENTION_INDEX_SQL,
     CREATE_TASKS_WORKER_STATUS_INDEX_SQL,
+    CREATE_WORKER_STATES_SNAPSHOT_AT_INDEX_SQL,
     CREATE_WORKER_STATES_WORKER_SNAPSHOT_INDEX_SQL,
     CREATE_WORKFLOW_TASKS_DEPS_INDEX_SQL,
     CREATE_WORKFLOW_TASKS_WF_STATUS_IDX_INDEX_SQL,
@@ -822,6 +824,10 @@ class PostgresBroker:
 
             # Migration (v10): single-statement claim function.
             await conn.execute(CREATE_CLAIM_FUNCTION_SQL)
+
+            # Migration (v11): retention eligibility indexes.
+            await conn.execute(CREATE_TASKS_RETENTION_INDEX_SQL)
+            await conn.execute(CREATE_WORKER_STATES_SNAPSHOT_AT_INDEX_SQL)
 
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
