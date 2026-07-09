@@ -30,18 +30,20 @@ WHERE status = 'CLAIMED'
   AND claimed_by_worker_id = $1
   AND claimed_at >= NOW() - $3 * INTERVAL '1 millisecond'";
 
-/// Maximum consecutive heartbeat failures before abandoning the loop.
+/// Consecutive heartbeat failures before escalating the log to error level.
 ///
-/// With a 30s heartbeat interval, 5 consecutive failures = 150s of dead
-/// time. The default stale threshold is 300s, leaving headroom for
-/// transient DB issues to resolve before the reaper acts.
+/// With a 30s heartbeat interval, 5 consecutive failures = 150s of degraded
+/// heartbeating. Neither loop abandons at this point — it escalates once and
+/// keeps retrying, so beats resume the instant connectivity recovers.
 const MAX_CONSECUTIVE_HEARTBEAT_FAILURES: u32 = 5;
 
 /// Spawn a runner heartbeat loop for a single task.
 ///
-/// Repeats heartbeats at `interval` until the cancellation token fires or
-/// consecutive failures exceed the internal threshold. Transient DB errors are
-/// logged and retried — a single failure does not kill heartbeating.
+/// Repeats heartbeats at `interval` until the cancellation token fires. Transient
+/// DB errors are logged and retried; the loop never abandons a live task — after
+/// `MAX_CONSECUTIVE_HEARTBEAT_FAILURES` it escalates the log once and keeps
+/// retrying (mirrors the claimer loop), because abandoning would let the reaper
+/// reclaim a healthy task once its last beat ages past the stale threshold (C4).
 ///
 /// The first beat is NOT sent here: it is written atomically with the CLAIMED →
 /// RUNNING transition (`SET_RUNNING_SQL`), so a task is never observable RUNNING
@@ -58,6 +60,7 @@ pub fn spawn_runner_heartbeat(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut consecutive_failures: u32 = 0;
+        let mut escalated = false;
 
         loop {
             tokio::select! {
@@ -73,6 +76,7 @@ pub fn spawn_runner_heartbeat(
                                 );
                             }
                             consecutive_failures = 0;
+                            escalated = false;
                         }
                         Err(e) => {
                             consecutive_failures += 1;
@@ -83,13 +87,15 @@ pub fn spawn_runner_heartbeat(
                                 max = MAX_CONSECUTIVE_HEARTBEAT_FAILURES,
                                 "runner heartbeat failed",
                             );
-                            if consecutive_failures >= MAX_CONSECUTIVE_HEARTBEAT_FAILURES {
+                            if consecutive_failures >= MAX_CONSECUTIVE_HEARTBEAT_FAILURES
+                                && !escalated
+                            {
+                                escalated = true;
                                 tracing::error!(
                                     task_id = %task_id,
                                     consecutive_failures,
-                                    "runner heartbeat abandoned after too many consecutive failures",
+                                    "runner heartbeat degraded for too long; the reaper may reclaim this task until DB connectivity recovers",
                                 );
-                                break;
                             }
                         }
                     }
@@ -223,4 +229,67 @@ async fn renew_claim_leases(
         .execute(pool)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|p| p.join(".env").exists());
+        let pw = root
+            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
+            .and_then(|c| {
+                c.lines()
+                    .filter_map(|l| l.trim().split_once('='))
+                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
+                    .map(|(_, v)| v.trim().to_owned())
+            })
+            .unwrap_or_else(|| "W0rklane".to_owned());
+        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    }
+
+    /// C4: the runner heartbeat loop must keep retrying after
+    /// `MAX_CONSECUTIVE_HEARTBEAT_FAILURES`, never abandoning a live task —
+    /// otherwise the reaper reclaims a healthy task once its last beat ages out.
+    /// A closed pool makes every beat fail instantly (`PoolClosed`); with a 5ms
+    /// interval, 200ms is ~40 failures (>> 5), yet the loop must still be running.
+    #[tokio::test]
+    async fn runner_heartbeat_survives_many_consecutive_failures() {
+        let pool = PgPool::connect(&test_db_url()).await.expect("connect");
+        // Close the pool so every heartbeat fails immediately and the loop
+        // actually iterates past the failure threshold within the test window.
+        pool.close().await;
+
+        let cancel = CancellationToken::new();
+        let handle = spawn_runner_heartbeat(
+            pool,
+            "task-1".to_owned(),
+            "worker-1".to_owned(),
+            "host-1".to_owned(),
+            123,
+            Duration::from_millis(5),
+            cancel.clone(),
+        );
+
+        // Far more than 5 failure intervals; before the fix the loop breaks at 5.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !handle.is_finished(),
+            "runner heartbeat must keep running after >5 consecutive failures",
+        );
+
+        // The cancellation token still stops it cleanly.
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("runner heartbeat must exit promptly on cancel")
+            .ok();
+    }
 }
