@@ -1293,3 +1293,27 @@ class TestGetBrokerErrorHandling:
 
             assert exc_info.value is original
             assert exc_info.value.code == ErrorCode.BROKER_INVALID_URL
+
+
+@pytest.mark.unit
+class TestWorkerStateSnapshotInterval:
+    """RecoveryConfig.worker_state_snapshot_interval_ms bounds and default."""
+
+    def test_default_is_30_seconds(self) -> None:
+        assert RecoveryConfig().worker_state_snapshot_interval_ms == 30_000
+
+    def test_bounds_accept_valid_edges(self) -> None:
+        assert RecoveryConfig(
+            worker_state_snapshot_interval_ms=1_000,
+        ).worker_state_snapshot_interval_ms == 1_000
+        assert RecoveryConfig(
+            worker_state_snapshot_interval_ms=300_000,
+        ).worker_state_snapshot_interval_ms == 300_000
+
+    def test_below_minimum_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            RecoveryConfig(worker_state_snapshot_interval_ms=999)
+
+    def test_above_maximum_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            RecoveryConfig(worker_state_snapshot_interval_ms=300_001)

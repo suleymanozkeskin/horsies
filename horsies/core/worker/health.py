@@ -226,8 +226,12 @@ class HealthMixin:
             logger.error(f'Failed to update worker state: {e}')
 
     async def _worker_state_heartbeat_loop(self) -> None:
-        """Periodically update worker state for monitoring (every 5 seconds)."""
-        worker_state_interval_ms = 5_000  # 5 seconds
+        """Periodically persist a worker-state snapshot for monitoring."""
+        worker_state_interval_ms = 30_000  # default: 30 seconds
+        if self.cfg.recovery_config:
+            worker_state_interval_ms = (
+                self.cfg.recovery_config.worker_state_snapshot_interval_ms
+            )
 
         try:
             while not self._stop.is_set():

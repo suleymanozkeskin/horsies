@@ -97,7 +97,8 @@ Indexes: `(task_id, role, sent_at DESC)`
 
 ## horsies_worker_states
 
-Worker monitoring snapshots (timeseries).
+Worker monitoring snapshots (timeseries). Each worker inserts one row per
+`worker_state_snapshot_interval_ms` (default 30s).
 
 | Column | Type | Description |
 | ------ | ---- | ----------- |
