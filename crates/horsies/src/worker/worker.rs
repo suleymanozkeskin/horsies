@@ -448,6 +448,15 @@ impl Worker {
             }
         }
 
+        // Stop all background loops (listener, claimer heartbeat, reaper,
+        // workflow recovery, worker-state) on every exit path — including a fatal
+        // claim error that `break`s without a prior cancel. Otherwise those loops
+        // keep running on the host runtime: the worker-state loop advertises the
+        // dead worker as alive and the claimer heartbeat keeps renewing leases,
+        // delaying reclamation of its CLAIMED tasks. Idempotent when a signal or
+        // `request_stop` already fired the token (C11).
+        self.cancel.cancel();
+
         // Graceful shutdown: wait for in-flight tasks.
         self.shutdown().await;
         Ok(())
@@ -2124,5 +2133,87 @@ mod tests {
         let pool = test_pool().await;
         pool.close().await;
         notify_worker_capacity(&pool, "default", "task-closed").await;
+    }
+
+    /// C11: `run()` must fire the cancellation token on a fatal exit path, not
+    /// only via signals / `request_stop`. Otherwise the listener, claimer
+    /// heartbeat, reaper, workflow-recovery and worker-state loops keep running
+    /// after the worker gives up — advertising a dead worker as alive and holding
+    /// claim leases. The broker is built with a distinct session URL so the
+    /// listener has its own pool: closing only the main pool lets the loop start
+    /// (background loops spawn), then makes every claim fail with a retryable
+    /// `PoolClosed`; a 1-retry budget exhausts and breaks the loop fatally.
+    #[tokio::test]
+    #[serial]
+    async fn run_fires_cancel_on_fatal_claim_exit() {
+        use crate::core::config::{PostgresConfig, QueueMode, WorkerResilienceConfig};
+
+        // Distinct session URL (same DB, extra query param) so the session pool
+        // is separate from the main pool.
+        let main_url = test_db_url();
+        let sep = if main_url.contains('?') { '&' } else { '?' };
+        let session_url = format!("{main_url}{sep}application_name=c11_session");
+        let pg_config = PostgresConfig {
+            database_url: main_url,
+            session_database_url: Some(session_url),
+            pgbouncer_transaction_mode: false,
+            pool_pre_ping: true,
+            pool_size: 30,
+            max_overflow: 30,
+            pool_timeout: 30,
+            pool_recycle: 1800,
+            echo: false,
+        };
+        let broker = Arc::new(
+            PostgresBroker::connect_with(&pg_config)
+                .await
+                .expect("connect broker with separate session pool"),
+        );
+
+        let app_config = AppConfig {
+            queue_mode: QueueMode::Default,
+            custom_queues: None,
+            broker: pg_config,
+            cluster_wide_cap: None,
+            prefetch_buffer: 0,
+            claim_lease_ms: None,
+            max_claim_renew_age_ms: 180_000,
+            recovery: RecoveryConfig::default(),
+            // Exhaust the claim retry budget quickly so the fatal break fires fast.
+            resilience: WorkerResilienceConfig {
+                db_retry_initial_ms: 100,
+                db_retry_max_ms: 100,
+                db_retry_max_attempts: 1,
+                notify_poll_interval_ms: 100,
+            },
+            schedule: None,
+            resend_on_transient_err: false,
+        };
+
+        let worker = Worker::new(
+            Arc::clone(&broker),
+            Arc::new(TaskRegistry::new()),
+            Arc::new(WorkflowSpecRegistry::new()),
+            app_config,
+            WorkerConfig::default(),
+        )
+        .expect("worker");
+        let cancel = worker.cancel_token();
+        assert!(!cancel.is_cancelled(), "token must start uncancelled");
+
+        // Close only the main pool; the listener connects via the session pool.
+        broker.pool().close().await;
+
+        let handle = tokio::spawn(async move { worker.run().await });
+        let result = tokio::time::timeout(Duration::from_secs(20), handle)
+            .await
+            .expect("run() must exit after the fatal claim error, not hang")
+            .expect("run task join");
+        assert!(result.is_ok(), "run() returns Ok after draining: {result:?}");
+
+        assert!(
+            cancel.is_cancelled(),
+            "run() must cancel the token on a fatal exit so background loops stop (C11)",
+        );
     }
 }
