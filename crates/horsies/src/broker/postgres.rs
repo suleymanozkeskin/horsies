@@ -1657,62 +1657,54 @@ impl PostgresBroker {
     ) -> Result<TaskResult<T>, BrokerError> {
         let start = Instant::now();
 
-        // Quick check — task may already be done.
-        if let Some(row) = self.fetch_result_row(task_id).await? {
-            if is_terminal_status(&row.status) {
-                return parse_task_result_row(row);
-            }
+        // Quick check — task may already be done, or may not exist.
+        if let Some(outcome) = self.poll_result(task_id).await? {
+            return Ok(outcome);
         }
 
         // Subscribe to the shared task_done listener.
         let shared = self.task_done_listener().await?;
         let mut subscription = shared.subscribe(task_id);
 
-        // Re-check after subscribing to avoid race where task completes
+        // Re-check after subscribing to avoid a race where the task completes
         // between our first check and the subscribe.
-        if let Some(row) = self.fetch_result_row(task_id).await? {
-            if is_terminal_status(&row.status) {
-                return parse_task_result_row(row);
-            }
+        if let Some(outcome) = self.poll_result(task_id).await? {
+            return Ok(outcome);
         }
 
         let deadline = timeout.map(|t| Instant::now() + t);
 
         loop {
-            let remaining = match deadline {
-                Some(d) => {
-                    let now = Instant::now();
-                    if now >= d {
-                        return self
-                            .final_poll_or_timeout(task_id, start.elapsed().as_millis() as u64)
-                            .await;
-                    }
-                    Some(d - now)
+            // For a timed wait, stop once the deadline has passed (terminal /
+            // not-found / WaitTimeout).
+            if let Some(d) = deadline {
+                if Instant::now() >= d {
+                    return self
+                        .final_poll_or_timeout(task_id, start.elapsed().as_millis() as u64)
+                        .await;
                 }
-                None => None,
+            }
+
+            // Cap each wait at the re-poll interval so a lost NOTIFY (listener
+            // reconnect) is recovered by a fresh poll rather than hanging — this
+            // is what makes the no-timeout wait safe (C3). Never wait past the
+            // deadline for a timed wait.
+            let wait = match deadline {
+                Some(d) => d
+                    .saturating_duration_since(Instant::now())
+                    .min(RESULT_WAIT_REPOLL),
+                None => RESULT_WAIT_REPOLL,
             };
 
-            let wake = match remaining {
-                Some(dur) => match tokio::time::timeout(dur, subscription.recv()).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        return self
-                            .final_poll_or_timeout(task_id, start.elapsed().as_millis() as u64)
-                            .await;
-                    }
-                },
-                None => subscription.recv().await,
-            };
-
-            match wake {
-                Ok(()) => {
-                    if let Some(row) = self.fetch_result_row(task_id).await? {
-                        if is_terminal_status(&row.status) {
-                            return parse_task_result_row(row);
-                        }
+            match tokio::time::timeout(wait, subscription.recv()).await {
+                // NOTIFY delivered, or the re-poll interval elapsed — re-check.
+                Ok(Ok(())) | Err(_) => {
+                    if let Some(outcome) = self.poll_result(task_id).await? {
+                        return Ok(outcome);
                     }
                 }
-                Err(e) => return Err(e),
+                // Listener error propagates.
+                Ok(Err(e)) => return Err(e),
             }
         }
     }
@@ -2366,6 +2358,26 @@ impl PostgresBroker {
             .map_err(BrokerError::Database)
     }
 
+    /// Poll the result row once for the wait loop.
+    ///
+    /// Returns `Some(outcome)` when the wait should end: the parsed terminal
+    /// result, or a typed `TaskNotFound` outcome for a row that does not exist
+    /// (pruned by retention, or never present) so the caller never blocks
+    /// forever (C3). Returns `None` when the task exists but is not yet terminal.
+    async fn poll_result<T: DeserializeOwned>(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<TaskResult<T>>, BrokerError> {
+        match self.fetch_result_row(task_id).await? {
+            Some(row) if is_terminal_status(&row.status) => parse_task_result_row(row).map(Some),
+            Some(_) => Ok(None),
+            None => Ok(Some(TaskResult::Err(TaskError::builtin(
+                RetrievalCode::TaskNotFound,
+                format!("task {} not found", task_id),
+            )))),
+        }
+    }
+
     async fn final_poll_or_timeout<T: DeserializeOwned>(
         &self,
         task_id: &str,
@@ -2486,6 +2498,11 @@ use crate::core::task::retry_utils::parse_max_retries;
 // ---------------------------------------------------------------------------
 // Transient retry helper
 // ---------------------------------------------------------------------------
+
+/// Re-poll interval for a `get_result` wait, bounding each `subscription.recv()`
+/// so a NOTIFY lost during a listener reconnect is recovered by a fresh terminal
+/// -status poll instead of hanging the caller forever (C3).
+const RESULT_WAIT_REPOLL: Duration = Duration::from_secs(30);
 
 /// Retry count for `resend_on_transient_err` (1 initial + 3 retries = 4 total).
 const SEND_RETRY_COUNT: u32 = 3;
@@ -3783,5 +3800,55 @@ mod set_running_heartbeat_tests {
         assert_eq!(runner_beats(&pool, &id).await, 0, "no orphan beat on non-applied transition");
 
         cleanup(&pool, &id).await;
+    }
+}
+
+#[cfg(test)]
+mod get_result_wait_tests {
+    //! C3: `get_result` must never block forever. A no-timeout wait on a task
+    //! that does not exist (pruned by retention, or a bogus id) returns a typed
+    //! `TaskNotFound` outcome from the initial poll instead of hanging.
+    use super::*;
+    use std::time::Duration;
+    use uuid::Uuid;
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|p| p.join(".env").exists());
+        let pw = root
+            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
+            .and_then(|c| {
+                c.lines()
+                    .filter_map(|l| l.trim().split_once('='))
+                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
+                    .map(|(_, v)| v.trim().to_owned())
+            })
+            .unwrap_or_else(|| "W0rklane".to_owned());
+        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    }
+
+    #[tokio::test]
+    async fn get_result_no_timeout_returns_not_found_for_missing_task() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let missing = format!("missing-{}", Uuid::new_v4());
+
+        // Wrap in an outer timeout: before the fix, a no-timeout wait on a
+        // missing task hangs here forever, so the expect() below fails fast.
+        let res = tokio::time::timeout(
+            Duration::from_secs(5),
+            broker.get_result::<i32>(&missing, None),
+        )
+        .await
+        .expect("get_result(None) must not hang for a missing task");
+
+        let outcome = res.expect("no broker error");
+        let err = outcome.unwrap_err();
+        let expected = TaskError::builtin(RetrievalCode::TaskNotFound, "").error_code;
+        assert_eq!(err.error_code, expected, "expected a TaskNotFound outcome");
     }
 }
