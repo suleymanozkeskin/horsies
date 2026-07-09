@@ -630,14 +630,16 @@ async fn enqueue_scheduled_task(
 
 /// Compute a simple hash of the schedule config for change detection.
 fn compute_config_hash(schedule: &TaskSchedule) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use sha2::{Digest, Sha256};
 
-    let mut hasher = DefaultHasher::new();
-    // Hash the serialized form of relevant fields.
+    // Stable across toolchain upgrades. `DefaultHasher`'s algorithm is
+    // explicitly unspecified between Rust releases: a shifted hash would make
+    // `initialize_schedules` treat every schedule as changed and reset
+    // `last_run_at`/`run_count`/`next_run_at`, dropping any pending catch-up
+    // backlog and run history (C20).
     let json = serde_json::to_string(schedule).unwrap_or_default();
-    json.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let digest = Sha256::digest(json.as_bytes());
+    format!("{:x}", digest)
 }
 
 #[cfg(test)]
@@ -781,6 +783,42 @@ mod tests {
         assert_ne!(
             compute_config_hash(&schedule1),
             compute_config_hash(&schedule2)
+        );
+    }
+
+    #[test]
+    fn compute_config_hash_is_stable_sha256() {
+        // C20: the config hash must use a stable algorithm (SHA-256), not the
+        // toolchain-dependent DefaultHasher. SHA-256 hex is 64 lowercase chars;
+        // the old u64 DefaultHasher output was 16 — pinning the length and a
+        // golden value guards against a regression to an unstable hasher.
+        let schedule = TaskSchedule {
+            name: "test".to_owned(),
+            task_name: "my_task".to_owned(),
+            pattern: SchedulePattern::Interval(IntervalSchedule {
+                seconds: Some(60),
+                minutes: None,
+                hours: None,
+                days: None,
+            }),
+            args: serde_json::Value::Null,
+            kwargs: serde_json::Value::Null,
+            queue_name: None,
+            enabled: true,
+            timezone: "UTC".to_owned(),
+            catch_up_missed: false,
+            max_catch_up_runs: 100,
+        };
+        let hash = compute_config_hash(&schedule);
+        assert_eq!(hash.len(), 64, "expected 64-char SHA-256 hex");
+        assert!(
+            hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "hash must be lowercase hex: {hash}",
+        );
+        // Golden value pins the exact algorithm + serialization basis.
+        assert_eq!(
+            hash,
+            "f017c54428c546a2d8ce73c45d1eafcf207d910b03ff1b73d29a4bd9407c1374",
         );
     }
 
