@@ -273,19 +273,29 @@ WHERE wt.workflow_id = $2 AND wt.task_index = $3
   AND w.id = wt.workflow_id
   AND w.status = 'RUNNING'";
 
+// The `w.status NOT IN (terminal)` gate mirrors COMPLETE_WORKFLOW_TASK_SQL: a
+// child completing after its parent was cancelled must not flip the parent's
+// (terminal-workflow) node to COMPLETED/FAILED post-cancellation (C22).
 const UPDATE_SUBWORKFLOW_COMPLETED_SQL: &str = "\
-UPDATE horsies_workflow_tasks
+UPDATE horsies_workflow_tasks wt
 SET status = 'COMPLETED', result = $1, sub_workflow_summary = $2, completed_at = NOW()
-WHERE workflow_id = $3 AND task_index = $4
-  AND status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
-RETURNING id";
+FROM horsies_workflows w
+WHERE wt.workflow_id = $3 AND wt.task_index = $4
+  AND wt.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
+  AND w.id = wt.workflow_id
+  AND w.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
+RETURNING wt.id";
 
+// Same terminal-workflow gate as UPDATE_SUBWORKFLOW_COMPLETED_SQL (C22).
 const UPDATE_SUBWORKFLOW_FAILED_SQL: &str = "\
-UPDATE horsies_workflow_tasks
+UPDATE horsies_workflow_tasks wt
 SET status = 'FAILED', result = $1, error = $2, sub_workflow_summary = $3, completed_at = NOW()
-WHERE workflow_id = $4 AND task_index = $5
-  AND status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
-RETURNING id";
+FROM horsies_workflows w
+WHERE wt.workflow_id = $4 AND wt.task_index = $5
+  AND wt.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
+  AND w.id = wt.workflow_id
+  AND w.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
+RETURNING wt.id";
 
 const COUNT_CHILD_TASK_STATUSES_SQL: &str = "\
 SELECT status, COUNT(*)::int as cnt
@@ -2832,6 +2842,95 @@ WHERE wt.workflow_id = $1
             error.as_deref().unwrap_or("").contains("boom"),
             "the triggering error must be stored on pause",
         );
+
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+            .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    /// C22: a late sub-workflow completion must not mutate a node whose parent
+    /// workflow is already terminal (e.g. cancelled). The CAS now gates on the
+    /// parent workflow not being terminal.
+    #[tokio::test]
+    #[serial]
+    async fn subworkflow_completion_blocked_when_parent_terminal() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let wf_id = Uuid::new_v4().to_string();
+
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index,
+                definition_key, depth, root_workflow_id,
+                sent_at, created_at, started_at, updated_at
+            ) VALUES ($1, 'c22_wf', 'CANCELLED', 'fail', NULL, 'test.c22.v1', 0, $1,
+                      NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(&wf_id)
+        .execute(&pool)
+        .await
+        .expect("insert workflow");
+
+        // A non-terminal sub-workflow node under the cancelled parent.
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                queue_name, priority, dependencies, allow_failed_deps, join_type,
+                status, is_subworkflow, created_at
+            ) VALUES ($1, $2, 0, 'node_0', 'sub', '[]', '{}',
+                      'default', 100, '{}', FALSE, 'all',
+                      'RUNNING', TRUE, NOW())",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&wf_id)
+        .execute(&pool)
+        .await
+        .expect("insert node");
+
+        // Parent CANCELLED: the sub-workflow completion CAS must be a no-op.
+        let blocked = sqlx::query(UPDATE_SUBWORKFLOW_COMPLETED_SQL)
+            .bind(Option::<String>::None) // $1 result
+            .bind(Option::<String>::None) // $2 summary
+            .bind(&wf_id) // $3
+            .bind(0_i32) // $4
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            blocked.rows_affected(),
+            0,
+            "sub-workflow completion must not touch a node of a terminal parent",
+        );
+        let node_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1")
+                .bind(&wf_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(node_status, "RUNNING", "node must be untouched");
+
+        // Parent RUNNING: the CAS applies.
+        sqlx::query("UPDATE horsies_workflows SET status = 'RUNNING' WHERE id = $1")
+            .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let applied = sqlx::query(UPDATE_SUBWORKFLOW_COMPLETED_SQL)
+            .bind(Option::<String>::None)
+            .bind(Option::<String>::None)
+            .bind(&wf_id)
+            .bind(0_i32)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(applied.rows_affected(), 1, "CAS must apply under a RUNNING parent");
 
         sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
             .bind(&wf_id)
