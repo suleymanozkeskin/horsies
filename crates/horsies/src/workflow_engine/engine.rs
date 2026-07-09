@@ -29,8 +29,18 @@ use crate::workflow_engine::error::WorkflowError;
 /// gated here — it flows through and is caught by the fresh PAUSED guard after
 /// failure handling, matching the prior control flow. Zero rows = not a
 /// workflow task, or its workflow row is missing; the caller treats both as a
-/// no-op. The data-modifying CTE always executes exactly once even though the
+/// no-op. The data-modifying CTEs always execute exactly once even though the
 /// outer query only reads `found`.
+///
+/// `pause_wf` folds the `on_error = 'pause'` parent pause into this same
+/// statement, atomic with the node-FAILED write: when the node CAS wins with
+/// status FAILED and the workflow's `on_error` is `pause`, it CASes the workflow
+/// RUNNING -> PAUSED and stores the triggering error. Without this, a crash
+/// between the node-FAILED commit and the separate pause in
+/// `handle_workflow_task_failure` permanently lost the pause and the workflow
+/// finalized FAILED (C16). `handle_workflow_task_failure` still runs for the
+/// child-pause cascade and error bookkeeping; its own parent pause then no-ops
+/// (already PAUSED).
 const COMPLETE_WORKFLOW_TASK_SQL: &str = "\
 WITH found AS (
     SELECT wt.workflow_id, wt.task_index, w.status AS wf_status, w.on_error
@@ -47,9 +57,21 @@ upd AS (
       AND wt.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
       AND found.wf_status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
     RETURNING wt.task_index
+),
+pause_wf AS (
+    UPDATE horsies_workflows w
+    SET status = 'PAUSED', error = COALESCE($4::text, w.error), updated_at = NOW()
+    FROM found
+    WHERE w.id = found.workflow_id
+      AND found.on_error = 'pause'
+      AND $2 = 'FAILED'
+      AND w.status = 'RUNNING'
+      AND EXISTS (SELECT 1 FROM upd)
+    RETURNING w.id
 )
 SELECT found.workflow_id, found.task_index, found.wf_status, found.on_error,
-       EXISTS (SELECT 1 FROM upd) AS cas_won
+       EXISTS (SELECT 1 FROM upd) AS cas_won,
+       EXISTS (SELECT 1 FROM pause_wf) AS wf_paused
 FROM found";
 
 const UPDATE_WORKFLOW_TASK_FAILED_SQL: &str = "\
@@ -320,6 +342,9 @@ struct CompleteTaskRow {
     wf_status: String,
     on_error: String,
     cas_won: bool,
+    /// True when this same statement CAS-paused the workflow (on_error=pause,
+    /// node CAS won with FAILED) atomically with the node-FAILED write (C16).
+    wf_paused: bool,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -521,6 +546,14 @@ pub async fn on_workflow_task_complete(
         tracing::debug!(workflow_id, task_index, "workflow task completed");
     } else {
         tracing::debug!(workflow_id, task_index, "workflow task failed");
+
+        if row.wf_paused {
+            tracing::debug!(
+                workflow_id,
+                task_index,
+                "workflow paused atomically with node-FAILED write (on_error=pause)",
+            );
+        }
 
         // Handle failure policy. on_error comes from the locked workflow row
         // returned by the statement above. error_json is Some on this branch.
@@ -2730,6 +2763,83 @@ WHERE wt.workflow_id = $1
             .ok();
         sqlx::query("DELETE FROM horsies_workflows WHERE id = ANY($1)")
             .bind(vec![wf_id.clone(), child_id.clone()])
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    /// C16: `COMPLETE_WORKFLOW_TASK_SQL` must pause an `on_error=pause` workflow
+    /// atomically with the node-FAILED write, so a crash before the separate
+    /// failure handler cannot lose the pause and finalize the workflow FAILED.
+    #[tokio::test]
+    #[serial]
+    async fn node_failed_pauses_on_error_pause_workflow_atomically() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let wf_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index,
+                definition_key, depth, root_workflow_id,
+                sent_at, created_at, started_at, updated_at
+            ) VALUES ($1, 'c16_wf', 'RUNNING', 'pause', NULL, 'test.c16.v1', 0, $1,
+                      NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(&wf_id)
+        .execute(&pool)
+        .await
+        .expect("insert workflow");
+
+        // A non-terminal node linked to the backing task id.
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                queue_name, priority, dependencies, allow_failed_deps, join_type,
+                status, is_subworkflow, task_id, created_at
+            ) VALUES ($1, $2, 0, 'node_0', 'c16_task', '[]', '{}',
+                      'default', 100, '{}', FALSE, 'all',
+                      'RUNNING', FALSE, $3, NOW())",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&wf_id)
+        .bind(&task_id)
+        .execute(&pool)
+        .await
+        .expect("insert node");
+
+        // The single statement that writes the node FAILED must also pause the wf.
+        let row: CompleteTaskRow = sqlx::query_as(COMPLETE_WORKFLOW_TASK_SQL)
+            .bind(&task_id) // $1
+            .bind("FAILED") // $2
+            .bind(Option::<String>::None) // $3 result
+            .bind(Some(r#"{"message":"boom"}"#)) // $4 error
+            .fetch_one(&pool)
+            .await
+            .expect("complete workflow task");
+        assert!(row.cas_won, "node CAS must win");
+        assert!(row.wf_paused, "the same statement must pause the workflow");
+
+        let (status, error): (String, Option<String>) =
+            sqlx::query_as("SELECT status, error FROM horsies_workflows WHERE id = $1")
+                .bind(&wf_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "PAUSED", "on_error=pause workflow must be PAUSED atomically");
+        assert!(
+            error.as_deref().unwrap_or("").contains("boom"),
+            "the triggering error must be stored on pause",
+        );
+
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+            .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(&wf_id)
             .execute(&pool)
             .await
             .ok();
