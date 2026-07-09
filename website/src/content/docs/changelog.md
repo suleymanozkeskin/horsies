@@ -1,8 +1,8 @@
 ---
 title: Changelog
-summary: Notable changes per release. 0.2.7 collapses the worker claim critical section into one server-side statement (the `horsies_claim` function, schema v10) so the cap-serialization advisory lock is held only across a single statement plus commit, removing the client-stall-while-holding-lock freeze, and changes the equal-queue-priority tie-break from configured queue order to a priority-then-FIFO band; 0.2.6 binds subworkflow tasks to their queue's configured priority so a parameterized child no longer claims at the default priority 100 on a CUSTOM queue; 0.2.5 adds default-on TCP keepalives for remote/pooled Postgres and gives the workflow reaper a grace window so it stops racing in-flight finalizers; 0.2.4 adds per-child memory recycling (`--max-memory-per-child-mb`, off by default), fixes a latent count-recycle hang (CPython gh-115634), and gates worker log color to TTYs; 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
+summary: Notable changes per release. 0.2.8 replaces the latest-per-worker `DISTINCT ON` scan with a recursive skip-scan, adds retention eligibility indexes (schema v11), batches retention deletes, makes the worker-state snapshot cadence configurable (`worker_state_snapshot_interval_ms`, default 30s, was hardcoded 5s), enforces per-queue `max_concurrency` without `queue_priorities`, and accepts EXPIRED rows in workflow finalization phase-2 replay; 0.2.7 collapses the worker claim critical section into one server-side statement (the `horsies_claim` function, schema v10) so the cap-serialization advisory lock is held only across a single statement plus commit, removing the client-stall-while-holding-lock freeze, and changes the equal-queue-priority tie-break from configured queue order to a priority-then-FIFO band; 0.2.6 binds subworkflow tasks to their queue's configured priority so a parameterized child no longer claims at the default priority 100 on a CUSTOM queue; 0.2.5 adds default-on TCP keepalives for remote/pooled Postgres and gives the workflow reaper a grace window so it stops racing in-flight finalizers; 0.2.4 adds per-child memory recycling (`--max-memory-per-child-mb`, off by default), fixes a latent count-recycle hang (CPython gh-115634), and gates worker log color to TTYs; 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
 related: [./monitoring/worker-health, ./migrations/migration-to-0-1-2, ./internals/serialization]
-tags: [changelog, releases, breaking-changes, 0.2.7, 0.2.6, 0.2.5, 0.2.4, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
+tags: [changelog, releases, breaking-changes, 0.2.8, 0.2.7, 0.2.6, 0.2.5, 0.2.4, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
 ---
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
@@ -10,6 +10,46 @@ horsies is pre-1.0: breaking changes may land in minor or patch releases, and
 there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
+
+## 0.2.8 — 2026-07-09
+
+Removes the two remaining full-table scans on the monitoring/retention path and
+bounds retention deletes. Schema v11 (two indexes, applied automatically by the
+broker's advisory-locked schema init on next startup).
+
+`list_worker_states` previously ran `DISTINCT ON (worker_id)` over the whole
+`horsies_worker_states` timeseries — Postgres has no loose index scan, so the
+read cost scaled with total retained snapshots, not worker count. At 118k
+retained rows across 6 workers the call took 10.3 s. It now runs a recursive
+skip-scan (one `(worker_id, snapshot_at DESC)` index probe per worker): 9.2 ms
+on the same table, dead/idle workers still listed. On the write side of the
+same table, the snapshot cadence is now configurable
+(`RecoveryConfig.worker_state_snapshot_interval_ms`, 1 s–5 min) and its default
+moves from the previously hardcoded 5 s to 30 s — ~20k rows per worker per week
+at the 7-day default retention instead of ~120k. Set it to `5_000` to keep the
+old chart resolution.
+
+The hourly retention pass previously seq-scanned the full `horsies_tasks` and
+`horsies_worker_states` heaps on every run — even with zero eligible rows — and
+ran all five DELETEs unbounded in a single transaction, so enabling retention
+on a long-running database meant one DELETE of the entire backlog (WAL burst,
+`task_attempts` cascades, full rollback on any failure). Schema v11 adds
+`idx_horsies_tasks_retention` (a partial expression index over terminal
+statuses; a row enters it once, at its finalize transition — claim and
+lease-renewal updates never maintain it) and
+`idx_horsies_worker_states_snapshot_at`. Deletes now run in 5,000-row batches,
+one transaction per batch, under a 60 s per-pass budget; a larger backlog
+drains across consecutive hourly passes, and concurrent passes drain disjoint
+batches via `FOR UPDATE SKIP LOCKED`.
+
+Two fixes. Per-queue `max_concurrency` is enforced when `queue_priorities` is
+not configured: a cap-only queue previously either ran uncapped (empty priority
+map — concurrent claimers over-claimed past the cap) or was never serviced
+(partial priority map omitting the capped queue). And workflow finalization
+phase-2 replay accepts EXPIRED rows: an expired-before-start task writes
+terminal EXPIRED plus a `TASK_EXPIRED` err result, but the replay reload only
+accepted COMPLETED/FAILED and discarded it as "terminal task result
+unavailable", wedging in-process replay for the expired case.
 
 ## 0.2.7 — 2026-06-24
 

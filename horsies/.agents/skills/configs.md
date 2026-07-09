@@ -300,6 +300,7 @@ Controls stale task detection, automatic recovery, and data retention.
 | `check_interval_ms` | `int` | `30_000` | 1s–10min | Reaper poll cadence |
 | `runner_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | Heartbeat from running task process |
 | `claimer_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | Heartbeat for CLAIMED tasks |
+| `worker_state_snapshot_interval_ms` | `int` | `30_000` | 1s–5min | How often each worker inserts a monitoring snapshot row into `horsies_worker_states` |
 | `heartbeat_retention_hours` | `int \| None` | `24` | 1–8760; None disables | Prune old heartbeat rows |
 | `worker_state_retention_hours` | `int \| None` | `168` (7d) | 1–8760; None disables | Prune old worker_state rows |
 | `terminal_record_retention_hours` | `int \| None` | `720` (30d) | 1–43800; None disables | Prune terminal task/workflow rows |
@@ -317,7 +318,7 @@ The 2x factor ensures a task can miss one full heartbeat cycle without being inc
 Runs on `check_interval_ms` cadence:
 1. CLAIMED tasks without heartbeat for `claimed_stale_threshold_ms` → requeued to PENDING (if enabled).
 2. RUNNING tasks without heartbeat for `running_stale_threshold_ms` → retry on `WORKER_CRASHED` policy or mark FAILED (if enabled). Recent `finalizing_at` and live parent worker state suppress this recovery.
-3. Hourly retention pruning: deletes old heartbeat, worker_state, and terminal rows based on retention settings.
+3. Hourly retention pruning: deletes old heartbeat, worker_state, and terminal rows based on retention settings. Deletes run in 5,000-row batches (one transaction each) under a 60s per-pass budget; a larger backlog drains across consecutive hourly passes.
 
 **CPU/GIL-heavy tasks:** Increase `running_stale_threshold_ms`. GIL-bound tasks may not send heartbeats at the configured interval. Rule of thumb: >= 3–5x worst-case heartbeat gap. The stale threshold is based on missing runner heartbeats, not total task duration.
 
