@@ -597,9 +597,43 @@ impl Worker {
         let mut dispatched_buffered = 0u32;
         if claimed_count > 0 && self.semaphore.available_permits() > 0 {
             let buffered = self.broker.load_buffered_claimed(&self.worker_id).await?;
+
+            // Soft-cap re-check: the claim function counts only RUNNING against a
+            // queue's `max_concurrency`, so successive passes can buffer more
+            // CLAIMED tasks of a capped queue than its cap while none are running.
+            // Dispatching all of them would push queue-level RUNNING past the cap
+            // by up to `prefetch_buffer` (C17). Gate capped-queue dispatch on the
+            // cluster-wide RUNNING count so a buffered task never starts beyond
+            // the cap; the excess stays CLAIMED (leased) until running frees up.
+            let mut running_by_queue = std::collections::HashMap::new();
+            if soft_cap_mode && !self.worker_config.queue_max_concurrency.is_empty() {
+                let capped: Vec<String> = buffered
+                    .iter()
+                    .map(|r| r.queue_name.clone())
+                    .filter(|q| self.worker_config.queue_max_concurrency.contains_key(q))
+                    .collect();
+                running_by_queue = self.broker.count_running_by_queue(&capped).await?;
+            }
+            let mut dispatched_by_queue: std::collections::HashMap<String, u32> =
+                std::collections::HashMap::new();
+
             for row in buffered {
                 if self.semaphore.available_permits() == 0 {
                     break;
+                }
+                // In soft-cap mode, do not start a capped queue's buffered task
+                // past its cluster-wide RUNNING cap.
+                if soft_cap_mode {
+                    if let Some(&cap) =
+                        self.worker_config.queue_max_concurrency.get(&row.queue_name)
+                    {
+                        let running = running_by_queue.get(&row.queue_name).copied().unwrap_or(0);
+                        let pending = *dispatched_by_queue.get(&row.queue_name).unwrap_or(&0);
+                        if running + i64::from(pending) >= i64::from(cap) {
+                            continue; // cap reached; leave this task CLAIMED
+                        }
+                        *dispatched_by_queue.entry(row.queue_name.clone()).or_insert(0) += 1;
+                    }
                 }
                 self.dispatch_task(row);
                 dispatched_buffered += 1;
@@ -1350,6 +1384,12 @@ mod tests {
     }
 
     async fn succeed(_: ()) -> Result<String, TaskError> {
+        Ok("done".to_owned())
+    }
+
+    /// A task that stays RUNNING long enough for a test to observe concurrency.
+    async fn block_a_while(_: ()) -> Result<String, TaskError> {
+        tokio::time::sleep(Duration::from_secs(30)).await;
         Ok("done".to_owned())
     }
 
@@ -2215,5 +2255,113 @@ mod tests {
             cancel.is_cancelled(),
             "run() must cancel the token on a fatal exit so background loops stop (C11)",
         );
+    }
+
+    /// C17: in soft-cap mode, buffered-dispatch must not start more of a capped
+    /// queue's tasks than its `max_concurrency`. The claim function counts only
+    /// RUNNING against the cap, so a worker can accumulate more CLAIMED tasks of
+    /// a capped queue than its cap while none run; dispatching all of them would
+    /// push queue RUNNING past the cap by up to `prefetch_buffer`.
+    #[tokio::test]
+    #[serial]
+    async fn buffered_dispatch_respects_queue_cap_in_soft_mode() {
+        use crate::core::config::{PostgresConfig, QueueMode, WorkerResilienceConfig};
+
+        let broker = test_broker().await;
+        let pool = broker.pool().clone();
+        clean(&pool).await;
+
+        let mut registry = TaskRegistry::new();
+        registry
+            .register("block_a_while", async_task_fn!(block_a_while, ()))
+            .expect("register");
+
+        let app_config = AppConfig {
+            queue_mode: QueueMode::Default,
+            custom_queues: None,
+            broker: PostgresConfig {
+                database_url: test_db_url(),
+                session_database_url: None,
+                pgbouncer_transaction_mode: false,
+                pool_pre_ping: true,
+                pool_size: 30,
+                max_overflow: 30,
+                pool_timeout: 30,
+                pool_recycle: 1800,
+                echo: false,
+            },
+            cluster_wide_cap: None,
+            prefetch_buffer: 4, // soft-cap mode
+            claim_lease_ms: Some(60_000),
+            max_claim_renew_age_ms: 180_000,
+            recovery: RecoveryConfig::default(),
+            resilience: WorkerResilienceConfig::default(),
+            schedule: None,
+            resend_on_transient_err: false,
+        };
+
+        let mut queue_max_concurrency = std::collections::HashMap::new();
+        queue_max_concurrency.insert("c17q".to_owned(), 2u32);
+        let worker_config = WorkerConfig {
+            queues: vec!["c17q".to_owned()],
+            concurrency: 10, // ample permits — the cap, not permits, must bind
+            queue_max_concurrency,
+            ..WorkerConfig::default()
+        };
+
+        let worker = Worker::new(
+            Arc::clone(&broker),
+            Arc::new(registry),
+            Arc::new(WorkflowSpecRegistry::new()),
+            app_config,
+            worker_config,
+        )
+        .expect("worker");
+
+        // Seed 6 buffered CLAIMED tasks of the capped queue owned by this worker,
+        // none RUNNING — the pathological state the claim function permits.
+        for _ in 0..6 {
+            let id = Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO horsies_tasks (
+                    id, task_name, queue_name, priority, args, kwargs, status,
+                    sent_at, enqueued_at, claimed_at, created_at, updated_at, claimed,
+                    claimed_by_worker_id, claim_expires_at, retry_count, max_retries,
+                    is_workflow_task, enqueue_sha
+                ) VALUES (
+                    $1, 'block_a_while', 'c17q', 100, '[]', '{}', 'CLAIMED',
+                    NOW(), NOW(), NOW(), NOW(), NOW(), TRUE,
+                    $2, NOW() + INTERVAL '60 seconds', 0, 3,
+                    FALSE, '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+                )",
+            )
+            .bind(&id)
+            .bind(&worker.worker_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        worker
+            .claim_and_dispatch_all()
+            .await
+            .expect("claim_and_dispatch_all");
+
+        // Let the dispatched tasks transition CLAIMED -> RUNNING.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        let running: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM horsies_tasks WHERE queue_name = 'c17q' AND status = 'RUNNING'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            running <= 2,
+            "queue RUNNING ({running}) must not exceed max_concurrency (2) via buffered dispatch",
+        );
+        assert_eq!(running, 2, "the cap's worth of buffered tasks must dispatch");
+
+        clean(&pool).await;
     }
 }

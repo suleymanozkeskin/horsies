@@ -346,6 +346,15 @@ const COUNT_RUNNING_FOR_WORKER_SQL: &str = "\
 SELECT COUNT(*) FROM horsies_tasks \
 WHERE claimed_by_worker_id = $1 AND status = 'RUNNING'";
 
+/// Cluster-wide RUNNING count per queue, for the given queues. Mirrors the
+/// soft-mode per-queue cap accounting in `horsies_claim` (RUNNING only), so a
+/// buffered-dispatch re-check against these counts matches the claim function's
+/// view of a queue's `max_concurrency` cap (C17).
+const COUNT_RUNNING_BY_QUEUE_SQL: &str = "\
+SELECT queue_name, COUNT(*) FROM horsies_tasks \
+WHERE queue_name = ANY($1) AND status = 'RUNNING' \
+GROUP BY queue_name";
+
 /// Load CLAIMED tasks owned by a specific worker (for prefetch buffer dispatch).
 const LOAD_BUFFERED_CLAIMED_SQL: &str = "\
 SELECT id, task_name, args, kwargs, retry_count, max_retries, task_options, queue_name, good_until, is_workflow_task \
@@ -1810,6 +1819,26 @@ impl PostgresBroker {
             .await
             .map_err(BrokerError::Database)?;
         Ok(count.0)
+    }
+
+    /// Cluster-wide RUNNING count per queue, for the given queues.
+    ///
+    /// Backs the soft-cap buffered-dispatch cap re-check: queues with no RUNNING
+    /// task are simply absent from the map (count 0). Returns an empty map when
+    /// `queues` is empty (no query issued).
+    pub async fn count_running_by_queue(
+        &self,
+        queues: &[String],
+    ) -> Result<std::collections::HashMap<String, i64>, BrokerError> {
+        if queues.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let rows: Vec<(String, i64)> = sqlx::query_as(COUNT_RUNNING_BY_QUEUE_SQL)
+            .bind(queues)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(BrokerError::Database)?;
+        Ok(rows.into_iter().collect())
     }
 
     /// Load CLAIMED tasks owned by a specific worker that are ready to dispatch.
