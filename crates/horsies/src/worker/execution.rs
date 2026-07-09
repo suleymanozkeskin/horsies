@@ -583,7 +583,13 @@ pub(crate) async fn schedule_retry_for_task(
             .await
             .map_err(crate::broker::BrokerError::Database)?;
         let applied = broker
-            .requeue_in_tx(&mut tx, task_id, Some(next_retry_at), worker.worker_id)
+            .requeue_in_tx(
+                &mut tx,
+                task_id,
+                Some(next_retry_at),
+                worker.worker_id,
+                Some(task_started_at),
+            )
             .await?;
         if applied {
             broker
@@ -809,7 +815,14 @@ async fn persist_ok_result(
         let payload = format!("capacity:{}", task_id);
         let tx_result = finalize_with_retry(task_id, "complete-fused", || async {
             broker
-                .finalize_completed_fused(task_id, Some(&wrapped_json), worker_id, &channel, &payload)
+                .finalize_completed_fused(
+                    task_id,
+                    Some(&wrapped_json),
+                    worker_id,
+                    &channel,
+                    &payload,
+                    Some(task_started_at),
+                )
                 .await
         })
         .await;
@@ -839,7 +852,13 @@ async fn persist_ok_result(
                 .await
                 .map_err(crate::broker::BrokerError::Database)?;
             let applied = broker
-                .complete_in_tx(&mut tx, task_id, Some(&wrapped_json), worker_id)
+                .complete_in_tx(
+                    &mut tx,
+                    task_id,
+                    Some(&wrapped_json),
+                    worker_id,
+                    Some(task_started_at),
+                )
                 .await?;
             if applied {
                 broker
@@ -898,7 +917,14 @@ async fn persist_ok_result(
                 .await
                 .map_err(crate::broker::BrokerError::Database)?;
             let applied = broker
-                .fail_in_tx(&mut tx, task_id, Some(&wrapped_json), Some(&ser_error_code), worker_id)
+                .fail_in_tx(
+                    &mut tx,
+                    task_id,
+                    Some(&wrapped_json),
+                    Some(&ser_error_code),
+                    worker_id,
+                    Some(task_started_at),
+                )
                 .await?;
             if applied {
                 broker
@@ -979,6 +1005,7 @@ async fn persist_err_terminal(
                 Some(&wrapped_json),
                 error_code_str.as_deref(),
                 worker_id,
+                Some(task_started_at),
             )
             .await?;
         if applied {

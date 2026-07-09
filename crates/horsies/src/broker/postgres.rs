@@ -144,6 +144,11 @@ hb AS (
 )
 SELECT id, started_at FROM upd";
 
+// The optional `started_at` fence ($4) scopes the CAS to a specific claim
+// generation: `set_running` returns the attempt's `started_at`, and threading it
+// here rejects a stale finalize from an attempt the reaper already requeued and
+// the same worker re-claimed (a new `started_at`). `NULL` disables the fence,
+// preserving the worker+status-only behavior for callers that do not pass it (C10).
 const COMPLETE_SQL: &str = "\
 UPDATE horsies_tasks
 SET status = 'COMPLETED',
@@ -156,6 +161,7 @@ SET status = 'COMPLETED',
 WHERE id = $1
   AND status = 'RUNNING'
   AND claimed_by_worker_id = $3
+  AND ($4::timestamptz IS NULL OR started_at = $4)
 RETURNING id";
 
 /// Fused ok-path finalization for plain (non-workflow) tasks: one statement that
@@ -174,6 +180,7 @@ WITH ctx AS (
     WHERE id = $1
       AND status = 'RUNNING'
       AND claimed_by_worker_id = $2
+      AND ($6::timestamptz IS NULL OR started_at = $6)
     FOR UPDATE
 ),
 attempt AS (
@@ -219,6 +226,9 @@ SELECT upd.id, pg_notify($4, $5)
 FROM upd";
 
 /// Task failure: sets result and error_code (user/task error path).
+///
+/// The optional `started_at` fence ($5) scopes the CAS to a claim generation;
+/// see `COMPLETE_SQL` (C10). `NULL` disables it.
 const FAIL_TASK_SQL: &str = "\
 UPDATE horsies_tasks
 SET status = 'FAILED',
@@ -231,6 +241,7 @@ SET status = 'FAILED',
 WHERE id = $1
   AND status = 'RUNNING'
   AND claimed_by_worker_id = $4
+  AND ($5::timestamptz IS NULL OR started_at = $5)
 RETURNING id";
 
 /// Worker failure: sets failed_reason, clears error_code (worker crash path).
@@ -260,6 +271,8 @@ RETURNING id";
 // FINALIZE_TASK_COMPLETED_SQL's ctx CTE), not passed by the caller: the
 // ownership CAS makes the claim-time snapshot provably equal to the row, so
 // self-incrementing removes the snapshot from the written value entirely.
+// The optional `started_at` fence ($4) scopes the CAS to a claim generation;
+// see `COMPLETE_SQL` (C10). `NULL` disables it.
 const REQUEUE_SQL: &str = "\
 UPDATE horsies_tasks
 SET status = 'PENDING',
@@ -274,6 +287,7 @@ WHERE id = $1
   AND status = 'RUNNING'
   AND claimed_by_worker_id = $3
   AND (good_until IS NULL OR $2 < good_until)
+  AND ($4::timestamptz IS NULL OR started_at = $4)
 RETURNING id";
 
 const GET_RESULT_SQL: &str = "\
@@ -1319,17 +1333,22 @@ impl PostgresBroker {
     }
 
     /// Mark a task as completed (transactional variant).
+    ///
+    /// `started_at` fences the CAS to a specific claim generation (`Some` from the
+    /// attempt's `set_running`); `None` disables the fence (C10).
     pub async fn complete_in_tx(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         task_id: &str,
         result_json: Option<&str>,
         worker_id: &str,
+        started_at: Option<DateTime<Utc>>,
     ) -> Result<bool, BrokerError> {
         let row: Option<ClaimedId> = sqlx::query_as(COMPLETE_SQL)
             .bind(task_id)
             .bind(result_json)
             .bind(worker_id)
+            .bind(started_at)
             .fetch_optional(tx.as_mut())
             .await
             .map_err(BrokerError::Database)?;
@@ -1358,6 +1377,7 @@ impl PostgresBroker {
         worker_id: &str,
         notify_channel: &str,
         notify_payload: &str,
+        started_at: Option<DateTime<Utc>>,
     ) -> Result<bool, BrokerError> {
         let row: Option<ClaimedId> = sqlx::query_as(FINALIZE_TASK_COMPLETED_SQL)
             .bind(task_id)
@@ -1365,6 +1385,7 @@ impl PostgresBroker {
             .bind(result_json)
             .bind(notify_channel)
             .bind(notify_payload)
+            .bind(started_at)
             .fetch_optional(&self.pool)
             .await
             .map_err(BrokerError::Database)?;
@@ -1382,10 +1403,12 @@ impl PostgresBroker {
         result_json: Option<&str>,
         worker_id: &str,
     ) -> Result<bool, BrokerError> {
+        // No claim-generation fence on the direct (non-execution) path.
         let row: Option<ClaimedId> = sqlx::query_as(COMPLETE_SQL)
             .bind(task_id)
             .bind(result_json)
             .bind(worker_id)
+            .bind(None::<DateTime<Utc>>)
             .fetch_optional(&self.pool)
             .await
             .map_err(BrokerError::Database)?;
@@ -1402,6 +1425,9 @@ impl PostgresBroker {
     }
 
     /// Mark a task as FAILED (transactional variant).
+    ///
+    /// `started_at` fences the CAS to a specific claim generation (`Some` from the
+    /// attempt's `set_running`); `None` disables the fence (C10).
     pub async fn fail_in_tx(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -1409,12 +1435,14 @@ impl PostgresBroker {
         result_json: Option<&str>,
         error_code: Option<&str>,
         worker_id: &str,
+        started_at: Option<DateTime<Utc>>,
     ) -> Result<bool, BrokerError> {
         let row: Option<ClaimedId> = sqlx::query_as(FAIL_TASK_SQL)
             .bind(task_id)
             .bind(result_json)
             .bind(error_code)
             .bind(worker_id)
+            .bind(started_at)
             .fetch_optional(tx.as_mut())
             .await
             .map_err(BrokerError::Database)?;
@@ -1441,11 +1469,13 @@ impl PostgresBroker {
         error_code: Option<&str>,
         worker_id: &str,
     ) -> Result<bool, BrokerError> {
+        // No claim-generation fence on the direct (non-execution) path.
         let row: Option<ClaimedId> = sqlx::query_as(FAIL_TASK_SQL)
             .bind(task_id)
             .bind(result_json)
             .bind(error_code)
             .bind(worker_id)
+            .bind(None::<DateTime<Utc>>)
             .fetch_optional(&self.pool)
             .await
             .map_err(BrokerError::Database)?;
@@ -1508,18 +1538,22 @@ impl PostgresBroker {
     /// Requeue a task for retry (transactional variant).
     ///
     /// `retry_count` is incremented from the CAS-locked row itself, so the
-    /// caller supplies no count.
+    /// caller supplies no count. `started_at` fences the CAS to a specific claim
+    /// generation (`Some` from the attempt's `set_running`); `None` disables the
+    /// fence (C10).
     pub async fn requeue_in_tx(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         task_id: &str,
         next_retry_at: Option<DateTime<Utc>>,
         worker_id: &str,
+        started_at: Option<DateTime<Utc>>,
     ) -> Result<bool, BrokerError> {
         let row: Option<ClaimedId> = sqlx::query_as(REQUEUE_SQL)
             .bind(task_id)
             .bind(next_retry_at)
             .bind(worker_id)
+            .bind(started_at)
             .fetch_optional(tx.as_mut())
             .await
             .map_err(BrokerError::Database)?;
@@ -1547,10 +1581,12 @@ impl PostgresBroker {
         next_retry_at: Option<DateTime<Utc>>,
         worker_id: &str,
     ) -> Result<bool, BrokerError> {
+        // No claim-generation fence on the direct (non-execution) path.
         let row: Option<ClaimedId> = sqlx::query_as(REQUEUE_SQL)
             .bind(task_id)
             .bind(next_retry_at)
             .bind(worker_id)
+            .bind(None::<DateTime<Utc>>)
             .fetch_optional(&self.pool)
             .await
             .map_err(BrokerError::Database)?;
@@ -3617,7 +3653,7 @@ mod fused_finalize_tests {
         seed(&pool, &id, "RUNNING", Some("w1"), 1).await;
 
         let applied = broker
-            .finalize_completed_fused(&id, Some("{\"Ok\":7}"), "w1", "task_queue_default", "capacity:x")
+            .finalize_completed_fused(&id, Some("{\"Ok\":7}"), "w1", "task_queue_default", "capacity:x", None)
             .await
             .expect("fused finalize");
         assert!(applied, "RUNNING owned task must finalize");
@@ -3654,7 +3690,7 @@ mod fused_finalize_tests {
         seed(&pool, &id, "COMPLETED", Some("w1"), 0).await;
 
         let applied = broker
-            .finalize_completed_fused(&id, Some("{\"Ok\":1}"), "w1", "task_queue_default", "capacity:x")
+            .finalize_completed_fused(&id, Some("{\"Ok\":1}"), "w1", "task_queue_default", "capacity:x", None)
             .await
             .expect("fused finalize");
         assert!(!applied, "non-RUNNING row must not be touched");
@@ -3679,7 +3715,7 @@ mod fused_finalize_tests {
         seed(&pool, &id, "RUNNING", Some("w1"), 0).await;
 
         let applied = broker
-            .finalize_completed_fused(&id, Some("{\"Ok\":1}"), "w2", "task_queue_default", "capacity:x")
+            .finalize_completed_fused(&id, Some("{\"Ok\":1}"), "w2", "task_queue_default", "capacity:x", None)
             .await
             .expect("fused finalize");
         assert!(!applied, "ownership mismatch must not finalize");
@@ -3690,6 +3726,114 @@ mod fused_finalize_tests {
             .await
             .expect("status");
         assert_eq!(status, "RUNNING", "row untouched");
+
+        cleanup(&pool, &id).await;
+    }
+
+    /// C10: the fused finalize must be fenced to a claim generation. A stale
+    /// finalize carrying an earlier attempt's `started_at` must not complete a
+    /// task the same worker re-claimed (new `started_at`) after a reaper requeue.
+    #[tokio::test]
+    #[serial]
+    async fn fused_finalize_fenced_by_started_at() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let id = Uuid::new_v4().to_string();
+        seed(&pool, &id, "RUNNING", Some("w1"), 0).await;
+
+        // The current claim generation is the row's actual started_at.
+        let current: DateTime<Utc> =
+            sqlx::query_scalar("SELECT started_at FROM horsies_tasks WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("started_at");
+        let stale = current - chrono::Duration::minutes(1);
+
+        // Stale generation: fenced out, row stays RUNNING.
+        let applied = broker
+            .finalize_completed_fused(
+                &id,
+                Some("{\"Ok\":1}"),
+                "w1",
+                "task_queue_default",
+                "capacity:x",
+                Some(stale),
+            )
+            .await
+            .expect("fused finalize");
+        assert!(!applied, "stale started_at must be fenced out");
+        let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("status");
+        assert_eq!(status, "RUNNING", "row must stay RUNNING under a stale fence");
+
+        // Current generation: finalizes.
+        let applied = broker
+            .finalize_completed_fused(
+                &id,
+                Some("{\"Ok\":2}"),
+                "w1",
+                "task_queue_default",
+                "capacity:x",
+                Some(current),
+            )
+            .await
+            .expect("fused finalize");
+        assert!(applied, "matching started_at must finalize");
+        let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("status");
+        assert_eq!(status, "COMPLETED");
+
+        cleanup(&pool, &id).await;
+    }
+
+    /// C10: the retry requeue CAS is likewise fenced by `started_at`, so a stale
+    /// attempt cannot requeue a task the worker is re-running under a new claim.
+    #[tokio::test]
+    #[serial]
+    async fn requeue_in_tx_fenced_by_started_at() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let id = Uuid::new_v4().to_string();
+        seed(&pool, &id, "RUNNING", Some("w1"), 0).await;
+
+        let current: DateTime<Utc> =
+            sqlx::query_scalar("SELECT started_at FROM horsies_tasks WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("started_at");
+        let stale = current - chrono::Duration::minutes(1);
+
+        // Stale generation: fenced out.
+        let mut tx = pool.begin().await.expect("begin");
+        let applied = broker
+            .requeue_in_tx(&mut tx, &id, Some(Utc::now()), "w1", Some(stale))
+            .await
+            .expect("requeue");
+        tx.commit().await.expect("commit");
+        assert!(!applied, "stale started_at must not requeue");
+
+        // Current generation: applies.
+        let mut tx = pool.begin().await.expect("begin");
+        let applied = broker
+            .requeue_in_tx(&mut tx, &id, Some(Utc::now()), "w1", Some(current))
+            .await
+            .expect("requeue");
+        tx.commit().await.expect("commit");
+        assert!(applied, "matching started_at must requeue");
+        let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("status");
+        assert_eq!(status, "PENDING");
 
         cleanup(&pool, &id).await;
     }
