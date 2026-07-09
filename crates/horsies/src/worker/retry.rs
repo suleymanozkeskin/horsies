@@ -202,11 +202,23 @@ fn parse_auto_retry_for(task_options_json: Option<&str>) -> Vec<String> {
             .and_then(|rp| rp.get("auto_retry_for"))
     });
 
+    // Accept both serializations of a code: a plain string (workflow-node path
+    // and user codes) and the tagged built-in object the direct-send path emits
+    // (`serde_json::to_string(&TaskOptions)` writes `TaskErrorCode::BuiltIn` as
+    // `{"__builtin_task_code__": "TASK_TIMEOUT"}`). Keeping only strings silently
+    // dropped every built-in code sent via `send`/`with_options` (C6).
     auto_retry_for
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
+                .filter_map(|v| match v {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    serde_json::Value::Object(map) => map
+                        .get("__builtin_task_code__")
+                        .and_then(|c| c.as_str())
+                        .map(String::from),
+                    _ => None,
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -444,6 +456,36 @@ mod tests {
         };
         let opts = r#"{"auto_retry_for": ["TASK_EXCEPTION"]}"#;
         assert!(!should_retry(&error, 0, 3, Some(opts), None));
+    }
+
+    #[test]
+    fn should_retry_builtin_code_from_direct_send_tagged_object() {
+        // C6: the direct-send path serializes `TaskOptions` via serde, which
+        // writes built-in `auto_retry_for` codes as the tagged object
+        // `{"__builtin_task_code__": "TASK_TIMEOUT"}`. should_retry must match
+        // them; before the fix the parser kept only strings and dropped these.
+        use crate::core::task::options::TaskOptions;
+        use crate::core::task::OutcomeCode;
+
+        let opts = TaskOptions {
+            task_name: "t".to_owned(),
+            queue_name: None,
+            good_until: None,
+            auto_retry_for: Some(vec![OutcomeCode::TaskTimeout.into()]),
+            retry_policy: None,
+            timeout_ms: None,
+        };
+        let json = serde_json::to_string(&opts).unwrap();
+        assert!(
+            json.contains("__builtin_task_code__"),
+            "direct-send serializes built-ins as tagged objects: {json}",
+        );
+
+        let error = TaskError::builtin(OutcomeCode::TaskTimeout, "timed out");
+        assert!(
+            should_retry(&error, 0, 3, Some(&json), None),
+            "a built-in auto_retry_for code sent via direct send must trigger retry",
+        );
     }
 
     // --- Exception type matching tests ---
