@@ -1681,3 +1681,113 @@ mod envelope_tests {
             .contains("kwargs payload is not a JSON object"));
     }
 }
+
+#[cfg(test)]
+mod replay_reload_tests {
+    use super::load_persisted_task_result;
+    use serial_test::serial;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|p| p.join(".env").exists());
+        if let Some(root) = root {
+            if let Ok(contents) = std::fs::read_to_string(root.join(".env")) {
+                for line in contents.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    if let Some((key, value)) = line.split_once('=') {
+                        if key.trim() == "DB_PASSWORD" {
+                            return format!(
+                                "postgresql://postgres:{}@localhost:5432/horsies-rust-port",
+                                value.trim(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        panic!("database URL not found: set DATABASE_URL or add DB_PASSWORD to .env");
+    }
+
+    async fn test_pool() -> PgPool {
+        let pool = PgPool::connect(&test_db_url()).await.expect("connect");
+        crate::broker::migrations::run_horsies_migrations(&pool)
+            .await
+            .expect("migrations");
+        pool
+    }
+
+    async fn insert_terminal_task(pool: &PgPool, task_id: &str, status: &str, result: Option<&str>) {
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, args, kwargs, status, result,
+                sent_at, created_at, updated_at, retry_count, max_retries, enqueue_sha
+            ) VALUES (
+                $1, 'replay_reload_task', 'default', 100, '[]', '{}', $2, $3,
+                NOW(), NOW(), NOW(), 0, 0, $1
+            )",
+        )
+        .bind(task_id)
+        .bind(status)
+        .bind(result)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn delete_task(pool: &PgPool, task_id: &str) {
+        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+            .bind(task_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// An expired-before-start task is terminal WITH a result (TASK_EXPIRED
+    /// err); Phase 2 replay must reload it. Regression pin for the accepted
+    /// status set (parity with horsies PR #165, where EXPIRED rows were
+    /// rejected as "terminal task result unavailable").
+    #[tokio::test]
+    #[serial]
+    async fn expired_err_result_reloads_for_phase2_replay() {
+        let pool = test_pool().await;
+        let task_id = Uuid::new_v4().to_string();
+        let stored = r#"{"ok":null,"err":{"error_code":"TASK_EXPIRED","message":"expired before start"}}"#;
+        insert_terminal_task(&pool, &task_id, "EXPIRED", Some(stored)).await;
+
+        let (result_json, is_success) = load_persisted_task_result(&pool, &task_id)
+            .await
+            .expect("EXPIRED row with a stored result must be replayable");
+        assert!(!is_success, "EXPIRED replays as a failure result");
+        assert_eq!(result_json, stored);
+
+        delete_task(&pool, &task_id).await;
+    }
+
+    /// CANCELLED is deliberately outside the replay set: it is the
+    /// result-less terminal state and workflows advance through the cancel
+    /// cascade, not result replay.
+    #[tokio::test]
+    #[serial]
+    async fn cancelled_row_is_not_replayable() {
+        let pool = test_pool().await;
+        let task_id = Uuid::new_v4().to_string();
+        insert_terminal_task(&pool, &task_id, "CANCELLED", None).await;
+
+        let err = load_persisted_task_result(&pool, &task_id)
+            .await
+            .expect_err("CANCELLED must not produce a replayable result");
+        assert!(!err.retryable, "missing terminal result is permanent");
+
+        delete_task(&pool, &task_id).await;
+    }
+}
