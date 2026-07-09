@@ -32,11 +32,27 @@ pub struct CustomQueueConfig {
     pub max_concurrency: Option<u32>,
 }
 
+/// Longest allowed queue name in bytes. The insert trigger fires
+/// `pg_notify('task_queue_' || NEW.queue_name, ..)`; Postgres rejects channel
+/// names over 63 bytes, and `"task_queue_"` is 11, leaving 52 for the name. A
+/// longer name makes every INSERT for that queue fail with an opaque trigger
+/// error (C18).
+const MAX_QUEUE_NAME_BYTES: usize = 52;
+
 /// Validation error for CustomQueueConfig.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum CustomQueueConfigError {
     #[error("queue name must not be empty")]
     EmptyName,
+    #[error(
+        "queue '{name}' name is {len} bytes; the NOTIFY channel 'task_queue_' + name \
+         must fit Postgres's 63-byte limit, so the name must be at most {max} bytes"
+    )]
+    NameTooLong {
+        name: String,
+        len: usize,
+        max: usize,
+    },
     #[error("queue '{name}' priority must be between 1 and 100, got {value}")]
     PriorityOutOfRange { name: String, value: u32 },
 }
@@ -46,12 +62,21 @@ impl CustomQueueConfig {
     ///
     /// Checks:
     /// - `name` is not empty
+    /// - `name` is at most 52 bytes (the NOTIFY channel-name limit)
     /// - `priority` is between 1 and 100 (matching Python `Field(ge=1, le=100)`)
     pub fn validate(&self) -> Vec<CustomQueueConfigError> {
         let mut errors = Vec::new();
 
         if self.name.is_empty() {
             errors.push(CustomQueueConfigError::EmptyName);
+        }
+
+        if self.name.len() > MAX_QUEUE_NAME_BYTES {
+            errors.push(CustomQueueConfigError::NameTooLong {
+                name: self.name.clone(),
+                len: self.name.len(),
+                max: MAX_QUEUE_NAME_BYTES,
+            });
         }
 
         if self.priority == 0 || self.priority > 100 {
@@ -128,6 +153,35 @@ mod tests {
             max_concurrency: Some(5),
         };
         assert!(config.validate().is_empty());
+    }
+
+    #[test]
+    fn custom_queue_name_at_52_bytes_ok() {
+        // 52 bytes → channel 'task_queue_' + name = 63 bytes, exactly the limit.
+        let config = CustomQueueConfig {
+            name: "a".repeat(52),
+            priority: 1,
+            max_concurrency: Some(5),
+        };
+        assert!(config.validate().is_empty(), "52-byte name must be accepted");
+    }
+
+    #[test]
+    fn custom_queue_name_over_52_bytes_rejected() {
+        // C18: a 53-byte name overflows the 63-byte NOTIFY channel limit and
+        // would make every INSERT for the queue fail in the trigger. Reject it
+        // at config time instead.
+        let config = CustomQueueConfig {
+            name: "a".repeat(53),
+            priority: 1,
+            max_concurrency: Some(5),
+        };
+        let errors = config.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            CustomQueueConfigError::NameTooLong { len: 53, max: 52, .. }
+        ));
     }
 
     #[test]
