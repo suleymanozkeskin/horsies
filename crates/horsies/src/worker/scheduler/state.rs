@@ -6,10 +6,8 @@ use sqlx::{PgPool, Postgres, Transaction};
 #[derive(Debug, sqlx::FromRow)]
 pub struct ScheduleStateRow {
     pub schedule_name: String,
-    #[allow(dead_code)] // populated by FromRow for completeness
     pub last_run_at: Option<DateTime<Utc>>,
     pub next_run_at: Option<DateTime<Utc>>,
-    #[allow(dead_code)] // populated by FromRow for completeness
     pub last_task_id: Option<String>,
     pub run_count: i32,
     pub config_hash: Option<String>,

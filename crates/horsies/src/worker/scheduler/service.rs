@@ -402,11 +402,42 @@ async fn process_schedule(
         }
         // If nothing caught up, don't advance state — retry everything next tick.
     } else {
-        // Anchor to the logical due slot, not wall-clock `now`. A late tick must
-        // keep the enqueue slot and next-run aligned to the schedule (no drift)
-        // and the slot-based task_id idempotent. Falls back to `now` for the
-        // first run, where there is no prior slot (parity with horsies PR #46).
-        let slot_time = state_row.next_run_at.unwrap_or(now);
+        // catch_up_missed=false: fire only the latest due slot. Older missed
+        // slots (scheduler downtime) are dropped and the schedule resumes
+        // strictly in the future, instead of replaying the whole backlog one
+        // tick at a time (C5). `slot_time` stays slot-aligned so the enqueue
+        // slot and slot-derived task_id remain deterministic (parity with
+        // horsies PR #46). Falls back to `now` for the first run, where there
+        // is no prior slot.
+        let first_due = state_row.next_run_at.unwrap_or(now);
+        let (slot_time, next, skipped) = advance_to_latest_due_slot(schedule, first_due, now);
+
+        if skipped > 0 {
+            tracing::warn!(
+                schedule = %schedule.name,
+                skipped,
+                slot = %slot_time,
+                "missed run(s); skipping to latest due slot (catch_up_missed=false)",
+            );
+        }
+
+        // Scan cap reached on a very deep backlog: persist progress without
+        // firing a stale slot; the next tick continues advancing from here.
+        if let Some(next) = next {
+            if next <= now {
+                state::upsert_state(
+                    broker.pool(),
+                    &schedule.name,
+                    state_row.last_run_at,
+                    Some(next),
+                    state_row.last_task_id.as_deref(),
+                    state_row.run_count,
+                    state_row.config_hash.as_deref(),
+                )
+                .await?;
+                return Ok(());
+            }
+        }
 
         let task_id = enqueue_scheduled_task(broker, schedule, app_config, slot_time).await?;
         tracing::info!(
@@ -416,7 +447,6 @@ async fn process_schedule(
             "scheduled task enqueued",
         );
 
-        let next = next_run_at(&schedule.pattern, slot_time, &schedule.timezone);
         if next.is_none() {
             tracing::error!(
                 schedule = %schedule.name,
@@ -437,6 +467,47 @@ async fn process_schedule(
     }
 
     Ok(())
+}
+
+/// Bound the per-tick slot scan so a pathological backlog (tiny period, very
+/// long downtime) cannot stall a tick; progress is persisted and the next tick
+/// continues from where this one stopped. Parity with Python
+/// `_MAX_SKIP_SCAN_PER_TICK`.
+const MAX_SKIP_SCAN_PER_TICK: u32 = 100_000;
+
+/// Advance through due slots to the latest one (catch_up_missed=false).
+///
+/// Returns `(latest_due_slot, next_run_after_slot, skipped)`. `next_run_after_slot`
+/// is `None` when the pattern is unsatisfiable from the latest slot, and may still
+/// be `Some(t)` with `t <= now` when the scan cap was reached — callers must not
+/// fire a slot in that case. Mirrors Python `_advance_to_latest_due_slot`.
+fn advance_to_latest_due_slot(
+    schedule: &TaskSchedule,
+    first_due: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> (DateTime<Utc>, Option<DateTime<Utc>>, u32) {
+    let mut slot = first_due;
+    let mut skipped: u32 = 0;
+    let mut next_run = next_run_at(&schedule.pattern, slot, &schedule.timezone);
+    while let Some(candidate) = next_run {
+        if candidate > now || skipped >= MAX_SKIP_SCAN_PER_TICK {
+            break;
+        }
+        // Non-monotonic guard: a non-advancing calculator would loop forever.
+        if candidate <= slot {
+            tracing::error!(
+                schedule = %schedule.name,
+                current = %slot,
+                next = %candidate,
+                "non-monotonic next_run_at — stopping skip-to-latest",
+            );
+            break;
+        }
+        slot = candidate;
+        skipped += 1;
+        next_run = next_run_at(&schedule.pattern, slot, &schedule.timezone);
+    }
+    (slot, next_run, skipped)
 }
 
 fn calculate_missed_runs(
@@ -857,35 +928,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_schedule_advances_next_run_from_slot_not_now() {
+    async fn process_schedule_single_late_tick_anchors_to_slot() {
+        // A late tick still within one period must fire the stored slot and
+        // advance one period from it (slot-anchored, not wall-clock; horsies
+        // PR #46). No skip occurs because the following slot is future.
         let pool = test_pool().await;
         let name = "pr46_slot_anchor";
+        let task_name = "pr46_anchor_task";
         sqlx::query("DELETE FROM horsies_schedule_state WHERE schedule_name = $1")
             .bind(name)
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'my_task'")
+        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = $1")
+            .bind(task_name)
             .execute(&pool)
             .await
             .unwrap();
 
         let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
-        let schedule = interval_schedule_secs(name, 5);
+        let mut schedule = interval_schedule_secs(name, 5);
+        schedule.task_name = task_name.to_owned();
         let app_config = default_app_config();
 
-        // Seed a due slot at 12:00:00; the tick arrives late at 12:00:17.
+        // Seed a due slot at 12:00:00; the tick arrives late at 12:00:03 —
+        // within one 5s period, so the following slot (12:00:05) is future.
         let due_slot = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
         state::upsert_state(&pool, name, None, Some(due_slot), None, 0, None)
             .await
             .unwrap();
 
-        let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 17).unwrap();
+        let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 3).unwrap();
         process_schedule(&broker, &schedule, now, 1, &app_config)
             .await
             .unwrap();
 
-        // next_run advances from the slot (12:00:05), not the wall clock (12:00:22).
+        // next_run advances from the slot (12:00:05), not wall-clock (12:00:08).
         let state_row = state::get_state(&pool, name).await.unwrap().unwrap();
         assert_eq!(
             state_row.next_run_at,
@@ -895,7 +973,8 @@ mod tests {
 
         // The enqueued task's sent_at is the logical slot, not wall-clock now.
         let sent_at: chrono::DateTime<Utc> =
-            sqlx::query_scalar("SELECT sent_at FROM horsies_tasks WHERE task_name = 'my_task'")
+            sqlx::query_scalar("SELECT sent_at FROM horsies_tasks WHERE task_name = $1")
+                .bind(task_name)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
@@ -907,10 +986,112 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'my_task'")
+        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = $1")
+            .bind(task_name)
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn process_schedule_skips_to_latest_due_slot_when_catch_up_disabled() {
+        // C5: catch_up_missed=false with a backlog more than one period deep must
+        // fire ONLY the latest due slot and persist a strictly-future next_run,
+        // not replay every missed slot one tick at a time. 5s interval, stored
+        // slot 12:00:00, tick at 12:00:17 → missed 12:00:05/10/15 → fire 12:00:15,
+        // next 12:00:20. Before the fix it fired 12:00:00 with next 12:00:05.
+        let pool = test_pool().await;
+        let name = "c5_skip_latest";
+        let task_name = "c5_skip_task";
+        sqlx::query("DELETE FROM horsies_schedule_state WHERE schedule_name = $1")
+            .bind(name)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = $1")
+            .bind(task_name)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let mut schedule = interval_schedule_secs(name, 5);
+        schedule.task_name = task_name.to_owned();
+        let app_config = default_app_config();
+
+        let due_slot = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
+        state::upsert_state(&pool, name, None, Some(due_slot), None, 0, None)
+            .await
+            .unwrap();
+
+        let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 17).unwrap();
+        process_schedule(&broker, &schedule, now, 1, &app_config)
+            .await
+            .unwrap();
+
+        // next_run is strictly future (12:00:20), skipping the 05/10/15 backlog.
+        let state_row = state::get_state(&pool, name).await.unwrap().unwrap();
+        assert_eq!(
+            state_row.next_run_at,
+            Some(Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 20).unwrap()),
+            "next_run must skip past now to the latest slot's successor",
+        );
+        assert!(
+            state_row.next_run_at.unwrap() > now,
+            "persisted next_run must be strictly in the future",
+        );
+
+        // Exactly one task enqueued, at the latest due slot (12:00:15).
+        let slots: Vec<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT sent_at FROM horsies_tasks WHERE task_name = $1 ORDER BY sent_at",
+        )
+        .bind(task_name)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(slots.len(), 1, "only the latest due slot must fire");
+        assert_eq!(
+            slots[0],
+            Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 15).unwrap(),
+            "the fired slot must be the latest due slot",
+        );
+
+        // Cleanup.
+        sqlx::query("DELETE FROM horsies_schedule_state WHERE schedule_name = $1")
+            .bind(name)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = $1")
+            .bind(task_name)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn advance_to_latest_due_slot_skips_backlog() {
+        // Pure-unit: 5s interval, stored slot 12:00:00, now 12:00:17 → latest
+        // due slot 12:00:15, next 12:00:20, skipped 3.
+        let schedule = interval_schedule_secs("unit_skip", 5);
+        let first_due = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 17).unwrap();
+        let (slot, next, skipped) = advance_to_latest_due_slot(&schedule, first_due, now);
+        assert_eq!(slot, Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 15).unwrap());
+        assert_eq!(next, Some(Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 20).unwrap()));
+        assert_eq!(skipped, 3);
+    }
+
+    #[test]
+    fn advance_to_latest_due_slot_no_skip_within_one_period() {
+        // The following slot is future → no advance, skipped 0.
+        let schedule = interval_schedule_secs("unit_noskip", 5);
+        let first_due = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 3).unwrap();
+        let (slot, next, skipped) = advance_to_latest_due_slot(&schedule, first_due, now);
+        assert_eq!(slot, first_due);
+        assert_eq!(next, Some(Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 5).unwrap()));
+        assert_eq!(skipped, 0);
     }
 
     /// The self-heal creates a state row for an enabled schedule that has none
