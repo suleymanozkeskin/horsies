@@ -35,6 +35,7 @@ class RecoveryConfig(BaseModel):
     - check_interval_ms: How often the reaper checks for stale tasks
     - runner_heartbeat_interval_ms: How often RUNNING tasks send heartbeats from inside the task process
     - claimer_heartbeat_interval_ms: How often CLAIMED tasks send heartbeats
+    - worker_state_snapshot_interval_ms: How often each worker persists a monitoring snapshot row
     - heartbeat_retention_hours: Keep heartbeat rows for this long (None disables cleanup)
     - worker_state_retention_hours: Keep worker_state rows for this long (None disables cleanup)
     - terminal_record_retention_hours: Keep terminal task/workflow rows for this long (None disables cleanup)
@@ -108,6 +109,15 @@ class RecoveryConfig(BaseModel):
     claimer_heartbeat_interval_ms: Annotated[int, Field(ge=1_000, le=120_000)] = Field(
         default=30_000,  # 30 seconds
         description='How often worker sends heartbeats for CLAIMED tasks in milliseconds (5s-2min)',
+    )
+
+    worker_state_snapshot_interval_ms: Annotated[int, Field(ge=1_000, le=300_000)] = Field(
+        default=30_000,  # 30 seconds
+        description=(
+            'How often each worker persists a worker-state snapshot (monitoring '
+            'timeseries) in milliseconds (1s-5min); each snapshot is one row in '
+            'horsies_worker_states, so shorter intervals grow the table faster'
+        ),
     )
 
     heartbeat_retention_hours: Annotated[
