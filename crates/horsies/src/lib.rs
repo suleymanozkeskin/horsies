@@ -631,6 +631,14 @@ impl Horsies {
         let schedule_config = app_config.schedule.clone().ok_or_else(|| {
             AppError::SchedulerConfig("schedule config is not enabled".to_owned())
         })?;
+        // Validate schedule patterns and timezones before spawning the scheduler
+        // task. `next_run_at` panics on an unparseable IANA timezone ("validated
+        // at config time"), but `AppConfig::validate` does not cover schedules —
+        // so surface an invalid schedule as a typed config error here rather than
+        // a task-panic JoinError at the first tick (C14).
+        schedule_config
+            .validate()
+            .map_err(AppError::SchedulerConfig)?;
         let broker = broker.get_ready(&app_config.resilience).await?;
         let cancel = CancellationToken::new();
 
@@ -741,6 +749,45 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn run_scheduler_rejects_invalid_timezone_without_panic() {
+        // C14: `run_scheduler` must validate the schedule config before spawning
+        // the scheduler task. An unparseable IANA timezone would otherwise panic
+        // `next_run_at` at the first tick (surfaced as a JoinError). Validation
+        // runs before the broker connection, so no DB is needed.
+        let mut config = valid_config();
+        let schedule = TaskSchedule {
+            name: "bad_tz".to_owned(),
+            task_name: "noop".to_owned(),
+            pattern: SchedulePattern::Interval(IntervalSchedule {
+                seconds: Some(60),
+                minutes: None,
+                hours: None,
+                days: None,
+            }),
+            args: serde_json::Value::Null,
+            kwargs: serde_json::Value::Null,
+            queue_name: None,
+            enabled: true,
+            timezone: "Not/AZone".to_owned(),
+            catch_up_missed: false,
+            max_catch_up_runs: 100,
+        };
+        config.schedule = Some(ScheduleConfig::new(vec![schedule]));
+
+        // Construction succeeds: AppConfig::validate does not cover schedules.
+        let app = Horsies::new(config).expect("construction must not validate schedules");
+        match app.run_scheduler().await {
+            Err(AppError::SchedulerConfig(msg)) => {
+                assert!(
+                    msg.contains("invalid timezone"),
+                    "expected an invalid-timezone message, got: {msg}",
+                );
+            }
+            other => panic!("expected SchedulerConfig error, got {other:?}"),
         }
     }
 
