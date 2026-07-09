@@ -56,8 +56,12 @@ where
         }
         // Exactly one positional arg is the input value.
         (false, 1) => args_array[0].clone(),
-        // No args and no kwargs decodes as the unit/null input.
-        (false, 0) => serde_json::Value::Null,
+        // No positional args and an empty (or absent) kwargs object is
+        // ambiguous: an input serializing to `{}` (empty map / field-less struct)
+        // and a unit/`Option::None` input (serializing to `null`) both reach
+        // decode as {args:[], kwargs:{}}. Prefer the empty object; the final
+        // decode falls back to `null` for unit/Option types (C12).
+        (false, 0) => serde_json::Value::Object(serde_json::Map::new()),
         (false, _) => {
             return Err(crate::core::task::TaskError::builtin(
                 crate::core::task::OperationalErrorCode::WorkerSerializationError,
@@ -66,21 +70,34 @@ where
         }
     };
 
-    serde_json::from_value(candidate.clone()).map_err(|e| crate::core::task::TaskError {
-        error_code: Some(crate::core::task::TaskErrorCode::from(
-            crate::core::task::ContractCode::ArgumentTypeMismatch,
-        )),
-        message: Some(format!(
-            "task args do not match declared input type {}",
-            std::any::type_name::<T>(),
-        )),
-        cause: None,
-        data: Some(serde_json::json!({
-            "expected_type": std::any::type_name::<T>(),
-            "actual_value": candidate,
-            "validation_error": e.to_string(),
-        })),
-    })
+    match serde_json::from_value::<T>(candidate.clone()) {
+        Ok(value) => Ok(value),
+        Err(e) => {
+            // Ambiguous empty envelope: a unit/`Option::None` input serializes to
+            // `null` but reaches decode as the empty object `{}`. Retry as null so
+            // those types still decode after the empty-object preference (C12).
+            if matches!(&candidate, serde_json::Value::Object(map) if map.is_empty()) {
+                if let Ok(value) = serde_json::from_value::<T>(serde_json::Value::Null) {
+                    return Ok(value);
+                }
+            }
+            Err(crate::core::task::TaskError {
+                error_code: Some(crate::core::task::TaskErrorCode::from(
+                    crate::core::task::ContractCode::ArgumentTypeMismatch,
+                )),
+                message: Some(format!(
+                    "task args do not match declared input type {}",
+                    std::any::type_name::<T>(),
+                )),
+                cause: None,
+                data: Some(serde_json::json!({
+                    "expected_type": std::any::type_name::<T>(),
+                    "actual_value": candidate,
+                    "validation_error": e.to_string(),
+                })),
+            })
+        }
+    }
 }
 
 /// Serialize a task's success value and verify it round-trips through the

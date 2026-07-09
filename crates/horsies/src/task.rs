@@ -1008,6 +1008,23 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_empty_object_and_unit_inputs_c12() {
+        // C12: an input serializing to `{}` (empty map / field-less struct) and a
+        // unit/`Option::None` input (serializing to `null`) both reach decode as
+        // {args:[], kwargs:{}}. All four must round-trip. Before the fix the
+        // empty-object cases decoded as `null` and failed ARGUMENT_TYPE_MISMATCH.
+        use std::collections::HashMap;
+
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        struct EmptyStruct {}
+
+        round_trip(HashMap::<String, i32>::new());
+        round_trip(EmptyStruct {});
+        round_trip(());
+        round_trip(Option::<i32>::None);
+    }
+
+    #[test]
     fn node_with_struct_populates_kwargs_and_defaults() {
         let core = CoreHorsies::new(valid_config()).unwrap();
         let mut app = crate::Horsies::from_core(core);
