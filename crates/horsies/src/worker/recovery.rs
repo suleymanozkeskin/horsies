@@ -152,13 +152,31 @@ WHERE horsies_tasks.id = stale.id";
 // Retention cleanup SQL
 // ---------------------------------------------------------------------------
 
+// Retention deletes run in bounded batches (parity with horsies PR #172):
+// each statement deletes at most $2 rows selected by an id-subselect, and the
+// pass commits per batch (autocommit). An unbounded DELETE turns the first
+// pass over a large eligible backlog (retention newly enabled, or the window
+// lowered) into one multi-hour-lock transaction: WAL burst, task_attempts
+// cascades, long row locks. FOR UPDATE SKIP LOCKED lets concurrent ungated
+// passes drain disjoint batches instead of blocking.
+
 const DELETE_EXPIRED_HEARTBEATS_SQL: &str = "\
 DELETE FROM horsies_heartbeats
-WHERE sent_at < NOW() - CAST($1 || ' hours' AS INTERVAL)";
+WHERE id IN (
+    SELECT id FROM horsies_heartbeats
+    WHERE sent_at < NOW() - CAST($1 || ' hours' AS INTERVAL)
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+)";
 
 const DELETE_EXPIRED_WORKER_STATES_SQL: &str = "\
 DELETE FROM horsies_worker_states
-WHERE snapshot_at < NOW() - CAST($1 || ' hours' AS INTERVAL)";
+WHERE id IN (
+    SELECT id FROM horsies_worker_states
+    WHERE snapshot_at < NOW() - CAST($1 || ' hours' AS INTERVAL)
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+)";
 
 // Retain a terminal+expired workflow's linkage until EVERY backing horsies_tasks
 // row is terminal. Defense-in-depth (parity with horsies PR #143): the invariant
@@ -167,45 +185,76 @@ WHERE snapshot_at < NOW() - CAST($1 || ' hours' AS INTERVAL)";
 // their task rows), so this guard never fires now — but it ensures a future change
 // can never strand a live task row by deleting its workflow_task linkage.
 const DELETE_EXPIRED_WORKFLOW_TASKS_SQL: &str = "\
-DELETE FROM horsies_workflow_tasks wt
-USING horsies_workflows w
-WHERE wt.workflow_id = w.id
-  AND w.status IN ('COMPLETED', 'FAILED', 'CANCELLED')
-  AND COALESCE(w.completed_at, w.updated_at, w.created_at) < NOW() - CAST($1 || ' hours' AS INTERVAL)
-  AND NOT EXISTS (
-      SELECT 1
-      FROM horsies_workflow_tasks live
-      JOIN horsies_tasks t ON t.id = live.task_id
-      WHERE live.workflow_id = w.id
-        AND t.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-  )";
+DELETE FROM horsies_workflow_tasks
+WHERE id IN (
+    SELECT wt.id
+    FROM horsies_workflow_tasks wt
+    JOIN horsies_workflows w ON w.id = wt.workflow_id
+    WHERE w.status IN ('COMPLETED', 'FAILED', 'CANCELLED')
+      AND COALESCE(w.completed_at, w.updated_at, w.created_at) < NOW() - CAST($1 || ' hours' AS INTERVAL)
+      AND NOT EXISTS (
+          SELECT 1
+          FROM horsies_workflow_tasks live
+          JOIN horsies_tasks t ON t.id = live.task_id
+          WHERE live.workflow_id = w.id
+            AND t.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
+      )
+    LIMIT $2
+    FOR UPDATE OF wt SKIP LOCKED
+)";
 
 const DELETE_EXPIRED_WORKFLOWS_SQL: &str = "\
 DELETE FROM horsies_workflows
-WHERE status IN ('COMPLETED', 'FAILED', 'CANCELLED')
-  AND COALESCE(completed_at, updated_at, created_at) < NOW() - CAST($1 || ' hours' AS INTERVAL)
-  AND NOT EXISTS (
-      SELECT 1
-      FROM horsies_workflow_tasks live
-      JOIN horsies_tasks t ON t.id = live.task_id
-      WHERE live.workflow_id = horsies_workflows.id
-        AND t.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-  )";
+WHERE id IN (
+    SELECT w.id
+    FROM horsies_workflows w
+    WHERE w.status IN ('COMPLETED', 'FAILED', 'CANCELLED')
+      AND COALESCE(w.completed_at, w.updated_at, w.created_at) < NOW() - CAST($1 || ' hours' AS INTERVAL)
+      AND NOT EXISTS (
+          SELECT 1
+          FROM horsies_workflow_tasks live
+          JOIN horsies_tasks t ON t.id = live.task_id
+          WHERE live.workflow_id = w.id
+            AND t.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
+      )
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+)";
 
+// The status list + COALESCE expression must stay textually aligned with
+// idx_horsies_tasks_retention (migrations/0025_retention_indexes.sql): the
+// planner can only serve the eligibility predicate from the partial index
+// while it can prove the status predicate implies the index predicate.
 const DELETE_EXPIRED_TASKS_SQL: &str = "\
-DELETE FROM horsies_tasks t
-WHERE t.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-  AND COALESCE(t.completed_at, t.failed_at, t.updated_at, t.created_at) < NOW() - CAST($1 || ' hours' AS INTERVAL)
-  AND NOT EXISTS (
-      SELECT 1
-      FROM horsies_workflow_tasks wt
-      JOIN horsies_workflows w ON w.id = wt.workflow_id
-      WHERE wt.task_id = t.id
-        AND w.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
-  )";
+DELETE FROM horsies_tasks
+WHERE id IN (
+    SELECT t.id
+    FROM horsies_tasks t
+    WHERE t.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
+      AND COALESCE(t.completed_at, t.failed_at, t.updated_at, t.created_at) < NOW() - CAST($1 || ' hours' AS INTERVAL)
+      AND NOT EXISTS (
+          SELECT 1
+          FROM horsies_workflow_tasks wt
+          JOIN horsies_workflows w ON w.id = wt.workflow_id
+          WHERE wt.task_id = t.id
+            AND w.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
+      )
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+)";
 
 /// Retention cleanup interval (1 hour), matching Python's `_RETENTION_CLEANUP_INTERVAL_S`.
 const RETENTION_CLEANUP_INTERVAL: Duration = Duration::from_secs(3600);
+
+/// Rows per retention DELETE batch. Bounds per-transaction WAL, row locks,
+/// and task_attempts cascade volume.
+const RETENTION_DELETE_BATCH_SIZE: i64 = 5_000;
+
+/// Wall-clock budget for one retention pass across all five statements. A
+/// backlog that does not drain within the budget resumes on the next pass;
+/// every statement still runs at least one batch per pass so a deep backlog
+/// in an earlier table cannot starve the later ones indefinitely.
+const RETENTION_PASS_TIME_BUDGET: Duration = Duration::from_secs(60);
 
 /// Spawn the reaper loop for stale task recovery.
 ///
@@ -658,12 +707,48 @@ pub async fn requeue_stale_claimed(pool: &PgPool, threshold_secs: f64) -> Result
     Ok(result.rows_affected())
 }
 
+/// Run one retention DELETE in bounded batches (autocommit per batch).
+///
+/// Always runs at least one batch; stops when a batch comes back short
+/// (backlog drained) or the pass deadline is reached (backlog resumes next
+/// pass). Bounded batches keep per-transaction WAL, row locks, and
+/// task_attempts cascade volume flat regardless of backlog size.
+async fn delete_expired_in_batches(
+    pool: &PgPool,
+    sql: &str,
+    retention_hours: u32,
+    batch_size: i64,
+    deadline: tokio::time::Instant,
+) -> Result<u64, sqlx::Error> {
+    let hours = retention_hours.to_string();
+    let mut total: u64 = 0;
+    loop {
+        let deleted = sqlx::query(sql)
+            .bind(&hours)
+            .bind(batch_size)
+            .execute(pool)
+            .await?
+            .rows_affected();
+        total += deleted;
+        if deleted < batch_size as u64 {
+            return Ok(total);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            tracing::info!(
+                total_deleted = total,
+                "retention pass time budget reached; remaining backlog resumes next pass",
+            );
+            return Ok(total);
+        }
+    }
+}
+
 /// Run retention cleanup: prune old heartbeats, worker states, and terminal records.
 ///
 /// Matches Python's retention cleanup logic in the worker's reaper loop.
 /// Each category is gated by its config (None = disabled).
 /// Order matters: workflow_tasks before workflows (FK constraint).
-/// Run retention cleanup: delete expired heartbeats, worker states, and terminal records.
+/// Deletes run in bounded batches under a shared pass time budget.
 ///
 /// Normally called by the reaper loop on a 1-hour interval.
 pub async fn run_retention_cleanup(pool: &PgPool, config: &RecoveryConfig) {
@@ -673,43 +758,63 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RecoveryConfig) {
     let mut deleted_workflows: u64 = 0;
     let mut deleted_tasks: u64 = 0;
 
+    // Shared wall-clock budget across the five statements. A backlog that
+    // outlives the budget resumes next pass.
+    let deadline = tokio::time::Instant::now() + RETENTION_PASS_TIME_BUDGET;
+
     let result: Result<(), sqlx::Error> = async {
         if let Some(hours) = config.heartbeat_retention_hours {
-            let r = sqlx::query(DELETE_EXPIRED_HEARTBEATS_SQL)
-                .bind(hours.to_string())
-                .execute(pool)
-                .await?;
-            deleted_heartbeats = r.rows_affected();
+            deleted_heartbeats = delete_expired_in_batches(
+                pool,
+                DELETE_EXPIRED_HEARTBEATS_SQL,
+                hours,
+                RETENTION_DELETE_BATCH_SIZE,
+                deadline,
+            )
+            .await?;
         }
 
         if let Some(hours) = config.worker_state_retention_hours {
-            let r = sqlx::query(DELETE_EXPIRED_WORKER_STATES_SQL)
-                .bind(hours.to_string())
-                .execute(pool)
-                .await?;
-            deleted_worker_states = r.rows_affected();
+            deleted_worker_states = delete_expired_in_batches(
+                pool,
+                DELETE_EXPIRED_WORKER_STATES_SQL,
+                hours,
+                RETENTION_DELETE_BATCH_SIZE,
+                deadline,
+            )
+            .await?;
         }
 
         if let Some(hours) = config.terminal_record_retention_hours {
-            let hours_str = hours.to_string();
+            // Order preserved: workflow_tasks -> workflows -> tasks. The
+            // all-backing-tasks-terminal guards inside each statement make
+            // partial progress between tables safe.
+            deleted_workflow_tasks = delete_expired_in_batches(
+                pool,
+                DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
+                hours,
+                RETENTION_DELETE_BATCH_SIZE,
+                deadline,
+            )
+            .await?;
 
-            let r = sqlx::query(DELETE_EXPIRED_WORKFLOW_TASKS_SQL)
-                .bind(&hours_str)
-                .execute(pool)
-                .await?;
-            deleted_workflow_tasks = r.rows_affected();
+            deleted_workflows = delete_expired_in_batches(
+                pool,
+                DELETE_EXPIRED_WORKFLOWS_SQL,
+                hours,
+                RETENTION_DELETE_BATCH_SIZE,
+                deadline,
+            )
+            .await?;
 
-            let r = sqlx::query(DELETE_EXPIRED_WORKFLOWS_SQL)
-                .bind(&hours_str)
-                .execute(pool)
-                .await?;
-            deleted_workflows = r.rows_affected();
-
-            let r = sqlx::query(DELETE_EXPIRED_TASKS_SQL)
-                .bind(&hours_str)
-                .execute(pool)
-                .await?;
-            deleted_tasks = r.rows_affected();
+            deleted_tasks = delete_expired_in_batches(
+                pool,
+                DELETE_EXPIRED_TASKS_SQL,
+                hours,
+                RETENTION_DELETE_BATCH_SIZE,
+                deadline,
+            )
+            .await?;
         }
 
         Ok(())
@@ -989,6 +1094,7 @@ mod tests {
         // live-backing-task guard should hold the linkage back.
         sqlx::query(DELETE_EXPIRED_WORKFLOW_TASKS_SQL)
             .bind("0")
+            .bind(RETENTION_DELETE_BATCH_SIZE)
             .execute(&pool)
             .await
             .unwrap();
@@ -1006,6 +1112,7 @@ mod tests {
             .unwrap();
         sqlx::query(DELETE_EXPIRED_WORKFLOW_TASKS_SQL)
             .bind("0")
+            .bind(RETENTION_DELETE_BATCH_SIZE)
             .execute(&pool)
             .await
             .unwrap();
@@ -1017,6 +1124,7 @@ mod tests {
 
         sqlx::query(DELETE_EXPIRED_WORKFLOWS_SQL)
             .bind("0")
+            .bind(RETENTION_DELETE_BATCH_SIZE)
             .execute(&pool)
             .await
             .unwrap();
@@ -1030,6 +1138,134 @@ mod tests {
 
         sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
             .bind(&task_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// Seed `count` heartbeat rows with an old sent_at, clearing the table first.
+    async fn seed_old_heartbeats(pool: &PgPool, count: i64) {
+        sqlx::query("DELETE FROM horsies_heartbeats")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at)
+             SELECT 'ret-batch-' || g, 'test-sender', 'runner', NOW() - INTERVAL '2 hours'
+             FROM generate_series(1, $1) g",
+        )
+        .bind(count)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn heartbeat_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM horsies_heartbeats")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// A backlog larger than the batch size drains fully across batches
+    /// (rowcounts 2, 2, 1 at batch_size=2). Parity with horsies PR #172.
+    #[tokio::test]
+    #[serial]
+    async fn retention_batches_drain_backlog() {
+        let pool = test_pool().await;
+        seed_old_heartbeats(&pool, 5).await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let deleted = delete_expired_in_batches(&pool, DELETE_EXPIRED_HEARTBEATS_SQL, 1, 2, deadline)
+            .await
+            .unwrap();
+
+        assert_eq!(deleted, 5, "full backlog drains across batches");
+        assert_eq!(heartbeat_count(&pool).await, 0);
+    }
+
+    /// An expired pass deadline still runs exactly one batch, and the
+    /// remaining backlog is left for the next pass.
+    #[tokio::test]
+    #[serial]
+    async fn retention_budget_runs_at_least_one_batch() {
+        let pool = test_pool().await;
+        seed_old_heartbeats(&pool, 5).await;
+
+        // Deadline already reached before the first batch.
+        let deadline = tokio::time::Instant::now();
+        let deleted = delete_expired_in_batches(&pool, DELETE_EXPIRED_HEARTBEATS_SQL, 1, 2, deadline)
+            .await
+            .unwrap();
+
+        assert_eq!(deleted, 2, "exactly one batch under an expired budget");
+        assert_eq!(heartbeat_count(&pool).await, 3, "backlog resumes next pass");
+
+        sqlx::query("DELETE FROM horsies_heartbeats")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// The planner must serve the tasks retention eligibility predicate from
+    /// idx_horsies_tasks_retention (migration 0025). Catches a drifted
+    /// COALESCE expression or a regression to bound-array status params,
+    /// either of which silently falls back to a full heap scan.
+    #[tokio::test]
+    #[serial]
+    async fn retention_delete_uses_retention_index() {
+        let pool = test_pool().await;
+
+        // Realistic statistics: a population of old terminal rows.
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, args, kwargs, status,
+                sent_at, created_at, updated_at, completed_at, retry_count, max_retries, enqueue_sha
+            )
+            SELECT
+                'ret-idx-' || g, 'ret_explain_task', 'default', 100, '[]', '{}', 'COMPLETED',
+                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
+                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days', 0, 0, 'ret-idx-' || g
+            FROM generate_series(1, 500) g",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE horsies_tasks")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // A 500-row table fits in a few pages, so the planner still prefers a
+        // seq scan; disable it (transaction-local) to force the index choice
+        // a production-sized heap produces on its own. EXPLAIN plans the real
+        // DELETE statement without executing it, so drift between the DELETE
+        // text and the index definition fails this test.
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL enable_seqscan = off")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let plan_rows: Vec<(String,)> =
+            sqlx::query_as(&format!("EXPLAIN {}", DELETE_EXPIRED_TASKS_SQL))
+                .bind("240")
+                .bind(RETENTION_DELETE_BATCH_SIZE)
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap();
+        tx.rollback().await.unwrap();
+
+        let plan = plan_rows
+            .iter()
+            .map(|(line,)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            plan.contains("idx_horsies_tasks_retention"),
+            "eligibility predicate must be served by the retention index; plan:\n{plan}",
+        );
+
+        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'ret_explain_task'")
             .execute(&pool)
             .await
             .unwrap();
