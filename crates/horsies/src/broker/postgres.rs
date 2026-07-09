@@ -3975,6 +3975,46 @@ mod set_running_heartbeat_tests {
 
         cleanup(&pool, &id).await;
     }
+
+    /// C21: `horsies_heartbeats.id` is BIGINT (migration 0020). `HeartbeatRow.id`
+    /// must be `i64` so `query_as` decodes it — including ids past `i32::MAX`.
+    /// With the old `i32` field, sqlx errors decoding the INT8 column.
+    #[tokio::test]
+    #[serial]
+    async fn heartbeat_row_decodes_bigint_id() {
+        use crate::broker::row::heartbeat::HeartbeatRow;
+
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let big_id: i64 = 3_000_000_000; // > i32::MAX
+        let task_id = Uuid::new_v4().to_string();
+
+        sqlx::query(
+            "INSERT INTO horsies_heartbeats (id, task_id, sender_id, role, sent_at, hostname, pid) \
+             VALUES ($1, $2, 'w1', 'runner', NOW(), 'h1', 1)",
+        )
+        .bind(big_id)
+        .bind(&task_id)
+        .execute(&pool)
+        .await
+        .expect("insert heartbeat");
+
+        let row: HeartbeatRow = sqlx::query_as(
+            "SELECT id, task_id, sender_id, role, sent_at, hostname, pid \
+             FROM horsies_heartbeats WHERE id = $1",
+        )
+        .bind(big_id)
+        .fetch_one(&pool)
+        .await
+        .expect("HeartbeatRow must decode a BIGINT id");
+        assert_eq!(row.id, big_id);
+
+        sqlx::query("DELETE FROM horsies_heartbeats WHERE id = $1")
+            .bind(big_id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
 }
 
 #[cfg(test)]

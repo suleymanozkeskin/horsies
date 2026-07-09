@@ -9,7 +9,8 @@ use sqlx::FromRow;
 /// Python equivalent: `TaskHeartbeatModel` in `horsies/core/models/task_pg.py`.
 #[derive(Debug, Clone, FromRow)]
 pub struct HeartbeatRow {
-    pub id: i32,
+    /// BIGINT since migration 0020 (`horsies_heartbeats.id`).
+    pub id: i64,
     pub task_id: String,
     pub sender_id: String,
     pub role: String,

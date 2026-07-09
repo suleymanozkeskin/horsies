@@ -9,7 +9,8 @@ use sqlx::FromRow;
 /// Python equivalent: `WorkerStateModel` in `horsies/core/models/task_pg.py`
 #[derive(Debug, Clone, FromRow)]
 pub struct WorkerStateRow {
-    pub id: i32,
+    /// BIGINT since migration 0020 (`horsies_worker_states.id`).
+    pub id: i64,
     pub worker_id: String,
     pub snapshot_at: DateTime<Utc>,
     pub hostname: String,
