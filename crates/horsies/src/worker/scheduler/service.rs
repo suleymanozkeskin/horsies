@@ -373,6 +373,13 @@ async fn process_schedule(
         if !caught_up.is_empty() {
             let last_slot = *caught_up.last().expect("caught_up not empty");
             let next = next_run_at(&schedule.pattern, last_slot, &schedule.timezone);
+            if next.is_none() {
+                tracing::error!(
+                    schedule = %schedule.name,
+                    last_slot = %last_slot,
+                    "next_run_at returned None; persisting NULL will stop this schedule",
+                );
+            }
             state::upsert_state(
                 broker.pool(),
                 &schedule.name,
@@ -410,6 +417,13 @@ async fn process_schedule(
         );
 
         let next = next_run_at(&schedule.pattern, slot_time, &schedule.timezone);
+        if next.is_none() {
+            tracing::error!(
+                schedule = %schedule.name,
+                slot = %slot_time,
+                "next_run_at returned None; persisting NULL will stop this schedule",
+            );
+        }
         state::upsert_state(
             broker.pool(),
             &schedule.name,

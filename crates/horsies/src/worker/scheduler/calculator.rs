@@ -17,6 +17,7 @@ const MAX_CRON_SCAN_DAYS: i64 = 146097;
 /// pattern always resolves while a genuinely unsatisfiable one still terminates.
 const HOURLY_SCAN_HOURS: i64 = 48;
 const DAILY_SCAN_DAYS: i64 = 8;
+const WEEKLY_SCAN_DAYS: i64 = 15;
 const MONTHLY_SCAN_MONTHS: u32 = 24;
 
 /// Calculate the next run time for a schedule pattern after a given reference time.
@@ -97,8 +98,11 @@ fn next_weekly(weekly: &WeeklySchedule, local: DateTime<Tz>, tz: Tz) -> Option<D
 
     let target_time = weekly.time;
 
-    // Check up to 8 days ahead (covers wrapping around the week).
-    for offset in 0..8i64 {
+    // Scan forward day by day, skipping any target that falls in a DST gap
+    // (`earliest()` is `None`). The window spans more than two weeks so a
+    // spring-forward Sunday still resolves to the following week's occurrence
+    // (parity with the widened hourly/daily/monthly scans; C1).
+    for offset in 0..WEEKLY_SCAN_DAYS {
         let day = local.date_naive() + chrono::Duration::days(offset);
         let weekday = day.weekday();
 
@@ -617,6 +621,24 @@ mod tests {
         let after = utc(2026, 2, 9, 0, 0, 0);
         let next = next_run_at(&pattern, after, "America/New_York").unwrap();
         assert_eq!(next, utc(2026, 4, 8, 6, 30, 0));
+    }
+
+    #[test]
+    fn weekly_dst_spring_forward_gap_not_disabled() {
+        // C1: a weekly Sunday 02:30 schedule in America/New_York whose next
+        // occurrence lands in the 2026-03-08 spring-forward gap must not return
+        // `None`. From the fired slot Sun 2026-03-01 02:30 EST, offset 0 is the
+        // fired slot (rejected as non-strict), offset 7 is the gap Sunday
+        // (skipped), and offset 14 (Sun 2026-03-15 02:30 EDT == 06:30 UTC) must
+        // resolve. An 8-day scan returned `None` and stopped the schedule forever.
+        let pattern = SchedulePattern::Weekly(WeeklySchedule {
+            days: vec![crate::core::config::Weekday::Sunday],
+            time: NaiveTime::from_hms_opt(2, 30, 0).unwrap(),
+        });
+        // Fired slot Sun 2026-03-01 02:30 EST (== 07:30 UTC).
+        let after = utc(2026, 3, 1, 7, 30, 0);
+        let next = next_run_at(&pattern, after, "America/New_York").unwrap();
+        assert_eq!(next, utc(2026, 3, 15, 6, 30, 0));
     }
 
     #[test]
