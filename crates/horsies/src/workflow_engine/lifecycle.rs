@@ -96,6 +96,10 @@ RETURNING id";
 const CHECK_WORKFLOW_EXISTS_SQL: &str = "\
 SELECT id FROM horsies_workflows WHERE id = $1";
 
+/// Current status of a workflow (for the idempotent resume path).
+const GET_WORKFLOW_STATUS_SQL: &str = "\
+SELECT status FROM horsies_workflows WHERE id = $1";
+
 const FIND_PENDING_TASKS_SQL: &str = "\
 SELECT task_index, dependencies, task_name, task_args, task_kwargs,
        queue_name, priority, args_from, workflow_ctx_from,
@@ -451,7 +455,18 @@ async fn pause_workflow_inner(pool: &PgPool, workflow_id: &str) -> Result<bool, 
 /// tasks (including sub-workflow READY tasks), and cascades resume
 /// to all paused child workflows.
 ///
-/// Returns `true` if the workflow was actually resumed.
+/// Idempotent: if the workflow is already RUNNING (e.g. a crash committed the
+/// parent PAUSED->RUNNING flip but died before cascading resume to children,
+/// leaving them stranded PAUSED), the re-evaluation, child cascade, and
+/// completion check still run — only the status flip is skipped (C8).
+///
+/// Returns:
+/// - `true` when the workflow was flipped PAUSED -> RUNNING, or when an
+///   already-RUNNING call actually recovered something (children resumed or
+///   ready nodes re-enqueued).
+/// - `Ok(false)` when there was nothing to do: the workflow is already RUNNING
+///   and consistent, or it is in a terminal state.
+/// - `WorkflowNotFound` when the workflow does not exist.
 pub async fn resume_workflow(
     pool: &PgPool,
     workflow_id: &str,
@@ -471,19 +486,44 @@ async fn resume_workflow_inner(
         .bind(workflow_id)
         .fetch_optional(pool)
         .await?;
+    let status_flipped = resumed.is_some();
 
-    if resumed.is_none() {
-        ensure_workflow_exists(pool, workflow_id).await?;
-        return Ok(false);
+    if !status_flipped {
+        // Not PAUSED. Distinguish not-found / terminal / already-RUNNING so a
+        // crash between the parent flip and the child cascade can still be
+        // recovered on retry (C8) instead of returning early.
+        let status: Option<String> = sqlx::query_scalar(GET_WORKFLOW_STATUS_SQL)
+            .bind(workflow_id)
+            .fetch_optional(pool)
+            .await?;
+        match status {
+            None => {
+                return Err(WorkflowError::WorkflowNotFound {
+                    workflow_id: workflow_id.to_owned(),
+                });
+            }
+            // A terminal workflow cannot be resumed; nothing to do.
+            Some(s) if matches!(s.as_str(), "COMPLETED" | "FAILED" | "CANCELLED") => {
+                return Ok(false);
+            }
+            // Already RUNNING (or otherwise non-terminal): fall through to run the
+            // idempotent re-evaluation + cascade + completion below.
+            Some(_) => {
+                tracing::info!(
+                    workflow_id,
+                    "resume called on an already-RUNNING workflow; running idempotent recovery",
+                );
+            }
+        }
+    } else {
+        tracing::info!(workflow_id, "workflow resumed, re-evaluating pending tasks");
     }
 
-    tracing::info!(workflow_id, "workflow resumed, re-evaluating pending tasks");
-
     // Re-evaluate and enqueue tasks for this workflow.
-    reevaluate_and_enqueue(pool, workflow_id, registry).await?;
+    let nodes_enqueued = reevaluate_and_enqueue(pool, workflow_id, registry).await?;
 
     // Cascade resume to paused child workflows (iterative BFS).
-    cascade_resume_to_children(pool, workflow_id, registry).await?;
+    let children_resumed = cascade_resume_to_children(pool, workflow_id, registry).await?;
 
     // Check if all tasks are already terminal (e.g., all pending tasks were
     // skipped during re-evaluation because upstream deps failed). Without
@@ -506,7 +546,11 @@ async fn resume_workflow_inner(
         tracing::warn!(workflow_id, error = %e, "resume recovery pass failed (non-fatal)");
     }
 
-    Ok(true)
+    // A genuine PAUSED->RUNNING flip is always a resume. An already-RUNNING
+    // (idempotent) call counts as a resume only if it actually recovered
+    // something — children resumed or ready nodes re-enqueued — so a no-op
+    // retry returns Ok(false) (C8).
+    Ok(status_flipped || children_resumed > 0 || nodes_enqueued > 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -613,9 +657,10 @@ async fn cascade_resume_to_children(
     pool: &PgPool,
     workflow_id: &str,
     registry: &WorkflowSpecRegistry,
-) -> Result<(), WorkflowError> {
+) -> Result<usize, WorkflowError> {
     let mut queue: VecDeque<String> = VecDeque::new();
     queue.push_back(workflow_id.to_owned());
+    let mut resumed_count = 0usize;
 
     while let Some(current_id) = queue.pop_front() {
         // Find paused child workflows.
@@ -630,6 +675,7 @@ async fn cascade_resume_to_children(
                 .bind(&child.id)
                 .execute(pool)
                 .await?;
+            resumed_count += 1;
 
             tracing::debug!(
                 parent_workflow_id = %current_id,
@@ -648,7 +694,7 @@ async fn cascade_resume_to_children(
         }
     }
 
-    Ok(())
+    Ok(resumed_count)
 }
 
 // ---------------------------------------------------------------------------
@@ -663,11 +709,15 @@ async fn cascade_resume_to_children(
 ///
 /// For already-READY tasks (which were READY at pause time but not yet
 /// enqueued), enqueues directly including sub-workflow READY tasks.
+/// Returns the number of READY nodes successfully enqueued (regular tasks and
+/// launched sub-workflows). In a consistent RUNNING workflow this is 0; a
+/// non-zero count signals recoverable state the resume actually re-enqueued.
 async fn reevaluate_and_enqueue(
     pool: &PgPool,
     workflow_id: &str,
     registry: &WorkflowSpecRegistry,
-) -> Result<(), WorkflowError> {
+) -> Result<usize, WorkflowError> {
+    let mut enqueued = 0usize;
     // 1. Re-evaluate PENDING tasks using full join evaluation.
     //
     // For each PENDING task, find a terminal dependency and trigger
@@ -721,13 +771,16 @@ async fn reevaluate_and_enqueue(
     for task in &ready_tasks {
         if task.is_subworkflow {
             // Sub-workflow READY task: launch child workflow.
-            if let Err(e) = enqueue_subworkflow_on_resume(pool, workflow_id, task, registry).await {
-                tracing::error!(
-                    workflow_id,
-                    task_index = task.task_index,
-                    error = %e,
-                    "failed to launch sub-workflow on resume",
-                );
+            match enqueue_subworkflow_on_resume(pool, workflow_id, task, registry).await {
+                Ok(()) => enqueued += 1,
+                Err(e) => {
+                    tracing::error!(
+                        workflow_id,
+                        task_index = task.task_index,
+                        error = %e,
+                        "failed to launch sub-workflow on resume",
+                    );
+                }
             }
         } else {
             // Regular READY task: enqueue into horsies_tasks.
@@ -798,6 +851,7 @@ async fn reevaluate_and_enqueue(
             }
 
             tx.commit().await?;
+            enqueued += 1;
 
             tracing::debug!(
                 workflow_id,
@@ -808,7 +862,7 @@ async fn reevaluate_and_enqueue(
         }
     }
 
-    Ok(())
+    Ok(enqueued)
 }
 
 // ---------------------------------------------------------------------------
@@ -919,3 +973,146 @@ async fn enqueue_subworkflow_on_resume(
 // ---------------------------------------------------------------------------
 
 use crate::workflow_engine::args_merge::merge_args_from_async as merge_args_from_for_ready;
+
+#[cfg(test)]
+mod resume_idempotency_tests {
+    //! C8: a crash after the parent PAUSED->RUNNING flip but before the child
+    //! cascade leaves children stranded PAUSED under a RUNNING parent. Retrying
+    //! `resume_workflow` must recover them (idempotent), not return early.
+    use super::*;
+    use crate::broker::PostgresBroker;
+    use serial_test::serial;
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|p| p.join(".env").exists());
+        let pw = root
+            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
+            .and_then(|c| {
+                c.lines()
+                    .filter_map(|l| l.trim().split_once('='))
+                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
+                    .map(|(_, v)| v.trim().to_owned())
+            })
+            .unwrap_or_else(|| "W0rklane".to_owned());
+        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    }
+
+    async fn insert_workflow(pool: &PgPool, id: &str, status: &str, parent: Option<&str>) {
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index,
+                definition_key, depth, root_workflow_id, parent_workflow_id,
+                sent_at, created_at, started_at, updated_at
+            ) VALUES (
+                $1, 'c8_wf', $2, 'fail', NULL,
+                'test.c8.v1', 0, $3, $4,
+                NOW(), NOW(), NOW(), NOW()
+            )",
+        )
+        .bind(id)
+        .bind(status)
+        .bind(parent.unwrap_or(id))
+        .bind(parent)
+        .execute(pool)
+        .await
+        .expect("insert workflow");
+    }
+
+    // A RUNNING task keeps its workflow non-terminal (untouched by re-evaluation).
+    async fn insert_running_task(pool: &PgPool, wf_id: &str) {
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                queue_name, priority, dependencies, allow_failed_deps, join_type,
+                status, is_subworkflow, created_at
+            ) VALUES (
+                $1, $2, 0, 'node_0', 'c8_task', '[]', '{}',
+                'default', 100, '{}', FALSE, 'all',
+                'RUNNING', FALSE, NOW()
+            )",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(wf_id)
+        .execute(pool)
+        .await
+        .expect("insert task");
+    }
+
+    async fn status_of(pool: &PgPool, id: &str) -> String {
+        sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("status")
+    }
+
+    async fn cleanup(pool: &PgPool, ids: &[&str]) {
+        for id in ids {
+            sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+                .bind(id)
+                .execute(pool)
+                .await
+                .ok();
+        }
+        // Delete children before parents (FK).
+        for id in ids.iter().rev() {
+            sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+                .bind(id)
+                .execute(pool)
+                .await
+                .ok();
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn resume_on_running_parent_recovers_stranded_paused_child() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let registry = WorkflowSpecRegistry::new();
+
+        let parent = Uuid::new_v4().to_string();
+        let child = Uuid::new_v4().to_string();
+        // Post-crash state: parent already RUNNING, child still PAUSED.
+        insert_workflow(&pool, &parent, "RUNNING", None).await;
+        insert_running_task(&pool, &parent).await;
+        insert_workflow(&pool, &child, "PAUSED", Some(&parent)).await;
+        insert_running_task(&pool, &child).await;
+
+        let resumed = resume_workflow(&pool, &parent, &registry)
+            .await
+            .expect("resume");
+        assert!(resumed, "idempotent resume must report it recovered the child");
+        assert_eq!(
+            status_of(&pool, &child).await,
+            "RUNNING",
+            "stranded PAUSED child must be resumed, not left PAUSED forever",
+        );
+
+        cleanup(&pool, &[&parent, &child]).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn resume_on_consistent_running_workflow_is_noop_false() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let registry = WorkflowSpecRegistry::new();
+
+        let id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &id, "RUNNING", None).await;
+        insert_running_task(&pool, &id).await;
+
+        // No paused children, no ready nodes → genuinely nothing to do.
+        let resumed = resume_workflow(&pool, &id, &registry).await.expect("resume");
+        assert!(!resumed, "a consistent RUNNING workflow resume must return Ok(false)");
+
+        cleanup(&pool, &[&id]).await;
+    }
+}
