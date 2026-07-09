@@ -558,6 +558,16 @@ pub(crate) fn serialize_explicit_input<V: Serialize>(
     Ok(match value {
         serde_json::Value::Null => (None, None),
         serde_json::Value::Object(_) => (None, Some(value.to_string())),
+        // A single node input whose serialized form is a JSON array (Vec, tuple,
+        // fixed array) must be carried as ONE positional element — mirror
+        // `serialize_args`. Without the wrap the worker's `decode_task_input`
+        // reads the array's elements as multiple positional args and rejects the
+        // envelope ("exactly one item when kwargs is empty"), so the node's task
+        // can never execute (C7).
+        serde_json::Value::Array(_) => {
+            let wrapped = serde_json::Value::Array(vec![value]);
+            (Some(wrapped.to_string()), None)
+        }
         other => (Some(other.to_string()), None),
     })
 }
@@ -699,6 +709,43 @@ pub fn resolve_node_queue_priority(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rebuild the worker envelope from serialized (args, kwargs) exactly as
+    /// `worker::execution::build_envelope_from_parts` does, so the decode path
+    /// under test is the real one.
+    fn rebuild_envelope(args: Option<String>, kwargs: Option<String>) -> Vec<u8> {
+        let args_array = match args {
+            Some(json) => match serde_json::from_str(&json).unwrap() {
+                serde_json::Value::Array(arr) => arr,
+                other => vec![other],
+            },
+            None => Vec::new(),
+        };
+        let kwargs_object = match kwargs {
+            Some(json) => match serde_json::from_str(&json).unwrap() {
+                serde_json::Value::Object(map) => map,
+                _ => panic!("kwargs is not an object"),
+            },
+            None => serde_json::Map::new(),
+        };
+        let envelope = serde_json::json!({ "args": args_array, "kwargs": kwargs_object });
+        serde_json::to_vec(&envelope).unwrap()
+    }
+
+    #[test]
+    fn serialize_explicit_input_wraps_array() {
+        // C7: an array-valued node input must be wrapped as ONE positional
+        // element so the worker's decode reads a single arg, not N. Before the
+        // fix it was stored unwrapped ("[1,2,3]") and the node was undeliverable.
+        let (args, kwargs) = serialize_explicit_input(&vec![1, 2, 3]).unwrap();
+        assert_eq!(args.as_deref(), Some("[[1,2,3]]"));
+        assert!(kwargs.is_none());
+
+        // And it round-trips through the real decode path back to the input.
+        let bytes = rebuild_envelope(args, kwargs);
+        let decoded: Vec<i32> = crate::core::task::macros::decode_task_input(&bytes).unwrap();
+        assert_eq!(decoded, vec![1, 2, 3]);
+    }
 
     #[test]
     fn join_type_serde() {
