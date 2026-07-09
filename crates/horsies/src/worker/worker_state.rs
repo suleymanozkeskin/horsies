@@ -80,7 +80,8 @@ async fn query_tasks_claimed(pool: &PgPool, worker_id: &str) -> Result<i32, sqlx
     Ok(count.0 as i32)
 }
 
-/// Spawn a background loop that inserts worker state snapshots every 5 seconds.
+/// Spawn a background loop that inserts worker state snapshots on
+/// `recovery.worker_state_snapshot_interval_ms` (default 30s).
 ///
 /// Tracks the worker's liveness, task counts, and resource metrics
 /// (memory/CPU via sysinfo) in `horsies_worker_states` as a timeseries.
@@ -98,6 +99,8 @@ pub fn spawn_worker_state_loop(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let total_permits = worker_config.concurrency as usize;
+        let snapshot_interval =
+            std::time::Duration::from_millis(app_config.recovery.worker_state_snapshot_interval_ms);
 
         // Serialize configuration to JSONB.
         let queue_priorities_json = if worker_config.queue_priorities.is_empty() {
@@ -127,7 +130,7 @@ pub fn spawn_worker_state_loop(
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
-                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                _ = tokio::time::sleep(snapshot_interval) => {}
             }
 
             if cancel.is_cancelled() {

@@ -45,6 +45,7 @@ pub fn fast_recovery_app_config() -> AppConfig {
         check_interval_ms: 1_000,
         runner_heartbeat_interval_ms: 1_000,
         claimer_heartbeat_interval_ms: 1_000,
+        worker_state_snapshot_interval_ms: 1_000,
         heartbeat_retention_hours: Some(1),
         worker_state_retention_hours: Some(1),
         terminal_record_retention_hours: Some(1),

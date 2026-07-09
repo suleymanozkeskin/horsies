@@ -54,6 +54,12 @@ pub struct RecoveryConfig {
     #[serde(default = "default_heartbeat_interval")]
     pub claimer_heartbeat_interval_ms: u64,
 
+    /// How often each worker persists a worker-state snapshot (monitoring
+    /// timeseries) in milliseconds (1s–5min). Each snapshot is one row in
+    /// `horsies_worker_states`, so shorter intervals grow the table faster.
+    #[serde(default = "default_worker_state_snapshot_interval")]
+    pub worker_state_snapshot_interval_ms: u64,
+
     /// How long to keep heartbeat rows in hours. None disables pruning.
     #[serde(default = "default_heartbeat_retention")]
     pub heartbeat_retention_hours: Option<u32>,
@@ -88,6 +94,9 @@ fn default_check_interval() -> u64 {
 fn default_heartbeat_interval() -> u64 {
     30_000
 }
+fn default_worker_state_snapshot_interval() -> u64 {
+    30_000
+}
 fn default_heartbeat_retention() -> Option<u32> {
     Some(24)
 }
@@ -110,6 +119,7 @@ impl Default for RecoveryConfig {
             check_interval_ms: 30_000,
             runner_heartbeat_interval_ms: 30_000,
             claimer_heartbeat_interval_ms: 30_000,
+            worker_state_snapshot_interval_ms: 30_000,
             heartbeat_retention_hours: Some(24),
             worker_state_retention_hours: Some(24 * 7),
             terminal_record_retention_hours: Some(24 * 30),
@@ -199,6 +209,10 @@ impl RecoveryConfig {
                 "claimer_heartbeat_interval_ms",
                 self.claimer_heartbeat_interval_ms,
             ),
+            (
+                "worker_state_snapshot_interval_ms",
+                self.worker_state_snapshot_interval_ms,
+            ),
         ];
 
         for &(field, value) in ms_fields {
@@ -240,6 +254,13 @@ impl RecoveryConfig {
                 field: "claimer_heartbeat_interval_ms",
                 value: self.claimer_heartbeat_interval_ms,
                 max: 120_000,
+            });
+        }
+        if self.worker_state_snapshot_interval_ms > 300_000 {
+            errors.push(RecoveryConfigError::AboveMaximum {
+                field: "worker_state_snapshot_interval_ms",
+                value: self.worker_state_snapshot_interval_ms,
+                max: 300_000,
             });
         }
         if self.running_stale_threshold_ms > 7_200_000 {
@@ -507,6 +528,61 @@ mod tests {
             "expected at least 2 total errors, got {}",
             errors.len()
         );
+    }
+
+    // --- worker_state_snapshot_interval_ms (parity with horsies PR #171) ---
+
+    #[test]
+    fn worker_state_snapshot_interval_defaults_to_30s() {
+        assert_eq!(
+            RecoveryConfig::default().worker_state_snapshot_interval_ms,
+            30_000
+        );
+        let from_empty: RecoveryConfig = serde_json::from_str("{}").expect("defaults deserialize");
+        assert_eq!(from_empty.worker_state_snapshot_interval_ms, 30_000);
+    }
+
+    #[test]
+    fn worker_state_snapshot_interval_bounds() {
+        let at_min = RecoveryConfig {
+            worker_state_snapshot_interval_ms: 1_000,
+            ..Default::default()
+        };
+        assert!(at_min.validate().is_empty());
+
+        let at_max = RecoveryConfig {
+            worker_state_snapshot_interval_ms: 300_000,
+            ..Default::default()
+        };
+        assert!(at_max.validate().is_empty());
+
+        let below = RecoveryConfig {
+            worker_state_snapshot_interval_ms: 999,
+            ..Default::default()
+        };
+        let errors = below.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            RecoveryConfigError::BelowMinimum {
+                field: "worker_state_snapshot_interval_ms",
+                ..
+            }
+        ));
+
+        let above = RecoveryConfig {
+            worker_state_snapshot_interval_ms: 300_001,
+            ..Default::default()
+        };
+        let errors = above.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            RecoveryConfigError::AboveMaximum {
+                field: "worker_state_snapshot_interval_ms",
+                ..
+            }
+        ));
     }
 
     // --- Edge cases: exactly at minimum / maximum ---

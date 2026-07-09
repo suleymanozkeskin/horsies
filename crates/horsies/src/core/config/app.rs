@@ -215,6 +215,10 @@ impl AppConfig {
             "    heartbeat_intervals: runner={}ms, claimer={}ms",
             self.recovery.runner_heartbeat_interval_ms, self.recovery.claimer_heartbeat_interval_ms,
         ));
+        lines.push(format!(
+            "    worker_state_snapshot_interval: {}ms",
+            self.recovery.worker_state_snapshot_interval_ms,
+        ));
 
         // Resilience config
         lines.push("  resilience:".to_owned());
