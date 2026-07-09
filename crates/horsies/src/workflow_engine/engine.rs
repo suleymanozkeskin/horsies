@@ -238,11 +238,18 @@ SELECT depth, root_workflow_id
 FROM horsies_workflows
 WHERE id = $1";
 
+// Guard on the parent workflow being RUNNING (mirrors LINK_ENQUEUED_TASK_SQL):
+// pausing a workflow does not change its READY nodes, so without this join a
+// child sub-workflow could be launched and linked under a PAUSED parent when the
+// pause lands between the dependents evaluation and this launch (C9).
 const UPDATE_SUBWORKFLOW_LINK_SQL: &str = "\
-UPDATE horsies_workflow_tasks
+UPDATE horsies_workflow_tasks wt
 SET sub_workflow_id = $1, status = 'RUNNING', started_at = NOW()
-WHERE workflow_id = $2 AND task_index = $3
-  AND status = 'READY'";
+FROM horsies_workflows w
+WHERE wt.workflow_id = $2 AND wt.task_index = $3
+  AND wt.status = 'READY'
+  AND w.id = wt.workflow_id
+  AND w.status = 'RUNNING'";
 
 const UPDATE_SUBWORKFLOW_COMPLETED_SQL: &str = "\
 UPDATE horsies_workflow_tasks
@@ -1334,8 +1341,9 @@ async fn enqueue_subworkflow_task(
     .await?;
 
     // Link parent workflow_task to child workflow (inside same tx).
-    // Guards on status = 'READY' — if workflow was paused, this is a no-op
-    // and the whole transaction rolls back.
+    // Guards on the node being READY AND the parent workflow being RUNNING — if
+    // the parent was paused, this matches 0 rows and the whole transaction
+    // (including the child workflow creation above) rolls back (C9).
     let link_result = sqlx::query(UPDATE_SUBWORKFLOW_LINK_SQL)
         .bind(&child_id)
         .bind(workflow_id)
@@ -2647,6 +2655,84 @@ WHERE wt.workflow_id = $1
             .execute(&pool)
             .await
             .expect("cleanup workflow");
+    }
+
+    /// C9: the sub-workflow link CAS must match 0 rows when the parent workflow
+    /// is PAUSED, so a child cannot be linked/started under a paused parent.
+    #[tokio::test]
+    #[serial]
+    async fn subworkflow_link_blocked_when_parent_paused() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let wf_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &wf_id).await;
+
+        // A READY sub-workflow node.
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                queue_name, priority, dependencies, allow_failed_deps, join_type,
+                status, is_subworkflow, created_at
+            ) VALUES (
+                $1, $2, 0, 'node_0', 'sub', '[]', '{}',
+                'default', 100, '{}', FALSE, 'all',
+                'READY', TRUE, NOW()
+            )",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&wf_id)
+        .execute(&pool)
+        .await
+        .expect("insert subworkflow node");
+
+        // A real child workflow (the link's sub_workflow_id has an FK to it).
+        let child_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &child_id).await;
+
+        // Parent PAUSED: the link must be a no-op (guard blocks it).
+        sqlx::query("UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = $1")
+            .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let blocked = sqlx::query(UPDATE_SUBWORKFLOW_LINK_SQL)
+            .bind(&child_id)
+            .bind(&wf_id)
+            .bind(0_i32)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            blocked.rows_affected(),
+            0,
+            "sub-workflow link must not fire under a PAUSED parent",
+        );
+
+        // Parent RUNNING again: the link now applies.
+        sqlx::query("UPDATE horsies_workflows SET status = 'RUNNING' WHERE id = $1")
+            .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let applied = sqlx::query(UPDATE_SUBWORKFLOW_LINK_SQL)
+            .bind(&child_id)
+            .bind(&wf_id)
+            .bind(0_i32)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(applied.rows_affected(), 1, "link must fire under a RUNNING parent");
+
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+            .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = ANY($1)")
+            .bind(vec![wf_id.clone(), child_id.clone()])
+            .execute(&pool)
+            .await
+            .ok();
     }
 }
 
