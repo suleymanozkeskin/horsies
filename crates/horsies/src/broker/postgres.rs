@@ -2455,6 +2455,21 @@ fn parse_task_result_row<T: DeserializeOwned>(
                 format!("task {} completed but result is null", row.id),
             ))),
         },
+        "EXPIRED" => match row.result {
+            // Expiry writers persist a serialized `TaskResult::Err(TASK_EXPIRED)`;
+            // decode it like COMPLETED/FAILED. A NULL result (older rows, or a
+            // lost write) still yields the terminal expired outcome instead of a
+            // spurious "non-terminal status EXPIRED" broker error (C2).
+            Some(ref result_json) => {
+                let task_result: TaskResult<T> =
+                    serde_json::from_str(result_json).map_err(BrokerError::Serialization)?;
+                Ok(task_result)
+            }
+            None => Ok(TaskResult::Err(TaskError::builtin(
+                OutcomeCode::TaskExpired,
+                format!("task {} expired", row.id),
+            ))),
+        },
         "CANCELLED" => Ok(TaskResult::Err(TaskError::builtin(
             OutcomeCode::TaskCancelled,
             format!("task {} was cancelled", row.id),
@@ -2630,6 +2645,42 @@ mod tests {
         };
         let result: Result<TaskResult<i32>, BrokerError> = parse_task_result_row(row);
         assert!(matches!(result, Err(BrokerError::InvalidStatus(_))));
+    }
+
+    /// C2: an EXPIRED row with a stored `TaskResult::Err(TASK_EXPIRED)` must
+    /// decode that stored outcome, not return a spurious `InvalidStatus` error.
+    #[test]
+    fn parse_expired_with_stored_result() {
+        let wrapped: TaskResult<i32> =
+            TaskResult::Err(TaskError::builtin(OutcomeCode::TaskExpired, "deadline passed"));
+        let result_json = serde_json::to_string(&wrapped).unwrap();
+        let row = TaskResultRow {
+            id: "abc".to_owned(),
+            status: "EXPIRED".to_owned(),
+            result: Some(result_json),
+            failed_reason: None,
+        };
+        let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
+        let err = task_result.unwrap_err();
+        let expected = TaskError::builtin(OutcomeCode::TaskExpired, "").error_code;
+        assert_eq!(err.error_code, expected);
+    }
+
+    /// C2: an EXPIRED row with a NULL result must still yield the terminal
+    /// expired outcome (fallback), not an `InvalidStatus` broker error.
+    #[test]
+    fn parse_expired_null_result() {
+        let row = TaskResultRow {
+            id: "abc".to_owned(),
+            status: "EXPIRED".to_owned(),
+            result: None,
+            failed_reason: None,
+        };
+        let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
+        let err = task_result.unwrap_err();
+        let expected = TaskError::builtin(OutcomeCode::TaskExpired, "").error_code;
+        assert_eq!(err.error_code, expected);
+        assert!(err.message.unwrap().contains("expired"));
     }
 
     // -----------------------------------------------------------------------
