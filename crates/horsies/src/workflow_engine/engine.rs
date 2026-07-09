@@ -1842,9 +1842,27 @@ fn check_workflow_completion_inner<'a>(
     registry: &'a WorkflowSpecRegistry,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WorkflowError>> + Send + 'a>> {
     Box::pin(async move {
-        // Run the entire completion check inside a transaction with FOR UPDATE
-        // to prevent concurrent workers from reading inconsistent state.
-        // Matches Python's LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL pattern.
+        // Cheap unlocked pre-check: if any workflow task is still non-terminal,
+        // the workflow cannot complete yet, so skip the lock entirely. This runs
+        // after every task completion, so holding the workflow row lock across
+        // the count round trip here serialized all same-workflow completions
+        // (~2 RTT of lock-hold each) — a large fan-in spent seconds in pure
+        // serialized lock-hold (P3). A stale non-zero count is safe: it merely
+        // defers finalize to a later completion's check; the completion that
+        // terminalizes the last task reads 0 below and proceeds. The final
+        // completion always observes 0.
+        let pre_count: NonTerminalCount = sqlx::query_as(COUNT_NON_TERMINAL_SQL)
+            .bind(workflow_id)
+            .fetch_one(pool)
+            .await?;
+        if pre_count.cnt > 0 {
+            return Ok(());
+        }
+
+        // Looks complete — now take the lock and re-count authoritatively to
+        // serialize concurrent finalizers and guard against a task transitioning
+        // between the unlocked read above and here. Matches Python's
+        // LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL pattern.
         let mut tx = pool.begin().await?;
 
         // Lock workflow row — serializes concurrent completion checks.
@@ -3047,6 +3065,78 @@ WHERE wt.workflow_id = $1
             .execute(&pool)
             .await
             .ok();
+    }
+
+    /// P3: the unlocked pre-check must still finalize an all-terminal workflow
+    /// and leave one with a non-terminal task RUNNING (behavior preserved while
+    /// dropping the lock-hold on the common early exit).
+    #[tokio::test]
+    #[serial]
+    async fn completion_check_finalizes_all_terminal_and_defers_otherwise() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let registry = WorkflowSpecRegistry::new();
+
+        async fn seed(pool: &sqlx::PgPool, wf: &str, node_status: &str) {
+            sqlx::query(
+                "INSERT INTO horsies_workflows (
+                    id, name, status, on_error, output_task_index, definition_key, depth,
+                    root_workflow_id, sent_at, created_at, started_at, updated_at
+                ) VALUES ($1, 'p3_wf', 'RUNNING', 'fail', NULL, 'test.p3.v1', 0, $1,
+                          NOW(), NOW(), NOW(), NOW())",
+            )
+            .bind(wf)
+            .execute(pool)
+            .await
+            .expect("insert workflow");
+            sqlx::query(
+                "INSERT INTO horsies_workflow_tasks (
+                    id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                    queue_name, priority, dependencies, allow_failed_deps, join_type,
+                    status, is_subworkflow, created_at
+                ) VALUES ($1, $2, 0, 'node_0', 'p3_task', '[]', '{}',
+                          'default', 100, '{}', FALSE, 'all', $3, FALSE, NOW())",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(wf)
+            .bind(node_status)
+            .execute(pool)
+            .await
+            .expect("insert node");
+        }
+
+        // All-terminal: finalizes to COMPLETED.
+        let done = Uuid::new_v4().to_string();
+        seed(&pool, &done, "COMPLETED").await;
+        check_workflow_completion(&pool, &done, &registry)
+            .await
+            .expect("completion check");
+        let done_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+                .bind(&done)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(done_status, "COMPLETED");
+
+        // Non-terminal node: the pre-check defers, workflow stays RUNNING.
+        let running = Uuid::new_v4().to_string();
+        seed(&pool, &running, "RUNNING").await;
+        check_workflow_completion(&pool, &running, &registry)
+            .await
+            .expect("completion check");
+        let running_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+                .bind(&running)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(running_status, "RUNNING");
+
+        for id in [&done, &running] {
+            sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1").bind(id).execute(&pool).await.ok();
+            sqlx::query("DELETE FROM horsies_workflows WHERE id = $1").bind(id).execute(&pool).await.ok();
+        }
     }
 }
 
