@@ -8,6 +8,60 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-07-09
+
+Removes the two remaining full-table scans on the monitoring/retention path,
+bounds retention deletes, and fixes two claim/finalize defects. Schema v11
+(two indexes, applied automatically by the broker's advisory-locked schema
+init on next startup).
+
+### Performance
+
+- `list_worker_states` reads the latest snapshot per worker via a recursive
+  skip-scan — one `(worker_id, snapshot_at DESC)` index probe per worker —
+  instead of a `DISTINCT ON` pass over the whole snapshot timeseries. At 118k
+  retained rows / 6 workers: 10.3 s → 9.2 ms.
+- Schema v11 adds retention eligibility indexes: `idx_horsies_tasks_retention`
+  (partial expression index on `COALESCE(completed_at, failed_at, updated_at,
+  created_at)` over terminal statuses) and
+  `idx_horsies_worker_states_snapshot_at`. The hourly retention pass
+  previously seq-scanned both heaps (593 MB + 157 MB at 554k tasks / 118k
+  snapshots) even with zero eligible rows. A task row enters the tasks index
+  once, at its finalize transition; claim and lease-renewal updates never
+  maintain it.
+
+### Added
+
+- `RecoveryConfig.worker_state_snapshot_interval_ms` (1 s–5 min, default
+  30 s): how often each worker inserts a monitoring snapshot row into
+  `horsies_worker_states`. Previously hardcoded to 5 s.
+
+### Changed
+
+- Worker-state snapshot cadence default is 30 s (was the hardcoded 5 s):
+  ~20k snapshot rows per worker per week at the 7-day default retention
+  instead of ~120k. Set `worker_state_snapshot_interval_ms=5_000` to keep the
+  old resolution.
+- Retention deletes run in 5,000-row batches, one transaction per batch,
+  under a 60 s per-pass budget (previously five unbounded DELETEs in one
+  transaction). Enabling retention on a long-running database no longer
+  produces a single DELETE of the entire backlog — it drains across
+  consecutive hourly passes — and a mid-pass failure loses one batch instead
+  of rolling back the whole pass. Concurrent passes drain disjoint batches
+  via `FOR UPDATE SKIP LOCKED`.
+
+### Fixed
+
+- Per-queue `max_concurrency` is enforced when `queue_priorities` is not
+  configured. A cap-only queue previously either ran uncapped (empty priority
+  map: concurrent claimers over-claimed past the cap) or was never serviced
+  (partial priority map omitting the capped queue).
+- Workflow finalization phase-2 replay accepts EXPIRED rows. An
+  expired-before-start task writes terminal EXPIRED plus a `TASK_EXPIRED` err
+  result, but the replay reload only accepted COMPLETED/FAILED and discarded
+  it as "terminal task result unavailable", wedging in-process replay for the
+  expired case.
+
 ## [0.2.7] - 2026-06-24
 
 Collapses the worker claim critical section into a single server-side statement.

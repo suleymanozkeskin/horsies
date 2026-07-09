@@ -195,7 +195,7 @@ Syce reads from the same PostgreSQL tables Horsies workers write to:
 
 | Table | Purpose |
 |-------|---------|
-| `horsies_worker_states` | Worker state snapshots (captured every 5s) |
+| `horsies_worker_states` | Worker state snapshots (captured every `worker_state_snapshot_interval_ms`, default 30s) |
 | `horsies_tasks` | Task records with status, arguments, results |
 | `horsies_heartbeats` | Task liveness heartbeats |
 | `horsies_workflows` | Workflow definitions and status |
