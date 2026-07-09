@@ -5,6 +5,7 @@ use serde::de::DeserializeOwned;
 use sqlx::PgPool;
 use tokio::time::Instant;
 
+use crate::broker::postgres::RESULT_WAIT_REPOLL;
 use crate::broker::SharedNotifyListener;
 use crate::core::{
     OperationalErrorCode, OutcomeCode, RetrievalCode, TaskError, TaskResult, WorkflowStatus,
@@ -146,27 +147,27 @@ pub async fn get_workflow_result<T: DeserializeOwned>(
     let deadline = timeout.map(|t| start + t);
 
     loop {
-        let remaining = match deadline {
-            Some(d) => {
-                let now = Instant::now();
-                if now >= d {
-                    return final_poll_or_timeout(pool, workflow_id, start).await;
-                }
-                Some(d - now)
+        // For a timed wait, stop once the deadline has passed.
+        if let Some(d) = deadline {
+            if Instant::now() >= d {
+                return final_poll_or_timeout(pool, workflow_id, start).await;
             }
-            None => None,
+        }
+
+        // Cap each wait at the re-poll interval so a lost NOTIFY (listener
+        // reconnect) is recovered by a fresh poll rather than hanging the
+        // no-timeout wait forever (C3). Never wait past the deadline. Shares the
+        // constant with the task-result wait loop.
+        let wait = match deadline {
+            Some(d) => d
+                .saturating_duration_since(Instant::now())
+                .min(RESULT_WAIT_REPOLL),
+            None => RESULT_WAIT_REPOLL,
         };
 
-        let wake = match remaining {
-            Some(dur) => match tokio::time::timeout(dur, subscription.recv()).await {
-                Ok(result) => result.map_err(WorkflowError::Broker),
-                Err(_) => return final_poll_or_timeout(pool, workflow_id, start).await,
-            },
-            None => subscription.recv().await.map_err(WorkflowError::Broker),
-        };
-
-        match wake {
-            Ok(()) => match try_fetch_terminal_result(pool, workflow_id).await? {
+        match tokio::time::timeout(wait, subscription.recv()).await {
+            // NOTIFY delivered, or the re-poll interval elapsed — re-check.
+            Ok(Ok(())) | Err(_) => match try_fetch_terminal_result(pool, workflow_id).await? {
                 TerminalFetch::Terminal(result) => {
                     return Ok(parse_workflow_result::<T>(workflow_id, &result));
                 }
@@ -178,7 +179,8 @@ pub async fn get_workflow_result<T: DeserializeOwned>(
                 }
                 TerminalFetch::NotTerminal => {}
             },
-            Err(e) => return Err(e),
+            // Listener error propagates.
+            Ok(Err(e)) => return Err(WorkflowError::Broker(e)),
         }
     }
 }
@@ -662,5 +664,59 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.error_code, original.error_code);
         assert_eq!(err.message, original.message);
+    }
+}
+
+#[cfg(test)]
+mod wait_tests {
+    //! C3 (workflow path): `get_workflow_result` must never block forever. A
+    //! no-timeout wait on a workflow that does not exist returns `WorkflowNotFound`
+    //! promptly. The lost-NOTIFY re-poll bound mirrors the task-path fix; its 30s
+    //! interval is not deterministically unit-testable without injecting it, so
+    //! this test pins the deterministic anti-hang property (missing workflow).
+    use super::*;
+    use crate::broker::postgres::PostgresBroker;
+    use crate::core::TaskErrorCode;
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|p| p.join(".env").exists());
+        let pw = root
+            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
+            .and_then(|c| {
+                c.lines()
+                    .filter_map(|l| l.trim().split_once('='))
+                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
+                    .map(|(_, v)| v.trim().to_owned())
+            })
+            .unwrap_or_else(|| "W0rklane".to_owned());
+        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    }
+
+    #[tokio::test]
+    async fn get_workflow_result_no_timeout_returns_not_found_for_missing_workflow() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let listener = broker.workflow_done_listener().await.expect("listener");
+        let missing = format!("missing-wf-{}", uuid::Uuid::new_v4());
+
+        // Wrap in an outer timeout: a regression to an unbounded wait hangs here.
+        let res = tokio::time::timeout(
+            Duration::from_secs(5),
+            get_workflow_result::<i32>(broker.pool(), listener, &missing, None),
+        )
+        .await
+        .expect("get_workflow_result(None) must not hang for a missing workflow");
+
+        let outcome = res.expect("no workflow error");
+        let err = outcome.unwrap_err();
+        assert_eq!(
+            err.error_code,
+            Some(TaskErrorCode::from(RetrievalCode::WorkflowNotFound)),
+        );
     }
 }

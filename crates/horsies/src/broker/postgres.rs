@@ -2499,10 +2499,11 @@ use crate::core::task::retry_utils::parse_max_retries;
 // Transient retry helper
 // ---------------------------------------------------------------------------
 
-/// Re-poll interval for a `get_result` wait, bounding each `subscription.recv()`
-/// so a NOTIFY lost during a listener reconnect is recovered by a fresh terminal
-/// -status poll instead of hanging the caller forever (C3).
-const RESULT_WAIT_REPOLL: Duration = Duration::from_secs(30);
+/// Re-poll interval for a result wait, bounding each `subscription.recv()` so a
+/// NOTIFY lost during a listener reconnect is recovered by a fresh terminal
+/// -status poll instead of hanging the caller forever (C3). Shared by the task
+/// (`get_result`) and workflow (`get_workflow_result`) wait loops.
+pub(crate) const RESULT_WAIT_REPOLL: Duration = Duration::from_secs(30);
 
 /// Retry count for `resend_on_transient_err` (1 initial + 3 retries = 4 total).
 const SEND_RETRY_COUNT: u32 = 3;
