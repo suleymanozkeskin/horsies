@@ -636,7 +636,10 @@ fn compute_config_hash(schedule: &TaskSchedule) -> String {
     // explicitly unspecified between Rust releases: a shifted hash would make
     // `initialize_schedules` treat every schedule as changed and reset
     // `last_run_at`/`run_count`/`next_run_at`, dropping any pending catch-up
-    // backlog and run history (C20).
+    // backlog and run history (C20). Upgrade note: deployments holding the old
+    // 16-char DefaultHasher value in `config_hash` see every schedule counted as
+    // changed on the first run after this change, incurring that reset exactly
+    // once — the same symptom, paid one time to move onto the stable hash.
     let json = serde_json::to_string(schedule).unwrap_or_default();
     let digest = Sha256::digest(json.as_bytes());
     format!("{:x}", digest)
