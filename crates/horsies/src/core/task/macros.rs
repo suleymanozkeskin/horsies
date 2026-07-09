@@ -8,6 +8,15 @@ use serde::{de::DeserializeOwned, Serialize};
 /// This helper keeps attribute-macro generated wrappers and the low-level
 /// `async_task_fn!` / `blocking_task_fn!` macros on exactly the same
 /// deserialization path.
+///
+/// Empty-envelope preference (C12): an input serializing to `{}` (empty map /
+/// field-less struct) and a unit/`Option::None` input (serializing to `null`)
+/// both reach decode as `{args:[], kwargs:{}}` — the envelope cannot distinguish
+/// them. Decode prefers `{}` and falls back to `null`, so a type that accepts
+/// `{}` wins first. Consequence: `Option::<Map>::None` decodes as
+/// `Some(empty map)`, because `Option<Map>` deserializes `{}` as `Some({})`
+/// before the `null` fallback is tried. This is an accepted trade of the erased
+/// distinction, not an accident.
 #[doc(hidden)]
 pub fn decode_task_input<T>(args: &[u8]) -> Result<T, crate::core::task::TaskError>
 where

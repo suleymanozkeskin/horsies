@@ -1025,6 +1025,23 @@ mod tests {
     }
 
     #[test]
+    fn option_of_map_none_decodes_as_some_empty_map_c12() {
+        // C12 pinned decision: the empty envelope {args:[], kwargs:{}} cannot
+        // distinguish `Option::<Map>::None` from `Some(empty map)`. With the
+        // {}-then-null preference, `Option<Map>` accepts `{}` as `Some({})`
+        // before the null fallback, so None round-trips to Some(empty map). This
+        // records the trade-off explicitly rather than leaving it to chance.
+        use std::collections::HashMap;
+
+        let value: Option<HashMap<String, i32>> = None;
+        let (args, kwargs) = serialize_args::<Option<HashMap<String, i32>>>("opt", &value).unwrap();
+        let bytes = rebuild_envelope(args, kwargs);
+        let decoded: Option<HashMap<String, i32>> =
+            crate::core::task::macros::decode_task_input(&bytes).unwrap();
+        assert_eq!(decoded, Some(HashMap::new()));
+    }
+
+    #[test]
     fn node_with_struct_populates_kwargs_and_defaults() {
         let core = CoreHorsies::new(valid_config()).unwrap();
         let mut app = crate::Horsies::from_core(core);
