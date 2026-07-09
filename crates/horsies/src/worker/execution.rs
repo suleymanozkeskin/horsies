@@ -193,6 +193,7 @@ pub(crate) async fn confirm_ownership_and_set_running(
     worker_id: &str,
     pid: i32,
     hostname: &str,
+    is_workflow_task: bool,
 ) -> OwnershipOutcome {
     match broker
         .set_running(task_id, worker_id, pid, hostname, "worker")
@@ -204,21 +205,28 @@ pub(crate) async fn confirm_ownership_and_set_running(
             // informational (COMPLETE_WORKFLOW_TASK_SQL accepts an ENQUEUED
             // workflow_task), so a transient failure of this update must NOT
             // fail the task closed before it ever runs. Log and proceed.
-            if let Err(e) = sqlx::query(
-                "UPDATE horsies_workflow_tasks \
-                 SET status = 'RUNNING' \
-                 WHERE task_id = $1 AND status = 'ENQUEUED'",
-            )
-            .bind(task_id)
-            .execute(broker.pool())
-            .await
-            {
-                tracing::warn!(
-                    task_id = %task_id,
-                    error = %e,
-                    "failed to update workflow task to RUNNING; proceeding with execution \
-                     (workflow_task left ENQUEUED, which completion tolerates)",
-                );
+            //
+            // Gate on `is_workflow_task`: for a plain task this UPDATE matches
+            // zero rows, so running it unconditionally added a full round trip to
+            // every task start's critical path (P1). The column is set at enqueue
+            // (migration 0017) precisely to route workflow work without this cost.
+            if is_workflow_task {
+                if let Err(e) = sqlx::query(
+                    "UPDATE horsies_workflow_tasks \
+                     SET status = 'RUNNING' \
+                     WHERE task_id = $1 AND status = 'ENQUEUED'",
+                )
+                .bind(task_id)
+                .execute(broker.pool())
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        error = %e,
+                        "failed to update workflow task to RUNNING; proceeding with execution \
+                         (workflow_task left ENQUEUED, which completion tolerates)",
+                    );
+                }
             }
             OwnershipOutcome::Running(started_at)
         }
@@ -1194,7 +1202,7 @@ pub(crate) async fn finalize_pre_execution_failure(
     let pid = std::process::id() as i32;
 
     let task_started_at = match confirm_ownership_and_set_running(
-        &broker, &task_id, &worker_id, pid, &hostname,
+        &broker, &task_id, &worker_id, pid, &hostname, is_workflow_task,
     )
     .await
     {
@@ -1268,7 +1276,7 @@ pub(crate) async fn execute_and_finalize(
 
     // Phase 0: Confirm ownership and transition to RUNNING.
     let task_started_at = match confirm_ownership_and_set_running(
-        &broker, &task_id, &worker_id, pid, &hostname,
+        &broker, &task_id, &worker_id, pid, &hostname, is_workflow_task,
     )
     .await
     {
@@ -1816,5 +1824,127 @@ mod replay_reload_tests {
         assert!(!err.retryable, "missing terminal result is permanent");
 
         delete_task(&pool, &task_id).await;
+    }
+}
+
+#[cfg(test)]
+mod set_running_gate_tests {
+    //! P1: `confirm_ownership_and_set_running` gates the workflow_task RUNNING
+    //! UPDATE on `is_workflow_task` to drop a per-task-start round trip for plain
+    //! tasks. Cross-check: the update must STILL happen for workflow tasks.
+    use super::{confirm_ownership_and_set_running, OwnershipOutcome};
+    use crate::broker::PostgresBroker;
+    use serial_test::serial;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|p| p.join(".env").exists());
+        let pw = root
+            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
+            .and_then(|c| {
+                c.lines()
+                    .filter_map(|l| l.trim().split_once('='))
+                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
+                    .map(|(_, v)| v.trim().to_owned())
+            })
+            .unwrap_or_else(|| "W0rklane".to_owned());
+        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    }
+
+    async fn seed_claimed(pool: &PgPool, task_id: &str, is_wf: bool) {
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, args, kwargs, status,
+                sent_at, claimed_at, created_at, updated_at, claimed,
+                claimed_by_worker_id, retry_count, max_retries, is_workflow_task, enqueue_sha
+            ) VALUES ($1, 'p1_task', 'default', 100, '[]', '{}', 'CLAIMED',
+                      NOW(), NOW(), NOW(), NOW(), TRUE, 'w1', 0, 3, $2, $1)",
+        )
+        .bind(task_id)
+        .bind(is_wf)
+        .execute(pool)
+        .await
+        .expect("seed task");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn workflow_task_still_transitions_node_to_running() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let wf_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index, definition_key, depth,
+                root_workflow_id, sent_at, created_at, started_at, updated_at
+            ) VALUES ($1, 'p1_wf', 'RUNNING', 'fail', NULL, 'test.p1.v1', 0, $1,
+                      NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(&wf_id)
+        .execute(&pool)
+        .await
+        .expect("insert workflow");
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                queue_name, priority, dependencies, allow_failed_deps, join_type,
+                status, is_subworkflow, task_id, created_at
+            ) VALUES ($1, $2, 0, 'node_0', 'p1_task', '[]', '{}',
+                      'default', 100, '{}', FALSE, 'all', 'ENQUEUED', FALSE, $3, NOW())",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&wf_id)
+        .bind(&task_id)
+        .execute(&pool)
+        .await
+        .expect("insert node");
+        seed_claimed(&pool, &task_id, true).await;
+
+        let outcome =
+            confirm_ownership_and_set_running(&broker, &task_id, "w1", 1, "h1", true).await;
+        assert!(matches!(outcome, OwnershipOutcome::Running(_)));
+
+        let node_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1")
+                .bind(&wf_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(node_status, "RUNNING", "workflow node must transition to RUNNING (gate must not skip it)");
+
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1").bind(&wf_id).execute(&pool).await.ok();
+        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1").bind(&task_id).execute(&pool).await.ok();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1").bind(&wf_id).execute(&pool).await.ok();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn plain_task_starts_running_without_workflow_update() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let task_id = Uuid::new_v4().to_string();
+        seed_claimed(&pool, &task_id, false).await;
+
+        let outcome =
+            confirm_ownership_and_set_running(&broker, &task_id, "w1", 1, "h1", false).await;
+        assert!(matches!(outcome, OwnershipOutcome::Running(_)));
+
+        let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+            .bind(&task_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "RUNNING");
+
+        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1").bind(&task_id).execute(&pool).await.ok();
     }
 }
