@@ -1,11 +1,11 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use std::sync::Arc;
 
+use crate::broker::PostgresBroker;
 use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::{
     AnyNode, OnError, WorkflowSpec, WorkflowSpecRegistry, WorkflowStartError,
@@ -129,11 +129,10 @@ struct PreparedNode<'a> {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Start a workflow with a separate session-capable pool for result
-/// LISTEN/NOTIFY handles.
-pub async fn start_workflow_with_listener_pool<T>(
-    pool: &PgPool,
-    listener_pool: &PgPool,
+/// Start a workflow. The returned handle reuses the broker's shared listener
+/// for result waits (P2).
+pub async fn start_workflow<T>(
+    broker: &Arc<PostgresBroker>,
     spec: &WorkflowSpec,
     workflow_id: Option<String>,
     registry: &WorkflowSpecRegistry,
@@ -141,7 +140,7 @@ pub async fn start_workflow_with_listener_pool<T>(
     let wf_id = workflow_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let wf_name = spec.name.clone();
 
-    start_workflow_inner(pool, listener_pool, spec, &wf_id, registry)
+    start_workflow_inner(broker, spec, &wf_id, registry)
         .await
         .map_err(|e| WorkflowStartError {
             code: classify_workflow_error(&e),
@@ -154,17 +153,15 @@ pub async fn start_workflow_with_listener_pool<T>(
 
 /// Start a workflow with retry and a separate session-capable pool for result
 /// LISTEN/NOTIFY handles.
-pub async fn start_workflow_with_retry_and_listener_pool<T>(
-    pool: &PgPool,
-    listener_pool: &PgPool,
+pub async fn start_workflow_with_retry<T>(
+    broker: &Arc<PostgresBroker>,
     spec: &WorkflowSpec,
     workflow_id: Option<String>,
     registry: &WorkflowSpecRegistry,
     resend_on_transient_err: bool,
 ) -> WorkflowStartResult<WorkflowHandle<T>> {
     if !resend_on_transient_err {
-        return start_workflow_with_listener_pool(pool, listener_pool, spec, workflow_id, registry)
-            .await;
+        return start_workflow(broker, spec, workflow_id, registry).await;
     }
 
     // 1 initial attempt + START_RETRY_COUNT retries = 4 total attempts.
@@ -197,15 +194,7 @@ pub async fn start_workflow_with_retry_and_listener_pool<T>(
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
         }
 
-        match start_workflow_with_listener_pool(
-            pool,
-            listener_pool,
-            spec,
-            Some(wf_id.clone()),
-            registry,
-        )
-        .await
-        {
+        match start_workflow(broker, spec, Some(wf_id.clone()), registry).await {
             Ok(handle) => return Ok(handle),
             Err(e) => {
                 if e.retryable && attempt < max_attempts - 1 {
@@ -221,12 +210,12 @@ pub async fn start_workflow_with_retry_and_listener_pool<T>(
 }
 
 async fn start_workflow_inner<T>(
-    pool: &PgPool,
-    listener_pool: &PgPool,
+    broker: &Arc<PostgresBroker>,
     spec: &WorkflowSpec,
     wf_id: &str,
     registry: &WorkflowSpecRegistry,
 ) -> Result<WorkflowHandle<T>, WorkflowError> {
+    let pool = broker.pool();
     // Idempotent start: if a caller-provided ID already exists, return
     // the existing handle without creating a new workflow.
     let existing: Option<ExistsRow> = sqlx::query_as(CHECK_WORKFLOW_EXISTS_SQL)
@@ -239,10 +228,9 @@ async fn start_workflow_inner<T>(
             workflow_id = %wf_id,
             "workflow already exists, returning existing handle",
         );
-        return Ok(WorkflowHandle::new_with_listener_pool(
+        return Ok(WorkflowHandle::new(
             wf_id.to_owned(),
-            pool.clone(),
-            listener_pool.clone(),
+            Arc::clone(broker),
             Arc::new(registry.clone()),
         ));
     }
@@ -279,10 +267,9 @@ async fn start_workflow_inner<T>(
 
     tx.commit().await?;
 
-    Ok(WorkflowHandle::new_with_listener_pool(
+    Ok(WorkflowHandle::new(
         wf_id.to_owned(),
-        pool.clone(),
-        listener_pool.clone(),
+        Arc::clone(broker),
         Arc::new(registry.clone()),
     ))
 }
@@ -307,18 +294,16 @@ fn is_retryable_workflow_error(e: &WorkflowError) -> bool {
     }
 }
 
-/// Retry a failed workflow start using a separate session-capable pool for
-/// result LISTEN/NOTIFY handles.
-pub async fn retry_start_with_listener_pool<T>(
-    pool: &PgPool,
-    listener_pool: &PgPool,
+/// Retry a failed workflow start using the broker.
+pub async fn retry_start<T>(
+    broker: &Arc<PostgresBroker>,
     spec: &WorkflowSpec,
     error: &WorkflowStartError,
     registry: &WorkflowSpecRegistry,
 ) -> WorkflowStartResult<WorkflowHandle<T>> {
     // Reuse the existing validation from horsies-core.
     let workflow_id = crate::core::workflow::start_types::validate_start_retry(error, &spec.name)?;
-    start_workflow_with_listener_pool(pool, listener_pool, spec, Some(workflow_id), registry).await
+    start_workflow(broker, spec, Some(workflow_id), registry).await
 }
 
 // ---------------------------------------------------------------------------

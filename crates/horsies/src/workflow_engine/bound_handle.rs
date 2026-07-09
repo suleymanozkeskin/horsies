@@ -3,9 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
-use sqlx::PgPool;
 
-use crate::broker::SharedNotifyListener;
+use crate::broker::PostgresBroker;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::{TaskError, TaskResult};
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
@@ -28,33 +27,27 @@ use crate::workflow_engine::info::WorkflowTaskInfo;
 ///   `resume()` return `HandleResult<_>`.
 pub struct WorkflowHandle<T> {
     workflow_id: String,
-    pool: PgPool,
-    listener_pool: PgPool,
+    broker: Arc<PostgresBroker>,
     registry: Arc<WorkflowSpecRegistry>,
-    listener: tokio::sync::OnceCell<SharedNotifyListener>,
     _phantom: std::marker::PhantomData<T>,
 }
 
 impl<T> WorkflowHandle<T> {
     /// Create a new workflow handle for a known workflow ID.
-    pub fn new(workflow_id: String, pool: PgPool, registry: Arc<WorkflowSpecRegistry>) -> Self {
-        Self::new_with_listener_pool(workflow_id, pool.clone(), pool, registry)
-    }
-
-    /// Create a workflow handle with a separate session-capable pool for
-    /// LISTEN/NOTIFY.
-    pub fn new_with_listener_pool(
+    ///
+    /// Queries run on the broker's main pool; result waits (`get`) reuse the
+    /// broker's process-wide `workflow_done_listener`, so many concurrently
+    /// waiting handles share one LISTEN connection instead of pinning one each
+    /// (P2).
+    pub fn new(
         workflow_id: String,
-        pool: PgPool,
-        listener_pool: PgPool,
+        broker: Arc<PostgresBroker>,
         registry: Arc<WorkflowSpecRegistry>,
     ) -> Self {
         Self {
             workflow_id,
-            pool,
-            listener_pool,
+            broker,
             registry,
-            listener: tokio::sync::OnceCell::new(),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -81,17 +74,15 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     /// }
     /// ```
     pub async fn get(&self, timeout: Option<Duration>) -> TaskResult<T> {
-        let listener = match self
-            .listener
-            .get_or_try_init(|| SharedNotifyListener::new(&self.listener_pool, "workflow_done"))
-            .await
-        {
+        // Reuse the broker's process-wide shared listener instead of pinning a
+        // per-handle LISTEN connection (P2).
+        let listener = match self.broker.workflow_done_listener().await {
             Ok(listener) => listener,
             Err(e) => return self.fold_task_result_error(&WorkflowError::Broker(e)),
         };
 
         match crate::workflow_engine::query::get_workflow_result::<T>(
-            &self.pool,
+            self.broker.pool(),
             listener,
             &self.workflow_id,
             timeout,
@@ -108,7 +99,7 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     /// This is a wrap-strategy method: infrastructure/query failures are
     /// returned as `HandleResult::Err(HandleOperationError)`.
     pub async fn status(&self) -> HandleResult<WorkflowStatus> {
-        crate::workflow_engine::query::get_workflow_status(&self.pool, &self.workflow_id)
+        crate::workflow_engine::query::get_workflow_status(self.broker.pool(), &self.workflow_id)
             .await
             .map_err(|e| self.wrap_error(&e))
     }
@@ -118,7 +109,7 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     /// This is a wrap-strategy method: DB/query failures return
     /// `HandleResult::Err(...)`.
     pub async fn results(&self) -> HandleResult<HashMap<String, TaskResult<serde_json::Value>>> {
-        crate::workflow_engine::query::get_workflow_results(&self.pool, &self.workflow_id)
+        crate::workflow_engine::query::get_workflow_results(self.broker.pool(), &self.workflow_id)
             .await
             .map_err(|e| self.wrap_error(&e))
     }
@@ -130,7 +121,7 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     /// `TaskResult::Err(TaskError)`.
     pub async fn result_for<V: DeserializeOwned>(&self, node_id: &str) -> TaskResult<V> {
         match crate::workflow_engine::query::get_workflow_result_for(
-            &self.pool,
+            self.broker.pool(),
             &self.workflow_id,
             node_id,
         )
@@ -154,7 +145,7 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     /// This is a wrap-strategy method: DB/query failures return
     /// `HandleResult::Err(...)`.
     pub async fn tasks(&self) -> HandleResult<Vec<WorkflowTaskInfo>> {
-        crate::workflow_engine::query::get_workflow_tasks(&self.pool, &self.workflow_id)
+        crate::workflow_engine::query::get_workflow_tasks(self.broker.pool(), &self.workflow_id)
             .await
             .map_err(|e| self.wrap_error(&e))
     }
@@ -163,7 +154,7 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     ///
     /// This is a wrap-strategy method.
     pub async fn cancel(&self) -> HandleResult<()> {
-        crate::workflow_engine::lifecycle::cancel_workflow(&self.pool, &self.workflow_id)
+        crate::workflow_engine::lifecycle::cancel_workflow(self.broker.pool(), &self.workflow_id)
             .await
             .map(|_| ())
     }
@@ -172,7 +163,7 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     ///
     /// This is a wrap-strategy method.
     pub async fn pause(&self) -> HandleResult<bool> {
-        crate::workflow_engine::lifecycle::pause_workflow(&self.pool, &self.workflow_id).await
+        crate::workflow_engine::lifecycle::pause_workflow(self.broker.pool(), &self.workflow_id).await
     }
 
     /// Resume the workflow (PAUSED -> RUNNING).
@@ -180,7 +171,7 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     /// This is a wrap-strategy method.
     pub async fn resume(&self) -> HandleResult<bool> {
         crate::workflow_engine::lifecycle::resume_workflow(
-            &self.pool,
+            self.broker.pool(),
             &self.workflow_id,
             &self.registry,
         )
@@ -241,7 +232,9 @@ mod tests {
     async fn fold_task_result_error_maps_missing_workflow_to_retrieval_error() {
         let handle = WorkflowHandle::<serde_json::Value>::new(
             "wf-123".to_owned(),
-            PgPool::connect_lazy("postgresql://localhost/test").expect("lazy pool"),
+            Arc::new(PostgresBroker::from_pool(
+                sqlx::PgPool::connect_lazy("postgresql://localhost/test").expect("lazy pool"),
+            )),
             Arc::new(WorkflowSpecRegistry::new()),
         );
 
@@ -267,7 +260,9 @@ mod tests {
     async fn fold_task_result_error_maps_db_failures_to_broker_error() {
         let handle = WorkflowHandle::<serde_json::Value>::new(
             "wf-123".to_owned(),
-            PgPool::connect_lazy("postgresql://localhost/test").expect("lazy pool"),
+            Arc::new(PostgresBroker::from_pool(
+                sqlx::PgPool::connect_lazy("postgresql://localhost/test").expect("lazy pool"),
+            )),
             Arc::new(WorkflowSpecRegistry::new()),
         );
 
@@ -286,5 +281,93 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod shared_listener_tests {
+    //! P2: many concurrently-waiting `WorkflowHandle`s must share the broker's
+    //! one process-wide listener, not pin a session-pool connection each. With
+    //! per-handle listeners, more handles than SESSION_POOL_MAX_CONNECTIONS(4)
+    //! exhaust the session pool and `get()` folds a broker error; the shared
+    //! listener lets all of them time out cleanly instead.
+    use super::*;
+    use crate::broker::PostgresBroker;
+    use crate::core::task::{BuiltInTaskCode, TaskErrorCode};
+    use serial_test::serial;
+    use uuid::Uuid;
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|p| p.join(".env").exists());
+        let pw = root
+            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
+            .and_then(|c| {
+                c.lines()
+                    .filter_map(|l| l.trim().split_once('='))
+                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
+                    .map(|(_, v)| v.trim().to_owned())
+            })
+            .unwrap_or_else(|| "W0rklane".to_owned());
+        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn many_waiting_handles_share_one_listener() {
+        let broker = Arc::new(PostgresBroker::connect(&test_db_url()).await.expect("connect"));
+        let pool = broker.pool().clone();
+        let registry = Arc::new(WorkflowSpecRegistry::new());
+        let wf_id = Uuid::new_v4().to_string();
+
+        // A RUNNING workflow that never completes (a RUNNING, non-terminal node).
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index, definition_key, depth,
+                root_workflow_id, sent_at, created_at, started_at, updated_at
+            ) VALUES ($1, 'p2_wf', 'RUNNING', 'fail', NULL, 'test.p2.v1', 0, $1,
+                      NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(&wf_id)
+        .execute(&pool)
+        .await
+        .expect("insert workflow");
+
+        // 8 concurrent waiters — twice the session-pool connection limit.
+        let mut futures = Vec::new();
+        for _ in 0..8 {
+            let handle = WorkflowHandle::<serde_json::Value>::new(
+                wf_id.clone(),
+                Arc::clone(&broker),
+                Arc::clone(&registry),
+            );
+            futures.push(async move { handle.get(Some(Duration::from_millis(400))).await });
+        }
+        let results = futures::future::join_all(futures).await;
+
+        for result in results {
+            match result {
+                TaskResult::Err(err) => assert_eq!(
+                    err.error_code,
+                    Some(TaskErrorCode::BuiltIn(BuiltInTaskCode::Retrieval(
+                        RetrievalCode::WaitTimeout,
+                    ))),
+                    "each waiter must time out via the shared listener, not fail on pool exhaustion: {:?}",
+                    err.error_code,
+                ),
+                TaskResult::Ok(_) => panic!("workflow must not complete"),
+            }
+        }
+
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .ok();
     }
 }

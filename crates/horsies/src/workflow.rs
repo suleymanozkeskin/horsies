@@ -213,7 +213,7 @@ impl<T: DeserializeOwned + Clone> WorkflowFunction<T> {
         let broker = self.broker.get_ready(&self.resilience).await?;
         Ok(BoundWorkflowSpec::from_broker(
             spec,
-            &broker,
+            Arc::clone(&broker),
             Arc::new(registry),
             self.resend_on_transient_err,
         ))
@@ -387,7 +387,7 @@ impl WorkflowStarter {
 
         let bound = BoundWorkflowSpec::<T>::from_broker(
             spec,
-            &broker,
+            Arc::clone(&broker),
             Arc::new(registry),
             self.resend_on_transient_err,
         );
@@ -431,7 +431,7 @@ impl WorkflowStarter {
 
         let bound = BoundWorkflowSpec::<T>::from_broker(
             spec,
-            &broker,
+            Arc::clone(&broker),
             Arc::new(registry),
             self.resend_on_transient_err,
         );
