@@ -96,6 +96,40 @@ async fn test_list_worker_states_latest_per_worker_includes_idle() {
     );
 }
 
+/// Regression for the recursive-CTE skip-scan rewrite of
+/// LIST_WORKER_STATES_SQL (parity with horsies PR #170): fresh, stale
+/// (days-old snapshots only), and single-snapshot workers each appear
+/// exactly once with their newest snapshot.
+#[tokio::test]
+#[serial_test::serial]
+async fn test_list_worker_states_fresh_stale_and_single_snapshot() {
+    let pool = db::create_pool().await;
+    db::run_migrations(&pool).await;
+    db::clean_tables(&pool).await;
+    let broker = horsies::PostgresBroker::from_pool(pool.clone());
+
+    let now = chrono::Utc::now();
+    let days_ago = now - chrono::Duration::days(3);
+    // Fresh worker: old + recent snapshots.
+    insert_snapshot(&pool, "worker-fresh", now - chrono::Duration::seconds(30), 1, days_ago).await;
+    insert_snapshot(&pool, "worker-fresh", now - chrono::Duration::seconds(5), 4, days_ago).await;
+    // Stale worker: days-old snapshots only — no time-window filter, still listed.
+    insert_snapshot(&pool, "worker-stale", days_ago, 2, days_ago).await;
+    insert_snapshot(&pool, "worker-stale", days_ago + chrono::Duration::minutes(1), 3, days_ago).await;
+    // Single-snapshot worker.
+    insert_snapshot(&pool, "worker-single", now - chrono::Duration::seconds(10), 7, days_ago).await;
+
+    let states = broker.list_worker_states().await.unwrap();
+    assert_eq!(states.len(), 3, "each worker appears exactly once");
+
+    let fresh = states.iter().find(|s| s.worker_id == "worker-fresh").unwrap();
+    assert_eq!(fresh.tasks_running, 4, "newest snapshot for the fresh worker");
+    let stale = states.iter().find(|s| s.worker_id == "worker-stale").unwrap();
+    assert_eq!(stale.tasks_running, 3, "newest snapshot for the stale worker");
+    let single = states.iter().find(|s| s.worker_id == "worker-single").unwrap();
+    assert_eq!(single.tasks_running, 7, "single snapshot returned as-is");
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn test_get_worker_state_latest_and_unknown() {

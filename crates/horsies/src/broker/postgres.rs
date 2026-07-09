@@ -536,14 +536,41 @@ ORDER BY hb.last_heartbeat NULLS FIRST";
 /// Groups by `(worker_hostname, worker_pid, worker_process_name)` and
 /// includes the oldest task start time and most recent heartbeat.
 /// Latest snapshot per worker (cluster-wide), including idle workers.
+///
+/// Recursive skip-scan: one `(worker_id, snapshot_at DESC)` index probe per
+/// distinct worker (`idx_horsies_worker_states_worker_snapshot`, migration
+/// 0018) — the seed term takes the first worker's newest snapshot, each
+/// recursive step probes the next `worker_id` boundary. Postgres has no loose
+/// index scan, so the previous `DISTINCT ON (worker_id)` form read every
+/// retained snapshot in the timeseries to return one row per worker.
+/// Parity with horsies PR #170.
 const LIST_WORKER_STATES_SQL: &str = "\
-SELECT DISTINCT ON (worker_id)
-    worker_id, snapshot_at, hostname, pid, processes, max_claim_batch,
-    max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
-    queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
-    memory_usage_mb, memory_percent, cpu_percent, worker_started_at
-FROM horsies_worker_states
-ORDER BY worker_id, snapshot_at DESC";
+WITH RECURSIVE latest AS (
+    (
+        SELECT
+            worker_id, snapshot_at, hostname, pid, processes, max_claim_batch,
+            max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
+            queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
+            memory_usage_mb, memory_percent, cpu_percent, worker_started_at
+        FROM horsies_worker_states
+        ORDER BY worker_id, snapshot_at DESC
+        LIMIT 1
+    )
+    UNION ALL
+    SELECT nxt.* FROM latest l
+    CROSS JOIN LATERAL (
+        SELECT
+            w.worker_id, w.snapshot_at, w.hostname, w.pid, w.processes, w.max_claim_batch,
+            w.max_claim_per_worker, w.cluster_wide_cap, w.queues, w.queue_priorities,
+            w.queue_max_concurrency, w.recovery_config, w.tasks_running, w.tasks_claimed,
+            w.memory_usage_mb, w.memory_percent, w.cpu_percent, w.worker_started_at
+        FROM horsies_worker_states w
+        WHERE w.worker_id > l.worker_id
+        ORDER BY w.worker_id, w.snapshot_at DESC
+        LIMIT 1
+    ) nxt
+)
+SELECT * FROM latest";
 
 /// Latest snapshot for a single worker.
 const GET_WORKER_STATE_LATEST_SQL: &str = "\
