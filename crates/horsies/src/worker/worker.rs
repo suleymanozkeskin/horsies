@@ -574,28 +574,17 @@ impl Worker {
         let prefetch = self.app_config.prefetch_buffer;
         let soft_cap_mode = prefetch > 0;
 
-        // ── max_claim_per_worker guard ──
-        // Mirrors Python's guard at the top of _claim_and_dispatch_all:
-        // prevents over-claiming beyond the configured (or auto-derived) limit.
-        let max_claimed = if self.worker_config.max_claim_per_worker > 0 {
-            self.worker_config.max_claim_per_worker
-        } else if soft_cap_mode {
-            self.worker_config.concurrency + prefetch
-        } else {
-            self.worker_config.concurrency
-        };
-        let claimed_count = self
-            .broker
-            .count_claimed_for_worker(&self.worker_id)
-            .await? as u32;
-        let can_claim_more = claimed_count < max_claimed;
-
         // ── Dispatch buffered CLAIMED tasks first ──
-        // In prefetch mode (and in rare hard-cap races), there may be CLAIMED
-        // tasks from a previous pass that couldn't be dispatched because no
-        // semaphore permit was available. Try to dispatch them before claiming.
+        // Only prefetch/soft-cap mode buffers CLAIMED tasks across passes (hard
+        // cap requeues a task on a missing permit), so the buffered-dispatch
+        // probe runs only there. The old per-pass `count_claimed_for_worker`
+        // round trip gated this and the per-worker budget, but `horsies_claim`
+        // recomputes that budget authoritatively under its advisory locks
+        // (including `max_claim_per_worker`) and returns empty when exhausted, so
+        // the client-side count was redundant (P5). `load_buffered_claimed`
+        // itself returns empty when there is nothing buffered.
         let mut dispatched_buffered = 0u32;
-        if claimed_count > 0 && self.semaphore.available_permits() > 0 {
+        if soft_cap_mode && self.semaphore.available_permits() > 0 {
             let buffered = self.broker.load_buffered_claimed(&self.worker_id).await?;
 
             // Soft-cap re-check: the claim function counts only RUNNING against a
@@ -638,10 +627,6 @@ impl Worker {
                 self.dispatch_task(row);
                 dispatched_buffered += 1;
             }
-        }
-
-        if !can_claim_more {
-            return Ok(dispatched_buffered > 0);
         }
 
         // Hard cap: no local permits means no new claims this pass.
@@ -704,7 +689,12 @@ impl Worker {
         // Post-claim non-runnable workflow filter.
         // PAUSED: cancel task → CANCELLED (terminal), reset workflow_task → READY
         // CANCELLED: cancel task → CANCELLED, skip workflow_task → SKIPPED
-        if !claimed_rows.is_empty() {
+        //
+        // Only workflow tasks can belong to a PAUSED/CANCELLED workflow, so a
+        // plain-task-only batch cannot be filtered — skip the guaranteed-empty
+        // JOIN query in that case (P5). `is_workflow_task` is carried on each
+        // claimed row.
+        if claimed_rows.iter().any(|r| r.is_workflow_task) {
             let all_ids: Vec<String> = claimed_rows.iter().map(|r| r.id.clone()).collect();
             let filtered_ids = self
                 .broker
