@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the crates to crates.io
+        required: true
+        default: true
+        type: boolean
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read and verify crate versions
+        id: version
+        run: |
+          facade=$(grep '^version = ' horsies/Cargo.toml | head -1 | cut -d'"' -f2)
+          macros=$(grep '^version = ' macros/Cargo.toml | head -1 | cut -d'"' -f2)
+          dep=$(grep '^horsies-macros = ' horsies/Cargo.toml | sed 's/.*version = "\([^"]*\)".*/\1/')
+          echo "horsies=$facade horsies-macros=$macros dep=$dep"
+          if [ "$facade" != "$macros" ] || [ "$facade" != "$dep" ]; then
+            echo "::error::crate versions disagree (horsies=$facade, horsies-macros=$macros, dep=$dep)"
+            exit 1
+          fi
+          echo "version=$facade" >> "$GITHUB_OUTPUT"
+
+      - name: Show release metadata
+        run: echo "Preparing release for horsies ${{ steps.version.outputs.version }}"
+
+  tests:
+    needs: metadata
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: horsies-rust-port
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run workspace tests
+        env:
+          DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies-rust-port
+        run: cargo test --workspace
+
+  publish:
+    if: ${{ inputs.publish }}
+    needs: [metadata, tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # horsies-macros has a circular dev-dep on horsies (for compile tests).
+      # Remove it for packaging, exactly as scripts/publish.sh does; --no-verify
+      # because the compile tests cannot build without the facade.
+      - name: Publish horsies-macros
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          sed -i '/^horsies = {.*path.*horsies/d' macros/Cargo.toml
+          cargo publish -p horsies-macros --allow-dirty --no-verify
+          git checkout -- macros/Cargo.toml
+
+      # cargo publish (1.66+) waits for the crate to be available in the index,
+      # but the sparse index can still lag; mirror scripts/publish.sh's grace.
+      - name: Wait for index update
+        run: sleep 30
+
+      - name: Publish horsies
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: cargo publish -p horsies
+
+      - name: Release summary
+        run: echo "Published horsies-macros and horsies ${{ needs.metadata.outputs.version }} to crates.io"
