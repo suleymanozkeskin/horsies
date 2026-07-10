@@ -2435,6 +2435,7 @@ mod guard_tests {
         let broker = PostgresBroker::connect(&test_db_url())
             .await
             .expect("connect broker");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
 
         let parent_id = Uuid::new_v4().to_string();
@@ -2467,6 +2468,7 @@ mod guard_tests {
         let broker = PostgresBroker::connect(&test_db_url())
             .await
             .expect("connect broker");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
 
         let parent_id = Uuid::new_v4().to_string();
@@ -2497,6 +2499,7 @@ mod guard_tests {
         let broker = PostgresBroker::connect(&test_db_url())
             .await
             .expect("connect broker");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
 
         let parent_id = Uuid::new_v4().to_string();
@@ -2697,6 +2700,7 @@ WHERE wt.workflow_id = $1
         let broker = PostgresBroker::connect(&test_db_url())
             .await
             .expect("connect broker");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
 
         let wf_id = Uuid::new_v4().to_string();
@@ -2745,6 +2749,7 @@ WHERE wt.workflow_id = $1
     #[serial]
     async fn subworkflow_link_blocked_when_parent_paused() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let wf_id = Uuid::new_v4().to_string();
         insert_workflow(&pool, &wf_id).await;
@@ -2824,6 +2829,7 @@ WHERE wt.workflow_id = $1
     #[serial]
     async fn node_failed_pauses_on_error_pause_workflow_atomically() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let wf_id = Uuid::new_v4().to_string();
         let task_id = Uuid::new_v4().to_string();
@@ -2901,6 +2907,7 @@ WHERE wt.workflow_id = $1
     #[serial]
     async fn subworkflow_completion_blocked_when_parent_terminal() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let wf_id = Uuid::new_v4().to_string();
 
@@ -2991,6 +2998,7 @@ WHERE wt.workflow_id = $1
     #[serial]
     async fn on_error_pause_node_failure_cascades_pause_to_running_child() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let registry = WorkflowSpecRegistry::new();
         let parent = Uuid::new_v4().to_string();
@@ -3081,6 +3089,7 @@ WHERE wt.workflow_id = $1
     #[serial]
     async fn completion_check_finalizes_all_terminal_and_defers_otherwise() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let registry = WorkflowSpecRegistry::new();
 
@@ -3274,6 +3283,7 @@ mod complete_task_merge_tests {
     #[serial]
     async fn success_cas_wins_and_returns_context() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let wf_id = Uuid::new_v4().to_string();
         let task_id = Uuid::new_v4().to_string();
@@ -3303,6 +3313,7 @@ mod complete_task_merge_tests {
     #[serial]
     async fn idempotent_on_already_terminal_node() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let wf_id = Uuid::new_v4().to_string();
         let task_id = Uuid::new_v4().to_string();
@@ -3335,6 +3346,7 @@ mod complete_task_merge_tests {
     #[serial]
     async fn terminal_workflow_blocks_node_mutation() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let wf_id = Uuid::new_v4().to_string();
         let task_id = Uuid::new_v4().to_string();
@@ -3360,6 +3372,7 @@ mod complete_task_merge_tests {
     #[serial]
     async fn paused_workflow_does_not_block_node_cas() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let wf_id = Uuid::new_v4().to_string();
         let task_id = Uuid::new_v4().to_string();
@@ -3380,6 +3393,7 @@ mod complete_task_merge_tests {
     #[serial]
     async fn failure_writes_error_column() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let wf_id = Uuid::new_v4().to_string();
         let task_id = Uuid::new_v4().to_string();
@@ -3409,6 +3423,7 @@ mod complete_task_merge_tests {
     #[serial]
     async fn unknown_task_id_returns_no_row() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let row = run_complete(
             &pool,
@@ -3551,6 +3566,7 @@ mod promotion_batch_tests {
     #[serial]
     async fn fan_out_promotes_all_dependents() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let registry = WorkflowSpecRegistry::new();
         let wf_id = Uuid::new_v4().to_string();
@@ -3591,6 +3607,7 @@ mod promotion_batch_tests {
     #[serial]
     async fn skip_cascade_resolves_chain() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let registry = WorkflowSpecRegistry::new();
         let wf_id = Uuid::new_v4().to_string();
@@ -3616,6 +3633,7 @@ mod promotion_batch_tests {
     #[serial]
     async fn allow_failed_deps_promotes() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let registry = WorkflowSpecRegistry::new();
         let wf_id = Uuid::new_v4().to_string();
@@ -3639,6 +3657,7 @@ mod promotion_batch_tests {
     #[serial]
     async fn paused_workflow_promotes_nothing() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let registry = WorkflowSpecRegistry::new();
         let wf_id = Uuid::new_v4().to_string();

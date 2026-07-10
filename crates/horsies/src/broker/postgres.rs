@@ -3691,6 +3691,7 @@ mod fused_finalize_tests {
     #[serial]
     async fn fused_finalize_completes_running_task() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "RUNNING", Some("w1"), 1).await;
@@ -3728,6 +3729,7 @@ mod fused_finalize_tests {
     #[serial]
     async fn fused_finalize_noop_when_not_running() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "COMPLETED", Some("w1"), 0).await;
@@ -3753,6 +3755,7 @@ mod fused_finalize_tests {
     #[serial]
     async fn fused_finalize_noop_on_wrong_worker() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "RUNNING", Some("w1"), 0).await;
@@ -3780,6 +3783,7 @@ mod fused_finalize_tests {
     #[serial]
     async fn fused_finalize_fenced_by_started_at() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "RUNNING", Some("w1"), 0).await;
@@ -3842,6 +3846,7 @@ mod fused_finalize_tests {
     #[serial]
     async fn load_buffered_claimed_respects_limit() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let mut ids = Vec::new();
         for _ in 0..5 {
@@ -3867,6 +3872,7 @@ mod fused_finalize_tests {
     #[serial]
     async fn requeue_in_tx_fenced_by_started_at() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "RUNNING", Some("w1"), 0).await;
@@ -3982,6 +3988,7 @@ mod set_running_heartbeat_tests {
     #[serial]
     async fn running_transition_writes_first_heartbeat() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
         seed_claimed(&pool, &id, "w1").await;
@@ -4000,6 +4007,7 @@ mod set_running_heartbeat_tests {
     #[serial]
     async fn non_applied_transition_writes_no_heartbeat() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
         seed_claimed(&pool, &id, "w1").await;
@@ -4024,6 +4032,7 @@ mod set_running_heartbeat_tests {
         use crate::broker::row::heartbeat::HeartbeatRow;
 
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let big_id: i64 = 3_000_000_000; // > i32::MAX
         let task_id = Uuid::new_v4().to_string();
@@ -4088,6 +4097,7 @@ mod get_result_wait_tests {
     #[tokio::test]
     async fn get_result_no_timeout_returns_not_found_for_missing_task() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let missing = format!("missing-{}", Uuid::new_v4());
 
         // Wrap in an outer timeout: before the fix, a no-timeout wait on a
@@ -4141,6 +4151,7 @@ mod filter_non_runnable_tests {
     #[serial]
     async fn paused_workflow_cancels_task_and_resets_node() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let wf_id = Uuid::new_v4().to_string();
         let task_id = Uuid::new_v4().to_string();

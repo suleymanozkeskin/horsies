@@ -289,6 +289,7 @@ mod tests {
         let broker = crate::broker::PostgresBroker::connect(&test_db_url())
             .await
             .expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let name = format!("qw_exist_{}", uuid::Uuid::new_v4());
 
@@ -308,6 +309,7 @@ mod tests {
         let broker = crate::broker::PostgresBroker::connect(&test_db_url())
             .await
             .expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let name = format!("qw_absent_{}", uuid::Uuid::new_v4());
         let first = Utc::now() + chrono::Duration::seconds(60);

@@ -1096,6 +1096,7 @@ mod resume_idempotency_tests {
     #[serial]
     async fn resume_on_running_parent_recovers_stranded_paused_child() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let registry = WorkflowSpecRegistry::new();
 
@@ -1124,6 +1125,7 @@ mod resume_idempotency_tests {
     #[serial]
     async fn resume_on_consistent_running_workflow_is_noop_false() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let registry = WorkflowSpecRegistry::new();
 
@@ -1232,6 +1234,7 @@ mod cancel_lock_order_tests {
     #[serial]
     async fn cancel_matches_completion_lock_order_no_deadlock() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
 
         let wf = Uuid::new_v4().to_string();
