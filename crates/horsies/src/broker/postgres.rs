@@ -4190,7 +4190,7 @@ mod filter_non_runnable_tests {
         .expect("insert task");
 
         let filtered = broker
-            .filter_non_runnable_workflow_tasks(&[task_id.clone()], "w1")
+            .filter_non_runnable_workflow_tasks(std::slice::from_ref(&task_id), "w1")
             .await
             .expect("filter");
         assert_eq!(filtered, vec![task_id.clone()], "paused task must be filtered");
