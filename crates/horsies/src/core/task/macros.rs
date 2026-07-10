@@ -22,23 +22,26 @@ pub fn decode_task_input<T>(args: &[u8]) -> Result<T, crate::core::task::TaskErr
 where
     T: DeserializeOwned,
 {
-    let envelope: serde_json::Value = crate::core::codec::from_json_bytes(args).map_err(|e| {
+    let mut envelope: serde_json::Value = crate::core::codec::from_json_bytes(args).map_err(|e| {
         crate::core::task::TaskError::builtin(
             crate::core::task::OperationalErrorCode::WorkerSerializationError,
             format!("failed to parse args/kwargs envelope: {}", e),
         )
     })?;
 
+    // Take ownership of the envelope's slots instead of deep-cloning them: the
+    // envelope is discarded after selection, so `Value::take` (leaves Null
+    // behind) avoids one full-payload copy per slot (P6).
     let kwargs_value = envelope
-        .get("kwargs")
-        .cloned()
+        .get_mut("kwargs")
+        .map(serde_json::Value::take)
         .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
     let args_value = envelope
-        .get("args")
-        .cloned()
+        .get_mut("args")
+        .map(serde_json::Value::take)
         .unwrap_or(serde_json::Value::Null);
 
-    let args_array = match args_value {
+    let mut args_array = match args_value {
         serde_json::Value::Array(arr) => arr,
         serde_json::Value::Null => Vec::new(),
         other => vec![other],
@@ -63,8 +66,8 @@ where
                 "args payload must be empty when kwargs is set; envelope carries both positional args and kwargs",
             ));
         }
-        // Exactly one positional arg is the input value.
-        (false, 1) => args_array[0].clone(),
+        // Exactly one positional arg is the input value (owned, not cloned; P6).
+        (false, 1) => args_array.swap_remove(0),
         // No positional args and an empty (or absent) kwargs object is
         // ambiguous: an input serializing to `{}` (empty map / field-less struct)
         // and a unit/`Option::None` input (serializing to `null`) both reach
@@ -79,14 +82,17 @@ where
         }
     };
 
-    match serde_json::from_value::<T>(candidate.clone()) {
+    // Deserialize by reference (`&Value` implements `Deserializer`), so the
+    // candidate survives for the C12 fallback and the error payload without the
+    // unconditional deep clone the owned `from_value` required (P6).
+    match T::deserialize(&candidate) {
         Ok(value) => Ok(value),
         Err(e) => {
             // Ambiguous empty envelope: a unit/`Option::None` input serializes to
             // `null` but reaches decode as the empty object `{}`. Retry as null so
             // those types still decode after the empty-object preference (C12).
             if matches!(&candidate, serde_json::Value::Object(map) if map.is_empty()) {
-                if let Ok(value) = serde_json::from_value::<T>(serde_json::Value::Null) {
+                if let Ok(value) = T::deserialize(&serde_json::Value::Null) {
                     return Ok(value);
                 }
             }

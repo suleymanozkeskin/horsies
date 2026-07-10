@@ -801,18 +801,26 @@ async fn persist_ok_result(
     is_workflow_task: bool,
     queue_name: &str,
 ) -> Result<FinalizeOutcome, FinalizeError> {
-    let (wrapped, is_success) = match serde_json::from_slice::<serde_json::Value>(result_bytes) {
-        Ok(v) => (TaskResult::Ok(v), true),
-        Err(e) => (
-            TaskResult::Err(TaskError::builtin(
-                OperationalErrorCode::WorkerSerializationError,
-                format!("failed to parse task result JSON: {}", e),
-            )),
-            false,
-        ),
-    };
-
-    let wrapped_json = serde_json::to_string(&wrapped).unwrap_or_else(|_| "{}".to_owned());
+    // Wrap the task's result bytes via `&RawValue`: parsing validates the JSON
+    // exactly like the previous full `Value` parse, but the adjacently-tagged
+    // wrapper then embeds the original bytes verbatim instead of building and
+    // re-serializing a full `Value` tree — no payload-sized intermediate, and no
+    // reformatting of numbers/whitespace on the way to the `result` column (P6).
+    let (wrapped_json, is_success) =
+        match serde_json::from_slice::<&serde_json::value::RawValue>(result_bytes) {
+            Ok(raw) => (
+                serde_json::to_string(&TaskResult::Ok(raw)).unwrap_or_else(|_| "{}".to_owned()),
+                true,
+            ),
+            Err(e) => (
+                serde_json::to_string(&TaskResult::<serde_json::Value>::Err(TaskError::builtin(
+                    OperationalErrorCode::WorkerSerializationError,
+                    format!("failed to parse task result JSON: {}", e),
+                )))
+                .unwrap_or_else(|_| "{}".to_owned()),
+                false,
+            ),
+        };
 
     // Plain (non-workflow) ok result: one fused statement (lock + attempt + CAS +
     // capacity notify) finalizes it with no Phase 2. Workflow tasks keep the
@@ -1666,6 +1674,43 @@ mod parse {
             results_by_id,
             summaries_by_id,
         ))
+    }
+}
+
+#[cfg(test)]
+mod result_wrap_tests {
+    //! P6: the ok-result wrap embeds the task's result bytes verbatim via
+    //! `&RawValue` — no intermediate `Value` tree, and no reformatting.
+
+    use crate::core::task::result::TaskResult;
+
+    #[test]
+    fn raw_value_wrap_embeds_result_bytes_verbatim() {
+        // A number form the old parse-to-Value path would have reformatted
+        // ("1.2300" -> 1.23) must survive byte-for-byte inside the wrapper.
+        let result_bytes: &[u8] = br#"{"amount": 1.2300, "id": 7}"#;
+        let raw = serde_json::from_slice::<&serde_json::value::RawValue>(result_bytes)
+            .expect("valid JSON");
+        let wrapped_json = serde_json::to_string(&TaskResult::Ok(raw)).expect("wrap serializes");
+
+        assert_eq!(
+            wrapped_json,
+            r#"{"__type":"ok","value":{"amount": 1.2300, "id": 7}}"#,
+            "result bytes must be embedded verbatim",
+        );
+
+        // And the wrapper still parses back through the typed reader.
+        let reparsed: TaskResult<serde_json::Value> =
+            serde_json::from_str(&wrapped_json).expect("wrapper round-trips");
+        assert!(reparsed.is_ok());
+    }
+
+    #[test]
+    fn invalid_result_bytes_are_rejected_like_the_value_parse() {
+        // `&RawValue` parsing validates full JSON syntax, matching the previous
+        // `from_slice::<Value>` gate: trailing garbage and truncation both fail.
+        assert!(serde_json::from_slice::<&serde_json::value::RawValue>(b"{\"a\": 1} x").is_err());
+        assert!(serde_json::from_slice::<&serde_json::value::RawValue>(b"{\"a\": ").is_err());
     }
 }
 
