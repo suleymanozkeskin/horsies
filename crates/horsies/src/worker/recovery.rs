@@ -291,16 +291,16 @@ pub fn spawn_reaper(
                     // Cluster-wide gate: only one worker runs a pass per interval.
                     // The passes are safe to run concurrently (SKIP LOCKED), but
                     // redundant across a cluster; the gate elides the duplicate work.
-                    match acquire_reaper_gate(&pool).await {
-                        ReaperGate::Skip => {
+                    match acquire_gate(&pool, advisory_key_reaper()).await {
+                        GatePass::Skip => {
                             tracing::debug!("reaper pass skipped: another worker holds the gate");
                         }
-                        ReaperGate::Ungated => {
+                        GatePass::Ungated => {
                             run_reaper_pass(&pool, &config, &mut next_retention_cleanup).await;
                         }
-                        ReaperGate::Held(tx) => {
+                        GatePass::Held(tx) => {
                             run_reaper_pass(&pool, &config, &mut next_retention_cleanup).await;
-                            release_reaper_gate(tx).await;
+                            release_gate(tx).await;
                         }
                     }
                 }
@@ -309,8 +309,8 @@ pub fn spawn_reaper(
     })
 }
 
-/// Outcome of trying to acquire the cluster-wide reaper gate.
-enum ReaperGate {
+/// Outcome of trying to acquire a cluster-wide periodic-pass gate.
+enum GatePass {
     /// Gate held by an otherwise-idle transaction; commit after the pass to
     /// release the xact-scoped lock.
     Held(sqlx::Transaction<'static, sqlx::Postgres>),
@@ -320,57 +320,71 @@ enum ReaperGate {
     Ungated,
 }
 
-/// Fixed advisory key for the cluster-wide reaper gate (distinct from the claim
-/// key). Parity with horsies PR #101 7a3eb0d6.
-fn advisory_key_reaper() -> i64 {
+/// Derive a fixed 64-bit advisory key from a label (first 8 bytes of SHA-256).
+fn advisory_key_from(label: &[u8]) -> i64 {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(b"horsies:reaper:v1");
+    hasher.update(label);
     let digest = hasher.finalize();
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&digest[..8]);
     i64::from_be_bytes(bytes)
 }
 
-/// Try to acquire the reaper gate as a transaction-scoped advisory lock held
-/// by an otherwise-idle transaction for the duration of the pass.
+/// Fixed advisory key for the cluster-wide reaper gate (distinct from the claim
+/// key). Parity with horsies PR #101 7a3eb0d6.
+fn advisory_key_reaper() -> i64 {
+    advisory_key_from(b"horsies:reaper:v1")
+}
+
+/// Fixed advisory key for the cluster-wide workflow-recovery gate. Distinct from
+/// the reaper key so the two passes gate independently. Python runs workflow
+/// recovery inside the reaper pass (one shared gate); the Rust port splits it
+/// into its own loop, so it needs its own gate to keep the same "one worker per
+/// interval, cluster-wide" behavior (parity with horsies PR #101).
+fn advisory_key_workflow_recovery() -> i64 {
+    advisory_key_from(b"horsies:workflow_recovery:v1")
+}
+
+/// Try to acquire a periodic-pass gate as a transaction-scoped advisory lock on
+/// `key`, held by an otherwise-idle transaction for the duration of the pass.
 ///
 /// Xact scoping keeps acquire and release on one server backend under
 /// PgBouncer transaction pooling (a session-level lock would not survive
 /// between round-trips there), and rollback-on-drop releases the lock on any
 /// error path.
-async fn acquire_reaper_gate(pool: &PgPool) -> ReaperGate {
+async fn acquire_gate(pool: &PgPool, key: i64) -> GatePass {
     // The gate holds one connection while the pass body needs another; on a
     // single-connection pool that would deadlock, so run ungated. SKIP LOCKED
     // keeps an ungated pass correct (just possibly duplicated). Parity with
     // horsies PR #101 4a7344ec.
     if pool.options().get_max_connections() < 2 {
-        return ReaperGate::Ungated;
+        return GatePass::Ungated;
     }
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => {
-            tracing::warn!(error = %e, "reaper gate connection unavailable; running ungated");
-            return ReaperGate::Ungated;
+            tracing::warn!(error = %e, "periodic-pass gate connection unavailable; running ungated");
+            return GatePass::Ungated;
         }
     };
     let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-        .bind(advisory_key_reaper())
+        .bind(key)
         .fetch_one(tx.as_mut())
         .await
         .unwrap_or(false);
     if acquired {
-        ReaperGate::Held(tx)
+        GatePass::Held(tx)
     } else {
-        ReaperGate::Skip
+        GatePass::Skip
     }
 }
 
-/// Release the reaper gate by committing its holder transaction (the
+/// Release a periodic-pass gate by committing its holder transaction (the
 /// xact-scoped lock frees on commit; on error it frees via rollback-on-drop).
-async fn release_reaper_gate(tx: sqlx::Transaction<'static, sqlx::Postgres>) {
+async fn release_gate(tx: sqlx::Transaction<'static, sqlx::Postgres>) {
     if let Err(e) = tx.commit().await {
-        tracing::warn!(error = %e, "reaper gate commit failed; lock frees when the connection closes");
+        tracing::warn!(error = %e, "periodic-pass gate commit failed; lock frees when the connection closes");
     }
 }
 
@@ -889,28 +903,57 @@ pub fn spawn_workflow_recovery(
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 _ = tokio::time::sleep(check_interval) => {
-                    match crate::workflow_engine::recover_stuck_workflows(
-                        &pool, &registry, config.crashed_worker_recovery_grace_ms,
-                    ).await {
-                        Ok(report) if report.total() > 0 => {
-                            tracing::info!(
-                                total = report.total(),
-                                errors = report.errors,
-                                "workflow recovery pass completed",
+                    // Cluster-wide gate: only one worker runs a recovery pass per
+                    // interval. Passes are safe to run concurrently (each case query
+                    // uses per-row CAS / SKIP LOCKED), but redundant across a cluster;
+                    // the gate elides the duplicate work. Restores the "one worker per
+                    // interval" behavior Python gets by running recovery inside the
+                    // gated reaper pass.
+                    match acquire_gate(&pool, advisory_key_workflow_recovery()).await {
+                        GatePass::Skip => {
+                            tracing::debug!(
+                                "workflow recovery pass skipped: another worker holds the gate",
                             );
                         }
-                        Err(e) => {
-                            tracing::error!(
-                                error = %e,
-                                "workflow recovery pass failed",
-                            );
+                        GatePass::Ungated => {
+                            run_workflow_recovery_pass(&pool, &registry, &config).await;
                         }
-                        _ => {}
+                        GatePass::Held(tx) => {
+                            run_workflow_recovery_pass(&pool, &registry, &config).await;
+                            release_gate(tx).await;
+                        }
                     }
                 }
             }
         }
     })
+}
+
+/// Run one workflow-recovery pass and log its outcome.
+async fn run_workflow_recovery_pass(
+    pool: &PgPool,
+    registry: &WorkflowSpecRegistry,
+    config: &RecoveryConfig,
+) {
+    match crate::workflow_engine::recover_stuck_workflows(
+        pool,
+        registry,
+        config.crashed_worker_recovery_grace_ms,
+    )
+    .await
+    {
+        Ok(report) if report.total() > 0 => {
+            tracing::info!(
+                total = report.total(),
+                errors = report.errors,
+                "workflow recovery pass completed",
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "workflow recovery pass failed");
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -954,6 +997,47 @@ mod tests {
             .await
             .expect("migrations");
         pool
+    }
+
+    /// N3: the workflow-recovery loop must gate cluster-wide (like the reaper),
+    /// so only one worker runs a pass per interval. Before this fix the loop had
+    /// no gate and every worker scanned each interval. Verify the gate mechanism
+    /// is wired to a distinct key and skips when another holder owns it.
+    #[tokio::test]
+    #[serial]
+    async fn workflow_recovery_gate_skips_when_another_holder_owns_it() {
+        // Distinct keys so the two periodic passes gate independently.
+        assert_ne!(
+            advisory_key_workflow_recovery(),
+            advisory_key_reaper(),
+            "workflow-recovery gate must not share the reaper key",
+        );
+
+        let pool = test_pool().await;
+
+        // Hold the workflow-recovery advisory lock on a separate connection.
+        let mut holder = pool.begin().await.expect("begin holder tx");
+        let held: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(advisory_key_workflow_recovery())
+            .fetch_one(holder.as_mut())
+            .await
+            .expect("holder acquires lock");
+        assert!(held, "holder must acquire the gate lock");
+
+        // A second acquirer must be told to skip the pass this interval.
+        match acquire_gate(&pool, advisory_key_workflow_recovery()).await {
+            GatePass::Skip => {}
+            GatePass::Held(_) => panic!("expected Skip while the gate is held, got Held"),
+            GatePass::Ungated => panic!("expected Skip, got Ungated (pool too small?)"),
+        }
+
+        // Release the holder; acquisition then succeeds and returns a held gate.
+        holder.rollback().await.expect("release holder");
+        match acquire_gate(&pool, advisory_key_workflow_recovery()).await {
+            GatePass::Held(tx) => release_gate(tx).await,
+            GatePass::Skip => panic!("expected Held after release, got Skip"),
+            GatePass::Ungated => panic!("expected Held after release, got Ungated"),
+        }
     }
 
     /// Insert a RUNNING task whose runner heartbeat is already stale, with the
