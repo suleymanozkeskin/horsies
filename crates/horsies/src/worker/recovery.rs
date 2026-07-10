@@ -31,7 +31,8 @@ WHERE t.status = 'RUNNING'
       t.finalizing_at IS NULL
       OR t.finalizing_at < NOW() - $2 * INTERVAL '1 second'
   )
-  AND COALESCE(hb.last_heartbeat, t.started_at) < NOW() - $1 * INTERVAL '1 second'";
+  AND COALESCE(hb.last_heartbeat, t.started_at) < NOW() - $1 * INTERVAL '1 second'
+LIMIT $3";
 
 /// SQL: Phase 2 per-task — re-acquire row with full context for retry eligibility.
 ///
@@ -250,6 +251,12 @@ const RETENTION_CLEANUP_INTERVAL: Duration = Duration::from_secs(3600);
 /// and task_attempts cascade volume.
 const RETENTION_DELETE_BATCH_SIZE: i64 = 5_000;
 
+/// Max stale-RUNNING candidates a single reaper pass processes. Phase 2 handles
+/// each in its own transaction under the cluster-wide reaper gate, so this bounds
+/// how long one pass holds the gate; successive passes drain any larger backlog
+/// (P8).
+const STALE_RUNNING_SCAN_LIMIT: i64 = 1_000;
+
 /// Wall-clock budget for one retention pass across all five statements. A
 /// backlog that does not drain within the budget resumes on the next pass;
 /// every statement still runs at least one batch per pass so a deep backlog
@@ -377,7 +384,14 @@ async fn run_reaper_pass(
     if config.auto_fail_stale_running {
         let threshold_secs = config.running_stale_threshold_ms as f64 / 1000.0;
         let finalizing_threshold_secs = config.finalizing_stale_threshold_ms as f64 / 1000.0;
-        match mark_stale_running_as_failed(pool, threshold_secs, finalizing_threshold_secs).await {
+        match mark_stale_running_as_failed(
+            pool,
+            threshold_secs,
+            finalizing_threshold_secs,
+            STALE_RUNNING_SCAN_LIMIT,
+        )
+        .await
+        {
             Ok(count) if count > 0 => {
                 tracing::warn!(count, "reaper marked stale RUNNING tasks as FAILED");
             }
@@ -434,12 +448,19 @@ pub async fn mark_stale_running_as_failed(
     pool: &PgPool,
     threshold_secs: f64,
     finalizing_threshold_secs: f64,
+    scan_limit: i64,
 ) -> Result<u64, sqlx::Error> {
     // Phase 1: Scan for stale task IDs (no row locks). A task that is actively
     // finalizing (finalizing_at set within finalizing_threshold_secs) is skipped.
+    // Bounded by `scan_limit`: Phase 2 processes candidates serially, one
+    // transaction each, while the cluster-wide reaper gate is held — an unbounded
+    // mass-stale event (a crashed fleet) would make one worker process the whole
+    // backlog under the gate while others skip their passes. Successive passes
+    // drain the remainder (P8).
     let stale_ids: Vec<StaleTaskId> = sqlx::query_as(FIND_STALE_RUNNING_IDS_SQL)
         .bind(threshold_secs)
         .bind(finalizing_threshold_secs)
+        .bind(scan_limit)
         .fetch_all(pool)
         .await?;
 
@@ -963,6 +984,40 @@ mod tests {
             .unwrap()
     }
 
+    /// P8: the Phase-1 scan is bounded by `scan_limit`, so one pass processes at
+    /// most that many stale tasks and successive passes drain the rest.
+    #[tokio::test]
+    #[serial]
+    async fn stale_running_scan_is_bounded_by_limit() {
+        let pool = test_pool().await;
+        // Clean this test's namespace so only our stale tasks are in play.
+        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'reaper_test'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            let id = Uuid::new_v4().to_string();
+            insert_stale_running_task(&pool, &id, "NULL").await;
+            ids.push(id);
+        }
+
+        // scan_limit = 2 with 3 stale candidates → exactly 2 processed this pass.
+        let count = mark_stale_running_as_failed(&pool, 1.0, 300.0, 2)
+            .await
+            .unwrap();
+        assert_eq!(count, 2, "the bounded scan must process at most scan_limit tasks");
+
+        for id in &ids {
+            sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
+
     /// A task actively finalizing (recent finalizing_at) must NOT be reclaimed
     /// by the stale-RUNNING reaper even though its runner heartbeat has stopped.
     #[tokio::test]
@@ -976,7 +1031,7 @@ mod tests {
         // running stale threshold 1s (heartbeat is 1h old → stale), finalizing
         // threshold 300s (finalizing_at is fresh → protected). The reaper scan is
         // global (shared test DB), so assert on this task's status, not the count.
-        mark_stale_running_as_failed(&pool, 1.0, 300.0)
+        mark_stale_running_as_failed(&pool, 1.0, 300.0, STALE_RUNNING_SCAN_LIMIT)
             .await
             .unwrap();
 
@@ -1003,7 +1058,7 @@ mod tests {
         // finalizing_at well in the past → past the finalizing threshold.
         insert_stale_running_task(&pool, &task_id, "NOW() - INTERVAL '1 hour'").await;
 
-        mark_stale_running_as_failed(&pool, 1.0, 300.0)
+        mark_stale_running_as_failed(&pool, 1.0, 300.0, STALE_RUNNING_SCAN_LIMIT)
             .await
             .unwrap();
 
