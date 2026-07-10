@@ -1270,4 +1270,60 @@ mod tests {
             .await
             .unwrap();
     }
+
+    /// P4: the heartbeat retention DELETE filters `sent_at < cutoff`; the planner
+    /// must serve it from idx_horsies_heartbeats_sent_at (migration 0026). Before
+    /// it, 0013's composite (task_id, role, sent_at DESC) could not serve a
+    /// leading sent_at range and every hourly pass seq-scanned the heartbeat heap.
+    #[tokio::test]
+    #[serial]
+    async fn heartbeat_retention_delete_uses_sent_at_index() {
+        let pool = test_pool().await;
+
+        // Realistic statistics: a population of old heartbeat rows.
+        sqlx::query(
+            "INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid)
+             SELECT 'hb-ret-' || g, 'w1', 'runner', NOW() - INTERVAL '30 days', 'h1', 1
+             FROM generate_series(1, 500) g",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE horsies_heartbeats")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // A 500-row table fits in a few pages, so force the index choice a
+        // production-sized heap makes on its own. EXPLAIN plans the real DELETE
+        // without executing it.
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL enable_seqscan = off")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let plan_rows: Vec<(String,)> =
+            sqlx::query_as(&format!("EXPLAIN {}", DELETE_EXPIRED_HEARTBEATS_SQL))
+                .bind("1")
+                .bind(RETENTION_DELETE_BATCH_SIZE)
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap();
+        tx.rollback().await.unwrap();
+
+        let plan = plan_rows
+            .iter()
+            .map(|(line,)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            plan.contains("idx_horsies_heartbeats_sent_at"),
+            "sent_at range predicate must be served by the sent_at index; plan:\n{plan}",
+        );
+
+        sqlx::query("DELETE FROM horsies_heartbeats WHERE task_id LIKE 'hb-ret-%'")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
 }
