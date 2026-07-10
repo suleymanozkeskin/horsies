@@ -32,6 +32,13 @@ use crate::workflow_engine::error::WorkflowError;
 /// no-op. The data-modifying CTEs always execute exactly once even though the
 /// outer query only reads `found`.
 ///
+/// Lock-order invariant (N6): this statement locks the workflow row (`found`'s
+/// `FOR UPDATE OF w`) before the workflow_task row (`upd`'s UPDATE). Every
+/// transaction that locks both `horsies_workflows` and `horsies_workflow_tasks`
+/// must take them in that order — workflows before workflow_tasks — or it can
+/// deadlock against this path. The cancel transaction
+/// (`LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL`) is held to the same order.
+///
 /// `pause_wf` folds the `on_error = 'pause'` parent pause into this same
 /// statement, atomic with the node-FAILED write: when the node CAS wins with
 /// status FAILED and the workflow's `on_error` is `pause`, it CASes the workflow

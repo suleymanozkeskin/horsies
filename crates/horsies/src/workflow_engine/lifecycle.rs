@@ -22,6 +22,16 @@ SET status = 'CANCELLED', completed_at = NOW(), updated_at = NOW()
 WHERE id = $1 AND status IN ('PENDING', 'RUNNING', 'PAUSED')
 RETURNING id";
 
+/// Lock the workflow row first, before any workflow_task rows, so the cancel
+/// transaction acquires `{horsies_workflows, horsies_workflow_tasks}` in the same
+/// order as `COMPLETE_WORKFLOW_TASK_SQL` (workflows before workflow_tasks). The
+/// two paths previously ran in opposite orders and could deadlock under
+/// contention — a task completing while its workflow is being cancelled — with
+/// Postgres aborting one side (SQLSTATE 40P01). Lock-order invariant (N6): any
+/// transaction locking both tables must take horsies_workflows first.
+const LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL: &str = "\
+SELECT id FROM horsies_workflows WHERE id = $1 FOR UPDATE";
+
 /// Lock the workflow's backing horsies_tasks rows before flipping the workflow
 /// status, so a concurrent worker claim (which uses `FOR UPDATE SKIP LOCKED`)
 /// cannot pick them up during the cancellation window. Excludes terminal rows.
@@ -331,11 +341,17 @@ pub async fn cancel_workflow(pool: &PgPool, workflow_id: &str) -> HandleResult<b
         .map_err(|e| to_handle_error(e, workflow_id))
 }
 
-/// Lock the backing tasks + workflow_tasks, flip the workflow status to
-/// CANCELLED, and run the backing-task cleanup — all in one transaction so the
-/// locks are held from before the status flip through commit. Worker claiming
-/// uses `FOR UPDATE SKIP LOCKED`, so these locks close the window where a worker
-/// could claim a queued task during the uncommitted cancellation (horsies #65).
+/// Lock the workflow row + backing tasks + workflow_tasks, flip the workflow
+/// status to CANCELLED, and run the backing-task cleanup — all in one
+/// transaction so the locks are held from before the status flip through commit.
+/// Worker claiming uses `FOR UPDATE SKIP LOCKED`, so these locks close the window
+/// where a worker could claim a queued task during the uncommitted cancellation
+/// (horsies #65).
+///
+/// Lock order (N6): the workflow row is locked first, before any
+/// workflow_task rows, matching `COMPLETE_WORKFLOW_TASK_SQL` (workflows before
+/// workflow_tasks). Opposite orders across the two paths deadlock under
+/// contention.
 ///
 /// Returns `true` if the workflow was non-terminal and got cancelled.
 async fn cancel_one_workflow_in_tx(
@@ -344,6 +360,12 @@ async fn cancel_one_workflow_in_tx(
 ) -> Result<bool, WorkflowError> {
     let mut tx = pool.begin().await?;
 
+    // Workflow row first — see the lock-order invariant above and on
+    // COMPLETE_WORKFLOW_TASK_SQL.
+    sqlx::query(LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL)
+        .bind(workflow_id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query(LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL)
         .bind(workflow_id)
         .execute(&mut *tx)
@@ -1114,5 +1136,167 @@ mod resume_idempotency_tests {
         assert!(!resumed, "a consistent RUNNING workflow resume must return Ok(false)");
 
         cleanup(&pool, &[&id]).await;
+    }
+}
+
+#[cfg(test)]
+mod cancel_lock_order_tests {
+    //! N6: the cancel transaction must lock the workflow row before workflow_task
+    //! rows, matching COMPLETE_WORKFLOW_TASK_SQL (workflows before workflow_tasks).
+    //! Opposite orders across the two paths deadlock under contention (Postgres
+    //! aborts one side, SQLSTATE 40P01). This test drives the real cancel tx
+    //! against a held completion-order lock pair and asserts neither side
+    //! deadlocks and both commit.
+    use super::*;
+    use crate::broker::PostgresBroker;
+    use serial_test::serial;
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|p| p.join(".env").exists());
+        let pw = root
+            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
+            .and_then(|c| {
+                c.lines()
+                    .filter_map(|l| l.trim().split_once('='))
+                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
+                    .map(|(_, v)| v.trim().to_owned())
+            })
+            .unwrap_or_else(|| "W0rklane".to_owned());
+        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    }
+
+    async fn insert_running_workflow(pool: &PgPool, id: &str) {
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index,
+                definition_key, depth, root_workflow_id, parent_workflow_id,
+                sent_at, created_at, started_at, updated_at
+            ) VALUES (
+                $1, 'n6_wf', 'RUNNING', 'fail', NULL,
+                'test.n6.v1', 0, $1, NULL,
+                NOW(), NOW(), NOW(), NOW()
+            )",
+        )
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("insert workflow");
+    }
+
+    async fn insert_wf_task(pool: &PgPool, wf_id: &str) {
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                queue_name, priority, dependencies, allow_failed_deps, join_type,
+                status, is_subworkflow, created_at
+            ) VALUES (
+                $1, $2, 0, 'node_0', 'n6_task', '[]', '{}',
+                'default', 100, '{}', FALSE, 'all',
+                'RUNNING', FALSE, NOW()
+            )",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(wf_id)
+        .execute(pool)
+        .await
+        .expect("insert workflow_task");
+    }
+
+    async fn cleanup(pool: &PgPool, id: &str) {
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+            .bind(id)
+            .execute(pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(id)
+            .execute(pool)
+            .await
+            .ok();
+    }
+
+    /// Drive the real cancel transaction while a separate connection holds locks
+    /// in completion order (workflow row first, then workflow_task row). With the
+    /// fixed cancel path (workflow row first), cancel waits on the workflow row
+    /// holding no workflow_task lock, so there is no circular wait — both sides
+    /// commit. Before the fix cancel held the workflow_task row while waiting on
+    /// the workflow row, closing a cycle against the completion-order holder and
+    /// deadlocking (Postgres aborts one side with 40P01).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn cancel_matches_completion_lock_order_no_deadlock() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+
+        let wf = Uuid::new_v4().to_string();
+        insert_running_workflow(&pool, &wf).await;
+        insert_wf_task(&pool, &wf).await;
+
+        // Conn A simulates an in-flight completion holding its first lock: the
+        // workflow row (COMPLETE_WORKFLOW_TASK_SQL's `FOR UPDATE OF w`).
+        let mut conn_a = pool.begin().await.expect("begin conn A");
+        sqlx::query("SELECT id FROM horsies_workflows WHERE id = $1 FOR UPDATE")
+            .bind(&wf)
+            .execute(&mut *conn_a)
+            .await
+            .expect("conn A locks the workflow row");
+
+        // Run the real cancel transaction concurrently.
+        let cancel_pool = pool.clone();
+        let cancel_wf = wf.clone();
+        let cancel_task =
+            tokio::spawn(async move { cancel_one_workflow_in_tx(&cancel_pool, &cancel_wf).await });
+
+        // Barrier: let the cancel task reach its first lock-wait. Its lock
+        // acquisition is sub-millisecond; this only has to exceed that so the
+        // interleaving is deterministic (pre-fix, cancel is now parked holding the
+        // workflow_task row and waiting on the workflow row).
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+
+        // Conn A now takes its second lock — the workflow_task row (completion's
+        // `upd`). Pre-fix this closes the deadlock cycle; post-fix it succeeds
+        // immediately because cancel holds no workflow_task lock while it waits.
+        let a_wf_task_lock = sqlx::query(
+            "SELECT task_index FROM horsies_workflow_tasks
+             WHERE workflow_id = $1 AND task_index = 0 FOR UPDATE",
+        )
+        .bind(&wf)
+        .execute(&mut *conn_a)
+        .await;
+
+        // Release conn A so the (fixed) cancel path can acquire the workflow row.
+        conn_a.commit().await.ok();
+
+        let cancel_result = cancel_task.await.expect("cancel task joins");
+
+        assert!(
+            a_wf_task_lock.is_ok(),
+            "completion-order lock pair must not deadlock against cancel (40P01): {:?}",
+            a_wf_task_lock.err(),
+        );
+        let cancelled =
+            cancel_result.expect("cancel tx must not deadlock against completion order (40P01)");
+        assert!(cancelled, "a RUNNING workflow must be cancelled");
+        assert_eq!(
+            status_of(&pool, &wf).await,
+            "CANCELLED",
+            "cancel must commit the CANCELLED status",
+        );
+
+        cleanup(&pool, &wf).await;
+    }
+
+    async fn status_of(pool: &PgPool, id: &str) -> String {
+        sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("status")
     }
 }
