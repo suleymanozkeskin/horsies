@@ -356,11 +356,14 @@ WHERE queue_name = ANY($1) AND status = 'RUNNING' \
 GROUP BY queue_name";
 
 /// Load CLAIMED tasks owned by a specific worker (for prefetch buffer dispatch).
+/// `$2` bounds the fetch to at most the available semaphore permits, since no
+/// more than that can be dispatched this pass (P7).
 const LOAD_BUFFERED_CLAIMED_SQL: &str = "\
 SELECT id, task_name, args, kwargs, retry_count, max_retries, task_options, queue_name, good_until, is_workflow_task \
 FROM horsies_tasks \
 WHERE claimed_by_worker_id = $1 AND status = 'CLAIMED' \
-ORDER BY priority ASC, enqueued_at ASC, id ASC";
+ORDER BY priority ASC, enqueued_at ASC, id ASC \
+LIMIT $2";
 
 /// Get the workflow status for a task (if it belongs to a workflow).
 const GET_WORKFLOW_STATUS_FOR_TASK_SQL: &str = "\
@@ -1849,9 +1852,11 @@ impl PostgresBroker {
     pub async fn load_buffered_claimed(
         &self,
         worker_id: &str,
+        limit: i64,
     ) -> Result<Vec<ClaimedTaskRow>, BrokerError> {
         let rows: Vec<ClaimedTaskRow> = sqlx::query_as(LOAD_BUFFERED_CLAIMED_SQL)
             .bind(worker_id)
+            .bind(limit)
             .fetch_all(&self.pool)
             .await
             .map_err(BrokerError::Database)?;
@@ -3829,6 +3834,31 @@ mod fused_finalize_tests {
         assert_eq!(status, "COMPLETED");
 
         cleanup(&pool, &id).await;
+    }
+
+    /// P7: `load_buffered_claimed` bounds its fetch to the requested limit, since
+    /// no more than the available permits can be dispatched in one pass.
+    #[tokio::test]
+    #[serial]
+    async fn load_buffered_claimed_respects_limit() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let pool = broker.pool().clone();
+        let mut ids = Vec::new();
+        for _ in 0..5 {
+            let id = Uuid::new_v4().to_string();
+            seed(&pool, &id, "CLAIMED", Some("p7_worker"), 0).await;
+            ids.push(id);
+        }
+
+        let rows = broker
+            .load_buffered_claimed("p7_worker", 2)
+            .await
+            .expect("load buffered");
+        assert_eq!(rows.len(), 2, "fetch must be bounded by the limit");
+
+        for id in &ids {
+            cleanup(&pool, id).await;
+        }
     }
 
     /// C10: the retry requeue CAS is likewise fenced by `started_at`, so a stale

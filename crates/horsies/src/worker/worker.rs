@@ -176,6 +176,10 @@ pub struct Worker {
     tracker: TaskTracker,
     cancel: CancellationToken,
     hostname: String,
+    /// Task ids currently handed to the tracker (dispatched, not yet finished).
+    /// The buffered-dispatch probe skips these so a task still in its
+    /// CLAIMED→RUNNING window is not re-fetched and re-dispatched next pass (P7).
+    in_dispatch: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl Worker {
@@ -204,6 +208,7 @@ impl Worker {
             tracker: TaskTracker::new(),
             cancel: CancellationToken::new(),
             hostname,
+            in_dispatch: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         })
     }
 
@@ -585,7 +590,13 @@ impl Worker {
         // itself returns empty when there is nothing buffered.
         let mut dispatched_buffered = 0u32;
         if soft_cap_mode && self.semaphore.available_permits() > 0 {
-            let buffered = self.broker.load_buffered_claimed(&self.worker_id).await?;
+            // At most `available_permits` rows can be dispatched this pass, so
+            // bound the fetch (which pulls full args/kwargs payloads) to that (P7).
+            let permit_limit = self.semaphore.available_permits() as i64;
+            let buffered = self
+                .broker
+                .load_buffered_claimed(&self.worker_id, permit_limit)
+                .await?;
 
             // Soft-cap re-check: the claim function counts only RUNNING against a
             // queue's `max_concurrency`, so successive passes can buffer more
@@ -609,6 +620,16 @@ impl Worker {
             for row in buffered {
                 if self.semaphore.available_permits() == 0 {
                     break;
+                }
+                // Skip a task already handed to the tracker: it is still CLAIMED
+                // in its set_running window and would be re-dispatched here (P7).
+                if self
+                    .in_dispatch
+                    .lock()
+                    .expect("in_dispatch poisoned")
+                    .contains(&row.id)
+                {
+                    continue;
                 }
                 // In soft-cap mode, do not start a capped queue's buffered task
                 // past its cluster-wide RUNNING cap.
@@ -827,6 +848,15 @@ impl Worker {
         let hostname = self.hostname.clone();
         let recovery = self.app_config.recovery.clone();
 
+        // Mark this task in-dispatch until the spawned execution finishes, so the
+        // buffered probe won't re-fetch it while it is still CLAIMED (P7).
+        let task_id = row.id.clone();
+        self.in_dispatch
+            .lock()
+            .expect("in_dispatch poisoned")
+            .insert(task_id.clone());
+        let in_dispatch = Arc::clone(&self.in_dispatch);
+
         self.tracker.spawn(async move {
             let phase2_work = execution::execute_and_finalize(
                 Arc::clone(&broker),
@@ -845,6 +875,11 @@ impl Worker {
             if let Some(work) = phase2_work {
                 execution::run_phase2(broker.pool(), &workflow_registry, work).await;
             }
+
+            in_dispatch
+                .lock()
+                .expect("in_dispatch poisoned")
+                .remove(&task_id);
         });
     }
 }
