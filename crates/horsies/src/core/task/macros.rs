@@ -128,7 +128,10 @@ pub fn encode_validated_task_output<T>(value: &T) -> crate::core::task::result::
 where
     T: Serialize + DeserializeOwned,
 {
-    let bytes = match crate::core::codec::to_json_bytes(value) {
+    // Strict serialization rejects non-finite floats (NaN/±Infinity) instead of
+    // letting serde_json coerce them to JSON `null` (N5, Python allow_nan=False
+    // parity).
+    let bytes = match crate::core::codec::to_json_bytes_strict(value) {
         Ok(bytes) => bytes,
         Err(e) => {
             return crate::core::task::result::TaskResult::Err(
@@ -461,6 +464,32 @@ mod tests {
         );
         let data = err.data.expect("expected mismatch diagnostics");
         assert_eq!(data["expected_type"], std::any::type_name::<BadRoundTrip>());
+    }
+
+    #[test]
+    fn encode_validated_output_rejects_non_finite_float() {
+        #[derive(Serialize, Deserialize)]
+        struct Out {
+            value: f64,
+        }
+
+        // N5: a task returning NaN/±Infinity must fail closed with a
+        // WorkerSerializationError naming the non-finite float, not persist
+        // JSON `null`.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = super::encode_validated_task_output(&Out { value: bad }).unwrap_err();
+            assert_eq!(
+                err.error_code,
+                Some(crate::core::task::TaskErrorCode::from(
+                    crate::core::task::OperationalErrorCode::WorkerSerializationError,
+                )),
+            );
+            assert!(err.message.expect("message").contains("non-finite"));
+        }
+
+        // Finite floats (including f64::MAX) still encode.
+        assert!(super::encode_validated_task_output(&Out { value: 3.5 }).is_ok());
+        assert!(super::encode_validated_task_output(&Out { value: f64::MAX }).is_ok());
     }
 
     #[test]

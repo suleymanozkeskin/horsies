@@ -686,7 +686,10 @@ fn serialize_args<A: Serialize>(
     task_name: &str,
     args: &A,
 ) -> TaskSendResult<(Option<String>, Option<String>)> {
-    let value = serde_json::to_value(args).map_err(|e| TaskSendError {
+    // Strict serialization rejects non-finite floats (NaN/±Infinity) at the send
+    // boundary instead of coercing them to JSON `null` (N5, Python
+    // allow_nan=False parity).
+    let value = crate::core::codec::to_json_value_strict(args).map_err(|e| TaskSendError {
         code: TaskSendErrorCode::ValidationFailed,
         message: format!("failed to serialize args for '{}': {}", task_name, e),
         retryable: false,
@@ -896,6 +899,30 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(kwargs.as_ref().unwrap()).unwrap();
         assert_eq!(parsed["a"], 1);
         assert_eq!(parsed["b"], 2);
+    }
+
+    #[test]
+    fn serialize_args_rejects_non_finite_float() {
+        #[derive(Serialize)]
+        struct Payload {
+            amount: f64,
+        }
+
+        // N5: NaN/±Infinity in a field are rejected at the send boundary with a
+        // typed ValidationFailed error that names the non-finite float, instead
+        // of being coerced to JSON `null`.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = serialize_args::<Payload>("charge", &Payload { amount: bad }).unwrap_err();
+            assert_eq!(err.code, TaskSendErrorCode::ValidationFailed);
+            assert!(err.message.contains("non-finite"), "{}", err.message);
+        }
+
+        // Finite floats (including f64::MAX) are unchanged.
+        let (args, kwargs) =
+            serialize_args::<Payload>("charge", &Payload { amount: 1.5 }).unwrap();
+        assert!(args.is_none());
+        assert!(kwargs.expect("kwargs json").contains("1.5"));
+        assert!(serialize_args::<Payload>("charge", &Payload { amount: f64::MAX }).is_ok());
     }
 
     #[test]

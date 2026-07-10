@@ -2,6 +2,9 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use crate::core::task::result::TaskResult;
 
+mod strict;
+pub use strict::{to_json_bytes_strict, to_json_value_strict};
+
 /// Serialize a value to a JSON byte vector.
 pub fn to_json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(value)

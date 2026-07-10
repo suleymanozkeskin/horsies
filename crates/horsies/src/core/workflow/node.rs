@@ -551,7 +551,10 @@ impl<T, I> TaskNode<T, I> {
 pub(crate) fn serialize_explicit_input<V: Serialize>(
     value: &V,
 ) -> Result<(Option<String>, Option<String>), HorsiesError> {
-    let value = serde_json::to_value(value).map_err(|e| {
+    // Strict serialization rejects non-finite floats (NaN/±Infinity) at the node
+    // input boundary instead of coercing them to JSON `null` (N5, Python
+    // allow_nan=False parity).
+    let value = crate::core::codec::to_json_value_strict(value).map_err(|e| {
         HorsiesError::new(format!("failed to serialize workflow node input: {}", e))
     })?;
 
@@ -745,6 +748,25 @@ mod tests {
         let bytes = rebuild_envelope(args, kwargs);
         let decoded: Vec<i32> = crate::core::task::macros::decode_task_input(&bytes).unwrap();
         assert_eq!(decoded, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn serialize_explicit_input_rejects_non_finite_float() {
+        #[derive(serde::Serialize)]
+        struct Payload {
+            ratio: f64,
+        }
+
+        // N5: NaN/±Infinity in a node input are rejected with a typed
+        // HorsiesError that names the non-finite float, not coerced to `null`.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = serialize_explicit_input(&Payload { ratio: bad }).unwrap_err();
+            assert!(err.to_string().contains("non-finite"), "{err}");
+        }
+
+        // Finite floats (including f64::MAX) are unchanged.
+        assert!(serialize_explicit_input(&Payload { ratio: 2.5 }).is_ok());
+        assert!(serialize_explicit_input(&Payload { ratio: f64::MAX }).is_ok());
     }
 
     #[test]
