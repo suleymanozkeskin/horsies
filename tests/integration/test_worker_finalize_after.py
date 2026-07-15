@@ -301,6 +301,7 @@ async def test_phase1_err_propagated_with_finalize_context(
         'queue_name': 'default',
         'is_workflow_task': True,
         'task_name': 'finalize_after_test',
+        'claimed_at': None,
     }
     worker._finalize_workflow_phase.assert_not_awaited()
 

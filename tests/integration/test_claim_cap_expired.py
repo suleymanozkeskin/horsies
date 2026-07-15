@@ -332,8 +332,9 @@ class TestReclaimUnderCap:
             queue_name: str = 'default',
             is_workflow_task: bool = True,
             timeout_ms: int | None = None,
+            claimed_at: datetime | None = None,
         ) -> None:
-            _ = (task_name, args_json, kwargs_json, queue_name, is_workflow_task)
+            _ = (task_name, args_json, kwargs_json, queue_name, is_workflow_task, claimed_at)
             dispatched_ids.append(task_id)
 
         worker._dispatch_one = AsyncMock(side_effect=_fake_dispatch)  # type: ignore[method-assign]

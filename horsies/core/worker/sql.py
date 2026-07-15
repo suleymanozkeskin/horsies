@@ -73,7 +73,7 @@ SET status = 'CLAIMED',
     updated_at = now()
 FROM next
 WHERE t.id = next.id
-RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name, t.is_workflow_task, t.task_options;
+RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name, t.is_workflow_task, t.task_options, t.claimed_at;
 """)
 
 
@@ -85,7 +85,8 @@ RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name, t.is_workflow_task,
 # a client round trip. Replaces the per-pass lock loop + counts + per-queue
 # CLAIM_SQL loop.
 HORSIES_CLAIM_SQL = text("""
-    SELECT id, task_name, args, kwargs, queue_name, is_workflow_task, task_options
+    SELECT id, task_name, args, kwargs, queue_name, is_workflow_task, task_options,
+           claimed_at
     FROM horsies_claim(
         :p_worker_id,
         CAST(:p_queues AS jsonb),
@@ -235,6 +236,11 @@ UNCLAIM_PAUSED_TASKS_SQL = text("""
     RETURNING id
 """)
 
+# The optional :claimed_at fence scopes the release to a specific claim
+# generation (C10); NULL disables it. Callers inside a transaction that
+# already fence-locked the row via SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL
+# pass the same value; the standalone requeue path passes its dispatch's
+# generation so it cannot release a re-claimed row.
 UNCLAIM_CLAIMED_TASK_SQL = text("""
     UPDATE horsies_tasks
     SET status = 'PENDING',
@@ -252,6 +258,8 @@ UNCLAIM_CLAIMED_TASK_SQL = text("""
     WHERE id = :id
       AND status = 'CLAIMED'
       AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
+      AND (CAST(:claimed_at AS TIMESTAMPTZ) IS NULL
+           OR claimed_at = CAST(:claimed_at AS TIMESTAMPTZ))
 """)
 
 RESET_PAUSED_WORKFLOW_TASKS_SQL = text("""
@@ -340,6 +348,18 @@ NOTIFY_TASK_QUEUE_SQL = text("""
 # context, CAS the task to COMPLETED, and fire the capacity wake — one
 # statement, one transaction. Empty result = status/ownership changed
 # (reaper reclaim or re-claim); nothing is written in that case.
+#
+# Claim-generation fence (C10): a (status, worker_id) fence alone cannot
+# reject a stale finalize when the SAME worker re-claimed its own
+# reaper-requeued task — worker_id matches and the row is RUNNING again.
+# :claimed_at scopes the CAS to the claim generation the dispatch was born
+# from (set by the claim, cleared by every requeue); NULL disables the
+# fence for callers without a dispatch context. The same fence guards
+# SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
+# SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL, UNCLAIM_CLAIMED_TASK_SQL,
+# TERMINATE_ORPHANED_WORKFLOW_TASK_SQL, and the child's CLAIMED->RUNNING
+# ownership confirm (child_runner._confirm_ownership_and_set_running) —
+# every statement that acts on a row this worker believes it owns.
 FINALIZE_TASK_COMPLETED_SQL = text("""
     WITH ctx AS (
         SELECT id, retry_count, started_at, claimed_by_worker_id,
@@ -349,6 +369,8 @@ FINALIZE_TASK_COMPLETED_SQL = text("""
         WHERE id = :id
           AND status = 'RUNNING'
           AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
+          AND (CAST(:claimed_at AS TIMESTAMPTZ) IS NULL
+               OR claimed_at = CAST(:claimed_at AS TIMESTAMPTZ))
         FOR UPDATE
     ),
     attempt AS (
@@ -422,6 +444,8 @@ SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL = text("""
     WHERE id = :id
       AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
       AND status IN ('CLAIMED', 'RUNNING')
+      AND (CAST(:claimed_at AS TIMESTAMPTZ) IS NULL
+           OR claimed_at = CAST(:claimed_at AS TIMESTAMPTZ))
     FOR UPDATE
 """)
 
@@ -645,6 +669,8 @@ TERMINATE_ORPHANED_WORKFLOW_TASK_SQL = text("""
     WHERE id = :id
       AND claimed_by_worker_id = :wid
       AND status = 'CLAIMED'
+      AND (CAST(:claimed_at AS TIMESTAMPTZ) IS NULL
+           OR claimed_at = CAST(:claimed_at AS TIMESTAMPTZ))
       AND is_workflow_task = TRUE
       AND NOT EXISTS (
           SELECT 1 FROM horsies_workflow_tasks wt
@@ -663,6 +689,8 @@ SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL = text("""
     WHERE id = :id
       AND status = 'RUNNING'
       AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
+      AND (CAST(:claimed_at AS TIMESTAMPTZ) IS NULL
+           OR claimed_at = CAST(:claimed_at AS TIMESTAMPTZ))
     FOR UPDATE
 """)
 
