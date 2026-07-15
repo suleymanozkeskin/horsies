@@ -1,4 +1,15 @@
-"""Workflow execution engine — DAG resolution, task completion, dependency management."""
+"""Workflow execution engine — DAG resolution, task completion, dependency management.
+
+Transaction-ownership invariant: this module NEVER commits, rolls back, or
+opens transactions — every function operates on the caller's session and the
+caller owns the single commit. This is load-bearing for `on_error='pause'`:
+the node-FAILED CAS, the RUNNING->PAUSED transition, and the child-pause
+cascade must be atomic, because recovery case 1.7 only matches NON-terminal
+nodes — a commit boundary between node-FAILED and the pause would, on a crash
+in that window, leave a terminal node with a RUNNING workflow that no
+recovery path repairs, permanently losing the pause. Pinned by
+tests/unit/test_workflow_engine_invariants.py.
+"""
 
 from __future__ import annotations
 
