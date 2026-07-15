@@ -110,6 +110,18 @@ CANCEL_WORKFLOW_SQL = text("""
     WHERE id = :wf_id AND status IN ('PENDING', 'RUNNING', 'PAUSED')
 """)
 
+# Lock the workflow row first, before any horsies_tasks/horsies_workflow_tasks
+# rows, so the cancel transaction acquires {horsies_workflows,
+# horsies_workflow_tasks} in the same order as COMPLETE_WORKFLOW_TASK_SQL
+# (workflows before workflow_tasks). The two paths previously locked in
+# opposite orders and deadlocked under contention — a task completing while
+# its workflow is being cancelled — with Postgres aborting one side
+# (SQLSTATE 40P01). Lock-order invariant (N6): any transaction locking both
+# tables must take horsies_workflows first.
+LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL = text("""
+    SELECT id FROM horsies_workflows WHERE id = :wf_id FOR UPDATE
+""")
+
 LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL = text("""
     SELECT t.id
     FROM horsies_tasks t
@@ -1112,6 +1124,12 @@ class WorkflowHandle(Generic[OutT]):
                     'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES,
                     'task_terminal_states': _TASK_TERMINAL_VALUES,
                 }
+                # Workflow row first — see the lock-order invariant (N6) on
+                # LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL and COMPLETE_WORKFLOW_TASK_SQL.
+                await session.execute(
+                    LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL,
+                    {'wf_id': self.workflow_id},
+                )
                 # Close the worker-pickup race before flipping workflow status:
                 # workers claim horsies_tasks rows with SKIP LOCKED, while
                 # enqueue/ready transitions mutate horsies_workflow_tasks rows.
@@ -1198,9 +1216,15 @@ class WorkflowHandle(Generic[OutT]):
                         'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES,
                         'task_terminal_states': _TASK_TERMINAL_VALUES,
                     }
-                    # Lock backing tasks + workflow tasks before flipping status,
-                    # then re-lock backing tasks to catch a row an enqueue linked
-                    # while we waited for the workflow-task locks.
+                    # Child workflow row first (same lock-order invariant as the
+                    # parent above), then backing tasks + workflow tasks before
+                    # flipping status, then re-lock backing tasks to catch a row
+                    # an enqueue linked while we waited for the workflow-task
+                    # locks.
+                    await session.execute(
+                        LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL,
+                        {'wf_id': child_workflow_id},
+                    )
                     await session.execute(
                         LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL,
                         child_lock_params,

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
@@ -1036,6 +1036,71 @@ class TestWorkflowHandleCancel:
         )
         assert row[1] is None, 'completed_at must stay NULL for CANCELLED'
         assert row[2] is None, 'workflow result must not be written after cancel'
+
+    async def test_cancel_does_not_deadlock_against_completion_lock_order(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        engine: AsyncEngine,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """N6 regression: cancel locks the workflow row before workflow_tasks.
+
+        COMPLETE_WORKFLOW_TASK_SQL locks the workflow row, then the
+        workflow_task row. A peer transaction holds locks in that order
+        while cancel runs concurrently. With the correct cancel order,
+        cancel waits on the workflow row holding no workflow_task locks,
+        the peer's second lock succeeds, and both sides finish. With the
+        inverted (pre-fix) order this exact interleaving deadlocks and
+        Postgres aborts one side (SQLSTATE 40P01).
+        """
+        task_a = make_simple_task(app, 'cancel_lock_order_a')
+        task_b = make_simple_task(app, 'cancel_lock_order_b')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        spec = make_workflow_spec(
+            broker=broker, name='cancel_lock_order', tasks=[node_a, node_b],
+        )
+        handle = await start_ok(spec, broker)
+
+        async with AsyncSession(engine, expire_on_commit=False) as peer:
+            # Completion order, step 1: workflow row lock (the found CTE's
+            # FOR UPDATE OF w).
+            await peer.execute(
+                text('SELECT id FROM horsies_workflows WHERE id = :wf_id FOR UPDATE'),
+                {'wf_id': handle.workflow_id},
+            )
+
+            cancel_task = asyncio.ensure_future(handle.cancel_async())
+            # Let cancel reach its first lock and block on the workflow row.
+            await asyncio.sleep(0.5)
+            assert not cancel_task.done(), (
+                'cancel must be blocked on the workflow row lock'
+            )
+
+            # Completion order, step 2: workflow_task row lock. Succeeds only
+            # while the blocked cancel holds no workflow_task locks; with the
+            # pre-fix lock order this deadlocks (one side aborts with 40P01).
+            await asyncio.wait_for(
+                peer.execute(
+                    text("""
+                        SELECT id FROM horsies_workflow_tasks
+                        WHERE workflow_id = :wf_id AND task_index = 0
+                        FOR UPDATE
+                    """),
+                    {'wf_id': handle.workflow_id},
+                ),
+                timeout=10.0,
+            )
+            await peer.commit()
+
+        cancel_r = await asyncio.wait_for(cancel_task, timeout=15.0)
+        assert is_ok(cancel_r)
+
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.CANCELLED
 
     async def test_cancel_leaves_no_pending_ready_enqueued_workflow_tasks(
         self,

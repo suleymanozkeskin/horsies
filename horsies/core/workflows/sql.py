@@ -244,6 +244,14 @@ GET_SUBWORKFLOW_SUMMARIES_SQL = text("""
 #     even though the outer query only reads `found`.
 # Zero rows = not a workflow task, or its workflow row is missing; the
 # caller treats both as a no-op (matches the old early returns).
+#
+# Lock-order invariant (N6): this statement locks the workflow row (`found`'s
+# FOR UPDATE OF w) before the workflow_task row (`upd`'s UPDATE). Every
+# transaction that locks both horsies_workflows and horsies_workflow_tasks
+# rows must take them in that order — workflows before workflow_tasks — or it
+# can deadlock against this path (Postgres aborts one side, SQLSTATE 40P01).
+# The cancel transaction (LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL in
+# models/workflow/handle.py) is held to the same order.
 COMPLETE_WORKFLOW_TASK_SQL = text("""
     WITH found AS (
         SELECT wt.workflow_id, wt.task_index,
