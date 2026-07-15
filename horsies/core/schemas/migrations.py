@@ -41,8 +41,16 @@ from sqlalchemy import text
 #      created_at) over terminal statuses; idx_horsies_worker_states_snapshot_at.
 #      The hourly retention deletes seq-scanned both heaps on every pass,
 #      including passes with zero eligible rows.
+#
+# v12: horsies_claim returns claimed_at — the claim-generation fence (C10).
+#      Finalize CASes fenced on (status, worker_id) alone let a stale finalize
+#      from a reaper-requeued attempt clobber a live attempt the SAME worker
+#      re-claimed (worker_id matches, status matches). claimed_at identifies
+#      the claim generation: set by the claim, cleared by every requeue.
+#      The return-type change requires DROP + CREATE (CREATE OR REPLACE
+#      cannot change OUT columns).
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
@@ -85,7 +93,8 @@ RETURNS TABLE(
     kwargs text,
     queue_name varchar,
     is_workflow_task boolean,
-    task_options text
+    task_options text,
+    claimed_at timestamptz
 )
 LANGUAGE plpgsql
 AS $func$
@@ -264,9 +273,18 @@ BEGIN
     FROM pick
     WHERE t.id = pick.id
     RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name,
-              t.is_workflow_task, t.task_options;
+              t.is_workflow_task, t.task_options, t.claimed_at;
 END;
 $func$;
+""")
+
+# v12: the RETURNS TABLE column set changed (claimed_at added), and
+# CREATE OR REPLACE cannot change a function's OUT columns — drop first.
+# The exact signature pins the drop to the v10/v11 definition.
+DROP_CLAIM_FUNCTION_SQL = text("""
+DROP FUNCTION IF EXISTS horsies_claim(
+    text, jsonb, jsonb, jsonb, boolean, int, int, int, int, int, bigint, jsonb
+)
 """)
 
 CREATE_SCHEMA_VERSION_TABLE_SQL = text("""

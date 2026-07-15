@@ -42,6 +42,7 @@ from horsies.core.worker.child_runner import (  # noqa: F401
     CHILD_HOOK_FAILURE_EXIT_CODE as CHILD_HOOK_FAILURE_EXIT_CODE,
     _locate_app as _locate_app,
     _child_initializer as _child_initializer,
+    _confirm_ownership_and_set_running as _confirm_ownership_and_set_running,
     _run_task_entry as _run_task_entry,
     import_by_path as import_by_path,
     _dedupe_paths as _dedupe_paths,

@@ -121,6 +121,7 @@ from horsies.core.schemas.indexes import (
 )
 from horsies.core.schemas.migrations import (
     CREATE_CLAIM_FUNCTION_SQL,
+    DROP_CLAIM_FUNCTION_SQL,
     CREATE_TASK_ATTEMPTS_TABLE_SQL,
     CREATE_SCHEMA_VERSION_TABLE_SQL,
     ADD_DEPTH_COLUMN_SQL,
@@ -823,6 +824,10 @@ class PostgresBroker:
             await self._create_workflow_schema(conn)
 
             # Migration (v10): single-statement claim function.
+            # Migration (v12): claimed_at added to the function's OUT columns
+            # (claim-generation fence, C10); the return-type change requires
+            # dropping the v10/v11 definition first.
+            await conn.execute(DROP_CLAIM_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_FUNCTION_SQL)
 
             # Migration (v11): retention eligibility indexes.
