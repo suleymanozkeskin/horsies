@@ -110,6 +110,7 @@ from horsies.core.schemas.indexes import (
     CREATE_TASK_ATTEMPTS_FINISHED_AT_INDEX_SQL,
     CREATE_TASKS_CLAIM_EXPIRED_INDEX_SQL,
     CREATE_TASKS_CLAIM_PENDING_INDEX_SQL,
+    CREATE_HEARTBEATS_SENT_AT_INDEX_SQL,
     CREATE_TASKS_CLAIM_EXPIRED_ORDERED_INDEX_SQL,
     CREATE_TASKS_ERROR_CODE_INDEX_SQL,
     CREATE_TASKS_RETENTION_INDEX_SQL,
@@ -121,6 +122,7 @@ from horsies.core.schemas.indexes import (
 )
 from horsies.core.schemas.migrations import (
     CREATE_CLAIM_FUNCTION_SQL,
+    DROP_CLAIM_FUNCTION_SQL,
     CREATE_TASK_ATTEMPTS_TABLE_SQL,
     CREATE_SCHEMA_VERSION_TABLE_SQL,
     ADD_DEPTH_COLUMN_SQL,
@@ -823,11 +825,19 @@ class PostgresBroker:
             await self._create_workflow_schema(conn)
 
             # Migration (v10): single-statement claim function.
+            # Migration (v12): claimed_at added to the function's OUT columns
+            # (claim-generation fence, C10); the return-type change requires
+            # dropping the v10/v11 definition first.
+            await conn.execute(DROP_CLAIM_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_FUNCTION_SQL)
 
             # Migration (v11): retention eligibility indexes.
             await conn.execute(CREATE_TASKS_RETENTION_INDEX_SQL)
             await conn.execute(CREATE_WORKER_STATES_SNAPSHOT_AT_INDEX_SQL)
+
+            # Migration (v12): heartbeat retention eligibility index (the
+            # v11 pass covered tasks and worker_states, not heartbeats).
+            await conn.execute(CREATE_HEARTBEATS_SENT_AT_INDEX_SQL)
 
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,

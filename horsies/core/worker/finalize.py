@@ -102,12 +102,19 @@ class FinalizeMixin:
             task_id: str,
             exc: BaseException,
             failed_executor: Optional[ProcessPoolExecutor] = None,
+            claimed_at: Optional[datetime] = None,
         ) -> None: ...
         async def _handle_task_timeout(
-            self, task_id: str, timeout_ms: int
+            self,
+            task_id: str,
+            timeout_ms: int,
+            claimed_at: Optional[datetime] = None,
         ) -> None: ...
         async def _recover_worker_future_failure(
-            self, task_id: str, reason: str
+            self,
+            task_id: str,
+            reason: str,
+            claimed_at: Optional[datetime] = None,
         ) -> _RequeueOutcome: ...
         async def _should_retry_task(
             self, task_id: str, error: TaskError, session: AsyncSession
@@ -136,6 +143,7 @@ class FinalizeMixin:
         timeout_ms: Optional[int] = None,
         *,
         task_name: str,
+        claimed_at: Optional[datetime] = None,
     ) -> Result[None, _FinalizeError]:
         try:
             if timeout_ms is not None:
@@ -147,7 +155,9 @@ class FinalizeMixin:
                         asyncio.shield(fut), timeout=timeout_ms / 1000.0,
                     )
                 except asyncio.TimeoutError:
-                    await self._handle_task_timeout(task_id, timeout_ms)
+                    await self._handle_task_timeout(
+                        task_id, timeout_ms, claimed_at=claimed_at,
+                    )
                     # The SIGKILL breaks the shared process pool; awaiting
                     # the original future routes into the BrokenProcessPool
                     # branch below, which restarts the executor (sibling
@@ -158,19 +168,26 @@ class FinalizeMixin:
         except asyncio.CancelledError:
             raise
         except BrokenProcessPool as exc:
-            await self._handle_broken_pool(task_id, exc, executor)
+            await self._handle_broken_pool(
+                task_id, exc, executor, claimed_at=claimed_at,
+            )
             return Err(
                 self._make_finalize_error(
                     task_id=task_id,
                     stage=_FINALIZE_STAGE_FUTURE,
                     message=f'Broken process pool during finalize: {exc}',
                     retryable=False,
-                    data={'exception_type': type(exc).__name__},
+                    data={
+                        'exception_type': type(exc).__name__,
+                        'claimed_at': claimed_at,
+                    },
                 )
             )
         except Exception as exc:
             requeue_outcome = await self._recover_worker_future_failure(
-                task_id, f'Worker future failed before result: {exc}'
+                task_id,
+                f'Worker future failed before result: {exc}',
+                claimed_at=claimed_at,
             )
             return Err(
                 self._make_finalize_error(
@@ -185,6 +202,7 @@ class FinalizeMixin:
                     data={
                         'exception_type': type(exc).__name__,
                         'requeue_outcome': requeue_outcome.value,
+                        'claimed_at': claimed_at,
                     },
                 )
             )
@@ -199,6 +217,7 @@ class FinalizeMixin:
             task_name=task_name,
             queue_name=queue_name,
             is_workflow_task=is_workflow_task,
+            claimed_at=claimed_at,
         )
         if is_err(phase1_r):
             return Err(
@@ -207,6 +226,7 @@ class FinalizeMixin:
                     queue_name=queue_name,
                     is_workflow_task=is_workflow_task,
                     task_name=task_name,
+                    claimed_at=claimed_at,
                 )
             )
         tr = phase1_r.ok_value
@@ -285,11 +305,13 @@ class FinalizeMixin:
         queue_name: str,
         is_workflow_task: bool,
         task_name: str,
+        claimed_at: Optional[datetime] = None,
     ) -> _FinalizeError:
         data = dict(err.data or {})
         data.setdefault('queue_name', queue_name or 'default')
         data.setdefault('is_workflow_task', is_workflow_task)
         data.setdefault('task_name', task_name)
+        data.setdefault('claimed_at', claimed_at)
         return _FinalizeError(
             error_code=err.error_code,
             message=err.message,
@@ -301,19 +323,24 @@ class FinalizeMixin:
 
     def _finalize_context_from_error(
         self, err: _FinalizeError,
-    ) -> tuple[str, bool, str]:
-        """Recover (queue_name, is_workflow_task, task_name) from error data.
+    ) -> tuple[str, bool, str, datetime | None]:
+        """Recover (queue_name, is_workflow_task, task_name, claimed_at)
+        from error data.
 
         A missing task_name degrades to '' — the engine's ok_type
         resolution then falls back to ``Any`` (same degradation as a
-        broker-less completion), it does not fail the retry.
+        broker-less completion), it does not fail the retry. A missing
+        claimed_at degrades to None, which disables the claim-generation
+        fence for the replay (pre-fence behavior).
         """
         data = err.data or {}
         is_workflow_task_raw = data.get('is_workflow_task')
+        claimed_at_raw = data.get('claimed_at')
         return (
             str(data.get('queue_name') or 'default'),
             is_workflow_task_raw if isinstance(is_workflow_task_raw, bool) else True,
             str(data.get('task_name') or ''),
+            claimed_at_raw if isinstance(claimed_at_raw, datetime) else None,
         )
 
     def _clear_finalize_retry_attempts(self, task_id: str, stage: str) -> None:
@@ -330,6 +357,7 @@ class FinalizeMixin:
         task_name: str,
         queue_name: str,
         is_workflow_task: bool,
+        claimed_at: datetime | None = None,
     ) -> Result[TaskResult[Any, TaskError] | None, _FinalizeError]:
         """Phase 1 of finalization: persist task terminal state/result durably.
 
@@ -372,7 +400,11 @@ class FinalizeMixin:
                         async with self.sf() as s:
                             terminate_res = await s.execute(
                                 TERMINATE_ORPHANED_WORKFLOW_TASK_SQL,
-                                {'id': task_id, 'wid': self.worker_instance_id},
+                                {
+                                    'id': task_id,
+                                    'wid': self.worker_instance_id,
+                                    'claimed_at': claimed_at,
+                                },
                             )
                             terminated = terminate_res.fetchone() is not None
                             await s.commit()
@@ -496,6 +528,7 @@ class FinalizeMixin:
                             'result_json': result_json_str,
                             'notify_channel': f'task_queue_{queue_name or "default"}',
                             'notify_payload': f'capacity:{task_id}',
+                            'claimed_at': claimed_at,
                         },
                     )
                     if fused_res.fetchone() is None:
@@ -530,10 +563,16 @@ class FinalizeMixin:
         try:
             # Note: Heartbeat thread in task process automatically dies when process completes.
             async with self.sf() as s:
-                # Lock the RUNNING row and extract context for attempt history
+                # Lock the RUNNING row and extract context for attempt history.
+                # The claim-generation fence (C10) rejects the row if it was
+                # requeued and re-claimed since this dispatch's claim.
                 ctx_result = await s.execute(
                     SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
-                    {'id': task_id, 'wid': self.worker_instance_id},
+                    {
+                        'id': task_id,
+                        'wid': self.worker_instance_id,
+                        'claimed_at': claimed_at,
+                    },
                 )
                 ctx_row = ctx_result.fetchone()
                 if ctx_row is None:
@@ -1100,9 +1139,13 @@ class FinalizeMixin:
         if self._stop.is_set():
             return
 
+        claimed_at_raw = (err.data or {}).get('claimed_at')
         outcome = await self._recover_worker_future_failure(
             err.task_id,
             f'Retry after future-stage finalize error: {err.message}',
+            claimed_at=(
+                claimed_at_raw if isinstance(claimed_at_raw, datetime) else None
+            ),
         )
         if outcome is _RequeueOutcome.REQUEUED:
             self._clear_finalize_retry_attempts(err.task_id, _FINALIZE_STAGE_FUTURE)
@@ -1159,7 +1202,7 @@ class FinalizeMixin:
             str(failed_reason_raw) if failed_reason_raw is not None else None
         )
 
-        retry_queue_name, retry_is_workflow_task, retry_task_name = (
+        retry_queue_name, retry_is_workflow_task, retry_task_name, retry_claimed_at = (
             self._finalize_context_from_error(err)
         )
         phase1_r = await self._persist_task_terminal_state(
@@ -1171,6 +1214,7 @@ class FinalizeMixin:
             task_name=retry_task_name,
             queue_name=retry_queue_name,
             is_workflow_task=retry_is_workflow_task,
+            claimed_at=retry_claimed_at,
         )
         if is_err(phase1_r):
             await self._handle_finalize_error(
@@ -1179,6 +1223,7 @@ class FinalizeMixin:
                     queue_name=retry_queue_name,
                     is_workflow_task=retry_is_workflow_task,
                     task_name=retry_task_name,
+                    claimed_at=retry_claimed_at,
                 )
             )
             return
@@ -1220,7 +1265,7 @@ class FinalizeMixin:
             return
         tr, loaded_task_name = load_r.ok_value
 
-        queue_name, is_workflow_task, _ = self._finalize_context_from_error(err)
+        queue_name, is_workflow_task, _, _ = self._finalize_context_from_error(err)
         phase2_r = await self._finalize_workflow_phase(
             err.task_id,
             tr,

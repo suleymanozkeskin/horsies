@@ -57,7 +57,7 @@ class TestClaimSqlReturningPayload:
         normalised = ' '.join(sql_text.split())
         assert (
             'RETURNING t.id, t.task_name, t.args, t.kwargs, '
-            't.queue_name, t.is_workflow_task, t.task_options;'
+            't.queue_name, t.is_workflow_task, t.task_options, t.claimed_at;'
         ) in normalised
 
     def test_claim_sql_reclaims_expired_leases(self) -> None:

@@ -41,8 +41,21 @@ from sqlalchemy import text
 #      created_at) over terminal statuses; idx_horsies_worker_states_snapshot_at.
 #      The hourly retention deletes seq-scanned both heaps on every pass,
 #      including passes with zero eligible rows.
+#
+# v12: horsies_claim returns claimed_at — the claim-generation fence (C10).
+#      Finalize CASes fenced on (status, worker_id) alone let a stale finalize
+#      from a reaper-requeued attempt clobber a live attempt the SAME worker
+#      re-claimed (worker_id matches, status matches). claimed_at identifies
+#      the claim generation: set by the claim, cleared by every requeue.
+#      The return-type change requires DROP + CREATE (CREATE OR REPLACE
+#      cannot change OUT columns).
+#      Also idx_horsies_heartbeats_sent_at: heartbeat retention deletes filter
+#      sent_at < cutoff, but the composite (task_id, role, sent_at DESC) index
+#      cannot serve a leading-column sent_at range, so every hourly pass
+#      scanned the heartbeats heap — the v11 retention indexes covered tasks
+#      and worker_states and omitted heartbeats.
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
@@ -53,6 +66,14 @@ SCHEMA_ADVISORY_LOCK_SQL = text("""
 # read with predictable ordering — a raw CTE cannot guarantee this. Held until
 # the caller COMMITs (xact-scoped); the only remaining client gap while held is
 # the commit round trip.
+#
+# NOTE: the return type deliberately diverges from horsies-rust — its
+# 0024_claim_function.sql has no claimed_at OUT column (Rust fences finalize
+# on started_at, viable in-process; this repo's process boundary requires the
+# claim-time marker, C10 / v12). Shared-database interoperability is BLOCKED
+# on this: Rust's 0024 cannot apply against a v12 schema (return-type
+# change), and a drop-first apply would remove the column this fence reads.
+# Align the return shapes on both sides before any shared-DB deployment.
 #
 # Claim ordering (global rank: qprio, priority, enqueued_at, id):
 #   - Distinct queue priorities: queue priority dominates — identical to the
@@ -85,7 +106,8 @@ RETURNS TABLE(
     kwargs text,
     queue_name varchar,
     is_workflow_task boolean,
-    task_options text
+    task_options text,
+    claimed_at timestamptz
 )
 LANGUAGE plpgsql
 AS $func$
@@ -264,9 +286,18 @@ BEGIN
     FROM pick
     WHERE t.id = pick.id
     RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name,
-              t.is_workflow_task, t.task_options;
+              t.is_workflow_task, t.task_options, t.claimed_at;
 END;
 $func$;
+""")
+
+# v12: the RETURNS TABLE column set changed (claimed_at added), and
+# CREATE OR REPLACE cannot change a function's OUT columns — drop first.
+# The exact signature pins the drop to the v10/v11 definition.
+DROP_CLAIM_FUNCTION_SQL = text("""
+DROP FUNCTION IF EXISTS horsies_claim(
+    text, jsonb, jsonb, jsonb, boolean, int, int, int, int, int, bigint, jsonb
+)
 """)
 
 CREATE_SCHEMA_VERSION_TABLE_SQL = text("""

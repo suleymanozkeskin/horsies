@@ -137,3 +137,16 @@ CREATE_WORKER_STATES_SNAPSHOT_AT_INDEX_SQL = text("""
     CREATE INDEX IF NOT EXISTS idx_horsies_worker_states_snapshot_at
     ON horsies_worker_states (snapshot_at);
 """)
+
+# v12: serves DELETE_EXPIRED_HEARTBEATS_SQL (sent_at < cutoff). The composite
+# (task_id, role, sent_at DESC) index leads with task_id and cannot serve a
+# leading-column sent_at range, so every hourly retention pass scanned the
+# heartbeats heap — the highest-insert-rate table in the schema (one row per
+# running task per interval, plus claimer beats). v11 added the analogous
+# indexes for tasks and worker_states and omitted heartbeats. Insert-order
+# appends keep maintenance to rightmost-leaf inserts, same as the
+# worker_states index above.
+CREATE_HEARTBEATS_SENT_AT_INDEX_SQL = text("""
+    CREATE INDEX IF NOT EXISTS idx_horsies_heartbeats_sent_at
+    ON horsies_heartbeats (sent_at);
+""")
