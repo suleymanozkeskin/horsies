@@ -5,17 +5,23 @@ The executor tests spawn real child processes (forcing the 'spawn' start
 method, as production does) and assert pid rotation; they need no database.
 """
 
+# Tests drive executor/Worker private seams directly.
+# pyright: reportPrivateUsage=false
+
 from __future__ import annotations
 
 import multiprocessing
 import os
+import threading
 from multiprocessing.context import BaseContext
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 
 from horsies.core.worker import mem_pool, runtime, worker as worker_mod
 from horsies.core.worker.config import WorkerConfig
@@ -318,6 +324,101 @@ class TestExecutor:
             ]
         assert len(pids) == 4
         assert len(set(pids)) >= 2  # memory recycle rotated children
+
+
+# ----------------------- spawn-failure containment ---------------------------
+
+
+class TestSpawnFailureContainment:
+    """A replacement-spawn failure during recycle must break the pool loudly.
+
+    Uncontained, the failure kills the executor manager thread through
+    threading.excepthook: ``_broken`` is never set, later ``submit()`` is
+    accepted silently, and pending futures hang PENDING forever.
+    """
+
+    @staticmethod
+    def _install_offthread_spawn_failure(ex: HorsiesProcessPoolExecutor) -> None:
+        """Make instance ``_spawn_process`` raise off the main thread only.
+
+        submit()-time spawns run on the main thread and stay intact; the
+        injected OSError fires exactly on the manager thread's recycle
+        replacement (stdlib run() -> _adjust_process_count).
+        """
+
+        def _failing_spawn() -> None:
+            if threading.current_thread() is not threading.main_thread():
+                raise OSError(
+                    'injected: replacement process start failed '
+                    '(fork: Resource temporarily unavailable)'
+                )
+            HorsiesProcessPoolExecutor._spawn_process(ex)
+
+        ex._spawn_process = _failing_spawn  # type: ignore[method-assign]
+
+    def test_replacement_spawn_failure_breaks_pool_instead_of_hanging(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        hook_exc_types: list[type[BaseException]] = []
+
+        def _record_hook(args: threading.ExceptHookArgs) -> None:
+            hook_exc_types.append(args.exc_type)
+
+        monkeypatch.setattr(threading, 'excepthook', _record_hook)
+
+        ex = HorsiesProcessPoolExecutor(
+            1, mp_context=_spawn_ctx(), max_tasks_per_child=2,
+        )
+        try:
+            self._install_offthread_spawn_failure(ex)
+            # Queue all three before any completes: task 2 triggers the count
+            # recycle, task 3 is pending when the replacement spawn fails.
+            fut1 = ex.submit(_return_pid)
+            fut2 = ex.submit(_return_pid)
+            fut3 = ex.submit(_return_pid)
+            assert isinstance(fut1.result(timeout=30), int)
+            assert isinstance(fut2.result(timeout=30), int)
+
+            # Bounded failure, not a hang: containment tears the pool down
+            # and the pending future fails with BrokenProcessPool.
+            with pytest.raises(BrokenProcessPool):
+                fut3.result(timeout=30)
+
+            # submit() is refused, not silently accepted.
+            with pytest.raises(BrokenProcessPool):
+                ex.submit(_return_pid)
+
+            # The manager thread ended instead of looping over closed state.
+            # Typed Any: typeshed mistypes _executor_manager_thread as
+            # _ThreadWakeup; at runtime it is the manager Thread.
+            manager_thread: Any = ex._executor_manager_thread
+            assert manager_thread is not None
+            manager_thread.join(timeout=10)
+            assert not manager_thread.is_alive()
+
+            # No unhandled manager-thread crash leaked to the excepthook;
+            # the intentional SystemExit clean exit is the only allowed call.
+            assert all(t is SystemExit for t in hook_exc_types)
+        finally:
+            ex.shutdown(wait=False)
+
+    def test_submit_time_spawn_failure_propagates_to_caller(self) -> None:
+        """Main-thread spawn failure keeps stock semantics: submit() raises
+        and the pool is not marked broken."""
+        ex = HorsiesProcessPoolExecutor(
+            1, mp_context=_spawn_ctx(), max_tasks_per_child=2,
+        )
+        try:
+
+            def _always_failing_spawn() -> None:
+                raise OSError('injected: submit-time process start failed')
+
+            ex._spawn_process = _always_failing_spawn  # type: ignore[method-assign]
+            with pytest.raises(OSError, match='submit-time'):
+                ex.submit(_return_pid)
+            assert ex._broken is False
+        finally:
+            ex.shutdown(wait=False)
 
 
 # ------------------------------ baseline guard -------------------------------
