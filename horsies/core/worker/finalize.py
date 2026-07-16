@@ -442,12 +442,34 @@ class FinalizeMixin:
                     'CLAIM_LOST'
                     | 'OWNERSHIP_UNCONFIRMED'
                     | 'WORKFLOW_STOPPED'
-                    | 'TASK_EXPIRED'
                 ):
                     logger.debug(
                         f'Task {task_id} aborted with reason={failed_reason}, skipping finalization'
                     )
                     return Ok(None)
+                case 'TASK_EXPIRED':
+                    if not is_workflow_task:
+                        logger.debug(
+                            f'Task {task_id} aborted with reason={failed_reason}, '
+                            f'skipping finalization'
+                        )
+                        return Ok(None)
+                    # The child persisted the terminal row itself
+                    # (_expire_claimed_task_before_start: status=EXPIRED,
+                    # error_code=TASK_EXPIRED, TaskResult err payload), so
+                    # phase 1 has no work left — but a workflow node still
+                    # needs phase 2, or its horsies_workflow_tasks row stays
+                    # ENQUEUED against a terminal task row until reaper
+                    # recovery case 1.7 repairs it (10-40s at defaults).
+                    # Load the persisted result so _finalize_after proceeds
+                    # to phase 2 with it. Loader errors surface as phase-2
+                    # finalize errors (the bounded phase-2 retries reload
+                    # and replay); case 1.7 remains the crash backstop.
+                    load_r = await self._load_persisted_task_result(task_id)
+                    if is_err(load_r):
+                        return Err(load_r.err_value)
+                    expired_tr, _ = load_r.ok_value
+                    return Ok(expired_tr)
                 case _:
                     pass
 

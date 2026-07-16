@@ -10,6 +10,9 @@ The raw SQL guards are tested in test_finalize_status_guard.py.
 Phase-1 branching is tested in test_worker_persist_terminal_state.py.
 """
 
+# Tests drive Worker's private finalize seams directly.
+# pyright: reportPrivateUsage=false
+
 from __future__ import annotations
 
 import asyncio
@@ -21,22 +24,36 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from datetime import datetime
+
 from horsies.core.app import Horsies
+from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.workflow import TaskNode
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
+from horsies.core.worker.current import set_current_app
 from horsies.core.worker.worker import (
     Worker,
     _FinalizeError,
     _FINALIZE_STAGE_PHASE1,
     _FINALIZE_STAGE_PHASE2,
     _FINALIZE_STAGE_FUTURE,
+    _initialize_worker_pool,
+    _run_task_entry,
 )
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import (
+    compute_test_enqueue_sha,
+    get_task_status as get_workflow_task_status,
+    get_workflow_status,
+    make_simple_task,
+    make_workflow_spec,
+    start_ok,
+)
 
 pytestmark = [pytest.mark.integration]
 
@@ -461,6 +478,182 @@ async def test_phase1_ok_none_clears_only_phase1_attempts(
     assert (task_id, _FINALIZE_STAGE_PHASE1) not in worker._finalize_retry_attempts
     # Phase-2 untouched
     assert worker._finalize_retry_attempts[(task_id, _FINALIZE_STAGE_PHASE2)] == 2
+
+
+# ---------------------------------------------------------------------------
+# TASK_EXPIRED finalize-skip gap (regression)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_task_expired_workflow_task_advances_workflow_without_reaper(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    broker: PostgresBroker,
+    app: Horsies,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """A claimed workflow task that expires before child start resolves the
+    workflow through parent finalize alone — no reaper/recovery call.
+
+    Regression for the TASK_EXPIRED finalize-skip gap: the child marks the
+    row EXPIRED itself and returns (False, '', 'TASK_EXPIRED'); the parent
+    used to skip finalization entirely, so the workflow node stayed
+    ENQUEUED against a terminal task row until reaper recovery case 1.7.
+    """
+    task_a = make_simple_task(app, 'expired_gap_a')
+    task_b = make_simple_task(app, 'expired_gap_b')
+    node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+    node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+    spec = make_workflow_spec(
+        broker=broker, name='expired_gap', tasks=[node_a, node_b],
+    )
+    handle = await start_ok(spec, broker)
+
+    task_row = (
+        await session.execute(
+            text("""
+                SELECT t.id, t.task_name, t.args, t.kwargs
+                FROM horsies_tasks t
+                JOIN horsies_workflow_tasks wt ON t.id = wt.task_id
+                WHERE wt.workflow_id = :wf_id AND wt.task_index = 0
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+    ).fetchone()
+    assert task_row is not None
+    task_id, task_name, args_json, kwargs_json = task_row
+
+    # Claim node 0's backing task with a good_until about to pass.
+    await session.execute(
+        text("""
+            UPDATE horsies_tasks
+            SET status = 'CLAIMED',
+                claimed = TRUE,
+                claimed_at = NOW(),
+                claimed_by_worker_id = :wid,
+                claim_expires_at = NULL,
+                good_until = NOW() + interval '1 second'
+            WHERE id = :tid
+        """),
+        {'tid': task_id, 'wid': TEST_WORKER_ID},
+    )
+    await session.commit()
+    claimed_at = (
+        await session.execute(
+            text('SELECT claimed_at FROM horsies_tasks WHERE id = :tid'),
+            {'tid': task_id},
+        )
+    ).scalar_one()
+    assert isinstance(claimed_at, datetime)
+
+    await asyncio.sleep(1.3)  # cross good_until before the child starts
+
+    set_current_app(app)
+    database_url = broker.listener.database_url
+    _initialize_worker_pool(database_url)
+    wire = _run_task_entry(
+        task_name=task_name,
+        args_json=args_json,
+        kwargs_json=kwargs_json,
+        task_id=task_id,
+        database_url=database_url,
+        master_worker_id=TEST_WORKER_ID,
+        claimed_at=claimed_at,
+    )
+    assert wire == (False, '', 'TASK_EXPIRED')
+    # The child self-expired the row before the parent finalizes.
+    assert await _get_task_status(session, task_id) == 'EXPIRED'
+
+    worker = _make_worker(engine)
+    worker._app = app
+    worker.broker = broker
+    fut = _make_resolved_future(wire[0], wire[1], wire[2])
+
+    result = await worker._finalize_after(
+        fut,
+        task_id,
+        is_workflow_task=True,
+        task_name=task_name,
+        claimed_at=claimed_at,
+    )
+
+    assert is_ok(result)
+    # No reaper/recovery ran: finalize alone resolved the workflow per
+    # on_error (node FAILED with TASK_EXPIRED, sibling SKIPPED, wf FAILED).
+    assert await get_workflow_task_status(session, handle.workflow_id, 0) == 'FAILED'
+    assert await get_workflow_task_status(session, handle.workflow_id, 1) == 'SKIPPED'
+    assert await get_workflow_status(session, handle.workflow_id) == 'FAILED'
+    node_result = (
+        await session.execute(
+            text("""
+                SELECT result FROM horsies_workflow_tasks
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+    ).scalar_one()
+    assert 'TASK_EXPIRED' in node_result
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_task_expired_plain_task_skips_finalization(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """Plain-task TASK_EXPIRED keeps the skip: Ok(None), no DB write,
+    no phase 2, no persisted-result load."""
+    task_id = await _insert_running_task(session)
+    worker = _make_worker(engine)
+    fut = _make_resolved_future(
+        ok=False, result_json='', failed_reason='TASK_EXPIRED',
+    )
+    worker._finalize_workflow_phase = AsyncMock(  # type: ignore[method-assign]
+        return_value=Ok(None),
+    )
+    worker._load_persisted_task_result = AsyncMock()  # type: ignore[method-assign]
+
+    result = await worker._finalize_after(
+        fut, task_id, is_workflow_task=False, task_name='finalize_after_test',
+    )
+
+    assert is_ok(result)
+    assert result.ok_value is None
+    assert await _get_task_status(session, task_id) == 'RUNNING'
+    worker._finalize_workflow_phase.assert_not_awaited()
+    worker._load_persisted_task_result.assert_not_awaited()
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_task_expired_workflow_task_loader_error_propagates(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """Workflow-task TASK_EXPIRED with a failing persisted-result load
+    returns that finalize error (phase-2 stage) instead of skipping."""
+    task_id = await _insert_running_task(session)
+    worker = _make_worker(engine)
+    fut = _make_resolved_future(
+        ok=False, result_json='', failed_reason='TASK_EXPIRED',
+    )
+    loader_err = _make_finalize_error(task_id, _FINALIZE_STAGE_PHASE2)
+    worker._load_persisted_task_result = AsyncMock(  # type: ignore[method-assign]
+        return_value=Err(loader_err),
+    )
+    worker._finalize_workflow_phase = AsyncMock(  # type: ignore[method-assign]
+        return_value=Ok(None),
+    )
+
+    result = await worker._finalize_after(
+        fut, task_id, is_workflow_task=True, task_name='finalize_after_test',
+    )
+
+    assert is_err(result)
+    assert result.err_value.stage == _FINALIZE_STAGE_PHASE2
+    assert result.err_value.task_id == task_id
+    worker._finalize_workflow_phase.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
