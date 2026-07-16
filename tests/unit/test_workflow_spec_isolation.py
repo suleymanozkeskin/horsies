@@ -53,6 +53,9 @@ class MockFn(TaskFunction[Any, Any]):
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
+    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
     def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
         return self
 
@@ -63,6 +66,9 @@ class MockFn(TaskFunction[Any, Any]):
         return Ok(TaskHandle('mock'))
 
     def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(self, **kwargs: Any) -> NodeFactory[Any, Any]:
@@ -93,6 +99,9 @@ class MockFnWithCtx(TaskFunction[Any, Any]):
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
+    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
     def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
         return self
 
@@ -103,6 +112,9 @@ class MockFnWithCtx(TaskFunction[Any, Any]):
         return Ok(TaskHandle('mock'))
 
     def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(self, **kwargs: Any) -> NodeFactory[Any, Any]:

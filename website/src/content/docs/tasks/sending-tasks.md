@@ -7,7 +7,7 @@ tags: [tasks, send, async, scheduling]
 
 # Sending Tasks
 
-Enqueue tasks with `.send()`, `.send_async()`, or `.schedule()`. All return a `TaskSendResult[TaskHandle[T]]` -- a `Result` type that is either `Ok(TaskHandle)` on success or `Err(TaskSendError)` on failure.
+Enqueue tasks with `.send()`, `.send_async()`, `.schedule()`, or `.schedule_async()`. All return a `TaskSendResult[TaskHandle[T]]` -- a `Result` type that is either `Ok(TaskHandle)` on success or `Err(TaskSendError)` on failure.
 
 ## How To
 
@@ -38,6 +38,12 @@ async def my_endpoint():
 ```
 `send_async()` only enqueues the task. Use `handle.get_async()` if you want to wait for completion.
 
+The sync variants are blocking database round trips, so calling them from a
+running event loop would stall every coroutine on it. They fail closed
+instead: `.send()`, `.schedule()`, `.retry_send()`, and `.retry_schedule()`
+called inside a running loop return `Err(TaskSendError(ASYNC_CONTEXT))`
+without touching the broker. Use the `*_async` variant there.
+
 ### Set a Task Deadline
 
 Use `.with_options(good_until=...)` to set a per-send expiry deadline. If the task is not executed before the deadline, it transitions to `EXPIRED`.
@@ -62,9 +68,10 @@ match my_task.with_options(good_until=deadline).send(name="alice", count=3):
 ```python
 opts = my_task.with_options(good_until=deadline)
 
-opts.send(name="alice", count=3)              # sync
-await opts.send_async(name="alice", count=3)  # async
-opts.schedule(60, name="alice", count=3)      # delayed
+opts.send(name="alice", count=3)                        # sync
+await opts.send_async(name="alice", count=3)            # async
+opts.schedule(60, name="alice", count=3)                # delayed
+await opts.schedule_async(60, name="alice", count=3)    # delayed, async
 ```
 
 For workflow nodes, use `.node(good_until=...)` instead — see [Typed Node Builder](../concepts/workflows/typed-node-builder).
@@ -75,6 +82,16 @@ For workflow nodes, use `.node(good_until=...)` instead — see [Typed Node Buil
 from horsies import Ok, Err
 
 match my_task.schedule(60, name="alice", count=3):
+    case Ok(handle):
+        print(f"Scheduled: {handle.task_id}")
+    case Err(err):
+        print(f"Schedule failed: {err.code}")
+```
+
+From async code, use `.schedule_async()`:
+
+```python
+match await my_task.schedule_async(60, name="alice", count=3):
     case Ok(handle):
         print(f"Scheduled: {handle.task_id}")
     case Err(err):
@@ -239,15 +256,22 @@ Enqueue task for delayed execution. Task arguments are keyword-only.
 
 **Returns:** `TaskSendResult[TaskHandle[T]]`
 
+### `.schedule_async(delay, **kwargs) -> TaskSendResult[TaskHandle[T]]`
+
+Async variant of `.schedule()`. Use in async code (FastAPI, etc.).
+Same `delay` validation as `.schedule()`.
+
+**Returns:** `TaskSendResult[TaskHandle[T]]`
+
 ### `.with_options(*, good_until=None) -> TaskSendOptions[P, T]`
 
-Return a per-send options builder. The returned object exposes `.send()`, `.send_async()`, and `.schedule()` with the overridden options applied.
+Return a per-send options builder. The returned object exposes `.send()`, `.send_async()`, `.schedule()`, and `.schedule_async()` with the overridden options applied.
 
 | Parameter | Type | Description |
 | --------- | ---- | ----------- |
 | `good_until` | `datetime \| None` | Task expiry deadline (must be timezone-aware) |
 
-**Returns:** `TaskSendOptions[P, T]` — a builder with `.send()`, `.send_async()`, and `.schedule()`.
+**Returns:** `TaskSendOptions[P, T]` — a builder with `.send()`, `.send_async()`, `.schedule()`, and `.schedule_async()`.
 
 Passing `good_until=None` explicitly clears any internally inherited deadline.
 
@@ -274,6 +298,10 @@ Retry a failed schedule using the stored payload. Only valid for `ENQUEUE_FAILED
 | `error` | `TaskSendError` | The error from a previous `.schedule()` call |
 
 **Returns:** `TaskSendResult[TaskHandle[T]]`
+
+### `.retry_schedule_async(error) -> TaskSendResult[TaskHandle[T]]`
+
+Async variant of `.retry_schedule()`.
 
 ### `TaskSendResult[T]`
 
@@ -304,6 +332,7 @@ Use `is_ok(result)` / `is_err(result)` from `horsies` as type-narrowing guards.
 | Code | Description | Retryable |
 | ---- | ----------- | --------- |
 | `SEND_SUPPRESSED` | Send suppressed during worker import/discovery | No |
+| `ASYNC_CONTEXT` | Sync send/schedule called inside a running event loop; use the `*_async` variant | No |
 | `VALIDATION_FAILED` | Argument serialization or validation failed | No |
 | `ENQUEUE_FAILED` | Broker/database failure during enqueue | Yes |
 | `PAYLOAD_MISMATCH` | Retry payload SHA does not match (payload was altered) | No |

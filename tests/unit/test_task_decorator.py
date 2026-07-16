@@ -2534,3 +2534,211 @@ class TestNodeFactoryManualArgsFrom:
         assert node.args_from == {'data': producer_node}  # type: ignore[union-attr]
         assert producer_node in node.waits_for  # type: ignore[union-attr]
         assert node.kwargs == {}  # type: ignore[union-attr]
+
+
+# =============================================================================
+# Async-context guard + schedule_async / retry_schedule_async
+# =============================================================================
+
+
+def _make_guard_task(
+    broker: MagicMock,
+) -> Any:
+    """Task wrapper wired to a mock broker whose enqueue paths succeed."""
+    app = _make_app()
+    app.get_broker.return_value = broker
+
+    def sample(*, value: int) -> TaskResult[int, TaskError]:
+        return TaskResult(ok=value)
+
+    return create_task_wrapper(sample, app, 'test.async_guard_sample')
+
+
+def _ok_broker() -> MagicMock:
+    broker = MagicMock()
+    broker.enqueue.return_value = Ok('task-id-sync')
+    broker.enqueue_async = AsyncMock(return_value=Ok('task-id-async'))
+    return broker
+
+
+def _failed_send_error(
+    task: Any,
+    broker: MagicMock,
+    *,
+    schedule_delay: int | None = None,
+) -> TaskSendError:
+    """Produce a real ENQUEUE_FAILED error (with payload) outside any loop."""
+    broker.enqueue.side_effect = ValueError('boom')
+    if schedule_delay is None:
+        res = task.send(value=1)
+    else:
+        res = task.schedule(schedule_delay, value=1)
+    broker.enqueue.side_effect = None
+    assert is_err(res)
+    assert res.err_value.code == TaskSendErrorCode.ENQUEUE_FAILED
+    return res.err_value
+
+
+@pytest.mark.unit
+class TestAsyncContextGuard:
+    """Sync send/schedule fail closed with ASYNC_CONTEXT on a running loop."""
+
+    def test_sync_send_inside_event_loop_returns_async_context(self) -> None:
+        broker = _ok_broker()
+        task = _make_guard_task(broker)
+
+        async def call_inside_loop() -> Any:
+            return task.send(value=1)
+
+        res = asyncio.run(call_inside_loop())
+        assert is_err(res)
+        assert res.err_value.code == TaskSendErrorCode.ASYNC_CONTEXT
+        assert res.err_value.retryable is False
+        assert 'send_async' in res.err_value.message
+        broker.enqueue.assert_not_called()
+
+    def test_sync_schedule_inside_event_loop_returns_async_context(self) -> None:
+        broker = _ok_broker()
+        task = _make_guard_task(broker)
+
+        async def call_inside_loop() -> Any:
+            return task.schedule(5, value=1)
+
+        res = asyncio.run(call_inside_loop())
+        assert is_err(res)
+        assert res.err_value.code == TaskSendErrorCode.ASYNC_CONTEXT
+        assert 'schedule_async' in res.err_value.message
+        broker.enqueue.assert_not_called()
+
+    def test_with_options_send_inside_event_loop_returns_async_context(self) -> None:
+        broker = _ok_broker()
+        task = _make_guard_task(broker)
+
+        async def call_inside_loop() -> Any:
+            return task.with_options(good_until=None).send(value=1)
+
+        res = asyncio.run(call_inside_loop())
+        assert is_err(res)
+        assert res.err_value.code == TaskSendErrorCode.ASYNC_CONTEXT
+        broker.enqueue.assert_not_called()
+
+    def test_retry_send_inside_event_loop_returns_async_context(self) -> None:
+        broker = _ok_broker()
+        task = _make_guard_task(broker)
+        failed = _failed_send_error(task, broker)
+
+        async def call_inside_loop() -> Any:
+            return task.retry_send(failed)
+
+        res = asyncio.run(call_inside_loop())
+        assert is_err(res)
+        assert res.err_value.code == TaskSendErrorCode.ASYNC_CONTEXT
+        # The guarded error keeps the payload so the caller can still
+        # retry via the async variant.
+        assert res.err_value.payload is not None
+
+    def test_retry_schedule_inside_event_loop_returns_async_context(self) -> None:
+        broker = _ok_broker()
+        task = _make_guard_task(broker)
+        failed = _failed_send_error(task, broker, schedule_delay=7)
+
+        async def call_inside_loop() -> Any:
+            return task.retry_schedule(failed)
+
+        res = asyncio.run(call_inside_loop())
+        assert is_err(res)
+        assert res.err_value.code == TaskSendErrorCode.ASYNC_CONTEXT
+
+    def test_sync_send_outside_loop_unaffected(self) -> None:
+        broker = _ok_broker()
+        task = _make_guard_task(broker)
+
+        res = task.send(value=1)
+        assert is_ok(res)
+        broker.enqueue.assert_called_once()
+
+    def test_sync_schedule_outside_loop_unaffected(self) -> None:
+        broker = _ok_broker()
+        task = _make_guard_task(broker)
+
+        res = task.schedule(5, value=1)
+        assert is_ok(res)
+        broker.enqueue.assert_called_once()
+        assert broker.enqueue.call_args.kwargs['enqueue_delay_seconds'] == 5
+
+    def test_send_async_inside_loop_unaffected(self) -> None:
+        broker = _ok_broker()
+        task = _make_guard_task(broker)
+
+        res = asyncio.run(task.send_async(value=1))
+        assert is_ok(res)
+        broker.enqueue_async.assert_awaited_once()
+
+
+@pytest.mark.unit
+class TestScheduleAsync:
+    """schedule_async / retry_schedule_async mirror the sync semantics."""
+
+    def test_schedule_async_happy_path(self) -> None:
+        broker = _ok_broker()
+        task = _make_guard_task(broker)
+
+        res = asyncio.run(task.schedule_async(9, value=1))
+        assert is_ok(res)
+        broker.enqueue_async.assert_awaited_once()
+        assert broker.enqueue_async.call_args.kwargs['enqueue_delay_seconds'] == 9
+
+    def test_schedule_async_rejects_negative_delay(self) -> None:
+        broker = _ok_broker()
+        task = _make_guard_task(broker)
+
+        res = asyncio.run(task.schedule_async(-1, value=1))
+        assert is_err(res)
+        assert res.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        broker.enqueue_async.assert_not_awaited()
+
+    def test_schedule_async_rejects_bool_delay(self) -> None:
+        broker = _ok_broker()
+        task = _make_guard_task(broker)
+
+        res = asyncio.run(task.schedule_async(True, value=1))  # type: ignore[arg-type]
+        assert is_err(res)
+        assert res.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        broker.enqueue_async.assert_not_awaited()
+
+    def test_schedule_async_zero_delay_allowed(self) -> None:
+        broker = _ok_broker()
+        task = _make_guard_task(broker)
+
+        res = asyncio.run(task.schedule_async(0, value=1))
+        assert is_ok(res)
+
+    def test_with_options_schedule_async(self) -> None:
+        broker = _ok_broker()
+        task = _make_guard_task(broker)
+
+        res = asyncio.run(
+            task.with_options(good_until=None).schedule_async(3, value=1)
+        )
+        assert is_ok(res)
+        assert broker.enqueue_async.call_args.kwargs['enqueue_delay_seconds'] == 3
+
+    def test_retry_schedule_async_reuses_payload(self) -> None:
+        broker = _ok_broker()
+        task = _make_guard_task(broker)
+        failed = _failed_send_error(task, broker, schedule_delay=7)
+
+        res = asyncio.run(task.retry_schedule_async(failed))
+        assert is_ok(res)
+        broker.enqueue_async.assert_awaited_once()
+        assert broker.enqueue_async.call_args.kwargs['enqueue_delay_seconds'] == 7
+        assert broker.enqueue_async.call_args.kwargs['task_id'] == failed.task_id
+
+    def test_retry_schedule_async_rejects_sendless_error(self) -> None:
+        broker = _ok_broker()
+        task = _make_guard_task(broker)
+        failed = _failed_send_error(task, broker)  # plain send, no delay
+
+        res = asyncio.run(task.retry_schedule_async(failed))
+        assert is_err(res)
+        assert res.err_value.code == TaskSendErrorCode.VALIDATION_FAILED

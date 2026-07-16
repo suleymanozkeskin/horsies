@@ -32,6 +32,11 @@ class TaskSendErrorCode(str, Enum):
     """Send called while suppression is active (worker/scheduler import phase,
     ``check()``, or ``TASKLIB_SUPPRESS_SENDS=1``). Non-retryable."""
 
+    ASYNC_CONTEXT = 'ASYNC_CONTEXT'
+    """Sync ``send()``/``schedule()`` (or their sync retry variants) called
+    from inside a running event loop; the blocking enqueue round trip would
+    stall the loop. Call the ``*_async`` variant instead. Non-retryable."""
+
     VALIDATION_FAILED = 'VALIDATION_FAILED'
     ENQUEUE_FAILED = 'ENQUEUE_FAILED'
     PAYLOAD_MISMATCH = 'PAYLOAD_MISMATCH'
