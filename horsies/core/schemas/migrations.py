@@ -67,6 +67,14 @@ SCHEMA_ADVISORY_LOCK_SQL = text("""
 # the caller COMMITs (xact-scoped); the only remaining client gap while held is
 # the commit round trip.
 #
+# NOTE: the return type deliberately diverges from horsies-rust — its
+# 0024_claim_function.sql has no claimed_at OUT column (Rust fences finalize
+# on started_at, viable in-process; this repo's process boundary requires the
+# claim-time marker, C10 / v12). Shared-database interoperability is BLOCKED
+# on this: Rust's 0024 cannot apply against a v12 schema (return-type
+# change), and a drop-first apply would remove the column this fence reads.
+# Align the return shapes on both sides before any shared-DB deployment.
+#
 # Claim ordering (global rank: qprio, priority, enqueued_at, id):
 #   - Distinct queue priorities: queue priority dominates — identical to the
 #     prior per-queue loop.
