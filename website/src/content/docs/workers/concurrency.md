@@ -8,7 +8,7 @@ tags: [workers, concurrency, claiming, limits]
 ## Operational Notes
 
 - **Priority ordering:** Within the same priority, FIFO ordering uses `enqueued_at`. When many tasks share the same timestamp, ordering can appear non-deterministic.
-- **Soft-cap bursts:** With `prefetch_buffer > 0`, queue concurrency counts only RUNNING tasks, while each worker's local claim budget still counts its already-claimed rows. Short-lived bursts above a queue's nominal cap can occur during claim/dispatch.
+- **Soft-cap overshoot:** With `prefetch_buffer > 0`, queue concurrency counts only RUNNING tasks; buffered CLAIMED tasks are invisible to the cap and are dispatched without a re-check. A queue's RUNNING count can therefore exceed its nominal cap, the excess lasts for the duration of those tasks (not just the claim pass), and with multiple workers each pass grants against the same RUNNING snapshot — N workers can reach up to N × cap RUNNING, bounded by their aggregate process slots. Use hard cap mode (`prefetch_buffer = 0`) where the cap must hold strictly.
 - **Claim leases:** In soft-cap mode, claims can expire and be reclaimed. Workers must verify ownership before running user code.
 
 ## Concurrency Levels
@@ -314,7 +314,7 @@ config = AppConfig(
 **Behavior:**
 - Prefetch allowed: workers can claim tasks ahead of execution
 - Lease expiry: prefetched claims expire and can be reclaimed by other workers
-- Soft limit: actual concurrent tasks may briefly exceed the cap during claiming
+- Soft limit: RUNNING tasks can exceed the cap — buffered CLAIMED tasks don't count against it and dispatch without a re-check, so the excess persists while those tasks run and scales with worker count (see [Soft-cap overshoot](#operational-notes))
 
 **Important:** `cluster_wide_cap` and `prefetch_buffer > 0` cannot be combined. If you need a global cap, use hard cap mode.
 **Important:** `claim_lease_ms` must be set when `prefetch_buffer > 0`. In hard cap mode (`prefetch_buffer = 0`), it is optional and overrides the default 60s lease.
