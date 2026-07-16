@@ -266,6 +266,20 @@ class ExecutorRestartFailedError(RuntimeError):
     """
 
 
+class ServiceLoopDiedError(RuntimeError):
+    """A worker-lifetime service loop died while the worker kept claiming.
+
+    Process-fatal by design: the service loops (claimer heartbeat,
+    worker-state snapshot, ping responder, reaper) contain their own
+    per-iteration errors, so an escape is a defect — and a worker whose
+    heartbeat loop is dead stops renewing claim leases, whose state loop is
+    dead disappears from monitoring, and whose reaper is dead contributes no
+    recovery passes, all while still claiming work. Logging alone leaves
+    that zombie running; escalating crashes the worker non-zero so the
+    supervisor restarts it whole.
+    """
+
+
 class MemoryBaselineExceedsThresholdError(RuntimeError):
     """Warmed child baseline RSS is at or above max_memory_per_child_mb.
 
