@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-use crate::broker::{ClaimedTaskRow, PostgresBroker};
+use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
@@ -38,8 +38,9 @@ pub(crate) use self::parse::parse_workflow_ctx;
 
 /// Outcome of confirming task ownership and transitioning to RUNNING.
 pub(crate) enum OwnershipOutcome {
-    /// Task transitioned to RUNNING at the given timestamp.
-    Running(chrono::DateTime<Utc>),
+    /// Task transitioned to RUNNING; carries the attempt context row
+    /// (`started_at` + retry/expiry columns) read under the transition's lock.
+    Running(SetRunningRow),
     /// Task expired while CLAIMED but before user code started.
     ExpiredBeforeStart { result_json: String },
     /// Ownership lost or workflow stopped — skip execution.
@@ -187,6 +188,10 @@ where
 ///
 /// Also updates the corresponding workflow_task status if applicable.
 /// On failure, attempts to unclaim the task or mark it as skipped.
+///
+/// `claimed_at` is the claim generation this dispatch was born from; it
+/// fences `set_running`, the pre-start expiry, and the failure-path unclaim
+/// so none of them can act on a row the same worker re-claimed (C10).
 pub(crate) async fn confirm_ownership_and_set_running(
     broker: &PostgresBroker,
     task_id: &str,
@@ -194,12 +199,13 @@ pub(crate) async fn confirm_ownership_and_set_running(
     pid: i32,
     hostname: &str,
     is_workflow_task: bool,
+    claimed_at: Option<chrono::DateTime<Utc>>,
 ) -> OwnershipOutcome {
     match broker
-        .set_running(task_id, worker_id, pid, hostname, "worker")
+        .set_running(task_id, worker_id, pid, hostname, "worker", claimed_at)
         .await
     {
-        Ok(Some(started_at)) => {
+        Ok(Some(running)) => {
             // `set_running` has already durably committed the CLAIMED → RUNNING
             // flip on horsies_tasks. The workflow_task RUNNING status is purely
             // informational (COMPLETE_WORKFLOW_TASK_SQL accepts an ENQUEUED
@@ -228,11 +234,11 @@ pub(crate) async fn confirm_ownership_and_set_running(
                     );
                 }
             }
-            OwnershipOutcome::Running(started_at)
+            OwnershipOutcome::Running(running)
         }
         Ok(None) => {
             match broker
-                .expire_claimed_task_before_start(task_id, worker_id)
+                .expire_claimed_task_before_start(task_id, worker_id, claimed_at)
                 .await
             {
                 Ok(Some(result_json)) => {
@@ -278,8 +284,14 @@ pub(crate) async fn confirm_ownership_and_set_running(
         }
         Err(e) => {
             tracing::error!(task_id = %task_id, error = %e, "failed to set RUNNING, requeueing");
-            if let Err(ue) =
-                unclaim_task_with_retry(broker, task_id, worker_id, "set RUNNING failed").await
+            if let Err(ue) = unclaim_task_with_retry(
+                broker,
+                task_id,
+                worker_id,
+                claimed_at,
+                "set RUNNING failed",
+            )
+            .await
             {
                 tracing::error!(task_id = %task_id, error = %ue, "failed to unclaim task after RUNNING transition error");
             }
@@ -334,12 +346,13 @@ pub(crate) async fn unclaim_task_with_retry(
     broker: &PostgresBroker,
     task_id: &str,
     worker_id: &str,
+    claimed_at: Option<chrono::DateTime<Utc>>,
     context: &str,
 ) -> Result<bool, crate::broker::BrokerError> {
     let mut last_err: Option<crate::broker::BrokerError> = None;
 
     for attempt in 1..=PRESTART_DB_RETRY_ATTEMPTS {
-        match broker.unclaim_task(task_id, worker_id).await {
+        match broker.unclaim_task(task_id, worker_id, claimed_at).await {
             Ok(applied) => {
                 if !applied {
                     tracing::warn!(
@@ -573,12 +586,13 @@ pub(crate) async fn schedule_retry_for_task(
     task_id: &str,
     task_error: &TaskError,
     row: &ClaimedTaskRow,
+    running: &SetRunningRow,
     attempt_num: i32,
-    task_started_at: chrono::DateTime<Utc>,
     now: chrono::DateTime<Utc>,
     worker: &WorkerProcessInfo<'_>,
 ) -> ScheduleRetryOutcome {
-    let new_count = row.retry_count + 1;
+    let task_started_at = running.started_at;
+    let new_count = running.retry_count + 1;
     let delay = calculate_retry_delay(new_count as u32, row.task_options.as_deref());
     let next_retry_at = Utc::now() + chrono::Duration::milliseconds((delay * 1000.0) as i64);
     let error_code_str = task_error.error_code.as_ref().map(|c| c.to_string());
@@ -653,7 +667,7 @@ pub(crate) async fn schedule_retry_for_task(
         }
         Ok(false) => {
             // Distinguish expired vs reaper-reclaimed (mirrors Python's postcheck).
-            if let Some(good_until) = row.good_until {
+            if let Some(good_until) = running.good_until {
                 if next_retry_at >= good_until {
                     tracing::info!(
                         task_id = %task_id,
@@ -692,13 +706,14 @@ pub(crate) async fn persist_terminal_state(
     task_id: &str,
     result: TaskResult<Vec<u8>>,
     row: &ClaimedTaskRow,
-    task_started_at: chrono::DateTime<Utc>,
+    running: &SetRunningRow,
     worker_id: &str,
     hostname: &str,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let pid = std::process::id() as i32;
     let process_name = format!("worker-{}", pid);
-    let attempt_num = row.retry_count + 1;
+    let task_started_at = running.started_at;
+    let attempt_num = running.retry_count + 1;
     let now = Utc::now();
     let worker = WorkerProcessInfo {
         worker_id,
@@ -729,18 +744,18 @@ pub(crate) async fn persist_terminal_state(
             // Check retry eligibility.
             if should_retry(
                 task_error,
-                row.retry_count,
-                row.max_retries,
+                running.retry_count,
+                running.max_retries,
                 row.task_options.as_deref(),
-                row.good_until,
+                running.good_until,
             ) {
                 match schedule_retry_for_task(
                     broker,
                     task_id,
                     task_error,
                     row,
+                    running,
                     attempt_num,
-                    task_started_at,
                     now,
                     &worker,
                 )
@@ -1209,12 +1224,18 @@ pub(crate) async fn finalize_pre_execution_failure(
     let is_workflow_task = row.is_workflow_task;
     let pid = std::process::id() as i32;
 
-    let task_started_at = match confirm_ownership_and_set_running(
-        &broker, &task_id, &worker_id, pid, &hostname, is_workflow_task,
+    let running = match confirm_ownership_and_set_running(
+        &broker,
+        &task_id,
+        &worker_id,
+        pid,
+        &hostname,
+        is_workflow_task,
+        row.claimed_at,
     )
     .await
     {
-        OwnershipOutcome::Running(started_at) => started_at,
+        OwnershipOutcome::Running(running) => running,
         OwnershipOutcome::ExpiredBeforeStart { result_json } => {
             return Some(Phase2Work {
                 task_id,
@@ -1232,7 +1253,7 @@ pub(crate) async fn finalize_pre_execution_failure(
         &task_id,
         TaskResult::Err(task_error),
         &row,
-        task_started_at,
+        &running,
         &worker_id,
         &hostname,
     )
@@ -1283,12 +1304,18 @@ pub(crate) async fn execute_and_finalize(
     let accepts_workflow_ctx = task_fn.accepts_workflow_ctx();
 
     // Phase 0: Confirm ownership and transition to RUNNING.
-    let task_started_at = match confirm_ownership_and_set_running(
-        &broker, &task_id, &worker_id, pid, &hostname, is_workflow_task,
+    let running = match confirm_ownership_and_set_running(
+        &broker,
+        &task_id,
+        &worker_id,
+        pid,
+        &hostname,
+        is_workflow_task,
+        row.claimed_at,
     )
     .await
     {
-        OwnershipOutcome::Running(started_at) => started_at,
+        OwnershipOutcome::Running(running) => running,
         OwnershipOutcome::ExpiredBeforeStart { result_json } => {
             return Some(Phase2Work {
                 task_id,
@@ -1349,7 +1376,7 @@ pub(crate) async fn execute_and_finalize(
         &task_id,
         result,
         &row,
-        task_started_at,
+        &running,
         &worker_id,
         &hostname,
     )
@@ -1399,7 +1426,7 @@ async fn retry_phase1(
     task_id: &str,
     result: TaskResult<Vec<u8>>,
     row: &ClaimedTaskRow,
-    task_started_at: chrono::DateTime<Utc>,
+    running: &SetRunningRow,
     worker_id: &str,
     hostname: &str,
 ) -> Option<FinalizeOutcome> {
@@ -1409,7 +1436,7 @@ async fn retry_phase1(
         task_id,
         result.clone(),
         row,
-        task_started_at,
+        running,
         worker_id,
         hostname,
     )
@@ -1450,7 +1477,7 @@ async fn retry_phase1(
             task_id,
             result.clone(),
             row,
-            task_started_at,
+            running,
             worker_id,
             hostname,
         )
@@ -1955,7 +1982,7 @@ mod set_running_gate_tests {
         seed_claimed(&pool, &task_id, true).await;
 
         let outcome =
-            confirm_ownership_and_set_running(&broker, &task_id, "w1", 1, "h1", true).await;
+            confirm_ownership_and_set_running(&broker, &task_id, "w1", 1, "h1", true, None).await;
         assert!(matches!(outcome, OwnershipOutcome::Running(_)));
 
         let node_status: String =
@@ -1980,7 +2007,7 @@ mod set_running_gate_tests {
         seed_claimed(&pool, &task_id, false).await;
 
         let outcome =
-            confirm_ownership_and_set_running(&broker, &task_id, "w1", 1, "h1", false).await;
+            confirm_ownership_and_set_running(&broker, &task_id, "w1", 1, "h1", false, None).await;
         assert!(matches!(outcome, OwnershipOutcome::Running(_)));
 
         let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
