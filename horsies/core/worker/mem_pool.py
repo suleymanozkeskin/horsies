@@ -21,6 +21,7 @@ enabled, and the feature is CPython-only.
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 import platform
 import sys
@@ -54,6 +55,27 @@ _SUPPORTED_PYTHON_MINORS = frozenset({(3, 13)})
 # probes, whose RSS is the baseline, not a per-task signal. Identity holds
 # under spawn (children re-import these module-level functions).
 _RECYCLE_EXEMPT_CALLS = (_warm_child_process, _warm_child_process_probe)
+
+
+def _flush_output_before_exit() -> None:
+    """Flush logging handlers and std streams ahead of ``os._exit``.
+
+    ``os._exit`` skips interpreter teardown, so anything still buffered
+    (above all the recycle log line) would be lost without this flush.
+    Best-effort by design: a broken handler or stream must not turn a
+    clean recycle exit into a crash.
+    """
+    try:
+        # Flushes (then closes) every registered handler; the process
+        # exits immediately after, so closed handlers are fine.
+        logging.shutdown()
+    except Exception:
+        pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
 
 
 class MemoryRecycleUnsupportedError(RuntimeError):
@@ -163,7 +185,17 @@ def _horsies_process_worker(
                     max_memory_per_child_mb,
                     ','.join(recycle_reasons),
                 )
-            return
+            # This process is being discarded: interpreter teardown (GC of
+            # the very heap that triggered the recycle, atexit hooks) is pure
+            # waste, and the manager inlines p.join() on the recycled child
+            # before reading further results, so a slow teardown head-of-line
+            # blocks sibling results. The result is already on the wire —
+            # _sendback_result has returned, and SimpleQueue.put writes the
+            # pickled item to the pipe synchronously under its lock (no
+            # feeder thread). Flush buffered output, then exit without
+            # teardown.
+            _flush_output_before_exit()
+            os._exit(0)
 
 
 # Instance attrs the gh-115634 _adjust_process_count override reads

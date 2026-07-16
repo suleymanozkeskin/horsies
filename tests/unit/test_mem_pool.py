@@ -310,6 +310,20 @@ class TestExecutor:
 
         assert recycle_replacement_supported() is False
 
+    def test_recycle_fast_exit_delivers_result_and_replacement_runs_next_task(
+        self,
+    ) -> None:
+        # max_tasks_per_child=1: every task recycles its child, so every
+        # iteration crosses the fast-exit path (os._exit after
+        # _sendback_result). Each result must still arrive and each
+        # subsequent task must run on a fresh replacement child.
+        with HorsiesProcessPoolExecutor(
+            1, mp_context=_spawn_ctx(), max_tasks_per_child=1,
+        ) as ex:
+            pids = [ex.submit(_return_pid).result(timeout=30) for _ in range(3)]
+        assert len(pids) == 3
+        assert len(set(pids)) == 3  # a fresh child ran every task
+
     def test_memory_recycle_rotates_children(self) -> None:
         # Each task retains 120MB; with threshold 120MB the child crosses it
         # after the first real task and recycles, so pids rotate.
