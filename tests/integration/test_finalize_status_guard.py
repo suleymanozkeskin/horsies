@@ -18,7 +18,11 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.worker.sql import FINALIZE_TASK_COMPLETED_SQL
 from horsies.core.worker.worker import (
+    _confirm_ownership_and_set_running,
+    _initialize_worker_pool,
     GET_TASK_RETRY_CONFIG_SQL,
     GET_TASK_RETRY_INFO_SQL,
     MARK_TASK_COMPLETED_SQL,
@@ -26,6 +30,8 @@ from horsies.core.worker.worker import (
     MARK_TASK_FAILED_WORKER_SQL,
     SCHEDULE_TASK_RETRY_SQL,
     SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
+    SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
+    UNCLAIM_CLAIMED_TASK_SQL,
 )
 from tests.integration.conftest import compute_test_enqueue_sha
 
@@ -44,6 +50,7 @@ async def _insert_running_task(
     session: AsyncSession,
     *,
     claimed_by_worker_id: str = OWNER_WORKER_ID,
+    claimed_at: datetime | None = None,
 ) -> str:
     """Insert a minimal horsies_tasks row in RUNNING state and return its id."""
     task_id = str(uuid.uuid4())
@@ -53,17 +60,20 @@ async def _insert_running_task(
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha, claimed_by_worker_id)
+                 max_retries, started_at, enqueue_sha, claimed_by_worker_id,
+                 claimed_at)
             VALUES
                 (:id, 'guard_test', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 3, NOW(), :enqueue_sha, :claimed_by_worker_id)
+                 3, NOW(), :enqueue_sha, :claimed_by_worker_id,
+                 :claimed_at)
         """),
         {
             'id': task_id,
             'sent_at': sent_at,
             'enqueue_sha': sha,
             'claimed_by_worker_id': claimed_by_worker_id,
+            'claimed_at': claimed_at,
         },
     )
     await session.flush()
@@ -496,7 +506,7 @@ async def test_context_select_blocks_on_ownership_mismatch(
     row = (
         await session.execute(
             SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
-            {'id': task_id, 'wid': OWNER_WORKER_ID},
+            {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': None},
         )
     ).fetchone()
     assert row is None, (
@@ -507,7 +517,7 @@ async def test_context_select_blocks_on_ownership_mismatch(
     owner_row = (
         await session.execute(
             SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
-            {'id': task_id, 'wid': OTHER_WORKER_ID},
+            {'id': task_id, 'wid': OTHER_WORKER_ID, 'claimed_at': None},
         )
     ).fetchone()
     assert owner_row is not None
@@ -666,3 +676,190 @@ async def test_stale_finalizer_after_reclaim_race_sequence(
     assert row[0] == 'RUNNING'
     assert row[1] == OTHER_WORKER_ID
     assert row[2] is None, 'Stale result must not be written'
+
+
+# ---------------------------------------------------------------------------
+# Claim-generation fence (C10)
+#
+# (status, worker_id) alone cannot reject a stale finalize when the SAME
+# worker re-claimed its own reaper-requeued task: worker_id matches and the
+# row is RUNNING again. The :claimed_at fence pins every owned-row statement
+# to the claim generation the dispatch was born from; a requeue clears
+# claimed_at and a re-claim stamps a new one, so a stale actor no longer
+# matches. NULL disables the fence (pre-fence caller behavior).
+# ---------------------------------------------------------------------------
+
+# Fixed, deterministic claim generations. GEN_STALE simulates the dispatch
+# born from the first claim; GEN_CURRENT is the row's generation after a
+# requeue + re-claim by the same worker.
+GEN_CURRENT = datetime(2026, 1, 1, 12, 0, 0, 123456, tzinfo=timezone.utc)
+GEN_STALE = GEN_CURRENT - timedelta(minutes=1)
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_fused_finalize_rejects_stale_claim_generation(
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """Fused finalize is a no-op for a stale generation, applies for the live one."""
+    task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
+
+    stale = await session.execute(
+        FINALIZE_TASK_COMPLETED_SQL,
+        {
+            'id': task_id,
+            'wid': OWNER_WORKER_ID,
+            'result_json': '{"ok": "stale_attempt_result"}',
+            'notify_channel': 'task_queue_default',
+            'notify_payload': f'capacity:{task_id}',
+            'claimed_at': GEN_STALE,
+        },
+    )
+    assert stale.fetchone() is None, (
+        'Same worker id + RUNNING status must not be enough: a stale '
+        'generation must be fenced out'
+    )
+    assert await _get_task_status(session, task_id) == 'RUNNING'
+
+    live = await session.execute(
+        FINALIZE_TASK_COMPLETED_SQL,
+        {
+            'id': task_id,
+            'wid': OWNER_WORKER_ID,
+            'result_json': '{"ok": "live_attempt_result"}',
+            'notify_channel': 'task_queue_default',
+            'notify_payload': f'capacity:{task_id}',
+            'claimed_at': GEN_CURRENT,
+        },
+    )
+    assert live.fetchone() is not None
+    assert await _get_task_status(session, task_id) == 'COMPLETED'
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_fused_finalize_null_fence_matches_any_generation(
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """NULL fence preserves the (status, worker_id)-only behavior."""
+    task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
+
+    res = await session.execute(
+        FINALIZE_TASK_COMPLETED_SQL,
+        {
+            'id': task_id,
+            'wid': OWNER_WORKER_ID,
+            'result_json': '{"ok": 1}',
+            'notify_channel': 'task_queue_default',
+            'notify_payload': f'capacity:{task_id}',
+            'claimed_at': None,
+        },
+    )
+    assert res.fetchone() is not None
+    assert await _get_task_status(session, task_id) == 'COMPLETED'
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_context_select_rejects_stale_claim_generation(
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """Err-path context lock skips a row from a different claim generation."""
+    task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
+
+    stale_row = (
+        await session.execute(
+            SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
+            {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': GEN_STALE},
+        )
+    ).fetchone()
+    assert stale_row is None
+
+    live_row = (
+        await session.execute(
+            SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
+            {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': GEN_CURRENT},
+        )
+    ).fetchone()
+    assert live_row is not None
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_worker_owned_select_rejects_stale_claim_generation(
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """Timeout/future-failure row lock skips a row from a different generation."""
+    task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
+
+    stale_row = (
+        await session.execute(
+            SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
+            {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': GEN_STALE},
+        )
+    ).fetchone()
+    assert stale_row is None
+
+    live_row = (
+        await session.execute(
+            SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
+            {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': GEN_CURRENT},
+        )
+    ).fetchone()
+    assert live_row is not None
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_unclaim_rejects_stale_claim_generation(
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """Standalone requeue cannot release a CLAIMED row it did not claim."""
+    task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
+    await _set_task_status(session, task_id, 'CLAIMED')
+
+    stale = await session.execute(
+        UNCLAIM_CLAIMED_TASK_SQL,
+        {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': GEN_STALE},
+    )
+    assert (getattr(stale, 'rowcount', 0) or 0) == 0
+    assert await _get_task_status(session, task_id) == 'CLAIMED'
+
+    live = await session.execute(
+        UNCLAIM_CLAIMED_TASK_SQL,
+        {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': GEN_CURRENT},
+    )
+    assert (getattr(live, 'rowcount', 0) or 0) == 1
+    assert await _get_task_status(session, task_id) == 'PENDING'
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_confirm_ownership_rejects_stale_claim_generation(
+    session: AsyncSession,
+    broker: 'PostgresBroker',
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """The child's CLAIMED->RUNNING confirm aborts CLAIM_LOST for a stale
+    generation and succeeds for the live one.
+
+    This closes the soft-cap double-dispatch route: a buffered stale child
+    whose row was re-claimed (same worker, expired lease) must not pass the
+    confirm on the strength of (status, worker_id) alone.
+    """
+    task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
+    await _set_task_status(session, task_id, 'CLAIMED')
+    await session.commit()  # the child confirm runs on its own connection
+
+    _initialize_worker_pool(broker.listener.database_url)
+
+    stale_result = _confirm_ownership_and_set_running(
+        task_id, OWNER_WORKER_ID, False, GEN_STALE,
+    )
+    assert stale_result == (False, '', 'CLAIM_LOST')
+    assert await _get_task_status(session, task_id) == 'CLAIMED'
+
+    live_result = _confirm_ownership_and_set_running(
+        task_id, OWNER_WORKER_ID, False, GEN_CURRENT,
+    )
+    assert live_result is None
+    assert await _get_task_status(session, task_id) == 'RUNNING'

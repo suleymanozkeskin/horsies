@@ -59,6 +59,7 @@ class ClaimMixin:
             queue_name: str = 'default',
             is_workflow_task: bool = True,
             timeout_ms: Optional[int] = None,
+            claimed_at: Optional[datetime] = None,
         ) -> None: ...
 
     async def _claim_and_dispatch_all(self) -> bool:
@@ -143,6 +144,7 @@ class ClaimMixin:
                 row.get('queue_name') or 'default',
                 bool(row.get('is_workflow_task', False)),
                 timeout_ms=_parse_timeout_ms(row.get('task_options'), row['id']),
+                claimed_at=row.get('claimed_at'),
             )
         return len(claimed_rows) > 0
 

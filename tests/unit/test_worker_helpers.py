@@ -1886,6 +1886,7 @@ class TestRetryFinalizePhase1:
             'queue_name': 'default',
             'is_workflow_task': True,
             'task_name': '',
+            'claimed_at': None,
         }
 
     # --- U-3f: _persist Ok(None) → clears phase1 only ---

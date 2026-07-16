@@ -10,6 +10,7 @@ import socket
 import threading
 import time
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from importlib import import_module
 from typing import Any, Optional, Tuple, cast
 
@@ -685,6 +686,7 @@ def _confirm_ownership_and_set_running(
     task_id: str,
     worker_id: str,
     is_workflow_task: bool = True,
+    claimed_at: Optional[datetime] = None,
 ) -> Optional[Tuple[bool, str, Optional[str]]]:
     try:
         pool = _get_worker_pool()
@@ -713,6 +715,7 @@ def _confirm_ownership_and_set_running(
                 WHERE id = %s
                   AND status = 'CLAIMED'
                   AND claimed_by_worker_id = %s
+                  AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
                   AND (claim_expires_at IS NULL OR claim_expires_at > now())
                   AND (good_until IS NULL OR good_until > now())
                 """
@@ -721,12 +724,19 @@ def _confirm_ownership_and_set_running(
                 RETURNING id
                 """
             )
+            # The claimed_at pair is the claim-generation fence (C10): the
+            # dispatch that submitted this child carries the claim's own
+            # claimed_at; a row requeued and re-claimed since then (same
+            # worker or not) no longer matches, so the stale child aborts
+            # with CLAIM_LOST instead of double-running the task.
             params = [
                 os.getpid(),
                 socket.gethostname(),
                 f'worker-{os.getpid()}',
                 task_id,
                 worker_id,
+                claimed_at,
+                claimed_at,
             ]
             if is_workflow_task:
                 params.append(task_id)
@@ -874,6 +884,7 @@ def _run_task_entry(
     runner_heartbeat_interval_ms: int = 30_000,
     is_workflow_task: bool = True,
     timeout_ms: Optional[int] = None,
+    claimed_at: Optional[datetime] = None,
 ) -> Tuple[bool, str, Optional[str]]:
     """
     Child-process entry.
@@ -904,6 +915,7 @@ def _run_task_entry(
         task_id,
         master_worker_id,
         is_workflow_task,
+        claimed_at,
     )
     if ownership_result is not None:
         return ownership_result

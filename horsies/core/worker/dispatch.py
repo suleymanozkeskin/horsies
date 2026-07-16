@@ -71,6 +71,7 @@ class DispatchMixin:
             timeout_ms: Optional[int] = None,
             *,
             task_name: str,
+            claimed_at: Optional[datetime] = None,
         ) -> Result[None, _FinalizeError]: ...
         async def _finalize_workflow_phase(
             self,
@@ -103,12 +104,21 @@ class DispatchMixin:
             finalizer: bool = False,
         ) -> asyncio.Task[Any]: ...
 
-    async def _requeue_claimed_task(self, task_id: str, reason: str) -> _RequeueOutcome:
+    async def _requeue_claimed_task(
+        self,
+        task_id: str,
+        reason: str,
+        claimed_at: Optional[datetime] = None,
+    ) -> _RequeueOutcome:
         try:
             async with self.sf() as s:
                 res = await s.execute(
                     UNCLAIM_CLAIMED_TASK_SQL,
-                    {'id': task_id, 'wid': self.worker_instance_id},
+                    {
+                        'id': task_id,
+                        'wid': self.worker_instance_id,
+                        'claimed_at': claimed_at,
+                    },
                 )
                 await s.commit()
                 rowcount = getattr(res, 'rowcount', 0) or 0
@@ -142,6 +152,7 @@ class DispatchMixin:
         task_id: str,
         exc: BaseException,
         failed_executor: Optional[ProcessPoolExecutor] = None,
+        claimed_at: Optional[datetime] = None,
     ) -> None:
         """Recover the task whose pool broke, then replace the executor.
 
@@ -157,6 +168,7 @@ class DispatchMixin:
         outcome = await self._recover_worker_future_failure(
             task_id,
             f'Broken process pool: {exc}',
+            claimed_at=claimed_at,
         )
         if outcome is _RequeueOutcome.DB_ERROR:
             logger.critical(
@@ -175,17 +187,25 @@ class DispatchMixin:
         self,
         task_id: str,
         reason: str,
+        claimed_at: Optional[datetime] = None,
     ) -> _RequeueOutcome:
         """Recover a task whose child future failed without a task result.
 
         CLAIMED means user code never started and can be unclaimed. RUNNING
         means user code may have executed, so recovery must respect retry policy.
+
+        ``claimed_at`` fences every statement to the dispatch's claim
+        generation (C10); None disables the fence.
         """
         try:
             async with self.sf() as s:
                 ctx_result = await s.execute(
                     SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
-                    {'id': task_id, 'wid': self.worker_instance_id},
+                    {
+                        'id': task_id,
+                        'wid': self.worker_instance_id,
+                        'claimed_at': claimed_at,
+                    },
                 )
                 ctx_row = ctx_result.fetchone()
                 if ctx_row is None:
@@ -200,7 +220,11 @@ class DispatchMixin:
                 if status_value == 'CLAIMED':
                     res = await s.execute(
                         UNCLAIM_CLAIMED_TASK_SQL,
-                        {'id': task_id, 'wid': self.worker_instance_id},
+                        {
+                            'id': task_id,
+                            'wid': self.worker_instance_id,
+                            'claimed_at': claimed_at,
+                        },
                     )
                     await s.commit()
                     return (
@@ -330,11 +354,17 @@ class DispatchMixin:
         queue_name: str = 'default',
         is_workflow_task: bool = True,
         timeout_ms: Optional[int] = None,
+        claimed_at: Optional[datetime] = None,
     ) -> None:
         """Submit to process pool; attach completion handler.
 
         Total for per-task failures: dispatch errors requeue or recover the
         task and return.
+
+        ``claimed_at`` is the claim generation this dispatch was born from
+        (the claim statement's RETURNING); it fences the child's ownership
+        confirm and every parent-side finalize/recovery statement so a
+        stale dispatch cannot touch a re-claimed row (C10).
 
         Raises:
             ExecutorRestartFailedError: from ``_restart_executor``
@@ -348,6 +378,7 @@ class DispatchMixin:
                 outcome = await self._requeue_claimed_task(
                     task_id,
                     'Executor unavailable after restart attempt',
+                    claimed_at=claimed_at,
                 )
                 if outcome is _RequeueOutcome.DB_ERROR:
                     logger.critical(
@@ -384,14 +415,16 @@ class DispatchMixin:
                 runner_heartbeat_interval_ms,
                 is_workflow_task,
                 timeout_ms,
+                claimed_at,
             )
         except BrokenProcessPool as exc:
-            await self._handle_broken_pool(task_id, exc, executor)
+            await self._handle_broken_pool(task_id, exc, executor, claimed_at=claimed_at)
             return
         except Exception as exc:
             outcome = await self._recover_worker_future_failure(
                 task_id,
                 f'Failed to dispatch task to executor: {exc}',
+                claimed_at=claimed_at,
             )
             if outcome is _RequeueOutcome.DB_ERROR:
                 logger.critical(
@@ -413,6 +446,7 @@ class DispatchMixin:
                 executor,
                 timeout_ms=timeout_ms,
                 task_name=task_name,
+                claimed_at=claimed_at,
             ),
             name=f'finalize-{task_id}',
             finalizer=True,
@@ -420,13 +454,21 @@ class DispatchMixin:
 
     # ----- finalize (write back to DB + notify) -----
 
-    async def _handle_task_timeout(self, task_id: str, timeout_ms: int) -> None:
+    async def _handle_task_timeout(
+        self,
+        task_id: str,
+        timeout_ms: int,
+        claimed_at: Optional[datetime] = None,
+    ) -> None:
         """Persist TASK_TIMEOUT for an over-deadline task and SIGKILL its child.
 
         Ownership-guarded like every finalize path: a row already resolved by
         another actor (reaper reclaim, cancel) is left alone. A CLAIMED row
         (child never confirmed RUNNING) is requeued instead of killed — the
         child's ownership confirm will come back CLAIM_LOST.
+
+        ``claimed_at`` fences the row lookup to this dispatch's claim
+        generation (C10); a re-claimed row is left alone entirely.
 
         The kill happens on both the retry-scheduled and terminal-failure
         branches: the hung child keeps executing user code either way, and a
@@ -437,7 +479,11 @@ class DispatchMixin:
             async with self.sf() as s:
                 ctx_result = await s.execute(
                     SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
-                    {'id': task_id, 'wid': self.worker_instance_id},
+                    {
+                        'id': task_id,
+                        'wid': self.worker_instance_id,
+                        'claimed_at': claimed_at,
+                    },
                 )
                 ctx_row = ctx_result.fetchone()
                 if ctx_row is None:
@@ -451,7 +497,11 @@ class DispatchMixin:
                 if status_value == 'CLAIMED':
                     await s.execute(
                         UNCLAIM_CLAIMED_TASK_SQL,
-                        {'id': task_id, 'wid': self.worker_instance_id},
+                        {
+                            'id': task_id,
+                            'wid': self.worker_instance_id,
+                            'claimed_at': claimed_at,
+                        },
                     )
                     await s.commit()
                     logger.warning(
