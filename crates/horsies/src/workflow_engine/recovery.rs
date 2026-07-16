@@ -1102,4 +1102,145 @@ mod cap_tests {
             .await
             .ok();
     }
+
+    /// Pin the reaper-PENDING-expiry repair chain. `expire_pending_tasks` is a
+    /// bulk UPDATE with no workflow callback: a workflow task that expires
+    /// unclaimed goes EXPIRED while its node stays ENQUEUED and the workflow
+    /// stays RUNNING. Case 1.7 is the designated repairer — EXPIRED is in its
+    /// terminal set — and must complete the node as failed, skip the
+    /// dependent, and fail the workflow with the stored TASK_EXPIRED result.
+    #[tokio::test]
+    #[serial]
+    async fn pending_expiry_then_case1_7_repairs_workflow() {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
+        let pool = broker.pool().clone();
+        let registry = WorkflowSpecRegistry::new();
+
+        let wf_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+
+        sqlx::query(
+            "INSERT INTO horsies_workflows (id, name, status, on_error, output_task_index,
+                definition_key, depth, root_workflow_id, sent_at, created_at, started_at, updated_at)
+             VALUES ($1, 'pending_expiry_wf', 'RUNNING', 'fail', NULL, 'test.pending_expiry.v1', 0, $1,
+                NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(&wf_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Node 0's task: enqueued, never claimed, good_until already passed.
+        sqlx::query(
+            "INSERT INTO horsies_tasks (id, task_name, queue_name, priority, args, kwargs, status,
+                sent_at, enqueued_at, good_until, max_retries, retry_count, enqueue_sha,
+                is_workflow_task, created_at, updated_at)
+             VALUES ($1, 'pending_expiry_task', 'default', 100, '[]', '{}', 'PENDING',
+                NOW(), NOW(), NOW() - INTERVAL '1 second', 0, 0, $1, TRUE, NOW(), NOW())",
+        )
+        .bind(&task_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (id, workflow_id, task_index, node_id, task_name,
+                task_args, task_kwargs, queue_name, priority, dependencies, allow_failed_deps,
+                join_type, status, is_subworkflow, task_id, created_at)
+             VALUES ($1, $2, 0, 'first', 'pending_expiry_task', '[]', '{}', 'default', 100, '{}',
+                FALSE, 'all', 'ENQUEUED', FALSE, $3, NOW())",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&wf_id)
+        .bind(&task_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Node 1 depends on node 0; not yet enqueued.
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (id, workflow_id, task_index, node_id, task_name,
+                task_args, task_kwargs, queue_name, priority, dependencies, allow_failed_deps,
+                join_type, status, is_subworkflow, task_id, created_at)
+             VALUES ($1, $2, 1, 'second', 'pending_expiry_dep', '[]', '{}', 'default', 100, '{0}',
+                FALSE, 'all', 'PENDING', FALSE, NULL, NOW())",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&wf_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let node_status = |pool: PgPool, wf: String, index: i32| async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = $2",
+            )
+            .bind(&wf)
+            .bind(index)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        let workflow_status = |pool: PgPool, wf: String| async move {
+            sqlx::query_scalar::<_, String>("SELECT status FROM horsies_workflows WHERE id = $1")
+                .bind(&wf)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+
+        // The reaper expires the unclaimed task (bulk UPDATE, no callback).
+        let expired = crate::worker::recovery::expire_pending_tasks(&pool)
+            .await
+            .expect("expire pass");
+        assert!(expired >= 1, "the pass must expire the seeded task");
+        let task_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+                .bind(&task_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(task_status, "EXPIRED");
+
+        // The window this test pins: the expiry alone advances nothing.
+        assert_eq!(node_status(pool.clone(), wf_id.clone(), 0).await, "ENQUEUED");
+        assert_eq!(workflow_status(pool.clone(), wf_id.clone()).await, "RUNNING");
+
+        // Case 1.7 (grace 0) repairs the workflow. The scan is global (shared
+        // test DB), so assert on this workflow's rows, not the report count.
+        let report = recover_stuck_workflows(&pool, &registry, 0)
+            .await
+            .expect("recovery pass");
+        assert!(report.case1_7_task_completed >= 1, "case 1.7 must fire");
+
+        assert_eq!(node_status(pool.clone(), wf_id.clone(), 0).await, "FAILED");
+        assert_eq!(node_status(pool.clone(), wf_id.clone(), 1).await, "SKIPPED");
+        assert_eq!(workflow_status(pool.clone(), wf_id.clone()).await, "FAILED");
+
+        let (wf_result, wf_error): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT result, error FROM horsies_workflows WHERE id = $1")
+                .bind(&wf_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let stored = format!("{} {}", wf_result.unwrap_or_default(), wf_error.unwrap_or_default());
+        assert!(
+            stored.contains("TASK_EXPIRED"),
+            "workflow failure must carry the stored TASK_EXPIRED result; got: {stored}",
+        );
+
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+            .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
 }
