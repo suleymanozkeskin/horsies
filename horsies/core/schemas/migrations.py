@@ -49,6 +49,11 @@ from sqlalchemy import text
 #      the claim generation: set by the claim, cleared by every requeue.
 #      The return-type change requires DROP + CREATE (CREATE OR REPLACE
 #      cannot change OUT columns).
+#      Also idx_horsies_heartbeats_sent_at: heartbeat retention deletes filter
+#      sent_at < cutoff, but the composite (task_id, role, sent_at DESC) index
+#      cannot serve a leading-column sent_at range, so every hourly pass
+#      scanned the heartbeats heap — the v11 retention indexes covered tasks
+#      and worker_states and omitted heartbeats.
 
 SCHEMA_VERSION = 12
 
