@@ -1,7 +1,7 @@
 ---
 title: Database Schema
 summary: PostgreSQL tables for tasks, heartbeats, worker states, and schedules.
-related: [postgres-broker, ../../configuration/broker-config]
+related: [postgres-broker, operational-indexes, ../../configuration/broker-config]
 tags: [internals, database, schema, PostgreSQL]
 ---
 
