@@ -327,7 +327,7 @@ impl Worker {
         // Start claimer heartbeat.
         let claimer_interval =
             Duration::from_millis(self.app_config.recovery.claimer_heartbeat_interval_ms);
-        let _claimer_hb = spawn_claimer_heartbeat(
+        let claimer_hb = spawn_claimer_heartbeat(
             self.broker.pool().clone(),
             self.worker_id.clone(),
             self.hostname.clone(),
@@ -339,14 +339,14 @@ impl Worker {
         );
 
         // Start reaper.
-        let _reaper = spawn_reaper(
+        let reaper = spawn_reaper(
             self.broker.pool().clone(),
             self.app_config.recovery.clone(),
             self.cancel.clone(),
         );
 
         // Start workflow recovery loop.
-        let _wf_recovery = spawn_workflow_recovery(
+        let wf_recovery = spawn_workflow_recovery(
             self.broker.pool().clone(),
             Arc::clone(&self.workflow_registry),
             self.app_config.recovery.clone(),
@@ -355,7 +355,7 @@ impl Worker {
 
         // Start worker state snapshot loop.
         let worker_started_at = Utc::now();
-        let _state_loop = crate::worker::worker_state::spawn_worker_state_loop(
+        let state_loop = crate::worker::worker_state::spawn_worker_state_loop(
             self.broker.pool().clone(),
             self.worker_id.clone(),
             self.hostname.clone(),
@@ -366,6 +366,33 @@ impl Worker {
             worker_started_at,
             self.cancel.clone(),
         );
+
+        // Supervise the service loops (C11-inverse): a loop that dies without
+        // a shutdown request — panic or unexpected return; DB errors are
+        // handled inside each loop — must not leave the worker claiming with
+        // lease renewal, stale-task recovery, or liveness advertising dead.
+        // The watchdog fires the cancellation token (claiming stops at once)
+        // and the death surfaces below as `WorkerError::ServiceLoopDied`, so
+        // the process exits non-zero. The listener task needs no watchdog:
+        // its death drops `notify_tx` and the main loop already shuts down on
+        // the closed channel.
+        let (fatal_tx, mut fatal_rx) =
+            mpsc::unbounded_channel::<crate::worker::supervision::ServiceExit>();
+        let services: [(&'static str, tokio::task::JoinHandle<()>); 4] = [
+            ("claimer-heartbeat", claimer_hb),
+            ("reaper", reaper),
+            ("workflow-recovery", wf_recovery),
+            ("worker-state", state_loop),
+        ];
+        for (service, handle) in services {
+            crate::worker::supervision::spawn_service_watchdog(
+                service,
+                handle,
+                self.cancel.clone(),
+                fatal_tx.clone(),
+            );
+        }
+        drop(fatal_tx);
 
         tracing::info!(worker_id = %self.worker_id, "worker ready");
 
@@ -464,6 +491,16 @@ impl Worker {
 
         // Graceful shutdown: wait for in-flight tasks.
         self.shutdown().await;
+
+        // A service-loop death fired the token to get here; surface it so the
+        // process exits non-zero instead of reporting a clean shutdown
+        // (C11-inverse). In-flight tasks were still drained above.
+        if let Ok(exit) = fatal_rx.try_recv() {
+            return Err(WorkerError::ServiceLoopDied {
+                service: exit.service,
+                reason: exit.reason,
+            });
+        }
         Ok(())
     }
 
