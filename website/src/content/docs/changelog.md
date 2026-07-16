@@ -1,8 +1,8 @@
 ---
 title: Changelog
-summary: Notable changes per release. 0.2.8 replaces the latest-per-worker `DISTINCT ON` scan with a recursive skip-scan, adds retention eligibility indexes (schema v11), batches retention deletes, makes the worker-state snapshot cadence configurable (`worker_state_snapshot_interval_ms`, default 30s, was hardcoded 5s), enforces per-queue `max_concurrency` without `queue_priorities`, and accepts EXPIRED rows in workflow finalization phase-2 replay; 0.2.7 collapses the worker claim critical section into one server-side statement (the `horsies_claim` function, schema v10) so the cap-serialization advisory lock is held only across a single statement plus commit, removing the client-stall-while-holding-lock freeze, and changes the equal-queue-priority tie-break from configured queue order to a priority-then-FIFO band; 0.2.6 binds subworkflow tasks to their queue's configured priority so a parameterized child no longer claims at the default priority 100 on a CUSTOM queue; 0.2.5 adds default-on TCP keepalives for remote/pooled Postgres and gives the workflow reaper a grace window so it stops racing in-flight finalizers; 0.2.4 adds per-child memory recycling (`--max-memory-per-child-mb`, off by default), fixes a latent count-recycle hang (CPython gh-115634), and gates worker log color to TTYs; 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
+summary: Notable changes per release. 0.2.9 fixes the cancel/completion lock-order deadlock (40P01 under concurrent cancel) and fences finalize/recovery/ownership-confirm statements to the claim generation so a stale attempt cannot clobber a re-claimed one, schema v12 (`horsies_claim` returns `claimed_at`, heartbeat retention index); 0.2.8 replaces the latest-per-worker `DISTINCT ON` scan with a recursive skip-scan, adds retention eligibility indexes (schema v11), batches retention deletes, makes the worker-state snapshot cadence configurable (`worker_state_snapshot_interval_ms`, default 30s, was hardcoded 5s), enforces per-queue `max_concurrency` without `queue_priorities`, and accepts EXPIRED rows in workflow finalization phase-2 replay; 0.2.7 collapses the worker claim critical section into one server-side statement (the `horsies_claim` function, schema v10) so the cap-serialization advisory lock is held only across a single statement plus commit, removing the client-stall-while-holding-lock freeze, and changes the equal-queue-priority tie-break from configured queue order to a priority-then-FIFO band; 0.2.6 binds subworkflow tasks to their queue's configured priority so a parameterized child no longer claims at the default priority 100 on a CUSTOM queue; 0.2.5 adds default-on TCP keepalives for remote/pooled Postgres and gives the workflow reaper a grace window so it stops racing in-flight finalizers; 0.2.4 adds per-child memory recycling (`--max-memory-per-child-mb`, off by default), fixes a latent count-recycle hang (CPython gh-115634), and gates worker log color to TTYs; 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
 related: [./monitoring/worker-health, ./migrations/migration-to-0-1-2, ./internals/serialization]
-tags: [changelog, releases, breaking-changes, 0.2.8, 0.2.7, 0.2.6, 0.2.5, 0.2.4, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
+tags: [changelog, releases, breaking-changes, 0.2.9, 0.2.8, 0.2.7, 0.2.6, 0.2.5, 0.2.4, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
 ---
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
@@ -10,6 +10,51 @@ horsies is pre-1.0: breaking changes may land in minor or patch releases, and
 there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
+
+## 0.2.9 — 2026-07-16
+
+Two correctness fixes on the workflow-cancel and task-finalize paths, plus a
+retention index. Schema v12 (`horsies_claim` return type + one index, applied
+automatically by the broker's advisory-locked schema init on next startup;
+rolling deploys are safe — pre-v12 workers select named columns and never bind
+the new fence parameter).
+
+Cancel/completion deadlock: the cancel transaction locked `horsies_tasks` →
+`horsies_workflow_tasks` → `horsies_workflows`, while task completion locks
+`horsies_workflows` → `horsies_workflow_tasks`. A task completing while its
+workflow is cancelled deadlocked; Postgres aborted one side with SQLSTATE
+40P01 — a spurious `DB_OPERATION_FAILED` on `cancel()` or an aborted
+completion transaction. Cancel now takes the workflow row lock first, for the
+parent and for each descendant in the cascade, matching the invariant every
+other lifecycle path already followed: lock `horsies_workflows` before
+`horsies_workflow_tasks`.
+
+Stale finalize could clobber a live attempt. Finalize and recovery statements
+fenced on `(status, worker_id)` alone cannot reject a stale actor when the
+same worker re-claims its own reaper-requeued task: a runner heartbeat starved
+past `running_stale_threshold_ms` gets requeued, the retry NOTIFY wakes the
+same worker, it re-claims — and the stalled first attempt, finishing later,
+marked the task COMPLETED with its own result while the second attempt was
+still executing (attempt history attributed to the wrong attempt). Every
+statement acting on a row the worker believes it owns — the fused ok-path
+finalize, the err-path context lock, the timeout-handler and future-failure
+row locks, the standalone unclaim, orphan termination, and the child's
+CLAIMED→RUNNING ownership confirm — is now fenced to the claim generation:
+`claimed_at`, returned by the claim statements and cleared by every requeue.
+The confirm fence also closes soft-cap same-worker double dispatch after
+lease expiry.
+
+Schema v12 also adds `idx_horsies_heartbeats_sent_at`: heartbeat retention
+deletes filter `sent_at < cutoff`, but the composite
+`(task_id, role, sent_at DESC)` index cannot serve a leading-column `sent_at`
+range, so every hourly retention pass scanned the heartbeats heap — the
+highest-insert-rate table in the schema. The v11 retention indexes covered
+tasks and worker_states and omitted heartbeats.
+
+Docs: the soft-cap concurrency page states the real overshoot bound (with
+`prefetch_buffer > 0`, RUNNING can exceed a queue's cap for the duration of
+the excess tasks, up to N workers × cap), replacing the short-lived-bursts
+description.
 
 ## 0.2.8 — 2026-07-09
 
