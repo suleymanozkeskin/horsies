@@ -8,6 +8,59 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-07-16
+
+Two correctness fixes on the workflow-cancel and task-finalize paths, plus a
+retention index. Schema v12 (`horsies_claim` return type + one index, applied
+automatically by the broker's advisory-locked schema init on next startup;
+rolling deploys are safe — pre-v12 workers select named columns and never
+bind the new fence parameter).
+
+### Fixed
+
+- Cancel/completion deadlock: the cancel transaction locked `horsies_tasks` →
+  `horsies_workflow_tasks` → `horsies_workflows`, while task completion locks
+  `horsies_workflows` → `horsies_workflow_tasks`. A task completing while its
+  workflow is cancelled deadlocked; Postgres aborted one side with SQLSTATE
+  40P01 — a spurious `DB_OPERATION_FAILED` on `cancel()` or an aborted
+  completion transaction. Cancel now takes the workflow row lock first, for
+  the parent and for each descendant in the cascade. Lock-order invariant
+  (workflows before workflow_tasks) documented at both statements.
+- Stale finalize could clobber a live attempt: finalize/recovery statements
+  fenced on `(status, worker_id)` alone cannot reject a stale actor when the
+  SAME worker re-claims its own reaper-requeued task — a stalled attempt that
+  later finished marked the task COMPLETED with its own result while the
+  re-claimed attempt was still executing, and the attempt-history row was
+  attributed to the wrong attempt. Every statement acting on a row the worker
+  believes it owns — the fused ok-path finalize, the err-path context lock,
+  the timeout-handler and future-failure row locks, the standalone unclaim,
+  orphan termination, and the child's CLAIMED→RUNNING ownership confirm — is
+  now fenced to the claim generation: `claimed_at`, returned by the claim
+  statements, cleared by every requeue. A NULL fence preserves the previous
+  matching for callers without a dispatch context. The confirm fence also
+  closes soft-cap same-worker double dispatch after lease expiry.
+
+### Performance
+
+- Schema v12 adds `idx_horsies_heartbeats_sent_at`: heartbeat retention
+  deletes filter `sent_at < cutoff`, but the composite
+  `(task_id, role, sent_at DESC)` index cannot serve a leading-column
+  `sent_at` range, so every hourly retention pass scanned the heartbeats
+  heap — the highest-insert-rate table in the schema. The v11 retention
+  indexes covered tasks and worker_states and omitted heartbeats.
+
+### Documentation
+
+- Soft-cap concurrency docs state the real overshoot bound: with
+  `prefetch_buffer > 0`, buffered CLAIMED tasks are invisible to the
+  per-queue cap and dispatch without a re-check, so RUNNING can exceed the
+  cap for the duration of the excess tasks, and N workers can reach
+  N × cap (previously described as short-lived bursts during claiming).
+- The workflow engine's transaction-ownership invariant (the engine never
+  commits — node-FAILED, `on_error='pause'`, and the child-pause cascade
+  share the caller's single commit) is documented and pinned by a
+  source-level tripwire test.
+
 ## [0.2.8] - 2026-07-09
 
 Removes the two remaining full-table scans on the monitoring/retention path,
