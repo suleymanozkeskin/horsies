@@ -775,11 +775,13 @@ impl Worker {
                 let broker = Arc::clone(&self.broker);
                 let task_id = row.id.clone();
                 let worker_id = self.worker_id.clone();
+                let claimed_at = row.claimed_at;
                 self.tracker.spawn(async move {
                     if let Err(e) = execution::unclaim_task_with_retry(
                         &broker,
                         &task_id,
                         &worker_id,
+                        claimed_at,
                         "no semaphore permit available",
                     )
                     .await
@@ -1022,11 +1024,13 @@ mod tests {
         .unwrap();
     }
 
+    /// Build a dispatch row for a task seeded by `insert_claimed_task` /
+    /// `insert_running_task`. Retry counts live on the DB row only: the
+    /// execution path reads them from `set_running`'s RETURNING, not the
+    /// claimed row (v12 claim shape).
     fn claimed_task_row(
         task_id: &str,
         queue_name: &str,
-        retry_count: i32,
-        max_retries: i32,
         task_options: Option<String>,
     ) -> ClaimedTaskRow {
         ClaimedTaskRow {
@@ -1034,12 +1038,10 @@ mod tests {
             task_name: "finalize_test".to_owned(),
             args: Some("[]".to_owned()),
             kwargs: Some("{}".to_owned()),
-            retry_count,
-            max_retries,
-            task_options,
             queue_name: queue_name.to_owned(),
-            good_until: None,
             is_workflow_task: false,
+            task_options,
+            claimed_at: None,
         }
     }
 
@@ -1048,13 +1050,11 @@ mod tests {
     fn claimed_workflow_task_row(
         task_id: &str,
         queue_name: &str,
-        retry_count: i32,
-        max_retries: i32,
         task_options: Option<String>,
     ) -> ClaimedTaskRow {
         ClaimedTaskRow {
             is_workflow_task: true,
-            ..claimed_task_row(task_id, queue_name, retry_count, max_retries, task_options)
+            ..claimed_task_row(task_id, queue_name, task_options)
         }
     }
 
@@ -1558,7 +1558,7 @@ mod tests {
         run_finalize(
             &broker,
             async_task_fn!(succeed, ()),
-            claimed_task_row(&task_id, "default", 0, 0, None),
+            claimed_task_row(&task_id, "default", None),
         )
         .await;
 
@@ -1721,7 +1721,7 @@ mod tests {
         run_finalize(
             &broker,
             async_task_fn!(callback_success_task, ()),
-            claimed_workflow_task_row(&task_id, "default", 0, 0, None),
+            claimed_workflow_task_row(&task_id, "default", None),
         )
         .await;
 
@@ -1756,7 +1756,7 @@ mod tests {
         let phase2_work = execute_and_finalize(
             Arc::clone(&broker),
             async_task_fn!(callback_success_task, ()),
-            claimed_workflow_task_row(&task_id, "default", 0, 0, None),
+            claimed_workflow_task_row(&task_id, "default", None),
             "worker-1".to_owned(),
             "localhost".to_owned(),
             RecoveryConfig::default(),
@@ -1807,7 +1807,7 @@ mod tests {
         let phase2_work = execute_and_finalize(
             Arc::clone(&broker),
             async_task_fn!(callback_success_task, ()),
-            claimed_workflow_task_row(&task_id, "default", 0, 0, None),
+            claimed_workflow_task_row(&task_id, "default", None),
             "worker-1".to_owned(),
             "localhost".to_owned(),
             RecoveryConfig::default(),
@@ -1855,7 +1855,7 @@ mod tests {
             run_finalize(
                 &broker,
                 async_task_fn!(counted_success_task, ()),
-                claimed_task_row(&task_id, "default", 0, 0, None),
+                claimed_task_row(&task_id, "default", None),
             )
             .await;
 
@@ -1914,7 +1914,7 @@ mod tests {
         run_finalize(
             &broker,
             async_task_fn!(counted_success_task, ()),
-            claimed_task_row(&task_id, "default", 0, 0, None),
+            claimed_task_row(&task_id, "default", None),
         )
         .await;
 
@@ -1954,7 +1954,7 @@ mod tests {
         run_finalize(
             &broker,
             async_task_fn!(counted_success_task, ()),
-            claimed_task_row(&task_id, "default", 0, 0, None),
+            claimed_task_row(&task_id, "default", None),
         )
         .await;
 
@@ -1993,7 +1993,7 @@ mod tests {
         run_finalize(
             &broker,
             async_task_fn!(retryable_failure, ()),
-            claimed_task_row(&task_id, "default", 0, 3, Some(task_options)),
+            claimed_task_row(&task_id, "default", Some(task_options)),
         )
         .await;
 
@@ -2040,7 +2040,7 @@ mod tests {
         run_finalize(
             &broker,
             async_task_fn!(fatal_failure, ()),
-            claimed_task_row(&task_id, "default", 0, 0, None),
+            claimed_task_row(&task_id, "default", None),
         )
         .await;
 
@@ -2075,7 +2075,7 @@ mod tests {
         run_finalize(
             &broker,
             async_task_fn!(panic_task, ()),
-            claimed_task_row(&task_id, "default", 0, 0, None),
+            claimed_task_row(&task_id, "default", None),
         )
         .await;
 
@@ -2108,8 +2108,14 @@ mod tests {
             &closed_broker,
             &task_id,
             TaskResult::Ok(br#""phase1-durable""#.to_vec()),
-            &claimed_task_row(&task_id, "default", 0, 0, None),
-            Utc::now(),
+            &claimed_task_row(&task_id, "default", None),
+            &crate::broker::SetRunningRow {
+                id: task_id.clone(),
+                started_at: Utc::now(),
+                retry_count: 0,
+                max_retries: 0,
+                good_until: None,
+            },
             "worker-1",
             "localhost",
         )
@@ -2144,7 +2150,7 @@ mod tests {
                 task: Arc::new(InvalidJsonTask),
                 meta: TaskMeta::default(),
             },
-            claimed_task_row(&task_id, "default", 0, 0, None),
+            claimed_task_row(&task_id, "default", None),
         )
         .await;
 

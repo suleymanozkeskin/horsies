@@ -22,8 +22,8 @@ pub use postgres::{compute_enqueue_sha, ClaimPassParams, PostgresBroker, UPSERT_
 pub use result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult};
 pub use row::heartbeat::HeartbeatRow;
 pub use row::task::{
-    ClaimedTaskRow, ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow, TaskResultRow,
-    TaskRunningContextRow,
+    ClaimedTaskRow, ExpiredTaskRow, SetRunningRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow,
+    TaskResultRow, TaskRunningContextRow,
 };
 pub use row::worker_state::WorkerStateRow;
 pub use row::workflow::{WorkflowRow, WorkflowTaskRow};

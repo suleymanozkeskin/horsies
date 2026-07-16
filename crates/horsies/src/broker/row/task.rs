@@ -13,46 +13,63 @@ pub struct ClaimedId {
     pub id: String,
 }
 
-/// Row returned by SET_RUNNING_SQL — includes the DB-assigned started_at.
-#[derive(Debug, FromRow)]
-pub struct SetRunningRow {
-    #[allow(dead_code)] // populated by FromRow; used as existence check
-    pub id: String,
-    pub started_at: DateTime<Utc>,
-}
-
-/// Task columns loaded after claiming.
+/// Row returned by SET_RUNNING_SQL — the attempt context read atomically
+/// with the CLAIMED → RUNNING transition.
 ///
-/// This row is a claim-time snapshot threaded through dispatch into finalize
-/// with NO re-read: `should_retry`, the retry-delay math, and the
-/// expired-vs-reclaimed postcheck all consume it directly. That is sound
-/// under three invariants the schema and statements maintain:
+/// `retry_count`, `max_retries`, and `good_until` are threaded through
+/// execution into finalize with NO re-read: `should_retry`, the retry-delay
+/// math, and the expired-vs-reclaimed postcheck all consume them directly.
+/// That is sound under three invariants the schema and statements maintain:
 ///
-/// 1. `max_retries`, `good_until`, `task_options`, `is_workflow_task`, and
-///    `queue_name` are frozen at enqueue — no statement mutates them.
+/// 1. `max_retries` and `good_until` are frozen at enqueue — no statement
+///    mutates them.
 /// 2. `retry_count` changes only in statements that simultaneously move the
 ///    row out of RUNNING-owned (the owner's `REQUEUE_SQL`) or clear
 ///    ownership (reaper requeue).
 /// 3. Every terminal/requeue write CASes on
-///    `status = 'RUNNING' AND claimed_by_worker_id = <me>`; a CAS miss
-///    aborts the finalize.
+///    `status = 'RUNNING' AND claimed_by_worker_id = <me>` (plus the
+///    optional `started_at` generation fence); a CAS miss aborts the
+///    finalize.
 ///
 /// Together these make the snapshot provably equal to the row whenever a
-/// write lands. A feature that mutates `retry_count` (or any column above)
-/// on a live RUNNING-owned row breaks invariant 2 and must revisit the
+/// write lands — the values were read under the row lock of the transition
+/// itself. A feature that mutates `retry_count` (or any column above) on a
+/// live RUNNING-owned row breaks invariant 2 and must revisit the
 /// finalize/retry flow, not just its own write.
+#[derive(Debug, Clone, FromRow)]
+pub struct SetRunningRow {
+    #[allow(dead_code)] // populated by FromRow; used as existence check
+    pub id: String,
+    pub started_at: DateTime<Utc>,
+    pub retry_count: i32,
+    pub max_retries: i32,
+    pub good_until: Option<DateTime<Utc>>,
+}
+
+/// Task columns returned by the claim (and the buffered-claimed reload).
+///
+/// The column set matches `horsies_claim`'s v12 return shape exactly —
+/// shared with the Python implementation so both stacks can run one
+/// database. `claimed_at` is the claim generation this dispatch was born
+/// from: set by the claim, cleared by every requeue, and threaded through
+/// dispatch so every statement acting on a row this worker believes it owns
+/// while it is still CLAIMED (`set_running`, unclaim, expire-before-start)
+/// can fence on it. `started_at` cannot serve there — a CLAIMED row has
+/// none. `None` degrades gracefully by disabling the fence.
+///
+/// The attempt context (`retry_count`, `max_retries`, `good_until`) is NOT
+/// part of this row; the dispatch reads it from [`SetRunningRow`], returned
+/// by the transition that locks the row.
 #[derive(Debug, Clone, FromRow)]
 pub struct ClaimedTaskRow {
     pub id: String,
     pub task_name: String,
     pub args: Option<String>,
     pub kwargs: Option<String>,
-    pub retry_count: i32,
-    pub max_retries: i32,
-    pub task_options: Option<String>,
     pub queue_name: String,
-    pub good_until: Option<DateTime<Utc>>,
     pub is_workflow_task: bool,
+    pub task_options: Option<String>,
+    pub claimed_at: Option<DateTime<Utc>>,
 }
 
 /// Columns fetched for result retrieval.
