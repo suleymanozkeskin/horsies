@@ -2637,6 +2637,29 @@ class TestAsyncContextGuard:
         # retry via the async variant.
         assert res.err_value.payload is not None
 
+    def test_retry_send_async_completes_async_context_error(self) -> None:
+        """ASYNC_CONTEXT carries the prepared payload; retry_send_async
+        completes the same task_id dispatch on the loop."""
+        broker = _ok_broker()
+        task = _make_guard_task(broker)
+
+        async def call_inside_loop() -> Any:
+            return task.send(value=1)
+
+        guarded = asyncio.run(call_inside_loop())
+        assert is_err(guarded)
+        assert guarded.err_value.code == TaskSendErrorCode.ASYNC_CONTEXT
+        assert guarded.err_value.task_id is not None
+        assert guarded.err_value.payload is not None
+
+        res = asyncio.run(task.retry_send_async(guarded.err_value))
+        assert is_ok(res)
+        broker.enqueue_async.assert_awaited_once()
+        assert (
+            broker.enqueue_async.call_args.kwargs['task_id']
+            == guarded.err_value.task_id
+        )
+
     def test_retry_schedule_inside_event_loop_returns_async_context(self) -> None:
         broker = _ok_broker()
         task = _make_guard_task(broker)
@@ -2648,6 +2671,31 @@ class TestAsyncContextGuard:
         res = asyncio.run(call_inside_loop())
         assert is_err(res)
         assert res.err_value.code == TaskSendErrorCode.ASYNC_CONTEXT
+
+    def test_retry_schedule_async_completes_async_context_error(self) -> None:
+        """ASYNC_CONTEXT from sync schedule completes via retry_schedule_async
+        with the same task_id and delay."""
+        broker = _ok_broker()
+        task = _make_guard_task(broker)
+
+        async def call_inside_loop() -> Any:
+            return task.schedule(7, value=1)
+
+        guarded = asyncio.run(call_inside_loop())
+        assert is_err(guarded)
+        assert guarded.err_value.code == TaskSendErrorCode.ASYNC_CONTEXT
+        assert guarded.err_value.task_id is not None
+        assert guarded.err_value.payload is not None
+        assert guarded.err_value.payload.enqueue_delay_seconds == 7
+
+        res = asyncio.run(task.retry_schedule_async(guarded.err_value))
+        assert is_ok(res)
+        broker.enqueue_async.assert_awaited_once()
+        assert (
+            broker.enqueue_async.call_args.kwargs['task_id']
+            == guarded.err_value.task_id
+        )
+        assert broker.enqueue_async.call_args.kwargs['enqueue_delay_seconds'] == 7
 
     def test_sync_send_outside_loop_unaffected(self) -> None:
         broker = _ok_broker()

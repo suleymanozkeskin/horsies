@@ -35,7 +35,11 @@ class TaskSendErrorCode(str, Enum):
     ASYNC_CONTEXT = 'ASYNC_CONTEXT'
     """Sync ``send()``/``schedule()`` (or their sync retry variants) called
     from inside a running event loop; the blocking enqueue round trip would
-    stall the loop. Call the ``*_async`` variant instead. Non-retryable."""
+    stall the loop. The error carries ``task_id`` and payload — complete the
+    dispatch with ``retry_send_async`` / ``retry_schedule_async``, or call
+    the matching ``*_async`` entry point with the original args.
+    ``retryable=False`` (not a transient broker fault; do not spin a sync
+    retry loop)."""
 
     VALIDATION_FAILED = 'VALIDATION_FAILED'
     ENQUEUE_FAILED = 'ENQUEUE_FAILED'

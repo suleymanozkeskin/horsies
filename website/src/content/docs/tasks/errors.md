@@ -127,7 +127,7 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | Code | Description | Retryable |
 | ---- | ----------- | --------- |
 | `SEND_SUPPRESSED` | Send suppressed during worker import/discovery to prevent side effects | No |
-| `ASYNC_CONTEXT` | Sync send/schedule (or sync retry variant) called inside a running event loop -- the blocking enqueue would stall the loop; use the `*_async` variant | No |
+| `ASYNC_CONTEXT` | Sync send/schedule (or sync retry variant) called inside a running event loop -- the blocking enqueue would stall the loop; error carries payload so `retry_*_async(err)` can complete the same dispatch (or call the `*_async` entry point with the original args) | No |
 | `VALIDATION_FAILED` | Argument serialization or validation failed before enqueue | No |
 | `ENQUEUE_FAILED` | Broker/database failure during enqueue (transient) | Yes |
 | `PAYLOAD_MISMATCH` | Retry payload SHA does not match -- payload was altered between send and retry | No |

@@ -42,7 +42,10 @@ The sync variants are blocking database round trips, so calling them from a
 running event loop would stall every coroutine on it. They fail closed
 instead: `.send()`, `.schedule()`, `.retry_send()`, and `.retry_schedule()`
 called inside a running loop return `Err(TaskSendError(ASYNC_CONTEXT))`
-without touching the broker. Use the `*_async` variant there.
+without touching the broker. The error carries the prepared `task_id` and
+payload — complete the dispatch with `.retry_send_async(err)` /
+`.retry_schedule_async(err)`, or call `.send_async` / `.schedule_async` with
+the original arguments.
 
 ### Set a Task Deadline
 
@@ -332,7 +335,7 @@ Use `is_ok(result)` / `is_err(result)` from `horsies` as type-narrowing guards.
 | Code | Description | Retryable |
 | ---- | ----------- | --------- |
 | `SEND_SUPPRESSED` | Send suppressed during worker import/discovery | No |
-| `ASYNC_CONTEXT` | Sync send/schedule called inside a running event loop; use the `*_async` variant | No |
+| `ASYNC_CONTEXT` | Sync send/schedule called inside a running event loop; complete via `retry_*_async(err)` or the `*_async` entry point | No |
 | `VALIDATION_FAILED` | Argument serialization or validation failed | No |
 | `ENQUEUE_FAILED` | Broker/database failure during enqueue | Yes |
 | `PAYLOAD_MISMATCH` | Retry payload SHA does not match (payload was altered) | No |

@@ -1841,14 +1841,27 @@ def create_task_wrapper(
     ) -> TaskSendResult[tuple[str, TaskSendPayload]]:
         """Validate a TaskSendError for retry eligibility.
 
-        Returns Ok((task_id, payload)) or Err(TaskSendError(VALIDATION_FAILED)).
+        Accepts ``ENQUEUE_FAILED`` (broker/transient failure) and
+        ``ASYNC_CONTEXT`` (sync entry point hit a running loop — the error
+        still carries the prepared payload so ``retry_*_async`` can complete
+        the same dispatch). Returns Ok((task_id, payload)) or
+        Err(TaskSendError(VALIDATION_FAILED)).
         """
-        if error.code != TaskSendErrorCode.ENQUEUE_FAILED:
-            return Err(TaskSendError(
-                code=TaskSendErrorCode.VALIDATION_FAILED,
-                message=f'retry is only valid for ENQUEUE_FAILED errors, got {error.code!r}',
-                retryable=False,
-            ))
+        match error.code:
+            case (
+                TaskSendErrorCode.ENQUEUE_FAILED
+                | TaskSendErrorCode.ASYNC_CONTEXT
+            ):
+                pass
+            case _:
+                return Err(TaskSendError(
+                    code=TaskSendErrorCode.VALIDATION_FAILED,
+                    message=(
+                        f'retry is only valid for ENQUEUE_FAILED or '
+                        f'ASYNC_CONTEXT errors, got {error.code!r}'
+                    ),
+                    retryable=False,
+                ))
         if error.payload is None or error.task_id is None:
             return Err(TaskSendError(
                 code=TaskSendErrorCode.VALIDATION_FAILED,
