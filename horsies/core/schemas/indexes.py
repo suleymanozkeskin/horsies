@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy import text
 
+from horsies.core.models.workflow.enums import WORKFLOW_TERMINAL_STATES
 from horsies.core.types.status import TASK_TERMINAL_STATES
 
 # Terminal task statuses rendered as SQL literals, sorted for deterministic
@@ -14,6 +15,13 @@ from horsies.core.types.status import TASK_TERMINAL_STATES
 # cannot be proven) rendered from the same set on both sides.
 TASK_TERMINAL_STATUS_SQL_LITERALS: str = ', '.join(
     sorted(f"'{s.value}'" for s in TASK_TERMINAL_STATES),
+)
+
+# Terminal workflow statuses, same contract as above: rendered here so the
+# workflow retention index and the workflow retention DELETEs in
+# worker/sql.py share one literal set.
+WORKFLOW_TERMINAL_STATUS_SQL_LITERALS: str = ', '.join(
+    sorted(f"'{s.value}'" for s in WORKFLOW_TERMINAL_STATES),
 )
 
 
@@ -119,8 +127,10 @@ CREATE_WORKER_STATES_WORKER_SNAPSHOT_INDEX_SQL = text("""
 # whole heap (593 MB / ~1.1s at 554k retained rows) even when zero rows
 # are eligible. Partial on terminal statuses: a row enters the index once,
 # on its finalize transition, so claim/lease-renewal updates (whose new
-# row versions are non-terminal) never maintain it. The expression must
-# stay textually identical to the delete's COALESCE.
+# row versions are non-terminal) never maintain it. The planner matches
+# the parsed expression, not the SQL text: keep the COALESCE column list
+# and order identical to the delete's (column qualification is
+# irrelevant).
 CREATE_TASKS_RETENTION_INDEX_SQL = text(f"""
     CREATE INDEX IF NOT EXISTS idx_horsies_tasks_retention
     ON horsies_tasks (COALESCE(completed_at, failed_at, updated_at, created_at))
@@ -149,4 +159,23 @@ CREATE_WORKER_STATES_SNAPSHOT_AT_INDEX_SQL = text("""
 CREATE_HEARTBEATS_SENT_AT_INDEX_SQL = text("""
     CREATE INDEX IF NOT EXISTS idx_horsies_heartbeats_sent_at
     ON horsies_heartbeats (sent_at);
+""")
+
+# v13: retention eligibility for DELETE_EXPIRED_WORKFLOWS_SQL and
+# DELETE_EXPIRED_WORKFLOW_TASKS_SQL, which both filter horsies_workflows on
+# terminal status + COALESCE(completed_at, updated_at, created_at) < cutoff.
+# Without it every hourly retention pass walks the whole workflows table:
+# the planner has no statistics on the COALESCE expression, overestimates
+# eligibility, and picks a stop-early pkey walk whose LIMIT never fills
+# (36k retained workflows ≈ 4-5s per statement serially under FOR UPDATE,
+# twice per pass, even with zero eligible rows). Partial on
+# terminal statuses: a row enters the index once, on its terminal
+# transition; updates during a workflow's running life never maintain it.
+# The planner matches the parsed expression, not the SQL text: keep the
+# COALESCE column list and order identical to the deletes' (column
+# qualification is irrelevant).
+CREATE_WORKFLOWS_RETENTION_INDEX_SQL = text(f"""
+    CREATE INDEX IF NOT EXISTS idx_horsies_workflows_retention
+    ON horsies_workflows (COALESCE(completed_at, updated_at, created_at))
+    WHERE status IN ({WORKFLOW_TERMINAL_STATUS_SQL_LITERALS});
 """)

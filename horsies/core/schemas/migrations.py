@@ -54,8 +54,19 @@ from sqlalchemy import text
 #      cannot serve a leading-column sent_at range, so every hourly pass
 #      scanned the heartbeats heap — the v11 retention indexes covered tasks
 #      and worker_states and omitted heartbeats.
+#
+# v13: idx_horsies_workflows_retention — partial expression index on
+#      COALESCE(completed_at, updated_at, created_at) over terminal workflow
+#      statuses. The workflow and workflow_tasks retention deletes both
+#      filter horsies_workflows on this predicate; with no supporting index
+#      and no statistics on the expression, the planner overestimated
+#      eligibility and chose a stop-early pkey walk whose LIMIT never
+#      filled — a full-table walk per statement, twice per hourly pass,
+#      serial under FOR UPDATE, regardless of how few rows were eligible.
+#      Completes the v11/v12 retention-index set (tasks, worker_states,
+#      heartbeats, now workflows).
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
