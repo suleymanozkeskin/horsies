@@ -65,11 +65,26 @@ from sqlalchemy import text
 #      serial under FOR UPDATE, regardless of how few rows were eligible.
 #      Completes the v11/v12 retention-index set (tasks, worker_states,
 #      heartbeats, now workflows).
+#      Also ANALYZE on the expression-indexed tables: an expression index
+#      has no pg_statistic rows until the table is ANALYZEd after the
+#      index exists, so between the migration and the next autoanalyze the
+#      planner still costs the expression predicate at default selectivity
+#      and keeps the pre-index plan — on a slow-churn table that window is
+#      hours to days. Every migration that adds an expression index must
+#      ANALYZE the table in the same block.
 
 SCHEMA_VERSION = 13
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
+""")
+
+# ANALYZE is sampled (bounded by default_statistics_target regardless of
+# table size), takes SHARE UPDATE EXCLUSIVE (never blocks reads or writes;
+# a conflicting autovacuum worker yields), and is legal inside the
+# migration transaction — its statistics commit with the schema version.
+ANALYZE_EXPRESSION_INDEXED_TABLES_SQL = text("""
+    ANALYZE horsies_tasks, horsies_workflows;
 """)
 
 # Collapsed claim. The advisory lock is the FIRST imperative statement (a

@@ -122,6 +122,7 @@ from horsies.core.schemas.indexes import (
     CREATE_WORKFLOWS_RETENTION_INDEX_SQL,
 )
 from horsies.core.schemas.migrations import (
+    ANALYZE_EXPRESSION_INDEXED_TABLES_SQL,
     CREATE_CLAIM_FUNCTION_SQL,
     DROP_CLAIM_FUNCTION_SQL,
     CREATE_TASK_ATTEMPTS_TABLE_SQL,
@@ -844,6 +845,13 @@ class PostgresBroker:
             # workflow retention deletes filter horsies_workflows on the
             # indexed predicate; completes the v11/v12 retention-index set.
             await conn.execute(CREATE_WORKFLOWS_RETENTION_INDEX_SQL)
+
+            # Statistics for the expression indexes above (tasks v11,
+            # workflows v13): without an ANALYZE after index creation the
+            # planner has no expression statistics and keeps the pre-index
+            # plan until autoanalyze fires — hours to days on a slow-churn
+            # table.
+            await conn.execute(ANALYZE_EXPRESSION_INDEXED_TABLES_SQL)
 
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
