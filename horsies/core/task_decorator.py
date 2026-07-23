@@ -98,6 +98,21 @@ _SEND_RETRY_INITIAL_MS: Final[int] = 200
 _SEND_RETRY_MAX_MS: Final[int] = 2000
 
 
+def _in_running_event_loop() -> bool:
+    """True when called from a thread with a running asyncio event loop.
+
+    The sync send/schedule executors are blocking DB round trips; running
+    them inline on an event loop stalls every coroutine on it. They fail
+    closed with ``ASYNC_CONTEXT`` instead (the ``*_async`` variants are the
+    correct call there).
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
 class FromNodeMarker:
     """Marker for injecting an upstream node's result into a `.node()()` kwarg.
 
@@ -829,6 +844,14 @@ class TaskFunction(Protocol[P, T]):
     ) -> TaskSendResult['TaskHandle[T]']: ...
 
     @abstractmethod
+    async def schedule_async(
+        self,
+        delay: int,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> TaskSendResult['TaskHandle[T]']: ...
+
+    @abstractmethod
     def with_options(
         self,
         *,
@@ -849,6 +872,12 @@ class TaskFunction(Protocol[P, T]):
 
     @abstractmethod
     def retry_schedule(
+        self,
+        error: TaskSendError,
+    ) -> TaskSendResult['TaskHandle[T]']: ...
+
+    @abstractmethod
+    async def retry_schedule_async(
         self,
         error: TaskSendError,
     ) -> TaskSendResult['TaskHandle[T]']: ...
@@ -892,6 +921,14 @@ class TaskSendOptions(Protocol[P, T]):
 
     @abstractmethod
     def schedule(
+        self,
+        delay: int,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> TaskSendResult['TaskHandle[T]']: ...
+
+    @abstractmethod
+    async def schedule_async(
         self,
         delay: int,
         *args: P.args,
@@ -1167,6 +1204,19 @@ def create_task_wrapper(
         payload: TaskSendPayload,
     ) -> TaskSendResult[TaskHandle[T]]:
         """Core sync send logic. Used by send() and retry_send()."""
+        if _in_running_event_loop():
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.ASYNC_CONTEXT,
+                message=(
+                    f'sync send for task {task_name!r} was called inside a '
+                    f'running event loop; its blocking enqueue would stall '
+                    f'the loop. Use `await {task_name}.send_async(...)` '
+                    f'(or retry_send_async for retries).'
+                ),
+                retryable=False,
+                task_id=task_id,
+                payload=payload,
+            ))
         try:
             broker = app.get_broker()
         except Exception as exc:
@@ -1318,6 +1368,19 @@ def create_task_wrapper(
         payload: TaskSendPayload,
     ) -> TaskSendResult[TaskHandle[T]]:
         """Core sync schedule logic. Used by schedule() and retry_schedule()."""
+        if _in_running_event_loop():
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.ASYNC_CONTEXT,
+                message=(
+                    f'sync schedule for task {task_name!r} was called inside '
+                    f'a running event loop; its blocking enqueue would stall '
+                    f'the loop. Use `await {task_name}.schedule_async(...)` '
+                    f'(or retry_schedule_async for retries).'
+                ),
+                retryable=False,
+                task_id=task_id,
+                payload=payload,
+            ))
         try:
             broker = app.get_broker()
         except Exception as exc:
@@ -1343,6 +1406,82 @@ def create_task_wrapper(
 
             try:
                 result = broker.enqueue(
+                    task_name,
+                    payload.queue_name,
+                    task_id=task_id,
+                    enqueue_sha=payload.enqueue_sha,
+                    args_json=payload.args_json,
+                    kwargs_json=payload.kwargs_json,
+                    priority=payload.priority,
+                    good_until=payload.good_until,
+                    sent_at=payload.sent_at,
+                    enqueue_delay_seconds=payload.enqueue_delay_seconds,
+                    task_options=payload.task_options,
+                )
+            except Exception as exc:
+                last_err = TaskSendError(
+                    code=TaskSendErrorCode.ENQUEUE_FAILED,
+                    message=f'Failed to schedule task {task_name}: {exc}',
+                    retryable=is_retryable_connection_error(exc),
+                    task_id=task_id,
+                    payload=payload,
+                    exception=exc,
+                )
+                if last_err.retryable and attempt < max_attempts - 1:
+                    continue
+                return Err(last_err)
+
+            if is_err(result):
+                mapped = _map_broker_err(result.err_value, task_id, payload)
+                send_err = mapped.err_value
+                if send_err.retryable and attempt < max_attempts - 1:
+                    last_err = send_err
+                    continue
+                return mapped
+
+            return Ok(TaskHandle(result.ok_value, app, broker_mode=True, ok_type=ok_type))
+
+        if last_err is not None:
+            return Err(last_err)
+        return Err(TaskSendError(
+            code=TaskSendErrorCode.ENQUEUE_FAILED,
+            message=f'Failed to schedule task {task_name}: exhausted retry attempts',
+            retryable=False,
+            task_id=task_id,
+            payload=payload,
+        ))
+
+    async def _do_schedule_async(
+        task_id: str,
+        payload: TaskSendPayload,
+    ) -> TaskSendResult[TaskHandle[T]]:
+        """Core async schedule logic. Used by schedule_async() and
+        retry_schedule_async()."""
+        try:
+            broker = app.get_broker()
+        except Exception as exc:
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.ENQUEUE_FAILED,
+                message=f'Failed to get broker for {task_name}: {exc}',
+                retryable=False,
+                task_id=task_id,
+                payload=payload,
+                exception=exc,
+            ))
+
+        last_err: TaskSendError | None = None
+        max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_err else 0)
+
+        for attempt in range(max_attempts):
+            if attempt > 0 and last_err is not None:
+                delay_ms = min(
+                    _SEND_RETRY_INITIAL_MS * (2 ** (attempt - 1)),
+                    _SEND_RETRY_MAX_MS,
+                )
+                await asyncio.sleep(delay_ms / 1000.0)
+
+            try:
+                result = await broker.enqueue_async(
                     task_name,
                     payload.queue_name,
                     task_id=task_id,
@@ -1536,6 +1675,33 @@ def create_task_wrapper(
         task_id, payload = prep.ok_value
         return await _do_send_async(task_id, payload)
 
+    def _validate_delay(delay: int) -> TaskSendError | None:
+        """Reject non-int and negative schedule delays; None means valid.
+
+        bool is an int subclass; schedule(False, ...) silently meaning delay=0
+        is a footgun, so reject it alongside other non-int types. This is a
+        Result-returning API, so bad runtime inputs return Err, not raise.
+        """
+        if isinstance(delay, bool) or not isinstance(delay, int):
+            return TaskSendError(
+                code=TaskSendErrorCode.VALIDATION_FAILED,
+                message=(
+                    f'schedule delay must be an int number of seconds, '
+                    f'got {type(delay).__name__}'
+                ),
+                retryable=False,
+            )
+        if delay < 0:
+            return TaskSendError(
+                code=TaskSendErrorCode.VALIDATION_FAILED,
+                message=(
+                    f'schedule delay must not be negative, got {delay}; '
+                    f'use delay=0 (or {task_name}.send(...)) for immediate execution'
+                ),
+                retryable=False,
+            )
+        return None
+
     def _schedule_with_options(
         delay: int,
         args: tuple[Any, ...],
@@ -1549,28 +1715,9 @@ def create_task_wrapper(
                 retryable=False,
             ))
 
-        # bool is an int subclass; schedule(False, ...) silently meaning delay=0
-        # is a footgun, so reject it alongside other non-int types. This is a
-        # Result-returning API, so bad runtime inputs return Err, not raise.
-        if isinstance(delay, bool) or not isinstance(delay, int):
-            return Err(TaskSendError(
-                code=TaskSendErrorCode.VALIDATION_FAILED,
-                message=(
-                    f'schedule delay must be an int number of seconds, '
-                    f'got {type(delay).__name__}'
-                ),
-                retryable=False,
-            ))
-
-        if delay < 0:
-            return Err(TaskSendError(
-                code=TaskSendErrorCode.VALIDATION_FAILED,
-                message=(
-                    f'schedule delay must not be negative, got {delay}; '
-                    f'use delay=0 (or {task_name}.send(...)) for immediate execution'
-                ),
-                retryable=False,
-            ))
+        delay_err = _validate_delay(delay)
+        if delay_err is not None:
+            return Err(delay_err)
 
         prep = _prepare_send(
             args,
@@ -1582,6 +1729,34 @@ def create_task_wrapper(
             return prep
         task_id, payload = prep.ok_value
         return _do_schedule(task_id, payload)
+
+    async def _schedule_async_with_options(
+        delay: int,
+        args: tuple[Any, ...],
+        kwargs_dict: dict[str, Any],
+        good_until_override: datetime | None | object,
+    ) -> TaskSendResult[TaskHandle[T]]:
+        if app.are_sends_suppressed():
+            return Err(TaskSendError(
+                code=TaskSendErrorCode.SEND_SUPPRESSED,
+                message=f'Task schedule suppressed for {task_name} (import/check phase or TASKLIB_SUPPRESS_SENDS=1)',
+                retryable=False,
+            ))
+
+        delay_err = _validate_delay(delay)
+        if delay_err is not None:
+            return Err(delay_err)
+
+        prep = _prepare_send(
+            args,
+            kwargs_dict,
+            enqueue_delay_seconds=delay,
+            good_until_override=good_until_override,
+        )
+        if is_err(prep):
+            return prep
+        task_id, payload = prep.ok_value
+        return await _do_schedule_async(task_id, payload)
 
     def send(
         *args: P.args,
@@ -1604,6 +1779,14 @@ def create_task_wrapper(
     ) -> TaskSendResult[TaskHandle[T]]:
         """Execute task asynchronously after a delay."""
         return _schedule_with_options(delay, args, kwargs, _UNSET)
+
+    async def schedule_async(
+        delay: int,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> TaskSendResult[TaskHandle[T]]:
+        """Async variant of schedule() for callers on an event loop."""
+        return await _schedule_async_with_options(delay, args, kwargs, _UNSET)
 
     class _TaskSendOptionsImpl:
         def __init__(self, good_until: datetime | None) -> None:
@@ -1631,6 +1814,16 @@ def create_task_wrapper(
         ) -> TaskSendResult[TaskHandle[T]]:
             return _schedule_with_options(delay, args, kwargs, self.good_until)
 
+        async def schedule_async(
+            self,
+            delay: int,
+            *args: P.args,
+            **kwargs: P.kwargs,
+        ) -> TaskSendResult[TaskHandle[T]]:
+            return await _schedule_async_with_options(
+                delay, args, kwargs, self.good_until,
+            )
+
     def with_options(
         *,
         good_until: datetime | None = None,
@@ -1648,14 +1841,27 @@ def create_task_wrapper(
     ) -> TaskSendResult[tuple[str, TaskSendPayload]]:
         """Validate a TaskSendError for retry eligibility.
 
-        Returns Ok((task_id, payload)) or Err(TaskSendError(VALIDATION_FAILED)).
+        Accepts ``ENQUEUE_FAILED`` (broker/transient failure) and
+        ``ASYNC_CONTEXT`` (sync entry point hit a running loop — the error
+        still carries the prepared payload so ``retry_*_async`` can complete
+        the same dispatch). Returns Ok((task_id, payload)) or
+        Err(TaskSendError(VALIDATION_FAILED)).
         """
-        if error.code != TaskSendErrorCode.ENQUEUE_FAILED:
-            return Err(TaskSendError(
-                code=TaskSendErrorCode.VALIDATION_FAILED,
-                message=f'retry is only valid for ENQUEUE_FAILED errors, got {error.code!r}',
-                retryable=False,
-            ))
+        match error.code:
+            case (
+                TaskSendErrorCode.ENQUEUE_FAILED
+                | TaskSendErrorCode.ASYNC_CONTEXT
+            ):
+                pass
+            case _:
+                return Err(TaskSendError(
+                    code=TaskSendErrorCode.VALIDATION_FAILED,
+                    message=(
+                        f'retry is only valid for ENQUEUE_FAILED or '
+                        f'ASYNC_CONTEXT errors, got {error.code!r}'
+                    ),
+                    retryable=False,
+                ))
         if error.payload is None or error.task_id is None:
             return Err(TaskSendError(
                 code=TaskSendErrorCode.VALIDATION_FAILED,
@@ -1718,6 +1924,16 @@ def create_task_wrapper(
         task_id, payload = v.ok_value
         return _do_schedule(task_id, payload)
 
+    async def retry_schedule_async(
+        error: TaskSendError,
+    ) -> TaskSendResult[TaskHandle[T]]:
+        """Retry a failed async schedule using the stored payload."""
+        v = _validate_retry(error, require_delay=True)
+        if is_err(v):
+            return v
+        task_id, payload = v.ok_value
+        return await _do_schedule_async(task_id, payload)
+
     class TaskFunctionImpl:
         def __init__(self) -> None:
             self.__name__ = fn.__name__
@@ -1774,6 +1990,14 @@ def create_task_wrapper(
         ) -> TaskSendResult[TaskHandle[T]]:
             return schedule(delay, *args, **kwargs)
 
+        async def schedule_async(
+            self,
+            delay: int,
+            *args: P.args,
+            **kwargs: P.kwargs,
+        ) -> TaskSendResult[TaskHandle[T]]:
+            return await schedule_async(delay, *args, **kwargs)
+
         def with_options(
             self,
             *,
@@ -1798,6 +2022,12 @@ def create_task_wrapper(
             error: TaskSendError,
         ) -> TaskSendResult[TaskHandle[T]]:
             return retry_schedule(error)
+
+        async def retry_schedule_async(
+            self,
+            error: TaskSendError,
+        ) -> TaskSendResult[TaskHandle[T]]:
+            return await retry_schedule_async(error)
 
         def node(
             self,

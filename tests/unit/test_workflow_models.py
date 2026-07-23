@@ -66,6 +66,9 @@ class MockTaskWrapper(TaskFunction[Any, Any]):
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
+    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
     def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
         return self
 
@@ -76,6 +79,9 @@ class MockTaskWrapper(TaskFunction[Any, Any]):
         return Ok(TaskHandle('mock'))
 
     def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
@@ -131,6 +137,9 @@ class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
+    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
     def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
         return self
 
@@ -141,6 +150,9 @@ class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
         return Ok(TaskHandle('mock'))
 
     def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
@@ -196,6 +208,9 @@ class MockTaskWrapperWithParams(TaskFunction[Any, Any]):
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
+    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
     def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
         return self
 
@@ -206,6 +221,9 @@ class MockTaskWrapperWithParams(TaskFunction[Any, Any]):
         return Ok(TaskHandle('mock'))
 
     def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
@@ -259,6 +277,9 @@ class MockTaskWrapperWithOptionalParam(TaskFunction[Any, Any]):
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
+    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
     def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
         return self
 
@@ -269,6 +290,9 @@ class MockTaskWrapperWithOptionalParam(TaskFunction[Any, Any]):
         return Ok(TaskHandle('mock'))
 
     def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
@@ -320,6 +344,9 @@ class MockTaskWrapperWithKwargs(TaskFunction[Any, Any]):
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
+    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
     def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
         return self
 
@@ -330,6 +357,9 @@ class MockTaskWrapperWithKwargs(TaskFunction[Any, Any]):
         return Ok(TaskHandle('mock'))
 
     def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
@@ -384,6 +414,9 @@ class MockTaskWrapperWithRequiredMeta(TaskFunction[Any, Any]):
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
+    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
     def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
         return self
 
@@ -394,6 +427,9 @@ class MockTaskWrapperWithRequiredMeta(TaskFunction[Any, Any]):
         return Ok(TaskHandle('mock'))
 
     def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
@@ -446,6 +482,9 @@ class MockTaskWrapperInt(TaskFunction[Any, int]):
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[int]]:
         return Ok(TaskHandle('mock'))
 
+    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[int]]:
+        return Ok(TaskHandle('mock'))
+
     def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
         return self
 
@@ -456,6 +495,9 @@ class MockTaskWrapperInt(TaskFunction[Any, int]):
         return Ok(TaskHandle('mock'))
 
     def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[int]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[int]]:
         return Ok(TaskHandle('mock'))
 
     def node(
@@ -513,6 +555,9 @@ class MockTaskWrapperWithStringResultParam(TaskFunction[Any, Any]):
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
+    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
     def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
         return self
 
@@ -523,6 +568,9 @@ class MockTaskWrapperWithStringResultParam(TaskFunction[Any, Any]):
         return Ok(TaskHandle('mock'))
 
     def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
@@ -580,6 +628,9 @@ class MockTaskWrapperWithRawParam(TaskFunction[Any, Any]):
     def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
+    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
     def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
         return self
 
@@ -590,6 +641,9 @@ class MockTaskWrapperWithRawParam(TaskFunction[Any, Any]):
         return Ok(TaskHandle('mock'))
 
     def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+        return Ok(TaskHandle('mock'))
+
+    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
