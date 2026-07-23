@@ -121,6 +121,7 @@ from horsies.core.worker.runtime import (  # noqa: F401,E402
     _REAPER_MAX_PERMANENT_FAILURES as _REAPER_MAX_PERMANENT_FAILURES,
     ChildHookFailedError as ChildHookFailedError,
     ExecutorRestartFailedError as ExecutorRestartFailedError,
+    ServiceLoopDiedError as ServiceLoopDiedError,
     MemoryBaselineExceedsThresholdError as MemoryBaselineExceedsThresholdError,
     _RetryBackoff as _RetryBackoff,
     _FinalizeError as _FinalizeError,
@@ -170,7 +171,9 @@ class Worker(
         self._service_tasks: set[asyncio.Task[Any]] = set()
         self._finalizer_tasks: set[asyncio.Task[Any]] = set()
         self._finalize_retry_attempts: dict[tuple[str, str], int] = {}
-        self._fatal_background_error: ExecutorRestartFailedError | None = None
+        self._fatal_background_error: (
+            ExecutorRestartFailedError | ServiceLoopDiedError | None
+        ) = None
 
     def request_stop(self) -> None:
         """Request worker to stop gracefully."""
@@ -182,32 +185,73 @@ class Worker(
         *,
         name: str,
         finalizer: bool = False,
+        service: bool = False,
     ) -> asyncio.Task[Any]:
-        """Create a tracked background task with automatic cleanup."""
+        """Create a tracked background task with automatic cleanup.
+
+        ``service=True`` marks a worker-lifetime loop (claimer heartbeat,
+        worker-state snapshot, ping responder, reaper): one that must run for
+        as long as the worker claims. Ending for any reason other than a
+        requested shutdown — an escaped exception or an unexpected return —
+        is process-fatal (``ServiceLoopDiedError``): the loops contain their
+        own per-iteration errors, and a worker that keeps claiming with a
+        dead heartbeat/reaper loop is a zombie that only looks healthy.
+
+        Shutdown is recognized by any of: the task was cancelled, a
+        cancellation was requested (the loops absorb ``CancelledError`` and
+        return — ``_cleanup_after_failed_start`` cancels them with ``_stop``
+        deliberately unset so the resilience retry can respawn them), or
+        ``_stop`` is set.
+        """
         task_group = self._finalizer_tasks if finalizer else self._service_tasks
         task = asyncio.create_task(coro, name=name)
         task_group.add(task)
+
+        def _escalate_fatal(
+            err: ExecutorRestartFailedError | ServiceLoopDiedError,
+        ) -> None:
+            # Capture and stop; run_forever re-raises it so the process
+            # exits non-zero for a supervisor restart.
+            self._fatal_background_error = err
+            self._stop.set()
 
         def _on_done(t: asyncio.Task[Any]) -> None:
             task_group.discard(t)
             if t.cancelled():
                 return
+            shutdown_requested = t.cancelling() > 0 or self._stop.is_set()
             exc = t.exception()
             if exc is not None:
                 match exc:
                     case ExecutorRestartFailedError():
                         # Process-fatal: an executorless worker that keeps
-                        # running is a zombie. Capture the error and stop;
-                        # run_forever re-raises it so the process exits
-                        # non-zero for a supervisor restart.
+                        # running is a zombie.
                         logger.critical(
                             f'Background task {t.get_name()!r} hit a '
                             f'process-fatal error; stopping worker: {exc}'
                         )
-                        self._fatal_background_error = exc
-                        self._stop.set()
+                        _escalate_fatal(exc)
+                    case _ if service and not shutdown_requested:
+                        logger.critical(
+                            f'Service loop {t.get_name()!r} died with the '
+                            f'worker still claiming; stopping worker: {exc}'
+                        )
+                        died = ServiceLoopDiedError(
+                            f'service loop {t.get_name()!r} died: {exc}'
+                        )
+                        died.__cause__ = exc
+                        _escalate_fatal(died)
                     case _:
                         logger.error(f'Background task {t.get_name()!r} failed: {exc}')
+                return
+            if service and not shutdown_requested:
+                logger.critical(
+                    f'Service loop {t.get_name()!r} returned with no shutdown '
+                    f'requested; stopping worker'
+                )
+                _escalate_fatal(ServiceLoopDiedError(
+                    f'service loop {t.get_name()!r} returned unexpectedly'
+                ))
                 return
             if finalizer:
                 result = t.result()
@@ -533,6 +577,10 @@ class Worker(
                 background task (finalizer dispatch path) and set stop;
                 re-raising here makes ``run_forever`` exit non-zero so the
                 supervisor restarts the worker with a fresh executor.
+            ServiceLoopDiedError: a worker-lifetime service loop died with
+                no shutdown requested; re-raising crashes the worker so the
+                supervisor restarts it instead of leaving a claiming worker
+                with dead heartbeat/reaper loops.
         """
         if self._fatal_background_error is not None:
             raise self._fatal_background_error
@@ -730,19 +778,27 @@ class Worker(
             self._spawn_background(
                 self._claimer_heartbeat_loop(),
                 name='claimer-heartbeat',
+                service=True,
             )
             # Start worker state heartbeat loop for monitoring
             self._spawn_background(
                 self._worker_state_heartbeat_loop(),
                 name='worker-state-heartbeat',
+                service=True,
             )
             logger.info('Worker state heartbeat loop started for monitoring')
             # Serve liveness pings from a background loop.
-            self._spawn_background(self._ping_responder_loop(), name='ping-responder')
+            self._spawn_background(
+                self._ping_responder_loop(),
+                name='ping-responder',
+                service=True,
+            )
             logger.info('Ping responder loop started for liveness probes')
             # Start reaper loop for automatic stale task handling
             if self.cfg.recovery_config:
-                self._spawn_background(self._reaper_loop(), name='reaper')
+                self._spawn_background(
+                    self._reaper_loop(), name='reaper', service=True,
+                )
                 logger.info('Reaper loop started for automatic stale task recovery')
         except Exception:
             await self._cleanup_after_failed_start()

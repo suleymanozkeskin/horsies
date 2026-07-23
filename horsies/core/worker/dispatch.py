@@ -102,6 +102,7 @@ class DispatchMixin:
             *,
             name: str,
             finalizer: bool = False,
+            service: bool = False,
         ) -> asyncio.Task[Any]: ...
 
     async def _requeue_claimed_task(

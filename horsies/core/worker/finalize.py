@@ -131,6 +131,7 @@ class FinalizeMixin:
             *,
             name: str,
             finalizer: bool = False,
+            service: bool = False,
         ) -> asyncio.Task[Any]: ...
 
     async def _finalize_after(

@@ -47,6 +47,7 @@ from horsies.core.worker.worker import (
     _RetryError,
     ChildHookFailedError,
     ExecutorRestartFailedError,
+    ServiceLoopDiedError,
 )
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.tasks import OperationalErrorCode
@@ -484,6 +485,133 @@ class TestWorkerStop:
         await asyncio.sleep(0.01)
 
         worker._handle_finalize_error.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# 7b. Service-loop fail-fatal (C11-inverse)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestServiceLoopFailFatal:
+    """A service loop ending with no shutdown requested is process-fatal.
+
+    The four worker-lifetime loops contain their own per-iteration errors,
+    so an escaped exception or an unexpected return means the worker would
+    keep claiming with a dead heartbeat/reaper loop. _on_done escalates via
+    ServiceLoopDiedError; every shutdown-shaped ending stays quiet.
+    """
+
+    @pytest.mark.asyncio
+    async def test_service_loop_exception_escalates(self) -> None:
+        worker = _make_worker()
+
+        async def _dying_loop() -> None:
+            raise ValueError('loop defect')
+
+        task = worker._spawn_background(
+            _dying_loop(), name='claimer-heartbeat', service=True,
+        )
+        with pytest.raises(ValueError):
+            await task
+        await asyncio.sleep(0.01)
+
+        assert worker._stop.is_set()
+        err = worker._fatal_background_error
+        assert isinstance(err, ServiceLoopDiedError)
+        assert 'claimer-heartbeat' in str(err)
+        assert isinstance(err.__cause__, ValueError)
+        with pytest.raises(ServiceLoopDiedError):
+            worker._raise_captured_fatal_error()
+
+    @pytest.mark.asyncio
+    async def test_service_loop_unexpected_return_escalates(self) -> None:
+        worker = _make_worker()
+
+        async def _returning_loop() -> None:
+            return None
+
+        task = worker._spawn_background(
+            _returning_loop(), name='reaper', service=True,
+        )
+        await task
+        await asyncio.sleep(0.01)
+
+        assert worker._stop.is_set()
+        err = worker._fatal_background_error
+        assert isinstance(err, ServiceLoopDiedError)
+        assert 'reaper' in str(err)
+
+    @pytest.mark.asyncio
+    async def test_service_loop_cancellation_does_not_escalate(self) -> None:
+        worker = _make_worker()
+
+        task = worker._spawn_background(
+            asyncio.sleep(999), name='ping-responder', service=True,
+        )
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.01)
+
+        assert not worker._stop.is_set()
+        assert worker._fatal_background_error is None
+
+    @pytest.mark.asyncio
+    async def test_service_loop_absorbed_cancel_does_not_escalate(self) -> None:
+        """The real loops catch CancelledError and return normally;
+        _cleanup_after_failed_start cancels them with _stop deliberately
+        unset. The cancelling() probe must recognize that as shutdown."""
+        worker = _make_worker()
+
+        async def _absorbing_loop() -> None:
+            try:
+                await asyncio.sleep(999)
+            except asyncio.CancelledError:
+                return
+
+        task = worker._spawn_background(
+            _absorbing_loop(), name='worker-state-heartbeat', service=True,
+        )
+        await asyncio.sleep(0)
+        task.cancel()
+        await task  # returns normally: cancel absorbed
+        await asyncio.sleep(0.01)
+
+        assert not worker._stop.is_set()
+        assert worker._fatal_background_error is None
+
+    @pytest.mark.asyncio
+    async def test_service_loop_return_after_stop_does_not_escalate(self) -> None:
+        worker = _make_worker()
+        worker._stop.set()
+
+        async def _stopping_loop() -> None:
+            return None
+
+        task = worker._spawn_background(
+            _stopping_loop(), name='reaper', service=True,
+        )
+        await task
+        await asyncio.sleep(0.01)
+
+        assert worker._fatal_background_error is None
+
+    @pytest.mark.asyncio
+    async def test_non_service_background_exception_only_logs(self) -> None:
+        worker = _make_worker()
+
+        async def _oneshot() -> None:
+            raise ValueError('one-shot failure')
+
+        task = worker._spawn_background(_oneshot(), name='delayed-notify')
+        with pytest.raises(ValueError):
+            await task
+        await asyncio.sleep(0.01)
+
+        assert not worker._stop.is_set()
+        assert worker._fatal_background_error is None
 
 
 # ---------------------------------------------------------------------------
