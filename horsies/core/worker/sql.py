@@ -5,15 +5,14 @@ from __future__ import annotations
 from sqlalchemy import text
 
 from horsies.core.models.workflow import WORKFLOW_TERMINAL_STATES
-from horsies.core.schemas.indexes import TASK_TERMINAL_STATUS_SQL_LITERALS
+from horsies.core.schemas.indexes import (
+    TASK_TERMINAL_STATUS_SQL_LITERALS,
+    WORKFLOW_TERMINAL_STATUS_SQL_LITERALS,
+)
 from horsies.core.types.status import TASK_TERMINAL_STATES
 
 WORKFLOW_TERMINAL_VALUES: list[str] = [s.value for s in WORKFLOW_TERMINAL_STATES]
 TASK_TERMINAL_VALUES: list[str] = [s.value for s in TASK_TERMINAL_STATES]
-
-WORKFLOW_TERMINAL_STATUS_SQL_LITERALS: str = ', '.join(
-    sorted(f"'{v}'" for v in WORKFLOW_TERMINAL_VALUES),
-)
 
 
 # ---------- Claim SQL (priority + enqueued_at) ----------

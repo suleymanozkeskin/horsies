@@ -119,6 +119,7 @@ from horsies.core.schemas.indexes import (
     CREATE_WORKER_STATES_WORKER_SNAPSHOT_INDEX_SQL,
     CREATE_WORKFLOW_TASKS_DEPS_INDEX_SQL,
     CREATE_WORKFLOW_TASKS_WF_STATUS_IDX_INDEX_SQL,
+    CREATE_WORKFLOWS_RETENTION_INDEX_SQL,
 )
 from horsies.core.schemas.migrations import (
     CREATE_CLAIM_FUNCTION_SQL,
@@ -838,6 +839,11 @@ class PostgresBroker:
             # Migration (v12): heartbeat retention eligibility index (the
             # v11 pass covered tasks and worker_states, not heartbeats).
             await conn.execute(CREATE_HEARTBEATS_SENT_AT_INDEX_SQL)
+
+            # Migration (v13): workflow retention eligibility index — both
+            # workflow retention deletes filter horsies_workflows on the
+            # indexed predicate; completes the v11/v12 retention-index set.
+            await conn.execute(CREATE_WORKFLOWS_RETENTION_INDEX_SQL)
 
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
