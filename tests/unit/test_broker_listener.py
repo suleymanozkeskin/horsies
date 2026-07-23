@@ -531,14 +531,9 @@ class TestDispatcher:
 
         import logging
 
-        _logger = logging.getLogger('horsies.listener')
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.WARNING, logger='horsies.listener'):
-                with pytest.raises(asyncio.CancelledError):
-                    await listener._dispatcher()
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.WARNING, logger='horsies.listener'):
+            with pytest.raises(asyncio.CancelledError):
+                await listener._dispatcher()
 
         # Full queue still has the old item (new notification was dropped)
         assert q_full.qsize() == 1

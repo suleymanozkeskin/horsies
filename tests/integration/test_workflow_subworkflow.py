@@ -713,16 +713,11 @@ class TestSubworkflowIntegration:
             )
         await session.commit()
 
-        engine_logger = logging.getLogger('horsies.workflow.engine')
-        engine_logger.propagate = True
         caplog.clear()
-        try:
-            with caplog.at_level(logging.DEBUG, logger='horsies.workflow.engine'):
-                await on_subworkflow_complete(session, child_id, broker)
-                await drain_parent_propagations_in_session(session, broker)
-                await session.commit()
-        finally:
-            engine_logger.propagate = False
+        with caplog.at_level(logging.DEBUG, logger='horsies.workflow.engine'):
+            await on_subworkflow_complete(session, child_id, broker)
+            await drain_parent_propagations_in_session(session, broker)
+            await session.commit()
 
         parent_row = await session.execute(
             text("""

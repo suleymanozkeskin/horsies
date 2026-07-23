@@ -219,21 +219,16 @@ class TestOnErrorFail:
             )
             await session.commit()
 
-        engine_logger = logging.getLogger('horsies.workflow.engine')
-        engine_logger.propagate = True
         caplog.clear()
-        try:
-            with caplog.at_level(logging.WARNING, logger='horsies.workflow.engine'):
-                await _fail_enqueued_task(
-                    session,
-                    handle.workflow_id,
-                    0,
-                    'late enqueue failure should not overwrite terminal task',
-                    broker,
-                )
-                await session.commit()
-        finally:
-            engine_logger.propagate = False
+        with caplog.at_level(logging.WARNING, logger='horsies.workflow.engine'):
+            await _fail_enqueued_task(
+                session,
+                handle.workflow_id,
+                0,
+                'late enqueue failure should not overwrite terminal task',
+                broker,
+            )
+            await session.commit()
 
         row = (
             await session.execute(
@@ -316,22 +311,17 @@ class TestOnErrorFail:
             )
             await session.commit()
 
-        engine_logger = logging.getLogger('horsies.workflow.engine')
-        engine_logger.propagate = True
         caplog.clear()
-        try:
-            with caplog.at_level(logging.WARNING, logger='horsies.workflow.engine'):
-                await _fail_subworkflow_load(
-                    session,
-                    broker,
-                    handle.workflow_id,
-                    0,
-                    'subworkflow_terminal_guard_workflow',
-                    'tests.unregistered_child.v1',
-                )
-                await session.commit()
-        finally:
-            engine_logger.propagate = False
+        with caplog.at_level(logging.WARNING, logger='horsies.workflow.engine'):
+            await _fail_subworkflow_load(
+                session,
+                broker,
+                handle.workflow_id,
+                0,
+                'subworkflow_terminal_guard_workflow',
+                'tests.unregistered_child.v1',
+            )
+            await session.commit()
 
         row = (
             await session.execute(
