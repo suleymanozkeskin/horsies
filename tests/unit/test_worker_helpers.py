@@ -1223,13 +1223,8 @@ class TestRequeueDbErrorContainment:
         )
         worker._restart_executor = AsyncMock()  # type: ignore[method-assign]
 
-        _logger = logging.getLogger('horsies.worker')
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
-                await worker._handle_broken_pool('task-20', BrokenProcessPool('pool died'))
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
+            await worker._handle_broken_pool('task-20', BrokenProcessPool('pool died'))
 
         worker._restart_executor.assert_awaited_once()
         critical_messages = [r for r in caplog.records if r.levelno == logging.CRITICAL]
@@ -1252,13 +1247,8 @@ class TestRequeueDbErrorContainment:
             return_value=_RequeueOutcome.DB_ERROR,
         )
 
-        _logger = logging.getLogger('horsies.worker')
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
-                await worker._dispatch_one('task-21', 'my_app.add', '[]', '{}')
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
+            await worker._dispatch_one('task-21', 'my_app.add', '[]', '{}')
 
         critical_messages = [r for r in caplog.records if r.levelno == logging.CRITICAL]
         assert len(critical_messages) == 1
@@ -1286,13 +1276,10 @@ class TestRequeueDbErrorContainment:
             return_value=_RequeueOutcome.DB_ERROR,
         )
 
-        _logger = logging.getLogger('horsies.worker')
-        _logger.propagate = True
         try:
             with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
                 await worker._dispatch_one('task-22', 'my_app.add', '[]', '{}')
         finally:
-            _logger.propagate = False
             loop.run_in_executor = original_run  # type: ignore[assignment]
 
         critical_messages = [r for r in caplog.records if r.levelno == logging.CRITICAL]
@@ -1312,13 +1299,8 @@ class TestRequeueDbErrorContainment:
         )
         worker._restart_executor = AsyncMock()  # type: ignore[method-assign]
 
-        _logger = logging.getLogger('horsies.worker')
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
-                await worker._handle_broken_pool('task-23', BrokenProcessPool('pool died'))
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
+            await worker._handle_broken_pool('task-23', BrokenProcessPool('pool died'))
 
         critical_messages = [r for r in caplog.records if r.levelno == logging.CRITICAL]
         assert len(critical_messages) == 0
@@ -1437,13 +1419,8 @@ class TestHandleFinalizeError:
         """Non-_FinalizeError payload → logs error, no attempts touched."""
         worker = _make_worker()
         worker._spawn_background = MagicMock()  # type: ignore[assignment]
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
-                await worker._handle_finalize_error('not a _FinalizeError')
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+            await worker._handle_finalize_error('not a _FinalizeError')
 
         assert 'Unexpected finalize error payload type' in caplog.text
         assert worker._spawn_background.call_count == 0
@@ -1459,13 +1436,8 @@ class TestHandleFinalizeError:
         worker = _make_worker()
         worker._spawn_background = MagicMock()  # type: ignore[assignment]
         err = _make_finalize_error(stage='phase99_unknown')
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
-                await worker._handle_finalize_error(err)
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+            await worker._handle_finalize_error(err)
 
         assert 'phase99_unknown' in caplog.text
         assert worker._spawn_background.call_count == 0
@@ -1482,13 +1454,8 @@ class TestHandleFinalizeError:
         err = _make_finalize_error(retryable=False)
         key = (err.task_id, err.stage)
         worker._finalize_retry_attempts[key] = 2
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
-                await worker._handle_finalize_error(err)
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+            await worker._handle_finalize_error(err)
 
         assert 'non-retryable' in caplog.text.lower()
         assert key not in worker._finalize_retry_attempts
@@ -1529,13 +1496,8 @@ class TestHandleFinalizeError:
         err = _make_finalize_error(retryable=True, stage=_FINALIZE_STAGE_PHASE1)
         key = (err.task_id, _FINALIZE_STAGE_PHASE1)
         worker._finalize_retry_attempts[key] = _FINALIZE_PHASE1_MAX_RETRIES
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.CRITICAL, logger=self._LOGGER_NAME):
-                await worker._handle_finalize_error(err)
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.CRITICAL, logger=self._LOGGER_NAME):
+            await worker._handle_finalize_error(err)
 
         assert 'retries exhausted' in caplog.text.lower()
         assert key not in worker._finalize_retry_attempts
@@ -1576,13 +1538,8 @@ class TestHandleFinalizeError:
         err = _make_finalize_error(retryable=True, stage=_FINALIZE_STAGE_FUTURE)
         key = (err.task_id, _FINALIZE_STAGE_FUTURE)
         worker._finalize_retry_attempts[key] = _FINALIZE_FUTURE_MAX_RETRIES
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.CRITICAL, logger=self._LOGGER_NAME):
-                await worker._handle_finalize_error(err)
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.CRITICAL, logger=self._LOGGER_NAME):
+            await worker._handle_finalize_error(err)
 
         assert 'retries exhausted' in caplog.text.lower()
         assert key not in worker._finalize_retry_attempts
@@ -1700,22 +1657,17 @@ class TestHandleFinalizeError:
             return MagicMock()
 
         worker._spawn_background = _capture_spawn  # type: ignore[assignment]
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            for _ in range(_FINALIZE_PHASE2_MAX_RETRIES):
-                with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
-                    await worker._handle_finalize_error(err)
+        for _ in range(_FINALIZE_PHASE2_MAX_RETRIES):
+            with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
+                await worker._handle_finalize_error(err)
 
-                for record in caplog.records:
-                    if 'Finalize retry scheduled' in record.message and err.task_id in record.message:
-                        parts = record.message.split(' in ')
-                        if len(parts) >= 2:
-                            delay_str = parts[-1].split('s:')[0]
-                            logged_delays.append(float(delay_str))
-                caplog.clear()
-        finally:
-            _logger.propagate = False
+            for record in caplog.records:
+                if 'Finalize retry scheduled' in record.message and err.task_id in record.message:
+                    parts = record.message.split(' in ')
+                    if len(parts) >= 2:
+                        delay_str = parts[-1].split('s:')[0]
+                        logged_delays.append(float(delay_str))
+            caplog.clear()
 
         assert len(logged_delays) == _FINALIZE_PHASE2_MAX_RETRIES
 
@@ -1877,13 +1829,8 @@ class TestRetryFinalizePhase1:
         key = (err.task_id, _FINALIZE_STAGE_PHASE1)
         worker._finalize_retry_attempts[key] = 2
 
-        _logger = logging.getLogger('horsies.worker')
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.ERROR, logger='horsies.worker'):
-                await worker._retry_finalize_phase1(err, 0.0)
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.ERROR, logger='horsies.worker'):
+            await worker._retry_finalize_phase1(err, 0.0)
 
         assert 'missing outcome payload' in caplog.text.lower()
         assert key not in worker._finalize_retry_attempts
@@ -1901,13 +1848,8 @@ class TestRetryFinalizePhase1:
         key = (err.task_id, _FINALIZE_STAGE_PHASE1)
         worker._finalize_retry_attempts[key] = 1
 
-        _logger = logging.getLogger('horsies.worker')
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.ERROR, logger='horsies.worker'):
-                await worker._retry_finalize_phase1(err, 0.0)
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.ERROR, logger='horsies.worker'):
+            await worker._retry_finalize_phase1(err, 0.0)
 
         assert 'missing result_json_str' in caplog.text.lower()
         assert key not in worker._finalize_retry_attempts
@@ -2604,13 +2546,8 @@ class TestCleanupAfterFailedStart:
         worker.listener.close.side_effect = RuntimeError('listener boom')
         worker._executor = None
 
-        _logger = logging.getLogger('horsies.worker')
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.ERROR, logger='horsies.worker'):
-                await worker._cleanup_after_failed_start()
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.ERROR, logger='horsies.worker'):
+            await worker._cleanup_after_failed_start()
 
         assert 'listener' in caplog.text.lower()
 
@@ -2627,13 +2564,8 @@ class TestCleanupAfterFailedStart:
         mock_executor.shutdown.side_effect = RuntimeError('executor boom')
         worker._executor = mock_executor
 
-        _logger = logging.getLogger('horsies.worker')
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.ERROR, logger='horsies.worker'):
-                await worker._cleanup_after_failed_start()
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.ERROR, logger='horsies.worker'):
+            await worker._cleanup_after_failed_start()
 
         assert 'executor' in caplog.text.lower()
 
@@ -2942,13 +2874,8 @@ class TestReaperMatchArms:
             requeue_results=[Ok(5)],
         )
 
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.INFO, logger=self._LOGGER_NAME):
-                await worker._reaper_loop()
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.INFO, logger=self._LOGGER_NAME):
+            await worker._reaper_loop()
 
         assert 'requeued 5 stale' in caplog.text.lower()
 
@@ -2967,13 +2894,8 @@ class TestReaperMatchArms:
             requeue_results=[_broker_err(retryable=True, message='transient db')],
         )
 
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
-                await worker._reaper_loop()
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
+            await worker._reaper_loop()
 
         assert 'transient' in caplog.text.lower()
 
@@ -2993,13 +2915,8 @@ class TestReaperMatchArms:
             requeue_results=[perm, perm, perm],
         )
 
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
-                await worker._reaper_loop()
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+            await worker._reaper_loop()
 
         assert 'disabled' in caplog.text.lower()
         critical_records = [r for r in caplog.records if r.levelno == logging.CRITICAL]
@@ -3020,13 +2937,8 @@ class TestReaperMatchArms:
             mark_failed_results=[Ok(3)],
         )
 
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
-                await worker._reaper_loop()
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
+            await worker._reaper_loop()
 
         assert 'marked 3 stale running' in caplog.text.lower()
 
@@ -3043,13 +2955,8 @@ class TestReaperMatchArms:
             mark_failed_results=[_broker_err(retryable=True, message='transient mark')],
         )
 
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
-                await worker._reaper_loop()
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
+            await worker._reaper_loop()
 
         assert 'transient' in caplog.text.lower()
 
@@ -3067,13 +2974,8 @@ class TestReaperMatchArms:
             mark_failed_results=[perm, perm, perm],
         )
 
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
-                await worker._reaper_loop()
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+            await worker._reaper_loop()
 
         assert 'disabled' in caplog.text.lower()
         critical_records = [r for r in caplog.records if r.levelno == logging.CRITICAL]
@@ -3094,13 +2996,8 @@ class TestReaperMatchArms:
             terminate_results=[Ok(4)],
         )
 
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
-                await worker._reaper_loop()
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
+            await worker._reaper_loop()
 
         assert 'cancelled 4 orphaned workflow' in caplog.text.lower()
 
@@ -3117,13 +3014,8 @@ class TestReaperMatchArms:
             terminate_results=[_broker_err(retryable=True, message='transient terminate')],
         )
 
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
-                await worker._reaper_loop()
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
+            await worker._reaper_loop()
 
         assert 'transient' in caplog.text.lower()
 
@@ -3141,13 +3033,8 @@ class TestReaperMatchArms:
             terminate_results=[perm, perm, perm],
         )
 
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
-                await worker._reaper_loop()
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+            await worker._reaper_loop()
 
         assert 'disabled' in caplog.text.lower()
         critical_records = [r for r in caplog.records if r.levelno == logging.CRITICAL]
@@ -3233,13 +3120,8 @@ class TestReaperMatchArms:
             AsyncMock(return_value=0),
         )
 
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
-                await worker._reaper_loop()
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+            await worker._reaper_loop()
 
         assert 'reaper loop error' in caplog.text.lower()
         assert loop_call_count >= 2  # continued after error
@@ -3285,13 +3167,8 @@ class TestReaperMatchArms:
             AsyncMock(return_value=0),
         )
 
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.INFO, logger=self._LOGGER_NAME):
-                await worker._reaper_loop()
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.INFO, logger=self._LOGGER_NAME):
+            await worker._reaper_loop()
 
         assert 'cancelled' in caplog.text.lower()
 
@@ -3316,13 +3193,8 @@ class TestReaperMatchArms:
             broker_close_result=close_err,
         )
 
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
-                await worker._reaper_loop()
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+            await worker._reaper_loop()
 
         assert 'closing reaper broker' in caplog.text.lower()
 
@@ -3463,14 +3335,9 @@ class TestPreloadModulesMain:
         mocks['app'].get_discovered_task_modules.return_value = []
         mocks['import_module'].side_effect = ImportError('no such module')
 
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
-                with pytest.raises(ImportError, match='no such module'):
-                    worker._preload_modules_main()
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+            with pytest.raises(ImportError, match='no such module'):
+                worker._preload_modules_main()
 
         assert 'failed during preload' in caplog.text.lower()
 
@@ -3670,13 +3537,8 @@ class TestUpdateWorkerState:
             MagicMock(side_effect=RuntimeError('psutil boom')),
         )
 
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
-                await worker._update_worker_state()  # should not raise
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+            await worker._update_worker_state()  # should not raise
 
         assert 'failed to update worker state' in caplog.text.lower()
 
@@ -3755,13 +3617,8 @@ class TestClaimerHeartbeatLoopErrorPaths:
             claimer_heartbeat_interval_ms=1_000,
         )
 
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
-                await worker._claimer_heartbeat_loop()
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+            await worker._claimer_heartbeat_loop()
 
         assert 'claimer heartbeat error' in caplog.text.lower()
         assert call_count >= 2  # continued after error
@@ -3867,13 +3724,8 @@ class TestRunForever:
         # Use a fast sleep to avoid test slowness
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
 
-        _logger = logging.getLogger(self._LOGGER_NAME)
-        _logger.propagate = True
-        try:
-            with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
-                await worker.run_forever()
-        finally:
-            _logger.propagate = False
+        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+            await worker.run_forever()
 
         assert call_count >= 2  # retried after error
         assert 'retrying' in caplog.text.lower()
