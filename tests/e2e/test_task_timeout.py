@@ -60,7 +60,7 @@ async def test_timeout_fails_task_and_worker_survives(
         processes=1,
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
-        handle = unwrap_send(basic_tasks.timeout_sleeper.send(duration_ms=60_000))
+        handle = unwrap_send(await basic_tasks.timeout_sleeper.send_async(duration_ms=60_000))
 
         # Deadline fires at 2s; allow slack for claim + dispatch + persist.
         await wait_for_status(
@@ -104,7 +104,7 @@ async def test_timeout_fails_task_and_worker_survives(
 
         # The SIGKILL broke the process pool; the worker restarts it and
         # must still execute new work.
-        follow_up = unwrap_send(basic_tasks.simple_task.send(x=21))
+        follow_up = unwrap_send(await basic_tasks.simple_task.send_async(x=21))
         result = follow_up.get(timeout_ms=30_000)
         assert result.is_ok()
         assert result.ok_value == 42

@@ -67,7 +67,7 @@ async def test_worker_processes_task_and_workflow_through_pgbouncer_split_urls()
 
             try:
                 with run_worker(PGB_INSTANCE):
-                    task_handle = unwrap_send(pgbouncer_tasks.double.send(value=21))
+                    task_handle = unwrap_send(await pgbouncer_tasks.double.send_async(value=21))
                     assert_ok(await task_handle.get_async(timeout_ms=15000), 42)
 
                     workflow_handle = start_ok_sync(pgbouncer_workflows.spec_smoke)

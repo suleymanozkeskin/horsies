@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Callable, Generator, Sequence
 
@@ -74,13 +75,50 @@ def _wait_for_ready(
     timeout: float,
     ready_check: ReadyCheck | None,
 ) -> None:
+    if ready_check is None:
+        _poll_ready(proc, timeout, None)
+        return
+    # Ready checks send tasks with the sync API. run_worker() is entered from
+    # async tests, so this poll runs on the event-loop thread, where sync send
+    # fails closed with ASYNC_CONTEXT. Execute each check on a dedicated
+    # thread: no running loop there, so the sync send API behaves as before.
+    with ThreadPoolExecutor(max_workers=1) as checker:
+        def _off_loop_check() -> bool:
+            return checker.submit(ready_check).result()
+
+        _poll_ready(proc, timeout, _off_loop_check)
+
+
+def _drain_output(proc: subprocess.Popen[str]) -> tuple[str, str]:
+    """Kill the process group and collect its output.
+
+    Reading a live process's pipe to EOF blocks forever — the worker's
+    executor children inherit the descriptors, so EOF may never come even
+    after the worker itself exits. Kill the whole group first, then drain
+    with a bounded communicate().
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        return proc.communicate(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        return '', ''
+
+
+def _poll_ready(
+    proc: subprocess.Popen[str],
+    timeout: float,
+    ready_check: ReadyCheck | None,
+) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if proc.poll() is not None:
-            stdout = proc.stdout.read() if proc.stdout else ''
-            stderr = proc.stderr.read() if proc.stderr else ''
+            returncode = proc.returncode
+            stdout, stderr = _drain_output(proc)
             raise RuntimeError(
-                f'Worker process exited before becoming ready (code={proc.returncode})\n'
+                f'Worker process exited before becoming ready (code={returncode})\n'
                 f'stdout: {stdout}\nstderr: {stderr}'
             )
         if ready_check is None:
@@ -93,19 +131,7 @@ def _wait_for_ready(
             pass
         time.sleep(0.2)
 
-    # Timeout - capture output for debugging
-    stdout = ''
-    stderr = ''
-    if proc.stdout:
-        import select
-
-        if select.select([proc.stdout], [], [], 0)[0]:
-            stdout = proc.stdout.read()
-    if proc.stderr:
-        import select
-
-        if select.select([proc.stderr], [], [], 0)[0]:
-            stderr = proc.stderr.read()
+    stdout, stderr = _drain_output(proc)
     raise RuntimeError(
         f'Worker did not become ready before timeout\n'
         f'stdout: {stdout}\nstderr: {stderr}'

@@ -84,7 +84,7 @@ async def _run_burst(
     db_task: _DbTask,
 ) -> None:
     handles = [
-        unwrap_send(db_task.send(sleep_ms=SLEEP_MS)) for _ in range(BURST)
+        unwrap_send(await db_task.send_async(sleep_ms=SLEEP_MS)) for _ in range(BURST)
     ]
     await wait_for_all_terminal(
         broker.session_factory,
