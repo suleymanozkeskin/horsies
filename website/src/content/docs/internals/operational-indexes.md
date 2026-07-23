@@ -1,7 +1,7 @@
 ---
 title: Operational Indexes
 summary: Opt-in DDL for adopter-side history queries that horsies deliberately does not index in the shipped schema.
-related: [database-schema, ../tasks/retrieving-results]
+related: [database-schema, ../../tasks/retrieving-results]
 tags: [internals, indexes, observability, postgres, performance]
 ---
 
@@ -91,6 +91,17 @@ queries at a fraction of the maintenance cost.
 **Don't skip `CONCURRENTLY` on a live database.** A plain `CREATE INDEX`
 takes a lock that blocks writes — including claims — for the duration of the
 build.
+
+`CONCURRENTLY` has two constraints of its own. It cannot run inside a
+transaction block — migration tools that wrap DDL in one must disable that
+for this statement. And a failed concurrent build leaves an `INVALID` index
+behind, which `IF NOT EXISTS` treats as present — a retry then silently does
+nothing. After a failed build, drop the leftover
+(`DROP INDEX CONCURRENTLY ...`) and re-run; invalid indexes are listed by:
+
+```sql
+SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid;
+```
 
 ## Compatibility
 
