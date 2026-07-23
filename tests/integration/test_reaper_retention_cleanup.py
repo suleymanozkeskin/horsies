@@ -19,10 +19,7 @@ from tests.integration.conftest import compute_test_enqueue_sha
 
 from horsies.core.brokers.postgres import PostgresBroker
 
-from horsies.core.schemas.indexes import (
-    TASK_TERMINAL_STATUS_SQL_LITERALS,
-    WORKFLOW_TERMINAL_STATUS_SQL_LITERALS,
-)
+from horsies.core.schemas.indexes import TASK_TERMINAL_STATUS_SQL_LITERALS
 from horsies.core.worker.sql import (
     DELETE_EXPIRED_HEARTBEATS_SQL,
     DELETE_EXPIRED_WORKER_STATES_SQL,
@@ -582,30 +579,53 @@ async def test_expired_tasks_delete_uses_retention_index(
     assert 'idx_horsies_tasks_retention' in plan, plan
 
 
+async def _explain_analyze_plan(
+    session: AsyncSession,
+    statement_sql: str,
+    params: dict[str, int],
+) -> str:
+    """EXPLAIN ANALYZE a statement, roll back, return the executed plan.
+
+    ANALYZE executes the statement, so the assertion covers the plan the
+    executor actually ran, not just the planner's proposal. The rollback
+    undoes both the DELETE and the seqscan toggle (a non-LOCAL SET inside
+    an aborted transaction is reverted with it), so every statement sees
+    the same seeded state. seqscan is disabled because the seeded tables
+    fit in a few pages, where the planner would prefer a seq scan and hide
+    the index-vs-index choice a production-sized heap produces on its own.
+    """
+    await session.execute(text('SET enable_seqscan = off'))
+    rows = (await session.execute(
+        text('EXPLAIN (ANALYZE, BUFFERS) ' + statement_sql), params,
+    )).fetchall()
+    plan = '\n'.join(str(row[0]) for row in rows)
+    await session.rollback()
+    return plan
+
+
 @pytest.mark.asyncio(loop_scope='function')
-async def test_expired_workflows_delete_uses_retention_index(
+async def test_retention_delete_statements_plan_on_retention_indexes(
     broker: PostgresBroker,  # noqa: ARG001 - ensures schema migrations are applied
     session: AsyncSession,
 ) -> None:
-    """The workflow eligibility predicate is planned via
-    idx_horsies_workflows_retention.
+    """The production retention DELETEs execute via their retention indexes.
 
-    Same contract as the tasks variant above: the partial index only serves
-    the workflow retention deletes while their status literals imply the
-    index predicate and the COALESCE expression matches textually. A
-    bound-array regression or a drifted COALESCE would fall back to a
-    full-table walk and fail here.
+    Unlike the eligibility-predicate test above, this EXPLAIN ANALYZEs the
+    exact statements the reaper executes (rolled back), so any drift in the
+    statement itself — status literals replaced by bound arrays, a reworded
+    COALESCE, an added predicate the partial index cannot serve — falls off
+    the index plan and fails here, not in production.
     """
     await _truncate_retention_tables(session)
 
-    # Production shape: many terminal workflows inside the retention window
-    # and one eligible row — the case where the planner previously chose a
-    # stop-early pkey walk whose LIMIT never filled.
+    # Production shape for both tables: many terminal rows inside the
+    # retention window and one eligible row — the case where the planner
+    # previously chose a stop-early pkey walk whose LIMIT never filled.
     await session.execute(text("""
         INSERT INTO horsies_workflows
             (id, name, status, on_error, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at, completed_at)
-        SELECT gen_random_uuid()::text, 'ret_idx_wf_test', 'COMPLETED', 'FAIL', 0,
+        SELECT gen_random_uuid()::text, 'ret_plan_wf_test', 'COMPLETED', 'FAIL', 0,
                gen_random_uuid()::text,
                NOW(), NOW(), NOW(), NOW(), NOW()
         FROM generate_series(1, 500)
@@ -615,31 +635,50 @@ async def test_expired_workflows_delete_uses_retention_index(
             (id, name, status, on_error, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at, completed_at)
         VALUES
-            (gen_random_uuid()::text, 'ret_idx_wf_test', 'COMPLETED', 'FAIL', 0,
+            (gen_random_uuid()::text, 'ret_plan_wf_test', 'COMPLETED', 'FAIL', 0,
              gen_random_uuid()::text,
              NOW(), NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours',
              NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours')
     """))
+    await session.execute(text("""
+        INSERT INTO horsies_tasks
+            (id, task_name, queue_name, priority, args, kwargs,
+             status, sent_at, created_at, updated_at, claimed, retry_count,
+             max_retries, completed_at, enqueue_sha)
+        SELECT gen_random_uuid()::text, 'ret_plan_task_test', 'default', 100, '[]', '{}',
+               'COMPLETED', NOW(), NOW(), NOW(), FALSE, 0,
+               0, NOW(), 'ret-plan-test-sha'
+        FROM generate_series(1, 500)
+    """))
+    await session.execute(text("""
+        INSERT INTO horsies_tasks
+            (id, task_name, queue_name, priority, args, kwargs,
+             status, sent_at, created_at, updated_at, claimed, retry_count,
+             max_retries, completed_at, enqueue_sha)
+        VALUES
+            (gen_random_uuid()::text, 'ret_plan_task_test', 'default', 100, '[]', '{}',
+             'COMPLETED', NOW(), NOW() - INTERVAL '48 hours',
+             NOW() - INTERVAL '48 hours', FALSE, 0,
+             0, NOW() - INTERVAL '48 hours', 'ret-plan-test-sha')
+    """))
     await session.commit()
-    await session.execute(text('ANALYZE horsies_workflows'))
+    await session.execute(text('ANALYZE horsies_workflows, horsies_tasks'))
 
-    explain_sql = text(f"""
-        EXPLAIN SELECT w.id
-        FROM horsies_workflows w
-        WHERE w.status IN ({WORKFLOW_TERMINAL_STATUS_SQL_LITERALS})
-          AND COALESCE(w.completed_at, w.updated_at, w.created_at)
-              < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
-    """)
-    # Same rationale as the tasks variant: a 500-row table fits in a few
-    # pages, so force the index-vs-index choice a production-sized heap
-    # produces on its own.
-    await session.execute(text('SET enable_seqscan = off'))
-    plan = '\n'.join(
-        str(row[0]) for row in
-        (await session.execute(
-            explain_sql, {'retention_hours': _RETENTION_HOURS},
-        )).fetchall()
+    params = {'retention_hours': _RETENTION_HOURS, 'batch_size': _BATCH_SIZE}
+
+    workflows_plan = await _explain_analyze_plan(
+        session, DELETE_EXPIRED_WORKFLOWS_SQL.text, params,
     )
-    await session.execute(text('SET enable_seqscan = on'))
+    assert 'idx_horsies_workflows_retention' in workflows_plan, workflows_plan
 
-    assert 'idx_horsies_workflows_retention' in plan, plan
+    workflow_tasks_plan = await _explain_analyze_plan(
+        session, DELETE_EXPIRED_WORKFLOW_TASKS_SQL.text, params,
+    )
+    assert 'idx_horsies_workflows_retention' in workflow_tasks_plan, (
+        workflow_tasks_plan
+    )
+
+    tasks_plan = await _explain_analyze_plan(
+        session, DELETE_EXPIRED_TASKS_SQL.text, params,
+    )
+    assert 'idx_horsies_tasks_retention' in tasks_plan, tasks_plan
