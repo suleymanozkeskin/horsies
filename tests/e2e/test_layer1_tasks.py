@@ -85,7 +85,7 @@ async def test_status_transitions(broker: PostgresBroker) -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = unwrap_send(basic_tasks.simple_task.send(x=5))
+        handle = unwrap_send(await basic_tasks.simple_task.send_async(x=5))
         result = handle.get(timeout_ms=5000)
         assert_ok(result)
 
@@ -216,7 +216,7 @@ async def test_retry_exhausted(broker: PostgresBroker) -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = unwrap_send(retry_tasks.retry_exhausted_task.send())
+        handle = unwrap_send(await retry_tasks.retry_exhausted_task.send_async())
         result = handle.get(timeout_ms=15000)
         assert_err(result, expected_code='TRANSIENT')
 
@@ -254,7 +254,7 @@ async def test_exponential_backoff_state(broker: PostgresBroker) -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = unwrap_send(retry_tasks.exponential_task.send())
+        handle = unwrap_send(await retry_tasks.exponential_task.send_async())
 
         # Wait for at least one retry to be scheduled
         deadline = time.time() + 5.0
@@ -275,7 +275,7 @@ async def test_exponential_backoff_intervals(broker: PostgresBroker) -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = unwrap_send(retry_tasks.exponential_task.send())
+        handle = unwrap_send(await retry_tasks.exponential_task.send_async())
 
         # Capture original enqueued_at before worker processes the task
         async with broker.session_factory() as session:
@@ -324,7 +324,7 @@ async def test_auto_retry_by_error_code(broker: PostgresBroker) -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = unwrap_send(retry_tasks.retry_error_code_task.send())
+        handle = unwrap_send(await retry_tasks.retry_error_code_task.send_async())
         result = handle.get(timeout_ms=10000)
         assert result.is_err()
 
@@ -340,7 +340,7 @@ async def test_auto_retry_by_mapped_exception(broker: PostgresBroker) -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = unwrap_send(retry_tasks.retry_mapped_exception_task.send())
+        handle = unwrap_send(await retry_tasks.retry_mapped_exception_task.send_async())
         result = handle.get(timeout_ms=10000)
         assert result.is_err()
 
@@ -356,7 +356,7 @@ async def test_no_retry_for_non_matching(broker: PostgresBroker) -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = unwrap_send(basic_tasks.no_retry_task.send())
+        handle = unwrap_send(await basic_tasks.no_retry_task.send_async())
         result = handle.get(timeout_ms=5000)
         assert_err(result, expected_code='PERMANENT')
 
@@ -375,7 +375,7 @@ async def test_retry_precedence_task_mapper_wins_over_global_no_retry(
         RETRY_PRECEDENCE_INSTANCE,
         ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
     ):
-        handle = unwrap_send(instance_retry_precedence.task_mapper_wins_no_retry_task.send())
+        handle = unwrap_send(await instance_retry_precedence.task_mapper_wins_no_retry_task.send_async())
         result = handle.get(timeout_ms=10000)
         assert result.is_err()
         assert result.err is not None
@@ -397,7 +397,7 @@ async def test_retry_precedence_task_mapper_wins_and_retries(
         RETRY_PRECEDENCE_INSTANCE,
         ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
     ):
-        handle = unwrap_send(instance_retry_precedence.task_mapper_wins_retry_task.send())
+        handle = unwrap_send(await instance_retry_precedence.task_mapper_wins_retry_task.send_async())
         result = handle.get(timeout_ms=10000)
         assert result.is_err()
         assert result.err is not None
@@ -419,7 +419,7 @@ async def test_retry_precedence_global_mapper_triggers_retry(
         RETRY_PRECEDENCE_INSTANCE,
         ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
     ):
-        handle = unwrap_send(instance_retry_precedence.global_mapper_retry_task.send())
+        handle = unwrap_send(await instance_retry_precedence.global_mapper_retry_task.send_async())
         result = handle.get(timeout_ms=10000)
         assert result.is_err()
         assert result.err is not None
@@ -441,7 +441,7 @@ async def test_retry_precedence_exception_name_collision_no_retry(
         RETRY_PRECEDENCE_INSTANCE,
         ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
     ):
-        handle = unwrap_send(instance_retry_precedence.exception_name_collision_task.send())
+        handle = unwrap_send(await instance_retry_precedence.exception_name_collision_task.send_async())
         result = handle.get(timeout_ms=10000)
         assert result.is_err()
         assert result.err is not None
@@ -484,7 +484,7 @@ async def test_custom_mode_queue_names_stored(custom_broker: PostgresBroker) -> 
     with run_worker(
         CUSTOM_INSTANCE, ready_check=_make_ready_check(queues_custom.high_task)
     ):
-        handle = unwrap_send(queues_custom.high_task.send())
+        handle = unwrap_send(await queues_custom.high_task.send_async())
         result = handle.get(timeout_ms=5000)
         assert_ok(result, 'high')
 
@@ -940,7 +940,7 @@ async def test_multiple_tasks_concurrent(broker: PostgresBroker) -> None:
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handles = [
-            unwrap_send(basic_tasks.slow_task.send(duration_ms=task_duration_ms)) for _ in range(num_tasks)
+            unwrap_send(await basic_tasks.slow_task.send_async(duration_ms=task_duration_ms)) for _ in range(num_tasks)
         ]
 
         # Observe runtime concurrency directly from DB instead of wall-clock timing.
@@ -1013,7 +1013,7 @@ async def test_max_claim_batch(broker: PostgresBroker) -> None:
     ):
         # Submit slow tasks
         handles = [
-            unwrap_send(basic_tasks.slow_task.send(duration_ms=task_duration_ms)) for _ in range(num_tasks)
+            unwrap_send(await basic_tasks.slow_task.send_async(duration_ms=task_duration_ms)) for _ in range(num_tasks)
         ]
 
         # Poll DB while tasks are running to check CLAIMED count
@@ -1085,7 +1085,7 @@ async def test_task_handle_info_async() -> None:
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
-        handle = unwrap_send(basic_tasks.simple_task.send(x=5))
+        handle = unwrap_send(await basic_tasks.simple_task.send_async(x=5))
         result = handle.get(timeout_ms=5000)
         assert_ok(result)
 

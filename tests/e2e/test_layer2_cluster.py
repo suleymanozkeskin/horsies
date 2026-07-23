@@ -696,7 +696,7 @@ async def test_retry_works_across_multiple_workers(broker: PostgresBroker) -> No
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         # Use .send() so retry policy (task_options) is persisted in DB
-        handles = [unwrap_send(retry_tasks.retry_exhausted_task.send()) for _ in range(num_tasks)]
+        handles = [unwrap_send(await retry_tasks.retry_exhausted_task.send_async()) for _ in range(num_tasks)]
         task_ids = [h.task_id for h in handles]
 
         # Wait for all to reach terminal state (3 retries x 1s + execution time)
@@ -1439,7 +1439,7 @@ async def test_requeue_db_error_age_guard_recovery(
         os.environ['E2E_REQUEUE_GUARD_LOG_DIR'] = log_dir
 
         # 1. Enqueue task
-        handle = unwrap_send(instance_requeue_guard.requeue_guard_task.send(token=token))
+        handle = unwrap_send(await instance_requeue_guard.requeue_guard_task.send_async(token=token))
         task_id = handle.task_id
 
         worker_a: subprocess.Popen[str] | None = None

@@ -111,7 +111,7 @@ async def test_subworkflow_child_binds_queue_priority_and_claim_order(
 
         # 3. Direct-send a task on serial AFTER scrape exists (later enqueued_at).
         #    .send() resolves priority through the queue config (→ 30).
-        direct_handle = unwrap_send(pb.direct_task.send())
+        direct_handle = unwrap_send(await pb.direct_task.send_async())
         direct_id = direct_handle.task_id
 
         # 4. Drain: blocker finishes, worker claims scrape then direct.
