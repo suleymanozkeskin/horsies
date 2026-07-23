@@ -216,7 +216,7 @@ match my_task.send(name="alice", count=3):
         print(f"Permanent failure: {err.code}")
 ```
 
-Retry methods only accept `ENQUEUE_FAILED` errors. Passing `SEND_SUPPRESSED`, `VALIDATION_FAILED`, or `PAYLOAD_MISMATCH` returns `Err(TaskSendError(VALIDATION_FAILED))`.
+Retry methods only accept `ENQUEUE_FAILED` and `ASYNC_CONTEXT` errors. Passing `SEND_SUPPRESSED`, `VALIDATION_FAILED`, or `PAYLOAD_MISMATCH` returns `Err(TaskSendError(VALIDATION_FAILED))`.
 
 ### Automatic Retry via Config
 
@@ -280,7 +280,7 @@ Passing `good_until=None` explicitly clears any internally inherited deadline.
 
 ### `.retry_send(error) -> TaskSendResult[TaskHandle[T]]`
 
-Retry a failed send using the stored payload from the error. Only valid for `ENQUEUE_FAILED` errors.
+Retry a failed send using the stored payload from the error. Only valid for `ENQUEUE_FAILED` and `ASYNC_CONTEXT` errors.
 
 | Parameter | Type | Description |
 | --------- | ---- | ----------- |
@@ -294,7 +294,7 @@ Async variant of `.retry_send()`.
 
 ### `.retry_schedule(error) -> TaskSendResult[TaskHandle[T]]`
 
-Retry a failed schedule using the stored payload. Only valid for `ENQUEUE_FAILED` errors that originated from `.schedule()`.
+Retry a failed schedule using the stored payload. Only valid for `ENQUEUE_FAILED` and `ASYNC_CONTEXT` errors that originated from `.schedule()`.
 
 | Parameter | Type | Description |
 | --------- | ---- | ----------- |
