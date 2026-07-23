@@ -30,14 +30,26 @@ See [error handling](../tasks/error-handling) for more.
 
 ## Why PostgreSQL only?
 
-**Because postgres is a powerful database which can cover the needs of most applications.**
+Correctness and performance.
 
-PostgreSQL handles task storage, LISTEN/NOTIFY for real-time dispatch, advisory locks for coordination, and heartbeat tracking. All in a single database with single source of truth.
+### Correctness:
 
-The trade-off is clear: this architecture is not built for highest-throughput like redis based queues. 
-If you have throughput levels which your postgres instance can't handle, use a dedicated broker. If you need moderate throughput with one less thing to operate, horsies fits.
+Every guarantee horsies makes is a Postgres primitive:
 
-Here `moderate` and `high` throughput is also relative to your postgres instance ( e.g. you will not get the same performance from a PlanetScale Postgres vs Heroku Postgres )
+- **Claiming**: one server-side function under `FOR UPDATE SKIP LOCKED`; a claim-generation fence rejects stale attempts, including a worker re-claiming its own requeued task. Double execution and phantom retries are impossible states, not tuned-away ones.
+- **Finalization**: row lock → immutable attempt-history append → state transition, one transaction.
+- **Recovery**: all state is rows and timestamps; the reaper reconstructs and repairs after a worker dies mid-flight — nothing in-flight exists only in a broker's memory.
+- **Workflows**: fan-in resolution, completion checks, subworkflow cascades, and orphan self-heal are multi-row transitions under a documented lock order.
+- **Dispatch**: LISTEN/NOTIFY push — no polling loop between enqueue and execution.
+- **Inspection**: task history is plain tables — SQL, `EXPLAIN`, your existing backups. See [operational indexes](../internals/operational-indexes) for query-shape guidance.
+
+A message broker can approximate the first three with visibility timeouts and acks; it cannot express them as invariants. That is the reason for the Postgres requirement, operating one less service is absolutely not a selling point. In fact, we strongly recommend running a dedicated Postgres instance for your worker.
+
+### Postgres is performant:
+
+It scales with your Postgres instance (a PlanetScale Postgres and a Heroku Postgres will not perform the same); even with a cross-machine deployment, app server and managed Postgres in the same region, holds per-statement p99 in the low single-digit milliseconds across the claim/dispatch/finalize hot path.
+
+Measured numbers: [performance](../internals/performance).
 
 ## Is it ergonomic for devs?
 
@@ -106,15 +118,18 @@ Deploy workers only when you need more capacity, not when you want to have separ
 
 ## Is it production-ready?
 
-Horsies has exited alpha. The core task, workflow, scheduling, and PostgreSQL storage APIs are intended to remain compatible across patch releases.
-Breaking API changes should be reserved for minor-version releases and documented in release notes.
+Yes — and read the version number as an API-contract statement, not an engine-maturity statement. Pre-1.0 means breaking API changes may still land in minor releases, each documented in the [changelog](../changelog). It does not describe the engine's correctness discipline:
 
-The library has been tested on a large Celery-dependent codebase with successful results.
+- 3,200+ test functions across unit, integration (real Postgres), e2e (real worker processes), and PgBouncer contract suites — a 2.2:1 test-to-source line ratio.
+- Failure-path-first testing: crash recovery, claim fencing, cancel/completion races, rolling-upgrade behavior, and query-plan pinning (`EXPLAIN ANALYZE` assertions on the hot-path statements).
+- The claim/finalize semantics are cross-validated against an independent Rust reimplementation of the engine.
+- A codebase with ~300 task definitions and recurring schedules, migrated off Celery, runs its full background workload on horsies.
 
 ## Throughput expectations and comparisons
 
-Compared with Redis/RabbitMQ-backed systems such as Celery, Dramatiq, RQ, Huey, or arq, Horsies trades raw broker throughput for Postgres-native durability and visibility. 
-Those systems should generally win fire-and-forget message benchmarks. Horsies is aimed at workloads where durable task state, typed results, retries, deadlines, workflow DAGs, worker health, and operational inspection are worth the extra database cost.
+Compared with Redis/RabbitMQ-backed systems such as Celery, Dramatiq, RQ, Huey, or arq, Horsies chooses transactional execution semantics over raw broker throughput. 
+Those systems should generally win fire-and-forget message benchmarks. Horsies is aimed at workloads where exactly-once-shaped ownership, durable task state, typed results, retries, deadlines, workflow DAGs, worker health, and operational inspection are worth the extra database cost.
+Measured per-statement latencies for this trade: [performance](../internals/performance).
 
 The closest comparison is Procrastinate, because it is also PostgreSQL-backed. 
 Horsies is heavier than a plain Postgres task queue because it adds strict serialization, typed TaskResult handling, workflow state, subworkflows, success policies, and monitoring state. Benchmark against Procrastinate if plain Postgres task throughput is the main buying criterion.
