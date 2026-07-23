@@ -1,8 +1,8 @@
 ---
 title: Changelog
-summary: Notable changes per release. 0.2.9 fixes the cancel/completion lock-order deadlock (40P01 under concurrent cancel) and fences finalize/recovery/ownership-confirm statements to the claim generation so a stale attempt cannot clobber a re-claimed one, schema v12 (`horsies_claim` returns `claimed_at`, heartbeat retention index); 0.2.8 replaces the latest-per-worker `DISTINCT ON` scan with a recursive skip-scan, adds retention eligibility indexes (schema v11), batches retention deletes, makes the worker-state snapshot cadence configurable (`worker_state_snapshot_interval_ms`, default 30s, was hardcoded 5s), enforces per-queue `max_concurrency` without `queue_priorities`, and accepts EXPIRED rows in workflow finalization phase-2 replay; 0.2.7 collapses the worker claim critical section into one server-side statement (the `horsies_claim` function, schema v10) so the cap-serialization advisory lock is held only across a single statement plus commit, removing the client-stall-while-holding-lock freeze, and changes the equal-queue-priority tie-break from configured queue order to a priority-then-FIFO band; 0.2.6 binds subworkflow tasks to their queue's configured priority so a parameterized child no longer claims at the default priority 100 on a CUSTOM queue; 0.2.5 adds default-on TCP keepalives for remote/pooled Postgres and gives the workflow reaper a grace window so it stops racing in-flight finalizers; 0.2.4 adds per-child memory recycling (`--max-memory-per-child-mb`, off by default), fixes a latent count-recycle hang (CPython gh-115634), and gates worker log color to TTYs; 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
+summary: Notable changes per release. 0.3.0 fails sync send/schedule closed inside a running event loop (`ASYNC_CONTEXT`, payload-carrying, completable via `retry_*_async`), adds `schedule_async`/`retry_schedule_async`, makes service-loop death process-fatal, fixes the TASK_EXPIRED workflow finalize gap and the recycle spawn-failure pool wedge, and adds the workflows retention index (schema v13); 0.2.9 fixes the cancel/completion lock-order deadlock (40P01 under concurrent cancel) and fences finalize/recovery/ownership-confirm statements to the claim generation so a stale attempt cannot clobber a re-claimed one, schema v12 (`horsies_claim` returns `claimed_at`, heartbeat retention index); 0.2.8 replaces the latest-per-worker `DISTINCT ON` scan with a recursive skip-scan, adds retention eligibility indexes (schema v11), batches retention deletes, makes the worker-state snapshot cadence configurable (`worker_state_snapshot_interval_ms`, default 30s, was hardcoded 5s), enforces per-queue `max_concurrency` without `queue_priorities`, and accepts EXPIRED rows in workflow finalization phase-2 replay; 0.2.7 collapses the worker claim critical section into one server-side statement (the `horsies_claim` function, schema v10) so the cap-serialization advisory lock is held only across a single statement plus commit, removing the client-stall-while-holding-lock freeze, and changes the equal-queue-priority tie-break from configured queue order to a priority-then-FIFO band; 0.2.6 binds subworkflow tasks to their queue's configured priority so a parameterized child no longer claims at the default priority 100 on a CUSTOM queue; 0.2.5 adds default-on TCP keepalives for remote/pooled Postgres and gives the workflow reaper a grace window so it stops racing in-flight finalizers; 0.2.4 adds per-child memory recycling (`--max-memory-per-child-mb`, off by default), fixes a latent count-recycle hang (CPython gh-115634), and gates worker log color to TTYs; 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
 related: [./monitoring/worker-health, ./migrations/migration-to-0-1-2, ./internals/serialization]
-tags: [changelog, releases, breaking-changes, 0.2.9, 0.2.8, 0.2.7, 0.2.6, 0.2.5, 0.2.4, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
+tags: [changelog, releases, breaking-changes, 0.3.0, 0.2.9, 0.2.8, 0.2.7, 0.2.6, 0.2.5, 0.2.4, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
 ---
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
@@ -10,6 +10,62 @@ horsies is pre-1.0: breaking changes may land in minor or patch releases, and
 there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
+
+## 0.3.0 — 2026-07-23
+
+Sync send fails closed on a running event loop (breaking for callers that
+silently blocked their loop), service-loop death is process-fatal, and three
+child-process expiry/recycle defects are fixed. Schema v13 (one partial
+index, applied automatically by the broker's advisory-locked schema init on
+next startup).
+
+**Breaking**: sync `.send()`, `.schedule()`, `.retry_send()`, and
+`.retry_schedule()` called inside a running event loop return
+`Err(TaskSendError(ASYNC_CONTEXT))` before any broker work. The sync
+executors are blocking database round trips; inline on a loop they stall
+every coroutine on it for the duration of the enqueue. The error carries the
+prepared `task_id` and payload — complete the dispatch with
+`retry_send_async(err)` / `retry_schedule_async(err)`, or call the matching
+`*_async` entry point with the original arguments. Off-loop callers are
+unaffected. `schedule_async()` and `retry_schedule_async()` are new, on task
+functions and `with_options(...)` builders, with the same delay validation
+as their sync counterparts.
+
+Service-loop death is process-fatal. The four worker-lifetime loops (claimer
+heartbeat, worker-state snapshot, ping responder, reaper) contain their own
+per-iteration errors, so ending with no shutdown requested is a defect — and
+a worker that keeps claiming with a dead heartbeat loop stops renewing claim
+leases, disappears from monitoring, and contributes no reaper passes while
+looking healthy. Previously one log line; now `ServiceLoopDiedError` is
+captured, the worker stops, and `run_forever` re-raises for a non-zero exit
+and supervisor restart.
+
+TASK_EXPIRED workflow finalize gap: a claimed workflow task whose
+`good_until` passed before child start was marked EXPIRED by the child, but
+the parent's finalize skipped phase 2 — the workflow node stayed ENQUEUED
+against a terminal task row until reaper recovery case 1.7 repaired it
+10–40 s later at default thresholds. Phase 1 now loads the child-persisted
+terminal result and proceeds to phase 2, so the workflow resolves per
+`on_error` without waiting for the reaper.
+
+Recycle spawn-failure containment: a failed replacement spawn during child
+recycle (fork ENOMEM/EMFILE) killed the executor manager thread with no
+containment — `submit()` kept accepting work and pending futures hung
+PENDING forever. The pool is now marked broken, pending futures fail with
+`BrokenProcessPool`, and the worker's existing recovery requeues and
+restarts the executor. Recycling children also exit via `os._exit(0)` after
+flushing output: the result is on the wire before exit, and skipping
+teardown of the very heap that triggered the recycle stops head-of-line
+blocking sibling results (~35 ms per million heap objects).
+
+Schema v13 adds `idx_horsies_workflows_retention`: both workflow retention
+deletes filter `horsies_workflows` on terminal status +
+`COALESCE(completed_at, updated_at, created_at) < cutoff`; unindexed, every
+hourly retention pass full-walked the workflows table twice, serial under
+`FOR UPDATE`, regardless of eligibility (36k retained workflows ≈ 4–5 s per
+statement with zero eligible rows). See the new
+[operational indexes](./internals/operational-indexes) page for opt-in DDL
+covering adopter-side history queries.
 
 ## 0.2.9 — 2026-07-16
 

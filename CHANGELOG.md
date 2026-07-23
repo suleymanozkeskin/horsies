@@ -8,6 +8,103 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-23
+
+Sync send fails closed on a running event loop (breaking for callers that
+silently blocked their loop), service-loop death is process-fatal, and three
+child-process expiry/recycle defects are fixed. Schema v13 (one partial
+index, applied automatically by the broker's advisory-locked schema init on
+next startup).
+
+### Changed
+
+- **Breaking**: sync `.send()`, `.schedule()`, `.retry_send()`, and
+  `.retry_schedule()` called inside a running event loop return
+  `Err(TaskSendError(ASYNC_CONTEXT))` before any broker work. The sync
+  executors are blocking database round trips; inline on a loop they stall
+  every coroutine on it for the duration of the enqueue, and a burst of
+  inline sends serializes the whole loop. The error carries the prepared
+  `task_id` and payload: complete the dispatch with `retry_send_async(err)`
+  / `retry_schedule_async(err)`, or call the matching `*_async` entry point
+  with the original arguments. Off-loop callers are unaffected.
+- A worker-lifetime service loop (claimer heartbeat, worker-state snapshot,
+  ping responder, reaper) that ends with no shutdown requested — escaped
+  exception or unexpected return — is now process-fatal
+  (`ServiceLoopDiedError`): the loops contain their own per-iteration
+  errors, and a worker that keeps claiming with a dead heartbeat loop stops
+  renewing claim leases, disappears from monitoring, and contributes no
+  reaper passes while looking healthy. Previously this ended the task with
+  one log line; now the error is captured, the worker stops, and
+  `run_forever` re-raises for a non-zero exit and supervisor restart.
+
+### Added
+
+- `schedule_async()` and `retry_schedule_async()` on task functions and
+  `with_options(...)` builders, with the same delay validation as their
+  sync counterparts. `ASYNC_CONTEXT` added to `TaskSendErrorCode`; retry
+  methods accept it alongside `ENQUEUE_FAILED`.
+
+### Fixed
+
+- A claimed workflow task whose `good_until` passed before child start was
+  marked EXPIRED by the child itself, but the parent's phase-1 skip arm
+  never ran phase 2 — the workflow node stayed ENQUEUED against a terminal
+  task row until reaper recovery case 1.7 repaired it 10–40 s later at
+  default thresholds. Phase 1 now loads the child-persisted terminal result
+  for workflow tasks and proceeds to phase 2, so the workflow resolves per
+  `on_error` without waiting for the reaper. Plain-task TASK_EXPIRED keeps
+  the skip.
+- A failed replacement spawn during child recycle (fork ENOMEM/EMFILE) ran
+  on the executor manager thread with no containment: the manager died via
+  `threading.excepthook`, `_broken` was never set, later `submit()` was
+  accepted silently, and pending futures hung PENDING forever — only
+  3–5-minute reaper thresholds bounded the damage. The spawn is now
+  contained: the pool is marked broken, pending futures fail with
+  `BrokenProcessPool`, and the failure surfaces through the existing
+  recovery path (requeue + executor restart).
+
+### Performance
+
+- Schema v13 adds `idx_horsies_workflows_retention`, a partial expression
+  index on `COALESCE(completed_at, updated_at, created_at)` over terminal
+  workflow statuses. Both workflow retention deletes filter
+  `horsies_workflows` on that predicate; with no index and no statistics on
+  the expression, the planner overestimated eligibility and chose a
+  stop-early pkey walk whose `LIMIT` never filled — a full-table walk per
+  statement, twice per hourly pass, serial under `FOR UPDATE`, regardless
+  of how few rows were eligible (36k retained workflows ≈ 4–5 s per
+  statement with zero eligible rows). Completes the v11/v12
+  retention-index set. A row enters the index once, at its terminal
+  transition; updates during a workflow's running life never maintain it.
+- A recycling child exits with `os._exit(0)` after flushing logging and
+  stdio instead of running full interpreter teardown. The result is
+  already on the wire before exit, and the stdlib manager inlines
+  `p.join()` on the recycled child before reading further results, so
+  teardown of the very heap that triggered the recycle head-of-line
+  blocked sibling results — measured ~35 ms per million heap objects
+  (728 ms at a 2.2 GB heap).
+
+### Documentation
+
+- New `internals/operational-indexes` page: opt-in DDL for adopter-side
+  history queries that horsies deliberately does not index in the shipped
+  schema — the verified partial terminal-only
+  `(task_name, COALESCE(completed_at, failed_at, updated_at) DESC)` index,
+  its exactness requirements, the all-rows-index and non-`CONCURRENTLY`
+  anti-patterns, `CONCURRENTLY`'s own constraints (no transaction block;
+  a failed build leaves an `INVALID` index that `IF NOT EXISTS` treats as
+  present), and the compatibility contract.
+
+### Internal
+
+- E2E suites route sends through `send_async` where tests run on a loop;
+  worker ready-checks execute off the event-loop thread, and the
+  ready-poll drains a dead worker's output with a bounded `communicate()`
+  instead of a blocking read-to-EOF that hung when the process group held
+  the pipe. Manual `propagate` flips around caplog removed — obsolete and
+  double-capturing under pytest 9.1, and their hardcoded restore corrupted
+  the propagation baseline. Docs site on astro 7 + starlight 0.41.
+
 ## [0.2.9] - 2026-07-16
 
 Two correctness fixes on the workflow-cancel and task-finalize paths, plus a
