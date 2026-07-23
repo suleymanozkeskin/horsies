@@ -23,6 +23,7 @@ from horsies.core.codec.json_value import JsonValue
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.workflow import (
     TaskNode,
+    WorkflowHandle,
     WorkflowSpec,
     WorkflowContext,
     OnError,
@@ -281,10 +282,8 @@ async def start_ok(
     spec: WorkflowSpec[Any],
     broker: PostgresBroker,
     workflow_id: str | None = None,
-) -> 'WorkflowHandle[Any]':
+) -> WorkflowHandle[Any]:
     """Unwrap start result or fail test with error details."""
-    from horsies.core.models.workflow import WorkflowHandle
-
     r = await start_workflow_async(spec, broker, workflow_id)
     if is_err(r):
         pytest.fail(f'start_workflow_async failed: {r.err_value}')
@@ -364,7 +363,7 @@ def make_workflow_spec(
     on_error: OnError = OnError.FAIL,
     output: TaskNode[Any] | None = None,
     success_policy: SuccessPolicy | None = None,
-) -> WorkflowSpec:
+) -> WorkflowSpec[Any]:
     """
     Create a WorkflowSpec with resolved queue/priority for testing.
 

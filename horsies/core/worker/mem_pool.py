@@ -21,9 +21,12 @@ enabled, and the feature is CPython-only.
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 import platform
 import sys
+import threading
+import traceback
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import process as _cf_process
 from typing import Any, Optional
@@ -52,6 +55,27 @@ _SUPPORTED_PYTHON_MINORS = frozenset({(3, 13)})
 # probes, whose RSS is the baseline, not a per-task signal. Identity holds
 # under spawn (children re-import these module-level functions).
 _RECYCLE_EXEMPT_CALLS = (_warm_child_process, _warm_child_process_probe)
+
+
+def _flush_output_before_exit() -> None:
+    """Flush logging handlers and std streams ahead of ``os._exit``.
+
+    ``os._exit`` skips interpreter teardown, so anything still buffered
+    (above all the recycle log line) would be lost without this flush.
+    Best-effort by design: a broken handler or stream must not turn a
+    clean recycle exit into a crash.
+    """
+    try:
+        # Flushes (then closes) every registered handler; the process
+        # exits immediately after, so closed handlers are fine.
+        logging.shutdown()
+    except Exception:
+        pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
 
 
 class MemoryRecycleUnsupportedError(RuntimeError):
@@ -161,11 +185,28 @@ def _horsies_process_worker(
                     max_memory_per_child_mb,
                     ','.join(recycle_reasons),
                 )
-            return
+            # This process is being discarded: interpreter teardown (GC of
+            # the very heap that triggered the recycle, atexit hooks) is pure
+            # waste, and the manager inlines p.join() on the recycled child
+            # before reading further results, so a slow teardown head-of-line
+            # blocks sibling results. The result is already on the wire —
+            # _sendback_result has returned, and SimpleQueue.put writes the
+            # pickled item to the pipe synchronously under its lock (no
+            # feeder thread). Flush buffered output, then exit without
+            # teardown.
+            _flush_output_before_exit()
+            os._exit(0)
 
 
-# Instance attrs the gh-115634 _adjust_process_count override reads.
-_RECYCLE_INSTANCE_ATTRS = ('_processes', '_max_workers', '_idle_worker_semaphore')
+# Instance attrs the gh-115634 _adjust_process_count override reads
+# (_executor_manager_thread: the spawn-failure containment reads it to tell
+# a recycle replacement on the manager thread from a submit-time spawn).
+_RECYCLE_INSTANCE_ATTRS = (
+    '_processes',
+    '_max_workers',
+    '_idle_worker_semaphore',
+    '_executor_manager_thread',
+)
 # Additional instance attrs the memory-aware _spawn_process override reads.
 _SPAWN_INSTANCE_ATTRS = (
     '_call_queue',
@@ -198,7 +239,51 @@ class _RecycleProcessPoolExecutor(ProcessPoolExecutor):
         # a recycled child unreplaced — gh-115634). Horsies warms the full pool
         # at startup, so the lost lazy-spawn optimization does not matter.
         if len(self._processes) < self._max_workers:
-            self._spawn_process()
+            # Typed Any: typeshed mistypes _executor_manager_thread as
+            # _ThreadWakeup; at runtime it is the _ExecutorManagerThread
+            # instance, or None before the first submit.
+            manager_thread: Any = self._executor_manager_thread
+            if (
+                manager_thread is None
+                or threading.current_thread() is not manager_thread
+            ):
+                # submit()-time spawn on the caller thread (the manager
+                # thread does not exist yet, or exists but this call came
+                # through submit). submit() propagates spawn failures to the
+                # caller itself; stock behavior, no containment needed.
+                self._spawn_process()
+                return
+            # Recycle replacement: run() invokes this on the executor manager
+            # thread. Uncontained, a spawn failure (fork ENOMEM/EMFILE) kills
+            # the manager thread through threading.excepthook: _broken is
+            # never set, later submit() is accepted silently, and pending
+            # futures hang PENDING forever.
+            try:
+                self._spawn_process()
+            except Exception as exc:
+                logger.critical(
+                    'Replacement child spawn failed during recycle: %s: %s; '
+                    'marking the process pool broken (pending tasks fail '
+                    'with BrokenProcessPool; the worker restarts the '
+                    'executor)',
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
+                # _terminate_broken, not the terminate_broken wrapper: run()
+                # holds shutdown_lock around this call and the lock is not
+                # reentrant. The teardown fails pending futures with
+                # BrokenProcessPool and flags the executor broken, so the
+                # failure surfaces through the existing recovery path
+                # (_handle_broken_pool -> requeue + _restart_executor).
+                manager_thread._terminate_broken(
+                    traceback.format_exception(exc),
+                )
+                # End the manager thread cleanly: run() must not continue
+                # over the torn-down queues, and the default
+                # threading.excepthook treats SystemExit as a silent thread
+                # exit (no traceback).
+                raise SystemExit(1) from exc
             return
         if self._idle_worker_semaphore.acquire(blocking=False):
             return
@@ -297,6 +382,17 @@ def recycle_replacement_supported() -> bool:
         for method in ('_adjust_process_count', '_spawn_process')
     )
     if supported:
+        # The spawn-failure containment calls the manager thread's lock-free
+        # broken-pool teardown; without it the override cannot contain a
+        # replacement-spawn failure, so degrade to the stock pool.
+        supported = callable(
+            getattr(
+                getattr(_cf_process, '_ExecutorManagerThread', None),
+                '_terminate_broken',
+                None,
+            )
+        )
+    if supported:
         supported = not _probe_executor_attrs(_RECYCLE_INSTANCE_ATTRS)
     _recycle_support = supported
     return supported
@@ -335,12 +431,19 @@ def verify_cpython_internals() -> None:
         '_sendback_result',
         '_ExceptionWithTraceback',
         '_process_worker',
+        '_ExecutorManagerThread',
     ):
         if not hasattr(_cf_process, symbol):
             missing.append(f'concurrent.futures.process.{symbol}')
     for method in ('_spawn_process', '_adjust_process_count'):
         if not hasattr(ProcessPoolExecutor, method):
             missing.append(f'ProcessPoolExecutor.{method}')
+    # The spawn-failure containment in _adjust_process_count calls the
+    # manager thread's lock-free broken-pool teardown.
+    if hasattr(_cf_process, '_ExecutorManagerThread') and not callable(
+        getattr(_cf_process._ExecutorManagerThread, '_terminate_broken', None)
+    ):
+        missing.append('_ExecutorManagerThread._terminate_broken')
     if missing:
         raise MemoryRecycleUnsupportedError(
             'max_memory_per_child_mb: required ProcessPoolExecutor internals '
