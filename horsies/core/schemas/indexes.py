@@ -127,8 +127,10 @@ CREATE_WORKER_STATES_WORKER_SNAPSHOT_INDEX_SQL = text("""
 # whole heap (593 MB / ~1.1s at 554k retained rows) even when zero rows
 # are eligible. Partial on terminal statuses: a row enters the index once,
 # on its finalize transition, so claim/lease-renewal updates (whose new
-# row versions are non-terminal) never maintain it. The expression must
-# stay textually identical to the delete's COALESCE.
+# row versions are non-terminal) never maintain it. The planner matches
+# the parsed expression, not the SQL text: keep the COALESCE column list
+# and order identical to the delete's (column qualification is
+# irrelevant).
 CREATE_TASKS_RETENTION_INDEX_SQL = text(f"""
     CREATE INDEX IF NOT EXISTS idx_horsies_tasks_retention
     ON horsies_tasks (COALESCE(completed_at, failed_at, updated_at, created_at))
@@ -169,7 +171,9 @@ CREATE_HEARTBEATS_SENT_AT_INDEX_SQL = text("""
 # twice per pass, even with zero eligible rows). Partial on
 # terminal statuses: a row enters the index once, on its terminal
 # transition; updates during a workflow's running life never maintain it.
-# The expression must stay textually identical to the deletes' COALESCE.
+# The planner matches the parsed expression, not the SQL text: keep the
+# COALESCE column list and order identical to the deletes' (column
+# qualification is irrelevant).
 CREATE_WORKFLOWS_RETENTION_INDEX_SQL = text(f"""
     CREATE INDEX IF NOT EXISTS idx_horsies_workflows_retention
     ON horsies_workflows (COALESCE(completed_at, updated_at, created_at))

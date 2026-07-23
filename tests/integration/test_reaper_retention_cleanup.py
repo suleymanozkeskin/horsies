@@ -663,6 +663,12 @@ async def test_retention_delete_statements_plan_on_retention_indexes(
     """))
     await session.commit()
     await session.execute(text('ANALYZE horsies_workflows, horsies_tasks'))
+    # ANALYZE's pg_statistic writes are MVCC-transactional; commit them so
+    # the per-statement rollbacks below revert only the DELETE and the
+    # seqscan toggle, not the gathered statistics — otherwise statements
+    # after the first are planned on stale stats and the test becomes
+    # order-sensitive.
+    await session.commit()
 
     params = {'retention_hours': _RETENTION_HOURS, 'batch_size': _BATCH_SIZE}
 
