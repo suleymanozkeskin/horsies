@@ -185,6 +185,13 @@ WHERE id IN (
 // linked task rows; complete/fail require all workflow_tasks terminal, which trails
 // their task rows), so this guard never fires now — but it ensures a future change
 // can never strand a live task row by deleting its workflow_task linkage.
+//
+// The workflow status list + COALESCE expression here and in
+// DELETE_EXPIRED_WORKFLOWS_SQL must stay structurally aligned with
+// idx_horsies_workflows_retention and stx_horsies_workflows_retention
+// (migration 0028): the partial index serves the scan only while the status
+// literals imply its predicate, and the statistics object supplies the
+// whole-table estimate only while the parsed expression matches.
 const DELETE_EXPIRED_WORKFLOW_TASKS_SQL: &str = "\
 DELETE FROM horsies_workflow_tasks
 WHERE id IN (
@@ -1405,6 +1412,79 @@ mod tests {
         );
 
         sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'ret_explain_task'")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// The workflow retention DELETEs must execute via
+    /// idx_horsies_workflows_retention (migration 0028). EXPLAIN ANALYZE runs
+    /// the exact production statements inside a rolled-back transaction, so
+    /// the assertion covers the plan the executor ran: a drifted COALESCE, a
+    /// status-literal regression, or a lost statistics object (whose default
+    /// 1/3 estimate flips the planner back to a full-table walk) fails here.
+    #[tokio::test]
+    #[serial]
+    async fn workflow_retention_deletes_use_retention_index() {
+        let pool = test_pool().await;
+
+        // Realistic statistics: a population of old terminal workflows.
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, definition_key, depth, root_workflow_id,
+                sent_at, created_at, started_at, updated_at, completed_at
+            )
+            SELECT
+                'ret-wf-idx-' || g, 'ret_explain_wf', 'COMPLETED', 'fail', 'test.ret.v1', 0,
+                'ret-wf-idx-' || g,
+                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
+                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
+                NOW() - INTERVAL '30 days'
+            FROM generate_series(1, 500) g",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE horsies_workflows")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // A 500-row table fits in a few pages, so the planner still prefers a
+        // seq scan; disable it (transaction-local) to force the index choice a
+        // production-sized heap produces on its own. ANALYZE executes the
+        // DELETE — the rollback reverts it, so both statements see the same
+        // seeded state.
+        for (delete_sql, label) in [
+            (DELETE_EXPIRED_WORKFLOWS_SQL, "workflows"),
+            (DELETE_EXPIRED_WORKFLOW_TASKS_SQL, "workflow_tasks"),
+        ] {
+            let mut tx = pool.begin().await.unwrap();
+            sqlx::query("SET LOCAL enable_seqscan = off")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            let plan_rows: Vec<(String,)> =
+                sqlx::query_as(&format!("EXPLAIN (ANALYZE, BUFFERS) {delete_sql}"))
+                    .bind("240")
+                    .bind(RETENTION_DELETE_BATCH_SIZE)
+                    .fetch_all(&mut *tx)
+                    .await
+                    .unwrap();
+            tx.rollback().await.unwrap();
+
+            let plan = plan_rows
+                .iter()
+                .map(|(line,)| line.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                plan.contains("idx_horsies_workflows_retention"),
+                "{label} retention delete must execute via the workflows retention index; plan:\n{plan}",
+            );
+        }
+
+        sqlx::query("DELETE FROM horsies_workflows WHERE name = 'ret_explain_wf'")
             .execute(&pool)
             .await
             .unwrap();
