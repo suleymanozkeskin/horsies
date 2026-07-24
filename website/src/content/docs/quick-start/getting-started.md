@@ -7,7 +7,7 @@ tags: [quickstart, installation, tutorial]
 
 ## Prerequisites
 
-- PostgreSQL 12+
+- PostgreSQL 14+
 - Python 3.13+
 
 ## Installation
