@@ -8,6 +8,41 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-24
+
+The workflow retention DELETEs plan onto their v13 index. Schema v14 (two
+expression-statistics objects plus an ANALYZE, applied automatically by the
+broker's advisory-locked schema init on next startup). Documented PostgreSQL
+floor raised from 12+ to 14+.
+
+### Fixed
+
+- The workflow retention DELETEs ignored the v13 partial index: the planner
+  never uses statistics gathered on a partial index for whole-table
+  selectivity, so the retention COALESCE cutoff was costed at the default
+  1/3 selectivity and index-vs-walk became a function of table size alone.
+  At 1M retained tasks the heap walk is expensive enough that the index
+  wins regardless; at 36k retained workflows the planner kept a full-table
+  walk — estimate 12,245 vs 13 actual, 4–5 s per statement, two statements
+  per hourly reaper pass, independent of eligible-row count — and the same
+  misestimate degraded the NOT EXISTS guard into a seq scan of the 1M-row
+  tasks table whenever the outer side did use the index. Schema v14 creates
+  whole-table expression statistics (`CREATE STATISTICS ... ON (<retention
+  COALESCE>)`) for `horsies_tasks` and `horsies_workflows` and runs ANALYZE
+  in the same migration transaction — extended statistics are empty until
+  the table is analyzed after their creation; ANALYZE is sampled, takes
+  SHARE UPDATE EXCLUSIVE, and never blocks reads or writes. Measured at 1M
+  tasks / 36k workflows / 144k workflow_tasks with the shipped statements:
+  workflows delete 98 ms → 7.7 ms, workflow_tasks delete 413 ms → 34 ms,
+  guard planned as per-row index probes instead of the 1M-row seq scan. No
+  statement changes.
+
+### Changed
+
+- Documented PostgreSQL floor raised from 12+ to 14+:
+  `CREATE STATISTICS ON (expression)` requires PostgreSQL 14 (12 and 13
+  are past end-of-life).
+
 ## [0.3.0] - 2026-07-23
 
 Sync send fails closed on a running event loop (breaking for callers that

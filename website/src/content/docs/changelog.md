@@ -1,8 +1,8 @@
 ---
 title: Changelog
-summary: Notable changes per release. 0.3.0 fails sync send/schedule closed inside a running event loop (`ASYNC_CONTEXT`, payload-carrying, completable via `retry_*_async`), adds `schedule_async`/`retry_schedule_async`, makes service-loop death process-fatal, fixes the TASK_EXPIRED workflow finalize gap and the recycle spawn-failure pool wedge, and adds the workflows retention index (schema v13); 0.2.9 fixes the cancel/completion lock-order deadlock (40P01 under concurrent cancel) and fences finalize/recovery/ownership-confirm statements to the claim generation so a stale attempt cannot clobber a re-claimed one, schema v12 (`horsies_claim` returns `claimed_at`, heartbeat retention index); 0.2.8 replaces the latest-per-worker `DISTINCT ON` scan with a recursive skip-scan, adds retention eligibility indexes (schema v11), batches retention deletes, makes the worker-state snapshot cadence configurable (`worker_state_snapshot_interval_ms`, default 30s, was hardcoded 5s), enforces per-queue `max_concurrency` without `queue_priorities`, and accepts EXPIRED rows in workflow finalization phase-2 replay; 0.2.7 collapses the worker claim critical section into one server-side statement (the `horsies_claim` function, schema v10) so the cap-serialization advisory lock is held only across a single statement plus commit, removing the client-stall-while-holding-lock freeze, and changes the equal-queue-priority tie-break from configured queue order to a priority-then-FIFO band; 0.2.6 binds subworkflow tasks to their queue's configured priority so a parameterized child no longer claims at the default priority 100 on a CUSTOM queue; 0.2.5 adds default-on TCP keepalives for remote/pooled Postgres and gives the workflow reaper a grace window so it stops racing in-flight finalizers; 0.2.4 adds per-child memory recycling (`--max-memory-per-child-mb`, off by default), fixes a latent count-recycle hang (CPython gh-115634), and gates worker log color to TTYs; 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
+summary: Notable changes per release. 0.3.1 makes the workflow retention deletes plan onto their index via whole-table expression statistics (schema v14) and raises the documented PostgreSQL floor to 14+; 0.3.0 fails sync send/schedule closed inside a running event loop (`ASYNC_CONTEXT`, payload-carrying, completable via `retry_*_async`), adds `schedule_async`/`retry_schedule_async`, makes service-loop death process-fatal, fixes the TASK_EXPIRED workflow finalize gap and the recycle spawn-failure pool wedge, and adds the workflows retention index (schema v13); 0.2.9 fixes the cancel/completion lock-order deadlock (40P01 under concurrent cancel) and fences finalize/recovery/ownership-confirm statements to the claim generation so a stale attempt cannot clobber a re-claimed one, schema v12 (`horsies_claim` returns `claimed_at`, heartbeat retention index); 0.2.8 replaces the latest-per-worker `DISTINCT ON` scan with a recursive skip-scan, adds retention eligibility indexes (schema v11), batches retention deletes, makes the worker-state snapshot cadence configurable (`worker_state_snapshot_interval_ms`, default 30s, was hardcoded 5s), enforces per-queue `max_concurrency` without `queue_priorities`, and accepts EXPIRED rows in workflow finalization phase-2 replay; 0.2.7 collapses the worker claim critical section into one server-side statement (the `horsies_claim` function, schema v10) so the cap-serialization advisory lock is held only across a single statement plus commit, removing the client-stall-while-holding-lock freeze, and changes the equal-queue-priority tie-break from configured queue order to a priority-then-FIFO band; 0.2.6 binds subworkflow tasks to their queue's configured priority so a parameterized child no longer claims at the default priority 100 on a CUSTOM queue; 0.2.5 adds default-on TCP keepalives for remote/pooled Postgres and gives the workflow reaper a grace window so it stops racing in-flight finalizers; 0.2.4 adds per-child memory recycling (`--max-memory-per-child-mb`, off by default), fixes a latent count-recycle hang (CPython gh-115634), and gates worker log color to TTYs; 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
 related: [./monitoring/worker-health, ./migrations/migration-to-0-1-2, ./internals/serialization]
-tags: [changelog, releases, breaking-changes, 0.3.0, 0.2.9, 0.2.8, 0.2.7, 0.2.6, 0.2.5, 0.2.4, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
+tags: [changelog, releases, breaking-changes, 0.3.1, 0.3.0, 0.2.9, 0.2.8, 0.2.7, 0.2.6, 0.2.5, 0.2.4, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
 ---
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
@@ -10,6 +10,35 @@ horsies is pre-1.0: breaking changes may land in minor or patch releases, and
 there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
+
+## 0.3.1 — 2026-07-24
+
+The workflow retention DELETEs plan onto their v13 index. Schema v14 — two
+expression-statistics objects plus an ANALYZE, applied automatically by the
+broker's advisory-locked schema init on next startup. Documented PostgreSQL
+floor raised from 12+ to 14+.
+
+The planner never uses statistics gathered on a partial index for
+whole-table selectivity, so the v11/v13 retention indexes provided no
+estimate for their own COALESCE expressions and the retention cutoff was
+costed at the default 1/3 selectivity. Index-vs-walk then depends on table
+size alone: at 1M retained tasks the heap walk is expensive enough that the
+index wins regardless; at 36k retained workflows the planner kept a
+full-table walk — estimate 12,245 vs 13 actual, 4–5 s per statement, two
+statements per hourly reaper pass, independent of eligible-row count — and
+the same misestimate degraded the NOT EXISTS guard into a seq scan of the
+1M-row tasks table whenever the outer side did use the index. v14 creates
+`CREATE STATISTICS ... ON (<retention COALESCE>)` objects for
+`horsies_tasks` and `horsies_workflows` — whole-table expression statistics
+the planner does use — and runs ANALYZE in the same migration transaction;
+extended statistics are empty until the table is analyzed after their
+creation, and ANALYZE is sampled, takes SHARE UPDATE EXCLUSIVE, and never
+blocks reads or writes. Measured at 1M tasks / 36k workflows / 144k
+workflow_tasks with the shipped statements: workflows delete 98 ms →
+7.7 ms, workflow_tasks delete 413 ms → 34 ms. No statement changes.
+
+`CREATE STATISTICS ON (expression)` requires PostgreSQL 14, so the
+documented floor moves from 12+ to 14+ (12 and 13 are past end-of-life).
 
 ## 0.3.0 — 2026-07-23
 
