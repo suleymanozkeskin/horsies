@@ -65,18 +65,46 @@ from sqlalchemy import text
 #      serial under FOR UPDATE, regardless of how few rows were eligible.
 #      Completes the v11/v12 retention-index set (tasks, worker_states,
 #      heartbeats, now workflows).
-#      Also ANALYZE on the expression-indexed tables: an expression index
-#      has no pg_statistic rows until the table is ANALYZEd after the
-#      index exists, so between the migration and the next autoanalyze the
-#      planner still costs the expression predicate at default selectivity
-#      and keeps the pre-index plan — on a slow-churn table that window is
-#      hours to days. Every migration that adds an expression index must
-#      ANALYZE the table in the same block.
+#
+# v14: extended expression statistics for the retention predicates, plus
+#      ANALYZE. The planner never uses statistics gathered on a PARTIAL
+#      index for whole-table selectivity (they describe only rows
+#      satisfying the index predicate), so the v11/v13 retention indexes
+#      provide no estimate for their own COALESCE expressions — the
+#      planner costs the cutoff comparison at the default 1/3 selectivity.
+#      Whether the retention DELETE then uses its index is a coin flip on
+#      table size: at 1M retained tasks the walk is expensive enough that
+#      the index wins anyway; at 36k retained workflows the planner kept a
+#      full-table walk (est 12k eligible vs 13 actual, 4-5s per statement
+#      per hourly pass) and the misestimate also degraded the not-exists
+#      guard into a seq scan of the 1M-row tasks table. CREATE STATISTICS
+#      ON (expression) (PostgreSQL 14+, the supported floor) builds
+#      whole-table expression statistics the planner does use; with them
+#      the estimate collapses to the true trickle and both the index scan
+#      and the per-row guard probe are chosen. ANALYZE populates the
+#      statistics objects in the same transaction — extended statistics
+#      are empty until the table is analyzed after their creation.
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
+""")
+
+# The COALESCE expressions must stay structurally identical (same columns,
+# same order) to the retention indexes in schemas/indexes.py and the
+# retention DELETEs in worker/sql.py — the planner matches parsed
+# expressions, and a drifted column list silently loses the statistics.
+CREATE_TASKS_RETENTION_STATISTICS_SQL = text("""
+    CREATE STATISTICS IF NOT EXISTS stx_horsies_tasks_retention
+    ON (COALESCE(completed_at, failed_at, updated_at, created_at))
+    FROM horsies_tasks;
+""")
+
+CREATE_WORKFLOWS_RETENTION_STATISTICS_SQL = text("""
+    CREATE STATISTICS IF NOT EXISTS stx_horsies_workflows_retention
+    ON (COALESCE(completed_at, updated_at, created_at))
+    FROM horsies_workflows;
 """)
 
 # ANALYZE is sampled (bounded by default_statistics_target regardless of
