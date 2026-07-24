@@ -42,12 +42,24 @@ fn test_worker_binary() -> String {
         .into_owned()
 }
 
+/// ERE for `pgrep -f`/`pkill -f` that matches only a spawned worker binary's
+/// command line — argv[0] is a path ending in the binary name — and never a
+/// command line that merely mentions the name as an argument.
+///
+/// The unanchored name matched `cargo test -p horsies-test-worker --test
+/// pgbouncer_contract ...` itself: procps (Linux) matches `-f` patterns
+/// against every process's full argv, including the caller's own ancestors,
+/// which BSD pkill (macOS) excludes by default. On CI the stale-worker sweep
+/// SIGTERMed cargo mid-run — the step exited 143 ("Terminated") while the
+/// orphaned test binary finished and reported all tests passed.
+const WORKER_PROCESS_PATTERN: &str = "(^|/)horsies-test-worker( |$)";
+
 /// Kill any leftover horsies-test-worker processes from previous tests.
 ///
 /// SIGTERM first (graceful), SIGKILL after 3s if needed.
 pub fn kill_stale_workers() {
     let result = Command::new("pgrep")
-        .args(["-f", "horsies-test-worker"])
+        .args(["-f", WORKER_PROCESS_PATTERN])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -55,13 +67,13 @@ pub fn kill_stale_workers() {
     if result.map(|s| s.success()).unwrap_or(false) {
         // Graceful SIGTERM first.
         let _ = Command::new("pkill")
-            .args(["-TERM", "-f", "horsies-test-worker"])
+            .args(["-TERM", "-f", WORKER_PROCESS_PATTERN])
             .status();
         std::thread::sleep(Duration::from_secs(1));
 
         // Check if still running.
         let still_running = Command::new("pgrep")
-            .args(["-f", "horsies-test-worker"])
+            .args(["-f", WORKER_PROCESS_PATTERN])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -70,7 +82,7 @@ pub fn kill_stale_workers() {
 
         if still_running {
             let _ = Command::new("pkill")
-                .args(["-9", "-f", "horsies-test-worker"])
+                .args(["-9", "-f", WORKER_PROCESS_PATTERN])
                 .status();
             std::thread::sleep(Duration::from_secs(1));
         }
