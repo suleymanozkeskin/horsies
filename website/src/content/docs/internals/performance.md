@@ -1,7 +1,7 @@
 ---
 title: Performance
 summary: Measured per-statement latencies of the hot path under a real workload shape, and what governs them.
-related: [../questions-and-answers, database-schema, operational-indexes]
+related: [../../questions-and-answers, database-schema, operational-indexes]
 tags: [internals, performance, latency, postgres]
 ---
 
@@ -47,4 +47,4 @@ saturates. Headroom scales with the instance tier.
 Results scale with the Postgres instance: a PlanetScale Postgres and a
 Heroku Postgres will not perform the same, and a transaction-pooled
 connection path taxes every round trip. Deployment guidance:
-[Throughput expectations](../questions-and-answers#throughput-expectations-and-comparisons).
+[Throughput expectations](../../questions-and-answers#throughput-expectations-and-comparisons).
