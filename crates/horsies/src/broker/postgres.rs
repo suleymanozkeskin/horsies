@@ -4017,6 +4017,8 @@ mod set_running_heartbeat_tests {
     //! Pin that the CLAIMED -> RUNNING transition writes the first runner
     //! heartbeat atomically (parity with horsies PR #134): an applied transition
     //! leaves a 'runner' heartbeat row; a non-applied one writes none.
+    use chrono::DurationRound;
+
     use super::*;
     use serial_test::serial;
     use uuid::Uuid;
@@ -4133,7 +4135,12 @@ mod set_running_heartbeat_tests {
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
-        let good_until = Utc::now() + chrono::Duration::hours(1);
+        // timestamptz stores microseconds; truncate so the round-trip compares
+        // equal on nanosecond-resolution clocks (Linux). Without it this
+        // passes only where Utc::now() already yields whole microseconds.
+        let good_until = (Utc::now() + chrono::Duration::hours(1))
+            .duration_trunc(chrono::Duration::microseconds(1))
+            .expect("truncate to microseconds");
         sqlx::query(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs,
