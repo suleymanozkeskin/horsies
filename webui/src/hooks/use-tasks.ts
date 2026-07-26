@@ -61,14 +61,21 @@ export function useTaskStats(filters: TaskFilters): {
 
 export function useFacets(scope: {
   status?: string[];
+  error_category?: string[];
   retried_only?: boolean;
 }): { facets: Facets | undefined; isError: boolean } {
   const mode = useLiveMode();
   const status = scope.status ?? [];
+  const errorCategory = scope.error_category ?? [];
   const retriedOnly = scope.retried_only ?? false;
   const { data, isError } = useQuery({
-    queryKey: queryKeys.taskFacets(status, retriedOnly),
-    queryFn: () => getFacets({ status, retried_only: retriedOnly }),
+    queryKey: queryKeys.taskFacets(status, errorCategory, retriedOnly),
+    queryFn: () =>
+      getFacets({
+        status,
+        error_category: errorCategory,
+        retried_only: retriedOnly,
+      }),
     refetchInterval: fallbackInterval(mode, POLL_FACETS_MS),
   });
   return { facets: data, isError };

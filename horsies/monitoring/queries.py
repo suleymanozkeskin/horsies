@@ -24,8 +24,10 @@ from sqlalchemy import (
     ColumnElement,
     Select,
     SQLColumnExpression,
+    and_,
     func,
     nulls_last,
+    or_,
     select,
 )
 from sqlalchemy.exc import SQLAlchemyError
@@ -38,6 +40,7 @@ from horsies.core.models.task_pg import (
     TaskModel,
 )
 from horsies.core.models.tasks import (
+    BUILTIN_CODE_REGISTRY,
     ContractCode,
     OperationalErrorCode,
     OutcomeCode,
@@ -151,6 +154,25 @@ _CODE_TO_CATEGORY: dict[str, ErrorCategory] = {
     **{member.value: ErrorCategory.RETRIEVAL for member in RetrievalCode},
     **{member.value: ErrorCategory.OUTCOME for member in OutcomeCode},
 }
+
+# The codes each built-in family selects when filtering, inverted from the
+# mapping above so a filter selects exactly the codes that mapping labels.
+_CATEGORY_TO_CODES: dict[ErrorCategory, tuple[str, ...]] = {
+    category: tuple(
+        code for code, member in _CODE_TO_CATEGORY.items() if member is category
+    )
+    for category in (
+        ErrorCategory.OPERATIONAL,
+        ErrorCategory.CONTRACT,
+        ErrorCategory.RETRIEVAL,
+        ErrorCategory.OUTCOME,
+    )
+}
+
+# Every code horsies defines. DOMAIN is the complement of this set, read from
+# core's registry rather than a copy, so a code added to the library leaves the
+# DOMAIN filter the moment it is registered.
+_BUILTIN_CODES: tuple[str, ...] = tuple(BUILTIN_CODE_REGISTRY)
 
 
 # --------------------------------------------------------------------------- #
@@ -345,6 +367,30 @@ def _node_exec_s(
 # --------------------------------------------------------------------------- #
 # Filter assembly
 # --------------------------------------------------------------------------- #
+def _category_predicate(category: ErrorCategory) -> ColumnElement[bool]:
+    """The condition selecting tasks in one taxonomy family.
+
+    A built-in family expands to its member codes. DOMAIN is their complement:
+    any non-empty code the library does not define, which is exactly what
+    ``categorize_error_code`` labels DOMAIN. Expansion happens here rather than
+    in a caller so no client has to carry a copy of the code lists.
+    """
+    match category:
+        case ErrorCategory.DOMAIN:
+            return and_(
+                TaskModel.error_code.is_not(None),
+                TaskModel.error_code != '',
+                TaskModel.error_code.not_in(_BUILTIN_CODES),
+            )
+        case (
+            ErrorCategory.OPERATIONAL
+            | ErrorCategory.CONTRACT
+            | ErrorCategory.RETRIEVAL
+            | ErrorCategory.OUTCOME
+        ):
+            return TaskModel.error_code.in_(_CATEGORY_TO_CODES[category])
+
+
 def _scope_conditions(
     *,
     statuses: list[TaskStatus],
@@ -352,13 +398,17 @@ def _scope_conditions(
     queues: list[str],
     workers: list[str],
     error_codes: list[str],
+    error_categories: list[ErrorCategory],
     retried_only: bool,
 ) -> list[ColumnElement[bool]]:
     """Build the WHERE conditions for the given task filters.
 
     Each dimension is multi-select: values within a dimension are OR-combined
     and dimensions are AND-combined. An empty list means no filter on that
-    dimension. ``retried_only`` keeps only tasks retried at least once.
+    dimension. ``error_categories`` is the coarse form of ``error_codes`` and
+    is an independent dimension: each family expands to a code predicate and
+    the families are OR-combined. ``retried_only`` keeps only tasks retried at
+    least once.
     """
     conditions: list[ColumnElement[bool]] = []
     if statuses:
@@ -371,6 +421,10 @@ def _scope_conditions(
         conditions.append(TaskModel.claimed_by_worker_id.in_(workers))
     if error_codes:
         conditions.append(TaskModel.error_code.in_(error_codes))
+    if error_categories:
+        conditions.append(
+            or_(*(_category_predicate(category) for category in error_categories))
+        )
     if retried_only:
         conditions.append(TaskModel.retry_count > 0)
     return conditions
@@ -416,6 +470,7 @@ async def task_stats(
     queues: list[str],
     workers: list[str],
     error_codes: list[str],
+    error_categories: list[ErrorCategory],
     retried_only: bool,
 ) -> MonitoringResult[list[StatusCount]]:
     """Task counts by status, for the overview cards.
@@ -430,6 +485,7 @@ async def task_stats(
         queues=queues,
         workers=workers,
         error_codes=error_codes,
+        error_categories=error_categories,
         retried_only=retried_only,
     )
     stmt = (
@@ -455,6 +511,7 @@ async def task_facets(
     broker: PostgresBroker,
     *,
     statuses: list[TaskStatus],
+    error_categories: list[ErrorCategory],
     retried_only: bool,
 ) -> MonitoringResult[Facets]:
     """Distinct workers, task names, queues, and error codes, with counts.
@@ -463,6 +520,12 @@ async def task_facets(
     by worker/task_name/queue/error_code, so changing one of those selections
     never empties the others' option lists. ``error_category_totals`` is
     computed over the uncapped error-code list; the returned list is capped.
+
+    ``error_categories`` narrows the returned code list to the selected
+    families, which is how the code dropdown follows the taxonomy selection.
+    It deliberately does not scope the totals: those totals are what the
+    taxonomy strip offers as its own options, and a control that hid the
+    families you have not picked could not express a second selection.
     """
     scope = _scope_conditions(
         statuses=statuses,
@@ -470,6 +533,7 @@ async def task_facets(
         queues=[],
         workers=[],
         error_codes=[],
+        error_categories=[],
         retried_only=retried_only,
     )
     workers_stmt = _facet_statement(
@@ -515,12 +579,19 @@ async def task_facets(
             category_totals.get(facet.category, 0) + facet.count
         )
 
+    selected = {category.value for category in error_categories}
+    listed = (
+        error_facets
+        if not selected
+        else [facet for facet in error_facets if facet.category in selected]
+    )
+
     return Ok(
         Facets(
             workers=_facet_values(worker_rows),
             task_names=_facet_values(name_rows),
             queues=_facet_values(queue_rows),
-            error_codes=error_facets[:_ERROR_FACET_CAP],
+            error_codes=listed[:_ERROR_FACET_CAP],
             error_category_totals=category_totals,
         )
     )
@@ -535,6 +606,7 @@ async def task_breakdown(
     queues: list[str],
     workers: list[str],
     error_codes: list[str],
+    error_categories: list[ErrorCategory],
     retried_only: bool,
     limit: int,
 ) -> MonitoringResult[Breakdown]:
@@ -552,6 +624,7 @@ async def task_breakdown(
         queues=queues,
         workers=workers,
         error_codes=error_codes,
+        error_categories=error_categories,
         retried_only=retried_only,
     )
 
@@ -648,6 +721,7 @@ async def list_tasks(
     queues: list[str],
     workers: list[str],
     error_codes: list[str],
+    error_categories: list[ErrorCategory],
     retried_only: bool,
     sort_by: TaskSortField,
     sort_dir: SortDirection,
@@ -669,6 +743,7 @@ async def list_tasks(
         queues=queues,
         workers=workers,
         error_codes=error_codes,
+        error_categories=error_categories,
         retried_only=retried_only,
     )
     count_stmt = select(func.count()).select_from(TaskModel).where(*scope)

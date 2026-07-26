@@ -30,8 +30,11 @@ export type QueryRoot = (typeof QUERY_ROOT)[keyof typeof QUERY_ROOT];
 export const queryKeys = {
   taskStats: (filters: TaskFilters) =>
     [QUERY_ROOT.taskStats, filters] as const,
-  taskFacets: (status: string[], retriedOnly: boolean) =>
-    [QUERY_ROOT.taskFacets, status, retriedOnly] as const,
+  taskFacets: (
+    status: string[],
+    errorCategory: string[],
+    retriedOnly: boolean
+  ) => [QUERY_ROOT.taskFacets, status, errorCategory, retriedOnly] as const,
   taskBreakdown: (groupBy: GroupBy, filters: TaskFilters) =>
     [QUERY_ROOT.taskBreakdown, groupBy, filters] as const,
   taskList: (

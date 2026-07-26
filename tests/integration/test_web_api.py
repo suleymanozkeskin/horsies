@@ -342,6 +342,64 @@ class TestTaskReads:
         assert response.status_code == 404
         assert response.json()['detail'] == 'Task not found.'
 
+    async def test_error_category_filters_every_task_surface(
+        self, api: AsyncClient, session: AsyncSession
+    ) -> None:
+        """One repeatable param, expanded to codes by the query layer."""
+        await persist(
+            session,
+            make_task(status=TaskStatus.FAILED, error_code='TASK_EXCEPTION'),
+            make_task(status=TaskStatus.FAILED, error_code='PAYMENT_DECLINED'),
+        )
+        scope = 'error_category=OPERATIONAL'
+
+        listing = (await api.get(f'/api/tasks?{scope}')).json()
+        stats = (await api.get(f'/api/tasks/stats?{scope}')).json()
+        breakdown = (
+            await api.get(f'/api/tasks/breakdown?group_by=task_name&{scope}')
+        ).json()
+        facets = (await api.get(f'/api/tasks/facets?{scope}')).json()
+
+        assert [row['error_code'] for row in listing['rows']] == ['TASK_EXCEPTION']
+        assert sum(row['count'] for row in stats) == 1
+        assert breakdown['total']['total'] == 1
+        # The code list follows the selection; the strip's own totals do not,
+        # so the categories it does not have selected stay offerable.
+        assert [f['value'] for f in facets['error_codes']] == ['TASK_EXCEPTION']
+        assert facets['error_category_totals'] == {'OPERATIONAL': 1, 'DOMAIN': 1}
+
+    async def test_repeated_error_category_params_are_or_combined(
+        self, api: AsyncClient, session: AsyncSession
+    ) -> None:
+        await persist(
+            session,
+            make_task(status=TaskStatus.FAILED, error_code='TASK_EXCEPTION'),
+            make_task(status=TaskStatus.CANCELLED, error_code='TASK_CANCELLED'),
+            make_task(status=TaskStatus.FAILED, error_code='PAYMENT_DECLINED'),
+        )
+
+        body = (
+            await api.get('/api/tasks?error_category=OUTCOME&error_category=DOMAIN')
+        ).json()
+
+        assert {row['error_code'] for row in body['rows']} == {
+            'TASK_CANCELLED',
+            'PAYMENT_DECLINED',
+        }
+
+    @pytest.mark.parametrize(
+        'path',
+        ['/api/tasks', '/api/tasks/stats', '/api/tasks/breakdown', '/api/tasks/facets'],
+    )
+    async def test_unknown_error_category_is_a_bad_request(
+        self, api: AsyncClient, path: str
+    ) -> None:
+        """An unknown family cannot be expanded, so it is rejected, not ignored."""
+        response = await api.get(f'{path}?error_category=NOT_A_FAMILY')
+
+        assert response.status_code == 400
+        assert response.json()['detail'] == "Unknown error category 'NOT_A_FAMILY'."
+
 
 @pytest.mark.usefixtures('clean_tables')
 class TestWorkflowReads:

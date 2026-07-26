@@ -31,6 +31,7 @@ const buildParams = (
   setDimension('queue', filters.queue);
   setDimension('worker', filters.worker);
   setDimension('error_code', filters.error_code);
+  setDimension('error_category', filters.error_category);
   if (filters.retried_only === true) {
     params.retried_only = 'true';
   }
@@ -48,14 +49,23 @@ export const getTaskStats = (
   return apiGet<StatusCount[]>('/tasks/stats', buildParams(rest));
 };
 
-/** Scoped distinct filter values (with counts) for the filter comboboxes. */
+/** Scoped distinct filter values (with counts) for the filter comboboxes.
+ * `error_category` narrows the error-code list only: the per-category totals
+ * come back whole, because they are what the taxonomy strip offers. */
 export const getFacets = (
-  scope: { status?: string[]; retried_only?: boolean } = {}
+  scope: {
+    status?: string[];
+    error_category?: string[];
+    retried_only?: boolean;
+  } = {}
 ): Promise<Facets> =>
   apiGet<Facets>(
     '/tasks/facets',
     buildParams({
       ...(scope.status === undefined ? {} : { status: scope.status }),
+      ...(scope.error_category === undefined
+        ? {}
+        : { error_category: scope.error_category }),
       ...(scope.retried_only === undefined
         ? {}
         : { retried_only: scope.retried_only }),

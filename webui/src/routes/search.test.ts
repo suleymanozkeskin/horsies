@@ -62,6 +62,22 @@ describe('task search validation', () => {
   it('ignores empty strings so a blank param never becomes a filter', () => {
     expect(validateTaskSearch({ task: '', status: '' })).toEqual({});
   });
+
+  it('round-trips one or many error categories', () => {
+    expect(validateTaskSearch({ error_category: 'DOMAIN' })).toEqual({
+      error_category: ['DOMAIN'],
+    });
+    expect(
+      validateTaskSearch({ error_category: ['OPERATIONAL', 'OUTCOME'] })
+    ).toEqual({ error_category: ['OPERATIONAL', 'OUTCOME'] });
+  });
+
+  it('drops an unknown error category instead of forwarding a 400', () => {
+    expect(validateTaskSearch({ error_category: 'NOT_A_FAMILY' })).toEqual({});
+    expect(
+      validateTaskSearch({ error_category: ['CONTRACT', 'NOT_A_FAMILY'] })
+    ).toEqual({ error_category: ['CONTRACT'] });
+  });
 });
 
 describe('filters extracted from the URL', () => {
@@ -78,6 +94,23 @@ describe('filters extracted from the URL', () => {
       worker: ['box-1'],
       retried_only: true,
     });
+  });
+
+  it('passes the error category through as its own dimension', () => {
+    const search = validateTaskSearch({
+      error_category: ['OPERATIONAL'],
+      error_code: 'TASK_EXCEPTION',
+    });
+    expect(filtersFromSearch(search)).toEqual({
+      error_category: ['OPERATIONAL'],
+      error_code: ['TASK_EXCEPTION'],
+    });
+  });
+
+  it('counts an error category as an active filter', () => {
+    expect(
+      hasActiveFilters(validateTaskSearch({ error_category: 'DOMAIN' }))
+    ).toBe(true);
   });
 
   it('reports no active filters for a sort-only URL', () => {

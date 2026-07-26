@@ -130,6 +130,9 @@ export interface TaskFilters {
   queue?: string[];
   worker?: string[];
   error_code?: string[];
+  /** Taxonomy families. The server expands each to the codes it covers — the
+   * code lists are the library's, never the client's. */
+  error_category?: string[];
   retried_only?: boolean;
 }
 

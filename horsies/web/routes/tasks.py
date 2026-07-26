@@ -27,6 +27,7 @@ from horsies.monitoring import (
     task_stats,
 )
 from horsies.web.routes._common import (
+    parse_error_categories,
     parse_group_by,
     parse_sort_by,
     parse_statuses,
@@ -44,6 +45,7 @@ def build_router(broker: PostgresBroker) -> APIRouter:
         queue: list[str] = Query(default=[]),
         worker: list[str] = Query(default=[]),
         error_code: list[str] = Query(default=[]),
+        error_category: list[str] = Query(default=[]),
         retried_only: bool = Query(default=False),
     ) -> list[StatusCount]:
         """Task counts by status. Deliberately unscoped by status: the cards
@@ -54,6 +56,7 @@ def build_router(broker: PostgresBroker) -> APIRouter:
             queues=queue,
             workers=worker,
             error_codes=error_code,
+            error_categories=parse_error_categories(error_category),
             retried_only=retried_only,
         )
         if is_err(result):
@@ -63,12 +66,14 @@ def build_router(broker: PostgresBroker) -> APIRouter:
     @router.get('/facets')
     async def read_facets(
         task_status: list[str] = Query(default=[], alias='status'),
+        error_category: list[str] = Query(default=[]),
         retried_only: bool = Query(default=False),
     ) -> Facets:
         """Distinct filter values with counts, scoped only by the coarse filters."""
         result = await task_facets(
             broker,
             statuses=parse_statuses(task_status),
+            error_categories=parse_error_categories(error_category),
             retried_only=retried_only,
         )
         if is_err(result):
@@ -83,6 +88,7 @@ def build_router(broker: PostgresBroker) -> APIRouter:
         queue: list[str] = Query(default=[]),
         worker: list[str] = Query(default=[]),
         error_code: list[str] = Query(default=[]),
+        error_category: list[str] = Query(default=[]),
         retried_only: bool = Query(default=False),
         limit: int = Query(default=50, ge=1, le=500),
     ) -> Breakdown:
@@ -95,6 +101,7 @@ def build_router(broker: PostgresBroker) -> APIRouter:
             queues=queue,
             workers=worker,
             error_codes=error_code,
+            error_categories=parse_error_categories(error_category),
             retried_only=retried_only,
             limit=limit,
         )
@@ -109,6 +116,7 @@ def build_router(broker: PostgresBroker) -> APIRouter:
         queue: list[str] = Query(default=[]),
         worker: list[str] = Query(default=[]),
         error_code: list[str] = Query(default=[]),
+        error_category: list[str] = Query(default=[]),
         retried_only: bool = Query(default=False),
         sort_by: str = Query(default='enqueued_at'),
         sort_dir: Literal['asc', 'desc'] = Query(default='desc'),
@@ -123,6 +131,7 @@ def build_router(broker: PostgresBroker) -> APIRouter:
             queues=queue,
             workers=worker,
             error_codes=error_code,
+            error_categories=parse_error_categories(error_category),
             retried_only=retried_only,
             sort_by=parse_sort_by(sort_by),
             sort_dir=sort_dir,

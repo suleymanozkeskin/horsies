@@ -10,10 +10,19 @@ from __future__ import annotations
 from fastapi import HTTPException, status
 
 from horsies.core.types.status import TaskStatus
-from horsies.monitoring import MonitoringQueryError, TaskGroupBy, TaskSortField
+from horsies.monitoring import (
+    ErrorCategory,
+    MonitoringQueryError,
+    TaskGroupBy,
+    TaskSortField,
+)
 
 _STATUS_BY_VALUE: dict[str, TaskStatus] = {
     member.value: member for member in TaskStatus
+}
+
+_CATEGORY_BY_VALUE: dict[str, ErrorCategory] = {
+    member.value: member for member in ErrorCategory
 }
 
 
@@ -26,6 +35,25 @@ def parse_statuses(values: list[str]) -> list[TaskStatus]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f'Unknown status {value!r}.',
+            )
+        parsed.append(member)
+    return parsed
+
+
+def parse_error_categories(values: list[str]) -> list[ErrorCategory]:
+    """Resolve error-category filter strings against the taxonomy.
+
+    The families are the query layer's vocabulary, not the caller's: an
+    unrecognised name cannot be expanded to codes, so it is a bad request
+    rather than a filter that silently matches nothing.
+    """
+    parsed: list[ErrorCategory] = []
+    for value in values:
+        member = _CATEGORY_BY_VALUE.get(value)
+        if member is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f'Unknown error category {value!r}.',
             )
         parsed.append(member)
     return parsed
