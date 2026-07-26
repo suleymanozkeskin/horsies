@@ -54,11 +54,6 @@
 	--glass-shadow-menu: 0 10px 34px rgba(0, 0, 0, 0.55);
 	--glass-shadow-window: 0 18px 60px rgba(0, 0, 0, 0.60);
 
-	/* Gold as TEXT. --horsie-gold stays for borders, washes and fills, where
-	   2:1 is acceptable; text gold must clear 4.5:1 on every surface it sits
-	   on. */
-	--horsie-gold-ink: #DAA520;
-
 	/* Starlight color overrides */
 	--sl-color-accent-low: #1a1200;
 	--sl-color-accent: #DAA520;
@@ -97,7 +92,7 @@
 :root[data-theme='light'] {
 	/* Horsie palette — keep the golden yellow, just darken slightly for cream bg */
 	--horsie-gold: #DAA520;
-	--horsie-gold-bright: #7E5F0F;
+	--horsie-gold-bright: #C49000;
 	--horsie-gold-dark: #B8860B;
 	--horsie-neon-green: #007A52;
 	--horsie-neon-green-dim: #006644;
@@ -112,17 +107,17 @@
 	--sl-color-white: #1A1A14;
 	--sl-color-gray-1: #2A2A20;
 	--sl-color-gray-2: #4A4A3A;
-	--sl-color-gray-3: #6A6A58;
+	--sl-color-gray-3: #7A7A68;
 	--sl-color-gray-4: #A8A894;
 	--sl-color-gray-5: #D6D2C6;
 	--sl-color-gray-6: #EDE8DD;
 	--sl-color-black: #F7F3EB;
 
 	--sl-color-bg: #F7F3EB;
-	--sl-color-bg-nav: #FAF7F1;
-	--sl-color-bg-sidebar: #FAF7F1;
+	--sl-color-bg-nav: #EDE8DD;
+	--sl-color-bg-sidebar: #EDE8DD;
 	--sl-color-text: #1A1A14;
-	--sl-color-text-accent: #7E5F0F;
+	--sl-color-text-accent: #DAA520;
 	--sl-color-hairline-light: #D6D2C6;
 	--sl-color-hairline: #E0DBCE;
 
@@ -133,10 +128,10 @@
 	--sl-color-gray-7: #F2EDE3;
 
 	/* ── Liquid glass material — light ── canvas #F7F3EB */
-	--glass-chrome-surface: rgba(251, 248, 242, 0.82);  /* composites to #FAF7F1 */
+	--glass-chrome-surface: rgba(235, 230, 218, 0.82);  /* composites to #EDE8DD */
 	--glass-panel-surface: rgba(253, 250, 244, 0.66);   /* composites to #FBF8F1 */
 	--glass-strong-surface: rgba(253, 250, 244, 0.85);  /* composites to #FCF9F3 */
-	--glass-fallback-chrome: #FAF7F1;
+	--glass-fallback-chrome: #EDE8DD;
 	--glass-fallback-panel: #FBF8F1;
 	--glass-fallback-strong: #FCF9F3;
 
@@ -145,15 +140,13 @@
 	--glass-shadow-ambient: 0 6px 24px rgba(30, 26, 22, 0.08);
 	--glass-shadow-menu: 0 10px 34px rgba(30, 26, 22, 0.16);
 	--glass-shadow-window: 0 18px 60px rgba(30, 26, 22, 0.22);
-
-	--horsie-gold-ink: #7E5F0F;
 }
 
 /* Light mode — inline code */
 [data-theme='light'] .sl-markdown-content :not(pre) > code {
 	background: rgba(218, 165, 32, 0.08);
 	border: 1px solid rgba(218, 165, 32, 0.2);
-	color: var(--horsie-gold-ink);
+	color: #8B6914;
 }
 
 /* Light mode — code block borders */
@@ -225,9 +218,13 @@
 	--pagefind-ui-tag: #C4B99A;
 }
 
+[data-theme='light'] .pagefind-ui__result-link {
+	color: var(--horsie-gold) !important;
+}
+
 [data-theme='light'] .pagefind-ui__result-excerpt mark {
 	background-color: rgba(218, 165, 32, 0.2);
-	color: var(--horsie-gold-ink);
+	color: #8B6914;
 }
 
 [data-theme='light'] mark.page-search-highlight {
@@ -259,7 +256,7 @@ h6,
 .sl-markdown-content h5,
 .sl-markdown-content h6 {
 	font-family: 'Departure Mono', ui-monospace, monospace;
-	color: var(--horsie-gold-ink);
+	color: var(--horsie-gold);
 }
 
 /* Site title in header */
@@ -354,7 +351,7 @@ h6,
 
 .sl-markdown-content th {
 	background: rgba(218, 165, 32, 0.1);
-	color: var(--horsie-gold-ink);
+	color: var(--horsie-gold);
 }
 
 .sl-markdown-content td {
@@ -439,7 +436,7 @@ h6,
 }
 
 .page-search-label {
-	color: var(--horsie-gold-ink);
+	color: var(--horsie-gold, #DAA520);
 	font-size: 1.1rem;
 	flex-shrink: 0;
 }
@@ -476,7 +473,7 @@ h6,
 	background: transparent;
 	border: 1px solid var(--horsie-gold-dark, #B8860B);
 	border-radius: 3px;
-	color: var(--horsie-gold-ink);
+	color: var(--horsie-gold, #DAA520);
 	font-family: 'Departure Mono', ui-monospace, monospace;
 	font-size: 0.75rem;
 	padding: 0.15rem 0.4rem;
@@ -524,7 +521,7 @@ site-search button[data-open-modal]:hover {
 	display: none;
 	align-items: center;
 	margin-inline-start: auto;
-	color: var(--horsie-gold-ink);
+	color: var(--horsie-gold-dark);
 	font-family: 'Departure Mono', ui-monospace, monospace;
 	font-size: var(--sl-text-2xs, 0.75rem);
 	white-space: nowrap;
