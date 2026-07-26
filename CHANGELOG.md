@@ -8,6 +8,78 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-27
+
+The web monitoring dashboard: a typed monitoring API in core, registry-free
+task cancel/retry primitives, a mountable FastAPI app plus a `horsies web`
+CLI behind the new `web` extra, and the Acme Clothing showcase application.
+No schema change (v14).
+
+### Added
+
+- `horsies.monitoring` (core, no extra): typed read-query API over tasks,
+  workflows, workers, and schedules (`task_stats`, `task_facets`,
+  `task_breakdown`, `list_tasks`, `get_task_detail`, workflow run/node
+  queries, `list_schedules`), with `error_category` filtering expanded
+  server-side from the built-in code registry. An absent row is `Ok(None)`;
+  `Err` is reserved for database failures.
+- `cancel_task` / `retry_task`: registry-free, single-transaction
+  compare-and-set task actions. A committed cancel cannot be overwritten by
+  claim, finalize, auto-retry, or reaper paths — each carries its own status
+  guard. Retry reuses the task row, preserves attempt history
+  (`retry_count` becomes the highest recorded attempt), never modifies
+  `max_retries` or `good_until` (a task past its deadline is refused, not
+  revived), and emits the queue NOTIFY the insert trigger does not fire for
+  updates. Cancelling a RUNNING task requires `include_running=True`: the row
+  flips durably but the process keeps executing and no attempt row is
+  recorded for that run. Workflow-bound rows are refused — workflow runs are
+  managed only by the workflow primitives.
+- `horsies[web]` extra: `create_monitoring_app(app, *, auth_policy, config)`
+  — a mountable FastAPI monitoring application — and the `horsies web` CLI
+  (app-path form with full features, or registry-less `--database-url` form;
+  the latter supports all reads, task actions, and workflow pause/cancel, but
+  not resuming runs whose next nodes carry `args_from`). The dashboard SPA is
+  bundled into the wheel as static assets; no Node at runtime. The library
+  never owns identity: mounted mode requires an explicit
+  `MonitoringAuthPolicy`, and the CLI is fail-closed — loopback default,
+  trusted-header auth required off-loopback, actions off unless
+  `--enable-actions`, `X-Horsies-Intent: action` required on mutations.
+- No-DDL guarantee for monitoring: brokers constructed by the web layer skip
+  schema migrations (new keyword-only `run_schema_migrations` on
+  `Horsies`/`PostgresBroker`, default unchanged for every existing caller).
+  Schema state is probed and reported as MATCH / MISMATCH / ABSENT / UNKNOWN:
+  mismatch serves reads and refuses actions with 409 `SCHEMA_INCOMPATIBLE`; a
+  database with no horsies schema is reported, never initialized; an
+  unreachable database is UNKNOWN, never conflated with absence.
+- Live updates: one `PostgresListener` per web process on the existing
+  `horsies_task_status` / `horsies_workflow_status` / `horsies_worker_state`
+  channels, coalesced into SSE invalidation events (`GET /api/events`);
+  client polling is a fallback that activates only while the stream is down.
+- `showcase/`: Acme Clothing, a runnable demonstration application — 35
+  tasks, 12 workflow definitions, 31 schedules across all six pattern types,
+  8 scenarios — with deterministic stable-hash failure draws so every run
+  reproduces. Own README, Procfile, docker-compose, and a Quick Start docs
+  page.
+- Agent skills: new `monitoring.md`; `horsies web` added to the CLI
+  reference.
+- CI: `webui` and `showcase` jobs; the release workflow builds the SPA before
+  the wheel and blocks unless the wheel carries the built assets.
+
+### Fixed
+
+- `args_from` envelopes now decode for optional targets. The codec's
+  passthrough matched only a bare `TaskResult[...]` annotation, so the
+  `TaskResult[T, TaskError] | None` form — the documented requirement for
+  `join='any'`/`'quorum'` targets — sent the envelope through the value
+  decoder and failed `WORKER_SERIALIZATION_ERROR` ("reserved key
+  '__h_taskresult_envelope__' in user-originated data") whenever the source
+  resolved in time. Unions are unwrapped before the passthrough test.
+- Documentation: `PostgresConfig` examples wrap `database_url` in
+  `pydantic.SecretStr` (the field's type — plain strings validate at runtime
+  but fail strict type checking), and PEP 695 `type` aliases in `TaskResult`
+  ok slots are documented as unsupported (rejected by strict-serde at startup,
+  HRS-105).
+
 ## [0.3.1] - 2026-07-24
 
 The workflow retention DELETEs plan onto their v13 index. Schema v14 (two
