@@ -23,14 +23,11 @@
   --muted-foreground: #7a7a68;
   --border: #a8a894;
 
-  /* Brand. The gold ramp is shared with the documentation site: base is
-     resting ink in both modes; high marks active borders and hover emphasis;
-     deep completes the ramp. */
+  /* Brand. One gold, identical in both modes — the same #DAA520 the
+     documentation site and syce use. */
   --primary: #daa520;
   --accent: #daa520;
   --ring: #daa520;
-  --accent-high: #c49000;
-  --accent-deep: #b8860b;
 
   /* Status families */
   --success: #007a52;
@@ -111,8 +108,6 @@
   --primary: #daa520;
   --accent: #daa520;
   --ring: #daa520;
-  --accent-high: #ffd700;
-  --accent-deep: #b8860b;
 
   --success: #00ffaa;
   --warning: #ffd700;
