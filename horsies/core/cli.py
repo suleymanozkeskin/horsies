@@ -940,6 +940,21 @@ def web_command(args: argparse.Namespace) -> None:
         logger.error(f'Failed to resolve app: {e}')
         sys.exit(1)
 
+    # An app path carries a registry, and the same strict startup validation
+    # `worker` and `scheduler` run also imports the discovered task modules.
+    # Serving with an empty registry breaks the actions that need it: resuming
+    # a run re-enqueues its READY nodes, and encoding an `args_from` envelope
+    # needs the source task's registered OkT. The `--database-url` form has no
+    # app to import and stays registry-less by design.
+    if args.database_url is None:
+        startup_errors = app.check(live=False)
+        if startup_errors:
+            report = ValidationReport('web-startup')
+            for error in startup_errors:
+                report.add(error)
+            print(report.format_rust_style(), file=sys.stderr)
+            sys.exit(1)
+
     policy = resolve_web_auth_policy(args)
     monitoring_app = create_monitoring_app(
         app,
