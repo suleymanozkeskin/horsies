@@ -36,6 +36,12 @@ export default defineConfig({
 				styleOverrides: {
 					borderColor: 'rgba(0, 255, 170, 0.4)',
 					borderWidth: '2px',
+					// Expressive Code derives a frame's outer radius as
+					// `borderRadius + borderWidth`, so 6 + 2 lands on the 8px
+					// --radius-md in src/styles/custom.css and the code blocks
+					// match the cards. EC builds its frames outside that
+					// stylesheet, so the value is duplicated here, not referenced.
+					borderRadius: '6px',
 				},
 			},
 			social: [

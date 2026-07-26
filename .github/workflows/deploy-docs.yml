@@ -29,6 +29,10 @@ jobs:
         working-directory: website
         run: bun install --frozen-lockfile
 
+      - name: Glass contrast gate
+        working-directory: website
+        run: bun run glass:check
+
       - name: Build site
         working-directory: website
         run: bun run build
