@@ -14,11 +14,20 @@ Root configuration passed to `Horsies(config=AppConfig(...))`.
 Pydantic `BaseModel`, frozen after construction.
 
 ```python
+from pydantic import SecretStr
+
 from horsies import Horsies, AppConfig, PostgresConfig
 
 app = Horsies(config=AppConfig(
-    broker=PostgresConfig(database_url="postgresql+psycopg://user:pass@host/db"),
+    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://user:pass@host/db")),
 ))
+```
+
+`database_url` and `session_database_url` are `SecretStr` fields: a plain
+string validates at runtime, but strict type checkers reject it — wrap with
+`pydantic.SecretStr` explicitly.
+
+```python
 ```
 
 ### Fields
@@ -128,7 +137,7 @@ info = broker.get_task_info("task-uuid", include_result=True)  # sync
 from horsies import PostgresConfig
 
 config = PostgresConfig(
-    database_url="postgresql+psycopg://user:pass@localhost:5432/mydb",
+    database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb"),
 )
 ```
 
@@ -610,6 +619,18 @@ horsies check <module> [--live] [--loglevel LEVEL]
 ```
 
 `--live` adds Phase 4 (broker connectivity). Default `--loglevel` is `WARNING`.
+
+### `horsies web`
+
+```bash
+horsies web <module> [--host 127.0.0.1] [--port 8600] [--auth none|trusted-header] [--enable-actions]
+horsies web --database-url "postgresql+psycopg://..." [--session-database-url URL]
+```
+
+Serves the monitoring dashboard (requires the `web` extra). Fail-closed:
+non-loopback hosts require `--auth trusted-header`; actions are off unless
+`--enable-actions`. Never executes DDL. See `monitoring.md` for the full
+reference including the registry-less capability boundary.
 
 ### `horsies get-docs`
 

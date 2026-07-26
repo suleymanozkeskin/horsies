@@ -57,6 +57,7 @@ export default defineConfig({
 						{ label: 'Defining Workflows', slug: 'quick-start/03-defining-workflows' },
 						{ label: 'Scheduling', slug: 'quick-start/04-scheduling' },
 						{ label: 'Workflow Patterns', slug: 'quick-start/05-workflow-patterns' },
+						{ label: 'Showcase Application', slug: 'quick-start/06-showcase' },
 					],
 				},
 				{
@@ -117,6 +118,9 @@ export default defineConfig({
 						{ label: 'Syce Overview', slug: 'monitoring/syce-overview' },
 						{ label: 'Worker & Database Health', slug: 'monitoring/worker-health' },
 						{ label: 'Broker Methods', slug: 'monitoring/broker-methods' },
+						{ label: 'Web UI Overview', slug: 'monitoring/web-ui-overview' },
+						{ label: 'Web UI Deployment & Auth', slug: 'monitoring/web-ui-deployment' },
+						{ label: 'Action Semantics', slug: 'monitoring/action-semantics' },
 					],
 				},
 				{

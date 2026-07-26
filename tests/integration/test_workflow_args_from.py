@@ -500,6 +500,94 @@ class TestArgsFromInjection:
         assert task_result.is_ok()
         assert task_result.unwrap() == 15
 
+    async def test_worker_deserializes_args_from_into_optional_parameter(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """A quorum node's args_from target is Optional, and still receives it.
+
+        `join='quorum'` requires every args_from target to declare a default,
+        and the documented default is `TaskResult[..., TaskError] | None = None`
+        — a source that never becomes terminal is simply not injected. When the
+        source DOES complete, the envelope has to decode against that Optional
+        annotation, which is the whole point of the pattern.
+        """
+        session, broker, app = setup
+
+        @app.task(task_name='quorum_optional_target')
+        def quorum_optional_target(
+            *,
+            input_result: TaskResult[int, TaskError] | None = None,
+        ) -> TaskResult[int, TaskError]:
+            if input_result is None:
+                return TaskResult(ok=-1)
+            return TaskResult(ok=input_result.unwrap() + 5)
+
+        task_a = make_simple_task(app, 'quorum_optional_a')
+        task_b = make_simple_task(app, 'quorum_optional_b')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 7})
+        node_c = TaskNode(
+            fn=quorum_optional_target,
+            waits_for=[node_a, node_b],
+            args_from={'input_result': node_a},
+            join='quorum',
+            min_success=1,
+        )
+
+        spec = make_workflow_spec(
+            broker=broker,
+            name='quorum_optional',
+            tasks=[node_a, node_b, node_c],
+        )
+        handle = await start_ok(spec, broker)
+
+        # A completing satisfies the quorum on its own, so C is enqueued with
+        # A's result injected.
+        await self._complete_task(
+            session, broker, handle.workflow_id, 0, TaskResult(ok=10)
+        )
+
+        task_row_result = await session.execute(
+            text("""
+                SELECT t.id, t.task_name, t.args, t.kwargs
+                FROM horsies_tasks t
+                JOIN horsies_workflow_tasks wt ON t.id = wt.task_id
+                WHERE wt.workflow_id = :wf_id AND wt.task_index = 2
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        task_row = task_row_result.fetchone()
+        assert task_row is not None
+
+        task_id, task_name, args_json, kwargs_json = task_row
+        assert isinstance(task_id, str)
+        assert isinstance(task_name, str)
+        assert isinstance(args_json, str)
+        assert isinstance(kwargs_json, str)
+
+        await self._claim_task(session, task_id, 'test-worker')
+
+        set_current_app(app)
+        database_url = broker.listener.database_url
+        _initialize_worker_pool(database_url)
+        ok, result_json, worker_failure = _run_task_entry(
+            task_name=task_name,
+            args_json=args_json,
+            kwargs_json=kwargs_json,
+            task_id=task_id,
+            database_url=database_url,
+            master_worker_id='test-worker',
+        )
+        assert ok is True
+        assert worker_failure is None
+
+        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
+        assert task_result.is_ok()
+        # 15, not the -1 sentinel: the envelope decoded rather than being
+        # rejected as user data carrying a reserved key.
+        assert task_result.unwrap() == 15
+
     async def test_failed_dep_skips_downstream_no_injection(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],

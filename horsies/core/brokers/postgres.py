@@ -521,8 +521,19 @@ class PostgresBroker:
       - Operational monitoring (stale tasks, worker stats)
     """
 
-    def __init__(self, config: PostgresConfig, *, assume_initialized: bool = False):
+    def __init__(
+        self,
+        config: PostgresConfig,
+        *,
+        assume_initialized: bool = False,
+        run_schema_migrations: bool = True,
+    ):
         self.config = config
+        # False makes this broker incapable of executing DDL. Read-only
+        # tooling that constructs its own broker sets it so that pointing
+        # the tool at a database can never migrate that database. Owning
+        # the schema stays the app's and the worker's job.
+        self.run_schema_migrations = run_schema_migrations
         self.logger = get_logger('broker')
         self._app: Horsies | None = None  # Set by Horsies.get_broker()
 
@@ -745,6 +756,11 @@ class PostgresBroker:
                 await asyncio.sleep(backoff)
 
     async def _run_schema_migrations(self, engine: AsyncEngine) -> None:
+        if not self.run_schema_migrations:
+            self.logger.info(
+                'Schema migrations are disabled on this broker; skipping DDL'
+            )
+            return
         async with engine.begin() as conn:
             # Acquire every relevant legacy URL-derived key before the new
             # constant key. Sorting keeps new-process lock ordering stable,

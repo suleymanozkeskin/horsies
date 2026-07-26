@@ -40,6 +40,22 @@ def _task_with_upstream(
     ...
 
 
+def _task_with_optional_upstream(
+    upstream_result: TaskResult[int, TaskError] | None,
+) -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
+    """An ``args_from`` target under ``join='any'`` / ``'quorum'``.
+
+    The source may never complete, so the documented annotation admits None.
+    """
+    ...
+
+
+def _task_with_plain_union(
+    payload: int | None,
+) -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
+    ...
+
+
 # Module-level fixtures for the wire-round-trip smoke. `dumps_json`
 # refuses to serialize classes defined inside a test function ("local
 # class can't be imported by the worker"), so the round-trip target
@@ -138,6 +154,46 @@ class TestDecodeStrictBinding:
             {'upstream_result': cast(Json, envelope)},
         )
         assert decoded['upstream_result'] == envelope
+
+    def test_optional_taskresult_kwarg_envelope_passes_through(self) -> None:
+        # `TaskResult[T, TaskError] | None` is the documented annotation for an
+        # args_from target under join='any' / 'quorum'. Its origin is the union,
+        # so an origin-only test sends the envelope to decode_value, which
+        # rejects the reserved envelope key and fails the node.
+        envelope: dict[str, Json] = {
+            '__h_taskresult_envelope__': True,
+            'data': '{"ok":42}',
+        }
+        decoded = decode_kwargs(
+            _task_with_optional_upstream,
+            {'upstream_result': cast(Json, envelope)},
+        )
+        assert decoded['upstream_result'] == envelope
+
+    def test_optional_taskresult_kwarg_accepts_an_absent_source(self) -> None:
+        # The other half of the join='any' contract: no envelope at all.
+        decoded = decode_kwargs(
+            _task_with_optional_upstream,
+            {'upstream_result': None},
+        )
+        assert decoded['upstream_result'] is None
+
+    def test_union_without_taskresult_still_decodes_as_a_value(self) -> None:
+        decoded = decode_kwargs(_task_with_plain_union, {'payload': 42})
+        assert decoded['payload'] == 42
+
+    def test_union_without_taskresult_still_rejects_the_reserved_key(self) -> None:
+        # Only the union-of-TaskResult shape gains passthrough; every other
+        # union keeps decode_value's smuggling guard.
+        smuggled: dict[str, Json] = {'__h_taskresult_envelope__': True}
+        with pytest.raises(
+            StrictJsonError,
+            match="reserved key '__h_taskresult_envelope__'",
+        ):
+            decode_kwargs(
+                _task_with_plain_union,
+                {'payload': cast(Json, smuggled)},
+            )
 
 
 class TestNoHintsFallback:

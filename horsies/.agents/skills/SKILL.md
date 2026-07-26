@@ -16,6 +16,7 @@ skill files in this directory:
 | `tasks.md` | `@app.task`, `TaskResult`, `send()`, `with_options()`, `RetryPolicy`, `ExceptionMapper`, serialization |
 | `workflows.md` | `WorkflowSpec`, `TaskNode`, `WorkflowHandle`, DAG construction, failure semantics |
 | `configs.md` | `AppConfig`, `PostgresConfig`, queues, recovery, recurring scheduling including `CronSchedule`, CLI commands |
+| `monitoring.md` | `horsies.monitoring` query API, `cancel_task`/`retry_task`, the `horsies[web]` dashboard, `create_monitoring_app`, `horsies web`, auth policies, schema states |
 
 All public symbols: `from horsies import <name>`
 
@@ -56,10 +57,12 @@ Note that these are measurements at a reference shape on an entry-tier instance,
 ## Define a Task
 
 ```python
+from pydantic import SecretStr
+
 from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
 
 app = Horsies(config=AppConfig(
-    broker=PostgresConfig(database_url="postgresql+psycopg://..."),
+    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://...")),
 ))
 
 @app.task("add_numbers")

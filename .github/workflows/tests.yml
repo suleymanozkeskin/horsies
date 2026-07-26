@@ -30,3 +30,105 @@ jobs:
 
       - name: Run unit tests
         run: uv run pytest tests/unit/ -v --tb=short
+
+  showcase:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Detect showcase changes
+        id: changed
+        run: |
+          base='${{ github.event.pull_request.base.sha }}'
+          if [ -z "$base" ]; then
+            base='${{ github.event.before }}'
+          fi
+          # Same rule as the webui job: an unknown base runs rather than skips.
+          if [ -z "$base" ] || [ "$base" = '0000000000000000000000000000000000000000' ]; then
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$base" HEAD -- showcase/ horsies/; then
+            echo 'run=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.changed.outputs.run == 'true'
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Install dependencies
+        if: steps.changed.outputs.run == 'true'
+        run: uv sync --dev
+
+      # No --live: this validates config, imports, every workflow DAG, and each
+      # registered builder without a database. It is what keeps the showcase
+      # compiling against the library as the library changes, which is why a
+      # change under horsies/ also triggers this job.
+      - name: Validate showcase app
+        if: steps.changed.outputs.run == 'true'
+        run: uv run horsies check showcase.acme.app:app
+
+      - name: Typecheck showcase
+        if: steps.changed.outputs.run == 'true'
+        run: uv run pyright showcase/
+
+  webui:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Detect webui changes
+        id: changed
+        run: |
+          base='${{ github.event.pull_request.base.sha }}'
+          if [ -z "$base" ]; then
+            base='${{ github.event.before }}'
+          fi
+          # An unknown base (first push to a branch) runs the job rather than
+          # skipping it: a missed check is worse than a redundant one.
+          if [ -z "$base" ] || [ "$base" = '0000000000000000000000000000000000000000' ]; then
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$base" HEAD -- webui/; then
+            echo 'run=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.changed.outputs.run == 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          # webui/bun.lock is lockfileVersion 1; pin a stable bun that reads
+          # and writes that format so --frozen-lockfile stays meaningful.
+          bun-version: "1.3.14"
+
+      - name: Install dependencies
+        if: steps.changed.outputs.run == 'true'
+        working-directory: webui
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        if: steps.changed.outputs.run == 'true'
+        working-directory: webui
+        run: bun run typecheck
+
+      - name: Run tests
+        if: steps.changed.outputs.run == 'true'
+        working-directory: webui
+        # `bun run test` invokes the vitest script; bare `bun test` would run
+        # Bun's own runner against the same files and fail.
+        run: bun run test
+
+      - name: Build
+        if: steps.changed.outputs.run == 'true'
+        working-directory: webui
+        run: bun run build

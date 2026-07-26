@@ -1,0 +1,3 @@
+worker: uv run horsies worker showcase.acme.app:app --processes 12
+scheduler: uv run horsies scheduler showcase.acme.app:app
+web: uv run horsies web showcase.acme.app:app --enable-actions

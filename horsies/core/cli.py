@@ -11,12 +11,13 @@ Module path resolution follows Celery's approach:
 import argparse
 import asyncio
 import importlib
+import ipaddress
 import logging
 import os
 import random
 import signal
 import sys
-from typing import Any
+from typing import Any, NoReturn
 
 from horsies.core.app import Horsies
 from horsies.core.banner import print_banner
@@ -175,9 +176,7 @@ def _max_tasks_per_child(value: str) -> int:
     """
     parsed = int(value)
     if parsed != 0 and parsed < 2:
-        raise argparse.ArgumentTypeError(
-            f'must be >= 2, or 0 to disable, got {parsed}'
-        )
+        raise argparse.ArgumentTypeError(f'must be >= 2, or 0 to disable, got {parsed}')
     return parsed
 
 
@@ -566,7 +565,9 @@ def worker_command(args: argparse.Namespace) -> None:
                 schema_broker = PostgresBroker(worker_postgres_config)
                 schema_broker.app = app
                 try:
-                    logger.info('Ensuring Postgres schema and triggers are initialized...')
+                    logger.info(
+                        'Ensuring Postgres schema and triggers are initialized...'
+                    )
                     await _ensure_schema_with_retry(
                         schema_broker,
                         app.config.resilience,
@@ -804,6 +805,181 @@ def get_docs_command(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+_TRUSTED_HEADER_WARNING = (
+    'SECURITY: the reverse proxy in front of this server MUST strip or '
+    'overwrite the %s header on incoming requests. A proxy that forwards a '
+    'client-supplied header makes this mode trivially spoofable, and horsies '
+    'cannot detect that.'
+)
+
+
+def _web_arg_error(message: str) -> NoReturn:
+    """Report a bad ``horsies web`` invocation and exit 2, as argparse does."""
+    print(f'horsies web: error: {message}', file=sys.stderr)
+    sys.exit(2)
+
+
+def _is_loopback(host: str) -> bool:
+    """Whether a bind address reaches only this machine.
+
+    Anything that is not a recognizable loopback address is treated as
+    exposed, so an unparseable host fails closed rather than open.
+    """
+    if host == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _registryless_app(args: argparse.Namespace) -> Horsies:
+    """Build a task-registry-less app that can only read and act on rows.
+
+    Monitoring never calls task functions, so an app with an empty registry
+    serves every endpoint. Typed result decoding is the one thing it cannot
+    do, which the monitoring surface does not use.
+
+    The broker is built unable to execute DDL: pointing this command at a
+    database must never migrate it.
+    """
+    from pydantic import SecretStr
+
+    from horsies.core.models.app import AppConfig
+    from horsies.core.models.broker import PostgresConfig
+
+    session_url: str | None = args.session_database_url
+    return Horsies(
+        AppConfig(
+            broker=PostgresConfig(
+                database_url=SecretStr(args.database_url),
+                session_database_url=(SecretStr(session_url) if session_url else None),
+                pgbouncer_transaction_mode=args.pgbouncer_transaction_mode,
+            )
+        ),
+        # The monitoring tool never migrates a database it is only reading.
+        run_schema_migrations=False,
+    )
+
+
+def resolve_web_app(args: argparse.Namespace) -> Horsies:
+    """Resolve the app a ``horsies web`` invocation should serve.
+
+    Exactly one source is allowed: a module locator, or a database URL. Both
+    or neither is a usage error.
+    """
+    locator: str | None = args.app_path
+    database_url: str | None = args.database_url
+
+    match (locator is not None, database_url is not None):
+        case (True, True):
+            _web_arg_error('pass either an app path or --database-url, not both')
+        case (False, False):
+            _web_arg_error(
+                'provide an app path (e.g. myapp.tasks:app) or --database-url'
+            )
+        case (True, False):
+            app, _var_name, _module_name, _root = discover_app(str(locator))
+            return app
+        case (False, True):
+            return _registryless_app(args)
+
+
+def resolve_web_auth_policy(args: argparse.Namespace) -> Any:
+    """Build the authorization policy for a ``horsies web`` invocation.
+
+    Binding beyond loopback without a proxy-supplied identity is refused: the
+    default posture is that anyone who can reach the port can read the
+    deployment's task data.
+    """
+    from horsies.web.auth import AllowAll, TrustedHeader, ViewOnly
+
+    host: str = args.host
+    enable_actions: bool = args.enable_actions
+
+    match args.auth:
+        case 'trusted-header':
+            header: str = args.trusted_header
+            if not header.strip():
+                _web_arg_error('--trusted-header requires a header name')
+            print(_TRUSTED_HEADER_WARNING % header, file=sys.stderr)
+            return TrustedHeader(header, allow_actions=enable_actions)
+        case 'none':
+            if not _is_loopback(host):
+                _web_arg_error(
+                    f'--auth none is only allowed on a loopback host; '
+                    f'{host!r} is reachable from the network. Use '
+                    f'--auth trusted-header with a proxy-set header.'
+                )
+            return AllowAll() if enable_actions else ViewOnly()
+        case _:
+            _web_arg_error(f'unknown --auth value {args.auth!r}')
+
+
+def web_command(args: argparse.Namespace) -> None:
+    """Handle the web command — serve the monitoring UI.
+
+    Exit contract: 2 for a bad invocation (argparse convention), 1 when the
+    app cannot be discovered or the web extra is missing.
+    """
+    setup_logging(args.loglevel)
+    logger = get_logger('cli')
+
+    try:
+        from horsies.web import create_monitoring_app
+    except ImportError as e:
+        print(f'error: {e}', file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        app = resolve_web_app(args)
+    except HorsiesError as e:
+        logger.error(str(e))
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f'Failed to resolve app: {e}')
+        sys.exit(1)
+
+    # An app path carries a registry, and the same strict startup validation
+    # `worker` and `scheduler` run also imports the discovered task modules.
+    # Serving with an empty registry breaks the actions that need it: resuming
+    # a run re-enqueues its READY nodes, and encoding an `args_from` envelope
+    # needs the source task's registered OkT. The `--database-url` form has no
+    # app to import and stays registry-less by design.
+    if args.database_url is None:
+        startup_errors = app.check(live=False)
+        if startup_errors:
+            report = ValidationReport('web-startup')
+            for error in startup_errors:
+                report.add(error)
+            print(report.format_rust_style(), file=sys.stderr)
+            sys.exit(1)
+
+    policy = resolve_web_auth_policy(args)
+    monitoring_app = create_monitoring_app(
+        app,
+        auth_policy=policy,
+        actions_enabled=args.enable_actions,
+    )
+
+    try:
+        import uvicorn  # pyright: ignore[reportMissingImports]
+    except ImportError:
+        print(
+            'error: horsies web requires the web extra. Install it with: '
+            "pip install 'horsies[web]'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    host: str = args.host
+    port: int = args.port
+    logger.info(f'Serving horsies monitoring UI on http://{host}:{port}')
+    uvicorn.run(  # pyright: ignore[reportUnknownMemberType]
+        monitoring_app, host=host, port=port
+    )
+
+
 def main() -> None:
     """Main CLI entry point.
 
@@ -953,6 +1129,74 @@ Examples:
             help='Also check broker connectivity (SELECT 1)',
         )
 
+        # Web command
+        web_parser = subparsers.add_parser(
+            'web',
+            help='Serve the monitoring web UI',
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog="""
+Examples:
+  # Full feature set, from your app module
+  horsies web myapp.tasks:app
+
+  # Registry-less: monitor a database directly
+  horsies web --database-url postgresql+psycopg://user:pw@host/db
+
+  # Behind a proxy that authenticates callers and sets the header
+  horsies web myapp.tasks:app --host 0.0.0.0 \\
+      --auth trusted-header --trusted-header X-Forwarded-User --enable-actions
+""",
+        )
+        web_parser.add_argument(
+            'app_path',
+            nargs='?',
+            help='App locator (e.g. myapp.tasks:app); omit when using --database-url',
+        )
+        web_parser.add_argument(
+            '--database-url',
+            help='Monitor a database without importing an app module',
+        )
+        web_parser.add_argument(
+            '--session-database-url',
+            help='Direct/session-capable URL when the main URL is pooled',
+        )
+        web_parser.add_argument(
+            '--pgbouncer-transaction-mode',
+            action='store_true',
+            default=False,
+            help='Disable prepared statements for a transaction-pooled URL',
+        )
+        web_parser.add_argument(
+            '--host', default='127.0.0.1', help='Bind address (default: 127.0.0.1)'
+        )
+        web_parser.add_argument(
+            '--port', type=int, default=8600, help='Bind port (default: 8600)'
+        )
+        web_parser.add_argument(
+            '--auth',
+            choices=['none', 'trusted-header'],
+            default='none',
+            help='Authorization mode (default: none, loopback only)',
+        )
+        web_parser.add_argument(
+            '--trusted-header',
+            default='X-Forwarded-User',
+            help='Identity header set by the proxy (default: X-Forwarded-User)',
+        )
+        web_parser.add_argument(
+            '--enable-actions',
+            action='store_true',
+            default=False,
+            help='Allow cancel/retry/pause/resume (default: view-only)',
+        )
+        web_parser.add_argument(
+            '--loglevel',
+            choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+            default='INFO',
+            type=str.upper,
+            help='Logging level (default: INFO)',
+        )
+
         # Get-docs command
         get_docs_parser = subparsers.add_parser(
             'get-docs',
@@ -973,6 +1217,8 @@ Examples:
                 scheduler_command(args)
             case 'check':
                 check_command(args)
+            case 'web':
+                web_command(args)
             case 'get-docs':
                 get_docs_command(args)
             case _:

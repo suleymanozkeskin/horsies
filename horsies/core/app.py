@@ -119,8 +119,11 @@ class Horsies:
     Requires an AppConfig instance for proper validation and type safety.
     """
 
-    def __init__(self, config: AppConfig):
+    def __init__(self, config: AppConfig, *, run_schema_migrations: bool = True):
         self.config = config
+        # Propagated to the broker this app constructs. See
+        # ``PostgresBroker.run_schema_migrations``.
+        self.run_schema_migrations = run_schema_migrations
         self._broker: Optional['PostgresBroker'] = None
         self._broker_init_lock = threading.Lock()
         self.tasks: TaskRegistry[Callable[..., Any]] = TaskRegistry()
@@ -1043,7 +1046,10 @@ class Horsies:
                             if self._role == 'worker'
                             else self.config.broker
                         )
-                        broker = PostgresBroker(broker_config)
+                        broker = PostgresBroker(
+                            broker_config,
+                            run_schema_migrations=self.run_schema_migrations,
+                        )
                         broker.app = self  # app ref for subworkflow support
                         self._broker = broker
             return self._broker

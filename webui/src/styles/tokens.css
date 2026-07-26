@@ -1,0 +1,168 @@
+/* Canonical horsies palette. Every color value in the web UI is defined here and
+   nowhere else — components reference tokens only, so a palette swap is a
+   single-file change.
+
+   Structure: `:root` holds the light values, `.dark` the dark overrides. The
+   ramp/glass formulas are identical in both blocks; they resolve differently
+   because the base tokens they mix differ.
+
+   This file is the token source and is exempt from `scripts/check-tokens.mjs`,
+   so `white` / `black` / `transparent` literals are permitted HERE and only
+   here. */
+
+:root {
+  /* Corner radius scale root, consumed by the ported components and the grid. */
+  --radius: 0.5rem;
+
+  /* Base surfaces and ink */
+  --background: #f7f3eb;
+  --card: #ede8dd;
+  --popover: #ede8dd;
+  --muted: #d6d2c6;
+  --foreground: #1a1a14;
+  --muted-foreground: #7a7a68;
+  --border: #a8a894;
+
+  /* Brand. One gold, identical in both modes — the same #DAA520 the
+     documentation site and syce use. */
+  --primary: #daa520;
+  --accent: #daa520;
+  --ring: #daa520;
+
+  /* Status families */
+  --success: #007a52;
+  --warning: #c49000;
+  --error: #f47067;
+  --destructive: #f47067;
+  --info: #1e6fb8;
+  --cancelled: #7a7a68;
+
+  /* Shadcn pairings. `--primary` is a saturated gold in both modes, so its ink
+     is the light-mode text token rather than `--foreground` (which inverts). */
+  --card-foreground: var(--foreground);
+  --popover-foreground: var(--foreground);
+  --primary-foreground: #1a1a14;
+  --accent-foreground: #1a1a14;
+  --secondary: var(--muted);
+  --secondary-foreground: var(--foreground);
+  --destructive-foreground: #1a1a14;
+  --input: var(--border);
+
+  /* Interaction surfaces derived from the base tokens. `--accent` is emphasis
+     ink, borders, focus and chart series; a hover or selected SURFACE uses
+     `--accent-surface`, which is the same hue diluted into the background. */
+  --accent-surface: color-mix(in oklab, var(--accent) 12%, var(--background));
+  --table-hover: color-mix(in oklab, var(--muted) 45%, transparent);
+  --surface-muted: color-mix(in oklab, var(--muted) 40%, transparent);
+  --overlay: color-mix(in oklab, var(--foreground) 45%, transparent);
+  --primary-hover: color-mix(in oklab, var(--primary) 88%, var(--foreground));
+  --destructive-hover: color-mix(
+    in oklab,
+    var(--destructive) 88%,
+    var(--foreground)
+  );
+  --secondary-hover: color-mix(in oklab, var(--secondary) 80%, var(--card));
+
+  /* Status ramps required by the ported components */
+  --success-light: color-mix(in oklab, var(--success) 60%, white);
+  --success-medium: color-mix(in oklab, var(--success) 80%, white);
+  --success-dark: color-mix(in oklab, var(--success) 72%, black);
+  --success-bg: color-mix(in oklab, var(--success) 12%, var(--background));
+  --error-light: color-mix(in oklab, var(--error) 60%, white);
+  --error-dark: color-mix(in oklab, var(--error) 72%, black);
+  --error-darker: color-mix(in oklab, var(--error) 55%, black);
+  --error-bg: color-mix(in oklab, var(--error) 12%, var(--background));
+  --warning-light: color-mix(in oklab, var(--warning) 60%, white);
+  --warning-dark: color-mix(in oklab, var(--warning) 72%, black);
+  --warning-bg: color-mix(in oklab, var(--warning) 12%, var(--background));
+  --info-light: color-mix(in oklab, var(--info) 60%, white);
+  --info-dark: color-mix(in oklab, var(--info) 72%, black);
+  --info-darker: color-mix(in oklab, var(--info) 55%, black);
+  --info-bg: color-mix(in oklab, var(--info) 12%, var(--background));
+
+  /* Chart series */
+  --chart-1: var(--primary);
+  --chart-2: var(--success);
+  --chart-3: var(--info);
+  --chart-4: var(--warning);
+  --chart-5: var(--muted-foreground);
+
+  /* Glass tiers */
+  --glass-blur-sm: 8px;
+  --glass-surface: color-mix(in oklab, var(--card) 72%, transparent);
+  --glass-surface-strong: color-mix(in oklab, var(--card) 88%, transparent);
+  --glass-field: color-mix(in oklab, var(--card) 55%, transparent);
+  --glass-table: color-mix(in oklab, var(--card) 65%, transparent);
+  --glass-inset: color-mix(in oklab, var(--muted) 45%, transparent);
+}
+
+.dark {
+  --background: #050505;
+  --card: #0d0d0d;
+  --popover: #0d0d0d;
+  --muted: #1a1a10;
+  --foreground: #f5f5f0;
+  --muted-foreground: #c9c9bc;
+  --border: #5a5a4a;
+
+  --primary: #daa520;
+  --accent: #daa520;
+  --ring: #daa520;
+
+  --success: #00ffaa;
+  --warning: #ffd700;
+  --error: #f47067;
+  --destructive: #f47067;
+  --info: #4ea3e8;
+  --cancelled: #8a8a78;
+
+  --card-foreground: var(--foreground);
+  --popover-foreground: var(--foreground);
+  --primary-foreground: #050505;
+  --accent-foreground: #050505;
+  --secondary: var(--muted);
+  --secondary-foreground: var(--foreground);
+  --destructive-foreground: #050505;
+  --input: var(--border);
+
+  --accent-surface: color-mix(in oklab, var(--accent) 18%, var(--background));
+  --table-hover: color-mix(in oklab, var(--muted) 45%, transparent);
+  --surface-muted: color-mix(in oklab, var(--muted) 40%, transparent);
+  --overlay: color-mix(in oklab, var(--background) 70%, transparent);
+  --primary-hover: color-mix(in oklab, var(--primary) 88%, var(--foreground));
+  --destructive-hover: color-mix(
+    in oklab,
+    var(--destructive) 88%,
+    var(--foreground)
+  );
+  --secondary-hover: color-mix(in oklab, var(--secondary) 80%, var(--card));
+
+  --success-light: color-mix(in oklab, var(--success) 60%, white);
+  --success-medium: color-mix(in oklab, var(--success) 80%, white);
+  --success-dark: color-mix(in oklab, var(--success) 72%, black);
+  --success-bg: color-mix(in oklab, var(--success) 18%, var(--background));
+  --error-light: color-mix(in oklab, var(--error) 60%, white);
+  --error-dark: color-mix(in oklab, var(--error) 72%, black);
+  --error-darker: color-mix(in oklab, var(--error) 55%, black);
+  --error-bg: color-mix(in oklab, var(--error) 18%, var(--background));
+  --warning-light: color-mix(in oklab, var(--warning) 60%, white);
+  --warning-dark: color-mix(in oklab, var(--warning) 72%, black);
+  --warning-bg: color-mix(in oklab, var(--warning) 18%, var(--background));
+  --info-light: color-mix(in oklab, var(--info) 60%, white);
+  --info-dark: color-mix(in oklab, var(--info) 72%, black);
+  --info-darker: color-mix(in oklab, var(--info) 55%, black);
+  --info-bg: color-mix(in oklab, var(--info) 18%, var(--background));
+
+  --chart-1: var(--primary);
+  --chart-2: var(--success);
+  --chart-3: var(--info);
+  --chart-4: var(--warning);
+  --chart-5: var(--muted-foreground);
+
+  --glass-blur-sm: 8px;
+  --glass-surface: color-mix(in oklab, var(--card) 72%, transparent);
+  --glass-surface-strong: color-mix(in oklab, var(--card) 88%, transparent);
+  --glass-field: color-mix(in oklab, var(--card) 55%, transparent);
+  --glass-table: color-mix(in oklab, var(--card) 65%, transparent);
+  --glass-inset: color-mix(in oklab, var(--muted) 45%, transparent);
+}
