@@ -1,13 +1,13 @@
 // Application chrome and the boot-time gates.
 //
-// Three conditions stop the UI before any surface renders: the viewer is not
-// authorized, the database has no horsies schema, or /api/meta is unreachable.
-// A schema mismatch is not a stop — it degrades the whole UI to read-only with a
-// persistent banner.
+// Four conditions stop the UI before any surface renders: the viewer is not
+// authorized, /api/meta is unreachable, the database has no horsies schema, or
+// its schema state could not be determined at all. A schema mismatch is not a
+// stop — it degrades the whole UI to read-only with a persistent banner.
 
 import type { ReactNode } from 'react';
 
-import { AlertTriangle, Database, ShieldOff } from 'lucide-react';
+import { AlertTriangle, Database, DatabaseZap, ShieldOff } from 'lucide-react';
 import { Link, Outlet } from '@tanstack/react-router';
 
 import { CapabilityProvider } from '@/actions/capability';
@@ -18,6 +18,7 @@ import { useMeta } from '@/hooks/use-meta';
 import { ApiError } from '@/lib/http';
 import {
   NO_SCHEMA_MESSAGE,
+  SCHEMA_UNREACHABLE_MESSAGE,
   schemaMismatchMessage,
   schemaState,
 } from '@/lib/schema-state';
@@ -126,6 +127,19 @@ export function AppShell() {
       <FullScreen icon={Database} title="Loading">
         <p className="text-sm text-muted-foreground">
           {isLoading ? 'Contacting the monitoring API…' : 'No data.'}
+        </p>
+      </FullScreen>
+    );
+  }
+
+  // Checked before `absent`: an unreachable database must never be reported as
+  // an uninitialized one, which would tell an operator to initialize a database
+  // that is merely down.
+  if (schemaState(meta) === 'unknown') {
+    return (
+      <FullScreen icon={DatabaseZap} title="Database unreachable">
+        <p className="text-sm text-muted-foreground">
+          {SCHEMA_UNREACHABLE_MESSAGE}
         </p>
       </FullScreen>
     );

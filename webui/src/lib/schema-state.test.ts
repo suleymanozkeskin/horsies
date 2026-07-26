@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { deriveCanAct } from '@/actions/capability';
 import {
   NO_SCHEMA_MESSAGE,
+  SCHEMA_UNREACHABLE_MESSAGE,
   schemaMismatchMessage,
   schemaState,
 } from '@/lib/schema-state';
@@ -37,13 +38,52 @@ describe('schema state', () => {
     ).toBe('mismatch');
   });
 
-  it('reports absent when no version row exists, whatever the compatibility flag says', () => {
+  it('reports absent when a successful probe found no version row', () => {
     expect(
       schemaState(meta({ schema_version: null, schema_compatible: false }))
     ).toBe('absent');
     expect(
       schemaState(meta({ schema_version: null, schema_compatible: true }))
     ).toBe('absent');
+  });
+
+  // Regression: `unknown` carries a null schema_version too, so keying on the
+  // version alone reported an unreachable database as an empty one — which
+  // tells an operator to initialize a database that is merely down.
+  it('reports unknown, not absent, when the probe has never succeeded', () => {
+    expect(
+      schemaState(
+        meta({
+          schema_version: null,
+          schema_compatible: false,
+          actions_disabled_reason: 'SCHEMA_UNKNOWN',
+        })
+      )
+    ).toBe('unknown');
+  });
+
+  it('lets the reason code win over any version the payload carries', () => {
+    expect(
+      schemaState(
+        meta({
+          schema_version: 14,
+          schema_compatible: true,
+          actions_disabled_reason: 'SCHEMA_UNKNOWN',
+        })
+      )
+    ).toBe('unknown');
+  });
+
+  it('keeps mismatch distinct from unknown', () => {
+    expect(
+      schemaState(
+        meta({
+          schema_version: 13,
+          schema_compatible: false,
+          actions_disabled_reason: 'SCHEMA_INCOMPATIBLE',
+        })
+      )
+    ).toBe('mismatch');
   });
 });
 
@@ -69,6 +109,15 @@ describe('schema copy', () => {
         'initialize it — the monitoring tool never modifies the database schema.'
     );
   });
+
+  it('states unreachability without claiming anything about the schema', () => {
+    expect(SCHEMA_UNREACHABLE_MESSAGE).toBe(
+      'Cannot reach the database to determine its schema state.'
+    );
+    // The two states must never share copy: one says "initialize this", the
+    // other says "we could not look".
+    expect(SCHEMA_UNREACHABLE_MESSAGE).not.toBe(NO_SCHEMA_MESSAGE);
+  });
 });
 
 describe('action capability', () => {
@@ -92,5 +141,17 @@ describe('action capability', () => {
 
   it('denies actions once a 403 has revoked them for the session', () => {
     expect(deriveCanAct(meta(), true)).toBe(false);
+  });
+
+  it('denies actions whenever the server set a reason, whatever the flags say', () => {
+    expect(
+      deriveCanAct(meta({ actions_disabled_reason: 'SCHEMA_UNKNOWN' }), false)
+    ).toBe(false);
+    expect(
+      deriveCanAct(
+        meta({ actions_disabled_reason: 'SCHEMA_INCOMPATIBLE' }),
+        false
+      )
+    ).toBe(false);
   });
 });
