@@ -1,0 +1,29 @@
+# Postgres for the Acme Clothing showcase.
+#
+#   docker compose -f showcase/docker-compose.yml up -d
+#   ACME_DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5433/acme_demo \
+#     uv run python -m showcase.acme.scenarios seed
+#
+# Port 5433, not 5432, so this never collides with a Postgres already running
+# on the host. Any Postgres 14+ works; this file exists so that "I do not have
+# a database" is not a reason to skip the demo.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: acme-showcase-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: acme_demo
+    ports:
+      - "5433:5432"
+    volumes:
+      - acme-showcase-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d acme_demo"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  acme-showcase-data:
