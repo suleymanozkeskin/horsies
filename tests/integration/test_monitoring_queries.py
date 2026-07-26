@@ -978,6 +978,64 @@ class TestGetTaskDetail:
         assert detail.attempts[0].will_retry is True
         assert detail.error_category == ErrorCategory.OPERATIONAL.value
 
+    async def test_standalone_task_has_no_workflow_linkage(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        task = make_task()
+        await insert_rows(session, task)
+
+        result = await get_task_detail(broker, task.id)
+
+        assert is_ok(result)
+        detail = result.ok_value
+        assert detail is not None
+        assert detail.workflow_id is None
+        assert detail.workflow_task_index is None
+
+    async def test_workflow_bound_task_links_to_its_run_and_node(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        """The detail panel needs these to link out instead of offering actions."""
+        run = make_workflow()
+        task = make_task(is_workflow_task=True)
+        await insert_rows(session, run)
+        await insert_rows(session, task)
+        await insert_rows(
+            session,
+            make_node(workflow_id=run.id, task_index=3, task_id=task.id),
+        )
+
+        result = await get_task_detail(broker, task.id)
+
+        assert is_ok(result)
+        detail = result.ok_value
+        assert detail is not None
+        assert detail.is_workflow_task is True
+        assert detail.workflow_id == run.id
+        assert detail.workflow_task_index == 3
+
+    async def test_a_node_row_pointing_elsewhere_does_not_leak_in(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        """The hop matches on task_id, not on membership in some workflow."""
+        run = make_workflow()
+        linked = make_task(is_workflow_task=True)
+        unrelated = make_task()
+        await insert_rows(session, run)
+        await insert_rows(session, linked, unrelated)
+        await insert_rows(
+            session,
+            make_node(workflow_id=run.id, task_index=0, task_id=linked.id),
+        )
+
+        result = await get_task_detail(broker, unrelated.id)
+
+        assert is_ok(result)
+        detail = result.ok_value
+        assert detail is not None
+        assert detail.workflow_id is None
+        assert detail.workflow_task_index is None
+
     async def test_reports_good_until_and_workflow_membership(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:

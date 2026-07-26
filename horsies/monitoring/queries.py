@@ -701,6 +701,12 @@ async def get_task_detail(
         .where(TaskAttemptModel.task_id == task_id)
         .order_by(TaskAttemptModel.attempt)
     )
+    # One indexed hop to the node this task backs, if any. Kept as its own
+    # statement rather than a join onto the task row: a standalone task is
+    # the common case and this returns nothing for it.
+    node_stmt = select(
+        WorkflowTaskModel.workflow_id, WorkflowTaskModel.task_index
+    ).where(WorkflowTaskModel.task_id == task_id)
 
     try:
         async with broker.session_factory() as session:
@@ -708,9 +714,11 @@ async def get_task_detail(
             if task is None:
                 return Ok(None)
             attempt_rows = (await session.execute(attempts_stmt)).scalars().all()
+            node = (await session.execute(node_stmt)).tuples().first()
     except SQLAlchemyError as exc:
         return _db_err('task detail query', exc)
 
+    workflow_id, workflow_task_index = node if node is not None else (None, None)
     return Ok(
         TaskDetail(
             leaf=_leaf_task(task),
@@ -720,6 +728,8 @@ async def get_task_detail(
             is_workflow_task=task.is_workflow_task,
             error_category=_category_value(task.error_code),
             attempts=[_attempt(row) for row in attempt_rows],
+            workflow_id=workflow_id,
+            workflow_task_index=workflow_task_index,
         )
     )
 

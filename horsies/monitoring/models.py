@@ -180,7 +180,12 @@ class TaskListPage(BaseModel):
 
 
 class TaskDetail(BaseModel):
-    """A single task with its full attempt history, ordered by attempt."""
+    """A single task with its full attempt history, ordered by attempt.
+
+    ``workflow_id`` and ``workflow_task_index`` locate the node a
+    workflow-bound task belongs to, so a UI can link to the run rather than
+    offering task actions it must refuse. Both are null for standalone tasks.
+    """
 
     leaf: LeafTaskInfo
     task_name: str
@@ -189,6 +194,8 @@ class TaskDetail(BaseModel):
     is_workflow_task: bool
     error_category: str | None
     attempts: list[TaskAttemptInfo]
+    workflow_id: str | None
+    workflow_task_index: int | None
 
 
 # --------------------------------------------------------------------------- #

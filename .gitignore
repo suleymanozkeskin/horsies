@@ -52,3 +52,6 @@ examples/
 .coverage
 .env.planetscale
 
+
+# built web UI assets (produced by the webui build, never committed)
+horsies/web/static/
