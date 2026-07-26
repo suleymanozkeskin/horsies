@@ -329,6 +329,12 @@ h6,
 	background: rgba(255, 243, 207, 0.1);
 	border: 1px solid rgba(255, 243, 207, 0.25);
 	border-radius: var(--radius-sm);
+	/* A bordered inline element that wraps is SLICED by default: the break
+	   edges lose their border and the chip reads as torn in half. `clone`
+	   redraws the whole box — border, fill and radius — on every fragment.
+	   Narrow table columns are where this shows up. */
+	-webkit-box-decoration-break: clone;
+	box-decoration-break: clone;
 	color: #FFF3CF;
 }
 
@@ -376,7 +382,13 @@ h6,
 /* Blockquotes */
 .sl-markdown-content blockquote {
 	border-left: 3px solid var(--horsie-gold);
+	border-radius: var(--radius-md);
 	background: rgba(218, 165, 32, 0.05);
+}
+
+/* Asides (:::note, :::tip, …) — Starlight draws the accent bar, we round it */
+.starlight-aside {
+	border-radius: var(--radius-md);
 }
 
 /* Selection highlight */
@@ -506,12 +518,16 @@ mark.page-search-highlight {
 	background: rgba(218, 165, 32, 0.3);
 	color: inherit;
 	border-radius: var(--radius-sm);
+	-webkit-box-decoration-break: clone;
+	box-decoration-break: clone;
 	padding: 0 1px;
 }
 
 mark.page-search-active {
 	background: rgba(0, 255, 170, 0.35);
 	border-radius: var(--radius-sm);
+	-webkit-box-decoration-break: clone;
+	box-decoration-break: clone;
 	outline: 2px solid var(--horsie-neon-green, #00FFAA);
 	outline-offset: 1px;
 }
@@ -629,7 +645,15 @@ site-search button[data-close-modal] {
 
 .pagefind-ui__result-excerpt mark {
 	background-color: rgba(218, 165, 32, 0.3);
+	border-radius: var(--radius-sm);
+	-webkit-box-decoration-break: clone;
+	box-decoration-break: clone;
 	color: var(--horsie-gold-bright);
+}
+
+/* Nested result rows carry their own fill inside the dialog. */
+.pagefind-ui__result-nested {
+	border-radius: var(--radius-sm) !important;
 }
 
 /* Result list borders */
