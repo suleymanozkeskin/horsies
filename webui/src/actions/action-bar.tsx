@@ -108,7 +108,7 @@ function ManagedByWorkflowNote({ detail }: { detail: TaskDetail }) {
           run: runId,
           ...(nodeIndex === null ? {} : { node: nodeIndex }),
         }}
-        className="font-mono text-primary underline-offset-4 hover:underline"
+        className="font-mono text-primary underline-offset-4 hover:text-accent-high hover:underline"
         title={runId}
       >
         {runId.slice(0, 8)}

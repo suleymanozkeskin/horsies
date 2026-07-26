@@ -32,6 +32,7 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent-surface: var(--accent-surface);
+  --color-accent-high: var(--accent-high);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-destructive-hover: var(--destructive-hover);
@@ -132,13 +133,24 @@
   }
 }
 
-/* The DAG canvas draws its own chrome; keep it on the token palette. */
-.react-flow__controls-button {
-  background-color: var(--card);
-  border-bottom-color: var(--border);
-  fill: var(--foreground);
+/* The DAG canvas draws its own chrome; keep it on the token palette. The
+   xyflow dist stylesheet arrives in the route-split chunk AFTER this file,
+   so equal-specificity rule overrides lose by order — its own theming
+   variables cannot, because the dist rules consume them. */
+.react-flow {
+  --xy-controls-button-background-color: var(--card);
+  --xy-controls-button-background-color-hover: var(--accent-surface);
+  --xy-controls-button-border-color: var(--border);
+  --xy-controls-button-color: var(--foreground);
+  --xy-controls-button-color-hover: var(--foreground);
+  --xy-controls-box-shadow: 0 1px 4px
+    color-mix(in oklab, var(--foreground) 12%, transparent);
 }
 
-.react-flow__controls-button:hover {
-  background-color: var(--muted);
+/* The dist sets no radius on the controls cluster, so this rule wins
+   regardless of load order. */
+.react-flow__controls {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
 }

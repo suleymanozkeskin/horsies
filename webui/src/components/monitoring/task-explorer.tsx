@@ -81,7 +81,7 @@ function StatsBar({
             className={cn(
               'flex items-center gap-2 rounded-lg border px-3 py-2 transition-colors',
               isActive
-                ? 'border-primary ring-1 ring-primary'
+                ? 'border-accent-high ring-1 ring-accent-high'
                 : 'border-border hover:bg-muted'
             )}
             style={{
