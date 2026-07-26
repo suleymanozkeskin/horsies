@@ -6,6 +6,7 @@ import { createRoot } from 'react-dom/client';
 
 import { ToastProvider } from '@/components/ui/toast';
 import { LiveProvider } from '@/events/live-provider';
+import { installChunkRecovery } from '@/lib/chunk-recovery';
 import { initTheme } from '@/lib/theme';
 import { router } from '@/routes/router';
 
@@ -13,6 +14,10 @@ import '@/styles/app.css';
 
 // Applied before the first paint so the shell never flashes the wrong theme.
 initTheme();
+
+// Before the router mounts: its routes are lazily imported, so the first
+// navigation of a tab left open across a deploy is exactly what fails.
+installChunkRecovery();
 
 // Defaults are deliberately untouched: cadences are per-query (§ data-freshness
 // contract), and a global override would silently change all of them.
