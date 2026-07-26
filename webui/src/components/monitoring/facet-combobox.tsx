@@ -82,7 +82,7 @@ export function FacetCombobox({
             size="sm"
             className={cn(
               'h-8 justify-between gap-2 font-normal',
-              value.length > 0 && 'border-primary',
+              value.length > 0 && 'border-accent-high',
               className
             )}
           >
