@@ -338,6 +338,19 @@ h6,
 	color: #FFF3CF;
 }
 
+/* Inline code inside a heading. The heading already carries the font, size and
+   colour; a wash, a border and a radius on top of that read as a button, and an
+   API signature long enough to wrap reads as a stack of them. Declared for both
+   themes so it outranks the light-mode inline-code override above. */
+.sl-markdown-content :is(h1, h2, h3, h4, h5, h6) code,
+[data-theme='light'] .sl-markdown-content :is(h1, h2, h3, h4, h5, h6) code {
+	background: none;
+	border: 0;
+	border-radius: 0;
+	padding: 0;
+	color: inherit;
+}
+
 /* Buttons and CTAs */
 .sl-markdown-content .action.primary {
 	background: linear-gradient(135deg, var(--horsie-gold-dark), var(--horsie-gold));
