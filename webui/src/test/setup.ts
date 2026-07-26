@@ -41,6 +41,34 @@ if (!('EventSource' in globalThis)) {
   });
 }
 
+/**
+ * jsdom implements neither of these, and cmdk calls both on mount: it observes
+ * the list to size the menu, and scrolls the active item into view on every
+ * selection change. Inert stand-ins — layout is not asserted in jsdom — keep
+ * command-menu components (the comboboxes) renderable under test.
+ */
+class InertResizeObserver {
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
+}
+
+if (!('ResizeObserver' in globalThis)) {
+  Object.defineProperty(globalThis, 'ResizeObserver', {
+    writable: true,
+    configurable: true,
+    value: InertResizeObserver,
+  });
+}
+
+if (!('scrollIntoView' in Element.prototype)) {
+  Object.defineProperty(Element.prototype, 'scrollIntoView', {
+    writable: true,
+    configurable: true,
+    value: function scrollIntoView(): void {},
+  });
+}
+
 afterEach(() => {
   cleanup();
 });

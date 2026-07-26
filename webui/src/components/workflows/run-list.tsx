@@ -1,13 +1,30 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 
+import {
+  SelectCombobox,
+  type SelectOption,
+} from '@/components/ui/select-combobox';
 import { StatusChip } from '@/components/ui/status-chip';
 import { useWorkflowNames, useWorkflowRuns } from '@/hooks/use-workflow-runs';
 import { formatElapsed } from '@/lib/format-duration';
+import { statusColorVar } from '@/lib/status-utils';
 import { cn } from '@/lib/utils';
 import type { WorkflowRunSummary } from '@/types/workflows';
 
 import { ErrorState } from '@/components/monitoring/states';
 import { RUN_STATUS_FILTERS } from './status';
+
+const STATUS_OPTIONS: SelectOption[] = RUN_STATUS_FILTERS.map(status => ({
+  value: status,
+  label: status.toLowerCase(),
+  adornment: (
+    <span
+      className="size-2 shrink-0 rounded-full"
+      style={{ background: statusColorVar(status) }}
+      aria-hidden
+    />
+  ),
+}));
 
 interface RunListProps {
   selectedRunId: string | null;
@@ -24,51 +41,32 @@ export function RunList({ selectedRunId, onSelect }: RunListProps) {
     status === '' ? null : status
   );
 
+  const nameOptions = useMemo<SelectOption[]>(
+    () => names.map(candidate => ({ value: candidate })),
+    [names]
+  );
+
   return (
     <div className="flex h-full flex-col border-r border-border">
       <div className="flex flex-col gap-3 border-b border-border p-3">
-        <div>
-          <label
-            htmlFor="workflow-name-filter"
-            className="mb-1.5 block text-xs font-medium text-muted-foreground"
-          >
-            Workflow
-          </label>
-          <select
-            id="workflow-name-filter"
-            value={name}
-            onChange={event => setName(event.target.value)}
-            className="w-full rounded-md border border-input bg-glass-field px-2.5 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-          >
-            <option value="">All workflows</option>
-            {names.map(candidate => (
-              <option key={candidate} value={candidate}>
-                {candidate}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label
-            htmlFor="workflow-status-filter"
-            className="mb-1.5 block text-xs font-medium text-muted-foreground"
-          >
-            Status
-          </label>
-          <select
-            id="workflow-status-filter"
-            value={status}
-            onChange={event => setStatus(event.target.value)}
-            className="w-full rounded-md border border-input bg-glass-field px-2.5 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-          >
-            <option value="">Any status</option>
-            {RUN_STATUS_FILTERS.map(candidate => (
-              <option key={candidate} value={candidate}>
-                {candidate.toLowerCase()}
-              </option>
-            ))}
-          </select>
-        </div>
+        <SelectCombobox
+          id="workflow-name-filter"
+          label="Workflow"
+          emptyLabel="All workflows"
+          placeholder="Search workflows…"
+          options={nameOptions}
+          value={name === '' ? null : name}
+          onChange={next => setName(next ?? '')}
+        />
+        <SelectCombobox
+          id="workflow-status-filter"
+          label="Status"
+          emptyLabel="Any status"
+          placeholder="Search statuses…"
+          options={STATUS_OPTIONS}
+          value={status === '' ? null : status}
+          onChange={next => setStatus(next ?? '')}
+        />
       </div>
 
       <div className="flex-1 overflow-y-auto">
