@@ -12,7 +12,10 @@ export interface MonitoringMeta {
   schema_version: number | null;
   /** Version this build was written against. */
   expected_schema_version: number;
-  /** False on any mismatch, and on an absent schema. */
+  /** False on any mismatch, and on an absent or undetermined schema. */
   schema_compatible: boolean;
-  actions_disabled_reason: 'SCHEMA_INCOMPATIBLE' | null;
+  /** Why the server force-disabled actions, independent of the auth policy.
+   * `SCHEMA_UNKNOWN` means the schema probe has never succeeded — it is the
+   * only signal that separates an unreachable database from an empty one. */
+  actions_disabled_reason: 'SCHEMA_INCOMPATIBLE' | 'SCHEMA_UNKNOWN' | null;
 }

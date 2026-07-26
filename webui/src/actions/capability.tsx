@@ -39,10 +39,16 @@ export function useCapability(): Capability {
   return capability;
 }
 
-/** Pure gate, so the precedence between the three inputs is testable. */
+/** Pure gate, so the precedence between the inputs is testable. A server-set
+ * `actions_disabled_reason` is authoritative on its own: the endpoints already
+ * refuse, so the UI must not offer what will be rejected. */
 export function deriveCanAct(meta: MonitoringMeta, revoked: boolean): boolean {
   return (
-    !revoked && meta.actions_enabled && meta.can_act && meta.schema_compatible
+    !revoked &&
+    meta.actions_enabled &&
+    meta.can_act &&
+    meta.schema_compatible &&
+    meta.actions_disabled_reason === null
   );
 }
 
