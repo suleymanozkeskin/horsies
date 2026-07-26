@@ -7,11 +7,12 @@ applies migrations). Coverage:
 2. task_facets — scoping, NULL/empty exclusion, caps, uncapped category rollup
 3. task_breakdown — rollup row, 'unknown' key, limit vs group_count
 4. list_tasks — filters, sorting, NULLS LAST, pagination envelope
-5. get_task_detail — attempt ordering, empty-text normalization, absence
-6. duration semantics (spec 5.3) — which spans count up and which stay None
-7. workflow names / runs / run detail / node detail
-8. list_schedules — NULLS LAST ordering
-9. database failure — Err(DB_OPERATION_FAILED) rather than a raised exception
+5. error-category filter — family expansion, DOMAIN as the registry complement
+6. get_task_detail — attempt ordering, empty-text normalization, absence
+7. duration semantics (spec 5.3) — which spans count up and which stay None
+8. workflow names / runs / run detail / node detail
+9. list_schedules — NULLS LAST ordering
+10. database failure — Err(DB_OPERATION_FAILED) rather than a raised exception
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from horsies.core.models.task_pg import (
     TaskAttemptModel,
     TaskModel,
 )
+from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
 from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.types.status import TaskStatus
@@ -46,6 +48,7 @@ from horsies.monitoring import (
     list_tasks,
     list_workflow_names,
     list_workflow_runs,
+    TaskSummary,
     task_breakdown,
     task_facets,
     task_stats,
@@ -275,6 +278,7 @@ class TestTaskStats:
             queues=[],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
         )
 
@@ -298,6 +302,7 @@ class TestTaskStats:
             queues=[],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
         )
 
@@ -347,6 +352,7 @@ class TestTaskStats:
             queues=queues,
             workers=workers,
             error_codes=error_codes,
+            error_categories=[],
             retried_only=retried_only,
         )
 
@@ -371,7 +377,9 @@ class TestTaskFacets:
             make_task(task_name='beta_task', queue_name='fast'),
         )
 
-        result = await task_facets(broker, statuses=[], retried_only=False)
+        result = await task_facets(
+            broker, statuses=[], error_categories=[], retried_only=False
+        )
 
         assert is_ok(result)
         facets = result.ok_value
@@ -390,7 +398,9 @@ class TestTaskFacets:
             make_task(worker_id=None),
         )
 
-        result = await task_facets(broker, statuses=[], retried_only=False)
+        result = await task_facets(
+            broker, statuses=[], error_categories=[], retried_only=False
+        )
 
         assert is_ok(result)
         assert [f.value for f in result.ok_value.workers] == ['worker-1']
@@ -406,7 +416,9 @@ class TestTaskFacets:
             make_task(status=TaskStatus.COMPLETED, error_code=None),
         )
 
-        result = await task_facets(broker, statuses=[], retried_only=False)
+        result = await task_facets(
+            broker, statuses=[], error_categories=[], retried_only=False
+        )
 
         assert is_ok(result)
         assert [f.value for f in result.ok_value.error_codes] == ['BOOM']
@@ -420,7 +432,9 @@ class TestTaskFacets:
             make_task(status=TaskStatus.COMPLETED, error_code='SOFT_FAIL'),
         )
 
-        result = await task_facets(broker, statuses=[], retried_only=False)
+        result = await task_facets(
+            broker, statuses=[], error_categories=[], retried_only=False
+        )
 
         assert is_ok(result)
         assert [f.value for f in result.ok_value.error_codes] == ['SOFT_FAIL']
@@ -435,7 +449,9 @@ class TestTaskFacets:
             make_task(status=TaskStatus.FAILED, error_code='MY_DOMAIN_ERROR'),
         )
 
-        result = await task_facets(broker, statuses=[], retried_only=False)
+        result = await task_facets(
+            broker, statuses=[], error_categories=[], retried_only=False
+        )
 
         assert is_ok(result)
         categories = {f.value: f.category for f in result.ok_value.error_codes}
@@ -459,9 +475,14 @@ class TestTaskFacets:
         )
 
         by_status = await task_facets(
-            broker, statuses=[TaskStatus.FAILED], retried_only=False
+            broker,
+            statuses=[TaskStatus.FAILED],
+            error_categories=[],
+            retried_only=False,
         )
-        by_retried = await task_facets(broker, statuses=[], retried_only=True)
+        by_retried = await task_facets(
+            broker, statuses=[], error_categories=[], retried_only=True
+        )
 
         assert is_ok(by_status)
         assert is_ok(by_retried)
@@ -479,7 +500,9 @@ class TestTaskFacets:
             *[make_task(task_name=f'task_{index:03d}') for index in range(55)],
         )
 
-        result = await task_facets(broker, statuses=[], retried_only=False)
+        result = await task_facets(
+            broker, statuses=[], error_categories=[], retried_only=False
+        )
 
         assert is_ok(result)
         assert len(result.ok_value.task_names) == 50
@@ -496,7 +519,9 @@ class TestTaskFacets:
             ],
         )
 
-        result = await task_facets(broker, statuses=[], retried_only=False)
+        result = await task_facets(
+            broker, statuses=[], error_categories=[], retried_only=False
+        )
 
         assert is_ok(result)
         assert len(result.ok_value.error_codes) == 30
@@ -528,6 +553,7 @@ class TestTaskBreakdown:
             queues=[],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
             limit=50,
         )
@@ -555,6 +581,7 @@ class TestTaskBreakdown:
             queues=[],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
             limit=50,
         )
@@ -578,6 +605,7 @@ class TestTaskBreakdown:
             queues=[],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
             limit=50,
         )
@@ -601,6 +629,7 @@ class TestTaskBreakdown:
             queues=[],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
             limit=2,
         )
@@ -628,6 +657,7 @@ class TestTaskBreakdown:
             queues=[],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
             limit=50,
         )
@@ -656,6 +686,7 @@ class TestTaskBreakdown:
             queues=[],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
             limit=50,
         )
@@ -684,6 +715,7 @@ class TestListTasks:
             queues=[],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
@@ -712,6 +744,7 @@ class TestListTasks:
             queues=[],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='asc',
@@ -750,6 +783,7 @@ class TestListTasks:
             queues=[],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir=sort_dir,
@@ -782,6 +816,7 @@ class TestListTasks:
             queues=[],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
             sort_by='completed_at',
             sort_dir=sort_dir,
@@ -819,6 +854,7 @@ class TestListTasks:
             queues=[],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
             sort_by='exec_s',
             sort_dir='desc',
@@ -849,6 +885,7 @@ class TestListTasks:
             queues=['fast'],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
@@ -877,6 +914,7 @@ class TestListTasks:
             queues=[],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
@@ -908,6 +946,7 @@ class TestListTasks:
             queues=[],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
@@ -933,6 +972,7 @@ class TestListTasks:
             queues=[],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
@@ -943,6 +983,247 @@ class TestListTasks:
         assert is_ok(result)
         assert result.ok_value.rows[0].error_code is None
         assert result.ok_value.rows[0].error_category is None
+
+
+# --------------------------------------------------------------------------- #
+# error-category filter
+# --------------------------------------------------------------------------- #
+async def rows_by_category(
+    broker: PostgresBroker,
+    categories: list[ErrorCategory],
+    *,
+    queues: list[str] | None = None,
+    error_codes: list[str] | None = None,
+) -> list[TaskSummary]:
+    """List the rows a category selection matches, other dimensions left open."""
+    result = await list_tasks(
+        broker,
+        statuses=[],
+        task_names=[],
+        queues=queues or [],
+        workers=[],
+        error_codes=error_codes or [],
+        error_categories=categories,
+        retried_only=False,
+        sort_by='enqueued_at',
+        sort_dir='desc',
+        offset=0,
+        limit=200,
+    )
+    assert is_ok(result)
+    return result.ok_value.rows
+
+
+# One representative code per family, plus a user-defined one for DOMAIN.
+_FAMILY_SAMPLES: dict[ErrorCategory, str] = {
+    ErrorCategory.OPERATIONAL: 'TASK_EXCEPTION',
+    ErrorCategory.CONTRACT: 'RETURN_TYPE_MISMATCH',
+    ErrorCategory.RETRIEVAL: 'WAIT_TIMEOUT',
+    ErrorCategory.OUTCOME: 'TASK_CANCELLED',
+    ErrorCategory.DOMAIN: 'PAYMENT_DECLINED',
+}
+
+_BUILT_IN_FAMILIES = [
+    ErrorCategory.OPERATIONAL,
+    ErrorCategory.CONTRACT,
+    ErrorCategory.RETRIEVAL,
+    ErrorCategory.OUTCOME,
+]
+
+
+@pytest.mark.usefixtures('clean_monitoring_tables')
+class TestErrorCategoryFilter:
+    """Families expand to codes in SQL; DOMAIN is the complement of the registry."""
+
+    async def seed_one_per_family(self, session: AsyncSession) -> None:
+        """One failed task per family, each carrying that family's sample code."""
+        await insert_rows(
+            session,
+            *[
+                make_task(status=TaskStatus.FAILED, error_code=code)
+                for code in _FAMILY_SAMPLES.values()
+            ],
+        )
+
+    @pytest.mark.parametrize('category', list(_FAMILY_SAMPLES))
+    async def test_a_family_selects_exactly_its_own_codes(
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+        category: ErrorCategory,
+    ) -> None:
+        await self.seed_one_per_family(session)
+
+        rows = await rows_by_category(broker, [category])
+
+        assert [row.error_code for row in rows] == [_FAMILY_SAMPLES[category]]
+
+    async def test_a_user_defined_code_is_domain_and_no_family_claims_it(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        await insert_rows(
+            session,
+            make_task(status=TaskStatus.FAILED, error_code='PAYMENT_DECLINED'),
+        )
+
+        domain = await rows_by_category(broker, [ErrorCategory.DOMAIN])
+
+        assert [row.error_code for row in domain] == ['PAYMENT_DECLINED']
+        assert domain[0].error_category == ErrorCategory.DOMAIN.value
+        for family in _BUILT_IN_FAMILIES:
+            assert await rows_by_category(broker, [family]) == []
+
+    async def test_absent_and_empty_codes_match_no_category(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        """DOMAIN means "carries a code the library does not define", not "no code"."""
+        await insert_rows(
+            session,
+            make_task(status=TaskStatus.COMPLETED, error_code=None),
+            make_task(status=TaskStatus.FAILED, error_code=''),
+        )
+
+        for category in ErrorCategory:
+            assert await rows_by_category(broker, [category]) == []
+
+    async def test_categories_are_or_combined(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        await self.seed_one_per_family(session)
+
+        rows = await rows_by_category(
+            broker, [ErrorCategory.CONTRACT, ErrorCategory.DOMAIN]
+        )
+
+        assert {row.error_code for row in rows} == {
+            'RETURN_TYPE_MISMATCH',
+            'PAYMENT_DECLINED',
+        }
+
+    async def test_the_category_dimension_ands_against_the_others(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        await insert_rows(
+            session,
+            make_task(
+                queue_name='fast',
+                status=TaskStatus.FAILED,
+                error_code='TASK_EXCEPTION',
+            ),
+            make_task(
+                queue_name='slow',
+                status=TaskStatus.FAILED,
+                error_code='BROKER_ERROR',
+            ),
+        )
+
+        scoped = await rows_by_category(
+            broker, [ErrorCategory.OPERATIONAL], queues=['fast']
+        )
+        # Same column, different dimensions: the code must also be in the family.
+        disjoint = await rows_by_category(
+            broker, [ErrorCategory.OPERATIONAL], error_codes=['PAYMENT_DECLINED']
+        )
+
+        assert [row.error_code for row in scoped] == ['TASK_EXCEPTION']
+        assert disjoint == []
+
+    async def test_an_empty_selection_filters_nothing(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        await self.seed_one_per_family(session)
+        await insert_rows(session, make_task(error_code=None))
+
+        rows = await rows_by_category(broker, [])
+
+        assert len(rows) == len(_FAMILY_SAMPLES) + 1
+
+    async def test_every_built_in_code_is_reachable_from_the_category_it_reports(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        """The label and the filter must stay one mapping.
+
+        A code core registers but the taxonomy map has not been taught would be
+        labelled DOMAIN while the DOMAIN filter — the complement of that same
+        registry — excludes it, leaving the row unreachable from the chip that
+        describes it.
+        """
+        await insert_rows(
+            session,
+            *[
+                make_task(status=TaskStatus.FAILED, error_code=code)
+                for code in BUILTIN_CODE_REGISTRY
+            ],
+        )
+
+        reported = {
+            row.error_code: row.error_category
+            for row in await rows_by_category(broker, [])
+        }
+        assert len(reported) == len(BUILTIN_CODE_REGISTRY)
+        for category in ErrorCategory:
+            matched = {
+                row.error_code for row in await rows_by_category(broker, [category])
+            }
+            expected = {
+                code for code, value in reported.items() if value == category.value
+            }
+            assert matched == expected
+
+    async def test_stats_and_breakdown_apply_the_same_expansion(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        await self.seed_one_per_family(session)
+
+        stats = await task_stats(
+            broker,
+            task_names=[],
+            queues=[],
+            workers=[],
+            error_codes=[],
+            error_categories=[ErrorCategory.OUTCOME],
+            retried_only=False,
+        )
+        breakdown = await task_breakdown(
+            broker,
+            group_by='task_name',
+            statuses=[],
+            task_names=[],
+            queues=[],
+            workers=[],
+            error_codes=[],
+            error_categories=[ErrorCategory.OUTCOME],
+            retried_only=False,
+            limit=50,
+        )
+
+        assert is_ok(stats)
+        assert is_ok(breakdown)
+        assert sum(row.count for row in stats.ok_value) == 1
+        assert breakdown.ok_value.total.total == 1
+
+    async def test_facets_narrow_the_code_list_and_keep_every_category_total(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        """The strip offers the categories, so its own totals ignore the selection.
+
+        Scoping them by the selection would hide every family the user has not
+        picked, and a control cannot offer a second selection it does not show.
+        """
+        await self.seed_one_per_family(session)
+
+        result = await task_facets(
+            broker,
+            statuses=[],
+            error_categories=[ErrorCategory.OPERATIONAL],
+            retried_only=False,
+        )
+
+        assert is_ok(result)
+        assert [f.value for f in result.ok_value.error_codes] == ['TASK_EXCEPTION']
+        assert result.ok_value.error_category_totals == {
+            category.value: 1 for category in _FAMILY_SAMPLES
+        }
 
 
 # --------------------------------------------------------------------------- #
@@ -1094,6 +1375,7 @@ class TestTaskDurations:
             queues=[],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
@@ -1718,6 +2000,7 @@ class TestDatabaseFailure:
             queues=[],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
@@ -1749,6 +2032,7 @@ class TestDatabaseFailure:
             queues=[],
             workers=[],
             error_codes=[],
+            error_categories=[],
             retried_only=False,
         )
 
