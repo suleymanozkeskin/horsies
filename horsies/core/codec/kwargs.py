@@ -27,7 +27,17 @@ from __future__ import annotations
 import inspect
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, cast, get_origin, get_type_hints
+from types import UnionType
+from typing import (
+    Any,
+    Callable,
+    Literal,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.typed import Json, decode_value, encode_value
@@ -267,6 +277,26 @@ def encode_kwargs(
     return encoded
 
 
+def _annotates_taskresult(annot: Any) -> bool:
+    """Whether a parameter annotation marks an ``args_from`` slot.
+
+    ``TaskResult[T, TaskError]`` is the plain form. Under ``join='any'`` /
+    ``'quorum'`` a source may be absent, so the documented target annotation is
+    ``TaskResult[T, TaskError] | None`` — a union, whose origin is the union
+    itself and never ``TaskResult``. Unwrapping it mirrors
+    ``models.workflow.typing_utils._extract_taskresult_ok_type``.
+
+    One member is enough, where that function requires exactly one: it must
+    name a single Ok type and an ambiguous union has none, while this only
+    decides that the slot carries an engine envelope rather than user data.
+    """
+    if get_origin(annot) is TaskResult:
+        return True
+    if get_origin(annot) in (Union, UnionType):
+        return any(get_origin(member) is TaskResult for member in get_args(annot))
+    return False
+
+
 def decode_kwargs(
     task_fn: Callable[..., Any],
     raw_kwargs: dict[str, Json],
@@ -277,7 +307,10 @@ def decode_kwargs(
     closed. Engine transport keys (`__h_*` prefix) pass through
     verbatim; TaskResult-typed kwargs pass through raw because the wire
     form is an `__h_taskresult_envelope__` envelope that the worker
-    entry point unpacks downstream.
+    entry point unpacks downstream. A parameter typed
+    `TaskResult[T, TaskError] | None` is such a slot too — that is the
+    documented shape for an `args_from` target whose source may be
+    absent under `join='any'` / `'quorum'`.
 
     Args:
         task_fn: The task callable; inspected via `get_type_hints` and
@@ -318,7 +351,7 @@ def decode_kwargs(
                 f"kwarg {key!r} has no type annotation on "
                 f"{_fn_name(task_fn)!r}",
             )
-        if get_origin(annot) is TaskResult:
+        if _annotates_taskresult(annot):
             # args_from envelope — handled by the worker entry point
             # after decode_kwargs returns.
             decoded[key] = raw_value
