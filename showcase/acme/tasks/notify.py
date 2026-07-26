@@ -119,27 +119,52 @@ def send_shipping_sms(
         auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
-def marketing_blast(
-    *,
-    segment: str,
-    sweep: TaskResult[AbandonedCartSweep, TaskError] | None = None,
-) -> TaskResult[MarketingBlast, TaskError]:
+def marketing_blast(*, segment: str) -> TaskResult[MarketingBlast, TaskError]:
     """Send one segment of a campaign.
 
     Slow, and sent in bulk onto a queue capped at 3. The backlog that builds is
     the point: it is what the queue pivot and the cancel-a-PENDING-task action
-    are demonstrated on.
-
-    `sweep` defaults to `None` so the daily schedule can send a fixed segment.
-    When a workflow injects a sweep result, the recipient count follows the
-    number of carts actually found instead of the nominal segment size.
+    are demonstrated on. Takes no upstream result, so it is equally usable from
+    a schedule and from a scenario burst.
     """
     simulate.perform(tuning.MARKETING_BLAST_WORK, segment, 'blast')
 
-    recipients = tuning.MARKETING_SEGMENT_SIZE
-    if sweep is not None and sweep.is_ok():
-        recipients = sweep.ok_value.swept
+    return TaskResult(
+        ok=MarketingBlast(
+            segment=segment,
+            recipients=tuning.MARKETING_SEGMENT_SIZE,
+        ),
+    )
+
+
+@app.task(
+    'winback_blast',
+    queue_name=QUEUE_NOTIFICATIONS,
+    retry_policy=RetryPolicy.fixed(
+        tuning.CRASH_RETRY_INTERVALS_SECONDS,
+        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+    ),
+)
+def winback_blast(
+    *,
+    segment: str,
+    sweep: TaskResult[AbandonedCartSweep, TaskError],
+) -> TaskResult[MarketingBlast, TaskError]:
+    """Mail the carts a sweep actually found.
+
+    The `sweep` parameter is a plain, required `TaskResult` — that is what an
+    `args_from` (or `from_node`) target has to be. Declaring it
+    `TaskResult[...] | None = None` looks harmless and is not: the decoder
+    recognises an injected envelope by `get_origin(annot) is TaskResult`, and a
+    union's origin is not `TaskResult`, so the envelope is handed to the value
+    decoder and rejected. Marketing's fire-and-forget send is a separate task
+    above for exactly this reason.
+    """
+    simulate.perform(tuning.MARKETING_BLAST_WORK, segment, 'winback')
+
+    if sweep.is_err():
+        return TaskResult(err=sweep.err_value)
 
     return TaskResult(
-        ok=MarketingBlast(segment=segment, recipients=recipients),
+        ok=MarketingBlast(segment=segment, recipients=sweep.ok_value.swept),
     )

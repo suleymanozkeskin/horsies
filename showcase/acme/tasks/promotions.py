@@ -320,7 +320,12 @@ def warm_cache_edge(*, campaign_id: str) -> TaskResult[CacheWarm, TaskError]:
 
 @app.task(
     'update_price',
-    queue_name=QUEUE_FULFILLMENT,
+    # `analytics`, capped at 2, not `fulfillment`, capped at 8. Bulk repricing
+    # is background work, and the cap is what makes the expiry story true: 80
+    # sends at ~2.5 s through 2 slots cannot clear a 45 s deadline, so the tail
+    # is never claimed. On an 8-slot queue the whole burst drains in ~25 s and
+    # nothing expires.
+    queue_name=QUEUE_ANALYTICS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
         auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],

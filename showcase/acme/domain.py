@@ -352,15 +352,10 @@ class SalesRollup(BaseModel):
 
 
 class AbandonedCartSweep(BaseModel):
-    """Orders that never reached a capture.
-
-    `orders_counted` is set only when the sweep ran inside `daily_report` and
-    received the rollup's result.
-    """
+    """Orders that never reached a capture."""
 
     swept: int
     oldest_order_id: str | None
-    orders_counted: int | None = None
 
 
 class RegionalRollup(BaseModel):

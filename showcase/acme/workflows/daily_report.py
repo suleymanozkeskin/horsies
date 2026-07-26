@@ -31,7 +31,7 @@ from .. import tuning
 from ..app import app
 from ..domain import AbandonedCartSweep
 from ..tasks.analytics import abandoned_cart_sweep, sales_rollup
-from ..tasks.notify import marketing_blast
+from ..tasks.notify import winback_blast
 
 DEFINITION_KEY: Final[str] = 'acme.daily_report.v1'
 
@@ -46,11 +46,13 @@ def build_daily_report(
 ) -> WorkflowSpec[AbandonedCartSweep]:
     """Roll up the day, sweep abandoned carts against it, then mail the segment."""
     rollup = sales_rollup.node()(window=window)
-    sweep = abandoned_cart_sweep.node()(
+    sweep = abandoned_cart_sweep.node(waits_for=[rollup])(
         older_than_minutes=older_than_minutes,
-        rollup=from_node(rollup),
     )
-    blast = marketing_blast.node(waits_for=[sweep])(segment=f'winback-{window}')
+    blast = winback_blast.node()(
+        segment=f'winback-{window}',
+        sweep=from_node(sweep),
+    )
 
     return app.workflow(
         name='daily_report',

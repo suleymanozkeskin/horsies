@@ -23,6 +23,8 @@ from typing import Any, Final
 from horsies import (
     Horsies,
     OnError,
+    SuccessCase,
+    SuccessPolicy,
     TaskNode,
     WorkflowDefinition,
     WorkflowSpec,
@@ -76,6 +78,16 @@ class Restock(WorkflowDefinition[RestockPlan]):
             tasks=[*feeds, aggregate],
             on_error=OnError.FAIL,
             output=aggregate,
+            # The quorum join decides when the aggregate *runs*; it does not
+            # change what counts as failure. Without a policy, one timed-out
+            # feed fails the workflow even though the aggregate completed on
+            # the other two — which is the opposite of what "two of three is
+            # enough" means. Success is the aggregate landing; the feeds are
+            # optional and excluded from failure accounting.
+            success_policy=SuccessPolicy(
+                cases=[SuccessCase(required=[aggregate])],
+                optional=list(feeds),
+            ),
         )
 
 

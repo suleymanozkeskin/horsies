@@ -26,7 +26,7 @@ from .. import tuning
 from ..app import app
 from ..domain import MarketingBlast
 from ..tasks.analytics import abandoned_cart_sweep
-from ..tasks.notify import marketing_blast
+from ..tasks.notify import winback_blast
 
 
 class CustomerWinback(WorkflowDefinition[MarketingBlast]):
@@ -51,11 +51,11 @@ class CustomerWinback(WorkflowDefinition[MarketingBlast]):
             node_id='abandoned_cart_sweep',
         )
         blast = TaskNode(
-            fn=marketing_blast,
+            fn=winback_blast,
             kwargs={'segment': segment},
             waits_for=[sweep],
             args_from={'sweep': sweep},
-            node_id='marketing_blast',
+            node_id='winback_blast',
         )
         return app.workflow(
             name=cls.name,

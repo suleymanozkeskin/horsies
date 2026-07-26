@@ -71,15 +71,8 @@ def sales_rollup(*, window: str) -> TaskResult[SalesRollup, TaskError]:
 def abandoned_cart_sweep(
     *,
     older_than_minutes: int,
-    rollup: TaskResult[SalesRollup, TaskError] | None = None,
 ) -> TaskResult[AbandonedCartSweep, TaskError]:
-    """Count orders that never reached a capture.
-
-    Runs two ways, which is why `rollup` has a default. On its HourlySchedule
-    it runs alone and reports a bare count. Inside `daily_report` the rollup
-    node's `TaskResult` is injected, and the sweep reports the count against
-    the day's order total.
-    """
+    """Count orders that never reached a capture. Runs hourly at :05."""
     simulate.perform(tuning.ABANDONED_CART_WORK, str(older_than_minutes), 'sweep')
 
     match store.abandoned_orders(older_than_minutes):
@@ -87,18 +80,9 @@ def abandoned_cart_sweep(
             return TaskResult(err=store_failure(error))
         case Ok(result):
             stranded, oldest = result
-
-    compared_against = None
-    if rollup is not None and rollup.is_ok():
-        compared_against = rollup.ok_value.orders_counted
-
-    return TaskResult(
-        ok=AbandonedCartSweep(
-            swept=stranded,
-            oldest_order_id=oldest,
-            orders_counted=compared_against,
-        ),
-    )
+            return TaskResult(
+                ok=AbandonedCartSweep(swept=stranded, oldest_order_id=oldest),
+            )
 
 
 @app.task(
