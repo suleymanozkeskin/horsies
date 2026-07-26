@@ -54,6 +54,19 @@
 	--glass-shadow-menu: 0 10px 34px rgba(0, 0, 0, 0.55);
 	--glass-shadow-window: 0 18px 60px rgba(0, 0, 0, 0.60);
 
+	/* ── Corner radius ──
+	   Two steps. `sm` is for controls that sit ON a surface (inputs, small
+	   buttons, pills, marks); `md` is for the surfaces themselves (cards, the
+	   search dialog, code blocks, tables). Starlight already draws link cards,
+	   pagination, the search trigger and the dialog at 8px, so `md` is set to
+	   match rather than to fight it.
+
+	   Full-bleed chrome — header.header, .sidebar-pane, #page-search-bar —
+	   stays square by rule, not by omission: it spans the viewport edge, and a
+	   radius there cuts a notch out of the corner of the page. */
+	--radius-sm: 4px;
+	--radius-md: 8px;
+
 	/* Starlight color overrides */
 	--sl-color-accent-low: #1a1200;
 	--sl-color-accent: #DAA520;
@@ -315,6 +328,7 @@ h6,
 .sl-markdown-content :not(pre) > code {
 	background: rgba(255, 243, 207, 0.1);
 	border: 1px solid rgba(255, 243, 207, 0.25);
+	border-radius: var(--radius-sm);
 	color: #FFF3CF;
 }
 
@@ -341,6 +355,7 @@ h6,
 /* Table styling */
 .sl-markdown-content table {
 	border: 1px solid rgba(0, 255, 170, 0.3);
+	border-radius: var(--radius-md);
 	width: fit-content;
 }
 
@@ -382,7 +397,7 @@ h6,
 
 ::-webkit-scrollbar-thumb {
 	background: var(--horsie-gold-dark);
-	border-radius: 4px;
+	border-radius: var(--radius-sm);
 }
 
 ::-webkit-scrollbar-thumb:hover {
@@ -400,7 +415,7 @@ h6,
 .hero-video video {
 	width: 100%;
 	height: auto;
-	border-radius: 12px;
+	border-radius: var(--radius-md);
 	opacity: 0.85;
 	filter: grayscale(20%);
 	transition: opacity 0.3s ease, filter 0.3s ease;
@@ -445,7 +460,7 @@ h6,
 	flex: 1;
 	background: transparent;
 	border: 1px solid transparent;
-	border-radius: 3px;
+	border-radius: var(--radius-sm);
 	padding: 0.25rem 0.5rem;
 	color: var(--horsie-neon-green, #00FFAA);
 	font-family: 'Departure Mono', ui-monospace, monospace;
@@ -472,7 +487,7 @@ h6,
 .page-search-close {
 	background: transparent;
 	border: 1px solid var(--horsie-gold-dark, #B8860B);
-	border-radius: 3px;
+	border-radius: var(--radius-sm);
 	color: var(--horsie-gold, #DAA520);
 	font-family: 'Departure Mono', ui-monospace, monospace;
 	font-size: 0.75rem;
@@ -490,12 +505,13 @@ h6,
 mark.page-search-highlight {
 	background: rgba(218, 165, 32, 0.3);
 	color: inherit;
-	border-radius: 2px;
+	border-radius: var(--radius-sm);
 	padding: 0 1px;
 }
 
 mark.page-search-active {
 	background: rgba(0, 255, 170, 0.35);
+	border-radius: var(--radius-sm);
 	outline: 2px solid var(--horsie-neon-green, #00FFAA);
 	outline-offset: 1px;
 }
