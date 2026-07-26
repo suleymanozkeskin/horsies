@@ -14,6 +14,7 @@ import {
 import { AppShell } from '@/components/app-shell';
 import { TaskExplorer } from '@/components/monitoring/task-explorer';
 import { uiConfig } from '@/lib/config';
+import { parseSearch, stringifySearch } from '@/routes/search-codec';
 import {
   validateTaskSearch,
   validateWorkflowSearch,
@@ -115,6 +116,10 @@ export const router = createRouter({
   routeTree,
   basepath: uiConfig.basePath,
   defaultPreload: false,
+  // A filtered view is meant to be shared, so the URL is written to be read:
+  // `?status=PENDING,FAILED&view=flat`, not the default JSON encoding.
+  parseSearch,
+  stringifySearch,
 });
 
 declare module '@tanstack/react-router' {
