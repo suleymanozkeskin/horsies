@@ -30,17 +30,24 @@ import {
   type TaskSearchPatch,
   type TaskView,
 } from '@/routes/search';
-import type { ErrorCategory, TaskFilters, TaskSummary } from '@/types/tasks';
+import type { TaskFilters, TaskSummary } from '@/types/tasks';
 
 import { AttemptHistory, DetailRow } from './detail';
-import { CategoryTag, ErrorChip } from './error-chip';
-import { ERROR_CATEGORIES, errorCategoryColorVar } from './error-taxonomy';
+import { ErrorChip } from './error-chip';
+import { errorCategoryColorVar } from './error-taxonomy';
 import { FacetCombobox, type FacetOption } from './facet-combobox';
 import { ErrorState } from './states';
 import { TaskBreakdown } from './task-breakdown';
+import { TaxonomyStrip } from './taxonomy-strip';
 
 /** URL dimensions the filter controls write to. */
-type ValueDimension = 'status' | 'task_name' | 'queue' | 'worker' | 'error_code';
+type ValueDimension =
+  | 'status'
+  | 'task_name'
+  | 'queue'
+  | 'worker'
+  | 'error_code'
+  | 'error_category';
 
 export interface TaskExplorerProps {
   search: TaskSearch;
@@ -100,38 +107,6 @@ function StatsBar({
           </button>
         );
       })}
-    </div>
-  );
-}
-
-/** Error-code counts rolled up by taxonomy category. Counts every task carrying
- * an error code (including completed tasks that returned a domain error), so it
- * is deliberately NOT labelled "failures". */
-function TaxonomyStrip({
-  totals,
-}: {
-  totals: Partial<Record<ErrorCategory, number>>;
-}) {
-  const present = ERROR_CATEGORIES.filter(category => (totals[category] ?? 0) > 0);
-  if (present.length === 0) {
-    return null;
-  }
-  return (
-    <div className="glass flex flex-wrap items-center gap-4 rounded-lg border border-border px-3 py-2">
-      <span
-        className="text-xs font-medium uppercase tracking-wide text-foreground"
-        title="Tasks carrying an error code, grouped by family. Includes domain errors returned by completed tasks, so this is not the same as the failed count."
-      >
-        Error codes by category
-      </span>
-      {present.map(category => (
-        <span key={category} className="flex items-center gap-1.5">
-          <CategoryTag category={category} />
-          <span className="font-mono text-11 tabular-nums text-muted-foreground">
-            {totals[category]}
-          </span>
-        </span>
-      ))}
     </div>
   );
 }
@@ -256,6 +231,9 @@ export function TaskExplorer({ search, onSearchChange }: TaskExplorerProps) {
 
   const { facets } = useFacets({
     ...(search.status === undefined ? {} : { status: search.status }),
+    ...(search.error_category === undefined
+      ? {}
+      : { error_category: search.error_category }),
     ...(search.retried === undefined ? {} : { retried_only: search.retried }),
   });
 
@@ -303,6 +281,7 @@ export function TaskExplorer({ search, onSearchChange }: TaskExplorerProps) {
       queue: undefined,
       worker: undefined,
       error_code: undefined,
+      error_category: undefined,
       retried: undefined,
       page: undefined,
     });
@@ -501,7 +480,11 @@ export function TaskExplorer({ search, onSearchChange }: TaskExplorerProps) {
         filters={filters}
         onToggle={status => toggleValue('status', status)}
       />
-      <TaxonomyStrip totals={facets?.error_category_totals ?? {}} />
+      <TaxonomyStrip
+        totals={facets?.error_category_totals ?? {}}
+        active={search.error_category ?? []}
+        onToggle={category => toggleValue('error_category', category)}
+      />
 
       <div className="glass flex flex-wrap items-end gap-3 rounded-lg border border-border px-3 py-2">
         <div className="flex flex-col gap-1">

@@ -31,6 +31,16 @@ const SORT_COLUMNS: ReadonlySet<string> = new Set([
   'exec_s',
 ]);
 
+/** Taxonomy family names. Only the names: expanding one to its error codes is
+ * the server's job, since the code lists live in the library. */
+const ERROR_CATEGORY_NAMES: ReadonlySet<string> = new Set([
+  'OPERATIONAL',
+  'CONTRACT',
+  'RETRIEVAL',
+  'OUTCOME',
+  'DOMAIN',
+]);
+
 export const PAGE_SIZES = [25, 50, 100, 200] as const;
 
 export interface TaskSearch {
@@ -39,6 +49,7 @@ export interface TaskSearch {
   queue?: string[];
   worker?: string[];
   error_code?: string[];
+  error_category?: string[];
   retried?: boolean;
   view?: TaskView;
   sort?: TaskSortBy;
@@ -102,6 +113,14 @@ export function validateTaskSearch(raw: Record<string, unknown>): TaskSearch {
   if (worker !== undefined) search.worker = worker;
   const errorCode = toStringArray(raw.error_code);
   if (errorCode !== undefined) search.error_code = errorCode;
+  // Unknown families are dropped rather than forwarded: the server rejects
+  // them with a 400, and a hand-edited URL should degrade, not error.
+  const errorCategory = toStringArray(raw.error_category)?.filter(value =>
+    ERROR_CATEGORY_NAMES.has(value)
+  );
+  if (errorCategory !== undefined && errorCategory.length > 0) {
+    search.error_category = errorCategory;
+  }
   if (isTrue(raw.retried)) search.retried = true;
   if (typeof raw.view === 'string' && TASK_VIEWS.has(raw.view)) {
     search.view = raw.view as TaskView;
@@ -132,6 +151,9 @@ export function filtersFromSearch(search: TaskSearch): TaskFilters {
   if (search.queue !== undefined) filters.queue = search.queue;
   if (search.worker !== undefined) filters.worker = search.worker;
   if (search.error_code !== undefined) filters.error_code = search.error_code;
+  if (search.error_category !== undefined) {
+    filters.error_category = search.error_category;
+  }
   if (search.retried === true) filters.retried_only = true;
   return filters;
 }
