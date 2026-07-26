@@ -194,11 +194,37 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - name: Build web UI assets
+        working-directory: webui
+        # Must precede the wheel build: the wheel ships this output as
+        # package data, and the source tree never contains it.
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
       - name: Clean dist directory
         run: rm -rf dist
 
       - name: Build distributions
         run: uv build
+
+      - name: Verify the wheel carries the built web UI
+        # A wheel with an empty static tree installs cleanly and then serves
+        # 503 on every page, so this is release-blocking rather than advisory.
+        run: |
+          set -euo pipefail
+          wheel=$(ls dist/horsies-*.whl)
+          echo "Inspecting $wheel"
+          contents=$(unzip -l "$wheel")
+          echo "$contents" | grep -q 'horsies/web/static/index.html' \
+            || { echo 'FAIL: horsies/web/static/index.html missing from wheel'; exit 1; }
+          echo "$contents" | grep -Eq 'horsies/web/static/assets/.+\.js' \
+            || { echo 'FAIL: no hashed JS asset under horsies/web/static/assets'; exit 1; }
+          echo "$contents" | grep -Eq 'horsies/web/static/assets/.+\.css' \
+            || { echo 'FAIL: no hashed CSS asset under horsies/web/static/assets'; exit 1; }
+          echo 'OK: wheel carries the built web UI'
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
