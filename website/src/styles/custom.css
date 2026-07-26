@@ -375,7 +375,13 @@ h6,
 .sl-markdown-content table {
 	border: 1px solid rgba(0, 255, 170, 0.3);
 	border-radius: var(--radius-md);
+	/* `fit-content` keeps a narrow table narrow, but on its own it resolves to
+	   the table's min-content width when that exceeds the column — the block
+	   grows past the content area and slides under the right-hand TOC. Starlight
+	   already sets `display: block; overflow: auto` here, so capping the width
+	   is what turns the excess into a scroll instead of an overlap. */
 	width: fit-content;
+	max-width: 100%;
 }
 
 .sl-markdown-content th,
