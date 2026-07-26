@@ -32,6 +32,32 @@
 	--horsie-black: #050505;
 	--horsie-charcoal: #0D0D0D;
 
+	/* ── Liquid glass material — dark ──
+	   Surfaces composited by the glass tiers at the end of this file. Every
+	   fallback token is EXACTLY what its tier composites to over the canvas
+	   (#050505); asserted by scripts/check-glass-contrast.mjs. */
+	--glass-blur-sm: 20px;
+	--glass-blur-md: 28px;
+	--glass-blur-lg: 40px;
+	--glass-saturate: 160%;
+
+	--glass-chrome-surface: rgba(12, 12, 9, 0.72);   /* composites to #0A0A08 — the pre-glass nav color, exactly */
+	--glass-panel-surface: rgba(42, 42, 32, 0.60);   /* composites to #1B1B15 */
+	--glass-strong-surface: rgba(48, 48, 42, 0.78);  /* composites to #272722 */
+	--glass-fallback-chrome: #0A0A08;
+	--glass-fallback-panel: #1B1B15;
+	--glass-fallback-strong: #272722;
+
+	--glass-inset: rgba(255, 255, 255, 0.055);       /* recessed zones ON a glass surface (search input) */
+
+	--glass-shadow-ambient: 0 6px 24px rgba(0, 0, 0, 0.40);
+	--glass-shadow-menu: 0 10px 34px rgba(0, 0, 0, 0.55);
+	--glass-shadow-window: 0 18px 60px rgba(0, 0, 0, 0.60);
+
+	/* Gold as TEXT. --horsie-gold stays for borders, washes and fills, where
+	   2:1 is acceptable; text gold must clear 4.5:1 on every surface it sits
+	   on. */
+	--horsie-gold-ink: #DAA520;
 
 	/* Starlight color overrides */
 	--sl-color-accent-low: #1a1200;
@@ -41,7 +67,7 @@
 	--sl-color-white: #F5F5F0;
 	--sl-color-gray-1: #E5E5DC;
 	--sl-color-gray-2: #C9C9BC;
-	--sl-color-gray-3: #8B8B7A;
+	--sl-color-gray-3: #9A9A88;
 	--sl-color-gray-4: #5A5A4A;
 	--sl-color-gray-5: #2A2A20;
 	--sl-color-gray-6: #151510;
@@ -69,86 +95,65 @@
 
 [data-theme='light'],
 :root[data-theme='light'] {
-	/*
-	 * !important is needed because Starlight's own light-mode CSS
-	 * (from props.css) compiles to unlayered CSS that appears AFTER
-	 * this block in the build output, overriding same-specificity
-	 * declarations by source order.
-	 */
-
 	/* Horsie palette — keep the golden yellow, just darken slightly for cream bg */
-	--horsie-gold: #DAA520 !important;
-	--horsie-gold-bright: #C49000 !important;
-	--horsie-gold-dark: #B8860B !important;
-	--horsie-neon-green: #007A52 !important;
-	--horsie-neon-green-dim: #006644 !important;
-	--horsie-black: #F7F3EB !important;
-	--horsie-charcoal: #EDE8DD !important;
+	--horsie-gold: #DAA520;
+	--horsie-gold-bright: #7E5F0F;
+	--horsie-gold-dark: #B8860B;
+	--horsie-neon-green: #007A52;
+	--horsie-neon-green-dim: #006644;
+	--horsie-black: #F7F3EB;
+	--horsie-charcoal: #EDE8DD;
 
 	/* Starlight semantic colors */
-	--sl-color-accent-low: #FFF5D6 !important;
-	--sl-color-accent: #DAA520 !important;
-	--sl-color-accent-high: #C49000 !important;
+	--sl-color-accent-low: #FFF5D6;
+	--sl-color-accent: #DAA520;
+	--sl-color-accent-high: #C49000;
 
-	--sl-color-white: #1A1A14 !important;
-	--sl-color-gray-1: #2A2A20 !important;
-	--sl-color-gray-2: #4A4A3A !important;
-	--sl-color-gray-3: #7A7A68 !important;
-	--sl-color-gray-4: #A8A894 !important;
-	--sl-color-gray-5: #D6D2C6 !important;
-	--sl-color-gray-6: #EDE8DD !important;
-	--sl-color-black: #F7F3EB !important;
+	--sl-color-white: #1A1A14;
+	--sl-color-gray-1: #2A2A20;
+	--sl-color-gray-2: #4A4A3A;
+	--sl-color-gray-3: #6A6A58;
+	--sl-color-gray-4: #A8A894;
+	--sl-color-gray-5: #D6D2C6;
+	--sl-color-gray-6: #EDE8DD;
+	--sl-color-black: #F7F3EB;
 
-	--sl-color-bg: #F7F3EB !important;
-	--sl-color-bg-nav: #EDE8DD !important;
-	--sl-color-bg-sidebar: #EDE8DD !important;
-	--sl-color-text: #1A1A14 !important;
-	--sl-color-text-accent: #DAA520 !important;
-	--sl-color-hairline-light: #D6D2C6 !important;
-	--sl-color-hairline: #E0DBCE !important;
+	--sl-color-bg: #F7F3EB;
+	--sl-color-bg-nav: #FAF7F1;
+	--sl-color-bg-sidebar: #FAF7F1;
+	--sl-color-text: #1A1A14;
+	--sl-color-text-accent: #7E5F0F;
+	--sl-color-hairline-light: #D6D2C6;
+	--sl-color-hairline: #E0DBCE;
 
 	/* Override Starlight's derived variables that use var() */
-	--sl-color-bg-inline-code: #EDE8DD !important;
-	--sl-color-text-invert: #F7F3EB !important;
-	--sl-color-bg-accent: #DAA520 !important;
-	--sl-color-gray-7: #F2EDE3 !important;
-}
+	--sl-color-bg-inline-code: #EDE8DD;
+	--sl-color-text-invert: #F7F3EB;
+	--sl-color-bg-accent: #DAA520;
+	--sl-color-gray-7: #F2EDE3;
 
-/* Light mode — headings */
-[data-theme='light'] h1,
-[data-theme='light'] h2,
-[data-theme='light'] h3,
-[data-theme='light'] h4,
-[data-theme='light'] h5,
-[data-theme='light'] h6,
-[data-theme='light'] .sl-markdown-content h1,
-[data-theme='light'] .sl-markdown-content h2,
-[data-theme='light'] .sl-markdown-content h3,
-[data-theme='light'] .sl-markdown-content h4,
-[data-theme='light'] .sl-markdown-content h5,
-[data-theme='light'] .sl-markdown-content h6 {
-	color: var(--horsie-gold);
-}
+	/* ── Liquid glass material — light ── canvas #F7F3EB */
+	--glass-chrome-surface: rgba(251, 248, 242, 0.82);  /* composites to #FAF7F1 */
+	--glass-panel-surface: rgba(253, 250, 244, 0.66);   /* composites to #FBF8F1 */
+	--glass-strong-surface: rgba(253, 250, 244, 0.85);  /* composites to #FCF9F3 */
+	--glass-fallback-chrome: #FAF7F1;
+	--glass-fallback-panel: #FBF8F1;
+	--glass-fallback-strong: #FCF9F3;
 
-/* Light mode — site title */
-[data-theme='light'] .site-title {
-	color: var(--horsie-gold-bright) !important;
-}
+	--glass-inset: rgba(30, 26, 22, 0.05);
 
-/* Light mode — content links */
-[data-theme='light'] .sl-markdown-content a:not([class]) {
-	color: var(--horsie-neon-green);
-}
+	--glass-shadow-ambient: 0 6px 24px rgba(30, 26, 22, 0.08);
+	--glass-shadow-menu: 0 10px 34px rgba(30, 26, 22, 0.16);
+	--glass-shadow-window: 0 18px 60px rgba(30, 26, 22, 0.22);
 
-[data-theme='light'] .sl-markdown-content a:not([class]):hover {
-	color: var(--horsie-neon-green-dim);
+	--horsie-gold-ink: #7E5F0F;
 }
 
 /* Light mode — inline code */
 [data-theme='light'] .sl-markdown-content :not(pre) > code {
 	background: rgba(218, 165, 32, 0.08);
 	border: 1px solid rgba(218, 165, 32, 0.2);
-	color: #8B6914;
+	color: var(--horsie-gold-ink);
 }
 
 /* Light mode — code block borders */
@@ -163,7 +168,6 @@
 
 [data-theme='light'] .sl-markdown-content th {
 	background: rgba(218, 165, 32, 0.08);
-	color: var(--horsie-gold);
 }
 
 [data-theme='light'] .sl-markdown-content td {
@@ -179,7 +183,6 @@
 /* Light mode — cards */
 [data-theme='light'] .card {
 	border-color: rgba(0, 122, 82, 0.3);
-	background: linear-gradient(180deg, rgba(237, 232, 221, 0.9) 0%, rgba(247, 243, 235, 0.95) 100%);
 }
 
 /* Light mode — selection */
@@ -201,11 +204,6 @@
 	background: var(--horsie-gold);
 }
 
-/* Light mode — sidebar active link */
-[data-theme='light'] .sidebar-content a[aria-current='page'] {
-	color: #F7F3EB !important;
-}
-
 /* Light mode — search trigger */
 [data-theme='light'] site-search button[data-open-modal] {
 	background-color: var(--horsie-charcoal);
@@ -214,7 +212,6 @@
 
 /* Light mode — search dialog */
 [data-theme='light'] site-search dialog {
-	background-color: #EDE8DD;
 	border-color: #C4B99A;
 }
 
@@ -224,44 +221,13 @@
 
 /* Light mode — pagefind overrides */
 [data-theme='light'] #starlight__search {
-	--pagefind-ui-primary: var(--horsie-gold);
-	--pagefind-ui-text: #2A2A20;
-	--pagefind-ui-background: #F7F3EB;
 	--pagefind-ui-border: #C4B99A;
 	--pagefind-ui-tag: #C4B99A;
 }
 
-[data-theme='light'] .pagefind-ui__search-input {
-	color: var(--horsie-neon-green) !important;
-	caret-color: var(--horsie-neon-green);
-}
-
-[data-theme='light'] .pagefind-ui__search-clear {
-	color: var(--horsie-gold) !important;
-	background-color: #F7F3EB !important;
-}
-
-[data-theme='light'] .pagefind-ui__result-link {
-	color: var(--horsie-gold) !important;
-}
-
-[data-theme='light'] .pagefind-ui__result-link:hover {
-	color: var(--horsie-neon-green) !important;
-}
-
 [data-theme='light'] .pagefind-ui__result-excerpt mark {
 	background-color: rgba(218, 165, 32, 0.2);
-	color: #8B6914;
-}
-
-/* Light mode — page search bar */
-[data-theme='light'] #page-search-bar {
-	background: var(--horsie-charcoal);
-	border-bottom-color: var(--horsie-gold);
-}
-
-[data-theme='light'] #page-search-input {
-	color: var(--horsie-neon-green);
+	color: var(--horsie-gold-ink);
 }
 
 [data-theme='light'] mark.page-search-highlight {
@@ -276,12 +242,6 @@
 /* Light mode — link cards */
 [data-theme='light'] .sl-link-card {
 	border-color: rgba(0, 122, 82, 0.3);
-	background: var(--horsie-black);
-}
-
-[data-theme='light'] .sl-link-card:hover {
-	background: rgba(218, 165, 32, 0.06);
-	border-color: var(--horsie-gold);
 }
 
 
@@ -299,13 +259,13 @@ h6,
 .sl-markdown-content h5,
 .sl-markdown-content h6 {
 	font-family: 'Departure Mono', ui-monospace, monospace;
-	color: var(--horsie-gold);
+	color: var(--horsie-gold-ink);
 }
 
 /* Site title in header */
 .site-title {
 	font-family: 'Departure Mono', ui-monospace, monospace;
-	color: var(--horsie-gold-bright) !important;
+	color: var(--horsie-gold-bright);
 }
 
 /* Sidebar group labels - Departure Mono */
@@ -374,7 +334,6 @@ h6,
 /* Cards */
 .card {
 	border: 2px solid rgba(0, 255, 170, 0.4);
-	background: linear-gradient(180deg, rgba(13, 13, 13, 0.9) 0%, rgba(5, 5, 5, 0.95) 100%);
 	transition: border-color 0.3s ease;
 }
 
@@ -395,7 +354,7 @@ h6,
 
 .sl-markdown-content th {
 	background: rgba(218, 165, 32, 0.1);
-	color: var(--horsie-gold);
+	color: var(--horsie-gold-ink);
 }
 
 .sl-markdown-content td {
@@ -469,7 +428,6 @@ h6,
 	align-items: center;
 	gap: 0.6rem;
 	padding: 0.5rem 1rem;
-	background: var(--horsie-charcoal, #0D0D0D);
 	border-bottom: 2px solid var(--horsie-gold, #DAA520);
 	font-family: 'Departure Mono', ui-monospace, monospace;
 	transform: translateY(-100%);
@@ -481,7 +439,7 @@ h6,
 }
 
 .page-search-label {
-	color: var(--horsie-gold, #DAA520);
+	color: var(--horsie-gold-ink);
 	font-size: 1.1rem;
 	flex-shrink: 0;
 }
@@ -518,7 +476,7 @@ h6,
 	background: transparent;
 	border: 1px solid var(--horsie-gold-dark, #B8860B);
 	border-radius: 3px;
-	color: var(--horsie-gold, #DAA520);
+	color: var(--horsie-gold-ink);
 	font-family: 'Departure Mono', ui-monospace, monospace;
 	font-size: 0.75rem;
 	padding: 0.15rem 0.4rem;
@@ -566,7 +524,7 @@ site-search button[data-open-modal]:hover {
 	display: none;
 	align-items: center;
 	margin-inline-start: auto;
-	color: var(--horsie-gold-dark);
+	color: var(--horsie-gold-ink);
 	font-family: 'Departure Mono', ui-monospace, monospace;
 	font-size: var(--sl-text-2xs, 0.75rem);
 	white-space: nowrap;
@@ -589,7 +547,6 @@ site-search button[data-open-modal]:hover {
 
 /* Dialog modal */
 site-search dialog {
-	background-color: var(--horsie-charcoal);
 	border: 1px solid var(--horsie-gold-dark);
 }
 
@@ -609,7 +566,7 @@ site-search button[data-close-modal] {
 #starlight__search {
 	--pagefind-ui-primary: var(--horsie-gold);
 	--pagefind-ui-text: var(--sl-color-gray-1);
-	--pagefind-ui-background: var(--horsie-black);
+	--pagefind-ui-background: transparent;
 	--pagefind-ui-border: var(--horsie-gold-dark);
 	--pagefind-ui-tag: var(--horsie-gold-dark);
 }
@@ -618,6 +575,7 @@ site-search button[data-close-modal] {
 .pagefind-ui__search-input {
 	font-family: 'Departure Mono', ui-monospace, monospace !important;
 	color: var(--horsie-neon-green) !important;
+	background-color: var(--glass-inset) !important;
 	caret-color: var(--horsie-neon-green);
 }
 
@@ -634,7 +592,7 @@ site-search button[data-close-modal] {
 /* Pagefind clear button */
 .pagefind-ui__search-clear {
 	color: var(--horsie-gold) !important;
-	background-color: var(--horsie-black) !important;
+	background-color: transparent !important;
 	font-family: 'Departure Mono', ui-monospace, monospace !important;
 }
 
@@ -672,3 +630,122 @@ site-search button[data-close-modal] {
 	font-family: 'Departure Mono', ui-monospace, monospace;
 }
 
+/* ============================================
+   Liquid glass tiers
+   ============================================
+   Four surface tiers. A surface belongs to exactly ONE tier; selectors are
+   asserted unique across tiers by scripts/check-glass-contrast.mjs.
+
+   Rules the tiers cannot enforce themselves:
+   - ONE GLASS PER DEPTH. Children of a glass surface are flat or use
+     var(--glass-inset) for a recessed zone. Nothing inside the search
+     dialog, the sidebar, or a card gets its own backdrop-filter.
+   - HOVER BRIGHTENS. Hover raises a panel to --glass-strong-surface. A hover
+     that swaps to a lower-alpha fill replaces the surface and reads as a
+     hole in the panel.
+   - TABLES AND CODE STAY OPAQUE. Content surfaces are not material.
+   - IDENTITY BORDERS ARE THE RIM. The 2px neon and 1px gold borders replace
+     specular/hairline shadows; do not add white inset box-shadows.
+   - ALPHA LIVES IN TOKENS. No rgba() surface literals at call sites.
+
+   Every tier degrades to its opaque fallback token (exact composite over the
+   canvas) under: no backdrop-filter support, prefers-reduced-transparency,
+   and print. */
+
+/* @glass-tier chrome */
+header.header,
+.sidebar-pane {
+	background-color: var(--glass-chrome-surface);
+	-webkit-backdrop-filter: blur(var(--glass-blur-md)) saturate(var(--glass-saturate));
+	backdrop-filter: blur(var(--glass-blur-md)) saturate(var(--glass-saturate));
+}
+
+/* @glass-tier panel */
+.feature-card,
+.sl-link-card,
+.card,
+.pagination-links a {
+	background: var(--glass-panel-surface);
+	-webkit-backdrop-filter: blur(var(--glass-blur-sm)) saturate(var(--glass-saturate));
+	backdrop-filter: blur(var(--glass-blur-sm)) saturate(var(--glass-saturate));
+	box-shadow: var(--glass-shadow-ambient);
+}
+
+/* Hover brightens (never dims): raised surface + gold rim. */
+.sl-link-card:hover,
+.pagination-links a:hover {
+	background: var(--glass-strong-surface);
+	border-color: var(--horsie-gold);
+}
+
+/* @glass-tier menu */
+#page-search-bar,
+mobile-starlight-toc .dropdown {
+	background-color: var(--glass-strong-surface);
+	-webkit-backdrop-filter: blur(var(--glass-blur-md)) saturate(var(--glass-saturate));
+	backdrop-filter: blur(var(--glass-blur-md)) saturate(var(--glass-saturate));
+	box-shadow: var(--glass-shadow-menu);
+}
+
+/* @glass-tier window */
+site-search dialog {
+	background-color: var(--glass-strong-surface);
+	-webkit-backdrop-filter: blur(var(--glass-blur-lg)) saturate(var(--glass-saturate));
+	backdrop-filter: blur(var(--glass-blur-lg)) saturate(var(--glass-saturate));
+	box-shadow: var(--glass-shadow-window);
+}
+
+/* Fallbacks: same design rendered flat. */
+@supports not (backdrop-filter: blur(1px)) {
+	header.header,
+	.sidebar-pane {
+		background-color: var(--glass-fallback-chrome);
+	}
+	.feature-card,
+	.sl-link-card,
+	.card,
+	.pagination-links a {
+		background: var(--glass-fallback-panel);
+	}
+	.sl-link-card:hover,
+	.pagination-links a:hover,
+	#page-search-bar,
+	mobile-starlight-toc .dropdown,
+	site-search dialog {
+		background-color: var(--glass-fallback-strong);
+	}
+}
+
+@media print, (prefers-reduced-transparency: reduce) {
+	header.header,
+	.sidebar-pane,
+	.feature-card,
+	.sl-link-card,
+	.card,
+	.pagination-links a,
+	.sl-link-card:hover,
+	.pagination-links a:hover,
+	#page-search-bar,
+	mobile-starlight-toc .dropdown,
+	site-search dialog {
+		-webkit-backdrop-filter: none;
+		backdrop-filter: none;
+	}
+	header.header,
+	.sidebar-pane {
+		background-color: var(--glass-fallback-chrome);
+	}
+	.feature-card,
+	.sl-link-card,
+	.card,
+	.pagination-links a {
+		background: var(--glass-fallback-panel);
+	}
+	.sl-link-card:hover,
+	.pagination-links a:hover,
+	#page-search-bar,
+	mobile-starlight-toc .dropdown,
+	site-search dialog {
+		background-color: var(--glass-fallback-strong);
+	}
+}
