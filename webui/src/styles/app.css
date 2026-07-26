@@ -1,0 +1,144 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import 'shadstack-table/style.css';
+@import './tokens.css';
+
+/* The task grid ships pre-built classes; Tailwind must scan its dist. */
+@source '../../node_modules/shadstack-table/dist';
+
+@custom-variant dark (&:is(.dark *));
+
+/* Semantic Tailwind color/size utilities. Every entry references a token from
+   tokens.css — no color value lives here. */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-hover: var(--primary-hover);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary-hover: var(--secondary-hover);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent-surface: var(--accent-surface);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-destructive-hover: var(--destructive-hover);
+
+  --color-success: var(--success);
+  --color-success-bg: var(--success-bg);
+  --color-warning: var(--warning);
+  --color-warning-dark: var(--warning-dark);
+  --color-warning-bg: var(--warning-bg);
+  --color-error: var(--error);
+  --color-error-bg: var(--error-bg);
+  --color-info: var(--info);
+  --color-info-bg: var(--info-bg);
+  --color-cancelled: var(--cancelled);
+
+  --color-overlay: var(--overlay);
+  --color-surface-muted: var(--surface-muted);
+  --color-table-hover: var(--table-hover);
+  --color-glass-field: var(--glass-field);
+  --color-glass-inset: var(--glass-inset);
+  --color-glass-table: var(--glass-table);
+  --color-glass-surface: var(--glass-surface);
+  --color-glass-surface-strong: var(--glass-surface-strong);
+
+  --text-9: 9px;
+  --text-10: 10px;
+  --text-11: 11px;
+  --text-13: 13px;
+}
+
+/* Glass tiers. Engines without backdrop-filter and reduced-transparency users
+   fall back to the opaque surface token. */
+@utility glass {
+  background-color: var(--glass-surface);
+  -webkit-backdrop-filter: blur(var(--glass-blur-sm));
+  backdrop-filter: blur(var(--glass-blur-sm));
+  @supports not (backdrop-filter: blur(1px)) {
+    background-color: var(--card);
+  }
+  @media (prefers-reduced-transparency: reduce) {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background-color: var(--card);
+  }
+}
+
+@utility glass-menu {
+  background-color: var(--glass-surface-strong);
+  -webkit-backdrop-filter: blur(var(--glass-blur-sm));
+  backdrop-filter: blur(var(--glass-blur-sm));
+  @supports not (backdrop-filter: blur(1px)) {
+    background-color: var(--popover);
+  }
+  @media (prefers-reduced-transparency: reduce) {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background-color: var(--popover);
+  }
+}
+
+@utility glass-window {
+  background-color: var(--glass-surface-strong);
+  -webkit-backdrop-filter: blur(var(--glass-blur-sm));
+  backdrop-filter: blur(var(--glass-blur-sm));
+  @supports not (backdrop-filter: blur(1px)) {
+    background-color: var(--card);
+  }
+  @media (prefers-reduced-transparency: reduce) {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background-color: var(--card);
+  }
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family:
+      ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  code,
+  pre,
+  .font-mono {
+    font-family:
+      ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  }
+}
+
+/* The DAG canvas draws its own chrome; keep it on the token palette. */
+.react-flow__controls-button {
+  background-color: var(--card);
+  border-bottom-color: var(--border);
+  fill: var(--foreground);
+}
+
+.react-flow__controls-button:hover {
+  background-color: var(--muted);
+}
