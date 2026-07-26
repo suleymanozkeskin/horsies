@@ -38,11 +38,19 @@ from horsies import (
 from .. import simulate, store, tuning
 from ..app import QUEUE_ANALYTICS, QUEUE_FULFILLMENT, app
 from ..domain import (
-    ORDER_NOT_FOUND,
+    CDN_REJECTED,
     LOYALTY_ENGINE_BUG,
+    ORDER_NOT_FOUND,
+    ORIGIN_REJECTED,
+    SEARCH_INDEX_STALE,
+    UNKNOWN_SKU,
+    CacheWarm,
     LoyaltyPoints,
     Order,
+    PriceUpdate,
+    PricePush,
     PromotionOutcome,
+    SearchPrewarm,
 )
 from . import store_failure
 
@@ -201,6 +209,159 @@ def compute_loyalty_points(
             tier=tier.label,
         ),
     )
+
+
+@app.task(
+    'publish_cdn',
+    queue_name=QUEUE_FULFILLMENT,
+    retry_policy=RetryPolicy.fixed(
+        tuning.CRASH_RETRY_INTERVALS_SECONDS,
+        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+    ),
+)
+def publish_cdn(*, campaign_id: str, sku: str) -> TaskResult[PricePush, TaskError]:
+    """Push sale prices to the CDN edge. One of two ways a sale can succeed."""
+    simulate.perform(tuning.PUBLISH_CDN_WORK, campaign_id, 'cdn')
+
+    if simulate.draw(tuning.CDN_REJECT_RATE, campaign_id, 'cdn-reject'):
+        return TaskResult(
+            err=TaskError(
+                error_code=CDN_REJECTED,
+                message=f'CDN refused the {campaign_id} price bundle',
+                data={'campaign_id': campaign_id},
+            ),
+        )
+    return TaskResult(
+        ok=PricePush(sku=sku, price_cents=_sale_price(sku), target='cdn'),
+    )
+
+
+@app.task(
+    'publish_origin',
+    queue_name=QUEUE_FULFILLMENT,
+    retry_policy=RetryPolicy.fixed(
+        tuning.CRASH_RETRY_INTERVALS_SECONDS,
+        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+    ),
+)
+def publish_origin(*, campaign_id: str, sku: str) -> TaskResult[PricePush, TaskError]:
+    """Push sale prices to origin. The other way a sale can succeed."""
+    simulate.perform(tuning.PUBLISH_ORIGIN_WORK, campaign_id, 'origin')
+
+    if simulate.draw(tuning.ORIGIN_REJECT_RATE, campaign_id, 'origin-reject'):
+        return TaskResult(
+            err=TaskError(
+                error_code=ORIGIN_REJECTED,
+                message=f'origin refused the {campaign_id} price bundle',
+                data={'campaign_id': campaign_id},
+            ),
+        )
+    return TaskResult(
+        ok=PricePush(sku=sku, price_cents=_sale_price(sku), target='origin'),
+    )
+
+
+@app.task(
+    'prewarm_search',
+    queue_name=QUEUE_ANALYTICS,
+    retry_policy=RetryPolicy.fixed(
+        tuning.CRASH_RETRY_INTERVALS_SECONDS,
+        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+    ),
+)
+def prewarm_search(*, campaign_id: str) -> TaskResult[SearchPrewarm, TaskError]:
+    """Rebuild the search index for the sale.
+
+    Declared `optional` in the workflow's SuccessPolicy, so it is excluded from
+    failure accounting entirely — it fails half the time and the sale still
+    completes.
+    """
+    simulate.perform(tuning.PREWARM_SEARCH_WORK, campaign_id, 'search')
+
+    if simulate.draw(tuning.SEARCH_PREWARM_FAIL_RATE, campaign_id, 'search-fail'):
+        return TaskResult(
+            err=TaskError(
+                error_code=SEARCH_INDEX_STALE,
+                message=f'search index for {campaign_id} did not finish rebuilding',
+                data={'campaign_id': campaign_id},
+            ),
+        )
+    return TaskResult(
+        ok=SearchPrewarm(
+            documents=simulate.integer(5_000, 50_000, campaign_id, 'docs'),
+            index_name=f'catalog-{campaign_id}',
+        ),
+    )
+
+
+@app.task(
+    'warm_cache_edge',
+    queue_name=QUEUE_FULFILLMENT,
+    retry_policy=RetryPolicy.fixed(
+        tuning.CRASH_RETRY_INTERVALS_SECONDS,
+        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+    ),
+)
+def warm_cache_edge(*, campaign_id: str) -> TaskResult[CacheWarm, TaskError]:
+    """Warm the edge cache as soon as *either* publish lands.
+
+    Its node uses `join='any'`, so it fires on the first of the two publishes
+    to complete instead of waiting for both.
+    """
+    simulate.perform(tuning.WARM_CACHE_EDGE_WORK, campaign_id, 'warm')
+
+    return TaskResult(
+        ok=CacheWarm(
+            target='edge',
+            keys_warmed=simulate.integer(200, 2_000, campaign_id, 'keys'),
+        ),
+    )
+
+
+@app.task(
+    'update_price',
+    queue_name=QUEUE_FULFILLMENT,
+    retry_policy=RetryPolicy.fixed(
+        tuning.CRASH_RETRY_INTERVALS_SECONDS,
+        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+    ),
+)
+def update_price(*, sku: str, campaign_id: str) -> TaskResult[PriceUpdate, TaskError]:
+    """Apply one sale price.
+
+    Sent in bulk with `with_options(good_until=...)`. The queue cannot drain
+    the burst inside the deadline, so the tail is never claimed and the reaper
+    reports it EXPIRED — which is a different outcome from failing, and the
+    dashboard shows it as one.
+    """
+    simulate.perform(tuning.UPDATE_PRICE_WORK, sku, campaign_id, 'price')
+
+    match store.list_catalog():
+        case Err(error):
+            return TaskResult(err=store_failure(error))
+        case Ok(catalog):
+            listed = [entry for entry in catalog if entry.product.sku == sku]
+
+    if not listed:
+        return TaskResult(
+            err=TaskError(
+                error_code=UNKNOWN_SKU,
+                message=f'{sku} is not in the catalog',
+                data={'sku': sku},
+            ),
+        )
+    was_cents = listed[0].product.price_cents
+    return TaskResult(
+        ok=PriceUpdate(sku=sku, was_cents=was_cents, now_cents=_sale_price(sku)),
+    )
+
+
+def _sale_price(sku: str) -> int:
+    """Flash-sale price for a SKU, from its stable base price."""
+    base = simulate.integer(
+        tuning.MIN_PRICE_CENTS, tuning.MAX_PRICE_CENTS, sku, 'price',
+    )
+    return base * (100 - tuning.FLASH_SALE_DISCOUNT_PERCENT) // 100
 
 
 def _lifetime_points(customer_id: str) -> int:

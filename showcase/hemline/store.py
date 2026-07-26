@@ -28,12 +28,15 @@ from horsies import Err, Ok, Result
 
 from .domain import (
     CatalogEntry,
+    ItemCondition,
     Order,
     OrderLine,
     OrderStatus,
     PaymentIntent,
     PaymentKind,
     Product,
+    ReturnCase,
+    ReturnStatus,
     Shipment,
     StockLevel,
 )
@@ -98,7 +101,18 @@ CREATE TABLE IF NOT EXISTS hemline_shipments (
     created_at        timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS hemline_returns (
+    return_id  text PRIMARY KEY,
+    order_id   text NOT NULL REFERENCES hemline_orders (order_id) ON DELETE CASCADE,
+    sku        text NOT NULL,
+    quantity   integer NOT NULL,
+    status     text NOT NULL,
+    condition  text,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE SEQUENCE IF NOT EXISTS hemline_order_seq;
+CREATE SEQUENCE IF NOT EXISTS hemline_return_seq;
 """
 
 
@@ -657,6 +671,223 @@ def _set_shipment_field(operation: str, column: str) -> Callable[[str, str], Sto
 set_booking_reference = _set_shipment_field('set_booking_reference', 'booking_reference')
 set_label_url = _set_shipment_field('set_label_url', 'label_url')
 set_tracking_code = _set_shipment_field('set_tracking_code', 'tracking_code')
+
+
+# --- Returns ------------------------------------------------------------
+
+
+def next_return_number() -> StoreResult[int]:
+    """Next value of the return sequence."""
+
+    def work(connection: psycopg.Connection[DictRow]) -> int:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT nextval('hemline_return_seq') AS value")
+            row = cursor.fetchone()
+            if row is None:
+                raise RuntimeError('nextval returned no row')
+            return int(row['value'])
+
+    return _run('next_return_number', work)
+
+
+def open_return(case: ReturnCase) -> StoreResult[None]:
+    """Book a return into the returns desk."""
+
+    def work(connection: psycopg.Connection[DictRow]) -> None:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO hemline_returns
+                    (return_id, order_id, sku, quantity, status, condition, created_at)
+                VALUES (%(return_id)s, %(order_id)s, %(sku)s, %(quantity)s,
+                        %(status)s, %(condition)s, %(created_at)s)
+                ON CONFLICT (return_id) DO NOTHING
+                """,
+                case.model_dump(),
+            )
+
+    return _run('open_return', work)
+
+
+def get_return(return_id: str) -> StoreResult[ReturnCase | None]:
+    """Load a return case."""
+
+    def work(connection: psycopg.Connection[DictRow]) -> ReturnCase | None:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT return_id, order_id, sku, quantity, status, condition, created_at
+                FROM hemline_returns
+                WHERE return_id = %s
+                """,
+                (return_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return ReturnCase(
+                return_id=row['return_id'],
+                order_id=row['order_id'],
+                sku=row['sku'],
+                quantity=row['quantity'],
+                status=row['status'],
+                condition=row['condition'],
+                created_at=row['created_at'],
+            )
+
+    return _run('get_return', work)
+
+
+def record_inspection(
+    return_id: str,
+    condition: ItemCondition,
+) -> StoreResult[bool]:
+    """Store what the inspector found."""
+
+    def work(connection: psycopg.Connection[DictRow]) -> bool:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE hemline_returns
+                SET condition = %(condition)s, status = 'inspected'
+                WHERE return_id = %(return_id)s
+                RETURNING return_id
+                """,
+                {'return_id': return_id, 'condition': condition},
+            )
+            return cursor.fetchone() is not None
+
+    return _run('record_inspection', work)
+
+
+def close_return(return_id: str, status: ReturnStatus) -> StoreResult[bool]:
+    """Move a return to its terminal status."""
+
+    def work(connection: psycopg.Connection[DictRow]) -> bool:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE hemline_returns
+                SET status = %(status)s
+                WHERE return_id = %(return_id)s
+                RETURNING return_id
+                """,
+                {'return_id': return_id, 'status': status},
+            )
+            return cursor.fetchone() is not None
+
+    return _run('close_return', work)
+
+
+def list_returnable_orders(limit: int) -> StoreResult[list[tuple[str, str, int]]]:
+    """Captured orders with a line, as (order_id, sku, quantity)."""
+
+    def work(connection: psycopg.Connection[DictRow]) -> list[tuple[str, str, int]]:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT o.order_id, ol.sku, ol.quantity
+                FROM hemline_orders AS o
+                JOIN hemline_order_lines AS ol USING (order_id)
+                WHERE o.status = 'captured'
+                ORDER BY o.created_at DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return [
+                (row['order_id'], row['sku'], int(row['quantity']))
+                for row in cursor.fetchall()
+            ]
+
+    return _run('list_returnable_orders', work)
+
+
+# --- Analytics ----------------------------------------------------------
+
+
+def sales_totals() -> StoreResult[tuple[int, int, int]]:
+    """(orders, gross cents, captured cents) across the whole demo database."""
+
+    def work(connection: psycopg.Connection[DictRow]) -> tuple[int, int, int]:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT count(*) AS orders, coalesce(sum(total_cents), 0) AS gross
+                FROM hemline_orders
+                """,
+            )
+            header = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT coalesce(sum(amount_cents), 0) AS captured
+                FROM hemline_payments
+                WHERE kind = 'capture'
+                """,
+            )
+            captured = cursor.fetchone()
+        orders = 0 if header is None else int(header['orders'])
+        gross = 0 if header is None else int(header['gross'])
+        settled = 0 if captured is None else int(captured['captured'])
+        return orders, gross, settled
+
+    return _run('sales_totals', work)
+
+
+def abandoned_orders(older_than_minutes: int) -> StoreResult[tuple[int, str | None]]:
+    """(count, oldest order id) for orders that never reached a capture."""
+
+    def work(connection: psycopg.Connection[DictRow]) -> tuple[int, str | None]:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT count(*) AS stranded, min(order_id) AS oldest
+                FROM hemline_orders
+                WHERE status NOT IN ('captured', 'shipped')
+                  AND created_at < now() - make_interval(mins => %s)
+                """,
+                (older_than_minutes,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return 0, None
+            return int(row['stranded']), row['oldest']
+
+    return _run('abandoned_orders', work)
+
+
+def payment_reconciliation() -> StoreResult[tuple[int, int, int]]:
+    """(authorizations, captures, authorizations without a capture)."""
+
+    def work(connection: psycopg.Connection[DictRow]) -> tuple[int, int, int]:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    count(*) FILTER (WHERE kind = 'authorization') AS authorizations,
+                    count(*) FILTER (WHERE kind = 'capture') AS captures
+                FROM hemline_payments
+                """,
+            )
+            totals = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT count(*) AS unmatched
+                FROM hemline_payments AS a
+                WHERE a.kind = 'authorization'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM hemline_payments AS c
+                      WHERE c.order_id = a.order_id AND c.kind = 'capture'
+                  )
+                """,
+            )
+            gap = cursor.fetchone()
+        authorizations = 0 if totals is None else int(totals['authorizations'])
+        captures = 0 if totals is None else int(totals['captures'])
+        unmatched = 0 if gap is None else int(gap['unmatched'])
+        return authorizations, captures, unmatched
+
+    return _run('payment_reconciliation', work)
 
 
 def get_shipment(order_id: str) -> StoreResult[Shipment | None]:

@@ -13,7 +13,16 @@ import argparse
 from collections.abc import Callable
 from typing import Final
 
-from . import seed, steady
+from . import (
+    bulk_import,
+    chaos,
+    flash_sale,
+    maintenance,
+    problem_child,
+    rush,
+    seed,
+    steady,
+)
 
 # Scenarios are watched live and are usually piped — into a terminal
 # multiplexer, a process manager, or a log file, where Python block-buffers
@@ -23,6 +32,12 @@ from . import seed, steady
 SCENARIOS: Final[dict[str, Callable[[], int]]] = {
     'seed': seed.run,
     'steady': steady.run,
+    'rush': rush.run,
+    'problem-child': problem_child.run,
+    'bulk-import': bulk_import.run,
+    'flash-sale': flash_sale.run,
+    'chaos': chaos.run,
+    'maintenance': maintenance.run,
 }
 
 

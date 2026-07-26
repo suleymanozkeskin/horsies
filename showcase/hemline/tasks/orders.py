@@ -24,9 +24,11 @@ from .. import simulate, store, tuning
 from ..app import QUEUE_FULFILLMENT, app
 from ..domain import (
     ORDER_NOT_FOUND,
+    UNKNOWN_SKU,
     Invoice,
     OrderValidation,
     PickPack,
+    WarehouseAllocation,
 )
 from . import store_failure
 
@@ -118,6 +120,50 @@ def pick_pack(
                     task_index=None if workflow_meta is None else workflow_meta.task_index,
                 ),
             )
+
+
+@app.task(
+    'allocate_warehouse',
+    queue_name=QUEUE_FULFILLMENT,
+    retry_policy=RetryPolicy.fixed(
+        tuning.CRASH_RETRY_INTERVALS_SECONDS,
+        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+    ),
+)
+def allocate_warehouse(
+    *,
+    sku: str,
+    quantity: int,
+) -> TaskResult[WarehouseAllocation, TaskError]:
+    """Pick the warehouse a transfer should draw from.
+
+    Used by `warehouse_transfer`, which moves stock between sites rather than
+    fulfilling an order — the flagship order DAG allocates implicitly when it
+    reserves.
+    """
+    simulate.perform(tuning.ALLOCATE_WAREHOUSE_WORK, sku, 'allocate')
+
+    match store.list_catalog():
+        case Err(error):
+            return TaskResult(err=store_failure(error))
+        case Ok(catalog):
+            known = any(entry.product.sku == sku for entry in catalog)
+
+    if not known:
+        return TaskResult(
+            err=TaskError(
+                error_code=UNKNOWN_SKU,
+                message=f'{sku} is not in the catalog',
+                data={'sku': sku},
+            ),
+        )
+    return TaskResult(
+        ok=WarehouseAllocation(
+            order_id=f'transfer:{sku}',
+            warehouse_code=simulate.choice(tuning.WAREHOUSES, sku, 'warehouse'),
+            distance_km=simulate.integer(20, 1_400, sku, 'distance'),
+        ),
+    )
 
 
 @app.task(

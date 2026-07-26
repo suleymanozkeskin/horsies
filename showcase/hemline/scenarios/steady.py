@@ -21,17 +21,20 @@ from ..domain import CatalogEntry, Order
 from ..settings import DATABASE
 from ..tasks.promotions import apply_promotions, compute_loyalty_points
 from ..workflows.order_fulfillment import build_order_fulfillment
+from ..workflows.restock import build_restock
 from . import (
     WEB_BASE_URL,
     bullet,
     heading,
     load_catalog_or_explain,
+    open_return_for,
     place_order,
     say,
+    will_pause,
 )
 
 
-def _start_fulfillment(order: Order) -> None:
+def start_fulfillment(order: Order) -> None:
     """Start the flagship workflow for one order and print its deep link.
 
     `resend_on_transient_err` is on, so a transient enqueue failure has
@@ -48,7 +51,7 @@ def _start_fulfillment(order: Order) -> None:
             say(f'{order.order_id}  workflow start failed: [{error.code}] {error.message}')
 
 
-def _send_standalone(order: Order) -> None:
+def send_standalone(order: Order) -> None:
     """Send the two per-order tasks that are not part of the workflow."""
     match apply_promotions.send(order_id=order.order_id):
         case Ok(_):
@@ -64,6 +67,44 @@ def _send_standalone(order: Order) -> None:
             pass
         case Err(error):
             say(f'{order.order_id}  compute_loyalty_points send failed: [{error.code}]')
+
+
+def spawn_return(order: Order) -> None:
+    """Open a return against a delivered order and start its review run.
+
+    One order in `RETURN_SPAWN_EVERY` gets one. Whether the inspection finds
+    damage — and so whether the run pauses for you — is knowable before it
+    starts, so the link is labelled accordingly.
+    """
+    line = order.lines[0]
+    match open_return_for(order.order_id, line.sku, line.quantity):
+        case Err(error):
+            say(f'{order.order_id}  return failed: {error.operation} — {error.message}')
+        case Ok(started):
+            return_id, _, workflow_id = started.partition(' ')
+            marker = 'WILL PAUSE' if will_pause(return_id) else 'clean'
+            say(
+                f'{return_id}  return on {order.order_id} ({marker})  ->  '
+                f'{WEB_BASE_URL}/workflows?run={workflow_id}'
+            )
+
+
+def spawn_restock() -> None:
+    """Start a supplier restock — the quorum join, in the default demo mode.
+
+    Three feeds, two of which are enough. Whichever supplier times out is
+    absent from the aggregate's context, and the run completes anyway with a
+    failed branch still drawn in the graph.
+    """
+    match build_restock(suppliers=list(tuning.SUPPLIERS)).start():
+        case Err(error):
+            say(f'restock start failed: [{error.code}] {error.message}')
+        case Ok(handle):
+            say(
+                f'restock   {len(tuning.SUPPLIERS)} feeds, quorum '
+                f'{tuning.RESTOCK_MIN_SUCCESSFUL_FEEDS}  ->  '
+                f'{WEB_BASE_URL}/workflows?run={handle.workflow_id}'
+            )
 
 
 def _what_to_watch() -> None:
@@ -107,8 +148,12 @@ def run() -> int:
                     return 1
                 case Ok(order):
                     placed += 1
-                    _start_fulfillment(order)
-                    _send_standalone(order)
+                    start_fulfillment(order)
+                    send_standalone(order)
+                    if placed % tuning.RETURN_SPAWN_EVERY == 0:
+                        spawn_return(order)
+                    if placed % tuning.RESTOCK_SPAWN_EVERY == 0:
+                        spawn_restock()
             time.sleep(
                 simulate.integer(
                     tuning.STEADY_MIN_INTERARRIVAL_SECONDS,

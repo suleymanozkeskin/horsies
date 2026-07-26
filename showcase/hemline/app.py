@@ -11,20 +11,36 @@ Run every process from the repository root:
 
 from __future__ import annotations
 
+from datetime import time
 from typing import Final
 
 from pydantic import SecretStr
 
 from horsies import (
     AppConfig,
+    ByMonthDay,
+    BothDays,
+    CronEnumValues,
+    CronEvery,
+    CronRange,
+    CronSchedule,
+    CronStep,
+    CronValues,
     CustomQueueConfig,
+    DailySchedule,
+    EveryDay,
     Horsies,
+    HourlySchedule,
     IntervalSchedule,
+    Month,
+    MonthlySchedule,
     PostgresConfig,
     QueueMode,
     RecoveryConfig,
     ScheduleConfig,
     TaskSchedule,
+    Weekday,
+    WeeklySchedule,
 )
 
 from . import domain, tuning
@@ -54,13 +70,250 @@ RECOVERY: Final[RecoveryConfig] = RecoveryConfig(
     terminal_record_retention_hours=24,
 )
 
+def _supplier_feeds() -> list[TaskSchedule]:
+    """One interval schedule per supplier, deliberately out of phase."""
+    return [
+        TaskSchedule(
+            name=f'supplier-feed-{supplier}',
+            task_name='sync_supplier_feed',
+            pattern=IntervalSchedule(
+                seconds=tuning.SUPPLIER_FEED_INTERVAL_SECONDS + index * 30,
+            ),
+            kwargs={'supplier': supplier},
+            catch_up_missed=False,
+        )
+        for index, supplier in enumerate(tuning.SUPPLIERS)
+    ]
+
+
+def _regional_rollups() -> list[TaskSchedule]:
+    """One hourly rollup per region, staggered five minutes apart."""
+    return [
+        TaskSchedule(
+            name=f'rollup-{region}',
+            task_name='regional_rollup',
+            pattern=HourlySchedule(minute=10 + index * 5, second=0),
+            kwargs={'region': region},
+            catch_up_missed=False,
+        )
+        for index, region in enumerate(tuning.REGIONS)
+    ]
+
+
+def _cache_warms() -> list[TaskSchedule]:
+    """Edge cache warms, one per region, on staggered intervals."""
+    return [
+        TaskSchedule(
+            name=f'cache-warm-{region}',
+            task_name='warm_cache_edge',
+            pattern=IntervalSchedule(
+                minutes=tuning.CACHE_WARM_INTERVAL_MINUTES + index,
+            ),
+            kwargs={'campaign_id': f'steady-{region}'},
+            catch_up_missed=False,
+        )
+        for index, region in enumerate(tuning.REGIONS)
+    ]
+
+
+# Every pattern type, on jobs that would really run on that shape. Three are
+# disabled on purpose — a schedules tab where everything is enabled does not
+# show you what a disabled schedule looks like. `catch_up_missed` is False
+# throughout: restarting a demo should not replay a backlog of missed runs.
 SCHEDULES: Final[ScheduleConfig] = ScheduleConfig(
     schedules=[
+        *_supplier_feeds(),
+        *_regional_rollups(),
+        *_cache_warms(),
         TaskSchedule(
-            name='supplier-feed-atlas',
+            name='search-prewarm',
+            task_name='prewarm_search',
+            pattern=IntervalSchedule(
+                minutes=tuning.SEARCH_PREWARM_INTERVAL_MINUTES,
+            ),
+            kwargs={'campaign_id': 'steady-state'},
+            catch_up_missed=False,
+        ),
+        TaskSchedule(
+            name='abandoned-cart-sweep',
+            task_name='abandoned_cart_sweep',
+            pattern=HourlySchedule(minute=tuning.ABANDONED_CART_MINUTE, second=0),
+            kwargs={'older_than_minutes': tuning.ABANDONED_CART_AGE_MINUTES},
+            catch_up_missed=False,
+        ),
+        TaskSchedule(
+            name='retention-audit-hourly',
+            task_name='retention_audit',
+            pattern=HourlySchedule(minute=50, second=0),
+            kwargs={'older_than_days': tuning.RETENTION_AUDIT_DAYS},
+            catch_up_missed=False,
+        ),
+        TaskSchedule(
+            name='sales-rollup-daily',
+            task_name='sales_rollup',
+            pattern=DailySchedule(time=time(tuning.SALES_ROLLUP_HOUR, 0, 0)),
+            kwargs={'window': 'daily'},
+            catch_up_missed=False,
+        ),
+        TaskSchedule(
+            name='retention-audit-daily',
+            task_name='retention_audit',
+            pattern=DailySchedule(time=time(3, 30, 0)),
+            kwargs={'older_than_days': 90},
+            catch_up_missed=False,
+        ),
+        TaskSchedule(
+            name='reconcile-daily',
+            task_name='reconcile_payments',
+            pattern=DailySchedule(time=time(4, 0, 0)),
+            kwargs={'window': 'daily'},
+            catch_up_missed=False,
+        ),
+        TaskSchedule(
+            name='winback-blast',
+            task_name='marketing_blast',
+            pattern=DailySchedule(time=time(9, 0, 0)),
+            kwargs={'segment': 'winback'},
+            catch_up_missed=False,
+        ),
+        # Disabled: the newsletter is drafted by hand, so the schedule exists
+        # but must not fire on its own.
+        TaskSchedule(
+            name='newsletter-blast',
+            task_name='marketing_blast',
+            pattern=DailySchedule(time=time(10, 0, 0)),
+            kwargs={'segment': 'newsletter'},
+            enabled=False,
+            catch_up_missed=False,
+        ),
+        TaskSchedule(
+            name='weekly-sales-review',
+            task_name='sales_rollup',
+            pattern=WeeklySchedule(days=[Weekday.MONDAY], time=time(6, 0)),
+            kwargs={'window': 'weekly'},
+            catch_up_missed=False,
+        ),
+        TaskSchedule(
+            name='weekly-supplier-audit',
             task_name='sync_supplier_feed',
-            pattern=IntervalSchedule(seconds=tuning.SUPPLIER_FEED_INTERVAL_SECONDS),
+            pattern=WeeklySchedule(
+                days=[Weekday.WEDNESDAY], time=time(7, 0),
+            ),
             kwargs={'supplier': tuning.SUPPLIERS[0]},
+            catch_up_missed=False,
+        ),
+        TaskSchedule(
+            name='weekend-flash-prep',
+            task_name='prewarm_search',
+            pattern=WeeklySchedule(
+                days=[Weekday.FRIDAY, Weekday.SATURDAY], time=time(12, 0),
+            ),
+            kwargs={'campaign_id': 'weekend'},
+            catch_up_missed=False,
+        ),
+        # Disabled: superseded by the hourly audit, kept for the quarter-end.
+        TaskSchedule(
+            name='weekly-retention-audit',
+            task_name='retention_audit',
+            pattern=WeeklySchedule(days=[Weekday.SUNDAY], time=time(2, 0)),
+            kwargs={'older_than_days': 180},
+            enabled=False,
+            catch_up_missed=False,
+        ),
+        TaskSchedule(
+            name='monthly-close',
+            task_name='reconcile_payments',
+            pattern=MonthlySchedule(day=1, time=time(5, 0)),
+            kwargs={'window': 'monthly'},
+            catch_up_missed=False,
+        ),
+        TaskSchedule(
+            name='monthly-catalog-audit',
+            task_name='retention_audit',
+            pattern=MonthlySchedule(day=15, time=time(8, 0)),
+            kwargs={'older_than_days': 365},
+            catch_up_missed=False,
+        ),
+        TaskSchedule(
+            name='monthly-markdown-review',
+            task_name='sales_rollup',
+            pattern=MonthlySchedule(day=28, time=time(11, 0)),
+            kwargs={'window': 'monthly'},
+            catch_up_missed=False,
+        ),
+        # "Every 4 hours at minute 15" as typed cron terms — no cron string,
+        # and `day=EveryDay()` makes the day-of-month / day-of-week choice
+        # explicit rather than inheriting cron's ambiguous default.
+        TaskSchedule(
+            name='payment-reconciliation',
+            task_name='reconcile_payments',
+            pattern=CronSchedule(
+                minute=[CronValues(values=[tuning.RECONCILE_MINUTE])],
+                hour=[CronStep(step=tuning.RECONCILE_HOUR_STEP)],
+                month=[CronEvery()],
+                day=EveryDay(),
+            ),
+            kwargs={'window': '4h'},
+            catch_up_missed=False,
+        ),
+        TaskSchedule(
+            name='price-sync-quarter-hour',
+            task_name='warm_cache_edge',
+            pattern=CronSchedule(
+                minute=[CronStep(step=tuning.PRICE_SYNC_MINUTE_STEP)],
+                hour=[CronEvery()],
+                month=[CronEvery()],
+                day=EveryDay(),
+            ),
+            kwargs={'campaign_id': 'price-sync'},
+            catch_up_missed=False,
+        ),
+        # Friday the 13th, not "the 13th or a Friday" — `BothDays` is how that
+        # distinction is stated, and cron cannot state it at all.
+        TaskSchedule(
+            name='fraud-review-friday-13th',
+            task_name='reconcile_payments',
+            pattern=CronSchedule(
+                minute=[CronValues(values=[0])],
+                hour=[CronValues(values=[9])],
+                month=[CronEvery()],
+                day=BothDays(
+                    day_of_month=[CronValues(values=[13])],
+                    day_of_week=[CronEnumValues[Weekday](values=[Weekday.FRIDAY])],
+                ),
+            ),
+            kwargs={'window': 'fraud-review'},
+            catch_up_missed=False,
+        ),
+        # Disabled: this export kills its own process by design. The chaos
+        # scenario drives it deliberately; a schedule must not.
+        TaskSchedule(
+            name='nightly-export',
+            task_name='flaky_export',
+            pattern=CronSchedule(
+                minute=[CronValues(values=[40])],
+                hour=[CronRange(start=1, end=5, step=2)],
+                month=[CronEvery()],
+                day=EveryDay(),
+            ),
+            kwargs={'export_id': 'nightly'},
+            enabled=False,
+            catch_up_missed=False,
+        ),
+        TaskSchedule(
+            name='quarterly-supplier-review',
+            task_name='sync_supplier_feed',
+            pattern=CronSchedule(
+                minute=[CronValues(values=[30])],
+                hour=[CronValues(values=[6])],
+                month=[
+                    CronEnumValues[Month](
+                        values=[Month.JANUARY, Month.APRIL, Month.JULY, Month.OCTOBER],
+                    ),
+                ],
+                day=ByMonthDay(day_of_month=[CronValues(values=[1])]),
+            ),
+            kwargs={'supplier': tuning.SUPPLIERS[2]},
             catch_up_missed=False,
         ),
     ],
@@ -89,7 +342,19 @@ app.discover_tasks([
     'showcase.hemline.tasks.orders',
     'showcase.hemline.tasks.promotions',
     'showcase.hemline.tasks.shipping',
+    'showcase.hemline.tasks.returns',
     'showcase.hemline.tasks.notify',
+    'showcase.hemline.tasks.analytics',
     'showcase.hemline.workflows.order_fulfillment',
     'showcase.hemline.workflows.shipping',
+    'showcase.hemline.workflows.returns_review',
+    'showcase.hemline.workflows.restock',
+    'showcase.hemline.workflows.flash_sale',
+    'showcase.hemline.workflows.catalog_import',
+    'showcase.hemline.workflows.daily_report',
+    'showcase.hemline.workflows.price_sync',
+    'showcase.hemline.workflows.customer_winback',
+    'showcase.hemline.workflows.warehouse_transfer',
+    'showcase.hemline.workflows.seasonal_markdown',
+    'showcase.hemline.workflows.fraud_review',
 ])

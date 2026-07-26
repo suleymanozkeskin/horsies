@@ -19,7 +19,7 @@ Three of those choices deliberately produce difficult data:
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from typing import Final
 
@@ -27,7 +27,8 @@ from horsies import Err, Ok
 
 from .. import simulate, store, tuning
 from ..domain import CatalogEntry, Order, OrderLine
-from ..store import StoreResult
+from ..store import StoreError, StoreResult
+from ..workflows.returns_review import build_returns_review
 
 WEB_BASE_URL: Final[str] = os.environ.get('HEMLINE_WEB_URL', 'http://127.0.0.1:8600')
 """Where `horsies web` listens; scenarios print their links against it. Set
@@ -139,6 +140,79 @@ def place_order(catalog: Sequence[CatalogEntry]) -> StoreResult[Order]:
             return Err(error)
         case Ok(_):
             return Ok(order)
+
+
+def reserve_order_id(
+    wanted: Callable[[str], bool],
+    *,
+    limit: int = 500,
+) -> StoreResult[str | None]:
+    """Advance the order sequence until an id whose draws match `wanted`.
+
+    Outcomes are a stable hash of the order id, so a scenario that needs a
+    declined payment cannot force one onto an arbitrary order — it has to go
+    find an id the issuer will decline. Burning sequence numbers is the honest
+    way to do that: the orders that get placed are ordinary orders, and their
+    failures are the ones their ids always had.
+    """
+    for _attempt in range(limit):
+        match store.next_order_number():
+            case Err(error):
+                return Err(error)
+            case Ok(number):
+                order_id = f'HEM-{number:05d}'
+        if wanted(order_id):
+            return Ok(order_id)
+    return Ok(None)
+
+
+def store_order(order_id: str, catalog: Sequence[CatalogEntry]) -> StoreResult[Order]:
+    """Build and persist an order under an id the caller already reserved."""
+    order = build_order(order_id, catalog)
+    match store.insert_order(order):
+        case Err(error):
+            return Err(error)
+        case Ok(_):
+            return Ok(order)
+
+
+def open_return_for(order_id: str, sku: str, quantity: int) -> StoreResult[str]:
+    """Reserve a return id and start a `returns_review` run for it.
+
+    Returns the workflow id so the caller can print a link, or an error if the
+    sequence or the workflow start failed.
+    """
+    match store.next_return_number():
+        case Err(error):
+            return Err(error)
+        case Ok(number):
+            return_id = f'RET-{number:05d}'
+
+    match build_returns_review(
+        return_id=return_id,
+        order_id=order_id,
+        sku=sku,
+        quantity=quantity,
+    ).start():
+        case Ok(handle):
+            return Ok(f'{return_id} {handle.workflow_id}')
+        case Err(error):
+            return Err(
+                StoreError(
+                    operation='start returns_review',
+                    message=f'[{error.code}] {error.message}',
+                ),
+            )
+
+
+def will_pause(return_id: str) -> bool:
+    """Whether this return's inspection will find damage, and so pause its run.
+
+    Knowable before the workflow starts, because the draw is a stable hash of
+    the return id — which is what lets a scenario tell you in advance which
+    runs are going to need you.
+    """
+    return simulate.draw(tuning.RETURN_DAMAGE_RATE, return_id, 'damage')
 
 
 def load_catalog_or_explain() -> StoreResult[list[CatalogEntry]]:

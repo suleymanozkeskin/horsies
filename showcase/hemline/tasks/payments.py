@@ -33,6 +33,7 @@ from ..domain import (
     PaymentCapture,
     PaymentIntent,
     PaymentRefund,
+    ReconciliationReport,
 )
 from . import store_failure
 
@@ -289,6 +290,36 @@ def refund_payment(
                     order_id=order_id,
                     refund_id=refund.payment_id,
                     amount_cents=refund.amount_cents,
+                ),
+            )
+
+
+@app.task(
+    'reconcile_payments',
+    queue_name=QUEUE_PAYMENTS,
+    retry_policy=RetryPolicy.fixed(
+        tuning.CRASH_RETRY_INTERVALS_SECONDS,
+        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+    ),
+)
+def reconcile_payments(*, window: str) -> TaskResult[ReconciliationReport, TaskError]:
+    """Check authorizations against captures.
+
+    Runs on a `CronSchedule` — every 4 hours at :15, written as typed cron
+    terms rather than a cron string.
+    """
+    simulate.perform(tuning.RECONCILE_PAYMENTS_WORK, window, 'reconcile')
+
+    match store.payment_reconciliation():
+        case Err(error):
+            return TaskResult(err=store_failure(error))
+        case Ok(counts):
+            authorizations, captures, unmatched = counts
+            return TaskResult(
+                ok=ReconciliationReport(
+                    authorizations=authorizations,
+                    captures=captures,
+                    unmatched=unmatched,
                 ),
             )
 

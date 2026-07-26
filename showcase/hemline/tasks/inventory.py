@@ -20,15 +20,20 @@ from horsies import (
     OperationalErrorCode,
     RetryPolicy,
     TaskError,
+    TaskNode,
     TaskResult,
+    WorkflowContext,
 )
 
 from .. import simulate, store, tuning
 from ..app import QUEUE_ANALYTICS, QUEUE_FULFILLMENT, app
 from ..domain import (
     INSUFFICIENT_STOCK,
+    NO_WORKFLOW_CONTEXT,
+    QUORUM_NOT_MET,
     SUPPLIER_TIMEOUT,
     UNKNOWN_SKU,
+    RestockPlan,
     StockRelease,
     StockReservation,
     SupplierFeed,
@@ -169,3 +174,91 @@ def sync_supplier_feed(*, supplier: str) -> TaskResult[SupplierFeed, TaskError]:
                     changed_count=simulate.integer(0, 12, supplier, window, 'changed'),
                 ),
             )
+
+
+def _feed_node(node_id: str) -> TaskNode[SupplierFeed]:
+    """A lookup handle for one feed node.
+
+    `WorkflowContext.has_result` keys on `node_id` alone, and it is the only
+    way to ask whether a result exists without `result_for` raising. A task
+    receives node ids as data, not node objects, so it rebuilds the handle.
+    """
+    return TaskNode(fn=sync_supplier_feed, node_id=node_id)
+
+
+@app.task(
+    'update_stock_levels',
+    queue_name=QUEUE_ANALYTICS,
+    retry_policy=RetryPolicy.fixed(
+        tuning.CRASH_RETRY_INTERVALS_SECONDS,
+        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+    ),
+)
+def update_stock_levels(
+    *,
+    feed_node_ids: list[str],
+    workflow_ctx: WorkflowContext | None = None,
+) -> TaskResult[RestockPlan, TaskError]:
+    """Apply whatever supplier feeds reported — the quorum aggregate.
+
+    Its node declares `join='quorum'` with `min_success=2`, so it fires as soon
+    as two of the three feeds land and does not wait for the third. Whichever
+    feed is missing or failed is simply absent from the context, which is why
+    every lookup is guarded rather than assumed.
+    """
+    if workflow_ctx is None:
+        return TaskResult(
+            err=TaskError(
+                error_code=NO_WORKFLOW_CONTEXT,
+                message='update_stock_levels runs only as a workflow node',
+                data={'feed_node_ids': feed_node_ids},
+            ),
+        )
+
+    match store.list_catalog():
+        case Err(error):
+            return TaskResult(err=store_failure(error))
+        case Ok(catalog):
+            skus = [entry.product.sku for entry in catalog]
+
+    reporting: list[str] = []
+    missing: list[str] = []
+    adjusted = 0
+
+    for node_id in feed_node_ids:
+        node = _feed_node(node_id)
+        if not workflow_ctx.has_result(node):
+            missing.append(node_id)
+            continue
+        feed = workflow_ctx.result_for(node)
+        if feed.is_err():
+            missing.append(node_id)
+            continue
+        supplier = feed.ok_value.supplier
+        reporting.append(supplier)
+        for sku in simulate.sample(
+            skus, min(tuning.RESTOCK_SKUS_PER_SUPPLIER, len(skus)), supplier, 'restock',
+        ):
+            match store.adjust_stock(sku, tuning.RESTOCK_UNITS_PER_SUPPLIER):
+                case Err(error):
+                    return TaskResult(err=store_failure(error))
+                case Ok(applied):
+                    adjusted += 1 if applied else 0
+
+    if not reporting:
+        return TaskResult(
+            err=TaskError(
+                error_code=QUORUM_NOT_MET,
+                message='no supplier feed reached the aggregate',
+                data={'missing': missing},
+            ),
+        )
+
+    return TaskResult(
+        ok=RestockPlan(
+            suppliers_reporting=reporting,
+            suppliers_missing=missing,
+            skus_adjusted=adjusted,
+            units_added=adjusted * tuning.RESTOCK_UNITS_PER_SUPPLIER,
+        ),
+    )

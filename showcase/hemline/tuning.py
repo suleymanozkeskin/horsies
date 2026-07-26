@@ -124,9 +124,140 @@ INVOICE_TIMEOUT_MS: Final[int] = 8_000
 INVOICE_HANG_MS: Final[int] = 20_000
 """How long a stuck render would sleep — it never gets there."""
 
+# --- Returns ------------------------------------------------------------
+
+RETURN_SPAWN_EVERY: Final[int] = 6
+"""Steady mode opens a return for one order in this many."""
+
+RETURN_DAMAGE_RATE: Final[float] = 0.30
+"""Returns whose inspection finds damage. `returns_review` runs under
+`OnError.PAUSE`, so each one pauses its workflow for a human decision."""
+
+RECEIVE_RETURN_WORK: Final[WorkEnvelope] = WorkEnvelope(low_ms=2_000, high_ms=3_500)
+INSPECT_ITEM_WORK: Final[WorkEnvelope] = WorkEnvelope(low_ms=2_500, high_ms=5_000)
+RESTOCK_OR_WRITEOFF_WORK: Final[WorkEnvelope] = WorkEnvelope(low_ms=2_000, high_ms=4_000)
+
+# --- Restock (quorum) ---------------------------------------------------
+
+RESTOCK_SPAWN_EVERY: Final[int] = 20
+"""Steady mode starts a `restock` run every this many orders, so the quorum
+join is exercised without a scenario of its own."""
+
+RESTOCK_MIN_SUCCESSFUL_FEEDS: Final[int] = 2
+"""`min_success` on the aggregate node: two of three suppliers is enough."""
+
+RESTOCK_UNITS_PER_SUPPLIER: Final[int] = 40
+RESTOCK_SKUS_PER_SUPPLIER: Final[int] = 5
+
+# --- Flash sale ---------------------------------------------------------
+
+FLASH_SALE_SKUS: Final[int] = 6
+FLASH_SALE_DISCOUNT_PERCENT: Final[int] = 30
+
+CDN_REJECT_RATE: Final[float] = 0.35
+ORIGIN_REJECT_RATE: Final[float] = 0.35
+"""Publish targets fail independently; the SuccessPolicy treats either one
+landing as success. The `flash-sale` scenario runs a second sale with a
+campaign id engineered to miss both, which reports
+WORKFLOW_SUCCESS_CASE_NOT_MET."""
+
+SEARCH_PREWARM_FAIL_RATE: Final[float] = 0.50
+"""`prewarm_search` is declared optional in the SuccessPolicy, so this rate
+never affects whether the sale succeeded."""
+
+EXPIRING_PRICE_SENDS: Final[int] = 80
+PRICE_GOOD_UNTIL_SECONDS: Final[int] = 45
+"""`update_price` is sent with `with_options(good_until=...)` into a queue that
+cannot drain 80 sends in 45 s, so the tail expires rather than running late."""
+
+PUBLISH_CDN_WORK: Final[WorkEnvelope] = WorkEnvelope(low_ms=2_500, high_ms=4_500)
+PUBLISH_ORIGIN_WORK: Final[WorkEnvelope] = WorkEnvelope(low_ms=2_500, high_ms=4_500)
+PREWARM_SEARCH_WORK: Final[WorkEnvelope] = WorkEnvelope(low_ms=3_000, high_ms=5_000)
+WARM_CACHE_EDGE_WORK: Final[WorkEnvelope] = WorkEnvelope(low_ms=2_000, high_ms=3_500)
+UPDATE_PRICE_WORK: Final[WorkEnvelope] = WorkEnvelope(low_ms=2_000, high_ms=3_000)
+
+# --- Catalog import -----------------------------------------------------
+
+CATALOG_IMPORT_CHUNKS: Final[int] = 40
+CATALOG_IMPORT_CHUNK_WORK: Final[WorkEnvelope] = WorkEnvelope(
+    low_ms=7_000, high_ms=9_000,
+)
+"""40 chunks at ~8 s on a queue capped at 2: long enough to cancel mid-run and
+watch pending nodes go SKIPPED while running ones drain."""
+
+CATALOG_IMPORT_ROWS_PER_CHUNK: Final[int] = 500
+
+# --- Analytics ----------------------------------------------------------
+
+SALES_ROLLUP_WORK: Final[WorkEnvelope] = WorkEnvelope(low_ms=3_000, high_ms=5_000)
+ABANDONED_CART_WORK: Final[WorkEnvelope] = WorkEnvelope(low_ms=2_500, high_ms=4_000)
+RECONCILE_PAYMENTS_WORK: Final[WorkEnvelope] = WorkEnvelope(low_ms=3_000, high_ms=5_000)
+FLAKY_EXPORT_WORK: Final[WorkEnvelope] = WorkEnvelope(low_ms=2_000, high_ms=4_000)
+
+ABANDONED_CART_AGE_MINUTES: Final[int] = 15
+
+CHAOS_EXPORT_CRASH_RATE: Final[float] = 0.50
+"""`flaky_export` calls os._exit(1) in the child for this share of export ids.
+The task never returns, so the worker reports WORKER_CRASHED and the retry
+policy brings it back — a different export id on the retry would defeat the
+demo, so the id is what the crash draw hashes."""
+
+CHAOS_EXPORT_SPACING_SECONDS: Final[int] = 30
+CHAOS_EXPORT_RETRY_INTERVALS_SECONDS: Final[list[int]] = [30, 60]
+"""Chaos is spaced out on purpose, and this is not cosmetic.
+
+A child that kills itself breaks the executor pool, and the worker replaces the
+whole pool — twelve children, which takes a few seconds to warm. If another
+self-killing task is dispatched *during* that warmup, the restart itself fails
+and the worker stops fail-closed rather than running without an executor. That
+is correct behaviour, and it is also how a chaos demo accidentally takes down
+the thing it is meant to demonstrate recovering.
+
+Spacing the sends by 30 s, and backing the retries off by 30 s and 60 s rather
+than the 3 s and 10 s the ordinary crash policy uses, keeps at most one
+self-kill in flight, so every restart completes and every crash is recovered."""
+
+# --- Notifications ------------------------------------------------------
+
+SEND_SHIPPING_SMS_WORK: Final[WorkEnvelope] = WorkEnvelope(low_ms=2_000, high_ms=3_000)
+MARKETING_BLAST_WORK: Final[WorkEnvelope] = WorkEnvelope(low_ms=4_000, high_ms=7_000)
+
+MARKETING_BLAST_SEGMENTS: Final[int] = 40
+"""Sent in one burst onto a queue capped at 3, which is what builds the deep
+PENDING backlog the queue pivot and the task-cancel action are demonstrated on."""
+
+MARKETING_SEGMENT_SIZE: Final[int] = 2_500
+
+# --- Scenario volumes ---------------------------------------------------
+
+RUSH_ORDER_COUNT: Final[int] = 50
+RUSH_WINDOW_SECONDS: Final[int] = 30
+
+PROBLEM_CHILD_RETURNS: Final[int] = 10
+PROBLEM_CHILD_DECLINES: Final[int] = 8
+
+CHAOS_EXPORT_COUNT: Final[int] = 4
+
 # --- Schedules ----------------------------------------------------------
 
 SUPPLIER_FEED_INTERVAL_SECONDS: Final[int] = 90
+ABANDONED_CART_MINUTE: Final[int] = 5
+"""HourlySchedule: every hour at :05."""
+
+SALES_ROLLUP_HOUR: Final[int] = 3
+"""DailySchedule: 03:00, so it will not fire during a demo."""
+
+RECONCILE_HOUR_STEP: Final[int] = 4
+RECONCILE_MINUTE: Final[int] = 15
+"""CronSchedule: every 4 hours at :15, expressed with CronStep + CronValues."""
+
+REGIONS: Final[list[str]] = ['eu-central', 'uk', 'turkiye', 'nordics']
+"""Regions with their own rollup and cache-warm schedules."""
+
+CACHE_WARM_INTERVAL_MINUTES: Final[int] = 5
+SEARCH_PREWARM_INTERVAL_MINUTES: Final[int] = 10
+RETENTION_AUDIT_DAYS: Final[int] = 30
+PRICE_SYNC_MINUTE_STEP: Final[int] = 15
 
 # --- Simulated fixtures -------------------------------------------------
 
