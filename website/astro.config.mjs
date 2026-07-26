@@ -51,6 +51,7 @@ export default defineConfig({
 						{ label: 'Defining Workflows', slug: 'quick-start/03-defining-workflows' },
 						{ label: 'Scheduling', slug: 'quick-start/04-scheduling' },
 						{ label: 'Workflow Patterns', slug: 'quick-start/05-workflow-patterns' },
+						{ label: 'Showcase Application', slug: 'quick-start/06-showcase' },
 					],
 				},
 				{
