@@ -54,6 +54,14 @@ from horsies.monitoring.models import (
     WorkflowRunSummary,
     WorkflowTaskDetail,
 )
+from horsies.monitoring.task_actions import (
+    TaskActionError,
+    TaskActionErrorCode,
+    TaskCancelled,
+    TaskRetried,
+    cancel_task,
+    retry_task,
+)
 from horsies.monitoring.queries import (
     SortDirection,
     TaskGroupBy,
@@ -80,6 +88,13 @@ __all__ = [
     'MonitoringQueryError',
     'MonitoringQueryErrorCode',
     'MonitoringResult',
+    'TaskActionError',
+    'TaskActionErrorCode',
+    # Actions
+    'TaskCancelled',
+    'TaskRetried',
+    'cancel_task',
+    'retry_task',
     # Query parameter vocabularies
     'SortDirection',
     'TaskGroupBy',
