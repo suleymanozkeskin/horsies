@@ -67,9 +67,9 @@ class DispatchMixin:
             task_id: str,
             queue_name: str = 'default',
             is_workflow_task: bool = True,
-            executor: Optional[ProcessPoolExecutor] = None,
             timeout_ms: Optional[int] = None,
             *,
+            executor: ProcessPoolExecutor,
             task_name: str,
             claimed_at: Optional[datetime] = None,
         ) -> Result[None, _FinalizeError]: ...
@@ -86,8 +86,9 @@ class DispatchMixin:
         async def _restart_executor(
             self,
             reason: str,
-            failed_executor: Optional[ProcessPoolExecutor] = None,
+            failed_executor: ProcessPoolExecutor,
         ) -> None: ...
+        async def _ensure_executor(self, reason: str) -> None: ...
         async def _should_retry_task(
             self, task_id: str, error: TaskError, session: AsyncSession
         ) -> Result[bool, _RetryError]: ...
@@ -152,7 +153,7 @@ class DispatchMixin:
         self,
         task_id: str,
         exc: BaseException,
-        failed_executor: Optional[ProcessPoolExecutor] = None,
+        failed_executor: ProcessPoolExecutor,
         claimed_at: Optional[datetime] = None,
     ) -> None:
         """Recover the task whose pool broke, then replace the executor.
@@ -368,13 +369,13 @@ class DispatchMixin:
         stale dispatch cannot touch a re-claimed row (C10).
 
         Raises:
-            ExecutorRestartFailedError: from ``_restart_executor``
+            ExecutorRestartFailedError: from ``_ensure_executor``
                 (process-fatal; propagates through the claim loop to the
                 main loop, which lets the worker crash for a supervisor
                 restart).
         """
         if self._executor is None:
-            await self._restart_executor('Executor missing before dispatch')
+            await self._ensure_executor('Executor missing before dispatch')
             if self._executor is None:
                 outcome = await self._requeue_claimed_task(
                     task_id,
@@ -444,8 +445,8 @@ class DispatchMixin:
                 task_id,
                 queue_name,
                 is_workflow_task,
-                executor,
                 timeout_ms=timeout_ms,
+                executor=executor,
                 task_name=task_name,
                 claimed_at=claimed_at,
             ),

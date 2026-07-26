@@ -8,6 +8,7 @@ import os
 import signal
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
 from importlib import import_module
 from collections.abc import Coroutine
@@ -118,9 +119,12 @@ from horsies.core.worker.runtime import (  # noqa: F401,E402
     _FINALIZE_PARENT_MAX_RETRIES as _FINALIZE_PARENT_MAX_RETRIES,
     _FINALIZE_RETRY_BASE_DELAY_S as _FINALIZE_RETRY_BASE_DELAY_S,
     _FINALIZE_RETRY_MAX_DELAY_S as _FINALIZE_RETRY_MAX_DELAY_S,
+    _EXECUTOR_WARMUP_ATTEMPTS as _EXECUTOR_WARMUP_ATTEMPTS,
+    _EXECUTOR_WARMUP_RETRY_DELAY_S as _EXECUTOR_WARMUP_RETRY_DELAY_S,
     _REAPER_MAX_PERMANENT_FAILURES as _REAPER_MAX_PERMANENT_FAILURES,
     ChildHookFailedError as ChildHookFailedError,
     ExecutorRestartFailedError as ExecutorRestartFailedError,
+    WarmupIncompleteError as WarmupIncompleteError,
     ServiceLoopDiedError as ServiceLoopDiedError,
     MemoryBaselineExceedsThresholdError as MemoryBaselineExceedsThresholdError,
     _RetryBackoff as _RetryBackoff,
@@ -275,8 +279,8 @@ class Worker(
             OSError: pool resource allocation failed (fd/semaphore
                 exhaustion). On the start path the resilience policy in
                 ``_start_with_resilience_config`` decides retry vs fail-fast;
-                on the restart path ``_restart_executor`` wraps it into
-                ``ExecutorRestartFailedError``.
+                on the restart path ``_create_warmed_executor_with_retry``
+                wraps it into ``ExecutorRestartFailedError``.
         """
         child_database_url = to_psycopg_url(self.cfg.dsn)
         kwargs: dict[str, Any] = {}
@@ -334,8 +338,12 @@ class Worker(
             **kwargs,
         )
 
-    async def _warm_executor(self) -> None:
+    async def _warm_executor(self, executor: ProcessPoolExecutor) -> None:
         """Start child processes while the parent has not opened listener sockets.
+
+        Takes the executor as a parameter — it is deliberately NOT published
+        to ``self._executor`` yet, so dispatch and the timeout kill path never
+        see a pool that is still warming.
 
         When ``max_tasks_per_child`` is set, each warmup call counts against a
         child's recycle budget: the first generation runs one warmup +
@@ -350,12 +358,13 @@ class Worker(
         by the baseline guard before any real work is dispatched.
 
         Raises:
+            WarmupIncompleteError: fewer distinct children than
+                ``cfg.processes`` came up within the bounded rounds.
+                Kill-shaped/transient; the restart path retries it.
             MemoryBaselineExceedsThresholdError: warmed child baseline RSS is
                 at or above ``max_memory_per_child_mb`` (the app does not fit
                 this per-child budget). Process-fatal on the start path.
         """
-        if self._executor is None:
-            return
         loop = asyncio.get_running_loop()
         mem_recycle = self.cfg.max_memory_per_child_mb is not None
         pids: set[int] = set()
@@ -363,7 +372,7 @@ class Worker(
         for _ in range(3):
             if mem_recycle:
                 probe_futures = [
-                    loop.run_in_executor(self._executor, _warm_child_process_probe)
+                    loop.run_in_executor(executor, _warm_child_process_probe)
                     for _ in range(self.cfg.processes)
                 ]
                 for pid, rss_mb in await asyncio.gather(*probe_futures):
@@ -371,14 +380,14 @@ class Worker(
                     self._record_child_baseline(baseline_by_pid, pid, rss_mb)
             else:
                 warm_futures = [
-                    loop.run_in_executor(self._executor, _warm_child_process)
+                    loop.run_in_executor(executor, _warm_child_process)
                     for _ in range(self.cfg.processes)
                 ]
                 pids.update(await asyncio.gather(*warm_futures))
             if len(pids) >= self.cfg.processes:
                 break
         if len(pids) < self.cfg.processes:
-            raise RuntimeError(
+            raise WarmupIncompleteError(
                 'worker child warmup started '
                 f'{len(pids)}/{self.cfg.processes} process(es)'
             )
@@ -455,14 +464,35 @@ class Worker(
         *,
         avoid_parent_fd_inheritance: bool = False,
     ) -> None:
+        """Create a pool, warm it fully, and only then publish it.
+
+        ``self._executor`` is assigned strictly after warmup succeeds:
+        dispatch reads it live, and the timeout kill path checks child
+        membership against it live, so publishing a warming pool lets real
+        tasks land on it and lets a timeout kill break it mid-warmup.
+
+        Raises:
+            ChildHookFailedError: a warm child exited with the hook-failure
+                exit code (never retried).
+            WarmupIncompleteError: child shortfall after bounded rounds
+                (kill-shaped; the restart path retries it).
+            Exception: pool creation or warmup failed; the unpublished pool
+                is torn down first. Cancellation (start timeout, shutdown)
+                also tears the pool down, then re-raises.
+        """
         executor = self._create_executor(
             avoid_parent_fd_inheritance=avoid_parent_fd_inheritance,
         )
-        self._executor = executor
         try:
-            await self._warm_executor()
+            await self._warm_executor(executor)
+        except asyncio.CancelledError:
+            # Start-attempt timeout or shutdown cancelled the warm: nothing
+            # else references this pool, so tear it down here. Synchronous
+            # non-waiting shutdown — awaiting inside cancellation can be
+            # interrupted by a second cancel, leaking the children.
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
         except Exception as warm_exc:
-            self._executor = None
             # Snapshot child processes before shutdown clears the mapping;
             # joined Process objects keep their exitcode afterwards.
             from multiprocessing.process import BaseProcess
@@ -489,18 +519,40 @@ class Worker(
                     'fix the hook — the worker will not restart-loop on it'
                 ) from warm_exc
             raise
+        if self._stop.is_set():
+            # stop() ran while the pool was warming: its executor-shutdown
+            # pass saw None, so publishing now would leak a live pool past
+            # shutdown. Tear it down and return unpublished.
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(
+                    None, lambda: executor.shutdown(wait=True, cancel_futures=True)
+                )
+            except Exception as shutdown_exc:
+                logger.error(
+                    f'Error shutting down executor warmed during stop: {shutdown_exc}'
+                )
+            return
+        self._executor = executor
 
     async def _restart_executor(
         self,
         reason: str,
-        failed_executor: Optional[ProcessPoolExecutor] = None,
+        failed_executor: ProcessPoolExecutor,
     ) -> None:
-        """Replace the process pool and warm the new children.
+        """Replace a broken process pool and warm the new children.
+
+        ``failed_executor`` is required: only the broken-pool handlers call
+        this, always with the pool the failure was observed on, and the
+        identity guard makes late sibling handlers no-ops instead of
+        replacing a healthy successor. Ensure-an-executor-exists semantics
+        live in ``_ensure_executor``.
 
         Raises:
             ExecutorRestartFailedError: pool creation/warmup failed at the
-                OS level. Process-fatal: propagates to the main loop so the
-                supervisor restarts the worker (a hook failure stops the
+                OS level, or kill-shaped warmup interruptions exhausted the
+                retry budget. Process-fatal: propagates to the main loop so
+                the supervisor restarts the worker (a hook failure stops the
                 worker via ``_stop_for_child_hook_failure`` instead).
         """
         if self._stop.is_set():
@@ -508,47 +560,98 @@ class Worker(
         async with self._executor_restart_lock:
             if self._stop.is_set():
                 return
-            if failed_executor is not None and failed_executor is not self._executor:
+            if failed_executor is not self._executor:
                 logger.warning(
                     f'Executor restart skipped; executor already replaced: {reason}'
                 )
                 return
-            if self._executor is None:
-                try:
-                    await self._create_warmed_executor(
-                        avoid_parent_fd_inheritance=self._parent_db_sockets_open,
-                    )
-                except ChildHookFailedError as exc:
-                    self._stop_for_child_hook_failure(exc)
-                    return
-                except Exception as exc:
-                    logger.critical(
-                        'Executor restart failed; worker cannot run tasks ' '(%s): %s',
-                        reason,
-                        exc,
-                    )
-                    raise ExecutorRestartFailedError(
-                        f'executor restart failed: {reason}',
-                    ) from exc
-                logger.warning(f'Executor created after restart request: {reason}')
-                return
 
             loop = asyncio.get_running_loop()
-            executor = self._executor
             self._executor = None
             logger.error(f'Restarting worker executor: {reason}')
             try:
                 await loop.run_in_executor(
-                    None, lambda: executor.shutdown(wait=True, cancel_futures=True)
+                    None,
+                    lambda: failed_executor.shutdown(wait=True, cancel_futures=True),
                 )
             except Exception as e:
                 logger.error(f'Error shutting down broken executor: {e}')
+            await self._create_warmed_executor_with_retry(reason)
+
+    async def _ensure_executor(self, reason: str) -> None:
+        """Create and warm a pool only if none is published.
+
+        The dispatch path calls this when ``self._executor`` is ``None``
+        (typically while a background restart holds the lock). Unlike
+        ``_restart_executor`` it never shuts an existing pool down: if a
+        pool exists once the lock is acquired, someone else already
+        restarted and this request is satisfied.
+
+        Raises:
+            ExecutorRestartFailedError: creation/warmup failed
+                (via ``_create_warmed_executor_with_retry``).
+        """
+        if self._stop.is_set():
+            return
+        async with self._executor_restart_lock:
+            if self._stop.is_set():
+                return
+            if self._executor is not None:
+                return
+            logger.warning(f'Executor missing; creating: {reason}')
+            await self._create_warmed_executor_with_retry(reason)
+
+    async def _create_warmed_executor_with_retry(self, reason: str) -> None:
+        """Create+warm with a bounded retry for kill-shaped interruptions.
+
+        Caller holds ``_executor_restart_lock``. Classification is by type:
+
+        - ``ChildHookFailedError``: stop the worker (retrying re-runs the
+          same failing hook forever); never counts against the budget.
+        - ``BrokenProcessPool`` / ``WarmupIncompleteError``: a child died or
+          never came up during warmup — on the restart path this is usually
+          the worker's own timeout enforcement killing a child whose task
+          was already overdue. Transient and self-inflicted: retry up to
+          ``_EXECUTOR_WARMUP_ATTEMPTS`` total attempts with a stop-aware
+          delay, then escalate.
+        - anything else (``OSError``, ``MemoryBaselineExceedsThresholdError``,
+          ...): a host or configuration condition retrying cannot fix —
+          escalate immediately.
+
+        Raises:
+            ExecutorRestartFailedError: budget exhausted or non-transient
+                failure. Process-fatal.
+        """
+        for attempt in range(1, _EXECUTOR_WARMUP_ATTEMPTS + 1):
+            if self._stop.is_set():
+                return
             try:
                 await self._create_warmed_executor(
                     avoid_parent_fd_inheritance=self._parent_db_sockets_open,
                 )
             except ChildHookFailedError as exc:
                 self._stop_for_child_hook_failure(exc)
+                return
+            except (BrokenProcessPool, WarmupIncompleteError) as exc:
+                if self._stop.is_set():
+                    return
+                if attempt == _EXECUTOR_WARMUP_ATTEMPTS:
+                    logger.critical(
+                        'Executor restart failed; worker cannot run tasks '
+                        '(%s): %s',
+                        reason,
+                        exc,
+                    )
+                    raise ExecutorRestartFailedError(
+                        f'executor restart failed: {reason}',
+                    ) from exc
+                logger.warning(
+                    'Executor warmup interrupted (attempt %s/%s), retrying: %s',
+                    attempt,
+                    _EXECUTOR_WARMUP_ATTEMPTS,
+                    exc,
+                )
+                await self._sleep_with_stop(_EXECUTOR_WARMUP_RETRY_DELAY_S * attempt)
             except Exception as exc:
                 logger.critical(
                     'Executor restart failed; worker cannot run tasks ' '(%s): %s',
@@ -558,6 +661,15 @@ class Worker(
                 raise ExecutorRestartFailedError(
                     f'executor restart failed: {reason}',
                 ) from exc
+            else:
+                if attempt > 1:
+                    logger.warning(
+                        'Executor warmup succeeded on attempt %s/%s: %s',
+                        attempt,
+                        _EXECUTOR_WARMUP_ATTEMPTS,
+                        reason,
+                    )
+                return
 
     def _stop_for_child_hook_failure(self, exc: ChildHookFailedError) -> None:
         """Stop the worker on a hook failure instead of restart-looping.

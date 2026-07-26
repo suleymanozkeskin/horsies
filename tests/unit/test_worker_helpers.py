@@ -47,6 +47,9 @@ from horsies.core.worker.worker import (
     _RetryError,
     ChildHookFailedError,
     ExecutorRestartFailedError,
+    WarmupIncompleteError,
+    MemoryBaselineExceedsThresholdError,
+    _EXECUTOR_WARMUP_ATTEMPTS,
     ServiceLoopDiedError,
 )
 from horsies.core.models.recovery import RecoveryConfig
@@ -1127,7 +1130,9 @@ class TestFinalizeAfterRequeueOutcome:
         fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
         fut.set_exception(OperationalError('connection reset'))
 
-        result = await worker._finalize_after(fut, 'task-10', task_name='helper_task')
+        result = await worker._finalize_after(
+            fut, 'task-10', task_name='helper_task', executor=MagicMock(),
+        )
 
         assert isinstance(result, Err)
         err: _FinalizeError = result.err_value
@@ -1150,7 +1155,9 @@ class TestFinalizeAfterRequeueOutcome:
         fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
         fut.set_exception(OperationalError('original connection error'))
 
-        result = await worker._finalize_after(fut, 'task-11', task_name='helper_task')
+        result = await worker._finalize_after(
+            fut, 'task-11', task_name='helper_task', executor=MagicMock(),
+        )
 
         assert isinstance(result, Err)
         err: _FinalizeError = result.err_value
@@ -1173,7 +1180,9 @@ class TestFinalizeAfterRequeueOutcome:
         fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
         fut.set_exception(OperationalError('transient'))
 
-        result = await worker._finalize_after(fut, 'task-12', task_name='helper_task')
+        result = await worker._finalize_after(
+            fut, 'task-12', task_name='helper_task', executor=MagicMock(),
+        )
 
         assert isinstance(result, Err)
         err: _FinalizeError = result.err_value
@@ -1193,7 +1202,9 @@ class TestFinalizeAfterRequeueOutcome:
         fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
         fut.set_exception(ValueError('bad data'))
 
-        result = await worker._finalize_after(fut, 'task-13', task_name='helper_task')
+        result = await worker._finalize_after(
+            fut, 'task-13', task_name='helper_task', executor=MagicMock(),
+        )
 
         assert isinstance(result, Err)
         err: _FinalizeError = result.err_value
@@ -1224,7 +1235,9 @@ class TestRequeueDbErrorContainment:
         worker._restart_executor = AsyncMock()  # type: ignore[method-assign]
 
         with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
-            await worker._handle_broken_pool('task-20', BrokenProcessPool('pool died'))
+            await worker._handle_broken_pool(
+                'task-20', BrokenProcessPool('pool died'), MagicMock(),
+            )
 
         worker._restart_executor.assert_awaited_once()
         critical_messages = [r for r in caplog.records if r.levelno == logging.CRITICAL]
@@ -1240,8 +1253,9 @@ class TestRequeueDbErrorContainment:
         worker = _make_worker()
         worker._executor = None
 
-        # _restart_executor keeps executor as None (simulating restart failure)
-        worker._restart_executor = AsyncMock()  # type: ignore[method-assign]
+        # _ensure_executor keeps executor as None (simulating create failure
+        # already handled elsewhere)
+        worker._ensure_executor = AsyncMock()  # type: ignore[method-assign]
 
         worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
             return_value=_RequeueOutcome.DB_ERROR,
@@ -1300,7 +1314,9 @@ class TestRequeueDbErrorContainment:
         worker._restart_executor = AsyncMock()  # type: ignore[method-assign]
 
         with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
-            await worker._handle_broken_pool('task-23', BrokenProcessPool('pool died'))
+            await worker._handle_broken_pool(
+                'task-23', BrokenProcessPool('pool died'), MagicMock(),
+            )
 
         critical_messages = [r for r in caplog.records if r.levelno == logging.CRITICAL]
         assert len(critical_messages) == 0
@@ -2209,7 +2225,7 @@ class TestSleepWithStop:
 
 @pytest.mark.unit
 class TestRestartExecutor:
-    """Tests for Worker._restart_executor."""
+    """Tests for Worker._restart_executor (force-replace semantics)."""
 
     # --- U-4d ---
 
@@ -2220,54 +2236,31 @@ class TestRestartExecutor:
         worker._stop.set()
         worker._create_executor = MagicMock()  # type: ignore[assignment]
 
-        await worker._restart_executor('test reason')
+        await worker._restart_executor('test reason', failed_executor=MagicMock())
 
         worker._create_executor.assert_not_called()
 
-    # --- U-4e ---
-
     @pytest.mark.asyncio
-    async def test_executor_none_creates_new(self) -> None:
-        """When executor is None, creates a new one without shutdown."""
+    async def test_stale_executor_is_not_restarted_when_current_is_none(self) -> None:
+        """A request for an executor that is no longer current is a no-op.
+
+        With ``self._executor is None`` (a restart already tore the pool
+        down), a late handler for the old pool must not create anything —
+        ensure-an-executor-exists is _ensure_executor's job.
+        """
         worker = _make_worker()
         worker._executor = None
-        mock_executor = MagicMock()
-        worker._create_executor = MagicMock(return_value=mock_executor)  # type: ignore[assignment]
-        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
+        worker._create_executor = MagicMock()  # type: ignore[assignment]
 
-        await worker._restart_executor('test reason')
+        await worker._restart_executor('late handler', failed_executor=MagicMock())
 
-        worker._create_executor.assert_called_once_with(
-            avoid_parent_fd_inheritance=False
-        )
-        worker._warm_executor.assert_awaited_once()
-        assert worker._executor is mock_executor
-
-    @pytest.mark.asyncio
-    async def test_executor_none_uses_spawn_safe_context_after_parent_db_opens(
-        self,
-    ) -> None:
-        """Replacement executors avoid inheriting parent DB sockets after startup."""
-        worker = _make_worker()
-        worker._parent_db_sockets_open = True
-        worker._executor = None
-        mock_executor = MagicMock()
-        worker._create_executor = MagicMock(return_value=mock_executor)  # type: ignore[assignment]
-        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
-
-        await worker._restart_executor('test reason')
-
-        worker._create_executor.assert_called_once_with(
-            avoid_parent_fd_inheritance=True
-        )
-        worker._warm_executor.assert_awaited_once()
-        assert worker._executor is mock_executor
+        worker._create_executor.assert_not_called()
 
     # --- U-4f ---
 
     @pytest.mark.asyncio
     async def test_executor_exists_shuts_down_and_recreates(self) -> None:
-        """When executor exists, shuts it down then creates a new one."""
+        """The failed executor is shut down, then a new one is created."""
         worker = _make_worker()
         old_executor = MagicMock()
         new_executor = MagicMock()
@@ -2275,7 +2268,7 @@ class TestRestartExecutor:
         worker._create_executor = MagicMock(return_value=new_executor)  # type: ignore[assignment]
         worker._warm_executor = AsyncMock()  # type: ignore[assignment]
 
-        await worker._restart_executor('broken pool')
+        await worker._restart_executor('broken pool', failed_executor=old_executor)
 
         old_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
         worker._create_executor.assert_called_once_with(
@@ -2283,6 +2276,27 @@ class TestRestartExecutor:
         )
         worker._warm_executor.assert_awaited_once()
         assert worker._executor is new_executor
+
+    @pytest.mark.asyncio
+    async def test_replacement_uses_spawn_safe_context_after_parent_db_opens(
+        self,
+    ) -> None:
+        """Replacement executors avoid inheriting parent DB sockets after startup."""
+        worker = _make_worker()
+        worker._parent_db_sockets_open = True
+        old_executor = MagicMock()
+        worker._executor = old_executor
+        mock_executor = MagicMock()
+        worker._create_executor = MagicMock(return_value=mock_executor)  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
+
+        await worker._restart_executor('broken pool', failed_executor=old_executor)
+
+        worker._create_executor.assert_called_once_with(
+            avoid_parent_fd_inheritance=True
+        )
+        worker._warm_executor.assert_awaited_once()
+        assert worker._executor is mock_executor
 
     # --- U-4g ---
 
@@ -2297,7 +2311,7 @@ class TestRestartExecutor:
         worker._create_executor = MagicMock(return_value=new_executor)  # type: ignore[assignment]
         worker._warm_executor = AsyncMock()  # type: ignore[assignment]
 
-        await worker._restart_executor('broken pool')
+        await worker._restart_executor('broken pool', failed_executor=old_executor)
 
         assert worker._executor is new_executor
 
@@ -2349,55 +2363,68 @@ class TestRestartExecutor:
 
     @pytest.mark.asyncio
     async def test_create_failure_raises_typed_fatal_error(self) -> None:
-        """OS-level pool creation failure surfaces as ExecutorRestartFailedError."""
+        """OS-level pool creation failure surfaces as ExecutorRestartFailedError.
+
+        No retry: resource exhaustion (fd/semaphore) is a host condition a
+        retry cannot fix.
+        """
         worker = _make_worker()
-        worker._executor = None
+        old_executor = MagicMock()
+        worker._executor = old_executor
         worker._create_executor = MagicMock(  # type: ignore[assignment]
             side_effect=OSError(24, 'Too many open files'),
         )
 
         with pytest.raises(ExecutorRestartFailedError) as excinfo:
-            await worker._restart_executor('broken pool')
+            await worker._restart_executor('broken pool', failed_executor=old_executor)
 
         assert isinstance(excinfo.value.__cause__, OSError)
         assert 'broken pool' in str(excinfo.value)
+        worker._create_executor.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_warm_failure_on_replacement_raises_typed_fatal_error(self) -> None:
-        """Warmup failure while replacing an executor surfaces typed, after shutdown."""
+    async def test_generic_warm_failure_raises_typed_fatal_without_retry(self) -> None:
+        """A warmup failure that is not kill-shaped stays immediately fatal.
+
+        Only WarmupIncompleteError / BrokenProcessPool enter the retry arm;
+        a bare RuntimeError must not.
+        """
         worker = _make_worker()
         old_executor = MagicMock()
         worker._executor = old_executor
         worker._create_executor = MagicMock(return_value=MagicMock())  # type: ignore[assignment]
         worker._warm_executor = AsyncMock(  # type: ignore[assignment]
-            side_effect=RuntimeError('worker child warmup started 0/4 process(es)'),
+            side_effect=RuntimeError('unexpected warmup failure'),
         )
 
         with pytest.raises(ExecutorRestartFailedError):
-            await worker._restart_executor('broken pool')
+            await worker._restart_executor('broken pool', failed_executor=old_executor)
 
         old_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+        worker._create_executor.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_hook_failure_stops_worker_instead_of_raising(self) -> None:
-        """ChildHookFailedError keeps its stop path; no fatal raise."""
+        """ChildHookFailedError keeps its stop path; no fatal raise, no retry."""
         worker = _make_worker()
-        worker._executor = None
+        old_executor = MagicMock()
+        worker._executor = old_executor
         worker._create_warmed_executor = AsyncMock(  # type: ignore[method-assign]
             side_effect=ChildHookFailedError('hook failed'),
         )
         worker._stop_for_child_hook_failure = MagicMock()  # type: ignore[method-assign]
 
-        await worker._restart_executor('broken pool')
+        await worker._restart_executor('broken pool', failed_executor=old_executor)
 
         worker._stop_for_child_hook_failure.assert_called_once()
+        worker._create_warmed_executor.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_dispatch_one_propagates_fatal_restart_error(self) -> None:
-        """_dispatch_one must not swallow the process-fatal restart failure."""
+        """_dispatch_one must not swallow the process-fatal ensure failure."""
         worker = _make_worker()
         worker._executor = None
-        worker._restart_executor = AsyncMock(  # type: ignore[method-assign]
+        worker._ensure_executor = AsyncMock(  # type: ignore[method-assign]
             side_effect=ExecutorRestartFailedError('executor restart failed: boom'),
         )
 
@@ -2430,7 +2457,301 @@ class TestRestartExecutor:
         fut.set_exception(BrokenProcessPool('pool died'))
 
         with pytest.raises(ExecutorRestartFailedError):
-            await worker._finalize_after(fut, 'task-1', task_name='helper_task')
+            await worker._finalize_after(
+                fut, 'task-1', task_name='helper_task', executor=MagicMock(),
+            )
+
+
+@pytest.mark.unit
+class TestEnsureExecutor:
+    """Tests for Worker._ensure_executor (create-if-missing semantics)."""
+
+    @pytest.mark.asyncio
+    async def test_creates_when_missing(self) -> None:
+        """With no executor published, creates, warms, and publishes one."""
+        worker = _make_worker()
+        worker._executor = None
+        mock_executor = MagicMock()
+        worker._create_executor = MagicMock(return_value=mock_executor)  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
+
+        await worker._ensure_executor('Executor missing before dispatch')
+
+        worker._create_executor.assert_called_once_with(
+            avoid_parent_fd_inheritance=False
+        )
+        worker._warm_executor.assert_awaited_once()
+        assert worker._executor is mock_executor
+
+    @pytest.mark.asyncio
+    async def test_uses_spawn_safe_context_after_parent_db_opens(self) -> None:
+        """Ensure-created executors avoid inheriting parent DB sockets."""
+        worker = _make_worker()
+        worker._parent_db_sockets_open = True
+        worker._executor = None
+        worker._create_executor = MagicMock(return_value=MagicMock())  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
+
+        await worker._ensure_executor('Executor missing before dispatch')
+
+        worker._create_executor.assert_called_once_with(
+            avoid_parent_fd_inheritance=True
+        )
+
+    @pytest.mark.asyncio
+    async def test_noop_when_executor_present(self) -> None:
+        """An existing pool is never torn down or replaced.
+
+        Regression: the dispatch-path 'Executor missing before dispatch'
+        request used to fall into _restart_executor's force-replace branch
+        after waiting on the restart lock, destroying the healthy pool a
+        background restart had just built.
+        """
+        worker = _make_worker()
+        existing = MagicMock()
+        worker._executor = existing
+        worker._create_executor = MagicMock()  # type: ignore[assignment]
+
+        await worker._ensure_executor('Executor missing before dispatch')
+
+        worker._create_executor.assert_not_called()
+        existing.shutdown.assert_not_called()
+        assert worker._executor is existing
+
+    @pytest.mark.asyncio
+    async def test_stop_set_is_noop(self) -> None:
+        """When stop is set, _ensure_executor does nothing."""
+        worker = _make_worker()
+        worker._stop.set()
+        worker._executor = None
+        worker._create_executor = MagicMock()  # type: ignore[assignment]
+
+        await worker._ensure_executor('Executor missing before dispatch')
+
+        worker._create_executor.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_failure_raises_typed_fatal_error(self) -> None:
+        """Creation failure surfaces as ExecutorRestartFailedError."""
+        worker = _make_worker()
+        worker._executor = None
+        worker._create_executor = MagicMock(  # type: ignore[assignment]
+            side_effect=OSError(24, 'Too many open files'),
+        )
+
+        with pytest.raises(ExecutorRestartFailedError):
+            await worker._ensure_executor('Executor missing before dispatch')
+
+
+@pytest.mark.unit
+class TestExecutorPublicationOrder:
+    """_create_warmed_executor publishes only a fully-warm pool.
+
+    Regression for the B1 crash-loop: the pool used to be published before
+    warmup, so dispatch fed real tasks onto the warming pool and a timeout
+    kill could break it mid-warmup, turning a routine pool replacement into
+    a process-fatal restart failure.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unpublished_while_warming(self) -> None:
+        """self._executor stays None until warmup completes."""
+        worker = _make_worker()
+        worker._executor = None
+        worker._create_executor = MagicMock(return_value=MagicMock())  # type: ignore[assignment]
+        entered = asyncio.Event()
+        gate = asyncio.Event()
+
+        async def _warm(_executor: Any) -> None:
+            entered.set()
+            await gate.wait()
+
+        worker._warm_executor = AsyncMock(side_effect=_warm)  # type: ignore[assignment]
+
+        create_task = asyncio.create_task(worker._create_warmed_executor())
+        await entered.wait()
+        assert worker._executor is None
+        gate.set()
+        await create_task
+        assert worker._executor is not None
+
+    @pytest.mark.asyncio
+    async def test_stays_unpublished_on_warm_failure(self) -> None:
+        """A failed warmup never publishes; the pool is torn down."""
+        worker = _make_worker()
+        worker._executor = None
+        created = MagicMock()
+        worker._create_executor = MagicMock(return_value=created)  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock(  # type: ignore[assignment]
+            side_effect=WarmupIncompleteError(
+                'worker child warmup started 5/6 process(es)'
+            ),
+        )
+
+        with pytest.raises(WarmupIncompleteError):
+            await worker._create_warmed_executor()
+
+        assert worker._executor is None
+        created.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+
+    @pytest.mark.asyncio
+    async def test_stop_during_warm_discards_pool(self) -> None:
+        """stop() during warmup: the pool is shut down, never published.
+
+        stop()'s executor-shutdown pass sees None while warmup runs, so
+        publishing afterwards would leak a live pool past shutdown.
+        """
+        worker = _make_worker()
+        worker._executor = None
+        created = MagicMock()
+        worker._create_executor = MagicMock(return_value=created)  # type: ignore[assignment]
+
+        async def _warm(_executor: Any) -> None:
+            worker._stop.set()
+
+        worker._warm_executor = AsyncMock(side_effect=_warm)  # type: ignore[assignment]
+
+        await worker._create_warmed_executor()
+
+        assert worker._executor is None
+        created.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_warm_tears_down_pool(self) -> None:
+        """Cancellation (start timeout) tears the unpublished pool down.
+
+        Regression: with late publication, _cleanup_after_failed_start sees
+        None and cannot tear the pool down — the cancel arm must do it, or
+        the half-warmed children leak and the resilience retry stacks a
+        second pool on top.
+        """
+        worker = _make_worker()
+        worker._executor = None
+        created = MagicMock()
+        worker._create_executor = MagicMock(return_value=created)  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock(  # type: ignore[assignment]
+            side_effect=asyncio.CancelledError(),
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await worker._create_warmed_executor()
+
+        assert worker._executor is None
+        created.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+
+
+@pytest.mark.unit
+class TestWarmupRetry:
+    """Bounded retry of kill-shaped warmup failures in the restart path."""
+
+    @pytest.mark.asyncio
+    async def test_warmup_incomplete_retries_then_succeeds(self) -> None:
+        """WarmupIncompleteError retries the create+warm cycle and recovers."""
+        worker = _make_worker()
+        old_executor = MagicMock()
+        worker._executor = old_executor
+        replacements = [MagicMock(name='first'), MagicMock(name='second')]
+        worker._create_executor = MagicMock(side_effect=replacements)  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock(  # type: ignore[assignment]
+            side_effect=[
+                WarmupIncompleteError('worker child warmup started 5/6 process(es)'),
+                None,
+            ],
+        )
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._restart_executor('broken pool', failed_executor=old_executor)
+
+        assert worker._executor is replacements[1]
+        assert worker._create_executor.call_count == 2
+        replacements[0].shutdown.assert_called_once_with(
+            wait=True, cancel_futures=True
+        )
+        worker._sleep_with_stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_broken_pool_during_warm_retries_then_succeeds(self) -> None:
+        """BrokenProcessPool during warmup (child killed mid-warm) retries."""
+        worker = _make_worker()
+        old_executor = MagicMock()
+        worker._executor = old_executor
+        replacements = [MagicMock(name='first'), MagicMock(name='second')]
+        worker._create_executor = MagicMock(side_effect=replacements)  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock(  # type: ignore[assignment]
+            side_effect=[BrokenProcessPool('child SIGKILLed during warmup'), None],
+        )
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._restart_executor('broken pool', failed_executor=old_executor)
+
+        assert worker._executor is replacements[1]
+        assert worker._create_executor.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_retry_budget_exhausted_raises_typed_fatal(self) -> None:
+        """Persistent warmup shortfall still fails closed after the budget."""
+        worker = _make_worker()
+        old_executor = MagicMock()
+        worker._executor = old_executor
+        worker._create_executor = MagicMock(  # type: ignore[assignment]
+            side_effect=[MagicMock() for _ in range(_EXECUTOR_WARMUP_ATTEMPTS)],
+        )
+        worker._warm_executor = AsyncMock(  # type: ignore[assignment]
+            side_effect=WarmupIncompleteError(
+                'worker child warmup started 0/6 process(es)'
+            ),
+        )
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[method-assign]
+
+        with pytest.raises(ExecutorRestartFailedError) as excinfo:
+            await worker._restart_executor('broken pool', failed_executor=old_executor)
+
+        assert isinstance(excinfo.value.__cause__, WarmupIncompleteError)
+        assert worker._create_executor.call_count == _EXECUTOR_WARMUP_ATTEMPTS
+        assert worker._executor is None
+
+    @pytest.mark.asyncio
+    async def test_memory_baseline_failure_fatal_immediately(self) -> None:
+        """MemoryBaselineExceedsThresholdError is misconfiguration: no retry."""
+        worker = _make_worker()
+        old_executor = MagicMock()
+        worker._executor = old_executor
+        worker._create_executor = MagicMock(return_value=MagicMock())  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock(  # type: ignore[assignment]
+            side_effect=MemoryBaselineExceedsThresholdError('baseline 900MB >= 512MB'),
+        )
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[method-assign]
+
+        with pytest.raises(ExecutorRestartFailedError) as excinfo:
+            await worker._restart_executor('broken pool', failed_executor=old_executor)
+
+        assert isinstance(
+            excinfo.value.__cause__, MemoryBaselineExceedsThresholdError
+        )
+        worker._create_executor.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_stop_between_retries_aborts_without_raise(self) -> None:
+        """A stop requested mid-retry ends the loop quietly."""
+        worker = _make_worker()
+        old_executor = MagicMock()
+        worker._executor = old_executor
+        worker._create_executor = MagicMock(return_value=MagicMock())  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock(  # type: ignore[assignment]
+            side_effect=WarmupIncompleteError(
+                'worker child warmup started 1/6 process(es)'
+            ),
+        )
+
+        async def _sleep_sets_stop(_delay: float) -> None:
+            worker._stop.set()
+
+        worker._sleep_with_stop = AsyncMock(side_effect=_sleep_sets_stop)  # type: ignore[method-assign]
+
+        await worker._restart_executor('broken pool', failed_executor=old_executor)
+
+        assert worker._executor is None
+        worker._create_executor.assert_called_once()
 
 
 @pytest.mark.unit
@@ -2715,7 +3036,7 @@ class TestWorkerStartConnectionOrdering:
             or MagicMock()
         )
 
-        async def _warm() -> None:
+        async def _warm(_executor: Any) -> None:
             events.append('warm-executor')
 
         async def _listener_start():
