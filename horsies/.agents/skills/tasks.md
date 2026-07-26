@@ -479,6 +479,10 @@ Serialization happens at `.send()` time, before enqueueing. Failure returns `Err
 ### Not supported — causes `VALIDATION_FAILED`
 
 - Custom class instances (not Pydantic/dataclass)
+- PEP 695 `type X = ...` aliases (`TypeAliasType`) anywhere in a model that
+  reaches a `TaskResult` ok slot — rejected by strict-serde at app startup
+  (HRS-105), which surfaces far from the alias itself; use a plain assignment
+  (`X = Literal[...]`) instead
 - `bytes`, `bytearray`
 - Enum instances (convert to `.value` first)
 - Objects defined in `__main__` or inside functions (`<locals>` in qualname)

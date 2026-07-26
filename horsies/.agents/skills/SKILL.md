@@ -56,10 +56,12 @@ Note that these are measurements at a reference shape on an entry-tier instance,
 ## Define a Task
 
 ```python
+from pydantic import SecretStr
+
 from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
 
 app = Horsies(config=AppConfig(
-    broker=PostgresConfig(database_url="postgresql+psycopg://..."),
+    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://...")),
 ))
 
 @app.task("add_numbers")

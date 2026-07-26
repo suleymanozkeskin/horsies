@@ -14,11 +14,20 @@ Root configuration passed to `Horsies(config=AppConfig(...))`.
 Pydantic `BaseModel`, frozen after construction.
 
 ```python
+from pydantic import SecretStr
+
 from horsies import Horsies, AppConfig, PostgresConfig
 
 app = Horsies(config=AppConfig(
-    broker=PostgresConfig(database_url="postgresql+psycopg://user:pass@host/db"),
+    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://user:pass@host/db")),
 ))
+```
+
+`database_url` and `session_database_url` are `SecretStr` fields: a plain
+string validates at runtime, but strict type checkers reject it — wrap with
+`pydantic.SecretStr` explicitly.
+
+```python
 ```
 
 ### Fields
@@ -128,7 +137,7 @@ info = broker.get_task_info("task-uuid", include_result=True)  # sync
 from horsies import PostgresConfig
 
 config = PostgresConfig(
-    database_url="postgresql+psycopg://user:pass@localhost:5432/mydb",
+    database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb"),
 )
 ```
 
