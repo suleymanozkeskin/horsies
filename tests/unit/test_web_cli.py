@@ -11,13 +11,19 @@ rather than guessing, so both are tested here. Serving itself is not exercised
 from __future__ import annotations
 
 import argparse
+import importlib
 import sys
+import types
 from typing import Any
 
 import pytest
+from pydantic import SecretStr
 
+from horsies import web as horsies_web
 from horsies.core import cli
 from horsies.core.app import Horsies
+from horsies.core.models.app import AppConfig
+from horsies.core.models.broker import PostgresConfig
 from horsies.web.auth import AllowAll, TrustedHeader, ViewOnly
 
 pytestmark = [pytest.mark.unit]
@@ -155,6 +161,99 @@ class TestAuthPolicySelection:
         stderr = capsys.readouterr().err
         assert 'MUST strip or overwrite' in stderr
         assert 'X-Forwarded-User' in stderr
+
+
+class TestAppPathBootLoadsTheRegistry:
+    """An app path is served with its tasks registered, or not served at all.
+
+    Actions that re-enqueue work need the registry: resuming a run encodes each
+    ready node's upstream results into fresh task rows, and that encoding reads
+    the source task's registered OkT. Serving an app path without importing its
+    task modules leaves those actions to fail at use.
+    """
+
+    @pytest.fixture
+    def sentinel_app(self, monkeypatch: pytest.MonkeyPatch) -> Horsies:
+        """A freshly imported sentinel app, so its registry starts empty."""
+        for name in list(sys.modules):
+            if name.startswith('tests.unit.web_cli_sentinel'):
+                monkeypatch.delitem(sys.modules, name, raising=False)
+        package = importlib.import_module('tests.unit.web_cli_sentinel')
+        app: Horsies = package.app
+        return app
+
+    @pytest.fixture
+    def served(self, monkeypatch: pytest.MonkeyPatch) -> list[Horsies]:
+        """Capture the apps handed to the server, without starting one."""
+        captured: list[Horsies] = []
+
+        def fake_create(app: Horsies, **_kwargs: Any) -> object:
+            captured.append(app)
+            return object()
+
+        def fake_run(*_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        monkeypatch.setattr(horsies_web, 'create_monitoring_app', fake_create)
+        fake_uvicorn = types.ModuleType('uvicorn')
+        setattr(fake_uvicorn, 'run', fake_run)
+        monkeypatch.setitem(sys.modules, 'uvicorn', fake_uvicorn)
+        return captured
+
+    def test_app_path_boot_imports_the_discovered_task_modules(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sentinel_app: Horsies,
+        served: list[Horsies],
+    ) -> None:
+        assert 'web_cli_sentinel_task' not in sentinel_app.list_tasks()
+
+        def fake_discover(_locator: str) -> tuple[Horsies, str, str, None]:
+            return (sentinel_app, 'app', 'sentinel', None)
+
+        monkeypatch.setattr(cli, 'discover_app', fake_discover)
+
+        cli.web_command(web_args(app_path='tests.unit.web_cli_sentinel:app'))
+
+        assert 'web_cli_sentinel_task' in sentinel_app.list_tasks()
+        assert served == [sentinel_app]
+
+    def test_a_failing_check_refuses_to_serve(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        served: list[Horsies],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        broken = Horsies(
+            config=AppConfig(
+                broker=PostgresConfig(
+                    database_url=SecretStr('postgresql+psycopg://u:p@localhost/db'),
+                ),
+            ),
+        )
+        broken.discover_tasks(['tests/unit/no_such_task_module.py'])
+
+        def fake_discover(_locator: str) -> tuple[Horsies, str, str, None]:
+            return (broken, 'app', 'broken', None)
+
+        monkeypatch.setattr(cli, 'discover_app', fake_discover)
+
+        with pytest.raises(SystemExit) as raised:
+            cli.web_command(web_args(app_path='broken:app'))
+
+        assert raised.value.code == 1
+        assert 'no_such_task_module.py' in capsys.readouterr().err
+        assert served == []
+
+    def test_database_url_boot_stays_registryless(
+        self, served: list[Horsies]
+    ) -> None:
+        # No app to import, so no registry and no startup validation — the
+        # read-only form is served as-is.
+        cli.web_command(web_args(database_url=DB_URL))
+
+        assert len(served) == 1
+        assert served[0].list_tasks() == []
 
 
 class TestParserDefaults:

@@ -34,12 +34,42 @@ export interface WorkflowNodeData extends Record<string, unknown> {
 
 export type WorkflowFlowNode = Node<WorkflowNodeData, 'workflow'>;
 
+/** The child-rollup badge's text, tooltip, and whether it reports failures. */
+export interface ChildRollupBadge {
+  text: string;
+  title: string;
+  failed: boolean;
+}
+
+/**
+ * Describe a subworkflow node's child rollup.
+ *
+ * A bare `k/N` reads as "k of N done" — a fully successful child run rendered
+ * `0/3`, which is the opposite of what it means. So a healthy rollup shows the
+ * child count alone and only a failing one spends the fraction, with the word
+ * that fixes its meaning. Returns null for a leaf node, which has no rollup.
+ */
+export function childRollupBadge(
+  childTotal: number | null,
+  childFailed: number | null
+): ChildRollupBadge | null {
+  if (childTotal === null) {
+    return null;
+  }
+  const failedCount = childFailed ?? 0;
+  const title = `${childTotal} child ${childTotal === 1 ? 'node' : 'nodes'}, ${failedCount} failed`;
+  return failedCount > 0
+    ? { text: `${failedCount}/${childTotal} failed`, title, failed: true }
+    : { text: String(childTotal), title, failed: false };
+}
+
 function WorkflowNodeCardImpl({ data, selected }: NodeProps<WorkflowFlowNode>) {
   const color = statusColorVar(data.status);
   // Null while queued — keep it null (not the shared '—') so the badge below
   // stays hidden rather than rendering a dash.
   const duration = data.execS === null ? null : formatDuration(data.execS);
   const residual = data.residual === null ? null : RESIDUAL_COPY[data.residual];
+  const rollup = childRollupBadge(data.childTotal, data.childFailed);
 
   return (
     <div
@@ -76,18 +106,15 @@ function WorkflowNodeCardImpl({ data, selected }: NodeProps<WorkflowFlowNode>) {
         >
           {data.label}
         </span>
-        {data.childTotal !== null && (
+        {rollup !== null && (
           <span
             className="shrink-0 rounded px-1 font-mono text-9 font-medium"
             style={{
-              color:
-                data.childFailed !== null && data.childFailed > 0
-                  ? 'var(--error)'
-                  : 'var(--muted-foreground)',
+              color: rollup.failed ? 'var(--error)' : 'var(--muted-foreground)',
             }}
-            title={`${data.childFailed ?? 0} of ${data.childTotal} child tasks failed`}
+            title={rollup.title}
           >
-            {data.childFailed ?? 0}/{data.childTotal}
+            {rollup.text}
           </span>
         )}
         <span

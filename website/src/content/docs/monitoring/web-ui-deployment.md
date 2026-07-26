@@ -115,10 +115,18 @@ horsies web myapp.tasks:app
 horsies web --database-url "postgresql+psycopg://user:pass@localhost:5432/mydb"
 ```
 
-The first form imports the application module and gets the full feature set. The
-second is registry-less: it constructs a minimal `Horsies` app from the URL
-alone, which is enough for every read and every action, because task rows carry
-their own encoded arguments, queue, priority, and options.
+The first form imports the application module and gets the full feature set. It
+runs the same startup validation as `horsies worker` and `horsies scheduler`,
+so a configuration error refuses to serve rather than surfacing later as a
+failed action.
+
+The second form is registry-less: it constructs a minimal `Horsies` app from the
+URL alone. Task rows carry their own encoded arguments, queue, priority, and
+options, so this form supports every read, every task action, and workflow pause
+and cancel. It does not support resuming a run whose next nodes carry
+`args_from`: the resume re-enqueues those nodes, and encoding an upstream result
+into a fresh task row requires the source task's registered return type. Use the
+app-path form where that matters.
 
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
