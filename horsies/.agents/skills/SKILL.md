@@ -16,6 +16,7 @@ skill files in this directory:
 | `tasks.md` | `@app.task`, `TaskResult`, `send()`, `with_options()`, `RetryPolicy`, `ExceptionMapper`, serialization |
 | `workflows.md` | `WorkflowSpec`, `TaskNode`, `WorkflowHandle`, DAG construction, failure semantics |
 | `configs.md` | `AppConfig`, `PostgresConfig`, queues, recovery, recurring scheduling including `CronSchedule`, CLI commands |
+| `monitoring.md` | `horsies.monitoring` query API, `cancel_task`/`retry_task`, the `horsies[web]` dashboard, `create_monitoring_app`, `horsies web`, auth policies, schema states |
 
 All public symbols: `from horsies import <name>`
 

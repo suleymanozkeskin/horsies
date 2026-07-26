@@ -620,6 +620,18 @@ horsies check <module> [--live] [--loglevel LEVEL]
 
 `--live` adds Phase 4 (broker connectivity). Default `--loglevel` is `WARNING`.
 
+### `horsies web`
+
+```bash
+horsies web <module> [--host 127.0.0.1] [--port 8600] [--auth none|trusted-header] [--enable-actions]
+horsies web --database-url "postgresql+psycopg://..." [--session-database-url URL]
+```
+
+Serves the monitoring dashboard (requires the `web` extra). Fail-closed:
+non-loopback hosts require `--auth trusted-header`; actions are off unless
+`--enable-actions`. Never executes DDL. See `monitoring.md` for the full
+reference including the registry-less capability boundary.
+
 ### `horsies get-docs`
 
 ```bash
