@@ -8,6 +8,37 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-27
+
+Worker lifecycle fix: a timeout kill landing while the replacement process
+pool warmed no longer stops the worker. No schema change (v14).
+
+### Fixed
+
+- Executor replacement published the new pool before its children finished
+  warming, so dispatch ran real tasks on the warming pool; a per-task
+  timeout SIGKILL landing on one of them — or warm rounds finding too few
+  distinct children because real tasks occupied them — failed the warmup
+  itself, and the worker exited fail-closed
+  (`worker child warmup started X/N process(es)`). A backlog of ~12 queued
+  timeout-prone tasks crash-looped the worker at any pool size. The pool is
+  now published only after warmup completes: dispatch waits on the restart
+  lock instead of feeding a warming pool, and no timeout kill can target
+  one. Present since 0.1.8.
+- A dispatch-path "executor missing" request that lost the race with a
+  concurrent restart could destroy the healthy pool that restart had just
+  built. Ensure and replace are now separate operations: the dispatch path
+  creates a pool only when none is published and never tears one down;
+  force-replace requires the failed pool and is identity-guarded.
+- Warmup interruptions are classified by type: `BrokenProcessPool` and the
+  new `WarmupIncompleteError` retry the create+warm cycle (3 attempts,
+  stop-aware delay) before failing closed; child-hook failures still stop
+  the worker without retrying; OS-level and memory-baseline failures stay
+  immediately fatal.
+- Cancellation during warmup (the 30s start-attempt timeout) tears the
+  unpublished pool down instead of leaking its children; a stop requested
+  during warmup discards the pool unpublished.
+
 ## [0.4.0] - 2026-07-27
 
 The web monitoring dashboard: a typed monitoring API in core, registry-free
