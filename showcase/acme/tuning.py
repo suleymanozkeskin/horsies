@@ -37,11 +37,13 @@ MAX_PRICE_CENTS: Final[int] = 14_900
 
 # --- Scenario pacing ----------------------------------------------------
 
-STEADY_MIN_INTERARRIVAL_SECONDS: Final[int] = 4
-STEADY_MAX_INTERARRIVAL_SECONDS: Final[int] = 8
-"""One order every 4-8 s: ~7.5 concurrent task slots of demand against the 12
-executor children S7 documents, so steady stays smooth and every node is
-catchable in RUNNING."""
+STEADY_MIN_INTERARRIVAL_SECONDS: Final[int] = 6
+STEADY_MAX_INTERARRIVAL_SECONDS: Final[int] = 12
+"""One order every 6-12 s. Sized for the public showcase box (2 vCPU,
+`--processes 10`): at 4-8 s that box accrued PENDING at ~30 rows/min over a
+9-hour run — inflow must sit below the box's drain rate for an always-on
+demo. Dev machines with more children idle slightly longer between orders;
+every node stays catchable in RUNNING either way."""
 
 # --- Failure rates ------------------------------------------------------
 
