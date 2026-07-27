@@ -52,13 +52,14 @@ QUEUE_NOTIFICATIONS: Final[str] = 'notifications'
 QUEUE_ANALYTICS: Final[str] = 'analytics'
 
 # Four queues, four priorities, four caps. `payments` is claimed first and
-# stays responsive; `notifications` is capped at 3 so a marketing blast
+# stays responsive; `notifications` is capped low so a marketing blast
 # builds a visible PENDING backlog on one queue while the rest run clear.
+# Caps are enforced cluster-wide: adding workers does not raise them.
 QUEUES: Final[list[CustomQueueConfig]] = [
     CustomQueueConfig(name=QUEUE_PAYMENTS, priority=1, max_concurrency=4),
     CustomQueueConfig(name=QUEUE_FULFILLMENT, priority=10, max_concurrency=8),
-    CustomQueueConfig(name=QUEUE_NOTIFICATIONS, priority=50, max_concurrency=3),
-    CustomQueueConfig(name=QUEUE_ANALYTICS, priority=90, max_concurrency=2),
+    CustomQueueConfig(name=QUEUE_NOTIFICATIONS, priority=50, max_concurrency=6),
+    CustomQueueConfig(name=QUEUE_ANALYTICS, priority=90, max_concurrency=4),
 ]
 
 # Demo-tuned recovery: snapshots every 10 s keep the worker charts moving,
