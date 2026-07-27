@@ -342,6 +342,7 @@ async def test_finalize_worker_failure_runs_phase2(
         queue_name='default',
         is_workflow_task=False,
         task_name='lifecycle_regression_test',
+        executor=MagicMock(),
     )
 
     assert is_ok(result)

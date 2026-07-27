@@ -35,9 +35,12 @@ __all__ = [
     '_FINALIZE_PARENT_MAX_RETRIES',
     '_FINALIZE_RETRY_BASE_DELAY_S',
     '_FINALIZE_RETRY_MAX_DELAY_S',
+    '_EXECUTOR_WARMUP_ATTEMPTS',
+    '_EXECUTOR_WARMUP_RETRY_DELAY_S',
     '_REAPER_MAX_PERMANENT_FAILURES',
     'ChildHookFailedError',
     'ExecutorRestartFailedError',
+    'WarmupIncompleteError',
     '_RetryBackoff',
     '_FinalizeError',
     '_RetryError',
@@ -61,6 +64,12 @@ _FINALIZE_PHASE2_MAX_RETRIES = 5
 _FINALIZE_PARENT_MAX_RETRIES = 5
 _FINALIZE_RETRY_BASE_DELAY_S = 0.5
 _FINALIZE_RETRY_MAX_DELAY_S = 15.0
+# Executor create+warm attempts per restart request, and the base delay
+# between them (scaled by attempt number). Bounds the tolerance for
+# kill-shaped warmup interruptions; a genuinely broken host exhausts the
+# budget and the worker still fails closed.
+_EXECUTOR_WARMUP_ATTEMPTS = 3
+_EXECUTOR_WARMUP_RETRY_DELAY_S = 0.5
 
 
 @dataclass
@@ -258,11 +267,33 @@ class ExecutorRestartFailedError(RuntimeError):
     """Replacing the process pool failed at the OS level.
 
     Process-fatal by design: the failure modes (fd/pid/memory/semaphore
-    exhaustion, children dying during warmup) are host conditions a waiting
-    worker cannot fix, and a worker without an executor only looks healthy
-    (heartbeat loops keep running) while doing no work. Propagates to the
-    main loop and crashes the worker so the supervisor restarts it with a
-    clean slate.
+    exhaustion) are host conditions a waiting worker cannot fix, and a
+    worker without an executor only looks healthy (heartbeat loops keep
+    running) while doing no work. Propagates to the main loop and crashes
+    the worker so the supervisor restarts it with a clean slate.
+
+    Kill-shaped warmup interruptions (``WarmupIncompleteError``,
+    ``BrokenProcessPool``) are retried with a bounded budget before this is
+    raised; only the exhausted budget or a non-transient failure reaches
+    here.
+    """
+
+
+class WarmupIncompleteError(RuntimeError):
+    """Executor warmup finished with fewer live children than configured.
+
+    Transient by classification: warmup counts distinct child pids over
+    bounded rounds, and a shortfall means children died or never came up
+    during the window — on the restart path this is usually the worker's own
+    timeout enforcement killing a child mid-warmup (a self-inflicted,
+    kill-shaped interruption), not a host failure. Callers retry the
+    create+warm cycle with a bounded budget; a persistent shortfall
+    escalates to ``ExecutorRestartFailedError``.
+
+    A dedicated type (not a bare ``RuntimeError``) so restart classification
+    can match on types alone — ``ChildHookFailedError`` and
+    ``MemoryBaselineExceedsThresholdError`` are also ``RuntimeError``
+    subclasses and must never enter the retry arm.
     """
 
 

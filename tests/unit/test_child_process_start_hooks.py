@@ -197,12 +197,16 @@ class TestRunChildStartHooks:
         worker = Worker(
             session_factory=MagicMock(), listener=MagicMock(), cfg=cfg,
         )
+        broken_executor = MagicMock()
+        worker._executor = broken_executor
         worker._create_warmed_executor = AsyncMock(  # type: ignore[method-assign]
             side_effect=ChildHookFailedError('hook failed in replacement child'),
         )
 
         async def _run() -> None:
-            await worker._restart_executor('broken pool during test')
+            await worker._restart_executor(
+                'broken pool during test', failed_executor=broken_executor,
+            )
 
         asyncio.run(_run())
 

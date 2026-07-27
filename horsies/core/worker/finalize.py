@@ -101,7 +101,7 @@ class FinalizeMixin:
             self,
             task_id: str,
             exc: BaseException,
-            failed_executor: Optional[ProcessPoolExecutor] = None,
+            failed_executor: ProcessPoolExecutor,
             claimed_at: Optional[datetime] = None,
         ) -> None: ...
         async def _handle_task_timeout(
@@ -140,9 +140,9 @@ class FinalizeMixin:
         task_id: str,
         queue_name: str = 'default',
         is_workflow_task: bool = True,
-        executor: Optional[ProcessPoolExecutor] = None,
         timeout_ms: Optional[int] = None,
         *,
+        executor: ProcessPoolExecutor,
         task_name: str,
         claimed_at: Optional[datetime] = None,
     ) -> Result[None, _FinalizeError]:

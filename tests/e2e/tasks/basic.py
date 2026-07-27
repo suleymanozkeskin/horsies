@@ -177,6 +177,20 @@ def timeout_sleeper(*, duration_ms: int) -> TaskResult[str, TaskError]:
     return TaskResult(ok=f'slept_{duration_ms}')
 
 
+@app.task(task_name='e2e_pool_breaker')
+def pool_breaker() -> TaskResult[str, TaskError]:
+    """SIGKILLs its own child process: every execution breaks the pool.
+
+    The kill happens after the child has confirmed RUNNING, so crash
+    recovery classifies the row WORKER_CRASHED deterministically.
+    """
+    import os
+    import signal
+
+    os.kill(os.getpid(), signal.SIGKILL)
+    return TaskResult(ok='unreachable')
+
+
 @app.task(task_name='e2e_unserializable')
 def unserializable_result_task() -> TaskResult[int, TaskError]:
     """Task that declares int return but actually returns a callable.

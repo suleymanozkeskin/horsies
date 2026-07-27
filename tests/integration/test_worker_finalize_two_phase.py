@@ -115,7 +115,9 @@ async def test_finalize_phase2_failure_keeps_terminal_task_result_durable(
     fut.set_result((True, serialized.ok_value, None))
 
     # Should return Err (for callback-driven handling) but keep phase-1 durability.
-    finalize_r = await worker._finalize_after(fut, task_id, task_name='two_phase_finalize_test')
+    finalize_r = await worker._finalize_after(
+        fut, task_id, task_name='two_phase_finalize_test', executor=MagicMock(),
+    )
     assert is_err(finalize_r)
 
     row = (
