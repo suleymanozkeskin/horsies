@@ -164,6 +164,13 @@ SCHEDULES: Final[ScheduleConfig] = ScheduleConfig(
             catch_up_missed=False,
         ),
         TaskSchedule(
+            name='nightly-stocktake',
+            task_name='replenish_catalog',
+            pattern=DailySchedule(time=time(4, 15, 0)),
+            kwargs={'target_units': tuning.CATALOG_STOCK_PER_SKU},
+            catch_up_missed=False,
+        ),
+        TaskSchedule(
             name='reconcile-daily',
             task_name='reconcile_payments',
             pattern=DailySchedule(time=time(4, 0, 0)),
