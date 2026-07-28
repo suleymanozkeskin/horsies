@@ -36,6 +36,7 @@ from ..domain import (
     RestockPlan,
     StockRelease,
     StockReservation,
+    StocktakeSummary,
     SupplierFeed,
 )
 from . import store_failure
@@ -128,6 +129,42 @@ def release_stock(
                 )
             return TaskResult(
                 ok=StockRelease(sku=sku, quantity=quantity, available_after=available),
+            )
+
+
+@app.task(
+    'replenish_catalog',
+    queue_name=QUEUE_ANALYTICS,
+    retry_policy=RetryPolicy.fixed(
+        tuning.CRASH_RETRY_INTERVALS_SECONDS,
+        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+    ),
+)
+def replenish_catalog(*, target_units: int) -> TaskResult[StocktakeSummary, TaskError]:
+    """Nightly stocktake: clear stale reservations, top every SKU back up.
+
+    An always-on shop drains its finite catalog: orders that fail after
+    reserving leak their reservation, and SKUs no supplier feed covers are
+    never restocked. Running this once a night (04:00, the demand trough)
+    resets the warehouse to a sellable morning state and caps runaway
+    restock accumulation.
+    """
+    simulate.perform(
+        tuning.REPLENISH_WORK,
+        str(int(time.time()) // 86_400),
+        'stocktake',
+    )
+
+    match store.nightly_stocktake(target_units, tuning.STOCKTAKE_CEILING_UNITS):
+        case Err(error):
+            return TaskResult(err=store_failure(error))
+        case Ok((topped_up, cleared)):
+            return TaskResult(
+                ok=StocktakeSummary(
+                    skus_topped_up=topped_up,
+                    reservations_cleared=cleared,
+                    target_units=target_units,
+                ),
             )
 
 

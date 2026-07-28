@@ -37,13 +37,33 @@ MAX_PRICE_CENTS: Final[int] = 14_900
 
 # --- Scenario pacing ----------------------------------------------------
 
-STEADY_MIN_INTERARRIVAL_SECONDS: Final[int] = 6
-STEADY_MAX_INTERARRIVAL_SECONDS: Final[int] = 12
-"""One order every 6-12 s. Sized for the public showcase box (2 vCPU,
-`--processes 10`): at 4-8 s that box accrued PENDING at ~30 rows/min over a
-9-hour run — inflow must sit below the box's drain rate for an always-on
-demo. Dev machines with more children idle slightly longer between orders;
-every node stays catchable in RUNNING either way."""
+STEADY_MIN_INTERARRIVAL_SECONDS: Final[int] = 4
+STEADY_MAX_INTERARRIVAL_SECONDS: Final[int] = 8
+"""Pace at the daily demand peak. Off-peak the draw is divided by the
+demand factor below, so the effective inter-arrival stretches to ~30-60 s
+in the night trough. Peak pace is sized for the two-worker showcase fleet
+(14 children, caps notifications=6/analytics=4); a single 6-child worker
+accrued backlog at ~30 rows/min at this pace."""
+
+STEADY_TIMEZONE: Final[str] = 'Europe/Berlin'
+"""Shop-local clock for the demand curve — warehouses and couriers are EU."""
+
+STEADY_HOURLY_DEMAND: Final[list[float]] = [
+    0.25, 0.18, 0.14, 0.12, 0.12, 0.15,  # 00-05  night trough
+    0.25, 0.40, 0.55, 0.65, 0.70, 0.75,  # 06-11  morning ramp
+    0.85, 0.80, 0.70, 0.65, 0.70, 0.80,  # 12-17  lunch bump, afternoon dip
+    0.90, 1.00, 1.00, 0.90, 0.65, 0.40,  # 18-23  evening peak, wind-down
+]
+"""Demand factor per shop-local hour, linearly interpolated between hours.
+1.0 runs at the peak pace; 0.12 stretches inter-arrival ~8x. The curve is a
+retail day: quiet nights, a lunch bump, and an evening peak — so the
+dashboard's throughput charts show a real daily rhythm, and the capped
+queues visibly breathe with it."""
+
+STEADY_RIPPLE_PERIOD_MINUTES: Final[int] = 45
+STEADY_RIPPLE_AMPLITUDE: Final[float] = 0.20
+"""A +-20% wave on top of the hourly curve so a short visit still sees the
+order rate move rather than a locally flat line."""
 
 # --- Failure rates ------------------------------------------------------
 
@@ -82,6 +102,13 @@ under the task's own `default_unhandled_error_code`."""
 
 SUPPLIER_TIMEOUT_RATE: Final[float] = 0.25
 """Supplier feed pulls that time out; retried on a fixed schedule."""
+
+STOCKTAKE_CEILING_UNITS: Final[int] = 5_000
+"""Nightly stocktake caps `on_hand` here: supplier restocks only ever add,
+so without a ceiling the 15 supplier-covered SKUs accumulate without bound
+(observed: ~480k units across the catalog after 1.5 days always-on)."""
+
+REPLENISH_WORK: Final[WorkEnvelope] = WorkEnvelope(low_ms=2_000, high_ms=4_000)
 
 # --- Retry policies -----------------------------------------------------
 

@@ -1,5 +1,5 @@
 # showcase/acme/scenarios/steady.py
-"""Place an order every few seconds until Ctrl-C — the "watch the dashboard" mode.
+"""Place orders on a retail-day rhythm until Ctrl-C — the "watch the dashboard" mode.
 
     uv run python -m showcase.acme.scenarios steady
 
@@ -7,12 +7,19 @@ Each order starts one `order_fulfillment` run and two standalone sends. Every
 failure the demo can produce appears on its own within a few minutes: retried
 authorizations, declined cards, out-of-stock skips, a stalled invoice, and the
 two promotions crashes.
+
+The order rate follows a shop-local daily demand curve (`STEADY_HOURLY_DEMAND`)
+with a short ripple on top: evening peak at full pace, quiet nights, so the
+dashboard's throughput charts show a real day instead of a flat line.
 """
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Sequence
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from horsies import Err, Ok
 
@@ -32,6 +39,25 @@ from . import (
     say,
     will_pause,
 )
+
+
+def demand_factor(now_epoch: float) -> float:
+    """Demand at this moment: the shop-local hourly curve times a ripple.
+
+    The hourly profile is linearly interpolated so the rate glides between
+    hours instead of stepping; the ripple keeps a short visit interesting.
+    Bounded below so the trough never stalls order flow entirely.
+    """
+    local = datetime.fromtimestamp(now_epoch, tz=ZoneInfo(tuning.STEADY_TIMEZONE))
+    hour = local.hour + local.minute / 60.0
+    profile = tuning.STEADY_HOURLY_DEMAND
+    base_low = profile[int(hour) % 24]
+    base_high = profile[(int(hour) + 1) % 24]
+    base = base_low + (base_high - base_low) * (hour - int(hour))
+    ripple = 1.0 + tuning.STEADY_RIPPLE_AMPLITUDE * math.sin(
+        math.tau * now_epoch / (tuning.STEADY_RIPPLE_PERIOD_MINUTES * 60),
+    )
+    return max(0.05, base * ripple)
 
 
 def start_fulfillment(order: Order) -> None:
@@ -160,7 +186,8 @@ def run() -> int:
                     tuning.STEADY_MAX_INTERARRIVAL_SECONDS,
                     order.order_id,
                     'interarrival',
-                ),
+                )
+                / demand_factor(time.time()),
             )
     except KeyboardInterrupt:
         say(f'\nstopped after placing {placed} orders')

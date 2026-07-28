@@ -87,6 +87,10 @@ def pick_pack(
 ) -> TaskResult[PickPack, TaskError]:
     """Pick and pack the order.
 
+    Packing consumes each line's reservation — the units leave the shelf,
+    so `on_hand` and `reserved` both drop and a completed order stops
+    holding stock. Per-line `consumed` flags make the pass replay-safe.
+
     Declaring `workflow_meta` is all it takes to receive the workflow id and
     node index; they land in the result so the node detail shows which run
     produced this pack.
@@ -106,6 +110,13 @@ def pick_pack(
                     ),
                 )
             units = sum(line.quantity for line in order.lines)
+
+    for line in order.lines:
+        match store.consume_line(order_id, line.line_no, line.sku, line.quantity):
+            case Err(error):
+                return TaskResult(err=store_failure(error))
+            case Ok(_):
+                pass
 
     match store.set_order_status(order_id, 'packed'):
         case Err(error):

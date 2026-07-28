@@ -75,8 +75,13 @@ CREATE TABLE IF NOT EXISTS acme_order_lines (
     quantity         integer NOT NULL,
     unit_price_cents integer NOT NULL,
     reserved         boolean NOT NULL DEFAULT false,
+    consumed         boolean NOT NULL DEFAULT false,
     PRIMARY KEY (order_id, line_no)
 );
+
+-- Databases seeded before the consumption column existed converge here.
+ALTER TABLE acme_order_lines
+    ADD COLUMN IF NOT EXISTS consumed boolean NOT NULL DEFAULT false;
 
 CREATE TABLE IF NOT EXISTS acme_payments (
     payment_id    text PRIMARY KEY,
@@ -136,6 +141,14 @@ class ReservationOutcome:
     replayed: bool
     known_sku: bool
     available: int
+
+
+@dataclass(frozen=True, slots=True)
+class ConsumptionOutcome:
+    """Whether a pack consumed its reservation now, or already had."""
+
+    consumed: bool
+    replayed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -500,6 +513,94 @@ def _read_available(cursor: psycopg.Cursor[DictRow], sku: str) -> int | None:
     )
     row = cursor.fetchone()
     return None if row is None else int(row['available'])
+
+
+def consume_line(
+    order_id: str,
+    line_no: int,
+    sku: str,
+    quantity: int,
+) -> StoreResult[ConsumptionOutcome]:
+    """Convert one line's reservation into shipped units, idempotently.
+
+    Packing takes the units off the shelf: both `on_hand` and `reserved`
+    drop by the line quantity, so a completed order stops holding stock.
+    A line already marked consumed returns `replayed=True` without touching
+    stock, so a crash-recovery re-run never double-consumes.
+    """
+
+    def work(connection: psycopg.Connection[DictRow]) -> ConsumptionOutcome:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT consumed
+                FROM acme_order_lines
+                WHERE order_id = %(order_id)s AND line_no = %(line_no)s
+                FOR UPDATE
+                """,
+                {'order_id': order_id, 'line_no': line_no},
+            )
+            line = cursor.fetchone()
+            if line is None:
+                return ConsumptionOutcome(consumed=False, replayed=False)
+            if line['consumed'] is True:
+                return ConsumptionOutcome(consumed=True, replayed=True)
+            cursor.execute(
+                """
+                UPDATE acme_stock
+                SET on_hand  = greatest(0, on_hand - %(quantity)s),
+                    reserved = greatest(0, reserved - %(quantity)s),
+                    updated_at = now()
+                WHERE sku = %(sku)s
+                """,
+                {'sku': sku, 'quantity': quantity},
+            )
+            cursor.execute(
+                """
+                UPDATE acme_order_lines
+                SET consumed = true
+                WHERE order_id = %(order_id)s AND line_no = %(line_no)s
+                """,
+                {'order_id': order_id, 'line_no': line_no},
+            )
+            return ConsumptionOutcome(consumed=True, replayed=False)
+
+    return _run('consume_line', work)
+
+
+def nightly_stocktake(
+    target_units: int,
+    ceiling_units: int,
+) -> StoreResult[tuple[int, int]]:
+    """Reset the warehouse to a healthy morning state.
+
+    Clears every standing reservation (orders that failed after reserving
+    leak theirs; 04:00 has almost no orders in flight, and an in-flight
+    line keeps its own `reserved`/`consumed` flags, so replay stays
+    correct), then tops each SKU up to at least `target_units` and caps
+    runaway restock accumulation at `ceiling_units`. Returns
+    ``(skus_topped_up, reservations_cleared)``.
+    """
+
+    def work(connection: psycopg.Connection[DictRow]) -> tuple[int, int]:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                'UPDATE acme_stock SET reserved = 0, updated_at = now() '
+                'WHERE reserved > 0',
+            )
+            cleared = cursor.rowcount
+            cursor.execute(
+                """
+                UPDATE acme_stock
+                SET on_hand = least(greatest(on_hand, %(target)s), %(ceiling)s),
+                    updated_at = now()
+                WHERE on_hand < %(target)s OR on_hand > %(ceiling)s
+                """,
+                {'target': target_units, 'ceiling': ceiling_units},
+            )
+            return (cursor.rowcount, cleared)
+
+    return _run('nightly_stocktake', work)
 
 
 def release_line(sku: str, quantity: int) -> StoreResult[int | None]:

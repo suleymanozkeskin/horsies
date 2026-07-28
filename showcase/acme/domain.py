@@ -169,6 +169,14 @@ class StockRelease(BaseModel):
     available_after: int
 
 
+class StocktakeSummary(BaseModel):
+    """What the nightly stocktake changed."""
+
+    skus_topped_up: int
+    reservations_cleared: int
+    target_units: int
+
+
 class WarehouseAllocation(BaseModel):
     """Which warehouse will pick the order."""
 
