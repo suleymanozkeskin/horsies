@@ -28,8 +28,6 @@ from horsies.core.worker.sql import (
     DELETE_EXPIRED_WORKFLOWS_SQL,
     DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
     REAPER_GATE_TRY_LOCK_SQL,
-    _RETENTION_CLEANUP_INTERVAL_S,
-    _RETENTION_DELETE_BATCH_SIZE,
     _RETENTION_PASS_TIME_BUDGET_S,
 )
 
@@ -256,6 +254,8 @@ class ReaperMixin:
                 # backlog that outlives the budget resumes next pass.
                 deadline = now_monotonic + _RETENTION_PASS_TIME_BUDGET_S
 
+                batch_size = recovery_cfg.retention_delete_batch_size
+
                 if recovery_cfg.heartbeat_retention_hours is not None:
                     deleted_heartbeats = await self._delete_expired_in_batches(
                         temp_broker,
@@ -264,6 +264,7 @@ class ReaperMixin:
                             'retention_hours': recovery_cfg.heartbeat_retention_hours,
                         },
                         deadline,
+                        batch_size,
                     )
 
                 if recovery_cfg.worker_state_retention_hours is not None:
@@ -274,6 +275,7 @@ class ReaperMixin:
                             'retention_hours': recovery_cfg.worker_state_retention_hours,
                         },
                         deadline,
+                        batch_size,
                     )
 
                 if recovery_cfg.terminal_record_retention_hours is not None:
@@ -288,18 +290,21 @@ class ReaperMixin:
                         DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
                         terminal_params,
                         deadline,
+                        batch_size,
                     )
                     deleted_workflows = await self._delete_expired_in_batches(
                         temp_broker,
                         DELETE_EXPIRED_WORKFLOWS_SQL,
                         terminal_params,
                         deadline,
+                        batch_size,
                     )
                     deleted_tasks = await self._delete_expired_in_batches(
                         temp_broker,
                         DELETE_EXPIRED_TASKS_SQL,
                         terminal_params,
                         deadline,
+                        batch_size,
                     )
 
                 if (
@@ -321,7 +326,7 @@ class ReaperMixin:
                 logger.error(f'Retention cleanup error: {cleanup_err}')
             finally:
                 state.next_retention_cleanup_at = (
-                    now_monotonic + _RETENTION_CLEANUP_INTERVAL_S
+                    now_monotonic + recovery_cfg.retention_sweep_interval_s
                 )
 
     async def _delete_expired_in_batches(
@@ -330,6 +335,7 @@ class ReaperMixin:
         statement: 'TextClause',
         params: dict[str, Any],
         deadline_monotonic: float,
+        batch_size: int,
     ) -> int:
         """Run one retention DELETE in bounded batches, committing per batch.
 
@@ -343,12 +349,12 @@ class ReaperMixin:
             async with temp_broker.session_factory() as s:
                 result = await s.execute(
                     statement,
-                    {**params, 'batch_size': _RETENTION_DELETE_BATCH_SIZE},
+                    {**params, 'batch_size': batch_size},
                 )
                 deleted = int(getattr(result, 'rowcount', 0) or 0)
                 await s.commit()
             total_deleted += deleted
-            if deleted < _RETENTION_DELETE_BATCH_SIZE:
+            if deleted < batch_size:
                 return total_deleted
             if time.monotonic() >= deadline_monotonic:
                 logger.info(

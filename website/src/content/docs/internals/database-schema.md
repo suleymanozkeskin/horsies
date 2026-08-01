@@ -184,20 +184,20 @@ Protected by advisory lock to prevent race conditions.
 
 ## Automatic Retention Cleanup
 
-The worker's reaper loop prunes old rows automatically every hour based on [RecoveryConfig](../../configuration/recovery-config) retention settings:
+The worker's reaper loop prunes old rows automatically every `retention_sweep_interval_s` seconds (default 5 minutes) based on [RecoveryConfig](../../configuration/recovery-config) retention settings:
 
 | Table | Config field | Default | Condition |
 |-------|-------------|---------|-----------|
 | `horsies_heartbeats` | `heartbeat_retention_hours` | 24h | `sent_at` older than threshold |
 | `horsies_worker_states` | `worker_state_retention_hours` | 7 days | `snapshot_at` older than threshold |
 | `horsies_tasks` | `terminal_record_retention_hours` | 30 days | Terminal status + oldest timestamp older than threshold |
-| `horsies_task_attempts` | — | — | Cascade-deleted when parent task row is deleted |
+| `horsies_task_attempts` | — | — | Purged set-wise in the same statement that deletes the parent task rows (the FK cascade remains as the correctness net for non-retention deletes) |
 | `horsies_workflows` | `terminal_record_retention_hours` | 30 days | Terminal status + oldest timestamp older than threshold |
 | `horsies_workflow_tasks` | `terminal_record_retention_hours` | 30 days | Parent workflow is terminal and older than threshold |
 
 Terminal statuses: COMPLETED, FAILED, CANCELLED, EXPIRED. Set any retention field to `None` to disable cleanup for that category. See [Recovery Config](../../configuration/recovery-config#retention-cleanup) for configuration details.
 
-Deletes run in batches of 5,000 rows, one transaction per batch, under a 60-second budget per pass. A backlog larger than the budget allows — for example the first pass after enabling retention on a long-running database — drains across consecutive hourly passes instead of running as one unbounded DELETE.
+Deletes run in batches of `retention_delete_batch_size` rows (default 500), one transaction per batch, under a 60-second budget per pass. A backlog larger than the budget allows — for example the first pass after enabling retention on a long-running database — drains across consecutive passes instead of running as one unbounded DELETE.
 
 ## File Location
 
