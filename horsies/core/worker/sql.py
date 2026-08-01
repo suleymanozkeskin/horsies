@@ -636,12 +636,59 @@ DELETE_EXPIRED_WORKFLOWS_SQL = text(f"""
 # trigger still fires per parent row but finds nothing, and remains the
 # correctness net for non-retention deletes. doomed is referenced twice,
 # so Postgres materializes the candidate scan once.
+# :excluded_queues carries the queues with a per-queue override window
+# (queue_terminal_record_retention_hours); an empty array excludes
+# nothing. The exclusion shields PLAIN tasks only: workflow-backing rows
+# (is_workflow_task = TRUE) age under the global window even on override
+# queues, because the per-queue statement filters them out — an
+# unconditional exclusion would leave them unreachable by both statements
+# and retained forever. The exclusion is a heap filter on the
+# already-bounded candidate scan, so the v11 index plan is unchanged.
 DELETE_EXPIRED_TASKS_SQL = text(f"""
     WITH doomed AS (
         SELECT t.id
         FROM horsies_tasks t
         WHERE t.status IN ({TASK_TERMINAL_STATUS_SQL_LITERALS})
           AND COALESCE(t.completed_at, t.failed_at, t.updated_at, t.created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
+          AND NOT (t.queue_name = ANY(CAST(:excluded_queues AS text[]))
+                   AND t.is_workflow_task = FALSE)
+          AND NOT EXISTS (
+              SELECT 1
+              FROM horsies_workflow_tasks wt
+              JOIN horsies_workflows w ON w.id = wt.workflow_id
+              WHERE wt.task_id = t.id
+                AND w.status NOT IN ({WORKFLOW_TERMINAL_STATUS_SQL_LITERALS})
+          )
+        LIMIT :batch_size
+        FOR UPDATE OF t SKIP LOCKED
+    ),
+    purged_attempts AS (
+        DELETE FROM horsies_task_attempts
+        WHERE task_id IN (SELECT id FROM doomed)
+    )
+    DELETE FROM horsies_tasks
+    WHERE id IN (SELECT id FROM doomed)
+""")
+
+# Per-queue override delete (queue_terminal_record_retention_hours). The
+# queue_name equality + COALESCE predicates must stay textually aligned
+# with idx_horsies_tasks_queue_retention (schemas/indexes.py) — the v11
+# expression index cannot serve an override window efficiently because
+# the override cutoff is far more recent than the global one, making
+# every other queue's retained terminal rows heap-filter misses.
+# Scoped to plain tasks (is_workflow_task = FALSE): workflow-backing rows
+# age under the global window so a workflow and its task rows are
+# retained as a unit. The NOT EXISTS guard is kept as defense in depth
+# (plain tasks have no workflow_task linkage). Same purged_attempts
+# mechanism as the global delete.
+DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL = text(f"""
+    WITH doomed AS (
+        SELECT t.id
+        FROM horsies_tasks t
+        WHERE t.queue_name = :queue_name
+          AND t.status IN ({TASK_TERMINAL_STATUS_SQL_LITERALS})
+          AND COALESCE(t.completed_at, t.failed_at, t.updated_at, t.created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
+          AND t.is_workflow_task = FALSE
           AND NOT EXISTS (
               SELECT 1
               FROM horsies_workflow_tasks wt

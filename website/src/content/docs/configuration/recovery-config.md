@@ -49,6 +49,7 @@ config = AppConfig(
 | `heartbeat_retention_hours` | `int \| None` | 24 | Hours to keep heartbeat rows; `None` disables pruning |
 | `worker_state_retention_hours` | `int \| None` | 168 (7 days) | Hours to keep worker_state snapshots; `None` disables pruning |
 | `terminal_record_retention_hours` | `int \| None` | 720 (30 days) | Hours to keep terminal task/workflow rows; `None` disables pruning |
+| `queue_terminal_record_retention_hours` | `dict[str, int]` | `{}` | Per-queue overrides of the terminal window for plain (non-workflow) tasks; applies even when the global window is `None` |
 | `retention_sweep_interval_s` | `int` | 300 (5 min) | Seconds between retention sweep passes (30s–24h) |
 | `retention_delete_batch_size` | `int` | 500 | Rows per retention `DELETE` batch (50–10,000); each batch commits independently |
 
@@ -153,6 +154,23 @@ RecoveryConfig(
     heartbeat_retention_hours=48,              # Keep heartbeats for 2 days
     worker_state_retention_hours=24 * 14,      # Keep worker snapshots for 2 weeks
     terminal_record_retention_hours=24 * 90,   # Keep terminal records for 90 days
+)
+```
+
+High-volume queues can carry their own terminal window via
+`queue_terminal_record_retention_hours`. Overrides govern **plain
+(non-workflow) tasks** on the listed queues — workflow-backing task rows
+always age under the global window, so a workflow and its task rows are
+retained as a unit. Queues not listed use the global window; overrides
+apply even when the global window is `None`.
+
+```python
+RecoveryConfig(
+    terminal_record_retention_hours=24 * 30,   # Global: 30 days
+    queue_terminal_record_retention_hours={
+        'metrics': 24,                          # Metric-style spam: 1 day
+        'audit': 24 * 365,                      # Audit trail: 1 year
+    },
 )
 ```
 

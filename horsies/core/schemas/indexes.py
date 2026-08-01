@@ -161,6 +161,23 @@ CREATE_HEARTBEATS_SENT_AT_INDEX_SQL = text("""
     ON horsies_heartbeats (sent_at);
 """)
 
+# v15: retention eligibility for DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL —
+# per-queue override windows filter on queue_name plus the same COALESCE
+# expression. The v11 expression index keeps serving the remainder delete
+# (its range is bounded by the global cutoff); an override delete's range
+# extends to a much more recent cutoff, where every other queue's
+# retained terminal rows would be heap-filter misses proportional to
+# (longest − shortest window) × the other queues' volume. Partial on
+# terminal statuses: maintained once per task lifetime, on the finalize
+# transition — claim/lease-renewal updates never touch it (the v11
+# mechanism). Keep the COALESCE column list and order identical to the
+# delete's; the planner matches the parsed expression.
+CREATE_TASKS_QUEUE_RETENTION_INDEX_SQL = text(f"""
+    CREATE INDEX IF NOT EXISTS idx_horsies_tasks_queue_retention
+    ON horsies_tasks (queue_name, COALESCE(completed_at, failed_at, updated_at, created_at))
+    WHERE status IN ({TASK_TERMINAL_STATUS_SQL_LITERALS});
+""")
+
 # v13: retention eligibility for DELETE_EXPIRED_WORKFLOWS_SQL and
 # DELETE_EXPIRED_WORKFLOW_TASKS_SQL, which both filter horsies_workflows on
 # terminal status + COALESCE(completed_at, updated_at, created_at) < cutoff.

@@ -1365,3 +1365,81 @@ class TestRetentionDeleteBatchSize:
     def test_above_maximum_rejected(self) -> None:
         with pytest.raises(ValidationError):
             RecoveryConfig(retention_delete_batch_size=10_001)
+
+
+@pytest.mark.unit
+class TestQueueTerminalRecordRetentionOverrides:
+    """RecoveryConfig.queue_terminal_record_retention_hours bounds and default."""
+
+    def test_default_is_empty(self) -> None:
+        assert RecoveryConfig().queue_terminal_record_retention_hours == {}
+
+    def test_accepts_valid_edge_windows(self) -> None:
+        overrides = {'metrics': 1, 'archive': 24 * 365 * 5}
+        cfg = RecoveryConfig(queue_terminal_record_retention_hours=overrides)
+        assert cfg.queue_terminal_record_retention_hours == overrides
+
+    def test_below_minimum_value_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            RecoveryConfig(queue_terminal_record_retention_hours={'q': 0})
+
+    def test_above_maximum_value_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            RecoveryConfig(
+                queue_terminal_record_retention_hours={'q': 24 * 365 * 5 + 1},
+            )
+
+
+@pytest.mark.unit
+class TestQueueRetentionOverridesNameDeclaredQueues:
+    """AppConfig rejects override keys that name no declared queue: a
+    typo'd key would otherwise be a silent no-op (inert override plus a
+    phantom exclusion that matches nothing)."""
+
+    def test_custom_mode_accepts_declared_queue(self) -> None:
+        config = AppConfig(
+            queue_mode=QueueMode.CUSTOM,
+            custom_queues=[CustomQueueConfig(name='metrics')],
+            broker=BROKER,
+            recovery=RecoveryConfig(
+                queue_terminal_record_retention_hours={'metrics': 24},
+            ),
+        )
+        assert config.recovery.queue_terminal_record_retention_hours == {
+            'metrics': 24,
+        }
+
+    def test_custom_mode_rejects_unknown_queue(self) -> None:
+        with pytest.raises(
+            ConfigurationError,
+            match="unknown queue",
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.CUSTOM,
+                custom_queues=[CustomQueueConfig(name='metrics')],
+                broker=BROKER,
+                recovery=RecoveryConfig(
+                    queue_terminal_record_retention_hours={'metrcs': 24},
+                ),
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+
+    def test_default_mode_accepts_default_key_only(self) -> None:
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+            recovery=RecoveryConfig(
+                queue_terminal_record_retention_hours={'default': 24},
+            ),
+        )
+        assert config.recovery.queue_terminal_record_retention_hours == {
+            'default': 24,
+        }
+        with pytest.raises(ConfigurationError, match='unknown queue'):
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                recovery=RecoveryConfig(
+                    queue_terminal_record_retention_hours={'bulk': 24},
+                ),
+            )
