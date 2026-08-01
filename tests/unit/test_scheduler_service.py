@@ -2656,6 +2656,97 @@ class TestEnsureStatesExist:
 
         state_manager.get_due_states.assert_not_awaited()
 
+    async def test_healthy_check_skipped_until_interval_elapses(self) -> None:
+        """While healthy, only the first tick reads existence; subsequent
+        ticks inside the interval skip it. Due states are read every tick."""
+        scheduler, state_manager = self._scheduler_with_mock_manager(['a'])
+        state_manager.get_existing_names = AsyncMock(return_value={'a'})
+        state_manager.get_due_states = AsyncMock(return_value=[])
+
+        for _tick in range(5):
+            await scheduler._check_and_run_schedules()
+
+        assert state_manager.get_existing_names.await_count == 1
+        assert state_manager.get_due_states.await_count == 5
+
+    async def test_healthy_check_reruns_after_interval(self) -> None:
+        """The existence check runs again once the tick interval elapses."""
+        scheduler, state_manager = self._scheduler_with_mock_manager(['a'])
+        state_manager.get_existing_names = AsyncMock(return_value={'a'})
+        state_manager.get_due_states = AsyncMock(return_value=[])
+
+        for _tick in range(scheduler._existence_check_interval_ticks + 1):
+            await scheduler._check_and_run_schedules()
+
+        assert state_manager.get_existing_names.await_count == 2
+
+    async def test_interval_ticks_derived_from_check_interval(self) -> None:
+        """The tick count preserves the ~60 s wall-clock cadence across
+        tick configs; a tick longer than the target floors at 1."""
+        for seconds, expected_ticks in ((1, 60), (10, 6), (60, 1)):
+            config = ScheduleConfig(
+                schedules=[
+                    TaskSchedule(
+                        name='a',
+                        task_name='my_task',
+                        pattern=IntervalSchedule(seconds=5),
+                    ),
+                ],
+                check_interval_seconds=seconds,
+            )
+            app = _make_app(schedule_config=config)
+            scheduler = Scheduler(app)
+            assert (
+                scheduler._existence_check_interval_ticks == expected_ticks
+            ), f'check_interval_seconds={seconds}'
+
+    async def test_unhealthy_pass_rechecks_next_tick(self) -> None:
+        """A failed re-init keeps the check running every tick until a
+        fully healthy pass, then the interval cadence resumes."""
+        scheduler, state_manager = self._scheduler_with_mock_manager(
+            ['flaky', 'ok'],
+        )
+        state_manager.get_existing_names = AsyncMock(
+            side_effect=[{'ok'}, {'ok'}, {'ok', 'flaky'}, {'ok', 'flaky'}],
+        )
+        state_manager.get_due_states = AsyncMock(return_value=[])
+        init_attempts = 0
+
+        async def _fail_once_then_succeed(schedule: object, now: object) -> None:
+            nonlocal init_attempts
+            init_attempts += 1
+            if init_attempts == 1:
+                raise RuntimeError('db error')
+
+        scheduler._initialize_single_schedule = AsyncMock(  # type: ignore[method-assign]
+            side_effect=_fail_once_then_succeed,
+        )
+
+        # Tick 1: missing + init fails -> unhealthy, recheck next tick.
+        # Tick 2: missing + init succeeds -> healthy, cadence resumes.
+        # Ticks 3-4: inside the interval -> no existence reads.
+        for _tick in range(4):
+            await scheduler._check_and_run_schedules()
+
+        assert state_manager.get_existing_names.await_count == 2
+        assert init_attempts == 2
+
+    async def test_existence_read_failure_rechecks_on_retried_tick(self) -> None:
+        """A raise on the existence read leaves the countdown armed: the
+        retried tick runs the check again instead of skipping it."""
+        scheduler, state_manager = self._scheduler_with_mock_manager(['a'])
+        state_manager.get_existing_names = AsyncMock(
+            side_effect=[RuntimeError('db down'), {'a'}],
+        )
+        state_manager.get_due_states = AsyncMock(return_value=[])
+
+        with pytest.raises(RuntimeError, match='db down'):
+            await scheduler._check_and_run_schedules()
+        await scheduler._check_and_run_schedules()
+
+        assert state_manager.get_existing_names.await_count == 2
+        state_manager.get_due_states.assert_awaited_once()
+
 
 @pytest.mark.unit
 class TestPreloadTaskModulesAdditionalPaths:
