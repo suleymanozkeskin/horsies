@@ -31,6 +31,7 @@ from horsies.core.codec.kwargs import (
     underlying_task_fn,
 )
 from horsies.core.codec.json_io import dumps_json, loads_json, SerdeResult
+from horsies.core.codec.payload_guard import enforce_payload_policy
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.typed import (
     Json,
@@ -787,6 +788,20 @@ async def _build_enqueued_task_params(
                 f'Failed to serialize kwargs for task {task_index}',
                 error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
             ))
+
+    # Warn-only payload guardrail: this is the args_from injection point,
+    # where an upstream task's result envelope becomes this task's kwargs
+    # — the likeliest producer of oversized payloads. Rejecting a
+    # mid-workflow node needs a designed node-failure path (a size limit
+    # must not strand a running workflow), so reject semantics for
+    # workflow nodes are deferred; see the P1b follow-on ledger entry.
+    if broker is not None and broker.app is not None:
+        enforce_payload_policy(
+            broker.app.config.payload,
+            task_name=task_name,
+            kind='kwargs',
+            encoded_len=len(kwargs_json),
+        )
 
     # Create actual task in tasks table
     task_id = str(uuid.uuid4())

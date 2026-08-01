@@ -2348,6 +2348,42 @@ class TestEnqueueScheduledTask:
         scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('enqueued-id'))
         return scheduler
 
+    async def test_oversized_schedule_kwargs_rejected_before_broker(self) -> None:
+        """payload.reject_bytes fails the slot closed; the broker is never
+        called. Wiring test for the guardrail in _enqueue_scheduled_task —
+        reverting that guard in place fails here."""
+        from horsies.core.codec.payload_guard import reset_payload_warnings
+        reset_payload_warnings()
+
+        def blob_fn(*, blob: str) -> None:
+            return None
+
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(
+                    name='s',
+                    task_name='my_task',
+                    pattern=IntervalSchedule(seconds=5),
+                    kwargs={'blob': 'x' * 2048},
+                ),
+            ],
+        )
+        task_mock = _make_task_mock(blob_fn)
+        app = _make_app(schedule_config=config, tasks={'my_task': task_mock})
+        app.config.payload = PayloadPolicy(warn_bytes=64, reject_bytes=256)
+        scheduler = Scheduler(app)
+        scheduler.broker = _make_broker_mock()
+        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('enqueued-id'))
+
+        result = await scheduler._enqueue_scheduled_task(
+            config.schedules[0],
+            slot_time=_utc(2025, 6, 1, 12, 0, 0),
+        )
+
+        assert is_err(result)
+        assert 'payload.reject_bytes' in result.err_value.message
+        scheduler.broker.enqueue_async.assert_not_awaited()
+
     async def test_no_broker_raises_runtime_error(self) -> None:
         """broker=None → RuntimeError."""
         config = ScheduleConfig(

@@ -112,8 +112,18 @@ serialization pass.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `payload.warn_bytes` | `int \| None` | 1 MiB | Warn when a serialized payload (kwargs at enqueue, result at completion) exceeds this size; rate-limited to once per task name and payload kind per process. `None` disables |
-| `payload.reject_bytes` | `int \| None` | `None` | Reject an enqueue whose serialized kwargs exceed this size: `.send()` returns `Err(PAYLOAD_TOO_LARGE)` and nothing is written. Results are never rejected — completed work is never destroyed over size. `None` (default) disables |
+| `payload.warn_bytes` | `int \| None` | 1 MiB | Warn when a serialized payload exceeds this size; rate-limited to once per task name and payload kind per process. `None` disables |
+| `payload.reject_bytes` | `int \| None` | `None` | Reject an enqueue whose serialized kwargs exceed this size before anything is written. Results are never rejected — completed work is never destroyed over size. `None` (default) disables |
+
+Coverage by boundary:
+
+| Boundary | Warn | Reject |
+|----------|------|--------|
+| `.send()` / `.send_async()` / `.schedule()` / `.schedule_async()` kwargs | yes | yes — `Err(PAYLOAD_TOO_LARGE)` |
+| Scheduled fires (TaskSchedule kwargs) | yes | yes — the slot fails, logged via the schedule's enqueue-failure path |
+| Workflow-node enqueues on a running flow (including `args_from` result injection) | yes | no — rejecting a mid-workflow node needs a defined node-failure path; deferred |
+| Subworkflow child-start kwargs and stored workflow definitions | not yet checked | not yet checked |
+| Task results at completion | yes | never — by design |
 
 ```python
 from horsies.core.models.payload import PayloadPolicy
