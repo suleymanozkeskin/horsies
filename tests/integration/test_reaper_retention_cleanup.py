@@ -516,6 +516,76 @@ async def test_expired_tasks_delete_is_bounded_by_batch_size(
 
 
 @pytest.mark.asyncio(loop_scope='function')
+async def test_expired_tasks_delete_purges_attempts_set_wise(
+    engine: AsyncEngine,
+    session: AsyncSession,
+) -> None:
+    """Deleting expired tasks removes their attempt history in the same
+    statement; attempts of surviving tasks are untouched.
+
+    Also pins the CTE form's rowcount contract: the statement reports
+    deleted PARENT rows only (the batching loop compares rowcount against
+    batch_size), never parent + attempts.
+    """
+    _ = engine
+    await _truncate_retention_tables(session)
+
+    doomed_task = str(uuid.uuid4())
+    surviving_task = str(uuid.uuid4())
+
+    for task_id, hours_ago in ((doomed_task, 48), (surviving_task, 1)):
+        sent_at, sha = compute_test_enqueue_sha(
+            task_name='ret_attempts_test',
+            sent_at=datetime.now(timezone.utc) - timedelta(hours=hours_ago),
+        )
+        await session.execute(text("""
+            INSERT INTO horsies_tasks
+                (id, task_name, queue_name, priority, args, kwargs,
+                 status, sent_at, created_at, updated_at, claimed, retry_count,
+                 max_retries, completed_at, enqueue_sha)
+            VALUES
+                (:id, 'ret_attempts_test', 'default', 100, '[]', '{}',
+                 'COMPLETED', :sent_at, NOW() - (:h || ' hours')::interval,
+                 NOW() - (:h || ' hours')::interval, FALSE, 0,
+                 0, NOW() - (:h || ' hours')::interval, :enqueue_sha)
+        """), {
+            'id': task_id,
+            'sent_at': sent_at,
+            'h': hours_ago,
+            'enqueue_sha': sha,
+        })
+
+    # Two attempts on the doomed task (a retry history), one on the survivor.
+    await session.execute(text("""
+        INSERT INTO horsies_task_attempts
+            (task_id, attempt, outcome, will_retry, started_at, finished_at)
+        VALUES
+            (:doomed, 1, 'FAILED', TRUE, NOW(), NOW()),
+            (:doomed, 2, 'COMPLETED', FALSE, NOW(), NOW()),
+            (:survivor, 1, 'COMPLETED', FALSE, NOW(), NOW())
+    """), {'doomed': doomed_task, 'survivor': surviving_task})
+    await session.commit()
+
+    assert await _count(session, 'horsies_task_attempts') == 3
+
+    result = await session.execute(
+        DELETE_EXPIRED_TASKS_SQL,
+        {'retention_hours': _RETENTION_HOURS, 'batch_size': _BATCH_SIZE},
+    )
+    await session.commit()
+
+    # rowcount counts parent task rows only, not the purged attempts.
+    assert int(result.rowcount or 0) == 1
+
+    surviving_attempts = (await session.execute(text("""
+        SELECT task_id, count(*) FROM horsies_task_attempts GROUP BY task_id
+    """))).fetchall()
+    assert {(row[0], int(row[1])) for row in surviving_attempts} == {
+        (surviving_task, 1),
+    }, 'doomed attempts purged; survivor history intact'
+
+
+@pytest.mark.asyncio(loop_scope='function')
 async def test_expired_tasks_delete_uses_retention_index(
     broker: PostgresBroker,  # noqa: ARG001 - ensures schema migrations are applied
     session: AsyncSession,
@@ -661,8 +731,18 @@ async def test_retention_delete_statements_plan_on_retention_indexes(
              NOW() - INTERVAL '48 hours', FALSE, 0,
              0, NOW() - INTERVAL '48 hours', 'ret-plan-test-sha')
     """))
+    # One attempt per task: the tasks delete must purge these set-wise via
+    # its purged_attempts CTE, visible below as a plan node.
+    await session.execute(text("""
+        INSERT INTO horsies_task_attempts
+            (task_id, attempt, outcome, will_retry, started_at, finished_at)
+        SELECT id, 1, 'COMPLETED', FALSE, NOW(), NOW()
+        FROM horsies_tasks
+    """))
     await session.commit()
-    await session.execute(text('ANALYZE horsies_workflows, horsies_tasks'))
+    await session.execute(text(
+        'ANALYZE horsies_workflows, horsies_tasks, horsies_task_attempts'
+    ))
     # ANALYZE's pg_statistic writes are MVCC-transactional; commit them so
     # the per-statement rollbacks below revert only the DELETE and the
     # seqscan toggle, not the gathered statistics — otherwise statements
@@ -688,3 +768,8 @@ async def test_retention_delete_statements_plan_on_retention_indexes(
         session, DELETE_EXPIRED_TASKS_SQL.text, params,
     )
     assert 'idx_horsies_tasks_retention' in tasks_plan, tasks_plan
+    # The set-wise attempts purge is a plan node; the per-row FK cascade it
+    # replaces surfaces only as trigger time. Dropping the purged_attempts
+    # CTE removes this node and fails here — the revert-proof for R1.
+    assert 'Delete on horsies_task_attempts' in tasks_plan, tasks_plan
+    assert 'uq_horsies_task_attempts_task_attempt' in tasks_plan, tasks_plan

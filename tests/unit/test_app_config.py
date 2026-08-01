@@ -1317,3 +1317,51 @@ class TestWorkerStateSnapshotInterval:
     def test_above_maximum_rejected(self) -> None:
         with pytest.raises(ValidationError):
             RecoveryConfig(worker_state_snapshot_interval_ms=300_001)
+
+
+@pytest.mark.unit
+class TestRetentionSweepInterval:
+    """RecoveryConfig.retention_sweep_interval_s bounds and default."""
+
+    def test_default_is_5_minutes(self) -> None:
+        assert RecoveryConfig().retention_sweep_interval_s == 300
+
+    def test_bounds_accept_valid_edges(self) -> None:
+        assert RecoveryConfig(
+            retention_sweep_interval_s=30,
+        ).retention_sweep_interval_s == 30
+        assert RecoveryConfig(
+            retention_sweep_interval_s=86_400,
+        ).retention_sweep_interval_s == 86_400
+
+    def test_below_minimum_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            RecoveryConfig(retention_sweep_interval_s=29)
+
+    def test_above_maximum_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            RecoveryConfig(retention_sweep_interval_s=86_401)
+
+
+@pytest.mark.unit
+class TestRetentionDeleteBatchSize:
+    """RecoveryConfig.retention_delete_batch_size bounds and default."""
+
+    def test_default_is_500(self) -> None:
+        assert RecoveryConfig().retention_delete_batch_size == 500
+
+    def test_bounds_accept_valid_edges(self) -> None:
+        assert RecoveryConfig(
+            retention_delete_batch_size=50,
+        ).retention_delete_batch_size == 50
+        assert RecoveryConfig(
+            retention_delete_batch_size=10_000,
+        ).retention_delete_batch_size == 10_000
+
+    def test_below_minimum_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            RecoveryConfig(retention_delete_batch_size=49)
+
+    def test_above_maximum_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            RecoveryConfig(retention_delete_batch_size=10_001)

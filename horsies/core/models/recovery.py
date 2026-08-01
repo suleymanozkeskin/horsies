@@ -39,6 +39,8 @@ class RecoveryConfig(BaseModel):
     - heartbeat_retention_hours: Keep heartbeat rows for this long (None disables cleanup)
     - worker_state_retention_hours: Keep worker_state rows for this long (None disables cleanup)
     - terminal_record_retention_hours: Keep terminal task/workflow rows for this long (None disables cleanup)
+    - retention_sweep_interval_s: Seconds between retention sweep passes
+    - retention_delete_batch_size: Rows per retention DELETE batch
     """
 
     auto_requeue_stale_claimed: bool = Field(
@@ -141,6 +143,22 @@ class RecoveryConfig(BaseModel):
         description=(
             'How long to keep terminal rows in tasks/workflows/workflow_tasks in hours; '
             'set None to disable pruning'
+        ),
+    )
+
+    retention_sweep_interval_s: Annotated[int, Field(ge=30, le=86_400)] = Field(
+        default=300,
+        description=(
+            'Seconds between retention sweep passes (30s-24h). Frequent small '
+            'sweeps keep each pass short instead of accumulating an hourly spike'
+        ),
+    )
+
+    retention_delete_batch_size: Annotated[int, Field(ge=50, le=10_000)] = Field(
+        default=500,
+        description=(
+            'Rows per retention DELETE batch (50-10000). Bounds per-statement '
+            'duration, row locks, and WAL; each batch commits independently'
         ),
     )
 

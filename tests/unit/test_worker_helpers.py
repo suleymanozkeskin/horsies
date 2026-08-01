@@ -54,7 +54,6 @@ from horsies.core.worker.worker import (
 )
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.tasks import OperationalErrorCode
-from horsies.core.worker.sql import _RETENTION_DELETE_BATCH_SIZE
 
 
 # ---------------------------------------------------------------------------
@@ -852,24 +851,24 @@ class TestRetentionBatchedDeletes:
     async def test_repeats_full_batches_until_short_batch(self) -> None:
         """Full batches keep the loop going; a short batch ends it."""
         worker = _make_worker()
-        broker, session = self._make_fake_broker(
-            [_RETENTION_DELETE_BATCH_SIZE, _RETENTION_DELETE_BATCH_SIZE, 3],
-        )
+        broker, session = self._make_fake_broker([5, 5, 3])
 
         total = await worker._delete_expired_in_batches(
             broker,
             DELETE_EXPIRED_TASKS_SQL,
             {'retention_hours': 24},
             deadline_monotonic=time.monotonic() + 3600.0,
+            batch_size=5,
         )
 
-        assert total == 2 * _RETENTION_DELETE_BATCH_SIZE + 3
+        assert total == 13
         assert session.execute.await_count == 3
         # One commit per batch: each batch is its own transaction.
         assert session.commit.await_count == 3
 
     @pytest.mark.asyncio
     async def test_batch_size_param_passed_to_statement(self) -> None:
+        """The caller-provided batch size reaches the statement parameters."""
         worker = _make_worker()
         broker, session = self._make_fake_broker([0])
 
@@ -878,30 +877,30 @@ class TestRetentionBatchedDeletes:
             DELETE_EXPIRED_HEARTBEATS_SQL,
             {'retention_hours': 12},
             deadline_monotonic=time.monotonic() + 3600.0,
+            batch_size=7,
         )
 
         params = session.execute.await_args_list[0].args[1]
         assert params == {
             'retention_hours': 12,
-            'batch_size': _RETENTION_DELETE_BATCH_SIZE,
+            'batch_size': 7,
         }
 
     @pytest.mark.asyncio
     async def test_expired_deadline_stops_after_one_batch(self) -> None:
         """A pass past its deadline still makes progress: exactly one batch."""
         worker = _make_worker()
-        broker, session = self._make_fake_broker(
-            [_RETENTION_DELETE_BATCH_SIZE, _RETENTION_DELETE_BATCH_SIZE],
-        )
+        broker, session = self._make_fake_broker([5, 5])
 
         total = await worker._delete_expired_in_batches(
             broker,
             DELETE_EXPIRED_TASKS_SQL,
             {'retention_hours': 24},
             deadline_monotonic=time.monotonic() - 1.0,
+            batch_size=5,
         )
 
-        assert total == _RETENTION_DELETE_BATCH_SIZE
+        assert total == 5
         assert session.execute.await_count == 1
 
 

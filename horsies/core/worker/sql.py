@@ -627,9 +627,17 @@ DELETE_EXPIRED_WORKFLOWS_SQL = text(f"""
 
 # The status + COALESCE predicates must stay textually aligned with
 # idx_horsies_tasks_retention (schemas/indexes.py).
+#
+# task_attempts are purged set-wise in the purged_attempts CTE rather than
+# left to the FK ON DELETE CASCADE: RI triggers are row-level, so the
+# cascade issues one child DELETE per doomed task inside this statement's
+# transaction — costlier in aggregate than the parent delete itself. The
+# CTE removes the whole child set in one indexed statement; the cascade
+# trigger still fires per parent row but finds nothing, and remains the
+# correctness net for non-retention deletes. doomed is referenced twice,
+# so Postgres materializes the candidate scan once.
 DELETE_EXPIRED_TASKS_SQL = text(f"""
-    DELETE FROM horsies_tasks
-    WHERE id IN (
+    WITH doomed AS (
         SELECT t.id
         FROM horsies_tasks t
         WHERE t.status IN ({TASK_TERMINAL_STATUS_SQL_LITERALS})
@@ -642,8 +650,14 @@ DELETE_EXPIRED_TASKS_SQL = text(f"""
                 AND w.status NOT IN ({WORKFLOW_TERMINAL_STATUS_SQL_LITERALS})
           )
         LIMIT :batch_size
-        FOR UPDATE SKIP LOCKED
+        FOR UPDATE OF t SKIP LOCKED
+    ),
+    purged_attempts AS (
+        DELETE FROM horsies_task_attempts
+        WHERE task_id IN (SELECT id FROM doomed)
     )
+    DELETE FROM horsies_tasks
+    WHERE id IN (SELECT id FROM doomed)
 """)
 
 # Terminate a single orphaned workflow task this worker still holds CLAIMED.
@@ -720,11 +734,8 @@ UPSERT_TASK_ATTEMPT_SQL = text("""
         worker_process_name = EXCLUDED.worker_process_name
 """)
 
-_RETENTION_CLEANUP_INTERVAL_S = 3600.0
-
-# Rows per retention DELETE batch. Bounds per-transaction WAL, row locks,
-# and task_attempts cascade volume.
-_RETENTION_DELETE_BATCH_SIZE = 5_000
+# Sweep cadence and batch size live on RecoveryConfig
+# (retention_sweep_interval_s, retention_delete_batch_size).
 
 # Wall-clock budget for one retention pass across all five statements. A
 # backlog that does not drain within the budget resumes on the next pass;
