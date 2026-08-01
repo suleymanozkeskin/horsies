@@ -1254,6 +1254,51 @@ class TestRequeueClaimedTask:
 
 
 @pytest.mark.unit
+class TestFinalizeResultPayloadWarn:
+    """_finalize_after warns on oversized result envelopes (warn-only).
+
+    Wiring test for the guardrail call before phase 1 — reverting that
+    guard in place fails here.
+    """
+
+    @pytest.mark.asyncio
+    async def test_oversized_result_warns(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+
+        from horsies.core.codec.payload_guard import reset_payload_warnings
+        from horsies.core.models.payload import PayloadPolicy
+
+        reset_payload_warnings()
+        worker = _make_worker()
+        worker._app = MagicMock()
+        worker._app.config.payload = PayloadPolicy(
+            warn_bytes=64, reject_bytes=None,
+        )
+        worker._persist_task_terminal_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=Err(MagicMock()),
+        )
+
+        fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
+        fut.set_result((True, '{"big": "' + 'x' * 1024 + '"}', None))
+
+        with caplog.at_level(logging.WARNING):
+            await worker._finalize_after(
+                fut, 'task-w', task_name='big_result_task',
+                executor=MagicMock(),
+            )
+
+        guard_records = [
+            r for r in caplog.records
+            if 'Payload size guardrail' in r.getMessage()
+        ]
+        assert len(guard_records) == 1
+        assert "'big_result_task'" in guard_records[0].getMessage()
+        assert 'result payload' in guard_records[0].getMessage()
+
+
+@pytest.mark.unit
 class TestFinalizeAfterRequeueOutcome:
     """Tests for the except-Exception branch in _finalize_after that uses
     _requeue_claimed_task and builds _FinalizeError with requeue_outcome."""

@@ -3,6 +3,7 @@ from typing import List, Optional
 from pydantic import BaseModel, model_validator, Field, ConfigDict
 from horsies.core.models.queues import QueueMode, CustomQueueConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.schedule import ScheduleConfig, SchedulePattern
@@ -42,6 +43,7 @@ class AppConfig(BaseModel):
     # Older claims are left to expire, preventing indefinite renewal of
     # orphaned CLAIMED tasks after dispatch failure + requeue DB error.
     max_claim_renew_age_ms: int = MAX_CLAIM_RENEW_AGE_MS
+    payload: PayloadPolicy = Field(default_factory=PayloadPolicy)
     recovery: RecoveryConfig = Field(default_factory=RecoveryConfig)
     resilience: WorkerResilienceConfig = Field(default_factory=WorkerResilienceConfig)
     schedule: Optional[ScheduleConfig] = Field(

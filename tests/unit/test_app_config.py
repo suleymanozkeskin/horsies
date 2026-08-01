@@ -1391,6 +1391,16 @@ class TestQueueTerminalRecordRetentionOverrides:
 
 
 @pytest.mark.unit
+class TestPayloadPolicyWiring:
+    """AppConfig carries a PayloadPolicy with warn-only defaults."""
+
+    def test_default_policy(self) -> None:
+        config = AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER)
+        assert config.payload.warn_bytes == 1_048_576
+        assert config.payload.reject_bytes is None
+
+
+@pytest.mark.unit
 class TestQueueRetentionOverridesNameDeclaredQueues:
     """AppConfig rejects override keys that name no declared queue: a
     typo'd key would otherwise be a silent no-op (inert override plus a

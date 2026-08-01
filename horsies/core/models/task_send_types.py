@@ -45,6 +45,11 @@ class TaskSendErrorCode(str, Enum):
     ENQUEUE_FAILED = 'ENQUEUE_FAILED'
     PAYLOAD_MISMATCH = 'PAYLOAD_MISMATCH'
 
+    PAYLOAD_TOO_LARGE = 'PAYLOAD_TOO_LARGE'
+    """Serialized kwargs exceeded ``payload.reject_bytes``; nothing was
+    written. Non-retryable — shrink the payload (pass a reference to
+    external storage) or raise the configured limit."""
+
 
 @dataclass(slots=True, frozen=True)
 class TaskSendPayload:
