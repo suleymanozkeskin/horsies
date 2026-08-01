@@ -32,6 +32,15 @@ SCHEDULE_ADVISORY_LOCK_SQL = text(
     """SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))"""
 )
 
+# Ticks between missing-row existence checks while every state row is
+# present and initialized. The check guards rare conditions (startup init
+# failure, external row deletion); running it every tick reads the whole
+# schedule-state table each second — 108 schedules at a 1 s tick is ~9M
+# rows/day for an answer that changes only on those rare events. While
+# any row is missing or an init failed, the check reruns every tick until
+# healthy.
+_EXISTENCE_CHECK_INTERVAL_TICKS = 60
+
 
 class Scheduler:
     """
@@ -53,6 +62,8 @@ class Scheduler:
         self.state_manager: Optional[ScheduleStateManager] = None
         self._stop = asyncio.Event()
         self._initialized = False
+        # 0 -> the next tick runs the missing-row existence check.
+        self._ticks_until_existence_check = 0
 
         # Validate that schedule config exists
         if not app.config.schedule:
@@ -281,7 +292,11 @@ class Scheduler:
 
         Per-schedule isolation: _check_schedule errors are logged and the
         remaining due schedules still run. The existence and due-states
-        reads raise to run_forever's tick handler (retry next tick).
+        reads raise to run_forever's tick handler (retry next tick); a
+        raise on the existence read leaves its countdown at zero, so the
+        retried tick re-runs the check. The existence check itself runs
+        every _EXISTENCE_CHECK_INTERVAL_TICKS ticks while healthy (every
+        tick while unhealthy), not per tick.
 
         Raises:
             RuntimeError: scheduler not initialized (programmer error).
@@ -300,7 +315,12 @@ class Scheduler:
         if not enabled_schedules:
             return
 
-        await self._ensure_states_exist(enabled_schedules, now)
+        if self._ticks_until_existence_check <= 0:
+            healthy = await self._ensure_states_exist(enabled_schedules, now)
+            self._ticks_until_existence_check = (
+                _EXISTENCE_CHECK_INTERVAL_TICKS if healthy else 1
+            )
+        self._ticks_until_existence_check -= 1
 
         # Bulk fetch due states to avoid O(N) per-tick queries
         due_states = await self.state_manager.get_due_states(
@@ -324,7 +344,7 @@ class Scheduler:
         self,
         enabled_schedules: dict[str, TaskSchedule],
         now: datetime,
-    ) -> None:
+    ) -> bool:
         """Recreate state rows missing for enabled schedules (self-heal).
 
         Closes the startup-init liveness gap: a schedule whose state-row
@@ -332,10 +352,20 @@ class Scheduler:
         externally — was invisible to get_due_states and stayed dormant
         until a restart. Initialization is idempotent (existing-row guard;
         a concurrent scheduler's IntegrityError lands in the per-schedule
-        except below and the next tick sees the winner's row).
+        except below and a later check sees the winner's row).
+
+        Runs on a tick cadence, not every tick: while healthy the caller
+        re-checks every ``_EXISTENCE_CHECK_INTERVAL_TICKS`` ticks; any
+        missing row or failed init makes the caller re-check every tick
+        until a fully healthy pass. Worst-case dormancy for an externally
+        deleted row is therefore one check interval instead of one tick.
 
         Per-schedule isolation: one schedule's init failure is logged and
-        retried next tick; the rest of the tick proceeds.
+        retried on the next check; the rest of the tick proceeds.
+
+        Returns:
+            True when every enabled schedule had a state row or was
+            re-initialized without error in this pass.
 
         Raises:
             RuntimeError: state manager not initialized (programmer error).
@@ -349,6 +379,7 @@ class Scheduler:
             list(enabled_schedules.keys()),
         )
         missing = enabled_schedules.keys() - existing
+        healthy = True
         for name in sorted(missing):
             logger.warning(
                 f"Schedule '{name}' has no state row (failed startup init "
@@ -359,11 +390,13 @@ class Scheduler:
                     enabled_schedules[name], now,
                 )
             except Exception as e:
+                healthy = False
                 logger.error(
                     f"Failed to initialize schedule '{name}' "
                     f'(will retry next tick): {e}',
                     exc_info=True,
                 )
+        return healthy
 
     def _schedule_advisory_key(self, schedule_name: str) -> int:
         """
