@@ -343,6 +343,7 @@ class TaskSendError:
 | `VALIDATION_FAILED` | No | Serialization failed, invalid queue, or cross-method retry attempted |
 | `ENQUEUE_FAILED` | Yes | Broker/DB failure. `TaskSendPayload` with `enqueue_sha` available for retry |
 | `PAYLOAD_MISMATCH` | No | Retry payload SHA doesn't match — payload was altered between send and retry |
+| `PAYLOAD_TOO_LARGE` | No | Serialized kwargs exceeded `payload.reject_bytes` (off by default); nothing was enqueued — shrink the payload (pass a reference to external storage) or raise the limit |
 
 ### `TaskSendPayload`
 
@@ -465,6 +466,8 @@ Only invoked for unhandled exceptions. If the task returns `TaskResult(err=...)`
 ## Serialization Rules
 
 Serialization happens at `.send()` time, before enqueueing. Failure returns `Err(TaskSendError(VALIDATION_FAILED))` — task is never enqueued.
+
+Serialized size is checked against `AppConfig.payload` (`PayloadPolicy`): above `warn_bytes` (default 1 MiB) a rate-limited warning fires; above `reject_bytes` (off by default) the send returns `Err(TaskSendError(PAYLOAD_TOO_LARGE))` and nothing is enqueued. See `configs.md`.
 
 ### Supported types
 
