@@ -8,6 +8,61 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-01
+
+Retention and payload-path performance release. Schema v15
+(`idx_horsies_tasks_queue_retention`). Retention sweep defaults changed:
+5-minute cadence and 500-row batches replace hourly 5,000-row batches.
+
+### Added
+
+- Per-queue terminal retention windows:
+  `RecoveryConfig.queue_terminal_record_retention_hours` maps queue names
+  to override windows (hours) for plain (non-workflow) tasks. Queues not
+  listed use the global window; overrides apply even when the global
+  window is `None`; workflow-backing task rows always age under the
+  global window so a workflow and its task rows are retained as a unit.
+  Override keys must name declared queues — an unknown key fails config
+  construction (and therefore `horsies check`) with HRS-200. Override
+  deletes are served by the new queue-leading composite partial index
+  (schema v15); the global delete keeps the v11 index.
+- Payload-size guardrail: `AppConfig.payload` (`PayloadPolicy`, exported
+  from `horsies`). `warn_bytes` (default 1 MiB, `None` disables) logs a
+  warning rate-limited to once per task name and payload kind per
+  process; `reject_bytes` (default `None` — off) fails an enqueue closed
+  before any row is written — `.send()` returns
+  `Err(TaskSendError(PAYLOAD_TOO_LARGE))`, a scheduled fire fails its
+  slot. Results are never rejected. The check is one integer comparison
+  against the already-serialized string. Coverage by boundary (task
+  sends, scheduled fires, workflow-node enqueues, results) is documented
+  on the app-config page.
+- `RecoveryConfig.retention_sweep_interval_s` (default 300, 30s–24h) and
+  `RecoveryConfig.retention_delete_batch_size` (default 500, 50–10,000)
+  replace the previously hardcoded hourly cadence and 5,000-row batch
+  size.
+
+### Changed
+
+- Retention deletes purge `horsies_task_attempts` set-wise in the same
+  statement as the parent task batch instead of relying on the per-row
+  FK `ON DELETE CASCADE` (which remains as a correctness net). The
+  row-level cascade cost more in aggregate than the parent delete itself
+  (at 37,500 deletes/day: 20.6 s/day cascade versus 17.6 s/day parent
+  batch).
+- Retention batch statements are bounded to tens of milliseconds by the
+  new defaults; the previous hourly 5,000-row batches ran 0.5–1.6 s each
+  while holding row locks.
+- The result-wait terminal fetch selects only `task_name`, `status`, and
+  `result` instead of the full task row, so args/kwargs no longer ship
+  with result polls — for kwargs-heavy tasks this removes nearly all
+  poll egress. Same `RawResultRecord` contract.
+- The scheduler's missing-row existence check runs on a ~60 s wall-clock
+  cadence (every tick while a row is missing or a re-init failed)
+  instead of every tick. At 108 schedules on a 1 s tick the per-tick
+  check read 9.1M rows/day from a 108-row table for an answer that
+  changes only on rare events; worst-case detection of an externally
+  deleted state row moves from one tick to ~60 s.
+
 ## [0.4.1] - 2026-07-27
 
 Worker lifecycle fix: a timeout kill landing while the replacement process

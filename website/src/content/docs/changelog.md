@@ -1,8 +1,8 @@
 ---
 title: Changelog
-summary: Notable changes per release. 0.4.1 stops a timeout kill during process-pool warmup from failing the executor restart and exiting the worker (a backlog of timeout-prone tasks could crash-loop it), publishes replacement pools only after they are fully warm, splits ensure-vs-replace so a dispatch request can no longer destroy a freshly built pool, and bounds kill-shaped warmup interruptions with a typed retry; 0.4.0 ships the web monitoring dashboard — the `horsies[web]` extra with a mountable FastAPI app and `horsies web` CLI (bundled SPA, fail-closed auth, no-DDL schema probing, SSE live updates), the typed `horsies.monitoring` query API with registry-free task cancel/retry, the Acme Clothing showcase application, and a codec fix so `args_from` envelopes decode for `TaskResult | None` targets under any/quorum joins; 0.3.1 makes the workflow retention deletes plan onto their index via whole-table expression statistics (schema v14) and raises the documented PostgreSQL floor to 14+; 0.3.0 fails sync send/schedule closed inside a running event loop (`ASYNC_CONTEXT`, payload-carrying, completable via `retry_*_async`), adds `schedule_async`/`retry_schedule_async`, makes service-loop death process-fatal, fixes the TASK_EXPIRED workflow finalize gap and the recycle spawn-failure pool wedge, and adds the workflows retention index (schema v13); 0.2.9 fixes the cancel/completion lock-order deadlock (40P01 under concurrent cancel) and fences finalize/recovery/ownership-confirm statements to the claim generation so a stale attempt cannot clobber a re-claimed one, schema v12 (`horsies_claim` returns `claimed_at`, heartbeat retention index); 0.2.8 replaces the latest-per-worker `DISTINCT ON` scan with a recursive skip-scan, adds retention eligibility indexes (schema v11), batches retention deletes, makes the worker-state snapshot cadence configurable (`worker_state_snapshot_interval_ms`, default 30s, was hardcoded 5s), enforces per-queue `max_concurrency` without `queue_priorities`, and accepts EXPIRED rows in workflow finalization phase-2 replay; 0.2.7 collapses the worker claim critical section into one server-side statement (the `horsies_claim` function, schema v10) so the cap-serialization advisory lock is held only across a single statement plus commit, removing the client-stall-while-holding-lock freeze, and changes the equal-queue-priority tie-break from configured queue order to a priority-then-FIFO band; 0.2.6 binds subworkflow tasks to their queue's configured priority so a parameterized child no longer claims at the default priority 100 on a CUSTOM queue; 0.2.5 adds default-on TCP keepalives for remote/pooled Postgres and gives the workflow reaper a grace window so it stops racing in-flight finalizers; 0.2.4 adds per-child memory recycling (`--max-memory-per-child-mb`, off by default), fixes a latent count-recycle hang (CPython gh-115634), and gates worker log color to TTYs; 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
+summary: Notable changes per release. 0.4.2 is a retention and payload-path performance release (schema v15) — per-queue terminal retention windows (`queue_terminal_record_retention_hours`, validated against declared queues), a payload-size guardrail (`AppConfig.payload`: warn at 1 MiB by default, optional enqueue reject with `PAYLOAD_TOO_LARGE`), configurable retention sweep cadence and batch size (defaults change from hourly/5,000-row to 5-minute/500-row), set-wise `task_attempts` purge replacing the per-row FK cascade in retention, a narrowed result-wait terminal fetch that stops shipping args/kwargs with result polls, and a ~60 s cadence for the scheduler's missing-row existence check; 0.4.1 stops a timeout kill during process-pool warmup from failing the executor restart and exiting the worker (a backlog of timeout-prone tasks could crash-loop it), publishes replacement pools only after they are fully warm, splits ensure-vs-replace so a dispatch request can no longer destroy a freshly built pool, and bounds kill-shaped warmup interruptions with a typed retry; 0.4.0 ships the web monitoring dashboard — the `horsies[web]` extra with a mountable FastAPI app and `horsies web` CLI (bundled SPA, fail-closed auth, no-DDL schema probing, SSE live updates), the typed `horsies.monitoring` query API with registry-free task cancel/retry, the Acme Clothing showcase application, and a codec fix so `args_from` envelopes decode for `TaskResult | None` targets under any/quorum joins; 0.3.1 makes the workflow retention deletes plan onto their index via whole-table expression statistics (schema v14) and raises the documented PostgreSQL floor to 14+; 0.3.0 fails sync send/schedule closed inside a running event loop (`ASYNC_CONTEXT`, payload-carrying, completable via `retry_*_async`), adds `schedule_async`/`retry_schedule_async`, makes service-loop death process-fatal, fixes the TASK_EXPIRED workflow finalize gap and the recycle spawn-failure pool wedge, and adds the workflows retention index (schema v13); 0.2.9 fixes the cancel/completion lock-order deadlock (40P01 under concurrent cancel) and fences finalize/recovery/ownership-confirm statements to the claim generation so a stale attempt cannot clobber a re-claimed one, schema v12 (`horsies_claim` returns `claimed_at`, heartbeat retention index); 0.2.8 replaces the latest-per-worker `DISTINCT ON` scan with a recursive skip-scan, adds retention eligibility indexes (schema v11), batches retention deletes, makes the worker-state snapshot cadence configurable (`worker_state_snapshot_interval_ms`, default 30s, was hardcoded 5s), enforces per-queue `max_concurrency` without `queue_priorities`, and accepts EXPIRED rows in workflow finalization phase-2 replay; 0.2.7 collapses the worker claim critical section into one server-side statement (the `horsies_claim` function, schema v10) so the cap-serialization advisory lock is held only across a single statement plus commit, removing the client-stall-while-holding-lock freeze, and changes the equal-queue-priority tie-break from configured queue order to a priority-then-FIFO band; 0.2.6 binds subworkflow tasks to their queue's configured priority so a parameterized child no longer claims at the default priority 100 on a CUSTOM queue; 0.2.5 adds default-on TCP keepalives for remote/pooled Postgres and gives the workflow reaper a grace window so it stops racing in-flight finalizers; 0.2.4 adds per-child memory recycling (`--max-memory-per-child-mb`, off by default), fixes a latent count-recycle hang (CPython gh-115634), and gates worker log color to TTYs; 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
 related: [./monitoring/worker-health, ./migrations/migration-to-0-1-2, ./internals/serialization]
-tags: [changelog, releases, breaking-changes, 0.4.1, 0.4.0, 0.3.1, 0.3.0, 0.2.9, 0.2.8, 0.2.7, 0.2.6, 0.2.5, 0.2.4, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
+tags: [changelog, releases, breaking-changes, 0.4.2, 0.4.1, 0.4.0, 0.3.1, 0.3.0, 0.2.9, 0.2.8, 0.2.7, 0.2.6, 0.2.5, 0.2.4, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
 ---
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
@@ -10,6 +10,60 @@ horsies is pre-1.0: breaking changes may land in minor or patch releases, and
 there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
+
+## 0.4.2 — 2026-08-01
+
+Retention and payload-path performance release. Schema v15
+(`idx_horsies_tasks_queue_retention`). Retention sweep defaults changed:
+5-minute cadence and 500-row batches replace hourly 5,000-row batches.
+
+### Added
+
+- Per-queue terminal retention windows:
+  `RecoveryConfig.queue_terminal_record_retention_hours` maps queue names
+  to override windows (hours) for plain (non-workflow) tasks. Queues not
+  listed use the global window; overrides apply even when the global
+  window is `None`; workflow-backing task rows always age under the
+  global window so a workflow and its task rows are retained as a unit.
+  Override keys must name declared queues — an unknown key fails config
+  construction (and therefore `horsies check`) with HRS-200. Override
+  deletes are served by the new queue-leading composite partial index
+  (schema v15); the global delete keeps the v11 index.
+- Payload-size guardrail: `AppConfig.payload` (`PayloadPolicy`, exported
+  from `horsies`). `warn_bytes` (default 1 MiB, `None` disables) logs a
+  warning rate-limited to once per task name and payload kind per
+  process; `reject_bytes` (default `None` — off) fails an enqueue closed
+  before any row is written — `.send()` returns
+  `Err(TaskSendError(PAYLOAD_TOO_LARGE))`, a scheduled fire fails its
+  slot. Results are never rejected. The check is one integer comparison
+  against the already-serialized string. Coverage by boundary is
+  documented on the [app-config page](../configuration/app-config).
+- `RecoveryConfig.retention_sweep_interval_s` (default 300, 30s–24h) and
+  `RecoveryConfig.retention_delete_batch_size` (default 500, 50–10,000)
+  replace the previously hardcoded hourly cadence and 5,000-row batch
+  size.
+
+### Changed
+
+- Retention deletes purge `horsies_task_attempts` set-wise in the same
+  statement as the parent task batch instead of relying on the per-row
+  FK `ON DELETE CASCADE` (which remains as a correctness net). The
+  row-level cascade cost more in aggregate than the parent delete itself
+  (at 37,500 deletes/day: 20.6 s/day cascade versus 17.6 s/day parent
+  batch).
+- Retention batch statements are bounded to tens of milliseconds by the
+  new defaults; the previous hourly 5,000-row batches ran 0.5–1.6 s each
+  while holding row locks.
+- The result-wait terminal fetch selects only `task_name`, `status`, and
+  `result` instead of the full task row, so args/kwargs no longer ship
+  with result polls — for kwargs-heavy tasks this removes nearly all
+  poll egress. Same `RawResultRecord` contract.
+- The scheduler's missing-row existence check runs on a ~60 s wall-clock
+  cadence (every tick while a row is missing or a re-init failed)
+  instead of every tick. At 108 schedules on a 1 s tick the per-tick
+  check read 9.1M rows/day from a 108-row table for an answer that
+  changes only on rare events; worst-case detection of an externally
+  deleted state row moves from one tick to ~60 s.
 
 ## 0.4.1 — 2026-07-27
 
