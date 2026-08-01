@@ -20,10 +20,7 @@ from horsies.core.models.schedule import (
 )
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import WorkflowContext
-from horsies.core.scheduler.service import (
-    Scheduler,
-    _EXISTENCE_CHECK_INTERVAL_TICKS,
-)
+from horsies.core.scheduler.service import Scheduler
 from horsies.core.scheduler.validation import (
     _serializable_error,
     _signature_error,
@@ -2678,10 +2675,30 @@ class TestEnsureStatesExist:
         state_manager.get_existing_names = AsyncMock(return_value={'a'})
         state_manager.get_due_states = AsyncMock(return_value=[])
 
-        for _tick in range(_EXISTENCE_CHECK_INTERVAL_TICKS + 1):
+        for _tick in range(scheduler._existence_check_interval_ticks + 1):
             await scheduler._check_and_run_schedules()
 
         assert state_manager.get_existing_names.await_count == 2
+
+    async def test_interval_ticks_derived_from_check_interval(self) -> None:
+        """The tick count preserves the ~60 s wall-clock cadence across
+        tick configs; a tick longer than the target floors at 1."""
+        for seconds, expected_ticks in ((1, 60), (10, 6), (60, 1)):
+            config = ScheduleConfig(
+                schedules=[
+                    TaskSchedule(
+                        name='a',
+                        task_name='my_task',
+                        pattern=IntervalSchedule(seconds=5),
+                    ),
+                ],
+                check_interval_seconds=seconds,
+            )
+            app = _make_app(schedule_config=config)
+            scheduler = Scheduler(app)
+            assert (
+                scheduler._existence_check_interval_ticks == expected_ticks
+            ), f'check_interval_seconds={seconds}'
 
     async def test_unhealthy_pass_rechecks_next_tick(self) -> None:
         """A failed re-init keeps the check running every tick until a

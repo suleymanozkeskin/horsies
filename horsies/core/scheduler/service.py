@@ -32,14 +32,17 @@ SCHEDULE_ADVISORY_LOCK_SQL = text(
     """SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))"""
 )
 
-# Ticks between missing-row existence checks while every state row is
-# present and initialized. The check guards rare conditions (startup init
-# failure, external row deletion); running it every tick reads the whole
-# schedule-state table each second — 108 schedules at a 1 s tick is ~9M
-# rows/day for an answer that changes only on those rare events. While
-# any row is missing or an init failed, the check reruns every tick until
-# healthy.
-_EXISTENCE_CHECK_INTERVAL_TICKS = 60
+# Wall-clock target between missing-row existence checks while every
+# state row is present and initialized. The check guards rare conditions
+# (startup init failure, external row deletion); running it every tick
+# reads the whole schedule-state table each tick — 108 schedules at a
+# 1 s tick is ~9M rows/day for an answer that changes only on those rare
+# events. Denominated in seconds, not ticks, so the worst-case dormancy
+# bound for an externally deleted row does not scale with
+# check_interval_seconds; the tick count is derived once at init. While
+# any row is missing or a re-init failed, the check reruns every tick
+# until healthy.
+_EXISTENCE_CHECK_INTERVAL_S = 60.0
 
 
 class Scheduler:
@@ -75,6 +78,17 @@ class Scheduler:
             )
 
         self.schedule_config: ScheduleConfig = app.config.schedule
+
+        # Derived once: run the existence check every this-many ticks so
+        # its wall-clock cadence stays ~_EXISTENCE_CHECK_INTERVAL_S
+        # regardless of check_interval_seconds.
+        self._existence_check_interval_ticks = max(
+            1,
+            round(
+                _EXISTENCE_CHECK_INTERVAL_S
+                / self.schedule_config.check_interval_seconds
+            ),
+        )
 
         logger.info(
             f'Scheduler initialized with {len(self.schedule_config.schedules)} schedules, '
@@ -295,8 +309,9 @@ class Scheduler:
         reads raise to run_forever's tick handler (retry next tick); a
         raise on the existence read leaves its countdown at zero, so the
         retried tick re-runs the check. The existence check itself runs
-        every _EXISTENCE_CHECK_INTERVAL_TICKS ticks while healthy (every
-        tick while unhealthy), not per tick.
+        on a ~_EXISTENCE_CHECK_INTERVAL_S wall-clock cadence while
+        healthy (every tick while unhealthy), not per tick; the tick
+        count is derived at init from check_interval_seconds.
 
         Raises:
             RuntimeError: scheduler not initialized (programmer error).
@@ -318,7 +333,7 @@ class Scheduler:
         if self._ticks_until_existence_check <= 0:
             healthy = await self._ensure_states_exist(enabled_schedules, now)
             self._ticks_until_existence_check = (
-                _EXISTENCE_CHECK_INTERVAL_TICKS if healthy else 1
+                self._existence_check_interval_ticks if healthy else 1
             )
         self._ticks_until_existence_check -= 1
 
@@ -354,11 +369,13 @@ class Scheduler:
         a concurrent scheduler's IntegrityError lands in the per-schedule
         except below and a later check sees the winner's row).
 
-        Runs on a tick cadence, not every tick: while healthy the caller
-        re-checks every ``_EXISTENCE_CHECK_INTERVAL_TICKS`` ticks; any
-        missing row or failed init makes the caller re-check every tick
-        until a fully healthy pass. Worst-case dormancy for an externally
-        deleted row is therefore one check interval instead of one tick.
+        Runs on a cadence, not every tick: while healthy the caller
+        re-checks roughly every ``_EXISTENCE_CHECK_INTERVAL_S`` seconds
+        (tick count derived at init from ``check_interval_seconds``); a
+        failed re-init makes the caller re-check every tick until a fully
+        healthy pass. Worst-case dormancy for an externally deleted row
+        is therefore one check interval instead of one tick, and the
+        bound does not scale with tick length.
 
         Per-schedule isolation: one schedule's init failure is logged and
         retried on the next check; the rest of the tick proceeds.
