@@ -8,6 +8,7 @@ these tests validate the SQL against real DB rows.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -772,4 +773,18 @@ async def test_retention_delete_statements_plan_on_retention_indexes(
     # replaces surfaces only as trigger time. Dropping the purged_attempts
     # CTE removes this node and fails here — the revert-proof for R1.
     assert 'Delete on horsies_task_attempts' in tasks_plan, tasks_plan
-    assert 'uq_horsies_task_attempts_task_attempt' in tasks_plan, tasks_plan
+    # Node presence proves the shape, not the work: a ModifyTable node
+    # reports rows=0 without RETURNING even when it deleted rows. Assert
+    # the scan feeding the attempts Delete produced non-zero actual rows
+    # (matching the `actual ... rows=` clause — the cost estimate on the
+    # same line also contains `rows=`).
+    attempts_scan = re.search(
+        r'uq_horsies_task_attempts_task_attempt[^\n]*'
+        r'\(actual[^)]*rows=([\d.]+) loops=(\d+)\)',
+        tasks_plan,
+    )
+    assert attempts_scan is not None, tasks_plan
+    attempts_rows_scanned = (
+        float(attempts_scan.group(1)) * int(attempts_scan.group(2))
+    )
+    assert attempts_rows_scanned > 0, tasks_plan
