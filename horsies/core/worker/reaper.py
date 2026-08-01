@@ -23,6 +23,7 @@ from horsies.core.worker.runtime import (
 )
 from horsies.core.worker.sql import (
     DELETE_EXPIRED_HEARTBEATS_SQL,
+    DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL,
     DELETE_EXPIRED_TASKS_SQL,
     DELETE_EXPIRED_WORKER_STATES_SQL,
     DELETE_EXPIRED_WORKFLOWS_SQL,
@@ -278,6 +279,10 @@ class ReaperMixin:
                         batch_size,
                     )
 
+                queue_overrides = (
+                    recovery_cfg.queue_terminal_record_retention_hours
+                )
+
                 if recovery_cfg.terminal_record_retention_hours is not None:
                     terminal_params = {
                         'retention_hours': recovery_cfg.terminal_record_retention_hours,
@@ -302,10 +307,31 @@ class ReaperMixin:
                     deleted_tasks = await self._delete_expired_in_batches(
                         temp_broker,
                         DELETE_EXPIRED_TASKS_SQL,
-                        terminal_params,
+                        {
+                            **terminal_params,
+                            'excluded_queues': sorted(queue_overrides),
+                        },
                         deadline,
                         batch_size,
                     )
+
+                # Per-queue override windows govern plain (non-workflow)
+                # tasks on their queues and apply even when the global
+                # terminal window is disabled.
+                for queue_name, override_hours in sorted(
+                    queue_overrides.items(),
+                ):
+                    deleted_tasks += await self._delete_expired_in_batches(
+                        temp_broker,
+                        DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL,
+                        {
+                            'retention_hours': override_hours,
+                            'queue_name': queue_name,
+                        },
+                        deadline,
+                        batch_size,
+                    )
+
 
                 if (
                     deleted_heartbeats > 0

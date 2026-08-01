@@ -85,7 +85,18 @@ from sqlalchemy import text
 #      statistics objects in the same transaction — extended statistics
 #      are empty until the table is analyzed after their creation.
 
-SCHEMA_VERSION = 14
+#
+# v15: idx_horsies_tasks_queue_retention — composite partial index
+#      (queue_name, COALESCE(completed_at, failed_at, updated_at,
+#      created_at)) over terminal statuses, serving the per-queue
+#      retention-override deletes (queue_terminal_record_retention_hours).
+#      The v11 expression index keeps serving the remainder delete; an
+#      override window's cutoff is far more recent than the global one,
+#      so without the queue-leading composite every other queue's retained
+#      terminal rows inside that gap are heap-filter misses. Maintained
+#      once per task lifetime (finalize transition), like v11.
+
+SCHEMA_VERSION = 15
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))

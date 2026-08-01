@@ -27,6 +27,7 @@ from horsies.core.worker.sql import (
     DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
     DELETE_EXPIRED_WORKFLOWS_SQL,
     DELETE_EXPIRED_TASKS_SQL,
+    DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL,
 )
 
 pytestmark = [pytest.mark.integration]
@@ -298,6 +299,7 @@ async def test_retention_keeps_terminal_workflow_with_live_task(
     params = {
         'retention_hours': _RETENTION_HOURS,
         'batch_size': _BATCH_SIZE,
+        'excluded_queues': [],
     }
     await session.execute(DELETE_EXPIRED_WORKFLOW_TASKS_SQL, params)
     await session.execute(DELETE_EXPIRED_WORKFLOWS_SQL, params)
@@ -443,6 +445,7 @@ async def test_expired_terminal_tasks_deleted_but_protected_by_workflow(
     task_params = {
         'retention_hours': _RETENTION_HOURS,
         'batch_size': _BATCH_SIZE,
+        'excluded_queues': [],
     }
 
     result = await session.execute(DELETE_EXPIRED_TASKS_SQL, task_params)
@@ -505,7 +508,11 @@ async def test_expired_tasks_delete_is_bounded_by_batch_size(
             })
     await session.commit()
 
-    params = {'retention_hours': _RETENTION_HOURS, 'batch_size': 2}
+    params = {
+        'retention_hours': _RETENTION_HOURS,
+        'batch_size': 2,
+        'excluded_queues': [],
+    }
     rowcounts: list[int] = []
     for _round in range(4):
         result = await session.execute(DELETE_EXPIRED_TASKS_SQL, params)
@@ -571,7 +578,11 @@ async def test_expired_tasks_delete_purges_attempts_set_wise(
 
     result = await session.execute(
         DELETE_EXPIRED_TASKS_SQL,
-        {'retention_hours': _RETENTION_HOURS, 'batch_size': _BATCH_SIZE},
+        {
+            'retention_hours': _RETENTION_HOURS,
+            'batch_size': _BATCH_SIZE,
+            'excluded_queues': [],
+        },
     )
     await session.commit()
 
@@ -584,6 +595,146 @@ async def test_expired_tasks_delete_purges_attempts_set_wise(
     assert {(row[0], int(row[1])) for row in surviving_attempts} == {
         (surviving_task, 1),
     }, 'doomed attempts purged; survivor history intact'
+
+
+# ---------------------------------------------------------------------------
+# Per-queue retention overrides (queue_terminal_record_retention_hours)
+# ---------------------------------------------------------------------------
+
+
+async def _insert_plain_task(
+    session: AsyncSession,
+    task_id: str,
+    *,
+    queue_name: str,
+    hours_ago: int,
+    is_workflow_task: bool = False,
+) -> None:
+    """Insert a COMPLETED task aged hours_ago on the given queue."""
+    sent_at, sha = compute_test_enqueue_sha(
+        task_name='ret_queue_test',
+        queue_name=queue_name,
+        sent_at=datetime.now(timezone.utc) - timedelta(hours=hours_ago),
+    )
+    await session.execute(text("""
+        INSERT INTO horsies_tasks
+            (id, task_name, queue_name, priority, args, kwargs,
+             status, sent_at, created_at, updated_at, claimed, retry_count,
+             max_retries, completed_at, enqueue_sha, is_workflow_task)
+        VALUES
+            (:id, 'ret_queue_test', :queue_name, 100, '[]', '{}',
+             'COMPLETED', :sent_at, NOW() - (:h || ' hours')::interval,
+             NOW() - (:h || ' hours')::interval, FALSE, 0,
+             0, NOW() - (:h || ' hours')::interval, :enqueue_sha, :is_wf)
+    """), {
+        'id': task_id,
+        'queue_name': queue_name,
+        'sent_at': sent_at,
+        'h': hours_ago,
+        'enqueue_sha': sha,
+        'is_wf': is_workflow_task,
+    })
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_queue_override_deletes_only_its_queues_plain_tasks(
+    engine: AsyncEngine,
+    session: AsyncSession,
+) -> None:
+    """The per-queue delete removes only eligible PLAIN tasks of its queue:
+    other queues, rows inside the override window, and workflow-backing
+    rows on the same queue all survive. Attempts of the doomed row are
+    purged in the same statement."""
+    _ = engine
+    await _truncate_retention_tables(session)
+
+    doomed = str(uuid.uuid4())
+    too_recent = str(uuid.uuid4())
+    other_queue = str(uuid.uuid4())
+    workflow_backed = str(uuid.uuid4())
+
+    await _insert_plain_task(session, doomed, queue_name='bulk', hours_ago=2)
+    await _insert_plain_task(
+        session, too_recent, queue_name='bulk', hours_ago=0,
+    )
+    await _insert_plain_task(
+        session, other_queue, queue_name='default', hours_ago=2,
+    )
+    await _insert_plain_task(
+        session, workflow_backed, queue_name='bulk', hours_ago=2,
+        is_workflow_task=True,
+    )
+    await session.execute(text("""
+        INSERT INTO horsies_task_attempts
+            (task_id, attempt, outcome, will_retry, started_at, finished_at)
+        VALUES (:doomed, 1, 'COMPLETED', FALSE, NOW(), NOW())
+    """), {'doomed': doomed})
+    await session.commit()
+
+    result = await session.execute(
+        DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL,
+        {
+            'retention_hours': 1,
+            'queue_name': 'bulk',
+            'batch_size': _BATCH_SIZE,
+        },
+    )
+    await session.commit()
+
+    assert int(result.rowcount or 0) == 1
+    surviving = {
+        row[0] for row in
+        (await session.execute(text('SELECT id FROM horsies_tasks'))).fetchall()
+    }
+    assert surviving == {too_recent, other_queue, workflow_backed}
+    assert await _count(session, 'horsies_task_attempts') == 0
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_global_delete_excludes_override_queues(
+    engine: AsyncEngine,
+    session: AsyncSession,
+) -> None:
+    """:excluded_queues shields override queues from the global-window
+    delete; an empty array excludes nothing."""
+    _ = engine
+    await _truncate_retention_tables(session)
+
+    bulk_task = str(uuid.uuid4())
+    default_task = str(uuid.uuid4())
+    await _insert_plain_task(session, bulk_task, queue_name='bulk', hours_ago=48)
+    await _insert_plain_task(
+        session, default_task, queue_name='default', hours_ago=48,
+    )
+    await session.commit()
+
+    result = await session.execute(
+        DELETE_EXPIRED_TASKS_SQL,
+        {
+            'retention_hours': _RETENTION_HOURS,
+            'batch_size': _BATCH_SIZE,
+            'excluded_queues': ['bulk'],
+        },
+    )
+    await session.commit()
+    assert int(result.rowcount or 0) == 1
+    surviving = {
+        row[0] for row in
+        (await session.execute(text('SELECT id FROM horsies_tasks'))).fetchall()
+    }
+    assert surviving == {bulk_task}, 'override queue shielded from global delete'
+
+    result = await session.execute(
+        DELETE_EXPIRED_TASKS_SQL,
+        {
+            'retention_hours': _RETENTION_HOURS,
+            'batch_size': _BATCH_SIZE,
+            'excluded_queues': [],
+        },
+    )
+    await session.commit()
+    assert int(result.rowcount or 0) == 1
+    assert await _count(session, 'horsies_tasks') == 0
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -647,13 +798,20 @@ async def test_expired_tasks_delete_uses_retention_index(
     )
     await session.execute(text('SET enable_seqscan = on'))
 
-    assert 'idx_horsies_tasks_retention' in plan, plan
+    # Either retention partial index proves the contract (status literals
+    # imply the partial predicate; COALESCE expression matches). At seeded
+    # scale the two cost the same and the planner's pick between them is
+    # arbitrary; predicate drift falls off both and fails here.
+    assert (
+        'idx_horsies_tasks_retention' in plan
+        or 'idx_horsies_tasks_queue_retention' in plan
+    ), plan
 
 
 async def _explain_analyze_plan(
     session: AsyncSession,
     statement_sql: str,
-    params: dict[str, int],
+    params: dict[str, object],
 ) -> str:
     """EXPLAIN ANALYZE a statement, roll back, return the executed plan.
 
@@ -751,7 +909,11 @@ async def test_retention_delete_statements_plan_on_retention_indexes(
     # order-sensitive.
     await session.commit()
 
-    params = {'retention_hours': _RETENTION_HOURS, 'batch_size': _BATCH_SIZE}
+    params: dict[str, object] = {
+        'retention_hours': _RETENTION_HOURS,
+        'batch_size': _BATCH_SIZE,
+        'excluded_queues': [],
+    }
 
     workflows_plan = await _explain_analyze_plan(
         session, DELETE_EXPIRED_WORKFLOWS_SQL.text, params,
@@ -765,10 +927,19 @@ async def test_retention_delete_statements_plan_on_retention_indexes(
         workflow_tasks_plan
     )
 
+    # Non-empty exclusion exercises the production shape when overrides
+    # exist; the exclusion is a heap filter and must not change the plan.
+    # Either retention partial index proves the contract at seeded scale
+    # (see test_expired_tasks_delete_uses_retention_index).
     tasks_plan = await _explain_analyze_plan(
-        session, DELETE_EXPIRED_TASKS_SQL.text, params,
+        session,
+        DELETE_EXPIRED_TASKS_SQL.text,
+        {**params, 'excluded_queues': ['bulk']},
     )
-    assert 'idx_horsies_tasks_retention' in tasks_plan, tasks_plan
+    assert (
+        'idx_horsies_tasks_retention' in tasks_plan
+        or 'idx_horsies_tasks_queue_retention' in tasks_plan
+    ), tasks_plan
     # The set-wise attempts purge is a plan node; the per-row FK cascade it
     # replaces surfaces only as trigger time. Dropping the purged_attempts
     # CTE removes this node and fails here — the revert-proof for R1.
@@ -788,3 +959,17 @@ async def test_retention_delete_statements_plan_on_retention_indexes(
         float(attempts_scan.group(1)) * int(attempts_scan.group(2))
     )
     assert attempts_rows_scanned > 0, tasks_plan
+
+    # Per-queue override delete plans on the v15 queue-leading composite,
+    # not the v11 expression index — an override window's recent cutoff
+    # makes every other queue's retained rows heap-filter misses on v11.
+    queue_plan = await _explain_analyze_plan(
+        session,
+        DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL.text,
+        {
+            'retention_hours': _RETENTION_HOURS,
+            'queue_name': 'default',
+            'batch_size': _BATCH_SIZE,
+        },
+    )
+    assert 'idx_horsies_tasks_queue_retention' in queue_plan, queue_plan

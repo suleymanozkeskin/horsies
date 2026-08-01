@@ -39,6 +39,7 @@ class RecoveryConfig(BaseModel):
     - heartbeat_retention_hours: Keep heartbeat rows for this long (None disables cleanup)
     - worker_state_retention_hours: Keep worker_state rows for this long (None disables cleanup)
     - terminal_record_retention_hours: Keep terminal task/workflow rows for this long (None disables cleanup)
+    - queue_terminal_record_retention_hours: Per-queue overrides of the terminal window for plain tasks
     - retention_sweep_interval_s: Seconds between retention sweep passes
     - retention_delete_batch_size: Rows per retention DELETE batch
     """
@@ -143,6 +144,19 @@ class RecoveryConfig(BaseModel):
         description=(
             'How long to keep terminal rows in tasks/workflows/workflow_tasks in hours; '
             'set None to disable pruning'
+        ),
+    )
+
+    queue_terminal_record_retention_hours: dict[
+        str, Annotated[int, Field(ge=1, le=24 * 365 * 5)],
+    ] = Field(
+        default_factory=dict,
+        description=(
+            'Per-queue overrides of terminal_record_retention_hours for plain '
+            '(non-workflow) tasks; queues not listed use the global window. '
+            'Overrides apply even when the global window is None. '
+            'Workflow-backing task rows always age under the global window so '
+            'a workflow and its task rows are retained as a unit'
         ),
     )
 

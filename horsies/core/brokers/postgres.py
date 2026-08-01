@@ -114,6 +114,7 @@ from horsies.core.schemas.indexes import (
     CREATE_TASKS_CLAIM_EXPIRED_ORDERED_INDEX_SQL,
     CREATE_TASKS_ERROR_CODE_INDEX_SQL,
     CREATE_TASKS_RETENTION_INDEX_SQL,
+    CREATE_TASKS_QUEUE_RETENTION_INDEX_SQL,
     CREATE_TASKS_WORKER_STATUS_INDEX_SQL,
     CREATE_WORKER_STATES_SNAPSHOT_AT_INDEX_SQL,
     CREATE_WORKER_STATES_WORKER_SNAPSHOT_INDEX_SQL,
@@ -880,6 +881,11 @@ class PostgresBroker:
             await conn.execute(CREATE_TASKS_RETENTION_STATISTICS_SQL)
             await conn.execute(CREATE_WORKFLOWS_RETENTION_STATISTICS_SQL)
             await conn.execute(ANALYZE_EXPRESSION_INDEXED_TABLES_SQL)
+
+            # Migration (v15): queue-leading retention index for the
+            # per-queue override deletes
+            # (queue_terminal_record_retention_hours).
+            await conn.execute(CREATE_TASKS_QUEUE_RETENTION_INDEX_SQL)
 
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,

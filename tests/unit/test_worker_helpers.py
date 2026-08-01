@@ -24,6 +24,7 @@ from horsies.core.worker.worker import (
     WorkerConfig,
     DELETE_EXPIRED_HEARTBEATS_SQL,
     DELETE_EXPIRED_TASKS_SQL,
+    DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL,
     DELETE_EXPIRED_WORKER_STATES_SQL,
     DELETE_EXPIRED_WORKFLOWS_SQL,
     DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
@@ -824,6 +825,81 @@ class TestReaperHeartbeatRetention:
         assert len(created_brokers) == 1
         assert created_brokers[0].assume_initialized is True
         created_brokers[0].close_async.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_reaper_runs_queue_overrides_and_excludes_them_globally(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Override queues get their own delete with their own window, the
+        global tasks delete excludes them, and overrides run even though
+        they are the only terminal retention configured."""
+        worker = _make_worker()
+        worker.cfg.recovery_config = RecoveryConfig(
+            auto_requeue_stale_claimed=False,
+            auto_terminate_orphaned_workflow_tasks=False,
+            auto_fail_stale_running=False,
+            check_interval_ms=1_000,
+            heartbeat_retention_hours=None,
+            worker_state_retention_hours=None,
+            terminal_record_retention_hours=72,
+            queue_terminal_record_retention_hours={'metrics': 2, 'bulk': 6},
+        )
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.commit = AsyncMock()
+
+        executed: list[tuple[Any, dict[str, Any]]] = []
+
+        async def _execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+            if args:
+                executed.append((stmt, args[0]))
+            return MagicMock(rowcount=0)
+
+        session.execute = AsyncMock(side_effect=_execute)
+
+        class _FakeBroker:
+            def __init__(self, config: Any, **kwargs: Any):
+                self.config = config
+                self.assume_initialized = kwargs.get('assume_initialized')
+                self.app = None
+                self.session_factory = MagicMock(return_value=session)
+                self.close_async = AsyncMock(return_value=Ok(None))
+
+        # Stop via the recovery seam, which runs BEFORE retention in every
+        # pass: the loop terminates after one full pass regardless of which
+        # retention statements execute (a revert of the override wiring
+        # must FAIL the assertions below, not hang the loop).
+        async def _recover_and_stop(*args: Any, **kwargs: Any) -> int:
+            worker._stop.set()
+            return 0
+
+        recover_mock = AsyncMock(side_effect=_recover_and_stop)
+        monkeypatch.setattr(
+            'horsies.core.brokers.postgres.PostgresBroker', _FakeBroker
+        )
+        monkeypatch.setattr(
+            'horsies.core.workflows.recovery.recover_stuck_workflows', recover_mock
+        )
+
+        _install_reaper_gate_session(worker)
+        await worker._reaper_loop()
+
+        global_task_params = [
+            params for stmt, params in executed
+            if stmt is DELETE_EXPIRED_TASKS_SQL
+        ]
+        assert global_task_params, 'global tasks delete ran'
+        assert global_task_params[0]['excluded_queues'] == ['bulk', 'metrics']
+
+        override_params = [
+            params for stmt, params in executed
+            if stmt is DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL
+        ]
+        assert [
+            (p['queue_name'], p['retention_hours']) for p in override_params
+        ] == [('bulk', 6), ('metrics', 2)]
 
 
 @pytest.mark.unit

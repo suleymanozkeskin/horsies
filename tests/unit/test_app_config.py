@@ -1365,3 +1365,26 @@ class TestRetentionDeleteBatchSize:
     def test_above_maximum_rejected(self) -> None:
         with pytest.raises(ValidationError):
             RecoveryConfig(retention_delete_batch_size=10_001)
+
+
+@pytest.mark.unit
+class TestQueueTerminalRecordRetentionOverrides:
+    """RecoveryConfig.queue_terminal_record_retention_hours bounds and default."""
+
+    def test_default_is_empty(self) -> None:
+        assert RecoveryConfig().queue_terminal_record_retention_hours == {}
+
+    def test_accepts_valid_edge_windows(self) -> None:
+        overrides = {'metrics': 1, 'archive': 24 * 365 * 5}
+        cfg = RecoveryConfig(queue_terminal_record_retention_hours=overrides)
+        assert cfg.queue_terminal_record_retention_hours == overrides
+
+    def test_below_minimum_value_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            RecoveryConfig(queue_terminal_record_retention_hours={'q': 0})
+
+    def test_above_maximum_value_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            RecoveryConfig(
+                queue_terminal_record_retention_hours={'q': 24 * 365 * 5 + 1},
+            )
