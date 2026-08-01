@@ -70,14 +70,20 @@ def _make_broker(database_url: str = 'postgresql+psycopg://u:p@localhost/db') ->
 def _make_result_session(row: Any) -> AsyncMock:
     """Mock session for get_raw_result_record_async.
 
-    The broker polls a slim status/name SELECT first and only fetches the
-    full TaskModel row (session.get) once a terminal status is observed.
+    The broker polls a slim status/name SELECT first and, once a terminal
+    status is observed, fetches only the columns RawResultRecord consumes
+    (task_name, status, result) — never the full entity, whose args/kwargs
+    payload columns can be multi-MB. ``session.get`` is a tripwire: the
+    result path regressing to a full-entity load fails loudly here.
     """
+    from horsies.core.brokers.postgres import GET_TASK_RESULT_RECORD_SQL
+
     session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=None)
     if row is None:
         probe_row = None
+        record_row = None
     else:
         probe_row = MagicMock()
         status = row.status
@@ -85,10 +91,26 @@ def _make_result_session(row: Any) -> AsyncMock:
             status.value if isinstance(status, TaskStatus) else status
         )
         probe_row.task_name = row.task_name
-    probe_result = MagicMock()
-    probe_result.fetchone = MagicMock(return_value=probe_row)
-    session.execute = AsyncMock(return_value=probe_result)
-    session.get = AsyncMock(return_value=row)
+        record_row = MagicMock()
+        record_row.status = probe_row.status
+        record_row.task_name = row.task_name
+        record_row.result = row.result
+
+    async def _execute(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        result = MagicMock()
+        if statement is GET_TASK_RESULT_RECORD_SQL:
+            result.fetchone = MagicMock(return_value=record_row)
+        else:
+            result.fetchone = MagicMock(return_value=probe_row)
+        return result
+
+    session.execute = AsyncMock(side_effect=_execute)
+    session.get = AsyncMock(
+        side_effect=AssertionError(
+            'result path must not full-entity load TaskModel; '
+            'use GET_TASK_RESULT_RECORD_SQL'
+        ),
+    )
     return session
 
 
