@@ -126,7 +126,7 @@ Coverage by boundary:
 | Task results at completion | yes | never — by design |
 
 ```python
-from horsies.core.models.payload import PayloadPolicy
+from horsies import PayloadPolicy
 
 AppConfig(
     broker=broker,

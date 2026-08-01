@@ -41,6 +41,7 @@ string validates at runtime, but strict type checkers reject it — wrap with
 | `prefetch_buffer` | `int` | `0` | 0 = hard cap; >0 = soft cap with lease |
 | `claim_lease_ms` | `int \| None` | `None` | Claim lease duration; None uses default 60s |
 | `max_claim_renew_age_ms` | `int` | `180_000` (3 min) | Max age of CLAIMED task that heartbeat will renew |
+| `payload` | `PayloadPolicy` | `PayloadPolicy()` | Payload-size guardrail (warn/reject thresholds) |
 | `recovery` | `RecoveryConfig` | `RecoveryConfig()` | Stale task detection and retention |
 | `resilience` | `WorkerResilienceConfig` | `WorkerResilienceConfig()` | Worker retry behavior |
 | `schedule` | `ScheduleConfig \| None` | `None` | Recurring task schedules |
@@ -293,6 +294,32 @@ config = AppConfig(
 
 Lower priority number = claimed first. `cluster_wide_cap` still applies as an upper bound.
 
+## PayloadPolicy
+
+Size guardrail for serialized payloads, checked as one integer comparison
+against the already-serialized JSON string (no extra serialization pass).
+
+| Field | Type | Default | Range | Description |
+|---|---|---|---|---|
+| `warn_bytes` | `int \| None` | `1_048_576` (1 MiB) | >=1; None disables | Warn when a serialized payload exceeds this size; rate-limited to once per (task_name, kind) per process |
+| `reject_bytes` | `int \| None` | `None` (off) | >=1; None disables | Reject an enqueue whose serialized kwargs exceed this size before anything is written |
+
+Coverage: `.send()`/`.schedule()` kwargs warn and reject
+(`Err(PAYLOAD_TOO_LARGE)`); scheduled fires warn and reject (slot fails
+via the schedule's enqueue-failure logging); running-flow workflow-node
+enqueues (including `args_from` injection) warn only; task results warn
+only — results are never rejected. Subworkflow child-start kwargs are not
+yet checked.
+
+```python
+from horsies import PayloadPolicy
+
+AppConfig(
+    broker=broker,
+    payload=PayloadPolicy(warn_bytes=1_048_576, reject_bytes=33_554_432),
+)
+```
+
 ## RecoveryConfig
 
 Controls stale task detection, automatic recovery, and data retention.
@@ -313,6 +340,15 @@ Controls stale task detection, automatic recovery, and data retention.
 | `heartbeat_retention_hours` | `int \| None` | `24` | 1–8760; None disables | Prune old heartbeat rows |
 | `worker_state_retention_hours` | `int \| None` | `168` (7d) | 1–8760; None disables | Prune old worker_state rows |
 | `terminal_record_retention_hours` | `int \| None` | `720` (30d) | 1–43800; None disables | Prune terminal task/workflow rows |
+| `queue_terminal_record_retention_hours` | `dict[str, int]` | `{}` | values 1–43800 | Per-queue overrides of the terminal window for plain (non-workflow) tasks; applies even when the global window is None |
+| `retention_sweep_interval_s` | `int` | `300` (5 min) | 30s–24h | Seconds between retention sweep passes |
+| `retention_delete_batch_size` | `int` | `500` | 50–10000 | Rows per retention DELETE batch; each batch commits independently |
+
+Override keys must name declared queues (`custom_queues` in CUSTOM mode,
+`"default"` in DEFAULT mode) — an unknown key fails config construction
+(and therefore `horsies check`) with HRS-200. Workflow-backing task rows
+always age under the global window so a workflow and its task rows are
+retained as a unit.
 
 ### Constraints (HRS-204)
 
@@ -327,7 +363,7 @@ The 2x factor ensures a task can miss one full heartbeat cycle without being inc
 Runs on `check_interval_ms` cadence:
 1. CLAIMED tasks without heartbeat for `claimed_stale_threshold_ms` → requeued to PENDING (if enabled).
 2. RUNNING tasks without heartbeat for `running_stale_threshold_ms` → retry on `WORKER_CRASHED` policy or mark FAILED (if enabled). Recent `finalizing_at` and live parent worker state suppress this recovery.
-3. Hourly retention pruning: deletes old heartbeat, worker_state, and terminal rows based on retention settings. Deletes run in 5,000-row batches (one transaction each) under a 60s per-pass budget; a larger backlog drains across consecutive hourly passes.
+3. Retention pruning every `retention_sweep_interval_s` seconds (default 5 min): deletes old heartbeat, worker_state, and terminal rows based on retention settings; a deleted task's `task_attempts` history is purged in the same statement. Deletes run in `retention_delete_batch_size`-row batches (default 500, one transaction each) under a 60s per-pass budget; a larger backlog drains across consecutive passes.
 
 **CPU/GIL-heavy tasks:** Increase `running_stale_threshold_ms`. GIL-bound tasks may not send heartbeats at the configured interval. Rule of thumb: >= 3–5x worst-case heartbeat gap. The stale threshold is based on missing runner heartbeats, not total task duration.
 
@@ -666,6 +702,8 @@ from horsies import (
     PostgresConfig,
     # Queue
     QueueMode, CustomQueueConfig,
+    # Payload
+    PayloadPolicy,
     # Recovery / Resilience
     RecoveryConfig, WorkerResilienceConfig,
     # Scheduling

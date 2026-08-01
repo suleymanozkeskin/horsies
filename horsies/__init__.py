@@ -86,6 +86,7 @@ from .core.models.schedule import (
     TaskSchedule,
     ScheduleConfig,
 )
+from .core.models.payload import PayloadPolicy
 from .core.models.recovery import RecoveryConfig
 from .core.models.resilience import WorkerResilienceConfig
 from .core.types.status import TaskStatus, TaskAttemptOutcome, TASK_TERMINAL_STATES
@@ -197,6 +198,8 @@ __all__ = [
     'SchedulePattern',
     'TaskSchedule',
     'ScheduleConfig',
+    # Payload
+    'PayloadPolicy',
     # Recovery
     'RecoveryConfig',
     'WorkerResilienceConfig',
