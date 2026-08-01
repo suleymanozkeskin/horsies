@@ -637,17 +637,21 @@ DELETE_EXPIRED_WORKFLOWS_SQL = text(f"""
 # correctness net for non-retention deletes. doomed is referenced twice,
 # so Postgres materializes the candidate scan once.
 # :excluded_queues carries the queues with a per-queue override window
-# (queue_terminal_record_retention_hours) so the global-window delete
-# never touches them; an empty array excludes nothing. The exclusion is a
-# heap filter on the already-bounded candidate scan, so the v11 index
-# plan is unchanged.
+# (queue_terminal_record_retention_hours); an empty array excludes
+# nothing. The exclusion shields PLAIN tasks only: workflow-backing rows
+# (is_workflow_task = TRUE) age under the global window even on override
+# queues, because the per-queue statement filters them out — an
+# unconditional exclusion would leave them unreachable by both statements
+# and retained forever. The exclusion is a heap filter on the
+# already-bounded candidate scan, so the v11 index plan is unchanged.
 DELETE_EXPIRED_TASKS_SQL = text(f"""
     WITH doomed AS (
         SELECT t.id
         FROM horsies_tasks t
         WHERE t.status IN ({TASK_TERMINAL_STATUS_SQL_LITERALS})
           AND COALESCE(t.completed_at, t.failed_at, t.updated_at, t.created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
-          AND NOT (t.queue_name = ANY(CAST(:excluded_queues AS text[])))
+          AND NOT (t.queue_name = ANY(CAST(:excluded_queues AS text[]))
+                   AND t.is_workflow_task = FALSE)
           AND NOT EXISTS (
               SELECT 1
               FROM horsies_workflow_tasks wt

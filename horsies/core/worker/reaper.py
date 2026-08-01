@@ -332,7 +332,6 @@ class ReaperMixin:
                         batch_size,
                     )
 
-
                 if (
                     deleted_heartbeats > 0
                     or deleted_worker_states > 0

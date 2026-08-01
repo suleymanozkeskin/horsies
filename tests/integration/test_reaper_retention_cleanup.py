@@ -738,6 +738,51 @@ async def test_global_delete_excludes_override_queues(
 
 
 @pytest.mark.asyncio(loop_scope='function')
+async def test_global_delete_still_sweeps_workflow_backed_rows_on_override_queues(
+    engine: AsyncEngine,
+    session: AsyncSession,
+) -> None:
+    """Workflow-backing rows age under the GLOBAL window even on override
+    queues: the exclusion shields only plain tasks. Without this scoping a
+    terminal is_workflow_task row on an override queue is excluded by the
+    global delete AND filtered by the per-queue delete — the only two
+    statements that delete horsies_tasks rows — and is retained forever."""
+    _ = engine
+    await _truncate_retention_tables(session)
+
+    workflow_backed = str(uuid.uuid4())
+    plain_shielded = str(uuid.uuid4())
+    await _insert_plain_task(
+        session, workflow_backed, queue_name='bulk', hours_ago=48,
+        is_workflow_task=True,
+    )
+    await _insert_plain_task(
+        session, plain_shielded, queue_name='bulk', hours_ago=48,
+    )
+    await session.commit()
+
+    result = await session.execute(
+        DELETE_EXPIRED_TASKS_SQL,
+        {
+            'retention_hours': _RETENTION_HOURS,
+            'batch_size': _BATCH_SIZE,
+            'excluded_queues': ['bulk'],
+        },
+    )
+    await session.commit()
+
+    assert int(result.rowcount or 0) == 1
+    surviving = {
+        row[0] for row in
+        (await session.execute(text('SELECT id FROM horsies_tasks'))).fetchall()
+    }
+    assert surviving == {plain_shielded}, (
+        'workflow-backed row swept by the global window; '
+        'plain task shielded for its override'
+    )
+
+
+@pytest.mark.asyncio(loop_scope='function')
 async def test_expired_tasks_delete_uses_retention_index(
     broker: PostgresBroker,  # noqa: ARG001 - ensures schema migrations are applied
     session: AsyncSession,
