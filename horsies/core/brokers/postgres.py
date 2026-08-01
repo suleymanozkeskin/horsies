@@ -420,6 +420,13 @@ GET_TASK_STATUS_NAME_SQL = text("""
     SELECT status, task_name FROM horsies_tasks WHERE id = :id
 """)
 
+# Terminal fetch for the result-wait loop: exactly the columns
+# RawResultRecord consumes. The full entity would also ship args/kwargs —
+# multi-MB for payload-heavy tasks — to read a result envelope.
+GET_TASK_RESULT_RECORD_SQL = text("""
+    SELECT task_name, status, result FROM horsies_tasks WHERE id = :id
+""")
+
 # Sentinel returned by _probe_result_row while the row is non-terminal.
 _STILL_WAITING = object()
 
@@ -1106,8 +1113,10 @@ class PostgresBroker:
 
     def _build_raw_result_record(
         self,
-        row: TaskModel,
         task_id: str,
+        task_name: str,
+        status: TaskStatus,
+        result_json: 'str | None',
     ) -> BrokerResult[RawResultRecord | None]:
         """Decode the result column into a ``RawResultRecord``.
 
@@ -1117,7 +1126,7 @@ class PostgresBroker:
         ``None`` nor a JSON object (the envelope grammar requires a
         ``dict``). Otherwise wraps the loaded value into the record.
         """
-        _lr = loads_json(row.result)
+        _lr = loads_json(result_json)
         if is_err(_lr):
             return Err(BrokerOperationError(
                 code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
@@ -1139,8 +1148,8 @@ class PostgresBroker:
             ))
         return Ok(RawResultRecord(
             task_id=task_id,
-            task_name=row.task_name,
-            status=row.status,
+            task_name=task_name,
+            status=status,
             raw_result=raw_value,
         ))
 
@@ -1174,10 +1183,17 @@ class PostgresBroker:
             TaskStatus.FAILED,
             TaskStatus.EXPIRED,
         ):
-            row = await session.get(TaskModel, task_id)
-            if row is None:
+            record_row = (await session.execute(
+                GET_TASK_RESULT_RECORD_SQL, {'id': task_id},
+            )).fetchone()
+            if record_row is None:
                 return Ok(None)
-            return self._build_raw_result_record(row, task_id)
+            return self._build_raw_result_record(
+                task_id,
+                str(record_row.task_name),
+                TaskStatus(str(record_row.status)),
+                cast('str | None', record_row.result),
+            )
         if status == TaskStatus.CANCELLED or non_terminal_snapshot:
             return Ok(RawResultRecord(
                 task_id=task_id,
