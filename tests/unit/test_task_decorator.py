@@ -34,6 +34,7 @@ from horsies.core.task_decorator import (
     from_node,
     resolve_node_queue_and_priority,
 )
+from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import (
     TaskSendError,
     TaskSendErrorCode,
@@ -55,14 +56,20 @@ def _make_app(
     exception_mapper: ExceptionMapper | None = None,
     default_unhandled_error_code: str = 'UNHANDLED_EXCEPTION',
     resend_on_transient_err: bool = False,
+    payload_policy: PayloadPolicy | None = None,
 ) -> MagicMock:
-    """Build a minimal mock Horsies app for unit tests."""
+    """Build a minimal mock Horsies app for unit tests.
+
+    ``config.payload`` is a REAL PayloadPolicy: a MagicMock attribute would
+    make the guardrail's size comparisons truthy and reject every send.
+    """
     app = MagicMock()
     app.config.queue_mode.name = queue_mode_name
     app.config.custom_queues = custom_queues
     app.config.exception_mapper = exception_mapper or {}
     app.config.default_unhandled_error_code = default_unhandled_error_code
     app.config.resend_on_transient_err = resend_on_transient_err
+    app.config.payload = payload_policy or PayloadPolicy()
     app.are_sends_suppressed.return_value = suppress_sends
     app.validate_queue_name.return_value = 'default'
     return app
@@ -1362,6 +1369,81 @@ class TestCreateTaskWrapperSend:
         assert err.task_id is not None
         assert err.payload is not None
         assert err.payload.task_name == 'test.good_fn'
+
+
+@pytest.mark.unit
+class TestSendPayloadGuardrail:
+    """PayloadPolicy enforcement on the send path."""
+
+    def setup_method(self) -> None:
+        from horsies.core.codec.payload_guard import reset_payload_warnings
+        reset_payload_warnings()
+
+    @staticmethod
+    def _wrapper_with_policy(policy: PayloadPolicy) -> tuple[Any, MagicMock]:
+        def good_fn(*, blob: str) -> TaskResult[str, TaskError]:
+            return TaskResult(ok=blob)
+
+        app = _make_app(payload_policy=policy)
+        broker = MagicMock()
+        broker.enqueue.return_value = Ok('task-abc')
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+        return wrapper, broker
+
+    def test_send_over_reject_bytes_fails_closed(self) -> None:
+        """Oversized kwargs return Err(PAYLOAD_TOO_LARGE); nothing enqueued."""
+        wrapper, broker = self._wrapper_with_policy(
+            PayloadPolicy(warn_bytes=64, reject_bytes=256),
+        )
+
+        result = wrapper.send(blob='x' * 1024)
+
+        assert is_err(result)
+        err = result.err_value
+        assert err.code == TaskSendErrorCode.PAYLOAD_TOO_LARGE
+        assert err.retryable is False
+        assert err.task_id is not None
+        broker.enqueue.assert_not_called()
+
+    def test_send_over_warn_bytes_warns_once_and_succeeds(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Warn-only threshold logs once per task/kind; sends still succeed."""
+        import logging
+
+        wrapper, broker = self._wrapper_with_policy(
+            PayloadPolicy(warn_bytes=64, reject_bytes=None),
+        )
+
+        with caplog.at_level(logging.WARNING):
+            first = wrapper.send(blob='x' * 1024)
+            second = wrapper.send(blob='y' * 1024)
+
+        assert is_ok(first) and is_ok(second)
+        assert broker.enqueue.call_count == 2
+        guard_records = [
+            r for r in caplog.records
+            if 'Payload size guardrail' in r.getMessage()
+        ]
+        assert len(guard_records) == 1
+
+    def test_default_policy_passes_ordinary_payloads_silently(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+
+        wrapper, broker = self._wrapper_with_policy(PayloadPolicy())
+
+        with caplog.at_level(logging.WARNING):
+            result = wrapper.send(blob='hello')
+
+        assert is_ok(result)
+        broker.enqueue.assert_called_once()
+        assert not [
+            r for r in caplog.records
+            if 'Payload size guardrail' in r.getMessage()
+        ]
 
 
 # =============================================================================

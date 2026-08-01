@@ -30,6 +30,7 @@ from pydantic import TypeAdapter, ValidationError
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import encode_kwargs
 from horsies.core.codec.json_io import dumps_json
+from horsies.core.codec.payload_guard import enforce_payload_policy
 from horsies.core.codec.task_options import serialize_task_options
 from horsies.core.codec.typed import (
     TypeAnnotation,
@@ -1602,6 +1603,26 @@ def create_task_wrapper(
                     exception=kwargs_r.err_value if isinstance(kwargs_r.err_value, BaseException) else None,
                 ))
             kwargs_json = kwargs_r.ok_value
+
+            oversize = enforce_payload_policy(
+                app.config.payload,
+                task_name=task_name,
+                kind='kwargs',
+                encoded_len=len(kwargs_json),
+            )
+            if oversize is not None:
+                return Err(TaskSendError(
+                    code=TaskSendErrorCode.PAYLOAD_TOO_LARGE,
+                    message=(
+                        f'kwargs payload for {task_name} is {oversize} bytes, '
+                        f'exceeding payload.reject_bytes='
+                        f'{app.config.payload.reject_bytes}; nothing was '
+                        f'enqueued. Pass a reference to external storage or '
+                        f'raise the limit.'
+                    ),
+                    retryable=False,
+                    task_id=task_id,
+                ))
 
         sha = enqueue_fingerprint(
             task_name=task_name,

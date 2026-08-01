@@ -23,6 +23,7 @@ from sqlalchemy import text
 
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.json_io import SerializationError, loads_json
+from horsies.core.codec.payload_guard import enforce_payload_policy
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.typed import (
     decode_task_error,
@@ -208,6 +209,16 @@ class FinalizeMixin:
                 )
             )
         now = datetime.now(timezone.utc)
+
+        # Warn-only: results are never rejected over size (the work is
+        # done; destroying it would convert a size concern into data loss).
+        if self._app is not None:
+            enforce_payload_policy(
+                self._app.config.payload,
+                task_name=task_name,
+                kind='result',
+                encoded_len=len(result_json_str),
+            )
 
         phase1_r = await self._persist_task_terminal_state(
             task_id=task_id,

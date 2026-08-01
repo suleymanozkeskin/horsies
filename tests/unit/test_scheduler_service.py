@@ -18,6 +18,7 @@ from horsies.core.models.schedule import (
     Weekday,
     WeeklySchedule,
 )
+from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import WorkflowContext
 from horsies.core.scheduler.service import Scheduler
@@ -44,9 +45,14 @@ def _make_app(
     schedule_config: ScheduleConfig | None = None,
     tasks: dict[str, MagicMock] | None = None,
 ) -> MagicMock:
-    """Build a minimal mock Horsies app for Scheduler tests."""
+    """Build a minimal mock Horsies app for Scheduler tests.
+
+    ``config.payload`` is a REAL PayloadPolicy: the payload guardrail
+    compares sizes against it, and int-vs-MagicMock comparison raises.
+    """
     app = MagicMock()
     app.config.schedule = schedule_config
+    app.config.payload = PayloadPolicy()
     app.tasks = tasks or {}
     # Default validate_queue_name returns 'default'
     app.validate_queue_name = MagicMock(return_value='default')

@@ -28,6 +28,7 @@ app = Horsies(config)
 | `prefetch_buffer` | `int` | `0` | 0 = hard cap mode, >0 = soft cap with prefetch |
 | `claim_lease_ms` | `int` | `None` | Claim lease duration (required if prefetch_buffer > 0; optional override in hard cap mode) |
 | `max_claim_renew_age_ms` | `int` | `180000` | Max age (ms) of a CLAIMED task that heartbeat will renew. Older claims are left to expire, preventing indefinite renewal of orphaned tasks. Must be >= effective claim lease |
+| `payload` | `PayloadPolicy` | defaults | Payload-size guardrail (warn/reject thresholds) |
 | `recovery` | `RecoveryConfig` | defaults | Crash recovery settings |
 | `resilience` | `WorkerResilienceConfig` | defaults | Worker retry/backoff and notify polling |
 | `schedule` | `ScheduleConfig` | `None` | Scheduled task configuration |
@@ -102,6 +103,35 @@ config = AppConfig(
 **Important:** `cluster_wide_cap` cannot be used with `prefetch_buffer > 0`. If you need a global cap, hard cap mode is required.
 
 See [Concurrency](../../workers/concurrency) for detailed explanation of hard vs soft cap modes.
+
+## Payload Size Guardrail
+
+Serialized payload sizes are checked at the encode boundary — one integer
+comparison against the string that is being written anyway, no extra
+serialization pass.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `payload.warn_bytes` | `int \| None` | 1 MiB | Warn when a serialized payload (kwargs at enqueue, result at completion) exceeds this size; rate-limited to once per task name and payload kind per process. `None` disables |
+| `payload.reject_bytes` | `int \| None` | `None` | Reject an enqueue whose serialized kwargs exceed this size: `.send()` returns `Err(PAYLOAD_TOO_LARGE)` and nothing is written. Results are never rejected — completed work is never destroyed over size. `None` (default) disables |
+
+```python
+from horsies.core.models.payload import PayloadPolicy
+
+AppConfig(
+    broker=broker,
+    payload=PayloadPolicy(
+        warn_bytes=1_048_576,      # warn above 1 MiB (default)
+        reject_bytes=33_554_432,   # hard ceiling: reject above 32 MiB
+    ),
+)
+```
+
+Every claim ships the task's kwargs to a worker and the row's weight stays
+in the table until retention removes it, so persistent oversized payloads
+are usually better passed as references to external storage. Workloads
+that intend large payloads raise or disable the thresholds and lose
+nothing.
 
 ## Recovery Configuration
 
