@@ -178,6 +178,27 @@ CREATE_TASKS_QUEUE_RETENTION_INDEX_SQL = text(f"""
     WHERE status IN ({TASK_TERMINAL_STATUS_SQL_LITERALS});
 """)
 
+# v16: monitoring list/facet indexes. The task list's default sort
+# (ORDER BY enqueued_at DESC LIMIT n) and the task-name facet
+# (GROUP BY task_name) otherwise seq-scan the whole heap per dashboard
+# render; at 1M rows that is ~167k buffer reads per query against ~53
+# (sort via backward index scan) and ~1.2k (facet via index-only scan).
+# Neither column appears in any worker-path predicate or leading sort key:
+# the claim ORDER BY leads with priority, so the planner cannot route any
+# hot-path query through these (asserted by the claim plan test). Both are
+# cheap to maintain — enqueued_at is near-monotonic (rightmost-leaf
+# appends, mutated only on retry), task_name is immutable and
+# deduplicates heavily.
+CREATE_TASKS_ENQUEUED_AT_INDEX_SQL = text("""
+    CREATE INDEX IF NOT EXISTS idx_horsies_tasks_enqueued_at
+    ON horsies_tasks (enqueued_at);
+""")
+
+CREATE_TASKS_TASK_NAME_INDEX_SQL = text("""
+    CREATE INDEX IF NOT EXISTS idx_horsies_tasks_task_name
+    ON horsies_tasks (task_name);
+""")
+
 # v13: retention eligibility for DELETE_EXPIRED_WORKFLOWS_SQL and
 # DELETE_EXPIRED_WORKFLOW_TASKS_SQL, which both filter horsies_workflows on
 # terminal status + COALESCE(completed_at, updated_at, created_at) < cutoff.

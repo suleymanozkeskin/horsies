@@ -96,7 +96,16 @@ from sqlalchemy import text
 #      terminal rows inside that gap are heap-filter misses. Maintained
 #      once per task lifetime (finalize transition), like v11.
 
-SCHEMA_VERSION = 15
+#
+# v16: monitoring read-path indexes — idx_horsies_tasks_enqueued_at
+#      (task list default sort; also unblocked by dropping the nulls_last
+#      wrapper on NOT NULL sort columns, whose DESC NULLS LAST ordering a
+#      plain btree cannot satisfy) and idx_horsies_tasks_task_name
+#      (task-name facet as an index-only scan). Neither column is in any
+#      worker-path predicate or leading sort key; the claim plan test
+#      pins idx_horsies_tasks_claim_pending.
+
+SCHEMA_VERSION = 16
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))

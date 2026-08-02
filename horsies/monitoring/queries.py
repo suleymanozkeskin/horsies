@@ -9,16 +9,19 @@ Sort and group columns are resolved through allowlist mappings keyed by
 ``Literal`` types, so no caller-supplied string reaches SQL.
 
 Load characteristics: ``task_stats``, ``task_facets`` and ``task_breakdown``
-are aggregates over ``horsies_tasks``; a full-scan GROUP BY is the expected
-plan for them. Retention keeps the table bounded and the UI's poll cadences
-are deliberately spaced; each open dashboard multiplies the load.
+are aggregates over ``horsies_tasks``. Unfiltered, each facet dimension
+rides its column index (schema v16 added ``task_name``; queue, worker and
+error_code were already indexed) as an index-only scan, so aggregate cost is
+bounded by index size, not heap size. Filtered variants may still walk the
+heap. Retention keeps the table bounded and the UI's refresh cadences are
+deliberately spaced; each open dashboard multiplies the load.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from sqlalchemy import (
     ColumnElement,
@@ -99,23 +102,41 @@ type TaskGroupBy = Literal['worker', 'task_name', 'queue']
 
 type SortDirection = Literal['asc', 'desc']
 
-# Sort key -> the expression it orders by. ``queue_s`` and ``exec_s`` sort by
-# the pure-SQL spans (dispatch->start, start->finish) so the table can be
-# triaged by where time is spent. A live row's displayed duration counts up
-# while its sort key stays NULL; that divergence is intentional.
-_SORT_COLUMNS: dict[str, SQLColumnExpression[Any]] = {
-    'enqueued_at': TaskModel.enqueued_at,
-    'started_at': TaskModel.started_at,
-    'completed_at': TaskModel.completed_at,
-    'failed_at': TaskModel.failed_at,
-    'status': TaskModel.status,
-    'task_name': TaskModel.task_name,
-    'queue_name': TaskModel.queue_name,
-    'priority': TaskModel.priority,
-    'retry_count': TaskModel.retry_count,
-    'queue_s': TaskModel.started_at - TaskModel.enqueued_at,
-    'exec_s': func.coalesce(TaskModel.completed_at, TaskModel.failed_at)
-    - TaskModel.started_at,
+# Sort key -> the expression it orders by, tagged with nullability.
+# ``queue_s`` and ``exec_s`` sort by the pure-SQL spans (dispatch->start,
+# start->finish) so the table can be triaged by where time is spent. A live
+# row's displayed duration counts up while its sort key stays NULL; that
+# divergence is intentional.
+#
+# ``nulls_last`` wraps only nullable expressions: on a NOT NULL column the
+# wrapper is semantically inert but changes the requested ordering
+# (DESC NULLS LAST) away from what a plain btree provides (DESC implies
+# NULLS FIRST), which blocks index-order scans. Measured at 1M rows: the
+# wrapper alone keeps the default sort on a full seq scan + top-N sort with
+# idx_horsies_tasks_enqueued_at present.
+class _SortKey(NamedTuple):
+    expression: SQLColumnExpression[Any]
+    nullable: bool
+
+
+_SORT_COLUMNS: dict[str, _SortKey] = {
+    'enqueued_at': _SortKey(TaskModel.enqueued_at, nullable=False),
+    'started_at': _SortKey(TaskModel.started_at, nullable=True),
+    'completed_at': _SortKey(TaskModel.completed_at, nullable=True),
+    'failed_at': _SortKey(TaskModel.failed_at, nullable=True),
+    'status': _SortKey(TaskModel.status, nullable=False),
+    'task_name': _SortKey(TaskModel.task_name, nullable=False),
+    'queue_name': _SortKey(TaskModel.queue_name, nullable=False),
+    'priority': _SortKey(TaskModel.priority, nullable=False),
+    'retry_count': _SortKey(TaskModel.retry_count, nullable=False),
+    'queue_s': _SortKey(
+        TaskModel.started_at - TaskModel.enqueued_at, nullable=True
+    ),
+    'exec_s': _SortKey(
+        func.coalesce(TaskModel.completed_at, TaskModel.failed_at)
+        - TaskModel.started_at,
+        nullable=True,
+    ),
 }
 
 # group_by value -> the model column it groups on.
@@ -456,7 +477,7 @@ def _scope_conditions(
     return conditions
 
 
-def _facet_statement(
+def facet_statement(
     column: InstrumentedAttribute[Any],
     scope: list[ColumnElement[bool]],
     *extra: ColumnElement[bool],
@@ -562,13 +583,13 @@ async def task_facets(
         error_categories=[],
         retried_only=retried_only,
     )
-    workers_stmt = _facet_statement(
+    workers_stmt = facet_statement(
         TaskModel.claimed_by_worker_id,
         scope,
         TaskModel.claimed_by_worker_id.is_not(None),
     )
-    names_stmt = _facet_statement(TaskModel.task_name, scope)
-    queues_stmt = _facet_statement(TaskModel.queue_name, scope)
+    names_stmt = facet_statement(TaskModel.task_name, scope)
+    queues_stmt = facet_statement(TaskModel.queue_name, scope)
     # Error codes are not capped in SQL: every distinct code is needed for an
     # accurate per-category rollup. The dropdown list is sliced afterwards.
     error_count = func.count().label('n')
@@ -739,6 +760,37 @@ async def task_breakdown(
     )
 
 
+def list_rows_statement(
+    *,
+    scope: list[ColumnElement[bool]],
+    sort_by: TaskSortField,
+    sort_dir: SortDirection,
+    offset: int,
+    limit: int,
+) -> Select[tuple[TaskModel]]:
+    """The list page's row statement.
+
+    Separated from ``list_tasks`` so the plan tests EXPLAIN exactly the
+    statement production executes — ordering form and projection included.
+    ``nulls_last`` wraps only nullable sort keys (see ``_SortKey``).
+    """
+    sort_key = _SORT_COLUMNS[sort_by]
+    directed = (
+        sort_key.expression.asc()
+        if sort_dir == 'asc'
+        else sort_key.expression.desc()
+    )
+    ordering = nulls_last(directed) if sort_key.nullable else directed
+    return (
+        select(TaskModel)
+        .options(load_only(*_SUMMARY_COLUMNS, raiseload=True))
+        .where(*scope)
+        .order_by(ordering)
+        .limit(limit)
+        .offset(offset)
+    )
+
+
 # Planner row estimate for the unfiltered task count. ``reltuples`` is
 # refreshed by VACUUM / ANALYZE / autovacuum; -1 means the table was never
 # sampled.
@@ -789,10 +841,6 @@ async def list_tasks(
     (an exact count would rescan the table on every poll for a number the
     UI only uses to size the pager).
     """
-    sort_column = _SORT_COLUMNS[sort_by]
-    ordering = nulls_last(
-        sort_column.asc() if sort_dir == 'asc' else sort_column.desc()
-    )
     scope = _scope_conditions(
         statuses=statuses,
         task_names=task_names,
@@ -802,13 +850,12 @@ async def list_tasks(
         error_categories=error_categories,
         retried_only=retried_only,
     )
-    rows_stmt = (
-        select(TaskModel)
-        .options(load_only(*_SUMMARY_COLUMNS, raiseload=True))
-        .where(*scope)
-        .order_by(ordering)
-        .limit(limit)
-        .offset(offset)
+    rows_stmt = list_rows_statement(
+        scope=scope,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        offset=offset,
+        limit=limit,
     )
 
     try:
