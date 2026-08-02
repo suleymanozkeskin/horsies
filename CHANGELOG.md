@@ -8,6 +8,38 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-08-02
+
+Workflow retention performance release. No schema change. At 40k workflows
+(35k eligible, 1-2 nodes each) / 460k tasks, a full backlog drain drops
+from 12.0s across 177 statements to 0.5s across 107 (per 500-node batch:
+~49k buffer reads → ~4.2k, 9ms).
+
+### Changed
+
+- Workflow retention batches by workflow, not by node row, in a single
+  statement (`DELETE_EXPIRED_WORKFLOW_TASKS_SQL` removed). Candidates come
+  from the workflows retention index; each is guarded once per statement
+  against a materialized set of workflows with non-terminal backing tasks,
+  computed from the non-terminal side (`status IN` the terminal set's
+  enum-derived complement, served by the tasks status index) instead of a
+  per-candidate `NOT terminal` heap walk. Node rows purge set-wise in the
+  same statement; a workflow with more nodes than the whole batch budget
+  drains alone instead of starving. Deletion semantics unchanged: same
+  cutoff, same guard meaning, a workflow and its node rows leave together.
+- Finalize logs scope their claim to the finalize-retry loop:
+  `Finalize stage will not be re-attempted` replaces
+  `Finalize error non-retryable`, and the broken-pool message states that
+  the task was already recovered per its retry policy and the pool
+  replaced. The old wording read as task loss when no task is lost.
+
+### Fixed
+
+- SKILL.md's task-info example steered readers to the broker-level
+  `get_task_info_async`, whose `decoded_result` is always empty; it now
+  shows `app.get_task_info_async` (typed decode) as the primary path with
+  the broker variants labeled raw-envelope.
+
 ## [0.4.3] - 2026-08-02
 
 Monitoring read-path performance release. Schema v16
