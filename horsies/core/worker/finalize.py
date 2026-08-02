@@ -173,11 +173,19 @@ class FinalizeMixin:
             await self._handle_broken_pool(
                 task_id, exc, executor, claimed_at=claimed_at,
             )
+            # By this point _handle_broken_pool has already recovered the
+            # task (requeue per its retry policy) and replaced the executor;
+            # the message states that so the log line cannot be read as a
+            # lost task.
             return Err(
                 self._make_finalize_error(
                     task_id=task_id,
                     stage=_FINALIZE_STAGE_FUTURE,
-                    message=f'Broken process pool during finalize: {exc}',
+                    message=(
+                        f'Broken process pool during finalize; task already '
+                        f'recovered per its retry policy and the pool '
+                        f'replaced: {exc}'
+                    ),
                     retryable=False,
                     data={
                         'exception_type': type(exc).__name__,
@@ -1111,8 +1119,14 @@ class FinalizeMixin:
         attempts = self._finalize_retry_attempts.get(key, 0)
 
         if not err.retryable:
+            # ``retryable`` scopes only this finalize-retry loop. Whether the
+            # TASK retries is decided by the recovery path that produced the
+            # error (broken-pool recovery, for one, requeues the task per its
+            # retry policy before this handler ever runs) — so the log must
+            # not claim anything about the task's fate.
             logger.error(
-                f'Finalize error non-retryable ({task_id}) stage={stage}: {err.message}; data={err.data}'
+                f'Finalize stage will not be re-attempted ({task_id}) '
+                f'stage={stage}: {err.message}; data={err.data}'
             )
             self._clear_finalize_retry_attempts(task_id, stage)
             return
