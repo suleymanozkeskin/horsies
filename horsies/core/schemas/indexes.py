@@ -199,9 +199,10 @@ CREATE_TASKS_TASK_NAME_INDEX_SQL = text("""
     ON horsies_tasks (task_name);
 """)
 
-# v13: retention eligibility for DELETE_EXPIRED_WORKFLOWS_SQL and
-# DELETE_EXPIRED_WORKFLOW_TASKS_SQL, which both filter horsies_workflows on
-# terminal status + COALESCE(completed_at, updated_at, created_at) < cutoff.
+# v13: retention eligibility for DELETE_EXPIRED_WORKFLOWS_SQL (which since
+# the workflow-batched rewrite also purges node rows), filtering
+# horsies_workflows on terminal status +
+# COALESCE(completed_at, updated_at, created_at) < cutoff.
 # Without it every hourly retention pass walks the whole workflows table:
 # the planner has no statistics on the COALESCE expression, overestimates
 # eligibility, and picks a stop-early pkey walk whose LIMIT never fills

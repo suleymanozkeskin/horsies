@@ -27,7 +27,6 @@ from horsies.core.worker.worker import (
     DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL,
     DELETE_EXPIRED_WORKER_STATES_SQL,
     DELETE_EXPIRED_WORKFLOWS_SQL,
-    DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
     INSERT_CLAIMER_HEARTBEAT_SQL,
     RENEW_CLAIM_LEASE_SQL,
     UNCLAIM_CLAIMED_TASK_SQL,
@@ -776,15 +775,22 @@ class TestReaperHeartbeatRetention:
         expected_rowcounts = {
             DELETE_EXPIRED_HEARTBEATS_SQL: 5,
             DELETE_EXPIRED_WORKER_STATES_SQL: 7,
-            DELETE_EXPIRED_WORKFLOW_TASKS_SQL: 11,
             DELETE_EXPIRED_WORKFLOWS_SQL: 13,
             DELETE_EXPIRED_TASKS_SQL: 17,
         }
+        statement_calls: dict[Any, int] = {}
 
         async def _execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
             if stmt in expected_rowcounts:
                 if stmt is DELETE_EXPIRED_TASKS_SQL:
                     worker._stop.set()
+                calls = statement_calls.get(stmt, 0)
+                statement_calls[stmt] = calls + 1
+                # The workflow statement runs until an EMPTY batch
+                # (drained_when='empty_batch'): report its rowcount once,
+                # then drained.
+                if stmt is DELETE_EXPIRED_WORKFLOWS_SQL and calls > 0:
+                    return MagicMock(rowcount=0)
                 return MagicMock(rowcount=expected_rowcounts[stmt])
             return MagicMock(rowcount=0)
 
@@ -961,7 +967,6 @@ class TestReaperHeartbeatRetention:
         executed_statements = [stmt for stmt, _ in executed]
         assert DELETE_EXPIRED_TASKS_SQL not in executed_statements
         assert DELETE_EXPIRED_WORKFLOWS_SQL not in executed_statements
-        assert DELETE_EXPIRED_WORKFLOW_TASKS_SQL not in executed_statements
         override_params = [
             params for stmt, params in executed
             if stmt is DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL
@@ -1030,6 +1035,29 @@ class TestRetentionBatchedDeletes:
             'retention_hours': 12,
             'batch_size': 7,
         }
+
+    @pytest.mark.asyncio
+    async def test_empty_batch_mode_loops_through_short_batches(self) -> None:
+        """drained_when='empty_batch' keeps going past short batches.
+
+        The workflow statement's rowcount counts workflows, which its node
+        budget keeps below batch_size while backlog remains — only a
+        zero-row batch means drained.
+        """
+        worker = _make_worker()
+        broker, session = self._make_fake_broker([3, 2, 0])
+
+        total = await worker._delete_expired_in_batches(
+            broker,
+            DELETE_EXPIRED_WORKFLOWS_SQL,
+            {'retention_hours': 24},
+            deadline_monotonic=time.monotonic() + 3600.0,
+            batch_size=5,
+            drained_when='empty_batch',
+        )
+
+        assert total == 5
+        assert session.execute.await_count == 3
 
     @pytest.mark.asyncio
     async def test_expired_deadline_stops_after_one_batch(self) -> None:

@@ -258,8 +258,14 @@ if is_err(outer):
 else:
     task_result = outer.ok_value  # typed TaskResult[Any, TaskError]
 
-# Raw envelope (no typed decode): broker.get_raw_result_record_async("task-uuid")
-info = await app.get_broker().get_task_info_async("task-uuid", include_result=True)
+# Task metadata with typed-decoded result: the app-level wrapper decodes
+# when the task is registered locally (decoded_result / result_decoded set).
+info = await app.get_task_info_async("task-uuid", include_result=True)
+
+# Broker-level variants are RAW envelope only — decoded_result is always
+# empty there. Reach for them for cross-process monitoring/dashboards:
+# app.get_broker().get_task_info_async(...) or
+# broker.get_raw_result_record_async(...)
 ```
 
 See `configs.md` for all broker methods. See website docs `monitoring/broker-methods` for full reference.

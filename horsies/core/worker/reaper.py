@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from horsies.core.logging import get_logger
 from horsies.core.types.result import Err, Ok, is_err
@@ -27,7 +27,6 @@ from horsies.core.worker.sql import (
     DELETE_EXPIRED_TASKS_SQL,
     DELETE_EXPIRED_WORKER_STATES_SQL,
     DELETE_EXPIRED_WORKFLOWS_SQL,
-    DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
     REAPER_GATE_TRY_LOCK_SQL,
     _RETENTION_PASS_TIME_BUDGET_S,
 )
@@ -247,7 +246,6 @@ class ReaperMixin:
             try:
                 deleted_heartbeats = 0
                 deleted_worker_states = 0
-                deleted_workflow_tasks = 0
                 deleted_workflows = 0
                 deleted_tasks = 0
 
@@ -287,22 +285,20 @@ class ReaperMixin:
                     terminal_params = {
                         'retention_hours': recovery_cfg.terminal_record_retention_hours,
                     }
-                    # Order preserved: workflow_tasks -> workflows -> tasks.
-                    # The all-backing-tasks-terminal guards inside each
-                    # statement make partial progress between tables safe.
-                    deleted_workflow_tasks = await self._delete_expired_in_batches(
-                        temp_broker,
-                        DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
-                        terminal_params,
-                        deadline,
-                        batch_size,
-                    )
+                    # Workflows and their node rows go together in one
+                    # workflow-batched statement (node purge is a CTE inside
+                    # it); tasks follow. The all-backing-tasks-terminal guard
+                    # makes partial progress between tables safe. The
+                    # statement's rowcount counts workflows, which the node
+                    # budget keeps below :batch_size while backlog remains —
+                    # hence drained_when='empty_batch'.
                     deleted_workflows = await self._delete_expired_in_batches(
                         temp_broker,
                         DELETE_EXPIRED_WORKFLOWS_SQL,
                         terminal_params,
                         deadline,
                         batch_size,
+                        drained_when='empty_batch',
                     )
                     deleted_tasks = await self._delete_expired_in_batches(
                         temp_broker,
@@ -335,15 +331,13 @@ class ReaperMixin:
                 if (
                     deleted_heartbeats > 0
                     or deleted_worker_states > 0
-                    or deleted_workflow_tasks > 0
                     or deleted_workflows > 0
                     or deleted_tasks > 0
                 ):
                     logger.info(
-                        'Reaper retention cleanup: heartbeats=%s worker_states=%s workflow_tasks=%s workflows=%s tasks=%s',
+                        'Reaper retention cleanup: heartbeats=%s worker_states=%s workflows=%s tasks=%s',
                         deleted_heartbeats,
                         deleted_worker_states,
-                        deleted_workflow_tasks,
                         deleted_workflows,
                         deleted_tasks,
                     )
@@ -361,13 +355,23 @@ class ReaperMixin:
         params: dict[str, Any],
         deadline_monotonic: float,
         batch_size: int,
+        *,
+        drained_when: Literal['short_batch', 'empty_batch'] = 'short_batch',
     ) -> int:
         """Run one retention DELETE in bounded batches, committing per batch.
 
-        Always runs at least one batch; stops when a batch comes back short
-        (backlog drained) or the pass deadline is reached (backlog resumes
-        next pass). Per-batch commits bound transaction size so a large
-        backlog never becomes one unbounded DELETE.
+        Always runs at least one batch; stops when the backlog reads as
+        drained or the pass deadline is reached (backlog resumes next pass).
+        Per-batch commits bound transaction size so a large backlog never
+        becomes one unbounded DELETE.
+
+        ``drained_when`` names the drained signal: ``short_batch`` for
+        statements whose rowcount equals the rows the batch selects (a short
+        batch means nothing eligible is left); ``empty_batch`` for the
+        workflow statement, whose rowcount counts workflows while its node
+        budget keeps batches routinely short of ``batch_size`` — there only
+        a zero-row batch means drained, at the cost of one empty statement
+        per drained pass.
         """
         total_deleted = 0
         while True:
@@ -379,7 +383,12 @@ class ReaperMixin:
                 deleted = int(getattr(result, 'rowcount', 0) or 0)
                 await s.commit()
             total_deleted += deleted
-            if deleted < batch_size:
+            match drained_when:
+                case 'short_batch':
+                    drained = deleted < batch_size
+                case 'empty_batch':
+                    drained = deleted == 0
+            if drained:
                 return total_deleted
             if time.monotonic() >= deadline_monotonic:
                 logger.info(

@@ -9,10 +9,22 @@ from horsies.core.schemas.indexes import (
     TASK_TERMINAL_STATUS_SQL_LITERALS,
     WORKFLOW_TERMINAL_STATUS_SQL_LITERALS,
 )
-from horsies.core.types.status import TASK_TERMINAL_STATES
+from horsies.core.types.status import TASK_TERMINAL_STATES, TaskStatus
 
 WORKFLOW_TERMINAL_VALUES: list[str] = [s.value for s in WORKFLOW_TERMINAL_STATES]
 TASK_TERMINAL_VALUES: list[str] = [s.value for s in TASK_TERMINAL_STATES]
+
+# Complement of the terminal set, derived from the same enum so the two can
+# never drift: together they cover every TaskStatus. Non-terminal statuses
+# are in-flight work — a small set of rows by definition — which lets the
+# retention guard probe ix_horsies_tasks_status instead of scanning for
+# "NOT terminal" (an inequality no index serves).
+TASK_NONTERMINAL_STATUS_SQL_LITERALS: str = ', '.join(
+    f"'{s.value}'" for s in sorted(
+        (s for s in TaskStatus if s not in TASK_TERMINAL_STATES),
+        key=lambda s: s.value,
+    )
+)
 
 
 # ---------- Claim SQL (priority + enqueued_at) ----------
@@ -580,49 +592,75 @@ DELETE_EXPIRED_WORKER_STATES_SQL = text("""
     )
 """)
 
-DELETE_EXPIRED_WORKFLOW_TASKS_SQL = text(f"""
-    DELETE FROM horsies_workflow_tasks
-    WHERE id IN (
-        SELECT wt.id
-        FROM horsies_workflow_tasks wt
-        JOIN horsies_workflows w ON w.id = wt.workflow_id
-        WHERE w.status IN ({WORKFLOW_TERMINAL_STATUS_SQL_LITERALS})
-          AND COALESCE(w.completed_at, w.updated_at, w.created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
-          -- Do not delete linkage while any backing task is still non-terminal,
-          -- which would orphan that horsies_tasks row (no workflow_task ref). All
-          -- backing tasks become terminal via orphan self-heal, so this only
-          -- defers cleanup, it does not block it.
-          AND NOT EXISTS (
-              SELECT 1
-              FROM horsies_workflow_tasks wt2
-              JOIN horsies_tasks t ON t.id = wt2.task_id
-              WHERE wt2.workflow_id = w.id
-                AND t.status NOT IN ({TASK_TERMINAL_STATUS_SQL_LITERALS})
-          )
-        LIMIT :batch_size
-        FOR UPDATE OF wt SKIP LOCKED
-    )
-""")
-
+# Workflow retention batches by WORKFLOW, not by node row. The previous
+# shape deleted workflow_tasks rows in :batch_size slices with the
+# all-backing-tasks-terminal guard re-evaluated for every candidate on
+# every batch; at 972k tasks / ~36k doomed workflows that walk read
+# ~686k rows per 500-row batch (~1,900 reads per deleted row, 5s per
+# statement). Selecting doomed workflows once, guarding each exactly once,
+# and purging its node rows set-wise does the same work in
+# nodes-per-workflow reads.
+#
+# doomed: candidate workflows via idx_horsies_workflows_retention, capped
+#   at :batch_size candidates so guard + node-count work per statement is
+#   bounded even when the guard rejects most of them.
+# budgeted: keeps candidates while their running node total stays within
+#   :batch_size (the knob keeps its documented meaning — rows per
+#   statement) and ALWAYS keeps the first candidate, so a workflow with
+#   more nodes than the whole budget still drains — alone in its own
+#   statement, proportional to its real size — instead of starving.
+# purged_nodes: set-wise node purge (the R1 task_attempts pattern); the
+#   workflow_id FK cascade still fires per parent row but finds nothing,
+#   and remains the correctness net for non-retention deletes.
+#
+# The top-level DELETE's rowcount counts WORKFLOWS, which under the node
+# budget is routinely smaller than :batch_size while backlog remains —
+# the reaper therefore drives this statement with stop_on_empty_batch
+# rather than the short-batch heuristic the row-batched statements use.
 DELETE_EXPIRED_WORKFLOWS_SQL = text(f"""
-    DELETE FROM horsies_workflows
-    WHERE id IN (
-        SELECT w.id
+    WITH live AS MATERIALIZED (
+        -- Workflows that still have a non-terminal backing task, computed
+        -- ONCE per statement from the non-terminal side: in-flight work is
+        -- small by definition and probes ix_horsies_tasks_status, where the
+        -- per-candidate "NOT terminal" walk scanned the tasks heap per
+        -- batch. Retention keeps these workflows (and their node rows) so
+        -- it never strands a live task row; orphan self-heal makes every
+        -- backing task terminal eventually, so this only defers cleanup.
+        SELECT DISTINCT wt.workflow_id
+        FROM horsies_tasks t
+        JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
+        WHERE t.status IN ({TASK_NONTERMINAL_STATUS_SQL_LITERALS})
+    ),
+    doomed AS (
+        SELECT w.id,
+               (SELECT count(*)
+                FROM horsies_workflow_tasks wt
+                WHERE wt.workflow_id = w.id) AS node_count
         FROM horsies_workflows w
         WHERE w.status IN ({WORKFLOW_TERMINAL_STATUS_SQL_LITERALS})
           AND COALESCE(w.completed_at, w.updated_at, w.created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
-          -- Same guard as the workflow_tasks delete: keep the workflow until every
-          -- backing task is terminal so retention never strands a live task row.
           AND NOT EXISTS (
-              SELECT 1
-              FROM horsies_workflow_tasks wt
-              JOIN horsies_tasks t ON t.id = wt.task_id
-              WHERE wt.workflow_id = w.id
-                AND t.status NOT IN ({TASK_TERMINAL_STATUS_SQL_LITERALS})
+              SELECT 1 FROM live WHERE live.workflow_id = w.id
           )
         LIMIT :batch_size
         FOR UPDATE SKIP LOCKED
+    ),
+    budgeted AS (
+        SELECT id
+        FROM (
+            SELECT id,
+                   SUM(node_count) OVER (ORDER BY id) AS nodes_running,
+                   ROW_NUMBER() OVER (ORDER BY id) AS position
+            FROM doomed
+        ) ranked
+        WHERE nodes_running <= :batch_size OR position = 1
+    ),
+    purged_nodes AS (
+        DELETE FROM horsies_workflow_tasks
+        WHERE workflow_id IN (SELECT id FROM budgeted)
     )
+    DELETE FROM horsies_workflows
+    WHERE id IN (SELECT id FROM budgeted)
 """)
 
 # The status + COALESCE predicates must stay textually aligned with
