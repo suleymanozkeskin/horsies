@@ -1662,7 +1662,11 @@ class TestHandleFinalizeError:
         with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
             await worker._handle_finalize_error(err)
 
-        assert 'non-retryable' in caplog.text.lower()
+        # The log scopes its claim to the finalize-retry loop; the task's
+        # own fate is decided by whichever recovery path produced the error,
+        # so the line must not read as "task will not be retried".
+        assert 'Finalize stage will not be re-attempted' in caplog.text
+        assert 'non-retryable' not in caplog.text.lower()
         assert key not in worker._finalize_retry_attempts
         assert worker._spawn_background.call_count == 0
 
