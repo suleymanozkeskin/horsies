@@ -29,9 +29,11 @@ from sqlalchemy import (
     nulls_last,
     or_,
     select,
+    text,
 )
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import InstrumentedAttribute
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute, load_only
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.task_pg import (
@@ -265,6 +267,30 @@ def _task_spans(task: TaskModel) -> tuple[int | None, int | None]:
     )
     exec_s = span_s(task.started_at, end, live=task.status is TaskStatus.RUNNING)
     return queue_s, exec_s
+
+
+# The exact column set ``_task_summary`` reads. ``list_tasks`` loads only
+# these; the payload columns (args, kwargs, result, task_options) stay
+# unfetched, so a list page never ships or detoasts task payloads.
+# ``raiseload=True`` turns any future access to an unlisted column into an
+# immediate error instead of a silent lazy load.
+_SUMMARY_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
+    TaskModel.id,
+    TaskModel.task_name,
+    TaskModel.queue_name,
+    TaskModel.priority,
+    TaskModel.status,
+    TaskModel.retry_count,
+    TaskModel.max_retries,
+    TaskModel.is_workflow_task,
+    TaskModel.error_code,
+    TaskModel.worker_hostname,
+    TaskModel.claimed_by_worker_id,
+    TaskModel.enqueued_at,
+    TaskModel.started_at,
+    TaskModel.completed_at,
+    TaskModel.failed_at,
+)
 
 
 def _task_summary(task: TaskModel) -> TaskSummary:
@@ -713,6 +739,33 @@ async def task_breakdown(
     )
 
 
+# Planner row estimate for the unfiltered task count. ``reltuples`` is
+# refreshed by VACUUM / ANALYZE / autovacuum; -1 means the table was never
+# sampled.
+_ESTIMATED_TOTAL_SQL = text(
+    'SELECT reltuples::bigint FROM pg_class WHERE oid = cast(:tablename AS regclass)'
+)
+
+
+async def _estimated_task_total(session: AsyncSession) -> int:
+    """Estimated row count of ``horsies_tasks``; exact only when unsampled.
+
+    Falls back to an exact count when the estimate is -1 (never sampled) —
+    the one case where the estimate carries no information.
+    """
+    estimate: int = (
+        await session.execute(
+            _ESTIMATED_TOTAL_SQL, {'tablename': TaskModel.__tablename__}
+        )
+    ).scalar_one()
+    if estimate >= 0:
+        return estimate
+    exact: int = (
+        await session.execute(select(func.count()).select_from(TaskModel))
+    ).scalar_one()
+    return exact
+
+
 async def list_tasks(
     broker: PostgresBroker,
     *,
@@ -731,7 +784,10 @@ async def list_tasks(
     """A paginated, server-sorted, server-filtered slice of tasks.
 
     ``total`` is the count matching the filters, not the length of ``rows``,
-    so the UI can paginate without a second request.
+    so the UI can paginate without a second request. With filters active it
+    is exact; on the unfiltered view it is the planner's row estimate
+    (an exact count would rescan the table on every poll for a number the
+    UI only uses to size the pager).
     """
     sort_column = _SORT_COLUMNS[sort_by]
     ordering = nulls_last(
@@ -746,14 +802,25 @@ async def list_tasks(
         error_categories=error_categories,
         retried_only=retried_only,
     )
-    count_stmt = select(func.count()).select_from(TaskModel).where(*scope)
     rows_stmt = (
-        select(TaskModel).where(*scope).order_by(ordering).limit(limit).offset(offset)
+        select(TaskModel)
+        .options(load_only(*_SUMMARY_COLUMNS, raiseload=True))
+        .where(*scope)
+        .order_by(ordering)
+        .limit(limit)
+        .offset(offset)
     )
 
     try:
         async with broker.session_factory() as session:
-            total = (await session.execute(count_stmt)).scalar_one()
+            match scope:
+                case []:
+                    total = await _estimated_task_total(session)
+                case _:
+                    count_stmt = (
+                        select(func.count()).select_from(TaskModel).where(*scope)
+                    )
+                    total = (await session.execute(count_stmt)).scalar_one()
             tasks = (await session.execute(rows_stmt)).scalars().all()
     except SQLAlchemyError as exc:
         return _db_err('task list query', exc)
