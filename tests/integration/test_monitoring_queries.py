@@ -24,7 +24,7 @@ from typing import Any, AsyncGenerator
 import pytest
 import pytest_asyncio
 from pydantic import SecretStr
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
@@ -707,6 +707,10 @@ class TestListTasks:
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
         await insert_rows(session, *[make_task() for _ in range(5)])
+        # The unfiltered total is a planner estimate; sample explicitly so
+        # the estimate is current rather than whatever autovacuum last saw.
+        await session.execute(text('ANALYZE horsies_tasks'))
+        await session.commit()
 
         result = await list_tasks(
             broker,
@@ -983,6 +987,152 @@ class TestListTasks:
         assert is_ok(result)
         assert result.ok_value.rows[0].error_code is None
         assert result.ok_value.rows[0].error_category is None
+
+    async def test_unfiltered_total_uses_planner_estimate_once_sampled(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        """After ANALYZE, the unfiltered total is the sampled estimate.
+
+        Rows inserted after the sample are not reflected in ``total`` — the
+        stale value proves the estimate branch ran instead of an exact count.
+        """
+        await insert_rows(session, *[make_task() for _ in range(5)])
+        await session.execute(text('ANALYZE horsies_tasks'))
+        await session.commit()
+        await insert_rows(session, *[make_task() for _ in range(3)])
+
+        result = await list_tasks(
+            broker,
+            statuses=[],
+            task_names=[],
+            queues=[],
+            workers=[],
+            error_codes=[],
+            error_categories=[],
+            retried_only=False,
+            sort_by='enqueued_at',
+            sort_dir='desc',
+            offset=0,
+            limit=50,
+        )
+
+        assert is_ok(result)
+        assert result.ok_value.total == 5
+        assert len(result.ok_value.rows) == 8
+
+    async def test_filtered_total_stays_exact_despite_stale_estimate(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        await insert_rows(session, *[make_task() for _ in range(5)])
+        await session.execute(text('ANALYZE horsies_tasks'))
+        await session.commit()
+        await insert_rows(session, *[make_task() for _ in range(3)])
+
+        result = await list_tasks(
+            broker,
+            statuses=[TaskStatus.PENDING],
+            task_names=[],
+            queues=[],
+            workers=[],
+            error_codes=[],
+            error_categories=[],
+            retried_only=False,
+            sort_by='enqueued_at',
+            sort_dir='desc',
+            offset=0,
+            limit=50,
+        )
+
+        assert is_ok(result)
+        assert result.ok_value.total == 8
+
+    async def test_unsampled_table_falls_back_to_exact_total(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        """An unsampled table (``reltuples`` = -1) falls back to exact count.
+
+        The sentinel is forced through the catalog because reaching it
+        naturally is version-dependent: PG 18 resets ``reltuples`` on
+        TRUNCATE, PG 16 keeps the stale pre-truncate value.
+        """
+        await session.execute(
+            text(
+                'UPDATE pg_class SET reltuples = -1 '
+                "WHERE oid = 'horsies_tasks'::regclass"
+            )
+        )
+        await session.commit()
+        await insert_rows(session, *[make_task() for _ in range(5)])
+
+        result = await list_tasks(
+            broker,
+            statuses=[],
+            task_names=[],
+            queues=[],
+            workers=[],
+            error_codes=[],
+            error_categories=[],
+            retried_only=False,
+            sort_by='enqueued_at',
+            sort_dir='desc',
+            offset=0,
+            limit=50,
+        )
+
+        assert is_ok(result)
+        assert result.ok_value.total == 5
+
+    async def test_list_page_does_not_fetch_payload_columns(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        """The list SELECT must not reference args/kwargs/result/task_options.
+
+        The wire statement is the contract: payload columns fetched here ship
+        every task's payload on every page and detoast large results.
+        """
+        await insert_rows(session, make_task())
+        captured: list[str] = []
+
+        def capture_statement(
+            conn: Any,
+            cursor: Any,
+            statement: str,
+            parameters: Any,
+            context: Any,
+            executemany: bool,
+        ) -> None:
+            captured.append(statement)
+
+        sync_engine = broker.async_engine.sync_engine
+        event.listen(sync_engine, 'before_cursor_execute', capture_statement)
+        try:
+            result = await list_tasks(
+                broker,
+                statuses=[],
+                task_names=[],
+                queues=[],
+                workers=[],
+                error_codes=[],
+                error_categories=[],
+                retried_only=False,
+                sort_by='enqueued_at',
+                sort_dir='desc',
+                offset=0,
+                limit=50,
+            )
+        finally:
+            event.remove(sync_engine, 'before_cursor_execute', capture_statement)
+
+        assert is_ok(result)
+        list_statements = [
+            s for s in captured if 'FROM horsies_tasks' in s and 'ORDER BY' in s
+        ]
+        assert len(list_statements) == 1
+        statement = list_statements[0]
+        for excluded in ('args', 'kwargs', 'result', 'task_options'):
+            assert f'horsies_tasks.{excluded}' not in statement
+        for included in ('task_name', 'enqueued_at', 'error_code'):
+            assert f'horsies_tasks.{included}' in statement
 
 
 # --------------------------------------------------------------------------- #

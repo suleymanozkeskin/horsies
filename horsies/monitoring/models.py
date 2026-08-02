@@ -173,7 +173,11 @@ class TaskSummary(BaseModel):
 
 
 class TaskListPage(BaseModel):
-    """A paginated slice of tasks plus the total matching the active filters."""
+    """A paginated slice of tasks plus the total matching the active filters.
+
+    ``total`` is exact when any filter is active and a planner estimate on
+    the unfiltered view.
+    """
 
     rows: list[TaskSummary]
     total: int
