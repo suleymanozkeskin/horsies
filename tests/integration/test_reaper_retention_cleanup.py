@@ -24,7 +24,6 @@ from horsies.core.schemas.indexes import TASK_TERMINAL_STATUS_SQL_LITERALS
 from horsies.core.worker.sql import (
     DELETE_EXPIRED_HEARTBEATS_SQL,
     DELETE_EXPIRED_WORKER_STATES_SQL,
-    DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
     DELETE_EXPIRED_WORKFLOWS_SQL,
     DELETE_EXPIRED_TASKS_SQL,
     DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL,
@@ -214,20 +213,107 @@ async def test_expired_terminal_workflows_deleted(
         'batch_size': _BATCH_SIZE,
     }
 
-    # Delete workflow_tasks first (FK dependency), then workflows
-    wt_result = await session.execute(DELETE_EXPIRED_WORKFLOW_TASKS_SQL, wf_params)
+    # One workflow-batched statement: node rows purge in its CTE.
     wf_result = await session.execute(DELETE_EXPIRED_WORKFLOWS_SQL, wf_params)
     await session.commit()
 
-    # Only the old completed workflow's task should be deleted
-    assert int(wt_result.rowcount or 0) == 1
-    # Only the old completed workflow itself should be deleted
+    # rowcount counts workflows: only the old completed one.
     assert int(wf_result.rowcount or 0) == 1
 
     # Survivors: old_running + recent_completed workflows
     assert await _count(session, 'horsies_workflows') == 2
     # Survivor: old_running's workflow_task
     assert await _count(session, 'horsies_workflow_tasks') == 1
+
+
+async def _insert_doomed_workflow(
+    session: AsyncSession, *, name: str, node_count: int
+) -> str:
+    """A terminal 48h-old workflow with ``node_count`` COMPLETED node rows."""
+    workflow_id = str(uuid.uuid4())
+    await session.execute(text("""
+        INSERT INTO horsies_workflows
+            (id, name, status, on_error, depth, root_workflow_id,
+             sent_at, created_at, started_at, updated_at, completed_at)
+        VALUES
+            (:id, :name, 'COMPLETED', 'FAIL', 0, :id,
+             NOW(), NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours',
+             NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours')
+    """), {'id': workflow_id, 'name': name})
+    for index in range(node_count):
+        await session.execute(text("""
+            INSERT INTO horsies_workflow_tasks
+                (id, workflow_id, task_index, node_id, task_name, task_args,
+                 task_kwargs, queue_name, priority, dependencies,
+                 allow_failed_deps, join_type, is_subworkflow, status,
+                 created_at)
+            VALUES
+                (:id, :wf_id, :task_index, :node_id, 'retention_budget_test',
+                 '[]', '{}', 'default', 100, '{}', FALSE, 'all',
+                 FALSE, 'COMPLETED', NOW())
+        """), {
+            'id': str(uuid.uuid4()),
+            'wf_id': workflow_id,
+            'task_index': index,
+            'node_id': f'node_{index}',
+        })
+    return workflow_id
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_workflow_delete_batches_by_node_budget(
+    engine: AsyncEngine,
+    session: AsyncSession,
+) -> None:
+    """One statement deletes workflows only while their running node total
+    fits :batch_size; the remainder drains on the next batch."""
+    _ = engine
+    await _truncate_retention_tables(session)
+
+    for index in range(4):
+        await _insert_doomed_workflow(
+            session, name=f'wf_budget_{index}', node_count=3
+        )
+    await session.commit()
+
+    params = {'retention_hours': _RETENTION_HOURS, 'batch_size': 6}
+
+    first = await session.execute(DELETE_EXPIRED_WORKFLOWS_SQL, params)
+    await session.commit()
+    # 4 workflows x 3 nodes against a budget of 6 node rows: two fit.
+    assert int(first.rowcount or 0) == 2
+    assert await _count(session, 'horsies_workflows') == 2
+    assert await _count(session, 'horsies_workflow_tasks') == 6
+
+    second = await session.execute(DELETE_EXPIRED_WORKFLOWS_SQL, params)
+    await session.commit()
+    assert int(second.rowcount or 0) == 2
+    assert await _count(session, 'horsies_workflows') == 0
+    assert await _count(session, 'horsies_workflow_tasks') == 0
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_workflow_larger_than_budget_still_drains(
+    engine: AsyncEngine,
+    session: AsyncSession,
+) -> None:
+    """A workflow with more nodes than the whole budget deletes alone
+    (position = 1 in the budget window) instead of starving forever."""
+    _ = engine
+    await _truncate_retention_tables(session)
+
+    await _insert_doomed_workflow(session, name='wf_jumbo', node_count=9)
+    await session.commit()
+
+    result = await session.execute(
+        DELETE_EXPIRED_WORKFLOWS_SQL,
+        {'retention_hours': _RETENTION_HOURS, 'batch_size': 4},
+    )
+    await session.commit()
+
+    assert int(result.rowcount or 0) == 1
+    assert await _count(session, 'horsies_workflows') == 0
+    assert await _count(session, 'horsies_workflow_tasks') == 0
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -301,7 +387,6 @@ async def test_retention_keeps_terminal_workflow_with_live_task(
         'batch_size': _BATCH_SIZE,
         'excluded_queues': [],
     }
-    await session.execute(DELETE_EXPIRED_WORKFLOW_TASKS_SQL, params)
     await session.execute(DELETE_EXPIRED_WORKFLOWS_SQL, params)
     await session.execute(DELETE_EXPIRED_TASKS_SQL, params)
     await session.commit()
@@ -964,13 +1049,6 @@ async def test_retention_delete_statements_plan_on_retention_indexes(
         session, DELETE_EXPIRED_WORKFLOWS_SQL.text, params,
     )
     assert 'idx_horsies_workflows_retention' in workflows_plan, workflows_plan
-
-    workflow_tasks_plan = await _explain_analyze_plan(
-        session, DELETE_EXPIRED_WORKFLOW_TASKS_SQL.text, params,
-    )
-    assert 'idx_horsies_workflows_retention' in workflow_tasks_plan, (
-        workflow_tasks_plan
-    )
 
     # Non-empty exclusion exercises the production shape when overrides
     # exist; the exclusion is a heap filter and must not change the plan.
