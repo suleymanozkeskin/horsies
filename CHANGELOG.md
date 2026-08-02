@@ -8,6 +8,49 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-08-02
+
+Monitoring read-path performance release. Schema v16
+(`idx_horsies_tasks_enqueued_at`, `idx_horsies_tasks_task_name`). At 1M
+rows / 1.3GB heap, the task list drops from ~167k buffer reads (full seq
+scan + top-N sort per page view) to 53, and the unfiltered task-name facet
+from ~167k to ~1.2k (index-only scan).
+
+### Added
+
+- Schema v16: indexes for the monitoring read path — `enqueued_at`
+  (task list default sort) and `task_name` (facet index-only scan).
+  Neither column appears in any worker-path predicate or leading sort
+  key; a plan test pins the claim statement to
+  `idx_horsies_tasks_claim_pending`.
+- Plan tests for the monitoring list, task-name facet, and claim
+  statement (EXPLAIN-based, same mechanism as the retention plan tests).
+
+### Changed
+
+- `list_tasks` loads only the columns the list view renders; `args`,
+  `kwargs`, `result`, and `task_options` are no longer fetched, so a
+  list page stops shipping task payloads (previously up to several MB
+  of egress per 50-row page) and stops detoasting large results.
+- `TaskListPage.total` is a planner estimate (`pg_class.reltuples`) on
+  the unfiltered view; any active filter keeps the exact count. A
+  never-sampled table falls back to the exact count.
+- Sort ordering wraps only nullable sort keys in `NULLS LAST`. On the
+  NOT NULL `enqueued_at` the wrapper was semantically inert but blocked
+  index-order scans (`DESC NULLS LAST` does not match a plain btree's
+  `DESC`); results are unchanged.
+- Web UI: the task aggregates (stats, facets, breakdown) no longer
+  refetch on every task event (the server debounce emits up to 4
+  events/s under load). They refresh on their existing cadences
+  (10s/12s/30s) in both live and fallback modes, on stream reconnect,
+  and on explicit user action. SSE keeps driving the task list, task
+  detail, and workflow run/node views.
+
+### Fixed
+
+- Docs changelog frontmatter failed YAML parsing (a `: ` sequence in the
+  0.4.2 summary); the docs site had not deployed since the v0.4.2 merge.
+
 ## [0.4.2] - 2026-08-01
 
 Retention and payload-path performance release. Schema v15

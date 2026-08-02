@@ -81,22 +81,26 @@ monitoring NOTIFY channels (`horsies_task_status`, `horsies_workflow_status`,
 `GET /api/events`. Payloads are ids, never data: an event says which surface
 changed, and the browser refetches through the normal endpoints.
 
-While the stream is connected, interval polling is off. Two queries are exempt:
+Events drive the row-level surfaces: the task list, task detail, and workflow
+run/node views. The task aggregates (stats, facets, breakdown) are
+timer-driven in both modes — they are whole-table aggregations whose value
+does not change meaningfully per event, and under load the server emits a
+coalesced task event up to 4×/s:
 
 | Query | Cadence | Reason |
 |---|---|---|
+| Task stats | 10 s, always | Aggregate; event-decoupled |
+| Facets | 30 s, always | Aggregate; event-decoupled |
+| Breakdown | 12 s, while the grouping view is active | Aggregate; event-decoupled |
 | Schedules | 15 s, always | `horsies_schedule_state` has no NOTIFY trigger |
 | Liveness ping | Manual only | An active round trip, not a read |
 
 When the stream drops, the client reconnects with exponential backoff from 1 s
 to a 30 s ceiling. If it stays down longer than 5 seconds, interval polling
-takes over at these cadences until it reconnects:
+takes over for the event-driven queries at these cadences until it reconnects:
 
 | Query | Interval | Condition |
 |---|---|---|
-| Task stats | 10 s | always |
-| Facets | 30 s | always |
-| Breakdown | 12 s | while the grouping view is active |
 | Task list | 8 s | only while a visible row is PENDING, CLAIMED, or RUNNING |
 | Task detail | 4 s | only while the task is PENDING, CLAIMED, or RUNNING |
 | Workers | 5 s | always |
@@ -105,12 +109,16 @@ takes over at these cadences until it reconnects:
 | Workflow run detail | 4 s | only while the run is PENDING, RUNNING, READY, or ENQUEUED |
 | Node detail | 4 s | only while the node is PENDING, RUNNING, READY, or ENQUEUED |
 
-On reconnect the client invalidates every event-covered query once, because an
-arbitrary number of events were missed while it was down.
+On reconnect the client invalidates every event-covered query once — and the
+timer-driven aggregates once as well, because an arbitrary number of changes
+were missed while it was down.
 
-Stats, facets, and the grouping breakdown are full-table aggregates over
-`horsies_tasks`. Retention bounds the table, the cadences above are deliberately
-spaced, and each open dashboard multiplies the load.
+Stats, facets, and the grouping breakdown aggregate over `horsies_tasks`;
+unfiltered, each facet dimension is an index-only scan (schema v16), so cost
+is bounded by index size rather than heap size. Retention bounds the table,
+the cadences above are deliberately spaced, and each open dashboard
+multiplies the load. The task list's `total` is a planner estimate on the
+unfiltered view and exact under any active filter.
 
 If the server's listener fails and cannot reconnect, the stream emits a
 `degraded` event and closes; the client falls back to polling and keeps
