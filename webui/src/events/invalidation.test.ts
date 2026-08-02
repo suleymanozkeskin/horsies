@@ -48,16 +48,25 @@ describe('event parsing', () => {
 });
 
 describe('topic to invalidation mapping', () => {
-  it('maps tasks to the list, aggregates and both open details', () => {
+  it('maps tasks to the list and both open details, never the aggregates', () => {
     expect(invalidationRootsFor({ topic: 'tasks', ids: ['t1'] })).toEqual([
       QUERY_ROOT.taskList,
-      QUERY_ROOT.taskStats,
-      QUERY_ROOT.taskFacets,
-      QUERY_ROOT.taskBreakdown,
       QUERY_ROOT.taskDetail,
       QUERY_ROOT.workflowRun,
       QUERY_ROOT.workflowNode,
     ]);
+  });
+
+  it('keeps the aggregates off every event topic — they refresh on timers', () => {
+    for (const topic of ['tasks', 'workflows', 'workers'] as const) {
+      for (const aggregate of [
+        QUERY_ROOT.taskStats,
+        QUERY_ROOT.taskFacets,
+        QUERY_ROOT.taskBreakdown,
+      ]) {
+        expect(TOPIC_INVALIDATIONS[topic]).not.toContain(aggregate);
+      }
+    }
   });
 
   it('maps workflows to the runs list and the open run detail', () => {
@@ -94,11 +103,14 @@ describe('topic to invalidation mapping', () => {
 });
 
 describe('reconnect sweep', () => {
-  it('covers every root any topic can invalidate, without duplicates', () => {
+  it('covers every event-driven root plus the timer-driven aggregates, without duplicates', () => {
     const union = new Set([
       ...TOPIC_INVALIDATIONS.tasks,
       ...TOPIC_INVALIDATIONS.workflows,
       ...TOPIC_INVALIDATIONS.workers,
+      QUERY_ROOT.taskStats,
+      QUERY_ROOT.taskFacets,
+      QUERY_ROOT.taskBreakdown,
     ]);
     expect(new Set(RECONNECT_SWEEP_ROOTS)).toEqual(union);
     expect(RECONNECT_SWEEP_ROOTS.length).toBe(union.size);
