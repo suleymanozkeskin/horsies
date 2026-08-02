@@ -1,8 +1,11 @@
 // Task list / stats / facets / breakdown queries.
 //
-// Freshness comes from SSE invalidation while the stream is up; the intervals
-// below only apply in fallback mode. They are deliberately spaced — each of
-// these is a full-table aggregation, and every open dashboard multiplies it.
+// The list's freshness comes from SSE invalidation while the stream is up;
+// its interval only applies in fallback mode. The aggregates (stats, facets,
+// breakdown) are decoupled from the event stream entirely: each is a
+// whole-table aggregation, so they refresh on their spaced timers in both
+// modes, with staleTime matching the timer so navigation inside a cycle
+// serves the cached value instead of refetching.
 
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 
@@ -44,11 +47,11 @@ export function useTaskStats(filters: TaskFilters): {
   isError: boolean;
   refetch: () => void;
 } {
-  const mode = useLiveMode();
   const { data, isError, refetch } = useQuery({
     queryKey: queryKeys.taskStats(filters),
     queryFn: () => getTaskStats(filters),
-    refetchInterval: fallbackInterval(mode, POLL_STATS_MS),
+    refetchInterval: POLL_STATS_MS,
+    staleTime: POLL_STATS_MS,
   });
   return {
     stats: data ?? [],
@@ -64,7 +67,6 @@ export function useFacets(scope: {
   error_category?: string[];
   retried_only?: boolean;
 }): { facets: Facets | undefined; isError: boolean } {
-  const mode = useLiveMode();
   const status = scope.status ?? [];
   const errorCategory = scope.error_category ?? [];
   const retriedOnly = scope.retried_only ?? false;
@@ -76,7 +78,8 @@ export function useFacets(scope: {
         error_category: errorCategory,
         retried_only: retriedOnly,
       }),
-    refetchInterval: fallbackInterval(mode, POLL_FACETS_MS),
+    refetchInterval: POLL_FACETS_MS,
+    staleTime: POLL_FACETS_MS,
   });
   return { facets: data, isError };
 }
@@ -91,12 +94,12 @@ export function useBreakdown(
   isError: boolean;
   refetch: () => void;
 } {
-  const mode = useLiveMode();
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: queryKeys.taskBreakdown(groupBy, filters),
     enabled,
     queryFn: () => getBreakdown(groupBy, filters),
-    refetchInterval: fallbackInterval(mode, POLL_BREAKDOWN_MS),
+    refetchInterval: POLL_BREAKDOWN_MS,
+    staleTime: POLL_BREAKDOWN_MS,
     placeholderData: keepPreviousData,
   });
   return {
