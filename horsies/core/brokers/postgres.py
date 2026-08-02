@@ -112,9 +112,11 @@ from horsies.core.schemas.indexes import (
     CREATE_TASKS_CLAIM_PENDING_INDEX_SQL,
     CREATE_HEARTBEATS_SENT_AT_INDEX_SQL,
     CREATE_TASKS_CLAIM_EXPIRED_ORDERED_INDEX_SQL,
+    CREATE_TASKS_ENQUEUED_AT_INDEX_SQL,
     CREATE_TASKS_ERROR_CODE_INDEX_SQL,
     CREATE_TASKS_RETENTION_INDEX_SQL,
     CREATE_TASKS_QUEUE_RETENTION_INDEX_SQL,
+    CREATE_TASKS_TASK_NAME_INDEX_SQL,
     CREATE_TASKS_WORKER_STATUS_INDEX_SQL,
     CREATE_WORKER_STATES_SNAPSHOT_AT_INDEX_SQL,
     CREATE_WORKER_STATES_WORKER_SNAPSHOT_INDEX_SQL,
@@ -886,6 +888,11 @@ class PostgresBroker:
             # per-queue override deletes
             # (queue_terminal_record_retention_hours).
             await conn.execute(CREATE_TASKS_QUEUE_RETENTION_INDEX_SQL)
+
+            # Migration (v16): monitoring read-path indexes — task list
+            # default sort and task-name facet.
+            await conn.execute(CREATE_TASKS_ENQUEUED_AT_INDEX_SQL)
+            await conn.execute(CREATE_TASKS_TASK_NAME_INDEX_SQL)
 
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
