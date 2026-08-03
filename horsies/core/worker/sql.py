@@ -229,8 +229,16 @@ GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL = text("""
       AND w.status IN ('PAUSED', 'CANCELLED')
 """)
 
+# Claim-generation fence (C10), pairwise: this guard runs in a transaction of
+# its own after the claim committed, so a lease can lapse, the reaper can
+# requeue, and this same worker can re-claim before the abandon lands. The
+# (status, worker) pair cannot reject that — the row is CLAIMED by this worker
+# again. Tasks in one batch may come from different claim transactions, so the
+# generation travels alongside each id rather than as one scalar. A NULL entry
+# disables the fence for that task, matching UNCLAIM_CLAIMED_TASK_SQL, so a
+# claim path that does not report claimed_at still abandons rather than skips.
 UNCLAIM_PAUSED_TASKS_SQL = text("""
-    UPDATE horsies_tasks
+    UPDATE horsies_tasks t
     SET status = 'CANCELLED',
         claimed = FALSE,
         claimed_at = NULL,
@@ -242,10 +250,15 @@ UNCLAIM_PAUSED_TASKS_SQL = text("""
         failed_reason = 'Workflow paused before task start',
         terminal_at = NOW(),
         updated_at = NOW()
-    WHERE id = ANY(:ids)
-      AND status = 'CLAIMED'
-      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
-    RETURNING id
+    FROM unnest(
+        CAST(:ids AS VARCHAR[]),
+        CAST(:claimed_ats AS TIMESTAMPTZ[])
+    ) AS g(id, claimed_at)
+    WHERE t.id = g.id
+      AND t.status = 'CLAIMED'
+      AND t.claimed_by_worker_id = CAST(:wid AS VARCHAR)
+      AND (g.claimed_at IS NULL OR t.claimed_at = g.claimed_at)
+    RETURNING t.id
 """)
 
 # The optional :claimed_at fence scopes the release to a specific claim
@@ -281,8 +294,10 @@ RESET_PAUSED_WORKFLOW_TASKS_SQL = text("""
       AND status IN ('ENQUEUED', 'RUNNING')
 """)
 
+# Same pairwise claim-generation fence as UNCLAIM_PAUSED_TASKS_SQL; both run
+# from the post-claim guard and share its staleness window.
 CANCEL_CANCELLED_WORKFLOW_TASKS_SQL = text("""
-    UPDATE horsies_tasks
+    UPDATE horsies_tasks t
     SET status = 'CANCELLED',
         claimed = FALSE,
         claimed_at = NULL,
@@ -292,10 +307,15 @@ CANCEL_CANCELLED_WORKFLOW_TASKS_SQL = text("""
         finalizing_by_worker_id = NULL,
         terminal_at = NOW(),
         updated_at = NOW()
-    WHERE id = ANY(:ids)
-      AND status = 'CLAIMED'
-      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
-    RETURNING id
+    FROM unnest(
+        CAST(:ids AS VARCHAR[]),
+        CAST(:claimed_ats AS TIMESTAMPTZ[])
+    ) AS g(id, claimed_at)
+    WHERE t.id = g.id
+      AND t.status = 'CLAIMED'
+      AND t.claimed_by_worker_id = CAST(:wid AS VARCHAR)
+      AND (g.claimed_at IS NULL OR t.claimed_at = g.claimed_at)
+    RETURNING t.id
 """)
 
 SKIP_CANCELLED_WORKFLOW_TASKS_SQL = text("""

@@ -440,17 +440,38 @@ class TestUnclaimSqlClearsLeaseExpiry:
         """Paused workflow cleanup must only cancel rows owned by this worker."""
         sql_text = UNCLAIM_PAUSED_TASKS_SQL.text
         normalised = ' '.join(sql_text.split())
-        assert "status = 'CLAIMED'" in normalised
-        assert 'claimed_by_worker_id = CAST(:wid AS VARCHAR)' in normalised
-        assert 'RETURNING id' in normalised
+        assert "t.status = 'CLAIMED'" in normalised
+        assert 't.claimed_by_worker_id = CAST(:wid AS VARCHAR)' in normalised
+        assert 'RETURNING t.id' in normalised
 
     def test_cancel_cancelled_workflow_tasks_matches_only_current_worker_claims(self) -> None:
         """Cancelled workflow cleanup must only cancel rows owned by this worker."""
         sql_text = CANCEL_CANCELLED_WORKFLOW_TASKS_SQL.text
         normalised = ' '.join(sql_text.split())
-        assert "status = 'CLAIMED'" in normalised
-        assert 'claimed_by_worker_id = CAST(:wid AS VARCHAR)' in normalised
-        assert 'RETURNING id' in normalised
+        assert "t.status = 'CLAIMED'" in normalised
+        assert 't.claimed_by_worker_id = CAST(:wid AS VARCHAR)' in normalised
+        assert 'RETURNING t.id' in normalised
+
+    def test_post_claim_guards_fence_on_the_claim_generation(self) -> None:
+        """Both post-claim guards carry a pairwise claim-generation fence.
+
+        The guard runs in its own transaction after the claim committed, so a
+        lapsed-and-re-claimed row is CLAIMED by this worker again and the
+        (status, worker) pair alone cannot reject it. Generations travel
+        alongside ids because one batch can span claim transactions.
+        """
+        for statement in (
+            UNCLAIM_PAUSED_TASKS_SQL,
+            CANCEL_CANCELLED_WORKFLOW_TASKS_SQL,
+        ):
+            normalised = ' '.join(statement.text.split())
+            assert 'unnest(' in normalised
+            assert 'CAST(:claimed_ats AS TIMESTAMPTZ[])' in normalised
+            assert 'AS g(id, claimed_at)' in normalised
+            assert (
+                '(g.claimed_at IS NULL OR t.claimed_at = g.claimed_at)'
+                in normalised
+            )
 
     def test_unclaim_claimed_task_clears_runtime_metadata(self) -> None:
         """RUNNING task requeue must clear stale runtime metadata."""

@@ -175,6 +175,14 @@ class ClaimMixin:
             return rows
 
         task_ids = [row['id'] for row in workflow_rows]
+        # The claim generation each row was dispatched from. This guard runs
+        # after the claim transaction committed, so it fences the abandon to
+        # that generation (C10); without it a lapsed-and-re-claimed row is
+        # still CLAIMED by this worker and would be cancelled out from under
+        # its new claim.
+        claimed_at_by_task_id: dict[str, Any] = {
+            row['id']: row.get('claimed_at') for row in workflow_rows
+        }
         paused_task_ids: set[str] = set()
         cancelled_task_ids: set[str] = set()
 
@@ -194,9 +202,17 @@ class ClaimMixin:
 
             if paused_task_ids:
                 # Unclaim paused-workflow tasks so they can be picked up on resume.
+                paused_ids = list(paused_task_ids)
                 paused_res = await s.execute(
                     UNCLAIM_PAUSED_TASKS_SQL,
-                    {'ids': list(paused_task_ids), 'wid': self.worker_instance_id},
+                    {
+                        'ids': paused_ids,
+                        'claimed_ats': [
+                            claimed_at_by_task_id.get(task_id)
+                            for task_id in paused_ids
+                        ],
+                        'wid': self.worker_instance_id,
+                    },
                 )
                 unclaimed_paused_task_ids = [
                     str(task_id) for task_id in paused_res.scalars().all()
@@ -210,9 +226,17 @@ class ClaimMixin:
 
             if cancelled_task_ids:
                 # Cancel this worker's claimed task rows so they are no longer claimable.
+                cancelled_ids = list(cancelled_task_ids)
                 cancelled_res = await s.execute(
                     CANCEL_CANCELLED_WORKFLOW_TASKS_SQL,
-                    {'ids': list(cancelled_task_ids), 'wid': self.worker_instance_id},
+                    {
+                        'ids': cancelled_ids,
+                        'claimed_ats': [
+                            claimed_at_by_task_id.get(task_id)
+                            for task_id in cancelled_ids
+                        ],
+                        'wid': self.worker_instance_id,
+                    },
                 )
                 cancelled_owned_task_ids = [
                     str(task_id) for task_id in cancelled_res.scalars().all()
