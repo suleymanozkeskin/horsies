@@ -44,8 +44,10 @@ from horsies.core.lifecycle.fences import (
     CallerHoldsRowLock,
     OwnedClaim,
     OwnedClaimBatch,
-    WorkflowStateUnderLock,
+    PriorLockedRead,
+    WorkerOwned,
 )
+from horsies.core.types.status import TaskStatus
 from tests.lifecycle_matrix import MATRIX
 
 pytestmark = [pytest.mark.unit]
@@ -56,21 +58,13 @@ _PAYLOAD = TerminalResultPayload(
 )
 _OWNED = OwnedClaim(worker_id='w1', claimed_at=_GENERATION)
 _BATCH = OwnedClaimBatch(worker_id='w1', claim_generations=(('t1', _GENERATION),))
-_PAUSED = WorkflowStateUnderLock(
-    workflow_ids=('wf1',),
-    required_workflow_status='PAUSED',
-    required_node_statuses=('ENQUEUED', 'RUNNING'),
-)
-_CANCELLED_WF = WorkflowStateUnderLock(
-    workflow_ids=('wf1',),
-    required_workflow_status='CANCELLED',
-    required_node_statuses=('ENQUEUED',),
-)
+_LOCKED_READ = PriorLockedRead(worker_id='w1')
+_WORKER = WorkerOwned(worker_id='w1')
 
 # One instance of every variant. Anything missing here fails the count check
 # below rather than silently going unexercised by the dispatch tests.
 ONE_OF_EACH: tuple[TerminalizationCommand, ...] = (
-    CompleteLockedTask(task_id='t1', worker_id='w1', payload=_PAYLOAD),
+    CompleteLockedTask(task_id='t1', fence=_LOCKED_READ, payload=_PAYLOAD),
     CompleteTaskFused(
         task_id='t1',
         fence=_OWNED,
@@ -78,26 +72,26 @@ ONE_OF_EACH: tuple[TerminalizationCommand, ...] = (
         notify_channel='task_queue_default',
         notify_payload='capacity:t1',
     ),
-    FailLockedTask(task_id='t1', worker_id='w1', payload=_PAYLOAD),
+    FailLockedTask(task_id='t1', fence=_LOCKED_READ, payload=_PAYLOAD),
     FailStaleTask(
         task_id='t1',
         stale_after_seconds=60,
         finalizing_stale_after_seconds=60,
         payload=_PAYLOAD,
     ),
-    ExpireOwnedClaim(task_id='t1', worker_id='w1', payload=_PAYLOAD),
+    ExpireOwnedClaim(task_id='t1', fence=_WORKER, payload=_PAYLOAD),
     ExpirePendingTasks(batch_size=100, payload=_PAYLOAD),
     CancelLockedTask(
         task_id='t1',
         fence=CallerHoldsRowLock(),
-        permitted_source_statuses=('PENDING', 'CLAIMED'),
+        permitted_source_statuses=(TaskStatus.PENDING, TaskStatus.CLAIMED),
         payload=_PAYLOAD,
     ),
     CancelOwnedOrphan(task_id='t1', fence=_OWNED, payload=_PAYLOAD),
     CancelOrphanedTasks(batch_size=100, payload=_PAYLOAD),
     AbandonOwnedNode(task_id='t1', fence=_OWNED, payload=_PAYLOAD),
     AbandonOwnedNodes(fence=_BATCH, payload=_PAYLOAD),
-    AbandonNodesOfPausedWorkflows(fence=_PAUSED, payload=_PAYLOAD),
+    AbandonNodesOfPausedWorkflows(workflow_ids=('wf1',), payload=_PAYLOAD),
     CancelOwnedNode(
         task_id='t1',
         fence=_OWNED,
@@ -105,7 +99,7 @@ ONE_OF_EACH: tuple[TerminalizationCommand, ...] = (
         payload=_PAYLOAD,
     ),
     CancelOwnedNodes(fence=_BATCH, payload=_PAYLOAD),
-    CancelNodesOfCancelledWorkflow(fence=_CANCELLED_WF, payload=_PAYLOAD),
+    CancelNodesOfCancelledWorkflow(workflow_ids=('wf1',), payload=_PAYLOAD),
 )
 
 
@@ -131,7 +125,7 @@ class TestUnionMatchesTheWriters:
 
     def test_target_statuses_cover_the_writers(self) -> None:
         """Every status the writers produce is produced by some command."""
-        from_commands = {target_status(c) for c in ONE_OF_EACH}
+        from_commands = {target_status(c).value for c in ONE_OF_EACH}
         from_writers = {row.target_status for row in MATRIX}
         assert from_commands == from_writers
 
@@ -143,9 +137,7 @@ class TestDispatchIsExhaustive:
         command: TerminalizationCommand,
     ) -> None:
         """No variant falls through; the checker rejects an omitted case."""
-        assert target_status(command) in {
-            'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED',
-        }
+        assert target_status(command).is_terminal
 
     @pytest.mark.parametrize('command', ONE_OF_EACH, ids=lambda c: type(c).__name__)
     def test_fence_of_returns_for_every_variant(
@@ -175,10 +167,25 @@ class TestIllegalStatesAreUnrepresentable:
                 assert not isinstance(fence_of(command), OwnedClaimBatch)
 
     def test_workflow_scoped_commands_carry_no_task_ids(self) -> None:
-        """The guard describes its targets; a separate id list could disagree."""
+        """They select whole workflows; a task id list could disagree."""
         for command in ONE_OF_EACH:
-            if isinstance(fence_of(command), WorkflowStateUnderLock):
+            if hasattr(command, 'workflow_ids'):
                 assert not hasattr(command, 'task_id'), type(command).__name__
+                assert fence_of(command) is None, type(command).__name__
+
+    def test_required_workflow_status_is_implied_by_the_variant(self) -> None:
+        """No command names the workflow status its guard requires.
+
+        Carrying it as data would let a pause command verify a cancellation —
+        the same defect a disposition field would introduce, one level down in
+        the fence. The absence of this test is what let that survive review
+        once already, so it is asserted rather than argued.
+        """
+        for command in ONE_OF_EACH:
+            fields = {f.name for f in dataclasses.fields(command)}
+            assert 'required_workflow_status' not in fields
+            assert 'required_node_statuses' not in fields
+            assert 'workflow_status' not in fields
 
     def test_node_disposition_is_implied_by_the_variant(self) -> None:
         """No command carries a disposition field that could contradict it.
@@ -198,3 +205,49 @@ class TestIllegalStatesAreUnrepresentable:
             assert dataclasses.is_dataclass(command)
             with pytest.raises(dataclasses.FrozenInstanceError):
                 setattr(command, 'payload', _PAYLOAD)
+
+
+class TestClaimBatchPreconditions:
+    """A batch fence is only meaningful if each task appears once."""
+
+    def test_duplicate_task_id_is_rejected_at_construction(self) -> None:
+        """Two generations for one row make the fence ambiguous.
+
+        Caught where the batch is built rather than discovered as a row count
+        that does not match expectations.
+        """
+        with pytest.raises(ValueError, match='duplicate task id'):
+            OwnedClaimBatch(
+                worker_id='w1',
+                claim_generations=(('t1', _GENERATION), ('t1', None)),
+            )
+
+    def test_distinct_task_ids_are_accepted(self) -> None:
+        batch = OwnedClaimBatch(
+            worker_id='w1',
+            claim_generations=(('t1', _GENERATION), ('t2', None)),
+        )
+        assert batch.task_ids() == ('t1', 't2')
+        assert batch.generations() == (_GENERATION, None)
+
+
+class TestFenceCoverageMatchesTheWriters:
+    """Every ownership model the writers use has exactly one fence type."""
+
+    def test_fence_kinds_used_match_the_writer_fence_kinds(self) -> None:
+        from tests.lifecycle_matrix import Fence
+
+        used = {
+            type(fence_of(c)).__name__ if fence_of(c) is not None else None
+            for c in ONE_OF_EACH
+        }
+        expected = {
+            Fence.CALLER_ROW_LOCK: 'CallerHoldsRowLock',
+            Fence.PRIOR_LOCKED_SELECT: 'PriorLockedRead',
+            Fence.WORKER: 'WorkerOwned',
+            Fence.WORKER_AND_GENERATION: 'OwnedClaim',
+            Fence.WORKER_AND_GENERATION_PAIRWISE: 'OwnedClaimBatch',
+            Fence.NONE: None,
+        }
+        from_matrix = {expected[row.fence] for row in MATRIX}
+        assert used == from_matrix

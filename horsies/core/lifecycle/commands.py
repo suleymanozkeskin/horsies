@@ -9,14 +9,14 @@ so needs its own contract.
 The count is not the point and compression was never the goal. What this
 vocabulary buys is that states which cannot occur cannot be written down: a
 batch fence cannot be attached to a single-task command, a pause disposition
-cannot be attached to a cancellation, and a workflow-scoped guard cannot carry
-task ids it does not guard. Each variant holds exactly the data its guard
-needs, so the two cannot disagree.
+cannot be attached to a cancellation, and a workflow-scoped command cannot name
+the workflow status it requires — the variant means it. Each variant holds
+exactly the data its guard needs and nothing that could contradict it.
 
 One union, not one per cardinality. Cardinality is variant identity here — a
 separate batch union would encode shape twice and let the two encodings drift.
 
-`tests/unit/test_lifecycle_matrix.py` asserts this union against the writer
+`tests/unit/test_lifecycle_commands.py` asserts this union against the writer
 matrix: a new writer differing in any signature field forces a new variant, and
 a variant matching an existing signature has to justify itself or merge.
 """
@@ -25,11 +25,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..types.status import TaskStatus
 from .fences import (
     CallerHoldsRowLock,
     OwnedClaim,
     OwnedClaimBatch,
-    WorkflowStateUnderLock,
+    PriorLockedRead,
+    TerminalFence,
+    WorkerOwned,
 )
 
 
@@ -60,7 +63,7 @@ class CompleteLockedTask:
     """
 
     task_id: str
-    worker_id: str
+    fence: PriorLockedRead
     payload: TerminalResultPayload
 
 
@@ -97,7 +100,7 @@ class FailLockedTask:
     """
 
     task_id: str
-    worker_id: str
+    fence: PriorLockedRead
     payload: TerminalResultPayload
 
 
@@ -132,7 +135,7 @@ class ExpireOwnedClaim:
     """
 
     task_id: str
-    worker_id: str
+    fence: WorkerOwned
     payload: TerminalResultPayload
 
 
@@ -167,7 +170,7 @@ class CancelLockedTask:
 
     task_id: str
     fence: CallerHoldsRowLock
-    permitted_source_statuses: tuple[str, ...]
+    permitted_source_statuses: tuple[TaskStatus, ...]
     payload: TerminalResultPayload
 
 
@@ -233,7 +236,7 @@ class AbandonNodesOfPausedWorkflows:
     the pause is exactly what must be abandoned.
     """
 
-    fence: WorkflowStateUnderLock
+    workflow_ids: tuple[str, ...]
     payload: TerminalResultPayload
 
 
@@ -275,7 +278,7 @@ class CancelNodesOfCancelledWorkflow:
     begun executing whatever its task row says.
     """
 
-    fence: WorkflowStateUnderLock
+    workflow_ids: tuple[str, ...]
     payload: TerminalResultPayload
 
 
@@ -298,15 +301,15 @@ type TerminalizationCommand = (
 )
 
 
-def target_status(command: TerminalizationCommand) -> str:
+def target_status(command: TerminalizationCommand) -> TaskStatus:
     """The status the command writes. Exhaustive over the union."""
     match command:
         case CompleteLockedTask() | CompleteTaskFused():
-            return 'COMPLETED'
+            return TaskStatus.COMPLETED
         case FailLockedTask() | FailStaleTask():
-            return 'FAILED'
+            return TaskStatus.FAILED
         case ExpireOwnedClaim() | ExpirePendingTasks():
-            return 'EXPIRED'
+            return TaskStatus.EXPIRED
         case (
             CancelLockedTask()
             | CancelOwnedOrphan()
@@ -318,40 +321,39 @@ def target_status(command: TerminalizationCommand) -> str:
             | CancelOwnedNodes()
             | CancelNodesOfCancelledWorkflow()
         ):
-            return 'CANCELLED'
+            return TaskStatus.CANCELLED
 
 
-def fence_of(command: TerminalizationCommand) -> object:
-    """The command's concurrency guard, for outcome reporting.
+def fence_of(command: TerminalizationCommand) -> TerminalFence | None:
+    """The command's claim-ownership guard, for outcome reporting.
 
-    Commands whose guard is a locked read the caller already performed have no
-    in-statement fence to report.
+    None means the statement carries no ownership predicate. Three kinds of
+    command have none, for three different reasons: stale recovery and batch
+    expiry act across workers because the owner is by hypothesis absent or
+    irrelevant; orphan sweeping acts on rows whose linkage, not their claim, is
+    the defect; and the workflow-scoped commands must reach claims other
+    workers hold, so an ownership predicate would skip their whole purpose.
     """
     match command:
+        case CompleteLockedTask(fence=fence) | FailLockedTask(fence=fence):
+            return fence
         case CompleteTaskFused(fence=fence):
+            return fence
+        case ExpireOwnedClaim(fence=fence):
             return fence
         case CancelLockedTask(fence=fence):
             return fence
         case CancelOwnedOrphan(fence=fence):
             return fence
-        case AbandonOwnedNode(fence=fence):
+        case AbandonOwnedNode(fence=fence) | CancelOwnedNode(fence=fence):
             return fence
-        case AbandonOwnedNodes(fence=fence):
-            return fence
-        case AbandonNodesOfPausedWorkflows(fence=fence):
-            return fence
-        case CancelOwnedNode(fence=fence):
-            return fence
-        case CancelOwnedNodes(fence=fence):
-            return fence
-        case CancelNodesOfCancelledWorkflow(fence=fence):
+        case AbandonOwnedNodes(fence=fence) | CancelOwnedNodes(fence=fence):
             return fence
         case (
-            CompleteLockedTask()
-            | FailLockedTask()
-            | FailStaleTask()
-            | ExpireOwnedClaim()
+            FailStaleTask()
             | ExpirePendingTasks()
             | CancelOrphanedTasks()
+            | AbandonNodesOfPausedWorkflows()
+            | CancelNodesOfCancelledWorkflow()
         ):
             return None
