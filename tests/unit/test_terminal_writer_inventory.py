@@ -1,26 +1,28 @@
 """Frozen allowlist of terminal-status writers on ``horsies_tasks``.
 
 Sixteen SQL statements in the runtime package can move a task row to a
-terminal status (T01-T16 in the terminalization decision record,
-``roadmap/terminalization-decisions-2026-08-03.md`` Appendix A). Until the
-terminalization consolidation installs module-boundary enforcement (plan
-Phase T8), this inventory is the tripwire: a seventeenth terminal writer —
-or a removed, moved, or status-drifted one — fails here and must be
-reviewed against the terminalization plan before the allowlist changes.
+terminal status. Until terminal writes are consolidated behind a single
+persistence module that can be enforced structurally, this inventory is the
+tripwire: a seventeenth terminal writer — or a removed, moved, or
+status-drifted one — fails here and must be reviewed before the allowlist
+changes.
+
+``tests/lifecycle_matrix.py`` describes what each of these writers does, and
+is cross-checked against this allowlist.
 
 Scope: UPDATE statements assigning ``status`` on ``horsies_tasks`` in any
 string literal of the runtime package — SQLAlchemy ``text()`` statements,
 raw psycopg SQL, and DDL function bodies alike. Writers assigning only
 live statuses (PENDING/CLAIMED/RUNNING) are out of scope. A parameterized
 ``status = :param`` assignment is terminal-capable and must be listed.
-INSERT-shaped terminal writes are out of scope (none exist; the Phase T8
+INSERT-shaped terminal writes are out of scope (none exist; a structural
 module boundary closes that door for good).
 
 Known limit of static per-string scanning: SQL assembled across separate
 string constants (``HEAD + TAIL`` concatenation, ``.join`` of fragments)
 is not reassembled, so a writer split that way evades this test. No
-runtime SQL is built that way today; the Phase T8 module boundary closes
-this class structurally.
+runtime SQL is built that way today, and routing terminal writes through a
+single persistence module closes this class structurally.
 """
 
 from __future__ import annotations
@@ -373,10 +375,10 @@ class TestTerminalWriterInventory:
         """Every terminal-capable writer is in the allowlist, exactly.
 
         A failure means a terminal writer was added, removed, moved, or
-        changed which statuses it assigns. Do not update the allowlist
-        without reviewing the change against
-        roadmap/terminalization-decisions-2026-08-03.md (Appendix A) and
-        the terminalization consolidation plan.
+        changed which statuses it assigns. Do not update the allowlist to
+        make this pass without establishing that the new write is correct:
+        every entry here is a statement that can end a task's life.
+        ``tests/lifecycle_matrix.py`` must be updated in step.
         """
         discovered = _scan_runtime_package()
         assert discovered == Counter(FROZEN_TERMINAL_WRITERS), (
