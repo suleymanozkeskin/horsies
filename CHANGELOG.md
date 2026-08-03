@@ -8,6 +8,39 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-08-03
+
+Task lifecycle release. Schema v17 (additive).
+
+**0.4.6 adds a CHECK constraint tying `terminal_at` to terminal status.
+Complete your 0.4.5 rollout on every worker before deploying 0.4.6.** The
+constraint rejects terminal writes that omit `terminal_at`, which is what a
+pre-0.4.5 worker produces; a deployment still running mixed versions would
+fail those workers' finalize statements. The requirement is per deployment,
+not a release gate — 0.4.6 ships when ready, and each deployment applies it
+once its own 0.4.5 rollout is complete.
+
+### Changed
+
+- Workflow pause and cancellation no longer terminalize a task whose claim
+  has been replaced. A task whose lease lapsed, was requeued by the reaper,
+  and was re-claimed carries a new claim generation; the abandon or cancel
+  now applies only to the generation it was issued against. Batch statements
+  fence per task, so one batch spanning several claim transactions rejects
+  only the entries whose generation moved. The child pre-start branches fence
+  to their own claim. A requeued `PENDING` row under a cancelled workflow
+  carries no claim to fence and is still cancelled.
+
+### Added
+
+- `horsies_tasks.terminal_at TIMESTAMPTZ` (schema v17): the canonical instant
+  a task became terminal, assigned from database time in the same transaction
+  as the terminal transition and cleared by manual in-place retry. Every
+  terminal transition from this release forward records it. Eight of the
+  terminal paths previously recorded no end timestamp at all, leaving terminal
+  age to fall through to `updated_at`. Nothing reads the column yet;
+  `completed_at` and `failed_at` are unchanged.
+
 ## [0.4.4] - 2026-08-02
 
 Workflow retention performance release. No schema change. At 40k workflows
