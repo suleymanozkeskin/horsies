@@ -35,7 +35,6 @@ from horsies.core.lifecycle.commands import (
     ExpirePendingTasks,
     FailLockedTask,
     FailStaleTask,
-    TerminalResultPayload,
     TerminalizationCommand,
     fence_of,
     target_status,
@@ -53,9 +52,7 @@ from tests.lifecycle_matrix import MATRIX
 pytestmark = [pytest.mark.unit]
 
 _GENERATION = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
-_PAYLOAD = TerminalResultPayload(
-    result_json='{}', error_code='CODE', failed_reason=None,
-)
+_RESULT = '{"ok": null}'
 _OWNED = OwnedClaim(worker_id='w1', claimed_at=_GENERATION)
 _BATCH = OwnedClaimBatch(worker_id='w1', claim_generations=(('t1', _GENERATION),))
 _LOCKED_READ = PriorLockedRead(worker_id='w1')
@@ -64,42 +61,53 @@ _WORKER = WorkerOwned(worker_id='w1')
 # One instance of every variant. Anything missing here fails the count check
 # below rather than silently going unexercised by the dispatch tests.
 ONE_OF_EACH: tuple[TerminalizationCommand, ...] = (
-    CompleteLockedTask(task_id='t1', fence=_LOCKED_READ, payload=_PAYLOAD),
+    CompleteLockedTask(task_id='t1', fence=_LOCKED_READ, result_json=_RESULT),
     CompleteTaskFused(
         task_id='t1',
         fence=_OWNED,
-        payload=_PAYLOAD,
+        result_json=_RESULT,
         notify_channel='task_queue_default',
         notify_payload='capacity:t1',
     ),
-    FailLockedTask(task_id='t1', fence=_LOCKED_READ, payload=_PAYLOAD),
+    FailLockedTask(
+        task_id='t1',
+        fence=_LOCKED_READ,
+        result_json=_RESULT,
+        error_code='TASK_EXCEPTION',
+        failed_reason=None,
+    ),
     FailStaleTask(
         task_id='t1',
         stale_after_seconds=60,
         finalizing_stale_after_seconds=60,
-        payload=_PAYLOAD,
+        result_json=_RESULT,
+        error_code='WORKER_CRASHED',
+        failed_reason='Worker process crashed',
     ),
-    ExpireOwnedClaim(task_id='t1', fence=_WORKER, payload=_PAYLOAD),
-    ExpirePendingTasks(batch_size=100, payload=_PAYLOAD),
+    ExpireOwnedClaim(
+        task_id='t1',
+        fence=_WORKER,
+        result_json=_RESULT,
+        error_code='TASK_EXPIRED',
+    ),
+    ExpirePendingTasks(
+        batch_size=100, result_json=_RESULT, error_code='TASK_EXPIRED',
+    ),
     CancelLockedTask(
         task_id='t1',
         fence=CallerHoldsRowLock(),
         permitted_source_statuses=(TaskStatus.PENDING, TaskStatus.CLAIMED),
-        payload=_PAYLOAD,
     ),
-    CancelOwnedOrphan(task_id='t1', fence=_OWNED, payload=_PAYLOAD),
-    CancelOrphanedTasks(batch_size=100, payload=_PAYLOAD),
-    AbandonOwnedNode(task_id='t1', fence=_OWNED, payload=_PAYLOAD),
-    AbandonOwnedNodes(fence=_BATCH, payload=_PAYLOAD),
-    AbandonNodesOfPausedWorkflows(workflow_ids=('wf1',), payload=_PAYLOAD),
+    CancelOwnedOrphan(task_id='t1', fence=_OWNED),
+    CancelOrphanedTasks(batch_size=100),
+    AbandonOwnedNode(task_id='t1', fence=_OWNED),
+    AbandonOwnedNodes(fence=_BATCH),
+    AbandonNodesOfPausedWorkflows(workflow_ids=('wf1',)),
     CancelOwnedNode(
-        task_id='t1',
-        fence=_OWNED,
-        accepts_requeued_pending=True,
-        payload=_PAYLOAD,
+        task_id='t1', fence=_OWNED, accepts_requeued_pending=True,
     ),
-    CancelOwnedNodes(fence=_BATCH, payload=_PAYLOAD),
-    CancelNodesOfCancelledWorkflow(workflow_ids=('wf1',), payload=_PAYLOAD),
+    CancelOwnedNodes(fence=_BATCH),
+    CancelNodesOfCancelledWorkflow(workflow_ids=('wf1',)),
 )
 
 
@@ -199,12 +207,39 @@ class TestIllegalStatesAreUnrepresentable:
             assert 'disposition' not in fields, type(command).__name__
             assert 'node_status' not in fields, type(command).__name__
 
+    def test_no_variant_carries_an_unaccounted_field(self) -> None:
+        """Every field on every variant is one of these roles, or the test fails.
+
+        Named forbidden fields only catch mistakes already made once. This
+        reads the fields the dataclasses actually have, so the next field
+        nobody thought about has to be justified here before it can ship —
+        which is how a free status field survived review the first time.
+        """
+        permitted = {
+            # what it acts on
+            'task_id', 'workflow_ids', 'batch_size',
+            # what proves it may
+            'fence', 'permitted_source_statuses', 'accepts_requeued_pending',
+            'stale_after_seconds', 'finalizing_stale_after_seconds',
+            # what it records
+            'result_json', 'error_code', 'failed_reason',
+            # what it wakes
+            'notify_channel', 'notify_payload',
+        }
+        for command in ONE_OF_EACH:
+            fields = {f.name for f in dataclasses.fields(command)}
+            assert fields <= permitted, (
+                f'{type(command).__name__} carries unaccounted '
+                f'{sorted(fields - permitted)}'
+            )
+
     def test_every_command_is_frozen(self) -> None:
         """A command is a record of a decision already made, not a builder."""
         for command in ONE_OF_EACH:
             assert dataclasses.is_dataclass(command)
+            first_field = dataclasses.fields(command)[0]
             with pytest.raises(dataclasses.FrozenInstanceError):
-                setattr(command, 'payload', _PAYLOAD)
+                setattr(command, first_field.name, getattr(command, first_field.name))
 
 
 class TestClaimBatchPreconditions:
