@@ -501,8 +501,17 @@ def _handle_workflow_stop_before_start(
     conn: Connection[Any],
     task_id: str,
     workflow_status: str,
+    worker_id: str,
+    claimed_at: Optional[datetime] = None,
 ) -> Tuple[bool, str, Optional[str]]:
     """Skip a task whose workflow is PAUSED/CANCELLED; return the wire tuple.
+
+    Both branches carry the ClaimedOwnerFence pair (worker_id, claimed_at) —
+    the same fence _confirm_ownership_and_set_running applies to the
+    CLAIMED->RUNNING transition. These are claimed pre-start operations, so a
+    row requeued and re-claimed since this child was handed its dispatch is a
+    different claim generation and must not be terminalized here. A NULL
+    claimed_at disables the generation half, matching the ownership confirm.
 
     Raises:
         Exception: DB errors propagate to the wrapped caller,
@@ -533,8 +542,10 @@ def _handle_workflow_stop_before_start(
                     updated_at = NOW()
                 WHERE id = %s
                   AND status = 'CLAIMED'
+                  AND claimed_by_worker_id = %s
+                  AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
                 """,
-                (task_id,),
+                (task_id, worker_id, claimed_at, claimed_at),
             )
             cursor.execute(
                 """
@@ -574,9 +585,19 @@ def _handle_workflow_stop_before_start(
                     terminal_at = NOW(),
                     updated_at = NOW()
                 WHERE id = %s
-                  AND status IN ('CLAIMED', 'PENDING')
+                  AND (
+                      -- Claimed: fence to this child's claim generation.
+                      (status = 'CLAIMED'
+                       AND claimed_by_worker_id = %s
+                       AND (%s::timestamptz IS NULL
+                            OR claimed_at = %s::timestamptz))
+                      -- Requeued to PENDING: the claim is already gone, so
+                      -- there is no generation to fence. The workflow is
+                      -- CANCELLED either way, which is the operative guard.
+                      OR status = 'PENDING'
+                  )
                 """,
-                (task_id,),
+                (task_id, worker_id, claimed_at, claimed_at),
             )
             conn.commit()
             return (False, '', 'WORKFLOW_STOPPED')
@@ -767,6 +788,8 @@ def _confirm_ownership_and_set_running(
                                 conn,
                                 task_id,
                                 workflow_status,
+                                worker_id,
+                                claimed_at,
                             )
                         case _:
                             pass

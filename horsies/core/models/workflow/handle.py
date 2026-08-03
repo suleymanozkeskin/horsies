@@ -152,8 +152,10 @@ MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL = text("""
         terminal_at = NOW(),
         updated_at = NOW()
     FROM horsies_workflow_tasks wt
+    JOIN horsies_workflows w ON w.id = wt.workflow_id
     WHERE wt.workflow_id = :wf_id
       AND wt.task_id = t.id
+      AND w.status = 'CANCELLED'
       AND wt.status = 'ENQUEUED'
       AND t.status IN ('PENDING', 'CLAIMED', 'RUNNING')
 """)

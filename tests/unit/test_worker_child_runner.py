@@ -18,6 +18,7 @@ import json
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Any, Generator
 from unittest.mock import MagicMock, patch, call
 
@@ -659,7 +660,7 @@ class TestHandleWorkflowStopBeforeStart:
         cursor = _FakeCursor()
         conn = _FakeConn(cursor)
         result = _handle_workflow_stop_before_start(
-            cursor, conn, 'task-1', 'CANCELLED',  # type: ignore[arg-type]
+            cursor, conn, 'task-1', 'CANCELLED', 'worker-1',  # type: ignore[arg-type]
         )
         assert result == (False, '', 'WORKFLOW_STOPPED')
         assert conn.commits == 1
@@ -671,7 +672,7 @@ class TestHandleWorkflowStopBeforeStart:
         cursor = _FakeCursor()
         conn = _FakeConn(cursor)
         result = _handle_workflow_stop_before_start(
-            cursor, conn, 'task-2', 'PAUSED',  # type: ignore[arg-type]
+            cursor, conn, 'task-2', 'PAUSED', 'worker-1',  # type: ignore[arg-type]
         )
         assert result == (False, '', 'WORKFLOW_STOPPED')
         assert conn.commits == 1
@@ -685,12 +686,54 @@ class TestHandleWorkflowStopBeforeStart:
         cursor = _FakeCursor()
         conn = _FakeConn(cursor)
         result = _handle_workflow_stop_before_start(
-            cursor, conn, 'task-3', 'UNKNOWN_STATUS',  # type: ignore[arg-type]
+            cursor, conn, 'task-3', 'UNKNOWN_STATUS', 'worker-1',  # type: ignore[arg-type]
         )
         assert result == (False, '', 'WORKFLOW_CHECK_FAILED')
         # No SQL should have been executed for the unknown branch
         assert len(cursor.queries) == 0
         assert conn.commits == 0
+
+    def test_both_branches_carry_the_claim_generation_fence(self) -> None:
+        """Claimed pre-start cancels fence on (worker_id, claimed_at).
+
+        Without the pair, a row requeued and re-claimed since this child was
+        handed its dispatch is still CLAIMED and would be terminalized out
+        from under the new claim generation.
+        """
+        generation = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+        for status in ('PAUSED', 'CANCELLED'):
+            cursor = _FakeCursor()
+            conn = _FakeConn(cursor)
+            _handle_workflow_stop_before_start(
+                cursor, conn, 'task-4', status, 'worker-7',  # type: ignore[arg-type]
+                generation,
+            )
+            task_updates = [
+                q for q in cursor.queries if 'UPDATE horsies_tasks' in q[0]
+            ]
+            assert len(task_updates) == 1, status
+            sql, params = task_updates[0][0], task_updates[0][1]
+            assert 'claimed_by_worker_id = %s' in sql, status
+            assert 'claimed_at = %s::timestamptz' in sql, status
+            assert 'worker-7' in params, status
+            assert generation in params, status
+
+    def test_cancelled_branch_still_cancels_a_requeued_pending_row(self) -> None:
+        """PENDING has no claim, so the generation fence must not gate it.
+
+        A row the reaper requeued between dispatch and this check carries no
+        claimed_by_worker_id. Gating it on the worker would silently stop
+        cancelling tasks whose workflow is already CANCELLED.
+        """
+        cursor = _FakeCursor()
+        conn = _FakeConn(cursor)
+        _handle_workflow_stop_before_start(
+            cursor, conn, 'task-5', 'CANCELLED', 'worker-7',  # type: ignore[arg-type]
+        )
+        task_sql = next(
+            q[0] for q in cursor.queries if 'UPDATE horsies_tasks' in q[0]
+        )
+        assert "OR status = 'PENDING'" in task_sql
 
 
 # ===================================================================

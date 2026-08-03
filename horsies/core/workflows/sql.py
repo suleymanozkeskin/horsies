@@ -79,8 +79,10 @@ CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL = text("""
             terminal_at = NOW(),
             updated_at = NOW()
         FROM horsies_workflow_tasks wt
+        JOIN horsies_workflows w ON w.id = wt.workflow_id
         WHERE wt.task_id = t.id
           AND wt.workflow_id = ANY(:workflow_ids)
+          AND w.status = 'PAUSED'
           AND wt.status IN ('ENQUEUED', 'RUNNING')
           AND t.status = 'CLAIMED'
         RETURNING t.id
