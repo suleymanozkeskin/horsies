@@ -264,6 +264,86 @@ class TestDeclaredGuardsMatchTheStatements:
         assert 'terminal_at = NOW()' in _normalised(row.writer_id), row.writer_id
 
 
+class TestWriterVariantGrouping:
+    """How many distinct operations the sixteen writers actually are.
+
+    A writer needs its own persistence variant when it differs in fence,
+    cardinality, coupled write, target status, or guards. Writers agreeing on
+    all five differ only in payload and must share one.
+
+    This is the check that a consolidation unified something rather than
+    renaming sixteen writers as sixteen commands — and, equally, the check that
+    it did not over-merge writers whose transitions genuinely differ.
+    """
+
+    @staticmethod
+    def _signature(row: TerminalWriter) -> tuple[object, ...]:
+        return (
+            row.fence,
+            row.shape,
+            row.coupled_write,
+            row.target_status,
+            row.guards,
+        )
+
+    def test_writers_group_into_fifteen_variants(self) -> None:
+        groups: dict[tuple[object, ...], list[str]] = {}
+        for row in MATRIX:
+            groups.setdefault(self._signature(row), []).append(row.writer_id)
+
+        assert len(groups) == 15, (
+            'the number of structurally distinct writers changed; the '
+            f'persistence model must follow.\n{sorted(groups.values())}'
+        )
+
+    def test_the_only_mandated_merge_is_the_two_failure_writers(self) -> None:
+        """Exactly one pair differs only in payload — the rule has teeth."""
+        groups: dict[tuple[object, ...], list[str]] = {}
+        for row in MATRIX:
+            groups.setdefault(self._signature(row), []).append(row.writer_id)
+
+        merged = sorted(v for v in groups.values() if len(v) > 1)
+        assert merged == [['T04', 'T05']], merged
+
+    def test_target_status_is_load_bearing_in_the_signature(self) -> None:
+        """Dropping it merges a failure transition with a completion one.
+
+        Nothing else in the signature separates them: same fence, same
+        cardinality, no coupled write, no guards.
+        """
+        without_status: dict[tuple[object, ...], list[str]] = {}
+        for row in MATRIX:
+            key = (row.fence, row.shape, row.coupled_write, row.guards)
+            without_status.setdefault(key, []).append(row.writer_id)
+
+        over_merged = sorted(v for v in without_status.values() if len(v) > 1)
+        assert over_merged == [['T04', 'T05', 'T06']], over_merged
+        statuses = {
+            row.target_status for row in MATRIX if row.writer_id in {'T04', 'T06'}
+        }
+        assert statuses == {'FAILED', 'COMPLETED'}
+
+    def test_status_and_guards_separate_the_batch_reapers_jointly(self) -> None:
+        """Either field alone keeps pending expiry apart from orphan cleanup.
+
+        They agree on fence, cardinality and coupled write, so with both fields
+        dropped the rule would merge a deadline-driven expiry with a linkage-
+        driven cancellation. Guards are redundant against target status here,
+        but a future pair differing only in guard would still need them.
+        """
+        without_either: dict[tuple[object, ...], list[str]] = {}
+        for row in MATRIX:
+            key = (row.fence, row.shape, row.coupled_write)
+            without_either.setdefault(key, []).append(row.writer_id)
+
+        over_merged = sorted(v for v in without_either.values() if len(v) > 1)
+        assert ['T14', 'T15'] in over_merged, over_merged
+
+        reapers = {row.writer_id: row for row in MATRIX if row.writer_id in {'T14', 'T15'}}
+        assert reapers['T14'].target_status != reapers['T15'].target_status
+        assert reapers['T14'].guards != reapers['T15'].guards
+
+
 class TestChildWritersAreDeclaredConsistently:
     """The psycopg writers cannot be text-checked here; pin their shape."""
 
