@@ -76,6 +76,7 @@ CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL = text("""
             finalizing_by_worker_id = NULL,
             error_code = 'TASK_CANCELLED',
             failed_reason = 'Workflow paused before task start',
+            terminal_at = NOW(),
             updated_at = NOW()
         FROM horsies_workflow_tasks wt
         WHERE wt.task_id = t.id

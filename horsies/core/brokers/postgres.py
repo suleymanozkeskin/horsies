@@ -137,6 +137,7 @@ from horsies.core.schemas.migrations import (
     ADD_ENQUEUED_AT_COLUMN_SQL,
     ADD_ERROR_CODE_COLUMN_SQL,
     ADD_TASK_FINALIZING_COLUMNS_SQL,
+    ADD_TASK_TERMINAL_AT_COLUMN_SQL,
     ADD_TASK_IS_WORKFLOW_TASK_COLUMN_SQL,
     ADD_IS_SUBWORKFLOW_COLUMN_SQL,
     ADD_JOIN_TYPE_COLUMN_SQL,
@@ -358,6 +359,7 @@ MARK_STALE_TASK_FAILED_SQL = text("""
         error_code = :error_code,
         finalizing_at = NULL,
         finalizing_by_worker_id = NULL,
+        terminal_at = NOW(),
         updated_at = NOW()
     WHERE t.id = :task_id
       AND t.status = 'RUNNING'
@@ -389,6 +391,7 @@ EXPIRE_PENDING_TASKS_SQL = text("""
         failed_at = NOW(),
         result = :result,
         error_code = :error_code,
+        terminal_at = NOW(),
         updated_at = NOW()
     FROM (
         SELECT id FROM horsies_tasks
@@ -499,6 +502,7 @@ TERMINATE_ORPHANED_CLAIMED_WORKFLOW_TASKS_SQL = text("""
         finalizing_by_worker_id = NULL,
         error_code = 'WORKFLOW_CHECK_FAILED',
         failed_reason = 'Workflow task orphaned: no live workflow_task linkage',
+        terminal_at = NOW(),
         updated_at = NOW()
     FROM (
         SELECT t2.id
@@ -815,6 +819,10 @@ class PostgresBroker:
             await conn.execute(ADD_TASK_IS_WORKFLOW_TASK_COLUMN_SQL)
             await conn.execute(BACKFILL_TASK_IS_WORKFLOW_TASK_SQL)
             await conn.execute(ADD_TASK_FINALIZING_COLUMNS_SQL)
+
+            # Migration (v17): canonical terminal_at. Catalog-only ALTER;
+            # the backfill of pre-existing terminal rows is separate.
+            await conn.execute(ADD_TASK_TERMINAL_AT_COLUMN_SQL)
             await conn.execute(CREATE_TASKS_ERROR_CODE_INDEX_SQL)
 
             # Migration (v3): claim-path indexes.

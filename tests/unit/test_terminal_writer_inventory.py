@@ -40,7 +40,15 @@ _TERMINAL_STATUSES = frozenset({'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'})
 
 _UPDATE_RE = re.compile(r'\bUPDATE\s+horsies_tasks\b', re.IGNORECASE)
 _SET_RE = re.compile(r'\bSET\b', re.IGNORECASE)
-_CLAUSE_END_RE = re.compile(r'\bWHERE\b|\bRETURNING\b|\bFROM\b', re.IGNORECASE)
+# Parentheses are tracked alongside the clause-enders so a keyword inside a
+# scalar subquery does not close the SET clause.
+_CLAUSE_SCAN_RE = re.compile(
+    r'[()]|\bWHERE\b|\bRETURNING\b|\bFROM\b',
+    re.IGNORECASE,
+)
+# Any quoted word, used to read status literals out of a predicate where they
+# appear as IN-lists rather than assignments.
+_STATUS_WORD_RE = re.compile(r"'(\w+)'")
 # Case-insensitive, quoted-identifier-tolerant: SET STATUS = / "status" =
 # are writers too — this test exists for the writer that does not follow
 # house style. The literal's own case is preserved by upper() at use sites.
@@ -139,6 +147,55 @@ def _constant_text(node: ast.expr) -> str:
     return '\n'.join(parts)
 
 
+def _update_clauses(sql: str) -> list[tuple[str, str]]:
+    """(SET window, remainder) for every UPDATE horsies_tasks in a statement.
+
+    The window runs from SET to the first WHERE, RETURNING or FROM, so it
+    holds the assignments alone; the remainder carries the predicate, where
+    a status literal is a source-state guard rather than a write.
+    """
+    clauses: list[tuple[str, str]] = []
+    for update_match in _UPDATE_RE.finditer(sql):
+        segment = sql[update_match.end():]
+        set_match = _SET_RE.search(segment)
+        if set_match is None:
+            continue
+        segment = segment[set_match.end():]
+        end = _clause_end(segment)
+        if end is None:
+            clauses.append((segment, ''))
+            continue
+        clauses.append((segment[:end], segment[end:]))
+    return clauses
+
+
+def _clause_end(segment: str) -> int | None:
+    """Offset of the keyword ending a SET clause, ignoring subqueries.
+
+    A SET assignment may contain a scalar subquery carrying its own FROM and
+    WHERE — manual retry recomputes retry_count that way. Only a keyword at
+    parenthesis depth zero closes the clause.
+    """
+    depth = 0
+    for match in _CLAUSE_SCAN_RE.finditer(segment):
+        token = match.group(0)
+        match token:
+            case '(':
+                depth += 1
+            case ')':
+                depth -= 1
+            case _ if depth == 0:
+                return match.start()
+            case _:
+                continue
+    return None
+
+
+def _set_clause_windows(sql: str) -> list[str]:
+    """SET-clause text of every UPDATE horsies_tasks in one statement."""
+    return [window for window, _ in _update_clauses(sql)]
+
+
 def _set_clause_statuses(sql: str) -> tuple[frozenset[str], bool]:
     """Terminal-relevant status assignments in UPDATE horsies_tasks SETs.
 
@@ -147,14 +204,7 @@ def _set_clause_statuses(sql: str) -> tuple[frozenset[str], bool]:
     """
     literals: set[str] = set()
     parameterized = False
-    for update_match in _UPDATE_RE.finditer(sql):
-        segment = sql[update_match.end():]
-        set_match = _SET_RE.search(segment)
-        if set_match is None:
-            continue
-        segment = segment[set_match.end():]
-        end_match = _CLAUSE_END_RE.search(segment)
-        window = segment[: end_match.start()] if end_match else segment
+    for window in _set_clause_windows(sql):
         literals.update(
             m.group(1).upper() for m in _STATUS_LITERAL_RE.finditer(window)
         )
@@ -195,10 +245,8 @@ def _statement_contexts(tree: ast.Module) -> dict[int, str]:
     return contexts
 
 
-def _scan_module(tree: ast.Module, module_path: str) -> Counter[_InventoryKey]:
-    """Terminal-capable status writers found in one parsed module."""
-    contexts = _statement_contexts(tree)
-    found: Counter[_InventoryKey] = Counter()
+def _task_update_strings(tree: ast.Module) -> list[tuple[int, str]]:
+    """(line number, SQL text) for every string holding an UPDATE of tasks."""
     # Constants nested inside an f-string are covered by their JoinedStr;
     # visiting them again would double-count the statement.
     fstring_parts: set[int] = {
@@ -208,6 +256,7 @@ def _scan_module(tree: ast.Module, module_path: str) -> Counter[_InventoryKey]:
         for part in ast.walk(node)
         if isinstance(part, ast.Constant)
     }
+    found: list[tuple[int, str]] = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Constant, ast.JoinedStr)):
             continue
@@ -218,6 +267,15 @@ def _scan_module(tree: ast.Module, module_path: str) -> Counter[_InventoryKey]:
         text = _constant_text(node)
         if _UPDATE_RE.search(text) is None:
             continue
+        found.append((node.lineno, text))
+    return found
+
+
+def _scan_module(tree: ast.Module, module_path: str) -> Counter[_InventoryKey]:
+    """Terminal-capable status writers found in one parsed module."""
+    contexts = _statement_contexts(tree)
+    found: Counter[_InventoryKey] = Counter()
+    for lineno, text in _task_update_strings(tree):
         statuses, parameterized = _set_clause_statuses(text)
         terminal_literals = statuses & _TERMINAL_STATUSES
         if not terminal_literals and not parameterized:
@@ -225,7 +283,7 @@ def _scan_module(tree: ast.Module, module_path: str) -> Counter[_InventoryKey]:
         described = ','.join(sorted(terminal_literals))
         if parameterized:
             described = f'{described}+PARAM' if described else 'PARAM'
-        context = contexts.get(node.lineno, '<module>')
+        context = contexts.get(lineno, '<module>')
         found[(module_path, context, described)] += 1
     return found
 
@@ -238,6 +296,74 @@ def _scan_runtime_package() -> Counter[_InventoryKey]:
         tree = ast.parse(path.read_text(encoding='utf-8'))
         found.update(_scan_module(tree, rel))
     return found
+
+
+def _terminal_set_windows(
+    tree: ast.Module,
+    module_path: str,
+) -> list[tuple[str, str, str]]:
+    """(module, context, SET window) per terminal-status-assigning window.
+
+    One entry per SET clause that assigns a terminal status literal, so a
+    statement with two such UPDATEs yields two entries.
+    """
+    contexts = _statement_contexts(tree)
+    windows: list[tuple[str, str, str]] = []
+    for lineno, text in _task_update_strings(tree):
+        context = contexts.get(lineno, '<module>')
+        for window in _set_clause_windows(text):
+            assigned = {
+                m.group(1).upper() for m in _STATUS_LITERAL_RE.finditer(window)
+            }
+            if assigned & _TERMINAL_STATUSES:
+                windows.append((module_path, context, window))
+    return windows
+
+
+def _scan_runtime_terminal_windows() -> list[tuple[str, str, str]]:
+    """Terminal-assigning SET windows across the whole runtime package."""
+    windows: list[tuple[str, str, str]] = []
+    for path in sorted(_RUNTIME_ROOT.rglob('*.py')):
+        rel = str(path.relative_to(_RUNTIME_ROOT.parent))
+        tree = ast.parse(path.read_text(encoding='utf-8'))
+        windows.extend(_terminal_set_windows(tree, rel))
+    return windows
+
+
+def _revival_set_windows(
+    tree: ast.Module,
+    module_path: str,
+) -> list[tuple[str, str, str]]:
+    """(module, context, SET window) per terminal-to-live transition.
+
+    A revival assigns a live status while its predicate restricts the source
+    to terminal statuses — the shape of manual in-place retry. Automatic
+    retry and requeue are live-to-live and do not match.
+    """
+    contexts = _statement_contexts(tree)
+    windows: list[tuple[str, str, str]] = []
+    for lineno, text in _task_update_strings(tree):
+        context = contexts.get(lineno, '<module>')
+        for window, predicate in _update_clauses(text):
+            assigned = {
+                m.group(1).upper() for m in _STATUS_LITERAL_RE.finditer(window)
+            }
+            if assigned & _TERMINAL_STATUSES or not assigned:
+                continue
+            guarded = {m.upper() for m in _STATUS_WORD_RE.findall(predicate)}
+            if guarded & _TERMINAL_STATUSES:
+                windows.append((module_path, context, window))
+    return windows
+
+
+def _scan_runtime_revival_windows() -> list[tuple[str, str, str]]:
+    """Terminal-to-live SET windows across the whole runtime package."""
+    windows: list[tuple[str, str, str]] = []
+    for path in sorted(_RUNTIME_ROOT.rglob('*.py')):
+        rel = str(path.relative_to(_RUNTIME_ROOT.parent))
+        tree = ast.parse(path.read_text(encoding='utf-8'))
+        windows.extend(_revival_set_windows(tree, rel))
+    return windows
 
 
 class TestTerminalWriterInventory:
@@ -354,4 +480,47 @@ class TestTerminalWriterInventory:
         found = _scan_module(ast.parse(source), 'synthetic.py')
         assert found == Counter(
             {('synthetic.py', '_cancel_in_child', 'CANCELLED'): 1},
+        )
+
+    def test_terminal_writers_set_terminal_at(self) -> None:
+        """Every terminal writer assigns terminal_at in the same SET clause.
+
+        The frozen inventory proves which statuses are assigned and where;
+        it does not prove the terminal_at assignment is present and spelled
+        correctly. A missed or misspelled writer would otherwise surface
+        only when the CHECK constraint lands, as a finalize failure on
+        whichever path the tests exercise least.
+        """
+        windows = _scan_runtime_terminal_windows()
+        assert len(windows) == 16, (
+            f'Expected sixteen terminal-assigning SET clauses, found '
+            f'{len(windows)}; the inventory and this assertion disagree.'
+        )
+        missing = [
+            (module, context)
+            for module, context, window in windows
+            if 'terminal_at' not in window
+        ]
+        assert not missing, (
+            'Terminal writers that do not assign terminal_at in the same '
+            f'SET clause as their terminal status: {sorted(missing)}'
+        )
+
+    def test_terminal_to_live_transitions_clear_terminal_at(self) -> None:
+        """A row returning from terminal to live clears terminal_at.
+
+        Manual in-place retry is the only such transition today. Automatic
+        retry and requeue are live-to-live and are not matched, so they are
+        not required to clear a column that is already NULL.
+        """
+        windows = _scan_runtime_revival_windows()
+        assert windows, 'No terminal-to-live transition found; expected retry.'
+        missing = [
+            (module, context)
+            for module, context, window in windows
+            if 'terminal_at' not in window
+        ]
+        assert not missing, (
+            'Transitions from a terminal status back to a live one that do '
+            f'not clear terminal_at: {sorted(missing)}'
         )

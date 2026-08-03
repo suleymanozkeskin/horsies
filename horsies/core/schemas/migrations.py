@@ -105,7 +105,24 @@ from sqlalchemy import text
 #      worker-path predicate or leading sort key; the claim plan test
 #      pins idx_horsies_tasks_claim_pending.
 
-SCHEMA_VERSION = 16
+# v17: canonical terminal_at on horsies_tasks. Additive: the column and the
+#      sixteen writer SET clauses only. Backfill and the CHECK constraint
+#      tying terminal_at to terminal status both ship in the next release,
+#      together in one migration.
+#
+#      The constraint cannot ship here: migrations apply at worker startup,
+#      so a rolling restart would leave un-upgraded workers writing terminal
+#      statuses with terminal_at NULL against a constraint their SQL cannot
+#      satisfy, failing their finalize statements. NOT VALID does not help —
+#      it skips existing rows but still enforces new writes.
+#
+#      The backfill is deferred with it rather than run here, because rows
+#      terminalized by un-upgraded workers during that same rolling window
+#      would be written after a v17 backfill had already passed over them.
+#      Backfilling in the migration that installs the constraint covers the
+#      window in one pass.
+
+SCHEMA_VERSION = 17
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
@@ -595,6 +612,15 @@ ADD_TASK_FINALIZING_COLUMNS_SQL = text("""
     ALTER TABLE horsies_tasks
     ADD COLUMN IF NOT EXISTS finalizing_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS finalizing_by_worker_id TEXT;
+""")
+
+# Migration (v17): canonical terminal instant. Nullable with no default, so
+# the ALTER is a catalog-only change on PostgreSQL 11+ regardless of table
+# size. Non-NULL exactly for terminal rows; the CHECK enforcing that ships
+# one release later (see the SCHEMA_VERSION note).
+ADD_TASK_TERMINAL_AT_COLUMN_SQL = text("""
+    ALTER TABLE horsies_tasks
+    ADD COLUMN IF NOT EXISTS terminal_at TIMESTAMPTZ;
 """)
 
 # Migration (v4): widen timeseries PKs to BIGINT. Both tables are

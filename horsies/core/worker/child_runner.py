@@ -529,6 +529,7 @@ def _handle_workflow_stop_before_start(
                     finalizing_by_worker_id = NULL,
                     error_code = 'TASK_CANCELLED',
                     failed_reason = 'Workflow paused before task start',
+                    terminal_at = NOW(),
                     updated_at = NOW()
                 WHERE id = %s
                   AND status = 'CLAIMED'
@@ -570,6 +571,7 @@ def _handle_workflow_stop_before_start(
                     claim_expires_at = NULL,
                     finalizing_at = NULL,
                     finalizing_by_worker_id = NULL,
+                    terminal_at = NOW(),
                     updated_at = NOW()
                 WHERE id = %s
                   AND status IN ('CLAIMED', 'PENDING')
@@ -658,6 +660,7 @@ def _expire_claimed_task_before_start(
             failed_at = NOW(),
             result = %s,
             error_code = %s,
+            terminal_at = NOW(),
             updated_at = NOW()
         WHERE id = %s
           AND status = 'CLAIMED'
