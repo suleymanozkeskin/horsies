@@ -1,21 +1,23 @@
 """Claim-generation fences on the workflow pause/cancel terminalizers.
 
 Six writers moved a task to a terminal status without rejecting a stale claim
-generation (T02, T03, T09, T10, T11, T16 in
-``roadmap/terminalization-decisions-2026-08-03.md``). Reading their callers
-splits them in two:
+generation: the two post-claim guard batches, the workflow-pause API batch, the
+two child pre-start branches, and the workflow-cancel batch. Reading their
+callers splits them in two.
 
-Scope A — T02, T03, T10, T11 — carry a real staleness window and now fence on
-``ClaimedOwnerFence(worker_id, claimed_at)``. The race: a worker's lease lapses,
+The four with a real staleness window — the two post-claim batches and the two
+child branches — now fence on worker plus claim generation. The race: a
+worker's lease lapses,
 the reaper requeues the task, the same worker re-claims it. The row is CLAIMED
 by that worker again, so a (status, worker) guard cannot tell the generations
 apart and terminalizes the new claim.
 
-Scope B — T09, T16 — have no staleness window: their callers hold row locks
-over exactly the rows they update. They gained a live workflow-status join
-instead, which must not change what they cancel. Both directions are pinned
-here because only the pair distinguishes the correct semantics from the
-generation fence that would have broken them.
+The other two — the workflow-pause API batch and the workflow-cancel batch —
+have no staleness window: their callers hold row locks over exactly the rows
+they update. They gained a live workflow-status join instead, which must not
+change what they cancel. Both directions are pinned here because only the pair
+distinguishes the correct semantics from the generation fence that would have
+broken them.
 
 One test proves the fence is armed rather than merely tolerant: a NULL
 generation disables it per task, so a dispatch path that stopped carrying
@@ -177,7 +179,7 @@ def _generations() -> tuple[datetime, datetime]:
 
 
 # ---------------------------------------------------------------------------
-# Scope A — T02: paused-workflow abandon, post-claim guard
+# Paused-workflow abandon, post-claim guard
 # ---------------------------------------------------------------------------
 
 
@@ -225,7 +227,7 @@ async def test_t02_matching_generation_abandons_the_task(
 
 
 # ---------------------------------------------------------------------------
-# Scope A — T03: cancelled-workflow cancel, post-claim guard
+# Cancelled-workflow cancel, post-claim guard
 # ---------------------------------------------------------------------------
 
 
@@ -364,7 +366,7 @@ async def test_real_claim_path_arms_the_fence(
 
 
 # ---------------------------------------------------------------------------
-# Scope A — T10, T11: child pre-start, raw psycopg
+# Child pre-start branches, raw psycopg
 # ---------------------------------------------------------------------------
 
 
@@ -436,7 +438,7 @@ async def test_child_prestart_still_cancels_requeued_pending_row(
 
 
 # ---------------------------------------------------------------------------
-# Scope B — T09, T16: live workflow-status guard, both directions
+# Workflow-API batches: live workflow-status guard, both directions
 # ---------------------------------------------------------------------------
 
 
