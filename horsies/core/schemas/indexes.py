@@ -24,6 +24,16 @@ WORKFLOW_TERMINAL_STATUS_SQL_LITERALS: str = ', '.join(
     sorted(f"'{s.value}'" for s in WORKFLOW_TERMINAL_STATES),
 )
 
+# Editing either constant is a schema migration. Both feed partial-index
+# predicates (three, below) as well as the DELETEs' IN-lists, and those
+# indexes are created with CREATE INDEX IF NOT EXISTS — which does not
+# rebuild an index that already exists under the old predicate. A changed
+# set therefore requires an explicit versioned DROP INDEX + CREATE.
+# Nothing catches this downstream: CI migrates a fresh database, gets the
+# new predicate, and every EXPLAIN plan test passes, while deployed
+# databases keep the stale index whose predicate no longer implies the new
+# IN-list, and the planner falls back to the heap walk the index removed.
+
 
 # GIN index on workflow_tasks.dependencies for efficient dependency array lookups.
 # Cannot use ORM __table_args__ because SQLAlchemy does not support GIN indexes directly.
