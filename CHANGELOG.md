@@ -18,7 +18,10 @@ constraint rejects terminal writes that omit `terminal_at`, which is what a
 pre-0.4.5 worker produces; a deployment still running mixed versions would
 fail those workers' finalize statements. The requirement is per deployment,
 not a release gate — 0.4.6 ships when ready, and each deployment applies it
-once its own 0.4.5 rollout is complete.
+once its own 0.4.5 rollout is complete. A full-stop upgrade (all workers
+stopped) may move to 0.4.6 from any version directly; the rollout requirement
+applies to rolling restarts, where pre-0.4.5 workers would keep writing
+terminal rows during the migration.
 
 ### Changed
 
