@@ -47,6 +47,7 @@ class TaskModel(Base):
     - started_at: datetime # when task actually started running in the worker's process
     - completed_at: datetime # when task was completed, set by the process
     - failed_at: datetime # when task failed, set by the process
+    - terminal_at: datetime # canonical terminal instant; NULL exactly while the task is live
     - result: str # task result, serialized as json
     - failed_reason: str # reason for task failure, serialized as json
     - claimed: bool # whether the task is claimed by a worker
@@ -102,6 +103,14 @@ class TaskModel(Base):
         DateTime(timezone=True), nullable=True
     )
     failed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Canonical terminal instant, assigned by database time in the terminal
+    # transition transaction. Non-NULL exactly for COMPLETED/FAILED/CANCELLED/
+    # EXPIRED; cleared by manual in-place retry. Eight of the sixteen terminal
+    # writers record no completed_at or failed_at, so this is the only column
+    # that dates every terminal row uniformly.
+    terminal_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
