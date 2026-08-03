@@ -17,6 +17,19 @@ status and records `terminal_at`; the ineligible case changes neither.
 These are characterization tests. They pin behavior as it is, including where
 it is asymmetric between writers, so that a later refactor is measured against
 what the system does rather than what it was assumed to do.
+
+Revert-proofing a refusal test: disable the guard, confirm the test fails,
+restore. Before concluding from a still-passing result, check that the disable
+patch reached the predicate — the static checks in
+``tests/unit/test_lifecycle_matrix.py`` must fail against it too. A guard those
+checks still see was never disabled, so the patch missed rather than the test
+being weak.
+
+The trap is treating a guard as a column name rather than a predicate position:
+these statements clear the very columns they do not fence on, so editing the
+wrong occurrence of ``claimed_by_worker_id`` changes nothing any guard depends
+on. Several writers also share an identical guard clause, so anchor by
+occurrence and confirm the anchor matched the writer under test.
 """
 
 from __future__ import annotations
