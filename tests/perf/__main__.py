@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from sqlalchemy import create_engine
@@ -101,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     engine = create_engine(arguments.dsn)
-    verdicts: list[Verdict] = []
+    outcomes: list[tuple[Verdict, bool]] = []
     control_failures: list[str] = []
     try:
         for scenario in scenarios:
@@ -116,7 +117,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             summary = render_summary(result)
             print(summary)
-            verdicts.append(result.verdict)
+            outcomes.append(
+                (result.verdict, 'control' in result.conditions.comparison),
+            )
             control_failures += _control_disagreements(result)
 
             if arguments.write_summary:
@@ -136,14 +139,34 @@ def main(argv: list[str] | None = None) -> int:
             print(f'control run disagrees with itself: {failure}', file=sys.stderr)
         return 1
 
-    # A smoke run proves the harness works; a wide interval at 200 observations
-    # is the expected answer, not a failure. A gate run has to establish
-    # something, so anything short of a pass leaves the phase blocked.
-    match arguments.scale:
+    return _exit_status(arguments.scale, outcomes)
+
+
+def _exit_status(
+    scale: str,
+    outcomes: Sequence[tuple[Verdict, bool]],
+) -> int:
+    """The run's exit code, from each scenario's verdict and comparison mode.
+
+    A gate run has to establish something, so anything short of a pass leaves
+    the phase blocked. A smoke run proves the machinery: a wide interval at
+    200 observations is the expected answer, and a control run's latency
+    verdict is not judged at all — p99 rests on a handful of samples there,
+    so a neighbour's burst during one side's blocks yields a narrow interval
+    around a real difference in the runner, not the code. What a control run
+    answers for is the exact-count checks, which fail the run at every scale
+    before this decision is reached.
+    """
+    match scale:
         case 'gate':
-            return 0 if all(v is Verdict.PASS for v in verdicts) else 1
+            return 0 if all(v is Verdict.PASS for v, _ in outcomes) else 1
         case _:
-            return 0 if Verdict.FAIL not in verdicts else 1
+            judged_failures = [
+                verdict
+                for verdict, is_control in outcomes
+                if verdict is Verdict.FAIL and not is_control
+            ]
+            return 1 if judged_failures else 0
 
 
 def _observations_for(scenario: Scenario, scale: str) -> int:
